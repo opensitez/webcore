@@ -1,50 +1,60 @@
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
-use winit::event::{WindowEvent, ElementState, MouseButton, KeyEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
-use winit::keyboard::{PhysicalKey, KeyCode};
 
-use webcore::{load_html, Document, Renderer, LayoutEngine, WebCore};
-use webcore::platform::Platform;
 use webcore::dom::{self, HtmlEventType};
+use webcore::platform::Platform;
+use webcore::{load_html, Document, LayoutEngine, Renderer, WebCore};
 
 const HTML: &str = include_str!("html/events.html");
 
 const COLS: &[(&str, &str)] = &[
-    ("col-backlog",  "body-backlog"),
-    ("col-todo",     "body-todo"),
+    ("col-backlog", "body-backlog"),
+    ("col-todo", "body-todo"),
     ("col-progress", "body-progress"),
-    ("col-review",   "body-review"),
-    ("col-done",     "body-done"),
+    ("col-review", "body-review"),
+    ("col-done", "body-done"),
 ];
 
 struct DragState {
     /// Card id being dragged, empty when idle.
-    source_id:   String,
+    source_id: String,
     /// Title text of card being dragged.
     source_title: String,
     /// Mouse position when drag was initiated.
-    start_pos:   (f32, f32),
+    start_pos: (f32, f32),
     /// Whether the drag threshold has been crossed.
-    active:      bool,
+    active: bool,
     /// Column body id we are currently hovering over, if any.
     target_body: Option<String>,
 }
 
 impl DragState {
-    fn idle() -> Self { Self { source_id: String::new(), source_title: String::new(), start_pos: (0.0, 0.0), active: false, target_body: None } }
-    fn has_source(&self) -> bool { !self.source_id.is_empty() }
+    fn idle() -> Self {
+        Self {
+            source_id: String::new(),
+            source_title: String::new(),
+            start_pos: (0.0, 0.0),
+            active: false,
+            target_body: None,
+        }
+    }
+    fn has_source(&self) -> bool {
+        !self.source_id.is_empty()
+    }
 }
 
 struct App {
-    window:   Option<Arc<Window>>,
+    window: Option<Arc<Window>>,
     platform: Option<Platform>,
     renderer: Renderer,
-    doc:      Option<Document>,
-    width:    f32,
+    doc: Option<Document>,
+    width: f32,
     mouse_pos: (f32, f32),
-    drag:     DragState,
+    drag: DragState,
     mouse_down: bool,
     /// Ghost overlay position during drag (logical coords), drawn after display list.
     ghost_pos: Option<(f32, f32)>,
@@ -52,11 +62,15 @@ struct App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        let window = Arc::new(event_loop.create_window(
-            Window::default_attributes()
-                .with_title("events_demo — webcore")
-                .with_inner_size(winit::dpi::LogicalSize::new(1000u32, 800u32))
-        ).unwrap());
+        let window = Arc::new(
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("events_demo — webcore")
+                        .with_inner_size(winit::dpi::LogicalSize::new(1000u32, 800u32)),
+                )
+                .unwrap(),
+        );
         let platform = Platform::new_windowed(window.clone());
         self.width = platform.logical_width();
 
@@ -64,44 +78,56 @@ impl ApplicationHandler for App {
 
         // Card selection on click (only fires when not dragging — handled below)
         let __root = doc.root.node_id;
-        doc.add_event_listener(__root, "click", Box::new(|evt, __d: &mut webcore::Document| {
-            // Delegation, the way a page writes it: one listener, then
-            // `closest()` to find which matching element was hit.
-            let Some(__cur) = __d.closest(evt.target, ".card") else { return };
-            let root = &mut __d.root;
-            let _ = &root;
-            let cur_id = __cur;
-            // Deselect all cards first
-            deselect_all(root);
-            // Select this card via node_id lookup
-            if let Some(target_mut) = dom::find_box_mut(root, cur_id) {
-                dom::add_class(target_mut, "card-selected");
-            }
-            // Re-lookup for id/title (borrow ended)
-            let (title, id_str) = {
-                let target = dom::find_box_mut(root, cur_id);
-                match target {
-                    Some(t) => {
-                        let title = get_text_of_class(t, "card-title");
-                        let id = t.attributes.get("id").cloned().unwrap_or_default();
-                        (title, id)
+        doc.add_event_listener(
+            __root,
+            "click",
+            Box::new(|evt, __d: &mut webcore::Document| {
+                // Delegation, the way a page writes it: one listener, then
+                // `closest()` to find which matching element was hit.
+                let Some(__cur) = __d.closest(evt.target, ".card") else {
+                    return;
+                };
+                let root = &mut __d.root;
+                let _ = &root;
+                let cur_id = __cur;
+                // Deselect all cards first
+                deselect_all(root);
+                // Select this card via node_id lookup
+                if let Some(target_mut) = dom::find_box_mut(root, cur_id) {
+                    dom::add_class(target_mut, "card-selected");
+                }
+                // Re-lookup for id/title (borrow ended)
+                let (title, id_str) = {
+                    let target = dom::find_box_mut(root, cur_id);
+                    match target {
+                        Some(t) => {
+                            let title = get_text_of_class(t, "card-title");
+                            let id = t.attributes.get("id").cloned().unwrap_or_default();
+                            (title, id)
+                        }
+                        None => return,
                     }
-                    None => return,
+                };
+                if !id_str.is_empty() {
+                    if let Some(info) = dom::query_selector_mut(root, "#selected-info") {
+                        dom::set_text_content(info, &format!("{} ({})", title, id_str));
+                    }
                 }
-            };
-            if !id_str.is_empty() {
-                if let Some(info) = dom::query_selector_mut(root, "#selected-info") {
-                    dom::set_text_content(info, &format!("{} ({})", title, id_str));
-                }
-            }
-        }), webcore::dom::events::ListenerOptions::default());
+            }),
+            webcore::dom::events::ListenerOptions::default(),
+        );
 
-        self.doc      = Some(doc);
-        self.window   = Some(window);
+        self.doc = Some(doc);
+        self.window = Some(window);
         self.platform = Some(platform);
     }
 
-    fn window_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, _window_id: winit::window::WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        event: WindowEvent,
+    ) {
         let (window, platform) = match (self.window.as_ref(), self.platform.as_mut()) {
             (Some(w), Some(p)) => (w, p),
             _ => return,
@@ -122,7 +148,9 @@ impl ApplicationHandler for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 let dy = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y * 20.0,
-                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / platform.scale_factor(),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => {
+                        p.y as f32 / platform.scale_factor()
+                    }
                 };
                 if let Some(doc) = self.doc.as_mut() {
                     let mp = self.mouse_pos;
@@ -144,7 +172,10 @@ impl ApplicationHandler for App {
                     if !self.drag.active && (dx * dx + dy * dy).sqrt() > 5.0 {
                         // Cross drag threshold — start the drag
                         self.drag.active = true;
-                        eprintln!("[DRAG] threshold crossed, starting drag of {}", self.drag.source_id);
+                        eprintln!(
+                            "[DRAG] threshold crossed, starting drag of {}",
+                            self.drag.source_id
+                        );
                         if let Some(doc) = self.doc.as_mut() {
                             drag_start(doc, &self.drag.source_id, &self.drag.source_title);
                             doc.style_dirty = true;
@@ -193,11 +224,15 @@ impl ApplicationHandler for App {
                             let doc_pt = (mx, my + doc.scroll_y);
                             // Check if we pressed on a card
                             let card_id = hit_card_id(&doc.root, doc_pt);
-                            eprintln!("[DRAG] pressed at {:?} scroll_y={} card_id={:?}", doc_pt, doc.scroll_y, card_id);
+                            eprintln!(
+                                "[DRAG] pressed at {:?} scroll_y={} card_id={:?}",
+                                doc_pt, doc.scroll_y, card_id
+                            );
                             if let Some(id) = card_id {
                                 let title = {
                                     let card = dom::query_selector(&doc.root, &format!("#{}", id));
-                                    card.map(|c| get_text_of_class(c, "card-title")).unwrap_or_default()
+                                    card.map(|c| get_text_of_class(c, "card-title"))
+                                        .unwrap_or_default()
                                 };
                                 eprintln!("[DRAG] source={} title={}", id, title);
                                 self.drag = DragState {
@@ -219,17 +254,26 @@ impl ApplicationHandler for App {
 
                     (ElementState::Released, MouseButton::Left) => {
                         self.mouse_down = false;
-                        eprintln!("[DRAG] released, active={} has_source={} target={:?}", self.drag.active, self.drag.has_source(), self.drag.target_body);
+                        eprintln!(
+                            "[DRAG] released, active={} has_source={} target={:?}",
+                            self.drag.active,
+                            self.drag.has_source(),
+                            self.drag.target_body
+                        );
                         if self.drag.active {
                             // Complete the drop
                             if let Some(doc) = self.doc.as_mut() {
-                                let dropped = if let Some(ref body_id) = self.drag.target_body.clone() {
-                                    eprintln!("[DRAG] dropping {} onto {}", self.drag.source_id, body_id);
-                                    drop_card(doc, &self.drag.source_id, body_id)
-                                } else {
-                                    eprintln!("[DRAG] no target body, cancelling");
-                                    false
-                                };
+                                let dropped =
+                                    if let Some(ref body_id) = self.drag.target_body.clone() {
+                                        eprintln!(
+                                            "[DRAG] dropping {} onto {}",
+                                            self.drag.source_id, body_id
+                                        );
+                                        drop_card(doc, &self.drag.source_id, body_id)
+                                    } else {
+                                        eprintln!("[DRAG] no target body, cancelling");
+                                        false
+                                    };
                                 drag_end(doc, &self.drag.source_id, dropped);
                                 doc.style_dirty = true;
                                 self.renderer.layout_engine().layout(doc, self.width);
@@ -266,16 +310,34 @@ impl ApplicationHandler for App {
                 }
             }
 
-            WindowEvent::KeyboardInput { event: KeyEvent { physical_key: PhysicalKey::Code(code), state: ElementState::Pressed, .. }, .. } => {
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(code),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => {
                 if let Some(doc) = self.doc.as_mut() {
                     let kc = match code {
                         KeyCode::Escape => 27,
-                        KeyCode::Enter  => 13,
-                        KeyCode::Tab    => 9,
+                        KeyCode::Enter => 13,
+                        KeyCode::Tab => 9,
                         KeyCode::Delete => 46,
                         _ => 0,
                     };
-                    if kc != 0 && doc.process_key_event(HtmlEventType::KeyDown, kc, None, false, false, false, false) {
+                    if kc != 0
+                        && doc.process_key_event(
+                            HtmlEventType::KeyDown,
+                            kc,
+                            None,
+                            false,
+                            false,
+                            false,
+                            false,
+                        )
+                    {
                         self.renderer.layout_engine().layout(doc, self.width);
                         window.request_redraw();
                     }
@@ -305,28 +367,40 @@ impl ApplicationHandler for App {
                                 let pixels = pixmap.pixels_mut();
                                 for dy in 0..ph {
                                     let y = py + dy;
-                                    if y < 0 || y >= pix_h { continue; }
+                                    if y < 0 || y >= pix_h {
+                                        continue;
+                                    }
                                     for dx in 0..pw {
                                         let x = px + dx;
-                                        if x < 0 || x >= pix_w { continue; }
+                                        if x < 0 || x >= pix_w {
+                                            continue;
+                                        }
                                         let idx = (y * pix_w + x) as usize;
                                         if idx < pixels.len() {
                                             // Blend: 80% opacity dark card
                                             let dst = pixels[idx];
                                             let a = 200u32;
                                             let ia = 255 - a;
-                                            let r = (30 * a / 255 + dst.red() as u32 * ia / 255) as u8;
-                                            let g = (36 * a / 255 + dst.green() as u32 * ia / 255) as u8;
-                                            let b = (42 * a / 255 + dst.blue() as u32 * ia / 255) as u8;
+                                            let r =
+                                                (30 * a / 255 + dst.red() as u32 * ia / 255) as u8;
+                                            let g = (36 * a / 255 + dst.green() as u32 * ia / 255)
+                                                as u8;
+                                            let b =
+                                                (42 * a / 255 + dst.blue() as u32 * ia / 255) as u8;
                                             let na = (a + dst.alpha() as u32 * ia / 255) as u8;
-                                            if let Some(p) = tiny_skia::PremultipliedColorU8::from_rgba(r, g, b, na) {
+                                            if let Some(p) =
+                                                tiny_skia::PremultipliedColorU8::from_rgba(
+                                                    r, g, b, na,
+                                                )
+                                            {
                                                 pixels[idx] = p;
                                             }
                                         }
                                     }
                                 }
                                 // Draw ghost title text
-                                if let Some(title) = dom::query_selector(&doc.root, "#ghost-title") {
+                                if let Some(title) = dom::query_selector(&doc.root, "#ghost-title")
+                                {
                                     let text = dom::get_text_content(title);
                                     if !text.is_empty() {
                                         // Title rendered by the display list at ghost's layout position;
@@ -351,16 +425,31 @@ fn hit_card_id(root: &WebCore, doc_pt: (f32, f32)) -> Option<String> {
     use webcore::layout::hit_test::point_to_hit;
     let hit = point_to_hit(root, doc_pt, 0)?;
     fn find_node<'a>(node: &'a WebCore, id: u32) -> Option<&'a WebCore> {
-        if node.node_id == id { return Some(node); }
-        for c in &node.children { if let Some(f) = find_node(c, id) { return Some(f); } }
+        if node.node_id == id {
+            return Some(node);
+        }
+        for c in &node.children {
+            if let Some(f) = find_node(c, id) {
+                return Some(f);
+            }
+        }
         None
     }
     let hit_node = find_node(root, hit.node_id);
-    eprintln!("[HIT] node_id={} tag={} class={} rect={:?}",
+    eprintln!(
+        "[HIT] node_id={} tag={} class={} rect={:?}",
         hit.node_id,
         hit_node.map(|n| n.tag.as_str()).unwrap_or("?"),
-        hit_node.and_then(|n| n.attributes.get("class")).map(|s| s.as_str()).unwrap_or(""),
-        hit_node.map(|n| (n.layout.border_rect.x, n.layout.border_rect.y, n.layout.border_rect.w, n.layout.border_rect.h)),
+        hit_node
+            .and_then(|n| n.attributes.get("class"))
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+        hit_node.map(|n| (
+            n.layout.border_rect.x,
+            n.layout.border_rect.y,
+            n.layout.border_rect.w,
+            n.layout.border_rect.h
+        )),
     );
     let result = find_card_ancestor(root, hit.node_id);
     eprintln!("[HIT] card_ancestor={:?}", result);
@@ -493,13 +582,20 @@ fn drop_card(doc: &mut Document, card_id: &str, target_body_id: &str) -> bool {
         let mut found: Option<String> = None;
         for &(_, body_id) in COLS {
             if let Some(body) = dom::query_selector(root, &format!("#{}", body_id)) {
-                if body.children.iter().any(|c| c.attributes.get("id").map(|s| s.as_str()) == Some(card_id)) {
+                if body
+                    .children
+                    .iter()
+                    .any(|c| c.attributes.get("id").map(|s| s.as_str()) == Some(card_id))
+                {
                     found = Some(body_id.to_string());
                     break;
                 }
             }
         }
-        match found { Some(id) => id, None => return false }
+        match found {
+            Some(id) => id,
+            None => return false,
+        }
     };
 
     // Don't drop onto the same column
@@ -510,16 +606,21 @@ fn drop_card(doc: &mut Document, card_id: &str, target_body_id: &str) -> bool {
     // Remove card from source body by node_id
     let card = {
         let src_body = match dom::query_selector_mut(root, &format!("#{}", src_body_id)) {
-            Some(b) => b, None => return false,
+            Some(b) => b,
+            None => return false,
         };
-        let card_node_id = match src_body.children.iter()
+        let card_node_id = match src_body
+            .children
+            .iter()
             .find(|c| c.attributes.get("id").map(|s| s.as_str()) == Some(card_id))
             .map(|c| c.node_id)
         {
-            Some(id) => id, None => return false,
+            Some(id) => id,
+            None => return false,
         };
         match dom::remove_child(src_body, card_node_id) {
-            Some(c) => c, None => return false,
+            Some(c) => c,
+            None => return false,
         }
     };
 
@@ -580,8 +681,12 @@ fn drag_end(doc: &mut Document, card_id: &str, _dropped: bool) {
 /// Deselect all cards.
 fn deselect_all(root: &mut WebCore) {
     fn walk(node: &mut WebCore) {
-        if dom::has_class(node, "card") { dom::remove_class(node, "card-selected"); }
-        for child in node.children.iter_mut() { walk(child); }
+        if dom::has_class(node, "card") {
+            dom::remove_class(node, "card-selected");
+        }
+        for child in node.children.iter_mut() {
+            walk(child);
+        }
     }
     walk(root);
 }
@@ -589,20 +694,30 @@ fn deselect_all(root: &mut WebCore) {
 /// Get the text content of the first descendant with `class_name`.
 fn get_text_of_class<'a>(node: &'a WebCore, class_name: &str) -> String {
     fn walk<'a>(node: &'a WebCore, class_name: &str) -> Option<&'a WebCore> {
-        if dom::has_class(node, class_name) { return Some(node); }
-        for child in &node.children { if let Some(b) = walk(child, class_name) { return Some(b); } }
+        if dom::has_class(node, class_name) {
+            return Some(node);
+        }
+        for child in &node.children {
+            if let Some(b) = walk(child, class_name) {
+                return Some(b);
+            }
+        }
         None
     }
-    walk(node, class_name).map(|b| dom::get_text_content(b)).unwrap_or_default()
+    walk(node, class_name)
+        .map(|b| dom::get_text_content(b))
+        .unwrap_or_default()
 }
 
 fn main() {
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App {
-        window: None, platform: None,
+        window: None,
+        platform: None,
         renderer: Renderer::new(),
-        doc: None, width: 1000.0,
+        doc: None,
+        width: 1000.0,
         mouse_pos: (0.0, 0.0),
         drag: DragState::idle(),
         mouse_down: false,

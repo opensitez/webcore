@@ -1,45 +1,46 @@
 /// Port of wxhtmledit/examples/edit_demo.cpp
 /// Layout and editing feature showcase.
-
 use std::sync::Arc;
-use winit::event::{ElementState, MouseButton, WindowEvent};
-use winit::keyboard::{Key, NamedKey};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::Window;
 use winit::application::ApplicationHandler;
+use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event_loop::{ControlFlow, EventLoop};
+use winit::keyboard::{Key, NamedKey};
+use winit::window::Window;
 
-use webcore::{Document, Renderer, HtmlEventType};
 use webcore::platform::Platform;
+use webcore::{Document, HtmlEventType, Renderer};
 
 const HTML: &str = include_str!("html/edit_demo.html");
 
 struct App {
-    window:   Option<Arc<Window>>,
+    window: Option<Arc<Window>>,
     platform: Option<Platform>,
     renderer: Renderer,
-    doc:      Option<Document>,
-    width:    f32,
-    height:   f32,
-    scale:    f32,
-    mouse_x:  f32,
-    mouse_y:  f32,
+    doc: Option<Document>,
+    width: f32,
+    height: f32,
+    scale: f32,
+    mouse_x: f32,
+    mouse_y: f32,
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         let window = Arc::new(
-            event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("edit_demo — webcore")
-                    .with_inner_size(winit::dpi::LogicalSize::new(1000u32, 780u32))
-            ).unwrap()
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("edit_demo — webcore")
+                        .with_inner_size(winit::dpi::LogicalSize::new(1000u32, 780u32)),
+                )
+                .unwrap(),
         );
         let platform = Platform::new_windowed(window.clone());
-        self.scale  = platform.scale_factor();
-        self.width  = platform.logical_width();
+        self.scale = platform.scale_factor();
+        self.width = platform.logical_width();
         self.height = platform.logical_height();
-        self.doc    = Some(self.renderer.load_html(HTML, self.width));
-        self.window   = Some(window);
+        self.doc = Some(self.renderer.load_html(HTML, self.width));
+        self.window = Some(window);
         self.platform = Some(platform);
     }
 
@@ -63,8 +64,8 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(size) => {
                 platform.resize(size.width, size.height);
-                self.scale  = platform.scale_factor();
-                self.width  = platform.logical_width();
+                self.scale = platform.scale_factor();
+                self.width = platform.logical_width();
                 self.height = platform.logical_height();
                 let mut engine = self.renderer.layout_engine();
                 if let Some(doc) = self.doc.as_mut() {
@@ -75,7 +76,9 @@ impl ApplicationHandler for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 let dy = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y * 20.0,
-                    winit::event::MouseScrollDelta::PixelDelta(p)  => p.y as f32 / platform.scale_factor(),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => {
+                        p.y as f32 / platform.scale_factor()
+                    }
                 };
                 let (mx, my, sc) = (self.mouse_x, self.mouse_y, self.scale);
                 if let Some(doc) = self.doc.as_mut() {
@@ -96,11 +99,15 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                let etype = if state == ElementState::Pressed { HtmlEventType::MouseDown } else { HtmlEventType::MouseUp };
+                let etype = if state == ElementState::Pressed {
+                    HtmlEventType::MouseDown
+                } else {
+                    HtmlEventType::MouseUp
+                };
                 let bt = match button {
-                    MouseButton::Left   => 0,
+                    MouseButton::Left => 0,
                     MouseButton::Middle => 1,
-                    MouseButton::Right  => 2,
+                    MouseButton::Right => 2,
                     _ => 0,
                 };
                 let (mx, my, sc) = (self.mouse_x, self.mouse_y, self.scale);
@@ -121,7 +128,15 @@ impl ApplicationHandler for App {
                 };
                 let mut engine = self.renderer.layout_engine();
                 if let Some(doc) = self.doc.as_mut() {
-                    if doc.process_key_event(HtmlEventType::KeyDown, key_code, ch, false, false, false, false) {
+                    if doc.process_key_event(
+                        HtmlEventType::KeyDown,
+                        key_code,
+                        ch,
+                        false,
+                        false,
+                        false,
+                        false,
+                    ) {
                         // Enter/Backspace/Delete can modify DOM structure → need full cascade.
                         // Plain character keys only change text → skip cascade for speed.
                         if ch.is_some() && key_code >= 32 {
@@ -134,12 +149,16 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                let doc = match self.doc.as_mut() { Some(d) => d, None => return };
+                let doc = match self.doc.as_mut() {
+                    Some(d) => d,
+                    None => return,
+                };
                 let renderer = &mut self.renderer;
                 platform.render(|scale, pixmap| {
                     renderer.render(doc, pixmap, scale);
                 });
-                event_loop.set_control_flow(ControlFlow::WaitUntil(doc.editor.next_blink_deadline()));
+                event_loop
+                    .set_control_flow(ControlFlow::WaitUntil(doc.editor.next_blink_deadline()));
             }
             _ => {}
         }
@@ -155,7 +174,11 @@ impl ApplicationHandler for App {
 }
 
 impl App {
-    fn request_redraw(&self) { if let Some(w) = self.window.as_ref() { w.request_redraw(); } }
+    fn request_redraw(&self) {
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
 }
 
 fn winit_key_to_code(key: &Key) -> u32 {
@@ -174,10 +197,15 @@ fn main() {
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App {
-        window: None, platform: None,
+        window: None,
+        platform: None,
         renderer: Renderer::new(),
-        doc: None, width: 1000.0, height: 780.0,
-        scale: 1.0, mouse_x: 0.0, mouse_y: 0.0,
+        doc: None,
+        width: 1000.0,
+        height: 780.0,
+        scale: 1.0,
+        mouse_x: 0.0,
+        mouse_y: 0.0,
     };
     event_loop.run_app(&mut app).unwrap();
 }

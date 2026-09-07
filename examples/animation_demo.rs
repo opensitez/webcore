@@ -1,47 +1,50 @@
 /// CSS @keyframes animation showcase.
 /// Demonstrates the webcore animation runtime: spin, pulse, bounce, fade,
 /// colour-cycle, staggered dots, ripple, heartbeat.
-
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
 
-use webcore::{load_html, Document, Renderer, HtmlEventType};
 use webcore::platform::Platform;
+use webcore::{load_html, Document, HtmlEventType, Renderer};
 
 const HTML: &str = include_str!("html/animation_demo.html");
 
 struct App {
-    window:    Option<Arc<Window>>,
-    platform:  Option<Platform>,
-    renderer:  Renderer,
-    doc:       Option<Document>,
-    width:     f32,
+    window: Option<Arc<Window>>,
+    platform: Option<Platform>,
+    renderer: Renderer,
+    doc: Option<Document>,
+    width: f32,
     mouse_pos: (f32, f32),
 }
 
 impl App {
     fn request_redraw(&self) {
-        if let Some(w) = self.window.as_ref() { w.request_redraw(); }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         let window = Arc::new(
-            event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("Animation Demo — webcore")
-                    .with_inner_size(winit::dpi::LogicalSize::new(960u32, 700u32))
-            ).unwrap()
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("Animation Demo — webcore")
+                        .with_inner_size(winit::dpi::LogicalSize::new(960u32, 700u32)),
+                )
+                .unwrap(),
         );
         let platform = Platform::new_windowed(window.clone());
         self.width = platform.logical_width();
         let doc = load_html(HTML, self.width);
-        self.doc      = Some(doc);
-        self.window   = Some(window);
+        self.doc = Some(doc);
+        self.window = Some(window);
         self.platform = Some(platform);
         // Kick off the first animation frame.
         self.request_redraw();
@@ -76,7 +79,7 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::CursorMoved { position, .. } => {
-                let sf   = platform.scale_factor();
+                let sf = platform.scale_factor();
                 let zoom = self.renderer.zoom;
                 self.mouse_pos = (position.x as f32 / sf, position.y as f32 / sf);
                 let mp = self.mouse_pos;
@@ -95,13 +98,13 @@ impl ApplicationHandler for App {
                     HtmlEventType::MouseUp
                 };
                 let bt = match button {
-                    MouseButton::Left   => 0,
+                    MouseButton::Left => 0,
                     MouseButton::Middle => 1,
-                    MouseButton::Right  => 2,
+                    MouseButton::Right => 2,
                     _ => 0,
                 };
                 let zoom = self.renderer.zoom;
-                let mp   = self.mouse_pos;
+                let mp = self.mouse_pos;
                 if let Some(doc) = self.doc.as_mut() {
                     let pt = (mp.0 / zoom, mp.1 / zoom + doc.scroll_y);
                     if doc.process_mouse_event(etype, pt, bt) {
@@ -113,10 +116,12 @@ impl ApplicationHandler for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 let dy = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y * 20.0,
-                    winit::event::MouseScrollDelta::PixelDelta(p)   => p.y as f32 / platform.scale_factor(),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => {
+                        p.y as f32 / platform.scale_factor()
+                    }
                 };
                 let zoom = self.renderer.zoom;
-                let mp   = self.mouse_pos;
+                let mp = self.mouse_pos;
                 if let Some(doc) = self.doc.as_mut() {
                     let doc_pt = (mp.0 / zoom, mp.1 / zoom + doc.scroll_y);
                     doc.process_wheel_event(doc_pt, dy);
@@ -125,7 +130,10 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
-                let doc      = match self.doc.as_mut() { Some(d) => d, None => return };
+                let doc = match self.doc.as_mut() {
+                    Some(d) => d,
+                    None => return,
+                };
                 let renderer = &mut self.renderer;
 
                 // Re-layout every frame so tick_animations advances.
@@ -151,11 +159,11 @@ fn main() {
     // Poll keeps the loop running continuously; needed for smooth animations.
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
-        window:    None,
-        platform:  None,
-        renderer:  Renderer::new(),
-        doc:       None,
-        width:     960.0,
+        window: None,
+        platform: None,
+        renderer: Renderer::new(),
+        doc: None,
+        width: 960.0,
         mouse_pos: (0.0, 0.0),
     };
     event_loop.run_app(&mut app).unwrap();

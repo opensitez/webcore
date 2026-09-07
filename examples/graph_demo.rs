@@ -1,23 +1,28 @@
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
-use winit::event::{WindowEvent, ElementState, MouseButton};
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
 
-use webcore::{Document, Renderer, WebCore};
-use webcore::types::Component;
-use webcore::platform::Platform;
-use webcore::dom::{self, HtmlEventType};
 use std::sync::Mutex;
+use webcore::dom::{self, HtmlEventType};
+use webcore::platform::Platform;
+use webcore::types::Component;
+use webcore::{Document, Renderer, WebCore};
 
 const HTML: &str = include_str!("html/graph.html");
 
 fn get_attr(node: &WebCore, key: &str, def: &str) -> String {
-    node.attributes.get(key).cloned().unwrap_or_else(|| def.to_string())
+    node.attributes
+        .get(key)
+        .cloned()
+        .unwrap_or_else(|| def.to_string())
 }
 
 fn parse_csv(s: &str) -> Vec<f32> {
-    s.split(',').filter_map(|x| x.trim().parse::<f32>().ok()).collect()
+    s.split(',')
+        .filter_map(|x| x.trim().parse::<f32>().ok())
+        .collect()
 }
 
 /// Graph custom component — implements the Component trait for full layout participation.
@@ -25,17 +30,32 @@ struct GraphComponent;
 
 impl Component for GraphComponent {
     fn measure(&self, node: &WebCore, _available_w: f32) -> (f32, f32) {
-        let w = get_attr(node, "data-width", "340").parse::<f32>().unwrap_or(340.0);
-        let h = get_attr(node, "data-height", "190").parse::<f32>().unwrap_or(190.0);
+        let w = get_attr(node, "data-width", "340")
+            .parse::<f32>()
+            .unwrap_or(340.0);
+        let h = get_attr(node, "data-height", "190")
+            .parse::<f32>()
+            .unwrap_or(190.0);
         (w, h)
     }
 
     fn intrinsic_width(&self, node: &WebCore) -> (f32, f32) {
-        let w = get_attr(node, "data-width", "340").parse::<f32>().unwrap_or(340.0);
+        let w = get_attr(node, "data-width", "340")
+            .parse::<f32>()
+            .unwrap_or(340.0);
         (w, w) // fixed size: min == max
     }
 
-    fn paint(&self, node: &WebCore, pixmap: &mut tiny_skia::Pixmap, x: f32, y: f32, w: f32, h: f32, scale: f32) {
+    fn paint(
+        &self,
+        node: &WebCore,
+        pixmap: &mut tiny_skia::Pixmap,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        scale: f32,
+    ) {
         use tiny_skia::*;
         let mut paint = Paint::default();
         paint.set_color_rgba8(22, 27, 34, 255);
@@ -46,7 +66,9 @@ impl Component for GraphComponent {
 
         let chart_type = get_attr(node, "data-type", "bar");
         let values = parse_csv(&get_attr(node, "data-values", ""));
-        if values.is_empty() { return; }
+        if values.is_empty() {
+            return;
+        }
 
         let max_val = values.iter().copied().fold(0.0f32, f32::max).max(1.0);
         let n = values.len();
@@ -91,8 +113,11 @@ impl Component for GraphComponent {
                 for (i, &v) in values.iter().enumerate() {
                     let px = x + margin + i as f32 * step;
                     let py = y + h - margin - (v / max_val) * plot_h;
-                    if i == 0 { pb.move_to(px, py); }
-                    else { pb.line_to(px, py); }
+                    if i == 0 {
+                        pb.move_to(px, py);
+                    } else {
+                        pb.line_to(px, py);
+                    }
                 }
                 if let Some(path) = pb.finish() {
                     let mut p = Paint::default();
@@ -113,13 +138,19 @@ impl Component for GraphComponent {
                 let colors = [(78, 121, 167), (242, 142, 43), (89, 161, 79), (225, 87, 89)];
                 for (i, &v) in values.iter().enumerate() {
                     let sw = (v / total) * 360.0;
-                    if sw < 0.5 { sa += sw; continue; }
+                    if sw < 0.5 {
+                        sa += sw;
+                        continue;
+                    }
                     let mut pb = PathBuilder::new();
                     let start_rad = sa.to_radians();
                     let _end_rad = (sa + sw).to_radians();
 
-                    if !donut { pb.move_to(cx, cy); }
-                    else { pb.move_to(cx + ir * start_rad.cos(), cy + ir * start_rad.sin()); }
+                    if !donut {
+                        pb.move_to(cx, cy);
+                    } else {
+                        pb.move_to(cx + ir * start_rad.cos(), cy + ir * start_rad.sin());
+                    }
 
                     pb.line_to(cx + r * start_rad.cos(), cy + r * start_rad.sin());
                     let steps = (sw / 5.0).max(5.0) as i32;
@@ -188,8 +219,11 @@ impl Component for GraphComponent {
                 let mut pb_track = PathBuilder::new();
                 for i in 0..=36 {
                     let a = (180.0 + i as f32 * 5.0).to_radians();
-                    if i == 0 { pb_track.move_to(cx + r * a.cos(), cy + r * a.sin()); }
-                    else { pb_track.line_to(cx + r * a.cos(), cy + r * a.sin()); }
+                    if i == 0 {
+                        pb_track.move_to(cx + r * a.cos(), cy + r * a.sin());
+                    } else {
+                        pb_track.line_to(cx + r * a.cos(), cy + r * a.sin());
+                    }
                 }
                 if let Some(path) = pb_track.finish() {
                     let mut p = Paint::default();
@@ -204,8 +238,11 @@ impl Component for GraphComponent {
                 let steps = (pct * 36.0) as i32;
                 for i in 0..=steps {
                     let a = (180.0 + i as f32 * 5.0).to_radians();
-                    if i == 0 { pb_fill.move_to(cx + r * a.cos(), cy + r * a.sin()); }
-                    else { pb_fill.line_to(cx + r * a.cos(), cy + r * a.sin()); }
+                    if i == 0 {
+                        pb_fill.move_to(cx + r * a.cos(), cy + r * a.sin());
+                    } else {
+                        pb_fill.line_to(cx + r * a.cos(), cy + r * a.sin());
+                    }
                 }
                 if let Some(path) = pb_fill.finish() {
                     let mut p = Paint::default();
@@ -216,11 +253,13 @@ impl Component for GraphComponent {
                     pixmap.stroke_path(&path, &p, &stroke, ts, None);
                 }
             }
-            _ => { }
+            _ => {}
         }
     }
 
-    fn accessibility_role(&self) -> &str { "img" }
+    fn accessibility_role(&self) -> &str {
+        "img"
+    }
 
     fn accessibility_label(&self, node: &WebCore) -> Option<String> {
         let chart_type = get_attr(node, "data-type", "chart");
@@ -260,7 +299,9 @@ fn log_event(root: &mut WebCore, state: &mut AppState, etype: &str, detail: &str
     for i in (2..=5).rev() {
         let src_id = format!("#log{}", i - 1);
         let dst_id = format!("#log{}", i);
-        let src_text = dom::query_selector(root, &src_id).map(|b| dom::get_text_content(b)).unwrap_or_default();
+        let src_text = dom::query_selector(root, &src_id)
+            .map(|b| dom::get_text_content(b))
+            .unwrap_or_default();
         if let Some(dst) = dom::query_selector_mut(root, &dst_id) {
             dom::set_text_content(dst, &src_text);
         }
@@ -273,10 +314,16 @@ fn log_event(root: &mut WebCore, state: &mut AppState, etype: &str, detail: &str
 
 fn scale_all_charts(root: &mut WebCore, mult: f32) {
     let graph_ids = dom::query_selector_all_ids(root, "graph");
-    for gid in graph_ids { let g = dom::find_box_mut(root, gid).unwrap();
-        let vals_str = dom::get_attribute(g, "data-values").unwrap_or("").to_string();
-        if vals_str.is_empty() { continue; }
-        let new_vals: Vec<String> = vals_str.split(',')
+    for gid in graph_ids {
+        let g = dom::find_box_mut(root, gid).unwrap();
+        let vals_str = dom::get_attribute(g, "data-values")
+            .unwrap_or("")
+            .to_string();
+        if vals_str.is_empty() {
+            continue;
+        }
+        let new_vals: Vec<String> = vals_str
+            .split(',')
             .filter_map(|s| s.trim().parse::<f32>().ok())
             .map(|v| format!("{:.0}", v * mult))
             .collect();
@@ -288,10 +335,16 @@ fn randomize_all_charts(root: &mut WebCore) {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let graph_ids = dom::query_selector_all_ids(root, "graph");
-    for gid in graph_ids { let g = dom::find_box_mut(root, gid).unwrap();
-        let vals_str = dom::get_attribute(g, "data-values").unwrap_or("").to_string();
-        if vals_str.is_empty() { continue; }
-        let new_vals: Vec<String> = vals_str.split(',')
+    for gid in graph_ids {
+        let g = dom::find_box_mut(root, gid).unwrap();
+        let vals_str = dom::get_attribute(g, "data-values")
+            .unwrap_or("")
+            .to_string();
+        if vals_str.is_empty() {
+            continue;
+        }
+        let new_vals: Vec<String> = vals_str
+            .split(',')
             .filter_map(|s| s.trim().parse::<f32>().ok())
             .map(|v| {
                 let factor: f32 = rng.gen_range(0.6..1.4);
@@ -303,196 +356,286 @@ fn randomize_all_charts(root: &mut WebCore) {
 }
 
 struct App {
-    window:     Option<Arc<Window>>,
-    platform:   Option<Platform>,
-    renderer:   Renderer,
-    doc:        Option<Document>,
-    state:      Arc<Mutex<AppState>>,
-    width:      f32,
-    mouse_pos:  (f32, f32),
+    window: Option<Arc<Window>>,
+    platform: Option<Platform>,
+    renderer: Renderer,
+    doc: Option<Document>,
+    state: Arc<Mutex<AppState>>,
+    width: f32,
+    mouse_pos: (f32, f32),
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        let window = Arc::new(event_loop.create_window(Window::default_attributes().with_title("graph_demo — webcore").with_inner_size(winit::dpi::LogicalSize::new(1100u32, 860u32))).unwrap());
+        let window = Arc::new(
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("graph_demo — webcore")
+                        .with_inner_size(winit::dpi::LogicalSize::new(1100u32, 860u32)),
+                )
+                .unwrap(),
+        );
         let platform = Platform::new_windowed(window.clone());
         self.width = platform.logical_width();
 
-        self.renderer.register_trait_component("graph", GraphComponent);
+        self.renderer
+            .register_trait_component("graph", GraphComponent);
         let mut doc = self.renderer.load_html_vp(HTML, self.width, 860.0);
-        
+
         let state = self.state.clone();
-        
+
         // Interactivity: Cycle chart type on click using library event system
         let __root = doc.root.node_id;
-        doc.add_event_listener(__root, "click", Box::new(move |evt, __d: &mut webcore::Document| {
-            // Delegation, the way a page writes it: one listener, then
-            // `closest()` to find which matching element was hit.
-            let Some(__cur) = __d.closest(evt.target, "graph") else { return };
-            let root = &mut __d.root;
-            let _ = &root;
-            let cur_id = __cur;
-            let types = ["bar", "line", "area", "pie", "donut", "hbar", "scatter", "gauge"];
-            let (cur_type, elem_id) = dom::find_box_mut(root, cur_id)
-                .map(|t| (
-                    t.attributes.get("data-type").cloned().unwrap_or("bar".to_string()),
-                    dom::get_attribute(t, "id").unwrap_or("?").to_string(),
-                ))
-                .unwrap_or(("bar".to_string(), "?".to_string()));
-            let idx = types.iter().position(|t| *t == cur_type).unwrap_or(0);
-            let next = types[(idx + 1) % types.len()];
-            if let Some(target_mut) = dom::find_box_mut(root, cur_id) {
-                dom::set_attribute(target_mut, "data-type", next);
-                target_mut.layout.layout_dirty = true;
-            }
+        doc.add_event_listener(
+            __root,
+            "click",
+            Box::new(move |evt, __d: &mut webcore::Document| {
+                // Delegation, the way a page writes it: one listener, then
+                // `closest()` to find which matching element was hit.
+                let Some(__cur) = __d.closest(evt.target, "graph") else {
+                    return;
+                };
+                let root = &mut __d.root;
+                let _ = &root;
+                let cur_id = __cur;
+                let types = [
+                    "bar", "line", "area", "pie", "donut", "hbar", "scatter", "gauge",
+                ];
+                let (cur_type, elem_id) = dom::find_box_mut(root, cur_id)
+                    .map(|t| {
+                        (
+                            t.attributes
+                                .get("data-type")
+                                .cloned()
+                                .unwrap_or("bar".to_string()),
+                            dom::get_attribute(t, "id").unwrap_or("?").to_string(),
+                        )
+                    })
+                    .unwrap_or(("bar".to_string(), "?".to_string()));
+                let idx = types.iter().position(|t| *t == cur_type).unwrap_or(0);
+                let next = types[(idx + 1) % types.len()];
+                if let Some(target_mut) = dom::find_box_mut(root, cur_id) {
+                    dom::set_attribute(target_mut, "data-type", next);
+                    target_mut.layout.layout_dirty = true;
+                }
 
-            let mut st = state.lock().unwrap();
-            st.cycle_count += 1;
-            bump_interaction(root, &mut st);
-            update_status(root, &format!("Cycled {} to {}", elem_id, next));
-            log_event(root, &mut st, "CLICK", &format!("graph#{} -> {}", elem_id, next));
-        }), webcore::dom::events::ListenerOptions::default());
+                let mut st = state.lock().unwrap();
+                st.cycle_count += 1;
+                bump_interaction(root, &mut st);
+                update_status(root, &format!("Cycled {} to {}", elem_id, next));
+                log_event(
+                    root,
+                    &mut st,
+                    "CLICK",
+                    &format!("graph#{} -> {}", elem_id, next),
+                );
+            }),
+            webcore::dom::events::ListenerOptions::default(),
+        );
 
         // All Bar/Line/etc buttons
-        let types = [("bar", "#btn-bar"), ("line", "#btn-line"), ("pie", "#btn-pie"), ("area", "#btn-area"), ("scatter", "#btn-scatter")];
+        let types = [
+            ("bar", "#btn-bar"),
+            ("line", "#btn-line"),
+            ("pie", "#btn-pie"),
+            ("area", "#btn-area"),
+            ("scatter", "#btn-scatter"),
+        ];
         for (t, id) in types {
             let state = self.state.clone();
             let __root = doc.root.node_id;
-            doc.add_event_listener(__root, "click", Box::new(move |evt, __d: &mut webcore::Document| {
-                // Delegation, the way a page writes it: one listener, then
-                // `closest()` to find which matching element was hit.
-                let Some(__cur) = __d.closest(evt.target, id) else { return };
-                let root = &mut __d.root;
-                let _ = &root;
-                let graph_ids = dom::query_selector_all_ids(root, "graph");
-                for gid in graph_ids { let g = dom::find_box_mut(root, gid).unwrap();
-                    dom::set_attribute(g, "data-type", t);
-                }
-                let mut st = state.lock().unwrap();
-                bump_interaction(root, &mut st);
-                update_status(root, &format!("All charts set to {}", t));
-                log_event(root, &mut st, "CLICK", &format!("btn -> all = {}", t));
-            }), webcore::dom::events::ListenerOptions::default());
+            doc.add_event_listener(
+                __root,
+                "click",
+                Box::new(move |evt, __d: &mut webcore::Document| {
+                    // Delegation, the way a page writes it: one listener, then
+                    // `closest()` to find which matching element was hit.
+                    let Some(__cur) = __d.closest(evt.target, id) else {
+                        return;
+                    };
+                    let root = &mut __d.root;
+                    let _ = &root;
+                    let graph_ids = dom::query_selector_all_ids(root, "graph");
+                    for gid in graph_ids {
+                        let g = dom::find_box_mut(root, gid).unwrap();
+                        dom::set_attribute(g, "data-type", t);
+                    }
+                    let mut st = state.lock().unwrap();
+                    bump_interaction(root, &mut st);
+                    update_status(root, &format!("All charts set to {}", t));
+                    log_event(root, &mut st, "CLICK", &format!("btn -> all = {}", t));
+                }),
+                webcore::dom::events::ListenerOptions::default(),
+            );
         }
 
         // Randomize
         let state = self.state.clone();
         let __root = doc.root.node_id;
-        doc.add_event_listener(__root, "click", Box::new(move |evt, __d: &mut webcore::Document| {
-            // Delegation, the way a page writes it: one listener, then
-            // `closest()` to find which matching element was hit.
-            let Some(__cur) = __d.closest(evt.target, "#btn-rand") else { return };
-            let root = &mut __d.root;
-            let _ = &root;
-            randomize_all_charts(root);
-            let mut st = state.lock().unwrap();
-            st.refresh_count += 1;
-            bump_interaction(root, &mut st);
-            update_status(root, "All chart data randomized!");
-            log_event(root, &mut st, "CLICK", "btn-rand -> randomized all data");
-        }), webcore::dom::events::ListenerOptions::default());
+        doc.add_event_listener(
+            __root,
+            "click",
+            Box::new(move |evt, __d: &mut webcore::Document| {
+                // Delegation, the way a page writes it: one listener, then
+                // `closest()` to find which matching element was hit.
+                let Some(__cur) = __d.closest(evt.target, "#btn-rand") else {
+                    return;
+                };
+                let root = &mut __d.root;
+                let _ = &root;
+                randomize_all_charts(root);
+                let mut st = state.lock().unwrap();
+                st.refresh_count += 1;
+                bump_interaction(root, &mut st);
+                update_status(root, "All chart data randomized!");
+                log_event(root, &mut st, "CLICK", "btn-rand -> randomized all data");
+            }),
+            webcore::dom::events::ListenerOptions::default(),
+        );
 
         // Grow
         let state = self.state.clone();
         let __root = doc.root.node_id;
-        doc.add_event_listener(__root, "click", Box::new(move |evt, __d: &mut webcore::Document| {
-            // Delegation, the way a page writes it: one listener, then
-            // `closest()` to find which matching element was hit.
-            let Some(__cur) = __d.closest(evt.target, "#btn-grow") else { return };
-            let root = &mut __d.root;
-            let _ = &root;
-            scale_all_charts(root, 1.1);
-            let mut st = state.lock().unwrap();
-            bump_interaction(root, &mut st);
-            update_status(root, "All values grew +10%");
-            log_event(root, &mut st, "CLICK", "btn-grow -> +10%");
-        }), webcore::dom::events::ListenerOptions::default());
+        doc.add_event_listener(
+            __root,
+            "click",
+            Box::new(move |evt, __d: &mut webcore::Document| {
+                // Delegation, the way a page writes it: one listener, then
+                // `closest()` to find which matching element was hit.
+                let Some(__cur) = __d.closest(evt.target, "#btn-grow") else {
+                    return;
+                };
+                let root = &mut __d.root;
+                let _ = &root;
+                scale_all_charts(root, 1.1);
+                let mut st = state.lock().unwrap();
+                bump_interaction(root, &mut st);
+                update_status(root, "All values grew +10%");
+                log_event(root, &mut st, "CLICK", "btn-grow -> +10%");
+            }),
+            webcore::dom::events::ListenerOptions::default(),
+        );
 
         // Shrink
         let state = self.state.clone();
         let __root = doc.root.node_id;
-        doc.add_event_listener(__root, "click", Box::new(move |evt, __d: &mut webcore::Document| {
-            // Delegation, the way a page writes it: one listener, then
-            // `closest()` to find which matching element was hit.
-            let Some(__cur) = __d.closest(evt.target, "#btn-shrink") else { return };
-            let root = &mut __d.root;
-            let _ = &root;
-            scale_all_charts(root, 0.9);
-            let mut st = state.lock().unwrap();
-            bump_interaction(root, &mut st);
-            update_status(root, "All values shrank -10%");
-            log_event(root, &mut st, "CLICK", "btn-shrink -> -10%");
-        }), webcore::dom::events::ListenerOptions::default());
+        doc.add_event_listener(
+            __root,
+            "click",
+            Box::new(move |evt, __d: &mut webcore::Document| {
+                // Delegation, the way a page writes it: one listener, then
+                // `closest()` to find which matching element was hit.
+                let Some(__cur) = __d.closest(evt.target, "#btn-shrink") else {
+                    return;
+                };
+                let root = &mut __d.root;
+                let _ = &root;
+                scale_all_charts(root, 0.9);
+                let mut st = state.lock().unwrap();
+                bump_interaction(root, &mut st);
+                update_status(root, "All values shrank -10%");
+                log_event(root, &mut st, "CLICK", "btn-shrink -> -10%");
+            }),
+            webcore::dom::events::ListenerOptions::default(),
+        );
 
         // Sidebar selection
         let state = self.state.clone();
         let __root = doc.root.node_id;
-        doc.add_event_listener(__root, "click", Box::new(move |evt, __d: &mut webcore::Document| {
-            // Delegation, the way a page writes it: one listener, then
-            // `closest()` to find which matching element was hit.
-            let Some(__cur) = __d.closest(evt.target, ".sb-item") else { return };
-            let root = &mut __d.root;
-            let _ = &root;
-            let cur_id = __cur;
-            let all_ids = dom::query_selector_all_ids(root, ".sb-item");
-            for bid in all_ids {
-                if let Some(b) = dom::find_box_mut(root, bid) {
-                    dom::remove_class(b, "sb-item-active");
+        doc.add_event_listener(
+            __root,
+            "click",
+            Box::new(move |evt, __d: &mut webcore::Document| {
+                // Delegation, the way a page writes it: one listener, then
+                // `closest()` to find which matching element was hit.
+                let Some(__cur) = __d.closest(evt.target, ".sb-item") else {
+                    return;
+                };
+                let root = &mut __d.root;
+                let _ = &root;
+                let cur_id = __cur;
+                let all_ids = dom::query_selector_all_ids(root, ".sb-item");
+                for bid in all_ids {
+                    if let Some(b) = dom::find_box_mut(root, bid) {
+                        dom::remove_class(b, "sb-item-active");
+                    }
                 }
-            }
-            if let Some(target_mut) = dom::find_box_mut(root, cur_id) {
-                dom::add_class(target_mut, "sb-item-active");
-            }
+                if let Some(target_mut) = dom::find_box_mut(root, cur_id) {
+                    dom::add_class(target_mut, "sb-item-active");
+                }
 
-            let id = dom::find_box_mut(root, cur_id)
-                .and_then(|t| dom::get_attribute(t, "id").map(|s| s.to_string()))
-                .unwrap_or_default();
-            let id = id.as_str();
-            let mult = match id {
-                "sb-home"     => 1.0,
-                "sb-products" => 0.75,
-                "sb-pricing"  => 0.5,
-                "sb-blog"     => 0.4,
-                "sb-docs"     => 0.3,
-                "sb-about"    => 0.2,
-                "sb-organic"  => 1.1,
-                "sb-direct"   => 0.65,
-                "sb-referral" => 0.35,
-                "sb-social"   => 0.25,
-                "sb-desktop"  => 1.0,
-                "sb-mobile"   => 0.6,
-                "sb-tablet"   => 0.15,
-                _ => 1.0,
-            };
-            scale_all_charts(root, mult);
-            
-            let mut st = state.lock().unwrap();
-            bump_interaction(root, &mut st);
-            update_status(root, &format!("Showing data for {}", id));
-            log_event(root, &mut st, "NAV", &format!("{} (scale={:.0}%)", id, mult * 100.0));
-        }), webcore::dom::events::ListenerOptions::default());
+                let id = dom::find_box_mut(root, cur_id)
+                    .and_then(|t| dom::get_attribute(t, "id").map(|s| s.to_string()))
+                    .unwrap_or_default();
+                let id = id.as_str();
+                let mult = match id {
+                    "sb-home" => 1.0,
+                    "sb-products" => 0.75,
+                    "sb-pricing" => 0.5,
+                    "sb-blog" => 0.4,
+                    "sb-docs" => 0.3,
+                    "sb-about" => 0.2,
+                    "sb-organic" => 1.1,
+                    "sb-direct" => 0.65,
+                    "sb-referral" => 0.35,
+                    "sb-social" => 0.25,
+                    "sb-desktop" => 1.0,
+                    "sb-mobile" => 0.6,
+                    "sb-tablet" => 0.15,
+                    _ => 1.0,
+                };
+                scale_all_charts(root, mult);
+
+                let mut st = state.lock().unwrap();
+                bump_interaction(root, &mut st);
+                update_status(root, &format!("Showing data for {}", id));
+                log_event(
+                    root,
+                    &mut st,
+                    "NAV",
+                    &format!("{} (scale={:.0}%)", id, mult * 100.0),
+                );
+            }),
+            webcore::dom::events::ListenerOptions::default(),
+        );
 
         // KPI selection
         let __root = doc.root.node_id;
-        doc.add_event_listener(__root, "click", Box::new(move |evt, __d: &mut webcore::Document| {
-            // Delegation, the way a page writes it: one listener, then
-            // `closest()` to find which matching element was hit.
-            let Some(__cur) = __d.closest(evt.target, ".kpi") else { return };
-            let root = &mut __d.root;
-            let _ = &root;
-            let cur_id = __cur;
-            if let Some(target_mut) = dom::find_box_mut(root, cur_id) {
-                dom::toggle_class(target_mut, "kpi-selected");
-            }
-        }), webcore::dom::events::ListenerOptions::default());
+        doc.add_event_listener(
+            __root,
+            "click",
+            Box::new(move |evt, __d: &mut webcore::Document| {
+                // Delegation, the way a page writes it: one listener, then
+                // `closest()` to find which matching element was hit.
+                let Some(__cur) = __d.closest(evt.target, ".kpi") else {
+                    return;
+                };
+                let root = &mut __d.root;
+                let _ = &root;
+                let cur_id = __cur;
+                if let Some(target_mut) = dom::find_box_mut(root, cur_id) {
+                    dom::toggle_class(target_mut, "kpi-selected");
+                }
+            }),
+            webcore::dom::events::ListenerOptions::default(),
+        );
 
         self.doc = Some(doc);
-        self.window   = Some(window);
+        self.window = Some(window);
         self.platform = Some(platform);
     }
 
-    fn window_event(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop, _window_id: winit::window::WindowId, event: WindowEvent) {
-        let (window, platform) = match (self.window.as_ref(), self.platform.as_mut()) { (Some(w), Some(p)) => (w, p), _ => return };
+    fn window_event(
+        &mut self,
+        _event_loop: &winit::event_loop::ActiveEventLoop,
+        _window_id: winit::window::WindowId,
+        event: WindowEvent,
+    ) {
+        let (window, platform) = match (self.window.as_ref(), self.platform.as_mut()) {
+            (Some(w), Some(p)) => (w, p),
+            _ => return,
+        };
         match event {
             WindowEvent::CloseRequested => _event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -505,7 +648,10 @@ impl ApplicationHandler for App {
                 window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.mouse_pos = (position.x as f32 / platform.scale_factor(), position.y as f32 / platform.scale_factor());
+                self.mouse_pos = (
+                    position.x as f32 / platform.scale_factor(),
+                    position.y as f32 / platform.scale_factor(),
+                );
                 let zoom = self.renderer.zoom;
                 if let Some(doc) = self.doc.as_mut() {
                     let (sx, sy) = self.mouse_pos;
@@ -515,7 +661,11 @@ impl ApplicationHandler for App {
                     }
                 }
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
                 let zoom = self.renderer.zoom;
                 let (sx, sy) = self.mouse_pos;
                 let pt = (sx / zoom, sy / zoom);
@@ -540,7 +690,12 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let dy = match delta { winit::event::MouseScrollDelta::LineDelta(_, y) => y * 20.0, winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / platform.scale_factor() };
+                let dy = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y * 20.0,
+                    winit::event::MouseScrollDelta::PixelDelta(p) => {
+                        p.y as f32 / platform.scale_factor()
+                    }
+                };
                 let mp = self.mouse_pos;
                 if let Some(doc) = self.doc.as_mut() {
                     let doc_pt = (mp.0, mp.1 + doc.scroll_y);
@@ -551,7 +706,9 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 if let Some(doc) = self.doc.as_mut() {
                     let renderer = &mut self.renderer;
-                    platform.render(|scale, pixmap| { renderer.render(doc, pixmap, scale); });
+                    platform.render(|scale, pixmap| {
+                        renderer.render(doc, pixmap, scale);
+                    });
                 }
             }
             _ => {}
@@ -563,9 +720,11 @@ fn main() {
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App {
-        window: None, platform: None,
+        window: None,
+        platform: None,
         renderer: Renderer::new(),
-        doc: None, width: 1100.0,
+        doc: None,
+        width: 1100.0,
         state: Arc::new(Mutex::new(AppState {
             interaction_count: 0,
             cycle_count: 0,

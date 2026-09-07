@@ -2,17 +2,16 @@
 /// Split-pane Markdown editor in a single window:
 ///   Left half  — raw Markdown source (editable, monospace)
 ///   Right half — live rendered preview (read-only)
-
 use std::sync::Arc;
-use winit::event::{ElementState, MouseButton, WindowEvent};
-use winit::keyboard::{Key, NamedKey};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::Window;
-use winit::application::ApplicationHandler;
 use tiny_skia::Pixmap;
+use winit::application::ApplicationHandler;
+use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event_loop::{ControlFlow, EventLoop};
+use winit::keyboard::{Key, NamedKey};
+use winit::window::Window;
 
-use webcore::{parse_markdown, load_html, Document, Renderer, HtmlEventType};
 use webcore::platform::Platform;
+use webcore::{load_html, parse_markdown, Document, HtmlEventType, Renderer};
 
 // ── Sample markdown ──────────────────────────────────────────────────────────
 
@@ -74,36 +73,40 @@ fn make_source_html(md: &str) -> String {
 // ── App state ─────────────────────────────────────────────────────────────────
 
 struct App {
-    window:   Option<Arc<Window>>,
+    window: Option<Arc<Window>>,
     platform: Option<Platform>,
     renderer: Renderer,
 
     /// Left pane: editable markdown source
-    src_doc:  Option<Document>,
+    src_doc: Option<Document>,
 
     /// Right pane: rendered markdown preview
     prev_doc: Option<Document>,
 
-    width:    f32,  // total logical window width
-    height:   f32,
-    scale:    f32,
-    mouse_x:  f32,
-    mouse_y:  f32,
+    width: f32, // total logical window width
+    height: f32,
+    scale: f32,
+    mouse_x: f32,
+    mouse_y: f32,
 }
 
 impl App {
     /// Left pane occupies [0, split_x), right pane [split_x, width)
-    fn split_x(&self) -> f32 { (self.width * 0.45).floor() }
+    fn split_x(&self) -> f32 {
+        (self.width * 0.45).floor()
+    }
 
     fn request_redraw(&self) {
-        if let Some(w) = self.window.as_ref() { w.request_redraw(); }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
     }
 
     fn is_in_left_pane(&self, mouse_x: f32) -> bool {
         mouse_x / self.scale < self.split_x()
     }
 
-/// Rebuild the preview document from the current source text.
+    /// Rebuild the preview document from the current source text.
     fn update_preview(&mut self) {
         let markdown = if let Some(doc) = self.src_doc.as_ref() {
             doc.root.text_content()
@@ -121,12 +124,12 @@ impl App {
     /// temporary sub-pixmaps and blitting them side-by-side.
     fn render_split(&mut self, scale: f32, main: &mut Pixmap) {
         let split_x = self.split_x();
-        let pane_w_left  = split_x;
+        let pane_w_left = split_x;
         let pane_w_right = self.width - split_x;
 
-        let pw_left  = (pane_w_left  * scale).round() as u32;
+        let pw_left = (pane_w_left * scale).round() as u32;
         let pw_right = (pane_w_right * scale).round() as u32;
-        let ph       = main.height();
+        let ph = main.height();
 
         // Left sub-pixmap
         if let Some(mut left_pm) = Pixmap::new(pw_left.max(1), ph.max(1)) {
@@ -162,15 +165,17 @@ impl App {
 
 /// Copy all pixels from `src` into `dst` at offset (`dst_x`, `dst_y`).
 fn blit(src: &Pixmap, dst: &mut Pixmap, dst_x: u32, dst_y: u32) {
-    let src_w = src.width()  as usize;
+    let src_w = src.width() as usize;
     let src_h = src.height() as usize;
-    let dst_w = dst.width()  as usize;
+    let dst_w = dst.width() as usize;
     let dst_h = dst.height() as usize;
     let src_pixels = src.pixels();
     let dst_pixels = dst.pixels_mut();
     for row in 0..src_h {
         let dst_row = dst_y as usize + row;
-        if dst_row >= dst_h { break; }
+        if dst_row >= dst_h {
+            break;
+        }
         let src_base = row * src_w;
         let dst_base = dst_row * dst_w + dst_x as usize;
         let copy_w = src_w.min(dst_w.saturating_sub(dst_x as usize));
@@ -181,12 +186,12 @@ fn blit(src: &Pixmap, dst: &mut Pixmap, dst_x: u32, dst_y: u32) {
 
 fn winit_key_to_code(key: &Key) -> u32 {
     match key {
-        Key::Named(NamedKey::Enter)      => 13,
-        Key::Named(NamedKey::Backspace)  => 8,
-        Key::Named(NamedKey::Delete)     => 46,
-        Key::Named(NamedKey::ArrowLeft)  => 37,
+        Key::Named(NamedKey::Enter) => 13,
+        Key::Named(NamedKey::Backspace) => 8,
+        Key::Named(NamedKey::Delete) => 46,
+        Key::Named(NamedKey::ArrowLeft) => 37,
         Key::Named(NamedKey::ArrowRight) => 39,
-        Key::Named(NamedKey::Tab)        => 9,
+        Key::Named(NamedKey::Tab) => 9,
         Key::Character(s) => s.chars().next().map(|c| c as u32).unwrap_or(0),
         _ => 0,
     }
@@ -197,15 +202,17 @@ fn winit_key_to_code(key: &Key) -> u32 {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         let window = Arc::new(
-            event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("Markdown Editor — webcore")
-                    .with_inner_size(winit::dpi::LogicalSize::new(1100u32, 750u32))
-            ).unwrap()
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("Markdown Editor — webcore")
+                        .with_inner_size(winit::dpi::LogicalSize::new(1100u32, 750u32)),
+                )
+                .unwrap(),
         );
         let platform = Platform::new_windowed(window.clone());
-        self.scale  = platform.scale_factor();
-        self.width  = platform.logical_width();
+        self.scale = platform.scale_factor();
+        self.width = platform.logical_width();
         self.height = platform.logical_height();
         // Sync renderer DPI scale so fill_char_x_for_line shapes at the same
         // physical-pixel size as draw_text_run.  Without this, on HiDPI displays
@@ -227,7 +234,7 @@ impl ApplicationHandler for App {
         prev_doc.editor.read_only = true;
         self.prev_doc = Some(prev_doc);
 
-        self.window   = Some(window);
+        self.window = Some(window);
         self.platform = Some(platform);
     }
 
@@ -237,7 +244,9 @@ impl ApplicationHandler for App {
         _window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        if self.platform.is_none() { return; }
+        if self.platform.is_none() {
+            return;
+        }
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
@@ -255,12 +264,12 @@ impl ApplicationHandler for App {
                     p.resize(size.width, size.height);
                     (p.scale_factor(), p.logical_width(), p.logical_height())
                 };
-                self.scale  = new_scale;
-                self.width  = new_w;
+                self.scale = new_scale;
+                self.width = new_w;
                 self.height = new_h;
                 self.renderer.set_scale(new_scale);
 
-                let src_w  = self.split_x();
+                let src_w = self.split_x();
                 let prev_w = self.width - src_w;
                 let mut engine = self.renderer.layout_engine();
                 if let Some(doc) = self.src_doc.as_mut() {
@@ -303,7 +312,13 @@ impl ApplicationHandler for App {
                 let pane_w_right = self.width - split_x;
                 if self.is_in_left_pane(self.mouse_x) {
                     if let Some(doc) = self.src_doc.as_mut() {
-                        let sb = doc.process_scrollbar_event(HtmlEventType::MouseMove, sx, sy, split_x, self.height);
+                        let sb = doc.process_scrollbar_event(
+                            HtmlEventType::MouseMove,
+                            sx,
+                            sy,
+                            split_x,
+                            self.height,
+                        );
                         if sb {
                             self.request_redraw();
                         } else {
@@ -315,7 +330,13 @@ impl ApplicationHandler for App {
                     }
                 } else if let Some(doc) = self.prev_doc.as_mut() {
                     let lx = sx - split_x;
-                    if doc.process_scrollbar_event(HtmlEventType::MouseMove, lx, sy, pane_w_right, self.height) {
+                    if doc.process_scrollbar_event(
+                        HtmlEventType::MouseMove,
+                        lx,
+                        sy,
+                        pane_w_right,
+                        self.height,
+                    ) {
                         self.request_redraw();
                     }
                 }
@@ -323,9 +344,9 @@ impl ApplicationHandler for App {
 
             WindowEvent::MouseInput { state, button, .. } => {
                 let bt = match button {
-                    MouseButton::Left   => 0,
+                    MouseButton::Left => 0,
                     MouseButton::Middle => 1,
-                    MouseButton::Right  => 2,
+                    MouseButton::Right => 2,
                     _ => 0,
                 };
                 let (mx, my, sc) = (self.mouse_x, self.mouse_y, self.scale);
@@ -335,7 +356,13 @@ impl ApplicationHandler for App {
                 if state == ElementState::Pressed {
                     if self.is_in_left_pane(self.mouse_x) {
                         if let Some(doc) = self.src_doc.as_mut() {
-                            let sb = doc.process_scrollbar_event(HtmlEventType::MouseDown, sx, sy, split_x, self.height);
+                            let sb = doc.process_scrollbar_event(
+                                HtmlEventType::MouseDown,
+                                sx,
+                                sy,
+                                split_x,
+                                self.height,
+                            );
                             if !sb {
                                 let pt = (sx, sy + doc.scroll_y);
                                 doc.process_mouse_event(HtmlEventType::MouseDown, pt, bt);
@@ -344,20 +371,38 @@ impl ApplicationHandler for App {
                         }
                     } else if let Some(doc) = self.prev_doc.as_mut() {
                         let lx = sx - split_x;
-                        doc.process_scrollbar_event(HtmlEventType::MouseDown, lx, sy, pane_w_right, self.height);
+                        doc.process_scrollbar_event(
+                            HtmlEventType::MouseDown,
+                            lx,
+                            sy,
+                            pane_w_right,
+                            self.height,
+                        );
                         self.request_redraw();
                     }
                 } else {
                     if self.is_in_left_pane(self.mouse_x) {
                         if let Some(doc) = self.src_doc.as_mut() {
-                            doc.process_scrollbar_event(HtmlEventType::MouseUp, sx, sy, split_x, self.height);
+                            doc.process_scrollbar_event(
+                                HtmlEventType::MouseUp,
+                                sx,
+                                sy,
+                                split_x,
+                                self.height,
+                            );
                             let pt = (sx, sy + doc.scroll_y);
                             doc.process_mouse_event(HtmlEventType::MouseUp, pt, bt);
                             self.request_redraw();
                         }
                     } else if let Some(doc) = self.prev_doc.as_mut() {
                         let lx = sx - split_x;
-                        doc.process_scrollbar_event(HtmlEventType::MouseUp, lx, sy, pane_w_right, self.height);
+                        doc.process_scrollbar_event(
+                            HtmlEventType::MouseUp,
+                            lx,
+                            sy,
+                            pane_w_right,
+                            self.height,
+                        );
                         self.request_redraw();
                     }
                 }
@@ -372,8 +417,18 @@ impl ApplicationHandler for App {
                 };
                 let src_w = self.split_x();
                 let changed = if let Some(doc) = self.src_doc.as_mut() {
-                    doc.process_key_event(HtmlEventType::KeyDown, key_code, ch, false, false, false, false)
-                } else { false };
+                    doc.process_key_event(
+                        HtmlEventType::KeyDown,
+                        key_code,
+                        ch,
+                        false,
+                        false,
+                        false,
+                        false,
+                    )
+                } else {
+                    false
+                };
 
                 if changed {
                     let mut engine = self.renderer.layout_engine();
@@ -388,9 +443,9 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 // Render both panes into a temp pixmap, then blit to the platform surface.
                 // This avoids double-borrowing self while platform.render holds its closure.
-                let scale    = self.scale;
-                let w_phys   = (self.width  * scale).round() as u32;
-                let h_phys   = (self.height * scale).round() as u32;
+                let scale = self.scale;
+                let w_phys = (self.width * scale).round() as u32;
+                let h_phys = (self.height * scale).round() as u32;
                 if let Some(mut main_pm) = Pixmap::new(w_phys.max(1), h_phys.max(1)) {
                     self.render_split(scale, &mut main_pm);
                     // Now borrow platform briefly
@@ -404,7 +459,8 @@ impl ApplicationHandler for App {
                     }
                 }
                 if let Some(doc) = self.src_doc.as_ref() {
-                    event_loop.set_control_flow(ControlFlow::WaitUntil(doc.editor.next_blink_deadline()));
+                    event_loop
+                        .set_control_flow(ControlFlow::WaitUntil(doc.editor.next_blink_deadline()));
                 }
             }
 
@@ -425,12 +481,16 @@ fn main() {
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App {
-        window: None, platform: None,
+        window: None,
+        platform: None,
         renderer: Renderer::new(),
         src_doc: None,
         prev_doc: None,
-        width: 1100.0, height: 750.0,
-        scale: 1.0, mouse_x: 0.0, mouse_y: 0.0,
+        width: 1100.0,
+        height: 750.0,
+        scale: 1.0,
+        mouse_x: 0.0,
+        mouse_y: 0.0,
     };
     event_loop.run_app(&mut app).unwrap();
 }

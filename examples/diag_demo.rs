@@ -1,8 +1,7 @@
+use webcore::types::{Display, WebCore};
 /// Port of wxhtmledit/examples/diag.cpp
 /// Diagnostic: dump box tree to see layout results.
-
 use webcore::{load_html, LayoutEngine};
-use webcore::types::{WebCore, Display};
 
 fn dump_box_tree(node: &WebCore, depth: usize) {
     if matches!(node.style.display, Display::None) {
@@ -11,7 +10,7 @@ fn dump_box_tree(node: &WebCore, depth: usize) {
 
     let indent = "  ".repeat(depth);
     let disp_str = format!("{:?}", node.style.display);
-    
+
     let tag = if node.tag.is_empty() {
         "(box)"
     } else {
@@ -36,7 +35,10 @@ fn dump_box_tree(node: &WebCore, depth: usize) {
     if !node.layout.line_cache.is_empty() {
         print!("{}  lines={}[", indent, node.layout.line_cache.len());
         for (i, line) in node.layout.line_cache.iter().enumerate() {
-            print!("LINE({:.0},{:.0} {:.0}x{:.0})", line.x, line.y, line.width, line.height);
+            print!(
+                "LINE({:.0},{:.0} {:.0}x{:.0})",
+                line.x, line.y, line.width, line.height
+            );
             if i + 1 < node.layout.line_cache.len() {
                 print!(", ");
             }

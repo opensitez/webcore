@@ -1,45 +1,50 @@
 /// Port of wxhtmledit/examples/demo.cpp
 /// Full HTML/CSS feature showcase.
-
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
 
-use webcore::{load_html, Document, Renderer, HtmlEventType};
 use webcore::platform::Platform;
+use webcore::{load_html, Document, HtmlEventType, Renderer};
 
 const HTML: &str = include_str!("html/demo.html");
 
 struct App {
-    window:    Option<Arc<Window>>,
-    platform:  Option<Platform>,
-    renderer:  Renderer,
-    doc:       Option<Document>,
-    width:     f32,
+    window: Option<Arc<Window>>,
+    platform: Option<Platform>,
+    renderer: Renderer,
+    doc: Option<Document>,
+    width: f32,
     mouse_pos: (f32, f32),
 }
 
 impl App {
-    fn request_redraw(&self) { if let Some(w) = self.window.as_ref() { w.request_redraw(); } }
+    fn request_redraw(&self) {
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         let window = Arc::new(
-            event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("demo — webcore")
-                    .with_inner_size(winit::dpi::LogicalSize::new(900u32, 700u32))
-            ).unwrap()
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("demo — webcore")
+                        .with_inner_size(winit::dpi::LogicalSize::new(900u32, 700u32)),
+                )
+                .unwrap(),
         );
         let platform = Platform::new_windowed(window.clone());
         self.width = platform.logical_width();
         let mut doc = load_html(HTML, self.width);
         self.renderer.layout_engine().layout(&mut doc, self.width);
         self.doc = Some(doc);
-        self.window   = Some(window);
+        self.window = Some(window);
         self.platform = Some(platform);
     }
 
@@ -83,11 +88,15 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                let etype = if state == ElementState::Pressed { HtmlEventType::MouseDown } else { HtmlEventType::MouseUp };
+                let etype = if state == ElementState::Pressed {
+                    HtmlEventType::MouseDown
+                } else {
+                    HtmlEventType::MouseUp
+                };
                 let bt = match button {
-                    MouseButton::Left   => 0,
+                    MouseButton::Left => 0,
                     MouseButton::Middle => 1,
-                    MouseButton::Right  => 2,
+                    MouseButton::Right => 2,
                     _ => 0,
                 };
                 let zoom = self.renderer.zoom;
@@ -102,7 +111,9 @@ impl ApplicationHandler for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 let dy = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y * 20.0,
-                    winit::event::MouseScrollDelta::PixelDelta(p)   => p.y as f32 / platform.scale_factor(),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => {
+                        p.y as f32 / platform.scale_factor()
+                    }
                 };
                 let zoom = self.renderer.zoom;
                 let mp = self.mouse_pos;
@@ -113,7 +124,10 @@ impl ApplicationHandler for App {
                 self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
-                let doc = match self.doc.as_mut() { Some(d) => d, None => return };
+                let doc = match self.doc.as_mut() {
+                    Some(d) => d,
+                    None => return,
+                };
                 let renderer = &mut self.renderer;
                 platform.render(|scale, pixmap| {
                     renderer.render(doc, pixmap, scale);
@@ -128,9 +142,11 @@ fn main() {
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App {
-        window: None, platform: None,
+        window: None,
+        platform: None,
         renderer: Renderer::new(),
-        doc: None, width: 900.0,
+        doc: None,
+        width: 900.0,
         mouse_pos: (0.0, 0.0),
     };
     event_loop.run_app(&mut app).unwrap();

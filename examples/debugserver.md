@@ -76,7 +76,7 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 ### Navigation
 | Command | Example |
 |---------|---------|
-| `screenshot` | `{"cmd":"screenshot","out":"/tmp/page.png"}` |
+| `screenshot` | `{"cmd":"screenshot","out":"/tmp/page.png"}`; add `"scale":2` to exercise the same HiDPI raster path as a Retina GUI window |
 | `navigate` | `{"cmd":"navigate","url":"https://example.com"}` |
 | `scroll` | `{"cmd":"scroll","dy":200}` |
 | `resize` | `{"cmd":"resize","width":800,"height":600}` |
@@ -102,8 +102,11 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 | `computed` | `{"cmd":"computed","selector":"h1"}` |
 | `css` | `{"cmd":"css","selector":"td","props":"display,width"}` |
 | `rules` | `{"cmd":"rules","selector":"h1"}` — matched CSS rules |
+| `inspect-mode` | `{"cmd":"inspect-mode","on":"true"}` — recascade with matched-rule capture enabled for scripted `rules` inspection; GUI mode preserves the pre-panel page viewport so responsive media queries do not change while the inspector opens |
+| `rule-search` | `{"cmd":"rule-search","query":"lg\\:flex","limit":10}` — search loaded stylesheet selectors while debugging cascade misses |
+| `paint-dump` | `{"cmd":"paint-dump","x":0,"y":0,"w":400,"h":200,"limit":80}` — display-list commands in a viewport rectangle; text entries include font metrics and decoration flags |
 | `box-model` | `{"cmd":"box-model","selector":"div"}` — Chrome-style |
-| `highlight` | `{"cmd":"highlight","selector":"h1","out":"/tmp/hl.png"}` |
+| `highlight` | `{"cmd":"highlight","selector":"h1","out":"/tmp/hl.png"}`; accepts `"scale":2` for HiDPI output |
 | `dom-tree` | `{"cmd":"dom-tree","depth":2}` — structured JSON tree |
 | `a11y` | `{"cmd":"a11y"}` — accessibility tree |
 
@@ -216,9 +219,14 @@ cargo run --release --example browser -- --headless --chrome https://example.com
 python3 examples/debugclient.py 9222
 ```
 ```
+dbg> {"cmd":"compare","selector":"[id]"}     geometry diff, both engines
+dbg> {"cmd":"compare","selector":".card"}    narrow it to one component
 dbg> ss
 dbg> {"cmd":"chrome-screenshot","out":"/tmp/chrome.png"}
 ```
+
+`compare` is the first thing to reach for on a layout difference: it says
+WHICH elements disagree and by how much, before any screenshot is opened.
 
 ### Performance profiling
 ```

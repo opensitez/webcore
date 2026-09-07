@@ -5,16 +5,15 @@
 /// This demo shows the document content with visual A4 page-break markers
 /// so the layout can be inspected.  The toolbar buttons display an
 /// informational notice instead of printing.
-
 use std::sync::Arc;
-use winit::event::{ElementState, MouseButton, WindowEvent};
-use winit::keyboard::{Key, NamedKey};
-use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::Window;
 use winit::application::ApplicationHandler;
+use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event_loop::{ControlFlow, EventLoop};
+use winit::keyboard::{Key, NamedKey};
+use winit::window::Window;
 
-use webcore::{load_html, Document, Renderer, LayoutEngine, HtmlEventType};
 use webcore::platform::Platform;
+use webcore::{load_html, Document, HtmlEventType, LayoutEngine, Renderer};
 
 const HTML: &str = include_str!("html/print.html");
 
@@ -22,35 +21,37 @@ const HTML: &str = include_str!("html/print.html");
 const A4_PAGE_HEIGHT_PX: f32 = 1122.0;
 
 struct App {
-    window:   Option<Arc<Window>>,
+    window: Option<Arc<Window>>,
     platform: Option<Platform>,
     renderer: Renderer,
-    doc:      Option<Document>,
-    width:    f32,
-    height:   f32,
-    scale:    f32,
-    mouse_x:  f32,
-    mouse_y:  f32,
+    doc: Option<Document>,
+    width: f32,
+    height: f32,
+    scale: f32,
+    mouse_x: f32,
+    mouse_y: f32,
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         let window = Arc::new(
-            event_loop.create_window(
-                Window::default_attributes()
-                    .with_title("Print Demo (preview only) — webcore")
-                    .with_inner_size(winit::dpi::LogicalSize::new(900u32, 780u32))
-            ).unwrap()
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("Print Demo (preview only) — webcore")
+                        .with_inner_size(winit::dpi::LogicalSize::new(900u32, 780u32)),
+                )
+                .unwrap(),
         );
         let platform = Platform::new_windowed(window.clone());
-        self.scale  = platform.scale_factor();
-        self.width  = platform.logical_width();
+        self.scale = platform.scale_factor();
+        self.width = platform.logical_width();
         self.height = platform.logical_height();
 
         let mut doc = load_html(HTML, self.width);
         doc.editor.read_only = true;
         self.doc = Some(doc);
-        self.window   = Some(window);
+        self.window = Some(window);
         self.platform = Some(platform);
     }
 
@@ -68,8 +69,8 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 platform.resize(size.width, size.height);
-                self.scale  = platform.scale_factor();
-                self.width  = platform.logical_width();
+                self.scale = platform.scale_factor();
+                self.width = platform.logical_width();
                 self.height = platform.logical_height();
                 if let Some(doc) = self.doc.as_mut() {
                     LayoutEngine::new().layout(doc, self.width);
@@ -79,7 +80,9 @@ impl ApplicationHandler for App {
             WindowEvent::MouseWheel { delta, .. } => {
                 let dy = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => y * 20.0,
-                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / platform.scale_factor(),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => {
+                        p.y as f32 / platform.scale_factor()
+                    }
                 };
                 let (mx, my, sc) = (self.mouse_x, self.mouse_y, self.scale);
                 if let Some(doc) = self.doc.as_mut() {
@@ -114,27 +117,38 @@ impl ApplicationHandler for App {
                 match &event.logical_key {
                     Key::Named(NamedKey::Escape) => event_loop.exit(),
                     Key::Named(NamedKey::Space) | Key::Named(NamedKey::PageDown) => {
-                        if let Some(doc) = self.doc.as_mut() { doc.scroll_y += self.height; }
+                        if let Some(doc) = self.doc.as_mut() {
+                            doc.scroll_y += self.height;
+                        }
                         self.request_redraw();
                     }
                     Key::Named(NamedKey::PageUp) => {
-                        if let Some(doc) = self.doc.as_mut() { doc.scroll_y -= self.height; }
+                        if let Some(doc) = self.doc.as_mut() {
+                            doc.scroll_y -= self.height;
+                        }
                         self.request_redraw();
                     }
                     Key::Named(NamedKey::ArrowDown) => {
-                        if let Some(doc) = self.doc.as_mut() { doc.scroll_y += 40.0; }
+                        if let Some(doc) = self.doc.as_mut() {
+                            doc.scroll_y += 40.0;
+                        }
                         self.request_redraw();
                     }
                     Key::Named(NamedKey::ArrowUp) => {
-                        if let Some(doc) = self.doc.as_mut() { doc.scroll_y -= 40.0; }
+                        if let Some(doc) = self.doc.as_mut() {
+                            doc.scroll_y -= 40.0;
+                        }
                         self.request_redraw();
                     }
                     _ => {}
                 }
             }
             WindowEvent::RedrawRequested => {
-                let doc = match self.doc.as_mut() { Some(d) => d, None => return };
-                let width    = self.width;
+                let doc = match self.doc.as_mut() {
+                    Some(d) => d,
+                    None => return,
+                };
+                let width = self.width;
                 let renderer = &mut self.renderer;
                 platform.render(|scale, pixmap| {
                     renderer.render(doc, pixmap, scale);
@@ -149,18 +163,22 @@ impl ApplicationHandler for App {
 }
 
 impl App {
-    fn request_redraw(&self) { if let Some(w) = self.window.as_ref() { w.request_redraw(); } }
+    fn request_redraw(&self) {
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
 }
 
 /// Draw thin red horizontal lines at A4 page boundaries onto the pixmap.
 fn draw_page_breaks(
-    pixmap:      &mut tiny_skia::Pixmap,
-    scale:       f32,
-    scroll_y:    f32,
-    _width:      f32,
+    pixmap: &mut tiny_skia::Pixmap,
+    scale: f32,
+    scroll_y: f32,
+    _width: f32,
     page_height: f32,
 ) {
-    let pw = pixmap.width()  as f32;
+    let pw = pixmap.width() as f32;
     let ph = pixmap.height() as f32;
 
     // First page boundary visible in the current scroll window
@@ -191,10 +209,15 @@ fn main() {
     let event_loop = EventLoop::new().unwrap();
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = App {
-        window: None, platform: None,
+        window: None,
+        platform: None,
         renderer: Renderer::new(),
-        doc: None, width: 900.0, height: 780.0,
-        scale: 1.0, mouse_x: 0.0, mouse_y: 0.0,
+        doc: None,
+        width: 900.0,
+        height: 780.0,
+        scale: 1.0,
+        mouse_x: 0.0,
+        mouse_y: 0.0,
     };
     event_loop.run_app(&mut app).unwrap();
 }

@@ -10,25 +10,25 @@
 
 use std::sync::{Arc, Mutex};
 use winit::application::ApplicationHandler;
-use winit::event::{WindowEvent, ElementState};
+use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::EventLoop;
-use winit::keyboard::{PhysicalKey, KeyCode};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
 
-use webcore::{load_html, Renderer, LayoutEngine};
-use webcore::platform::Platform;
 use webcore::dom::{self, HtmlEventType};
+use webcore::platform::Platform;
 use webcore::WebCore;
+use webcore::{load_html, LayoutEngine, Renderer};
 
 const HTML: &str = include_str!("html/forms_demo.html");
 
 struct App {
-    window:   Option<Arc<Window>>,
+    window: Option<Arc<Window>>,
     platform: Option<Platform>,
     renderer: Renderer,
-    doc:      Option<webcore::Document>,
-    mouse:    (f32, f32),
-    width:    f32,
+    doc: Option<webcore::Document>,
+    mouse: (f32, f32),
+    width: f32,
 }
 
 fn update_summary(root: &mut WebCore) {
@@ -41,7 +41,8 @@ fn update_summary(root: &mut WebCore) {
         .unwrap_or_default();
 
     // Size from radio
-    let size = ["small", "medium", "large"].iter()
+    let size = ["small", "medium", "large"]
+        .iter()
         .find(|s| {
             dom::query_selector(root, &format!("input[value={}]", s))
                 .map(|n| n.attributes.contains_key("checked"))
@@ -49,13 +50,17 @@ fn update_summary(root: &mut WebCore) {
         })
         .unwrap_or(&"medium");
     let price = match *size {
-        "small" => 9.99f32, "large" => 19.99, _ => 14.99,
+        "small" => 9.99f32,
+        "large" => 19.99,
+        _ => 14.99,
     };
 
     // Toppings
     let mut toppings = Vec::new();
     let mut topping_price = 0.0f32;
-    for id in &["pep","mush","onion","saus","pepper","olive","cheese","jala"] {
+    for id in &[
+        "pep", "mush", "onion", "saus", "pepper", "olive", "cheese", "jala",
+    ] {
         let sel = format!("#{}", id);
         if let Some(n) = dom::query_selector(root, &sel) {
             if n.attributes.contains_key("checked") {
@@ -70,7 +75,11 @@ fn update_summary(root: &mut WebCore) {
     }
 
     let total = price + topping_price;
-    let topping_str = if toppings.is_empty() { "None".into() } else { toppings.join(", ") };
+    let topping_str = if toppings.is_empty() {
+        "None".into()
+    } else {
+        toppings.join(", ")
+    };
 
     if let Some(el) = dom::query_selector_mut(root, "#sum-name") {
         dom::set_text_content(el, if name.is_empty() { "—" } else { &name });
@@ -92,7 +101,8 @@ fn update_summary(root: &mut WebCore) {
 impl App {
     fn new() -> Self {
         Self {
-            window: None, platform: None,
+            window: None,
+            platform: None,
             renderer: Renderer::new(),
             doc: None,
             mouse: (0.0, 0.0),
@@ -103,11 +113,14 @@ impl App {
 
 impl ApplicationHandler<()> for App {
     fn resumed(&mut self, el: &winit::event_loop::ActiveEventLoop) {
-        let window = Arc::new(el.create_window(
-            Window::default_attributes()
-                .with_title("Pizza Builder — webcore Forms Demo")
-                .with_inner_size(winit::dpi::LogicalSize::new(860u32, 900u32))
-        ).unwrap());
+        let window = Arc::new(
+            el.create_window(
+                Window::default_attributes()
+                    .with_title("Pizza Builder — webcore Forms Demo")
+                    .with_inner_size(winit::dpi::LogicalSize::new(860u32, 900u32)),
+            )
+            .unwrap(),
+        );
         let platform = Platform::new_windowed(window.clone());
         self.width = platform.logical_width();
 
@@ -116,91 +129,127 @@ impl ApplicationHandler<()> for App {
         // ── Wire up events using the library event system ────────────────
 
         // Checkboxes: toggle and update summary
-        for id in &["pep","mush","onion","saus","pepper","olive","cheese","jala"] {
+        for id in &[
+            "pep", "mush", "onion", "saus", "pepper", "olive", "cheese", "jala",
+        ] {
             let sel = format!("#{}", id);
             let __root = doc.root.node_id;
-            doc.add_event_listener(__root, "click", Box::new(move |evt, __d: &mut webcore::Document| {
-                // Delegation, the way a page writes it: one listener, then
-                // `closest()` to find which matching element was hit.
-                let Some(__cur) = __d.closest(evt.target, sel.as_str()) else { return };
-                let root = &mut __d.root;
-                let _ = &root;
-                // Toggle is already handled by process_mouse_event
-                update_summary(root);
-            }), webcore::dom::events::ListenerOptions::default());
+            doc.add_event_listener(
+                __root,
+                "click",
+                Box::new(move |evt, __d: &mut webcore::Document| {
+                    // Delegation, the way a page writes it: one listener, then
+                    // `closest()` to find which matching element was hit.
+                    let Some(__cur) = __d.closest(evt.target, sel.as_str()) else {
+                        return;
+                    };
+                    let root = &mut __d.root;
+                    let _ = &root;
+                    // Toggle is already handled by process_mouse_event
+                    update_summary(root);
+                }),
+                webcore::dom::events::ListenerOptions::default(),
+            );
         }
 
         // Radio buttons: update summary on size change
         for val in &["small", "medium", "large"] {
             let sel = format!("input[value={}]", val);
             let __root = doc.root.node_id;
-            doc.add_event_listener(__root, "click", Box::new(move |evt, __d: &mut webcore::Document| {
-                // Delegation, the way a page writes it: one listener, then
-                // `closest()` to find which matching element was hit.
-                let Some(__cur) = __d.closest(evt.target, sel.as_str()) else { return };
-                let root = &mut __d.root;
-                let _ = &root;
-                update_summary(root);
-            }), webcore::dom::events::ListenerOptions::default());
+            doc.add_event_listener(
+                __root,
+                "click",
+                Box::new(move |evt, __d: &mut webcore::Document| {
+                    // Delegation, the way a page writes it: one listener, then
+                    // `closest()` to find which matching element was hit.
+                    let Some(__cur) = __d.closest(evt.target, sel.as_str()) else {
+                        return;
+                    };
+                    let root = &mut __d.root;
+                    let _ = &root;
+                    update_summary(root);
+                }),
+                webcore::dom::events::ListenerOptions::default(),
+            );
         }
 
         // Order button
         let __root = doc.root.node_id;
-        doc.add_event_listener(__root, "click", Box::new(move |evt, __d: &mut webcore::Document| {
-            // Delegation, the way a page writes it: one listener, then
-            // `closest()` to find which matching element was hit.
-            let Some(__cur) = __d.closest(evt.target, "#order-btn") else { return };
-            let root = &mut __d.root;
-            let _ = &root;
-            if let Some(el) = dom::query_selector_mut(root, "#status") {
-                dom::set_text_content(el, "Order placed! Thank you!");
-            }
-            if let Some(el) = dom::query_selector_mut(root, "#progress") {
-                dom::set_attribute(el, "value", "1");
-            }
-            eprintln!("🍕 ORDER PLACED!");
-        }), webcore::dom::events::ListenerOptions::default());
+        doc.add_event_listener(
+            __root,
+            "click",
+            Box::new(move |evt, __d: &mut webcore::Document| {
+                // Delegation, the way a page writes it: one listener, then
+                // `closest()` to find which matching element was hit.
+                let Some(__cur) = __d.closest(evt.target, "#order-btn") else {
+                    return;
+                };
+                let root = &mut __d.root;
+                let _ = &root;
+                if let Some(el) = dom::query_selector_mut(root, "#status") {
+                    dom::set_text_content(el, "Order placed! Thank you!");
+                }
+                if let Some(el) = dom::query_selector_mut(root, "#progress") {
+                    dom::set_attribute(el, "value", "1");
+                }
+                eprintln!("🍕 ORDER PLACED!");
+            }),
+            webcore::dom::events::ListenerOptions::default(),
+        );
 
         // Reset button
         let __root = doc.root.node_id;
-        doc.add_event_listener(__root, "click", Box::new(move |evt, __d: &mut webcore::Document| {
-            // Delegation, the way a page writes it: one listener, then
-            // `closest()` to find which matching element was hit.
-            let Some(__cur) = __d.closest(evt.target, "#reset-btn") else { return };
-            let root = &mut __d.root;
-            let _ = &root;
-            // Clear text inputs
-            for id in &["name", "phone"] {
-                if let Some(el) = dom::query_selector_mut(root, &format!("#{}", id)) {
-                    dom::set_attribute(el, "value", "");
+        doc.add_event_listener(
+            __root,
+            "click",
+            Box::new(move |evt, __d: &mut webcore::Document| {
+                // Delegation, the way a page writes it: one listener, then
+                // `closest()` to find which matching element was hit.
+                let Some(__cur) = __d.closest(evt.target, "#reset-btn") else {
+                    return;
+                };
+                let root = &mut __d.root;
+                let _ = &root;
+                // Clear text inputs
+                for id in &["name", "phone"] {
+                    if let Some(el) = dom::query_selector_mut(root, &format!("#{}", id)) {
+                        dom::set_attribute(el, "value", "");
+                    }
                 }
-            }
-            // Uncheck all toppings
-            for id in &["pep","mush","onion","saus","pepper","olive","cheese","jala"] {
-                if let Some(el) = dom::query_selector_mut(root, &format!("#{}", id)) {
-                    el.attributes.remove("checked");
+                // Uncheck all toppings
+                for id in &[
+                    "pep", "mush", "onion", "saus", "pepper", "olive", "cheese", "jala",
+                ] {
+                    if let Some(el) = dom::query_selector_mut(root, &format!("#{}", id)) {
+                        el.attributes.remove("checked");
+                    }
                 }
-            }
-            if let Some(el) = dom::query_selector_mut(root, "#status") {
-                dom::set_text_content(el, "Order reset. Start fresh!");
-            }
-            if let Some(el) = dom::query_selector_mut(root, "#progress") {
-                dom::set_attribute(el, "value", "0");
-            }
-            update_summary(root);
-            eprintln!("🔄 Order reset");
-        }), webcore::dom::events::ListenerOptions::default());
+                if let Some(el) = dom::query_selector_mut(root, "#status") {
+                    dom::set_text_content(el, "Order reset. Start fresh!");
+                }
+                if let Some(el) = dom::query_selector_mut(root, "#progress") {
+                    dom::set_attribute(el, "value", "0");
+                }
+                update_summary(root);
+                eprintln!("🔄 Order reset");
+            }),
+            webcore::dom::events::ListenerOptions::default(),
+        );
 
         // Initial summary
         update_summary(&mut doc.root);
 
-        self.doc      = Some(doc);
-        self.window   = Some(window);
+        self.doc = Some(doc);
+        self.window = Some(window);
         self.platform = Some(platform);
     }
 
-    fn window_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop,
-                    _wid: winit::window::WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        _wid: winit::window::WindowId,
+        event: WindowEvent,
+    ) {
         let (window, platform) = match (&self.window, &mut self.platform) {
             (Some(w), Some(p)) => (w, p),
             _ => return,
@@ -227,8 +276,13 @@ impl ApplicationHandler<()> for App {
                 if let Some(doc) = self.doc.as_mut() {
                     let w = self.width;
                     let ch = platform.logical_height();
-                    doc.process_scrollbar_event(HtmlEventType::MouseMove,
-                        self.mouse.0, self.mouse.1, w, ch);
+                    doc.process_scrollbar_event(
+                        HtmlEventType::MouseMove,
+                        self.mouse.0,
+                        self.mouse.1,
+                        w,
+                        ch,
+                    );
                 }
                 window.request_redraw();
             }
@@ -251,35 +305,65 @@ impl ApplicationHandler<()> for App {
                 window.request_redraw();
             }
 
-            WindowEvent::KeyboardInput { event: key_event, .. } => {
+            WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } => {
                 if let Some(doc) = self.doc.as_mut() {
                     if let PhysicalKey::Code(code) = key_event.physical_key {
                         let kc = match code {
-                            KeyCode::Escape => 27, KeyCode::Enter => 13, KeyCode::Tab => 9,
-                            KeyCode::Backspace => 8, KeyCode::Delete => 46, KeyCode::Space => 32,
-                            KeyCode::ArrowLeft => 37, KeyCode::ArrowUp => 38,
-                            KeyCode::ArrowRight => 39, KeyCode::ArrowDown => 40,
-                            KeyCode::KeyA => 65, KeyCode::KeyB => 66, KeyCode::KeyC => 67,
-                            KeyCode::KeyD => 68, KeyCode::KeyE => 69, KeyCode::KeyF => 70,
-                            KeyCode::KeyG => 71, KeyCode::KeyH => 72, KeyCode::KeyI => 73,
-                            KeyCode::KeyJ => 74, KeyCode::KeyK => 75, KeyCode::KeyL => 76,
-                            KeyCode::KeyM => 77, KeyCode::KeyN => 78, KeyCode::KeyO => 79,
-                            KeyCode::KeyP => 80, KeyCode::KeyQ => 81, KeyCode::KeyR => 82,
-                            KeyCode::KeyS => 83, KeyCode::KeyT => 84, KeyCode::KeyU => 85,
-                            KeyCode::KeyV => 86, KeyCode::KeyW => 87, KeyCode::KeyX => 88,
-                            KeyCode::KeyY => 89, KeyCode::KeyZ => 90,
-                            KeyCode::Digit0 => 48, KeyCode::Digit1 => 49, KeyCode::Digit2 => 50,
-                            KeyCode::Digit3 => 51, KeyCode::Digit4 => 52, KeyCode::Digit5 => 53,
-                            KeyCode::Digit6 => 54, KeyCode::Digit7 => 55, KeyCode::Digit8 => 56,
+                            KeyCode::Escape => 27,
+                            KeyCode::Enter => 13,
+                            KeyCode::Tab => 9,
+                            KeyCode::Backspace => 8,
+                            KeyCode::Delete => 46,
+                            KeyCode::Space => 32,
+                            KeyCode::ArrowLeft => 37,
+                            KeyCode::ArrowUp => 38,
+                            KeyCode::ArrowRight => 39,
+                            KeyCode::ArrowDown => 40,
+                            KeyCode::KeyA => 65,
+                            KeyCode::KeyB => 66,
+                            KeyCode::KeyC => 67,
+                            KeyCode::KeyD => 68,
+                            KeyCode::KeyE => 69,
+                            KeyCode::KeyF => 70,
+                            KeyCode::KeyG => 71,
+                            KeyCode::KeyH => 72,
+                            KeyCode::KeyI => 73,
+                            KeyCode::KeyJ => 74,
+                            KeyCode::KeyK => 75,
+                            KeyCode::KeyL => 76,
+                            KeyCode::KeyM => 77,
+                            KeyCode::KeyN => 78,
+                            KeyCode::KeyO => 79,
+                            KeyCode::KeyP => 80,
+                            KeyCode::KeyQ => 81,
+                            KeyCode::KeyR => 82,
+                            KeyCode::KeyS => 83,
+                            KeyCode::KeyT => 84,
+                            KeyCode::KeyU => 85,
+                            KeyCode::KeyV => 86,
+                            KeyCode::KeyW => 87,
+                            KeyCode::KeyX => 88,
+                            KeyCode::KeyY => 89,
+                            KeyCode::KeyZ => 90,
+                            KeyCode::Digit0 => 48,
+                            KeyCode::Digit1 => 49,
+                            KeyCode::Digit2 => 50,
+                            KeyCode::Digit3 => 51,
+                            KeyCode::Digit4 => 52,
+                            KeyCode::Digit5 => 53,
+                            KeyCode::Digit6 => 54,
+                            KeyCode::Digit7 => 55,
+                            KeyCode::Digit8 => 56,
                             KeyCode::Digit9 => 57,
                             _ => 0,
                         };
                         if kc != 0 {
                             // Extract the actual character typed
-                            let ch = key_event.text.as_ref()
-                                .and_then(|s| s.chars().next());
+                            let ch = key_event.text.as_ref().and_then(|s| s.chars().next());
                             let etype = match key_event.state {
-                                ElementState::Pressed  => HtmlEventType::KeyDown,
+                                ElementState::Pressed => HtmlEventType::KeyDown,
                                 ElementState::Released => HtmlEventType::KeyUp,
                             };
                             if doc.process_key_event(etype, kc, ch, false, false, false, false) {
