@@ -386,7 +386,7 @@ impl<'a> InlineParser<'a> {
                                         &format!("{}px", h),
                                     );
                                 }
-                                img.image_data = Some(data);
+                                img.image_data = Some(std::sync::Arc::new(data));
                                 img.image_width = w;
                                 img.image_height = h;
                             }
