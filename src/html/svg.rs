@@ -4,6 +4,4 @@
 //! sites can move gradually without changing behavior.
 
 pub use crate::svg::{load_background_images, rasterize_svg_intrinsic, rasterize_svg_to_rgba};
-pub(crate) use crate::svg::{
-    parse_px, parse_svg_length_px, parse_viewbox_value, prepare_svg_for_rasterization, style_px,
-};
+pub(crate) use crate::svg::parse_svg_length_px;

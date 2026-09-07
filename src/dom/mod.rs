@@ -49,7 +49,6 @@ use crate::layout::hit_test::point_to_hit;
 use crate::types::{
     Color, CssLength, Display, Document, FontStyle, FontWeight, Position, UserSelect, WebCore,
 };
-use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 const CARET_BLINK_MS: u64 = 500;

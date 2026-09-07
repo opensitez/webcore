@@ -5,8 +5,8 @@
 //! it existed the whole time. Call sites say `crate::html::X`, so the glob
 //! re-exports keep one path to each item.
 
-use crate::css::{apply_cascade, apply_property, ua_stylesheet, Stylesheet};
-use crate::types::{Display, Document, ListStyleType, WebCore};
+use crate::css::{apply_property, ua_stylesheet};
+use crate::types::Document;
 
 pub mod arena_wiring;
 pub mod charset;

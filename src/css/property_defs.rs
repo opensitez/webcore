@@ -3055,8 +3055,7 @@ pub const INHERITED_IDS: &[PropertyId] = &[
 // ═══════════════════════════════════════════════════════════════════════════════
 
 use super::{
-    parse_color, parse_font_size, parse_font_size_checked, parse_length, parse_length_checked,
-    parse_length_or_none,
+    parse_color, parse_font_size_checked, parse_length, parse_length_checked,
 };
 use crate::types::*;
 
