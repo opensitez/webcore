@@ -3,7 +3,7 @@
 // Widget API tests (MdWidget) are skipped — require wxHtmlEditWidget.
 
 use webcore::types::*;
-use webcore::{parse_markdown, serialize_markdown, parse_html, load_html, LayoutEngine};
+use webcore::{load_html, parse_html, parse_markdown, serialize_markdown, LayoutEngine};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -79,8 +79,11 @@ fn md_atx_heading_trailing_hashes() {
     let doc = parse_markdown("## Title ##");
     let h = find_tag(&doc, "h2");
     assert!(h.is_some(), "h2 not found");
-    assert!(get_text(h.unwrap()).contains("Title"),
-        "Text should contain 'Title', got: {:?}", get_text(h.unwrap()));
+    assert!(
+        get_text(h.unwrap()).contains("Title"),
+        "Text should contain 'Title', got: {:?}",
+        get_text(h.unwrap())
+    );
 }
 
 // ============================================================
@@ -143,7 +146,11 @@ fn md_paragraph_soft_break() {
 fn md_bold() {
     let doc = parse_markdown("This is **bold** text");
     let p = find_tag(&doc, "p").expect("p not found");
-    let found = p.layout.inline_runs.iter().any(|r| r.style.font_weight == FontWeight::Bold);
+    let found = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.font_weight == FontWeight::Bold);
     assert!(found, "No bold run found");
 }
 
@@ -151,7 +158,11 @@ fn md_bold() {
 fn md_italic() {
     let doc = parse_markdown("This is *italic* text");
     let p = find_tag(&doc, "p").expect("p not found");
-    let found = p.layout.inline_runs.iter().any(|r| r.style.font_style == FontStyle::Italic);
+    let found = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.font_style == FontStyle::Italic);
     assert!(found, "No italic run found");
 }
 
@@ -169,7 +180,11 @@ fn md_bold_italic() {
 fn md_strikethrough() {
     let doc = parse_markdown("~~deleted~~");
     let p = find_tag(&doc, "p").expect("p not found");
-    let found = p.layout.inline_runs.iter().any(|r| r.style.text_decoration.strikethrough);
+    let found = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.text_decoration.strikethrough);
     assert!(found, "No strikethrough run found");
 }
 
@@ -177,7 +192,11 @@ fn md_strikethrough() {
 fn md_inline_code() {
     let doc = parse_markdown("Use `printf()` here");
     let p = find_tag(&doc, "p").expect("p not found");
-    let found = p.layout.inline_runs.iter().any(|r| r.style.font_family == "monospace");
+    let found = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.font_family == "monospace");
     assert!(found, "No monospace run found");
 }
 
@@ -185,7 +204,11 @@ fn md_inline_code() {
 fn md_underscore_bold() {
     let doc = parse_markdown("__bold__");
     let p = find_tag(&doc, "p").expect("p not found");
-    let found = p.layout.inline_runs.iter().any(|r| r.style.font_weight == FontWeight::Bold);
+    let found = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.font_weight == FontWeight::Bold);
     assert!(found, "No bold run found");
 }
 
@@ -193,7 +216,11 @@ fn md_underscore_bold() {
 fn md_underscore_italic() {
     let doc = parse_markdown("_italic_");
     let p = find_tag(&doc, "p").expect("p not found");
-    let found = p.layout.inline_runs.iter().any(|r| r.style.font_style == FontStyle::Italic);
+    let found = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.font_style == FontStyle::Italic);
     assert!(found, "No italic run found");
 }
 
@@ -205,7 +232,11 @@ fn md_underscore_italic() {
 fn md_inline_link() {
     let doc = parse_markdown("[click me](https://example.com)");
     let p = find_tag(&doc, "p").expect("p not found");
-    let found = p.layout.inline_runs.iter().any(|r| r.style.href == "https://example.com");
+    let found = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.href == "https://example.com");
     assert!(found, "No link run with correct href found");
 }
 
@@ -226,7 +257,10 @@ fn md_image() {
     let img = find_box(&doc.root, &|b| b.tag == "img");
     assert!(img.is_some(), "img not found");
     let img = img.unwrap();
-    assert_eq!(img.attributes.get("src").map(|s| s.as_str()), Some("image.png"));
+    assert_eq!(
+        img.attributes.get("src").map(|s| s.as_str()),
+        Some("image.png")
+    );
     assert_eq!(img.data.get("md-alt").map(|s| s.as_str()), Some("alt text"));
 }
 
@@ -361,13 +395,21 @@ fn md_thematic_break_underscore() {
 fn md_simple_table() {
     let doc = parse_markdown("| A | B |\n|---|---|\n| 1 | 2 |");
     assert!(find_tag(&doc, "table").is_some(), "table not found");
-    assert!(find_box(&doc.root, &|b| b.tag == "th").is_some(), "th not found");
-    assert!(find_box(&doc.root, &|b| b.tag == "td").is_some(), "td not found");
+    assert!(
+        find_box(&doc.root, &|b| b.tag == "th").is_some(),
+        "th not found"
+    );
+    assert!(
+        find_box(&doc.root, &|b| b.tag == "td").is_some(),
+        "td not found"
+    );
 }
 
 #[test]
 fn md_table_alignment() {
-    let doc = parse_markdown("| Left | Center | Right |\n|:-----|:------:|------:|\n| a    | b      | c     |");
+    let doc = parse_markdown(
+        "| Left | Center | Right |\n|:-----|:------:|------:|\n| a    | b      | c     |",
+    );
     let table = find_tag(&doc, "table").expect("table not found");
     let align = table.data.get("md-align").expect("md-align not set");
     assert!(align.contains("center"), "md-align: {}", align);
@@ -385,7 +427,11 @@ fn md_escaped_asterisk() {
     let text = get_text(p);
     assert!(text.contains("*not italic*"), "text: {:?}", text);
     // Should NOT be italic
-    assert!(!p.layout.inline_runs.iter().any(|r| r.style.font_style == FontStyle::Italic));
+    assert!(!p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.font_style == FontStyle::Italic));
 }
 
 // ============================================================
@@ -454,7 +500,11 @@ fn md_roundtrip_heading() {
     let input = "# Hello World";
     let doc = parse_markdown(input);
     let output = serialize_markdown(&doc);
-    assert!(output.trim().contains("# Hello World"), "output: {:?}", output);
+    assert!(
+        output.trim().contains("# Hello World"),
+        "output: {:?}",
+        output
+    );
 }
 
 #[test]
@@ -541,7 +591,11 @@ fn md_roundtrip_link() {
     let input = "[click](https://example.com)";
     let doc = parse_markdown(input);
     let output = serialize_markdown(&doc);
-    assert!(output.contains("[click](https://example.com)"), "output: {:?}", output);
+    assert!(
+        output.contains("[click](https://example.com)"),
+        "output: {:?}",
+        output
+    );
 }
 
 #[test]
@@ -615,9 +669,15 @@ fn md_indented_code_block_round_trip() {
 fn md_task_list_unchecked() {
     let doc = parse_markdown("- [ ] Todo item");
     let ul = find_tag(&doc, "ul").expect("ul not found");
-    assert!(ul.data.contains_key("md-task-list"), "md-task-list not set on ul");
+    assert!(
+        ul.data.contains_key("md-task-list"),
+        "md-task-list not set on ul"
+    );
     let li = find_box(ul, &|b| b.tag == "li").expect("li not found");
-    assert_eq!(li.data.get("md-task").map(|s| s.as_str()), Some("unchecked"));
+    assert_eq!(
+        li.data.get("md-task").map(|s| s.as_str()),
+        Some("unchecked")
+    );
 }
 
 #[test]
@@ -661,7 +721,11 @@ fn md_task_list_text() {
 fn md_reference_link_full() {
     let doc = parse_markdown("[click here][example]\n\n[example]: https://example.com");
     let p = find_tag(&doc, "p").expect("p not found");
-    let found = p.layout.inline_runs.iter().any(|r| r.style.href == "https://example.com");
+    let found = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.href == "https://example.com");
     assert!(found, "No run with href=https://example.com found");
 }
 
@@ -669,7 +733,11 @@ fn md_reference_link_full() {
 fn md_reference_link_collapsed() {
     let doc = parse_markdown("[example][]\n\n[example]: https://example.com");
     let p = find_tag(&doc, "p").expect("p not found");
-    let found = p.layout.inline_runs.iter().any(|r| r.style.href == "https://example.com");
+    let found = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.href == "https://example.com");
     assert!(found, "No run with href=https://example.com found");
 }
 
@@ -677,7 +745,11 @@ fn md_reference_link_collapsed() {
 fn md_reference_link_shortcut() {
     let doc = parse_markdown("[example]\n\n[example]: https://example.com");
     let p = find_tag(&doc, "p").expect("p not found");
-    let found = p.layout.inline_runs.iter().any(|r| r.style.href == "https://example.com");
+    let found = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.href == "https://example.com");
     assert!(found, "No run with href=https://example.com found");
 }
 
@@ -685,7 +757,11 @@ fn md_reference_link_shortcut() {
 fn md_reference_link_case_insensitive() {
     let doc = parse_markdown("[Click][EXAMPLE]\n\n[example]: https://example.com");
     let p = find_tag(&doc, "p").expect("p not found");
-    let found = p.layout.inline_runs.iter().any(|r| r.style.href == "https://example.com");
+    let found = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.href == "https://example.com");
     assert!(found, "No run with href=https://example.com found");
 }
 
@@ -697,7 +773,11 @@ fn md_reference_link_case_insensitive() {
 fn md_autolink_url() {
     let doc = parse_markdown("<https://example.com>");
     let p = find_tag(&doc, "p").expect("p not found");
-    let found = p.layout.inline_runs.iter().any(|r| r.style.href == "https://example.com");
+    let found = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.href == "https://example.com");
     assert!(found, "No run with autolink href found");
 }
 
@@ -705,7 +785,11 @@ fn md_autolink_url() {
 fn md_autolink_email() {
     let doc = parse_markdown("<user@example.com>");
     let p = find_tag(&doc, "p").expect("p not found");
-    let found = p.layout.inline_runs.iter().any(|r| r.style.href == "mailto:user@example.com");
+    let found = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.href == "mailto:user@example.com");
     assert!(found, "No run with mailto href found");
 }
 
@@ -714,7 +798,11 @@ fn md_autolink_round_trip() {
     let input = "<https://example.com>";
     let doc = parse_markdown(input);
     let output = serialize_markdown(&doc);
-    assert!(output.contains("<https://example.com>"), "output: {:?}", output);
+    assert!(
+        output.contains("<https://example.com>"),
+        "output: {:?}",
+        output
+    );
 }
 
 #[test]
@@ -722,7 +810,11 @@ fn md_autolink_email_round_trip() {
     let input = "<user@example.com>";
     let doc = parse_markdown(input);
     let output = serialize_markdown(&doc);
-    assert!(output.contains("<user@example.com>"), "output: {:?}", output);
+    assert!(
+        output.contains("<user@example.com>"),
+        "output: {:?}",
+        output
+    );
 }
 
 // ============================================================
@@ -733,9 +825,11 @@ fn md_autolink_email_round_trip() {
 fn md_highlight() {
     let doc = parse_markdown("This is ==highlighted== text");
     let p = find_tag(&doc, "p").expect("p not found");
-    let found = p.layout.inline_runs.iter().any(|r| {
-        r.style.background_color == Color::rgb(255, 255, 0)
-    });
+    let found = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.background_color == Color::rgb(255, 255, 0));
     assert!(found, "No highlighted run found");
 }
 
@@ -755,8 +849,10 @@ fn md_highlight_round_trip() {
 fn md_footnote_reference() {
     let doc = parse_markdown("Text with a footnote[^1].\n\n[^1]: This is the footnote.");
     let p = find_tag(&doc, "p").expect("p not found");
-    assert!(p.data.contains_key("md-footnote-ref"),
-        "md-footnote-ref not set on p");
+    assert!(
+        p.data.contains_key("md-footnote-ref"),
+        "md-footnote-ref not set on p"
+    );
 }
 
 #[test]
@@ -786,7 +882,11 @@ fn md_definition_list() {
     let dt = find_box(dl, &|b| b.tag == "dt").expect("dt not found");
     let dd = find_box(dl, &|b| b.tag == "dd").expect("dd not found");
     assert!(get_text(dt).contains("Term"), "dt text: {:?}", get_text(dt));
-    assert!(get_text(dd).contains("Definition"), "dd text: {:?}", get_text(dd));
+    assert!(
+        get_text(dd).contains("Definition"),
+        "dd text: {:?}",
+        get_text(dd)
+    );
 }
 
 #[test]
@@ -828,7 +928,11 @@ fn md_raw_html_round_trip() {
     let input = "<div class=\"test\">\nContent\n</div>";
     let doc = parse_markdown(input);
     let output = serialize_markdown(&doc);
-    assert!(output.contains("<div class=\"test\">"), "output: {:?}", output);
+    assert!(
+        output.contains("<div class=\"test\">"),
+        "output: {:?}",
+        output
+    );
     assert!(output.contains("Content"), "output: {:?}", output);
 }
 
@@ -840,9 +944,10 @@ fn md_raw_html_round_trip() {
 fn md_nested_unordered_list() {
     let doc = parse_markdown("- Parent\n  - Child 1\n  - Child 2");
     let ul = find_tag(&doc, "ul").expect("ul not found");
-    let found_nested = ul.children.iter().any(|li| {
-        li.children.iter().any(|c| c.tag == "ul")
-    });
+    let found_nested = ul
+        .children
+        .iter()
+        .any(|li| li.children.iter().any(|c| c.tag == "ul"));
     assert!(found_nested, "No nested ul found inside li");
 }
 
@@ -850,9 +955,10 @@ fn md_nested_unordered_list() {
 fn md_nested_ordered_in_unordered() {
     let doc = parse_markdown("- Item\n  1. Sub 1\n  2. Sub 2");
     let ul = find_tag(&doc, "ul").expect("ul not found");
-    let found_nested = ul.children.iter().any(|li| {
-        li.children.iter().any(|c| c.tag == "ol")
-    });
+    let found_nested = ul
+        .children
+        .iter()
+        .any(|li| li.children.iter().any(|c| c.tag == "ol"));
     assert!(found_nested, "No nested ol found inside li");
 }
 
@@ -874,7 +980,8 @@ fn html_pre_preserves_newlines() {
     let text = pre.text_content();
     assert!(
         text.contains('\n'),
-        "<pre> text should contain newline, got: {:?}", text
+        "<pre> text should contain newline, got: {:?}",
+        text
     );
     assert!(text.contains("hello"), "text: {:?}", text);
     assert!(text.contains("world"), "text: {:?}", text);
@@ -891,7 +998,8 @@ fn html_pre_preserves_multiple_newlines() {
     // There should be at least 2 newlines separating the three lines.
     assert!(
         text.matches('\n').count() >= 2,
-        "Expected at least 2 newlines, got: {:?}", text
+        "Expected at least 2 newlines, got: {:?}",
+        text
     );
 }
 
@@ -900,7 +1008,11 @@ fn html_pre_preserves_indentation() {
     let doc = parse_html("<pre>    indented\n    code</pre>");
     let pre = find_pre(&doc).expect("pre not found");
     let text = pre.text_content();
-    assert!(text.contains("    indented"), "indentation lost: {:?}", text);
+    assert!(
+        text.contains("    indented"),
+        "indentation lost: {:?}",
+        text
+    );
     assert!(text.contains("    code"), "indentation lost: {:?}", text);
 }
 
@@ -913,11 +1025,16 @@ fn html_pre_strips_only_leading_newline() {
     let text = pre.text_content();
     // "hello" should be present and the text should NOT start with a newline.
     assert!(text.contains("hello"), "text: {:?}", text);
-    assert!(!text.starts_with('\n'), "leading newline not stripped: {:?}", text);
+    assert!(
+        !text.starts_with('\n'),
+        "leading newline not stripped: {:?}",
+        text
+    );
     // But the newline between hello and world must be kept.
     assert!(
         text.contains("hello\nworld") || (text.contains("hello") && text.contains('\n')),
-        "internal newline lost: {:?}", text
+        "internal newline lost: {:?}",
+        text
     );
 }
 
@@ -927,7 +1044,11 @@ fn html_p_collapses_whitespace() {
     let doc = parse_html("<p>hello\nworld</p>");
     let p = find_tag(&doc, "p").expect("p not found");
     let text = p.text_content();
-    assert!(!text.contains('\n'), "newline should be collapsed in <p>, got: {:?}", text);
+    assert!(
+        !text.contains('\n'),
+        "newline should be collapsed in <p>, got: {:?}",
+        text
+    );
     assert!(text.contains("hello"), "text: {:?}", text);
     assert!(text.contains("world"), "text: {:?}", text);
 }
@@ -965,13 +1086,16 @@ fn md_demo_source_pane_preserves_newlines() {
     for line in markdown.lines() {
         assert!(
             recovered.contains(line),
-            "Line {:?} missing from recovered text: {:?}", line, recovered
+            "Line {:?} missing from recovered text: {:?}",
+            line,
+            recovered
         );
     }
     // Newlines must be preserved — text must not be one long line.
     assert!(
         recovered.contains('\n'),
-        "Newlines collapsed in source pane text_content: {:?}", recovered
+        "Newlines collapsed in source pane text_content: {:?}",
+        recovered
     );
 }
 
@@ -981,11 +1105,16 @@ fn md_demo_source_pane_code_block_preserved() {
     let html = make_source_html(markdown);
     let doc = load_html(&html, 600.0);
     let recovered = doc.root.text_content();
-    assert!(recovered.contains("fn main()"), "recovered: {:?}", recovered);
+    assert!(
+        recovered.contains("fn main()"),
+        "recovered: {:?}",
+        recovered
+    );
     assert!(recovered.contains("println!"), "recovered: {:?}", recovered);
     assert!(
         recovered.contains('\n'),
-        "Newlines collapsed: {:?}", recovered
+        "Newlines collapsed: {:?}",
+        recovered
     );
 }
 
@@ -1003,10 +1132,17 @@ fn md_demo_preview_updates_from_source() {
     LayoutEngine::new().layout(&mut prev_doc, 605.0);
 
     // The preview should contain the heading and paragraph.
-    assert!(find_tag(&prev_doc, "h1").is_some(), "h1 missing from preview");
+    assert!(
+        find_tag(&prev_doc, "h1").is_some(),
+        "h1 missing from preview"
+    );
     assert!(find_tag(&prev_doc, "p").is_some(), "p missing from preview");
     let h1 = find_tag(&prev_doc, "h1").unwrap();
-    assert!(get_text(h1).contains("Title"), "h1 text: {:?}", get_text(h1));
+    assert!(
+        get_text(h1).contains("Title"),
+        "h1 text: {:?}",
+        get_text(h1)
+    );
 }
 
 // ============================================================
@@ -1025,10 +1161,15 @@ fn md_heading_font_sizes_are_em_based() {
     // We check the pre-layout style directly.
     assert!(
         matches!(h1.style.font_size, CssLength::Em(_)),
-        "h1 font_size should be Em, got: {:?}", h1.style.font_size
+        "h1 font_size should be Em, got: {:?}",
+        h1.style.font_size
     );
     if let CssLength::Em(v) = h1.style.font_size {
-        assert!((v - 2.0).abs() < 0.01, "h1 Em factor should be 2.0, got {}", v);
+        assert!(
+            (v - 2.0).abs() < 0.01,
+            "h1 Em factor should be 2.0, got {}",
+            v
+        );
     }
 }
 
@@ -1055,7 +1196,8 @@ fn md_ul_padding_matches_ua() {
     let ul = find_tag(&doc, "ul").expect("ul not found");
     assert!(
         matches!(ul.style.padding_left, CssLength::Px(px) if (px - 40.0).abs() < 0.1),
-        "ul padding_left should be 40px, got: {:?}", ul.style.padding_left
+        "ul padding_left should be 40px, got: {:?}",
+        ul.style.padding_left
     );
 }
 
@@ -1076,9 +1218,17 @@ fn parse_and_layout(md: &str) -> Document {
 fn md_layout_blocks_have_nonzero_height() {
     let doc = parse_and_layout("# Heading\n\nParagraph text here.");
     let h1 = find_tag(&doc, "h1").expect("h1 not found");
-    let p  = find_tag(&doc, "p").expect("p not found");
-    assert!(h1.layout.margin_rect.h > 0.0, "h1 should have nonzero height, got {}", h1.layout.margin_rect.h);
-    assert!(p.layout.margin_rect.h  > 0.0, "p should have nonzero height, got {}",  p.layout.margin_rect.h);
+    let p = find_tag(&doc, "p").expect("p not found");
+    assert!(
+        h1.layout.margin_rect.h > 0.0,
+        "h1 should have nonzero height, got {}",
+        h1.layout.margin_rect.h
+    );
+    assert!(
+        p.layout.margin_rect.h > 0.0,
+        "p should have nonzero height, got {}",
+        p.layout.margin_rect.h
+    );
 }
 
 #[test]
@@ -1087,12 +1237,13 @@ fn md_layout_blocks_stacked_vertically() {
     // Use padding_rect (the visual box) because adjacent margin_rects collapse and overlap.
     let doc = parse_and_layout("# Heading\n\nParagraph text here.");
     let h1 = find_tag(&doc, "h1").expect("h1 not found");
-    let p  = find_tag(&doc, "p").expect("p not found");
+    let p = find_tag(&doc, "p").expect("p not found");
     let h1_bottom = h1.layout.padding_rect.y + h1.layout.padding_rect.h;
     assert!(
         p.layout.padding_rect.y >= h1_bottom,
         "paragraph padding (y={}) should be below heading padding (bottom={})",
-        p.layout.padding_rect.y, h1_bottom
+        p.layout.padding_rect.y,
+        h1_bottom
     );
 }
 
@@ -1101,7 +1252,11 @@ fn md_layout_heading_display_is_block() {
     // After layout (which runs the cascade), h1 must still have display:block.
     let doc = parse_and_layout("# Heading");
     let h1 = find_tag(&doc, "h1").expect("h1 not found");
-    assert_eq!(h1.style.display, Display::Block, "h1 display should be Block after layout");
+    assert_eq!(
+        h1.style.display,
+        Display::Block,
+        "h1 display should be Block after layout"
+    );
 }
 
 #[test]
@@ -1109,11 +1264,20 @@ fn md_layout_heading_font_px_larger_than_body() {
     // After layout, h1 font size resolves to 32px at 16px root.
     let doc = parse_and_layout("# Heading\n\nParagraph.");
     let h1 = find_tag(&doc, "h1").expect("h1 not found");
-    let p  = find_tag(&doc, "p").expect("p not found");
+    let p = find_tag(&doc, "p").expect("p not found");
     let h1_px = h1.style.font_size_px(16.0, 16.0);
-    let p_px  = p.style.font_size_px(16.0, 16.0);
-    assert!(h1_px > p_px, "h1 font ({} px) should be larger than p font ({} px)", h1_px, p_px);
-    assert!((h1_px - 32.0).abs() < 0.5, "h1 should be ~32px, got {}", h1_px);
+    let p_px = p.style.font_size_px(16.0, 16.0);
+    assert!(
+        h1_px > p_px,
+        "h1 font ({} px) should be larger than p font ({} px)",
+        h1_px,
+        p_px
+    );
+    assert!(
+        (h1_px - 32.0).abs() < 0.5,
+        "h1 should be ~32px, got {}",
+        h1_px
+    );
 }
 
 #[test]
@@ -1123,11 +1287,14 @@ fn md_layout_list_items_stacked() {
     let items: Vec<&WebCore> = ul.children.iter().filter(|c| c.tag == "li").collect();
     assert_eq!(items.len(), 3, "should have 3 li items");
     for i in 1..items.len() {
-        let prev_bottom = items[i-1].layout.margin_rect.y + items[i-1].layout.margin_rect.h;
+        let prev_bottom = items[i - 1].layout.margin_rect.y + items[i - 1].layout.margin_rect.h;
         assert!(
             items[i].layout.margin_rect.y >= prev_bottom,
             "li[{}] (y={}) should be below li[{}] (bottom={})",
-            i, items[i].layout.margin_rect.y, i-1, prev_bottom
+            i,
+            items[i].layout.margin_rect.y,
+            i - 1,
+            prev_bottom
         );
     }
 }
@@ -1136,21 +1303,33 @@ fn md_layout_list_items_stacked() {
 fn md_layout_ul_display_is_block() {
     let doc = parse_and_layout("- item");
     let ul = find_tag(&doc, "ul").expect("ul not found");
-    assert_eq!(ul.style.display, Display::Block, "ul display should be Block after layout");
+    assert_eq!(
+        ul.style.display,
+        Display::Block,
+        "ul display should be Block after layout"
+    );
 }
 
 #[test]
 fn md_layout_pre_display_is_block() {
     let doc = parse_and_layout("```\ncode\n```");
     let pre = find_tag(&doc, "pre").expect("pre not found");
-    assert_eq!(pre.style.display, Display::Block, "pre display should be Block after layout");
+    assert_eq!(
+        pre.style.display,
+        Display::Block,
+        "pre display should be Block after layout"
+    );
 }
 
 #[test]
 fn md_layout_blockquote_display_is_block() {
     let doc = parse_and_layout("> quote");
     let bq = find_tag(&doc, "blockquote").expect("blockquote not found");
-    assert_eq!(bq.style.display, Display::Block, "blockquote display should be Block after layout");
+    assert_eq!(
+        bq.style.display,
+        Display::Block,
+        "blockquote display should be Block after layout"
+    );
 }
 
 #[test]
@@ -1160,17 +1339,29 @@ fn md_layout_multiple_headings_stacked() {
     let h1 = find_tag(&doc, "h1").expect("h1 not found");
     let h2 = find_tag(&doc, "h2").expect("h2 not found");
     let h3 = find_tag(&doc, "h3").expect("h3 not found");
-    assert!(h2.layout.padding_rect.y >= h1.layout.padding_rect.y + h1.layout.padding_rect.h,
-        "h2 (y={}) should be below h1 (bottom={})", h2.layout.padding_rect.y, h1.layout.padding_rect.y + h1.layout.padding_rect.h);
-    assert!(h3.layout.padding_rect.y >= h2.layout.padding_rect.y + h2.layout.padding_rect.h,
-        "h3 (y={}) should be below h2 (bottom={})", h3.layout.padding_rect.y, h2.layout.padding_rect.y + h2.layout.padding_rect.h);
+    assert!(
+        h2.layout.padding_rect.y >= h1.layout.padding_rect.y + h1.layout.padding_rect.h,
+        "h2 (y={}) should be below h1 (bottom={})",
+        h2.layout.padding_rect.y,
+        h1.layout.padding_rect.y + h1.layout.padding_rect.h
+    );
+    assert!(
+        h3.layout.padding_rect.y >= h2.layout.padding_rect.y + h2.layout.padding_rect.h,
+        "h3 (y={}) should be below h2 (bottom={})",
+        h3.layout.padding_rect.y,
+        h2.layout.padding_rect.y + h2.layout.padding_rect.h
+    );
 }
 
 #[test]
 fn md_layout_table_display_is_table() {
     let doc = parse_and_layout("| A | B |\n|---|---|\n| 1 | 2 |");
     let table = find_tag(&doc, "table").expect("table not found");
-    assert_eq!(table.style.display, Display::Table, "table display should be Table after layout");
+    assert_eq!(
+        table.style.display,
+        Display::Table,
+        "table display should be Table after layout"
+    );
 }
 
 #[test]
@@ -1198,8 +1389,14 @@ fn md_roundtrip_complex_document() {
     assert!(find_tag(&doc2, "h2").is_some(), "h2 lost in roundtrip");
     assert!(find_tag(&doc2, "ul").is_some(), "ul lost in roundtrip");
     assert!(find_tag(&doc2, "pre").is_some(), "pre lost in roundtrip");
-    assert!(find_tag(&doc2, "blockquote").is_some(), "blockquote lost in roundtrip");
-    assert!(find_tag(&doc2, "table").is_some(), "table lost in roundtrip");
+    assert!(
+        find_tag(&doc2, "blockquote").is_some(),
+        "blockquote lost in roundtrip"
+    );
+    assert!(
+        find_tag(&doc2, "table").is_some(),
+        "table lost in roundtrip"
+    );
     // Text content preserved
     assert_eq!(get_text(find_tag(&doc2, "h1").unwrap()), "Title");
 }
@@ -1212,16 +1409,36 @@ fn md_roundtrip_inline_formatting() {
     let doc2 = parse_markdown(&md2);
     let p = find_tag(&doc2, "p").expect("p not found in roundtrip");
     // Bold run present
-    let has_bold = p.layout.inline_runs.iter().any(|r| r.style.font_weight == FontWeight::Bold);
+    let has_bold = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.font_weight == FontWeight::Bold);
     assert!(has_bold, "bold lost in roundtrip; serialized: {}", md2);
     // Italic run present
-    let has_italic = p.layout.inline_runs.iter().any(|r| r.style.font_style == FontStyle::Italic);
+    let has_italic = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.font_style == FontStyle::Italic);
     assert!(has_italic, "italic lost in roundtrip; serialized: {}", md2);
     // Strikethrough run present
-    let has_strike = p.layout.inline_runs.iter().any(|r| r.style.text_decoration.strikethrough);
-    assert!(has_strike, "strikethrough lost in roundtrip; serialized: {}", md2);
+    let has_strike = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.text_decoration.strikethrough);
+    assert!(
+        has_strike,
+        "strikethrough lost in roundtrip; serialized: {}",
+        md2
+    );
     // Code run present (monospace)
-    let has_code = p.layout.inline_runs.iter().any(|r| r.style.font_family == "monospace");
+    let has_code = p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.font_family == "monospace");
     assert!(has_code, "code lost in roundtrip; serialized: {}", md2);
 }
 
@@ -1235,7 +1452,11 @@ fn md_roundtrip_nested_list() {
     let ul = find_tag(&doc2, "ul").expect("ul lost in nested list roundtrip");
     // Should have at least 2 li children at top level
     let top_items: Vec<_> = ul.children.iter().filter(|c| c.tag == "li").collect();
-    assert!(top_items.len() >= 2, "should have at least 2 top-level li items; got {}", top_items.len());
+    assert!(
+        top_items.len() >= 2,
+        "should have at least 2 top-level li items; got {}",
+        top_items.len()
+    );
 }
 
 #[test]
@@ -1265,7 +1486,10 @@ fn md_layout_demo_sample() {
     let h2 = find_tag(&doc, "h2").expect("h2 not found");
     // h1 and h2 must be at different vertical positions
     assert!(h1.layout.margin_rect.h > 0.0, "h1 height is 0");
-    assert!(h2.layout.margin_rect.y > h1.layout.margin_rect.y, "h2 not below h1");
+    assert!(
+        h2.layout.margin_rect.y > h1.layout.margin_rect.y,
+        "h2 not below h1"
+    );
     // Table must have block geometry
     let table = find_tag(&doc, "table").expect("table not found");
     assert!(table.layout.margin_rect.h > 0.0, "table height is 0");
@@ -1286,16 +1510,34 @@ fn parse_layout_find<'a>(doc: &'a Document, tag: &str) -> &'a WebCore {
 fn md_layout_preserves_bold() {
     let doc = parse_and_layout("A **bold** word.");
     let p = parse_layout_find(&doc, "p");
-    let bold_run = p.layout.inline_runs.iter().find(|r| r.style.font_weight == FontWeight::Bold);
-    assert!(bold_run.is_some(), "bold run missing after layout; runs: {:?}",
-        p.layout.inline_runs.iter().map(|r| (&p.text[r.text_offset..r.text_offset+r.length], r.style.font_weight)).collect::<Vec<_>>());
+    let bold_run = p
+        .layout
+        .inline_runs
+        .iter()
+        .find(|r| r.style.font_weight == FontWeight::Bold);
+    assert!(
+        bold_run.is_some(),
+        "bold run missing after layout; runs: {:?}",
+        p.layout
+            .inline_runs
+            .iter()
+            .map(|r| (
+                &p.text[r.text_offset..r.text_offset + r.length],
+                r.style.font_weight
+            ))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn md_layout_preserves_italic() {
     let doc = parse_and_layout("A *italic* word.");
     let p = parse_layout_find(&doc, "p");
-    let run = p.layout.inline_runs.iter().find(|r| r.style.font_style == FontStyle::Italic);
+    let run = p
+        .layout
+        .inline_runs
+        .iter()
+        .find(|r| r.style.font_style == FontStyle::Italic);
     assert!(run.is_some(), "italic run missing after layout");
 }
 
@@ -1303,7 +1545,11 @@ fn md_layout_preserves_italic() {
 fn md_layout_preserves_strikethrough() {
     let doc = parse_and_layout("A ~~struck~~ word.");
     let p = parse_layout_find(&doc, "p");
-    let run = p.layout.inline_runs.iter().find(|r| r.style.text_decoration.strikethrough);
+    let run = p
+        .layout
+        .inline_runs
+        .iter()
+        .find(|r| r.style.text_decoration.strikethrough);
     assert!(run.is_some(), "strikethrough run missing after layout");
 }
 
@@ -1311,7 +1557,11 @@ fn md_layout_preserves_strikethrough() {
 fn md_layout_preserves_code_font() {
     let doc = parse_and_layout("Use `code` here.");
     let p = parse_layout_find(&doc, "p");
-    let run = p.layout.inline_runs.iter().find(|r| r.style.font_family == "monospace");
+    let run = p
+        .layout
+        .inline_runs
+        .iter()
+        .find(|r| r.style.font_family == "monospace");
     assert!(run.is_some(), "code (monospace) run missing after layout");
 }
 
@@ -1319,11 +1569,18 @@ fn md_layout_preserves_code_font() {
 fn md_layout_preserves_link_color() {
     let doc = parse_and_layout("See [link](https://example.com) here.");
     let p = parse_layout_find(&doc, "p");
-    let run = p.layout.inline_runs.iter().find(|r| !r.style.href.is_empty());
+    let run = p
+        .layout
+        .inline_runs
+        .iter()
+        .find(|r| !r.style.href.is_empty());
     assert!(run.is_some(), "link run (href) missing after layout");
     let run = run.unwrap();
     assert_eq!(run.style.href, "https://example.com");
-    assert!(run.style.text_decoration.underline, "link should be underlined");
+    assert!(
+        run.style.text_decoration.underline,
+        "link should be underlined"
+    );
 }
 
 #[test]
@@ -1331,7 +1588,21 @@ fn md_layout_heading_preserves_bold_italic() {
     // Heading text is itself bold, but also supports nested italic
     let doc = parse_and_layout("# Heading with *italic* word");
     let h1 = parse_layout_find(&doc, "h1");
-    let italic_run = h1.layout.inline_runs.iter().find(|r| r.style.font_style == FontStyle::Italic);
-    assert!(italic_run.is_some(), "italic inside h1 missing after layout; runs: {:?}",
-        h1.layout.inline_runs.iter().map(|r| (&h1.text[r.text_offset..r.text_offset+r.length], r.style.font_style)).collect::<Vec<_>>());
+    let italic_run = h1
+        .layout
+        .inline_runs
+        .iter()
+        .find(|r| r.style.font_style == FontStyle::Italic);
+    assert!(
+        italic_run.is_some(),
+        "italic inside h1 missing after layout; runs: {:?}",
+        h1.layout
+            .inline_runs
+            .iter()
+            .map(|r| (
+                &h1.text[r.text_offset..r.text_offset + r.length],
+                r.style.font_style
+            ))
+            .collect::<Vec<_>>()
+    );
 }

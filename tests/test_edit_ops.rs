@@ -5,10 +5,8 @@
 // increase/decrease_quote_level.
 
 use webcore::dom::{
-    Editor, TextRange,
-    query_selector, query_selector_mut, query_selector_all,
-    get_text_content, insert_hr,
-    toggle_bold,
+    get_text_content, insert_hr, query_selector, query_selector_all, query_selector_mut,
+    toggle_bold, Editor, TextRange,
 };
 use webcore::layout::LayoutEngine;
 use webcore::parse_html;
@@ -26,7 +24,7 @@ fn parse_and_layout(html: &str) -> webcore::types::Document {
 /// # Safety
 /// The pointer must remain valid (no tree mutation) until the next editor call.
 fn set_caret(editor: &mut Editor, element: &WebCore, offset: usize) {
-    editor.caret_box  = Some(element.node_id);
+    editor.caret_box = Some(element.node_id);
     editor.collapse_to(offset);
 }
 
@@ -38,7 +36,9 @@ fn tags(root: &WebCore) -> Vec<String> {
 }
 fn collect_tags(node: &WebCore, out: &mut Vec<String>) {
     out.push(node.tag.clone());
-    for c in &node.children { collect_tags(c, out); }
+    for c in &node.children {
+        collect_tags(c, out);
+    }
 }
 
 // ── 1. insert_char: basic text insertion ──────────────────────────────────────
@@ -103,7 +103,7 @@ fn delete_selection_replaces_single_node_text() {
         let p = query_selector_mut(&mut doc.root, "p").unwrap();
         set_caret(&mut doc.editor, p, 0);
         doc.editor.sel_start = 0;
-        doc.editor.sel_end   = 5; // select "Hello"
+        doc.editor.sel_end = 5; // select "Hello"
     }
     doc.editor.insert_char(&mut doc.root, 'X');
     let p = query_selector(&doc.root, "p").unwrap();
@@ -119,7 +119,7 @@ fn delete_selection_across_inline_element() {
         let p = query_selector_mut(&mut doc.root, "p").unwrap();
         set_caret(&mut doc.editor, p, 0);
         doc.editor.sel_start = 3; // offset 3: inside "Hello" (after "Hel")
-        doc.editor.sel_end   = 8; // offset 8: " wo" — spans the node boundary
+        doc.editor.sel_end = 8; // offset 8: " wo" — spans the node boundary
         doc.editor.caret_local = 8;
     }
     doc.editor.insert_char(&mut doc.root, 'X');
@@ -136,7 +136,10 @@ fn backspace_single_char() {
         set_caret(&mut doc.editor, p, 5);
     }
     doc.editor.delete_selection_or_before(&mut doc.root);
-    assert_eq!(get_text_content(query_selector(&doc.root, "p").unwrap()), "Hell");
+    assert_eq!(
+        get_text_content(query_selector(&doc.root, "p").unwrap()),
+        "Hell"
+    );
     assert_eq!(doc.editor.caret_local, 4);
 }
 
@@ -148,7 +151,10 @@ fn delete_key_single_char() {
         set_caret(&mut doc.editor, p, 0);
     }
     doc.editor.delete_selection_or_at(&mut doc.root);
-    assert_eq!(get_text_content(query_selector(&doc.root, "p").unwrap()), "ello");
+    assert_eq!(
+        get_text_content(query_selector(&doc.root, "p").unwrap()),
+        "ello"
+    );
     assert_eq!(doc.editor.caret_local, 0);
 }
 
@@ -160,7 +166,7 @@ fn delete_selection_multi_node_via_backspace() {
         let p = query_selector_mut(&mut doc.root, "p").unwrap();
         set_caret(&mut doc.editor, p, 8);
         doc.editor.sel_start = 4;
-        doc.editor.sel_end   = 8;
+        doc.editor.sel_end = 8;
     }
     doc.editor.delete_selection_or_before(&mut doc.root);
     let p = query_selector(&doc.root, "p").unwrap();
@@ -264,10 +270,11 @@ fn insert_hr_after_paragraph() {
     let child_tags: Vec<&str> = body.children.iter().map(|c| c.tag.as_str()).collect();
     assert!(
         child_tags.contains(&"hr"),
-        "body should contain an <hr>; children: {:?}", child_tags
+        "body should contain an <hr>; children: {:?}",
+        child_tags
     );
     // hr should come AFTER the first p
-    let p_pos  = child_tags.iter().position(|&t| t == "p").unwrap();
+    let p_pos = child_tags.iter().position(|&t| t == "p").unwrap();
     let hr_pos = child_tags.iter().position(|&t| t == "hr").unwrap();
     assert!(hr_pos > p_pos, "<hr> should follow the first <p>");
 }
@@ -300,19 +307,23 @@ fn insert_br_splits_text_within_paragraph() {
     let has_br = p.children.iter().any(|c| c.tag == "br");
     assert!(has_br, "<p> should contain a <br> after insert_br");
     // Text before br = "Hello", text after br = " world"
-    let text_before = p.children.iter()
+    let text_before = p
+        .children
+        .iter()
         .take_while(|c| c.tag != "br")
         .map(|c| c.text.as_str())
         .collect::<Vec<_>>()
         .concat();
-    let text_after = p.children.iter()
+    let text_after = p
+        .children
+        .iter()
         .skip_while(|c| c.tag != "br")
         .skip(1) // skip the br itself
         .map(|c| c.text.as_str())
         .collect::<Vec<_>>()
         .concat();
     assert_eq!(text_before, "Hello");
-    assert_eq!(text_after,  " world");
+    assert_eq!(text_after, " world");
 }
 
 #[test]
@@ -341,11 +352,13 @@ fn insert_br_at_end() {
 
     let p = query_selector(&doc.root, "p").unwrap();
     // A <br> must have been inserted somewhere
-    assert!(p.children.iter().any(|c| c.tag == "br") || {
-        // Might be appended as last child when caret is at very end
-        let all_tags = tags(p);
-        all_tags.contains(&"br".to_string())
-    });
+    assert!(
+        p.children.iter().any(|c| c.tag == "br") || {
+            // Might be appended as last child when caret is at very end
+            let all_tags = tags(p);
+            all_tags.contains(&"br".to_string())
+        }
+    );
     assert!(get_text_content(p).contains("Hello"));
 }
 
@@ -380,10 +393,7 @@ fn toggle_bullet_wraps_and_caret_moves_to_li() {
     // Caret box should now point inside the <li>
     if let Some(caret_id) = doc.editor.caret_box {
         let li = query_selector(&doc.root, "li").unwrap();
-        assert!(
-            caret_id == li.node_id,
-            "caret should be on the <li>"
-        );
+        assert!(caret_id == li.node_id, "caret should be on the <li>");
     } else {
         panic!("caret_box should be set after toggle_bullet_list");
     }
@@ -400,8 +410,14 @@ fn toggle_bullet_unwraps_single_li_removes_ul() {
     doc.editor.toggle_bullet_list(&mut doc.root);
 
     // No <ul> or <li> should remain
-    assert!(query_selector(&doc.root, "ul").is_none(), "<ul> should be gone after toggle-off");
-    assert!(query_selector(&doc.root, "li").is_none(), "<li> should be gone after toggle-off");
+    assert!(
+        query_selector(&doc.root, "ul").is_none(),
+        "<ul> should be gone after toggle-off"
+    );
+    assert!(
+        query_selector(&doc.root, "li").is_none(),
+        "<li> should be gone after toggle-off"
+    );
     // Text should still be accessible
     let p = query_selector(&doc.root, "p");
     assert!(p.is_some(), "should now have a <p>");
@@ -423,7 +439,8 @@ fn increase_indent_adds_margin_left() {
     let style_attr = p.attributes.get("style").cloned().unwrap_or_default();
     assert!(
         style_attr.contains("margin-left"),
-        "style attribute should contain margin-left; got: {:?}", style_attr
+        "style attribute should contain margin-left; got: {:?}",
+        style_attr
     );
     // Computed style should reflect 40px
     match &p.style.margin_left {
@@ -477,7 +494,7 @@ fn decrease_indent_does_not_go_below_zero() {
     let p = query_selector(&doc.root, "p").unwrap();
     match &p.style.margin_left {
         webcore::types::CssLength::Px(v) => assert!(*v >= 0.0, "margin-left must not go negative"),
-        webcore::types::CssLength::Zero  => {} // ok
+        webcore::types::CssLength::Zero => {} // ok
         other => panic!("unexpected {:?}", other),
     }
 }
@@ -533,7 +550,10 @@ fn increase_quote_level_twice_nests_blockquotes() {
     let outer = query_selector(&doc.root, "blockquote").unwrap();
     let inner = query_selector(outer, "blockquote");
     assert!(inner.is_some(), "should have nested <blockquote>");
-    assert_eq!(get_text_content(query_selector(inner.unwrap(), "p").unwrap()), "Hello");
+    assert_eq!(
+        get_text_content(query_selector(inner.unwrap(), "p").unwrap()),
+        "Hello"
+    );
 }
 
 #[test]
@@ -581,7 +601,10 @@ fn quote_roundtrip_increase_then_decrease() {
     doc.editor.decrease_quote_level(&mut doc.root);
 
     assert!(query_selector(&doc.root, "blockquote").is_none());
-    assert_eq!(get_text_content(query_selector(&doc.root, "p").unwrap()), "Hello");
+    assert_eq!(
+        get_text_content(query_selector(&doc.root, "p").unwrap()),
+        "Hello"
+    );
 }
 
 // ── 9. insert_newline: non-prose containers get <br>, not a sibling ──────────
@@ -597,7 +620,12 @@ fn enter_in_div_inserts_br_not_new_div() {
     doc.editor.insert_newline(&mut doc.root);
 
     let divs: Vec<_> = query_selector_all(&doc.root, "div");
-    assert_eq!(divs.len(), 1, "Enter in a <div> must not create a second <div>; found: {}", divs.len());
+    assert_eq!(
+        divs.len(),
+        1,
+        "Enter in a <div> must not create a second <div>; found: {}",
+        divs.len()
+    );
     // The <div> should now contain a <br>
     let has_br = tags(query_selector(&doc.root, "div").unwrap()).contains(&"br".to_string());
     assert!(has_br, "<div> should contain a <br> after Enter");
@@ -613,7 +641,11 @@ fn enter_in_blockquote_inserts_br() {
     doc.editor.insert_newline(&mut doc.root);
 
     let bqs: Vec<_> = query_selector_all(&doc.root, "blockquote");
-    assert_eq!(bqs.len(), 1, "Enter in a <blockquote> must not create a second one");
+    assert_eq!(
+        bqs.len(),
+        1,
+        "Enter in a <blockquote> must not create a second one"
+    );
     let has_br = tags(bqs[0]).contains(&"br".to_string());
     assert!(has_br, "<blockquote> should contain a <br> after Enter");
 }
@@ -631,7 +663,7 @@ fn key_enter_splits_paragraph() {
     let redraw = doc.editor.handle_key_event(
         &mut doc.root,
         HtmlEventType::KeyDown,
-        13,    // Enter
+        13, // Enter
         None,
         false,
     );
@@ -650,7 +682,8 @@ fn key_enter_does_not_insert_literal_newline() {
         let p = query_selector_mut(&mut doc.root, "p").unwrap();
         set_caret(&mut doc.editor, p, 5);
     }
-    doc.editor.handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 13, None, false);
+    doc.editor
+        .handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 13, None, false);
 
     // There should now be two paragraphs; neither should contain '\n'
     let all_text = query_selector_all(&doc.root, "p")
@@ -658,7 +691,11 @@ fn key_enter_does_not_insert_literal_newline() {
         .map(|p| get_text_content(p))
         .collect::<Vec<_>>();
     for t in &all_text {
-        assert!(!t.contains('\n'), "text must not contain a literal newline; got: {:?}", all_text);
+        assert!(
+            !t.contains('\n'),
+            "text must not contain a literal newline; got: {:?}",
+            all_text
+        );
     }
 }
 
@@ -670,7 +707,11 @@ fn toggle_bold_on_range_after_layout() {
     let p = query_selector_mut(&mut doc.root, "p").unwrap();
     let range = TextRange { start: 0, end: 5 };
     toggle_bold(p, &range);
-    assert!(p.layout.inline_runs.iter().any(|r| r.style.font_weight.is_bold()));
+    assert!(p
+        .layout
+        .inline_runs
+        .iter()
+        .any(|r| r.style.font_weight.is_bold()));
 }
 
 // ── 11. Space then text in table cell and grid div ────────────────────────────
@@ -698,7 +739,11 @@ fn space_then_letter_in_table_cell() {
 
     let td = query_selector(&doc.root, "td").unwrap();
     let text = get_text_content(td);
-    assert_eq!(text, "Hi X", "space and letter must be inserted in order; got {:?}", text);
+    assert_eq!(
+        text, "Hi X",
+        "space and letter must be inserted in order; got {:?}",
+        text
+    );
     // Caret must be just after the 'X' (offset 4)
     assert_eq!(doc.editor.caret_local, 4, "caret should be after 'X'");
 }
@@ -740,18 +785,39 @@ fn arrow_right_twice_then_enter_splits_at_correct_offset() {
     }
 
     // Press right twice — caret_local should advance to 2
-    doc.editor.handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 39, None, false);
-    doc.editor.handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 39, None, false);
-    assert_eq!(doc.editor.caret_local, 2, "two right presses must move caret to offset 2");
+    doc.editor
+        .handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 39, None, false);
+    doc.editor
+        .handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 39, None, false);
+    assert_eq!(
+        doc.editor.caret_local, 2,
+        "two right presses must move caret to offset 2"
+    );
 
     // Press Enter — paragraph should split at offset 2
-    doc.editor.handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 13, None, false);
+    doc.editor
+        .handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 13, None, false);
 
     let paras: Vec<_> = query_selector_all(&doc.root, "p");
-    assert_eq!(paras.len(), 2, "Enter after arrow must create two paragraphs");
-    assert_eq!(get_text_content(paras[0]), "He",        "first para must contain text before split");
-    assert_eq!(get_text_content(paras[1]), "llo world", "second para must contain text after split");
-    assert_eq!(doc.editor.caret_local, 0, "caret must be at start of new paragraph");
+    assert_eq!(
+        paras.len(),
+        2,
+        "Enter after arrow must create two paragraphs"
+    );
+    assert_eq!(
+        get_text_content(paras[0]),
+        "He",
+        "first para must contain text before split"
+    );
+    assert_eq!(
+        get_text_content(paras[1]),
+        "llo world",
+        "second para must contain text after split"
+    );
+    assert_eq!(
+        doc.editor.caret_local, 0,
+        "caret must be at start of new paragraph"
+    );
 }
 
 /// Arrow right into inline children then Enter: split must be at the correct
@@ -767,11 +833,14 @@ fn arrow_right_into_inline_child_then_enter() {
     }
 
     // Move past "A" and "B"
-    doc.editor.handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 39, None, false);
-    doc.editor.handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 39, None, false);
+    doc.editor
+        .handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 39, None, false);
+    doc.editor
+        .handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 39, None, false);
     assert_eq!(doc.editor.caret_local, 2);
 
-    doc.editor.handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 13, None, false);
+    doc.editor
+        .handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 13, None, false);
 
     let paras: Vec<_> = query_selector_all(&doc.root, "p");
     assert_eq!(paras.len(), 2);
@@ -790,10 +859,12 @@ fn arrow_left_then_enter_splits_at_moved_position() {
     }
 
     // Move one step left — caret should be at 4
-    doc.editor.handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 37, None, false);
+    doc.editor
+        .handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 37, None, false);
     assert_eq!(doc.editor.caret_local, 4);
 
-    doc.editor.handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 13, None, false);
+    doc.editor
+        .handle_key_event(&mut doc.root, HtmlEventType::KeyDown, 13, None, false);
 
     let paras: Vec<_> = query_selector_all(&doc.root, "p");
     assert_eq!(paras.len(), 2);
@@ -850,6 +921,7 @@ fn absolute_child_excluded_from_parent_flat_text() {
     let flat = collect_flat_text(rel);
     assert!(
         !flat.contains("abs text"),
-        "flat text of relative container must not include absolute child's text; got {:?}", flat
+        "flat text of relative container must not include absolute child's text; got {:?}",
+        flat
     );
 }

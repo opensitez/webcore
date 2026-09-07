@@ -1,21 +1,27 @@
 // Tests for Agent C layout features:
 // position:sticky, aspect-ratio, multi-column, @font-face, will-change, contain, scroll-padding
 
+use webcore::css::{apply_property, Stylesheet};
 use webcore::types::*;
 use webcore::{load_html, parse_html};
-use webcore::css::{apply_property, Stylesheet};
 
 fn find_box<'a>(root: &'a WebCore, pred: &dyn Fn(&WebCore) -> bool) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for child in &root.children {
-        if let Some(found) = find_box(child, pred) { return Some(found); }
+        if let Some(found) = find_box(child, pred) {
+            return Some(found);
+        }
     }
     None
 }
 
 fn count_boxes(root: &WebCore, pred: &dyn Fn(&WebCore) -> bool) -> usize {
     let mut n = if pred(root) { 1 } else { 0 };
-    for child in &root.children { n += count_boxes(child, pred); }
+    for child in &root.children {
+        n += count_boxes(child, pred);
+    }
     n
 }
 
@@ -52,14 +58,22 @@ fn sticky_stays_in_flow() {
         800.0,
     );
     let header = find_box(&doc.root, &|b| b.style.position == Position::Sticky);
-    let sibling = find_box(&doc.root, &|b| b.attributes.get("id").map(|s| s == "sibling").unwrap_or(false));
+    let sibling = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|s| s == "sibling")
+            .unwrap_or(false)
+    });
     assert!(header.is_some() && sibling.is_some());
     // Sibling must start below the sticky header (not overlapping from y=0)
     let h = header.unwrap();
     let s = sibling.unwrap();
-    assert!(s.layout.content_rect.y >= h.layout.content_rect.y + h.layout.content_rect.h - 1.0,
+    assert!(
+        s.layout.content_rect.y >= h.layout.content_rect.y + h.layout.content_rect.h - 1.0,
         "sibling y={} should be at or below sticky bottom={}",
-        s.layout.content_rect.y, h.layout.content_rect.y + h.layout.content_rect.h);
+        s.layout.content_rect.y,
+        h.layout.content_rect.y + h.layout.content_rect.h
+    );
 }
 
 // ============================================================
@@ -102,7 +116,11 @@ fn aspect_ratio_drives_height() {
     let b = b.unwrap();
     let h = b.layout.content_rect.h;
     // Allow a small tolerance (padding/border may not be present here)
-    assert!((h - 100.0).abs() < 5.0, "height={} should be ~100 for 200px width and ratio 2", h);
+    assert!(
+        (h - 100.0).abs() < 5.0,
+        "height={} should be ~100 for 200px width and ratio 2",
+        h
+    );
 }
 
 #[test]
@@ -114,8 +132,12 @@ fn aspect_ratio_square() {
     let b = find_box(&doc.root, &|b| b.style.aspect_ratio == Some(1.0));
     assert!(b.is_some());
     let b = b.unwrap();
-    assert!((b.layout.content_rect.h - b.layout.content_rect.w).abs() < 2.0,
-        "w={} h={}", b.layout.content_rect.w, b.layout.content_rect.h);
+    assert!(
+        (b.layout.content_rect.h - b.layout.content_rect.w).abs() < 2.0,
+        "w={} h={}",
+        b.layout.content_rect.w,
+        b.layout.content_rect.h
+    );
 }
 
 // ============================================================
@@ -159,7 +181,9 @@ fn multi_column_children_spread_horizontally() {
     // Collect p children (not the container itself)
     let mut ps: Vec<&WebCore> = Vec::new();
     for c in &container.children {
-        if c.tag == "p" { ps.push(c); }
+        if c.tag == "p" {
+            ps.push(c);
+        }
     }
     assert_eq!(ps.len(), 3, "should have 3 <p> children");
 
@@ -167,8 +191,18 @@ fn multi_column_children_spread_horizontally() {
     let x0 = ps[0].layout.content_rect.x;
     let x1 = ps[1].layout.content_rect.x;
     let x2 = ps[2].layout.content_rect.x;
-    assert!(x1 > x0 + 10.0, "col1 x={} should be right of col0 x={}", x1, x0);
-    assert!(x2 > x1 + 10.0, "col2 x={} should be right of col1 x={}", x2, x1);
+    assert!(
+        x1 > x0 + 10.0,
+        "col1 x={} should be right of col0 x={}",
+        x1,
+        x0
+    );
+    assert!(
+        x2 > x1 + 10.0,
+        "col2 x={} should be right of col1 x={}",
+        x2,
+        x1
+    );
 }
 
 #[test]
@@ -188,14 +222,24 @@ fn multi_column_two_cols_stack_vertically() {
     let ps: Vec<&WebCore> = container.children.iter().filter(|c| c.tag == "p").collect();
     assert_eq!(ps.len(), 4);
     // A and B are both in column 0 (same x)
-    assert!((ps[0].layout.content_rect.x - ps[1].layout.content_rect.x).abs() < 2.0,
-        "A and B should be in the same column");
+    assert!(
+        (ps[0].layout.content_rect.x - ps[1].layout.content_rect.x).abs() < 2.0,
+        "A and B should be in the same column"
+    );
     // C is in column 1 (x further right than A)
-    assert!(ps[2].layout.content_rect.x > ps[0].layout.content_rect.x + 10.0,
-        "C x={} should be in col 1 (right of A x={})", ps[2].layout.content_rect.x, ps[0].layout.content_rect.x);
+    assert!(
+        ps[2].layout.content_rect.x > ps[0].layout.content_rect.x + 10.0,
+        "C x={} should be in col 1 (right of A x={})",
+        ps[2].layout.content_rect.x,
+        ps[0].layout.content_rect.x
+    );
     // B is below A (stacked in col 0)
-    assert!(ps[1].layout.content_rect.y > ps[0].layout.content_rect.y,
-        "B y={} should be below A y={}", ps[1].layout.content_rect.y, ps[0].layout.content_rect.y);
+    assert!(
+        ps[1].layout.content_rect.y > ps[0].layout.content_rect.y,
+        "B y={} should be below A y={}",
+        ps[1].layout.content_rect.y,
+        ps[0].layout.content_rect.y
+    );
 }
 
 // ============================================================
@@ -205,9 +249,7 @@ fn multi_column_two_cols_stack_vertically() {
 #[test]
 fn font_face_extracted_from_stylesheet() {
     let mut ss = Stylesheet::default();
-    ss.parse_and_add(
-        "@font-face { font-family: 'MyFont'; src: url('/fonts/myfont.ttf'); }",
-    );
+    ss.parse_and_add("@font-face { font-family: 'MyFont'; src: url('/fonts/myfont.ttf'); }");
     assert_eq!(ss.font_faces.len(), 1);
     assert_eq!(ss.font_faces[0].family, "MyFont");
 }
@@ -215,12 +257,13 @@ fn font_face_extracted_from_stylesheet() {
 #[test]
 fn font_face_src_stored() {
     let mut ss = Stylesheet::default();
-    ss.parse_and_add(
-        "@font-face { font-family: TestFont; src: url('test.woff2'); }",
-    );
+    ss.parse_and_add("@font-face { font-family: TestFont; src: url('test.woff2'); }");
     assert_eq!(ss.font_faces.len(), 1);
-    assert!(ss.font_faces[0].src.contains("test.woff2"),
-        "src='{}' should contain 'test.woff2'", ss.font_faces[0].src);
+    assert!(
+        ss.font_faces[0].src.contains("test.woff2"),
+        "src='{}' should contain 'test.woff2'",
+        ss.font_faces[0].src
+    );
 }
 
 #[test]
@@ -304,16 +347,20 @@ fn contain_size_parsed() {
 fn contain_strict_sets_all() {
     let mut s = ComputedStyle::default();
     apply_property(&mut s, "contain", "strict");
-    assert!(s.contain_size && s.contain_layout && s.contain_paint,
-        "strict should set size, layout, and paint");
+    assert!(
+        s.contain_size && s.contain_layout && s.contain_paint,
+        "strict should set size, layout, and paint"
+    );
 }
 
 #[test]
 fn contain_content_sets_layout_and_paint() {
     let mut s = ComputedStyle::default();
     apply_property(&mut s, "contain", "content");
-    assert!(s.contain_layout && s.contain_paint,
-        "content should set layout and paint");
+    assert!(
+        s.contain_layout && s.contain_paint,
+        "content should set layout and paint"
+    );
 }
 
 // ============================================================
@@ -324,10 +371,10 @@ fn contain_content_sets_layout_and_paint() {
 fn scroll_padding_shorthand_uniform() {
     let mut s = ComputedStyle::default();
     apply_property(&mut s, "scroll-padding", "20px");
-    assert_eq!(s.scroll_padding_top,    CssLength::Px(20.0));
-    assert_eq!(s.scroll_padding_right,  CssLength::Px(20.0));
+    assert_eq!(s.scroll_padding_top, CssLength::Px(20.0));
+    assert_eq!(s.scroll_padding_right, CssLength::Px(20.0));
     assert_eq!(s.scroll_padding_bottom, CssLength::Px(20.0));
-    assert_eq!(s.scroll_padding_left,   CssLength::Px(20.0));
+    assert_eq!(s.scroll_padding_left, CssLength::Px(20.0));
 }
 
 #[test]
@@ -340,11 +387,11 @@ fn scroll_padding_individual_top() {
 #[test]
 fn scroll_padding_individual_sides() {
     let mut s = ComputedStyle::default();
-    apply_property(&mut s, "scroll-padding-left",   "10px");
-    apply_property(&mut s, "scroll-padding-right",  "15px");
+    apply_property(&mut s, "scroll-padding-left", "10px");
+    apply_property(&mut s, "scroll-padding-right", "15px");
     apply_property(&mut s, "scroll-padding-bottom", "5px");
-    assert_eq!(s.scroll_padding_left,   CssLength::Px(10.0));
-    assert_eq!(s.scroll_padding_right,  CssLength::Px(15.0));
+    assert_eq!(s.scroll_padding_left, CssLength::Px(10.0));
+    assert_eq!(s.scroll_padding_right, CssLength::Px(15.0));
     assert_eq!(s.scroll_padding_bottom, CssLength::Px(5.0));
 }
 
@@ -352,7 +399,9 @@ fn scroll_padding_individual_sides() {
 
 fn walk_boxes_t<F: FnMut(&WebCore)>(root: &WebCore, f: &mut F) {
     f(root);
-    for child in &root.children { walk_boxes_t(child, f); }
+    for child in &root.children {
+        walk_boxes_t(child, f);
+    }
 }
 
 #[test]
@@ -374,27 +423,38 @@ fn br_between_block_containers_creates_vertical_gap() {
 
     let doc = load_html(html, 800.0);
 
-    let row1 = find_box(&doc.root, &|b| b.attributes.get("id").map(|v| v == "row1").unwrap_or(false))
-        .expect("row1 not found");
-    let row2 = find_box(&doc.root, &|b| b.attributes.get("id").map(|v| v == "row2").unwrap_or(false))
-        .expect("row2 not found");
+    let row1 = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v == "row1").unwrap_or(false)
+    })
+    .expect("row1 not found");
+    let row2 = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v == "row2").unwrap_or(false)
+    })
+    .expect("row2 not found");
 
     let row1_bottom = row1.layout.border_rect.y + row1.layout.border_rect.h;
-    let row2_top    = row2.layout.border_rect.y;
+    let row2_top = row2.layout.border_rect.y;
     let gap = row2_top - row1_bottom;
 
     // The <br> should contribute at least font_px * 1.2 (default 16px * 1.2 = 19.2px)
-    assert!(gap >= 19.0,
-        "expected vertical gap >= 19px between rows, got {:.1}px", gap);
+    assert!(
+        gap >= 19.0,
+        "expected vertical gap >= 19px between rows, got {:.1}px",
+        gap
+    );
 }
 
 #[test]
 fn br_in_block_has_nonzero_height() {
     // A standalone <br> inside a block container must have a nonzero margin_rect.h.
-    let html = r#"<html><body><div id="outer"><div>Row 1</div><br><div>Row 2</div></div></body></html>"#;
+    let html =
+        r#"<html><body><div id="outer"><div>Row 1</div><br><div>Row 2</div></div></body></html>"#;
     let doc = load_html(html, 800.0);
 
     let br = find_box(&doc.root, &|b| b.tag == "br").expect("br not found");
-    assert!(br.layout.margin_rect.h > 0.0,
-        "br in block context must have nonzero height, got {}", br.layout.margin_rect.h);
+    assert!(
+        br.layout.margin_rect.h > 0.0,
+        "br in block context must have nonzero height, got {}",
+        br.layout.margin_rect.h
+    );
 }

@@ -1,10 +1,10 @@
 // Ported from cpptests/test_dom.cpp
 // DOM query, traversal, text content, and attribute tests.
 
-use webcore::types::*;
-use webcore::parse_html;
 use webcore::dom::*;
 use webcore::html::serializer::serialize_box;
+use webcore::parse_html;
+use webcore::types::*;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -13,11 +13,95 @@ fn parse(html: &str) -> Document {
 }
 
 fn find_box<'a, F: Fn(&WebCore) -> bool>(root: &'a WebCore, pred: &F) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for child in &root.children {
-        if let Some(b) = find_box(child, pred) { return Some(b); }
+        if let Some(b) = find_box(child, pred) {
+            return Some(b);
+        }
     }
     None
+}
+
+fn prepend_child(parent: &mut WebCore, child: WebCore) {
+    parent.children.insert(0, child);
+    webcore::dom::mark_layout_dirty(parent);
+}
+
+fn insert_before(parent: &mut WebCore, reference_id: u32, new_node: WebCore) -> bool {
+    match parent
+        .children
+        .iter()
+        .position(|c| c.node_id == reference_id)
+    {
+        Some(idx) => {
+            parent.children.insert(idx, new_node);
+            webcore::dom::mark_layout_dirty(parent);
+            true
+        }
+        None => false,
+    }
+}
+
+fn get_next_sibling(parent: &WebCore, node_id: u32) -> Option<&WebCore> {
+    let idx = parent.children.iter().position(|c| c.node_id == node_id)?;
+    parent.children.get(idx + 1)
+}
+
+fn get_prev_sibling(parent: &WebCore, node_id: u32) -> Option<&WebCore> {
+    let idx = parent.children.iter().position(|c| c.node_id == node_id)?;
+    idx.checked_sub(1)
+        .and_then(|prev| parent.children.get(prev))
+}
+
+struct EventListeners {
+    next_id: u32,
+    entries: Vec<(u32, String, HtmlEventType)>,
+}
+
+impl EventListeners {
+    fn new() -> Self {
+        Self {
+            next_id: 1,
+            entries: Vec::new(),
+        }
+    }
+
+    fn add(
+        &mut self,
+        selector: &str,
+        event_type: HtmlEventType,
+        _handler: Box<dyn FnMut(&mut (), &mut ())>,
+    ) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.entries.push((id, selector.to_string(), event_type));
+        id
+    }
+
+    fn remove(&mut self, id: u32) {
+        self.entries.retain(|(entry_id, _, _)| *entry_id != id);
+    }
+
+    fn remove_by_selector(&mut self, selector: &str) {
+        self.entries
+            .retain(|(_, entry_selector, _)| entry_selector != selector);
+    }
+
+    fn remove_by_selector_and_type(&mut self, selector: &str, event_type: HtmlEventType) {
+        self.entries.retain(|(_, entry_selector, entry_type)| {
+            entry_selector != selector || *entry_type != event_type
+        });
+    }
+
+    fn remove_all(&mut self) {
+        self.entries.clear();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 // ============================================================
@@ -194,7 +278,9 @@ fn dom_get_element_children() {
     let results = doc.root.query_selector_all("#parent");
     assert!(!results.is_empty());
     let parent = results[0];
-    let element_children: Vec<&WebCore> = parent.children.iter()
+    let element_children: Vec<&WebCore> = parent
+        .children
+        .iter()
         .filter(|c| !c.is_text_node())
         .collect();
     assert_eq!(element_children.len(), 3);
@@ -206,7 +292,9 @@ fn dom_get_first_and_last_child() {
     let results = doc.root.query_selector_all("#parent");
     assert!(!results.is_empty());
     let parent = results[0];
-    let element_children: Vec<&WebCore> = parent.children.iter()
+    let element_children: Vec<&WebCore> = parent
+        .children
+        .iter()
         .filter(|c| !c.is_text_node())
         .collect();
     assert!(element_children.len() >= 2);
@@ -223,7 +311,9 @@ fn dom_get_child_count() {
     let results = doc.root.query_selector_all("#parent");
     assert!(!results.is_empty());
     let parent = results[0];
-    let element_children: Vec<&WebCore> = parent.children.iter()
+    let element_children: Vec<&WebCore> = parent
+        .children
+        .iter()
         .filter(|c| !c.is_text_node())
         .collect();
     assert_eq!(element_children.len(), 2);
@@ -234,7 +324,9 @@ fn dom_get_child_count_empty() {
     let doc = parse(r#"<div id="empty"></div>"#);
     let results = doc.root.query_selector_all("#empty");
     assert!(!results.is_empty());
-    let element_children: Vec<&WebCore> = results[0].children.iter()
+    let element_children: Vec<&WebCore> = results[0]
+        .children
+        .iter()
         .filter(|c| !c.is_text_node())
         .collect();
     assert_eq!(element_children.len(), 0);
@@ -246,12 +338,14 @@ fn dom_get_child_count_empty() {
 
 #[test]
 fn dom_multiple_queries_on_same_tree() {
-    let doc = parse(r#"<div>
+    let doc = parse(
+        r#"<div>
         <p class="a">One</p>
         <p class="b">Two</p>
         <span id="s1">Three</span>
         <span class="a">Four</span>
-    </div>"#);
+    </div>"#,
+    );
 
     let p_results = doc.root.query_selector_all("p");
     assert_eq!(p_results.len(), 2);
@@ -269,11 +363,13 @@ fn dom_multiple_queries_on_same_tree() {
 
 #[test]
 fn dom_nested_query() {
-    let doc = parse(r#"<div id="outer">
+    let doc = parse(
+        r#"<div id="outer">
         <div id="inner">
             <p class="deep">Deep text</p>
         </div>
-    </div>"#);
+    </div>"#,
+    );
 
     // query_selector_all searches the entire subtree
     let deep = doc.root.query_selector_all(".deep");
@@ -290,18 +386,18 @@ fn dom_nested_query() {
 
 #[test]
 fn dom_children_are_ordered() {
-    let doc = parse(r#"<ul id="list">
+    let doc = parse(
+        r#"<ul id="list">
         <li>First</li>
         <li>Second</li>
         <li>Third</li>
-    </ul>"#);
+    </ul>"#,
+    );
 
     let list_results = doc.root.query_selector_all("#list");
     assert!(!list_results.is_empty());
     let list = list_results[0];
-    let items: Vec<&WebCore> = list.children.iter()
-        .filter(|c| c.tag == "li")
-        .collect();
+    let items: Vec<&WebCore> = list.children.iter().filter(|c| c.tag == "li").collect();
     assert_eq!(items.len(), 3);
     assert!(items[0].text_content().contains("First"));
     assert!(items[1].text_content().contains("Second"));
@@ -324,7 +420,10 @@ fn dom_attributes_preserved() {
     let doc = parse(r#"<a href="https://example.com" title="Link">Click</a>"#);
     let links = doc.root.query_selector_all("a");
     assert!(!links.is_empty());
-    assert_eq!(links[0].attributes.get("href").unwrap(), "https://example.com");
+    assert_eq!(
+        links[0].attributes.get("href").unwrap(),
+        "https://example.com"
+    );
     assert_eq!(links[0].attributes.get("title").unwrap(), "Link");
 }
 
@@ -332,7 +431,10 @@ fn dom_attributes_preserved() {
 fn dom_data_attributes_preserved() {
     let doc = parse(r#"<div data-value="42" data-name="test">Content</div>"#);
     let divs = doc.root.query_selector_all("div");
-    let div = divs.iter().find(|d| d.attributes.contains_key("data-value")).unwrap();
+    let div = divs
+        .iter()
+        .find(|d| d.attributes.contains_key("data-value"))
+        .unwrap();
     assert_eq!(get_attribute(div, "data-value").unwrap(), "42");
 }
 
@@ -360,7 +462,10 @@ fn dom_prepend_child() {
     set_attribute(&mut new_el, "id", "first");
     prepend_child(parent, new_el);
     assert_eq!(get_first_child(parent).unwrap().tag, "p");
-    assert_eq!(get_attribute(get_first_child(parent).unwrap(), "id").unwrap(), "first");
+    assert_eq!(
+        get_attribute(get_first_child(parent).unwrap(), "id").unwrap(),
+        "first"
+    );
 }
 
 #[test]
@@ -465,7 +570,15 @@ fn dom_set_style_property_color() {
     let mut doc = parse(r#"<div><p id="t">Text</p></div>"#);
     let t = query_selector_mut(&mut doc.root, "#t").unwrap();
     set_style_property(t, "color", "red");
-    assert_eq!(t.style.color, Color { r: 255, g: 0, b: 0, a: 255 });
+    assert_eq!(
+        t.style.color,
+        Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255
+        }
+    );
 }
 
 #[test]
@@ -473,7 +586,15 @@ fn dom_set_style_property_background() {
     let mut doc = parse(r#"<div><p id="t">Text</p></div>"#);
     let t = query_selector_mut(&mut doc.root, "#t").unwrap();
     set_style_property(t, "background-color", "#00ff00");
-    assert_eq!(t.style.background_color, Color { r: 0, g: 255, b: 0, a: 255 });
+    assert_eq!(
+        t.style.background_color,
+        Color {
+            r: 0,
+            g: 255,
+            b: 0,
+            a: 255
+        }
+    );
 }
 
 // ============================================================
@@ -500,7 +621,10 @@ fn dom_set_inner_html() {
     let t = query_selector_mut(&mut doc.root, "#t").unwrap();
     t.children = new_inner.root.children;
     let text = get_text_content(t);
-    assert!(text.contains("Bold") || text.contains("text"), "got: {text}");
+    assert!(
+        text.contains("Bold") || text.contains("text"),
+        "got: {text}"
+    );
 }
 
 #[test]
@@ -538,7 +662,10 @@ fn dom_get_outer_html_vs_inner_html() {
     // Outer should be longer (includes the tag itself)
     assert!(outer.len() > inner.len());
     // Inner should not contain the opening <p tag
-    assert!(!inner.contains("<p"), "inner should not contain <p, got: {inner}");
+    assert!(
+        !inner.contains("<p"),
+        "inner should not contain <p, got: {inner}"
+    );
 }
 
 // ============================================================
@@ -554,12 +681,14 @@ fn dom_insert_before() {
     set_attribute(&mut new_el, "id", "mid");
     insert_before(parent, b_id, new_el);
 
-    let element_children: Vec<&WebCore> = parent.children.iter()
+    let element_children: Vec<&WebCore> = parent
+        .children
+        .iter()
         .filter(|c| !c.is_text_node())
         .collect();
-    let mid_idx = element_children.iter().position(|c| {
-        get_attribute(c, "id") == Some("mid")
-    });
+    let mid_idx = element_children
+        .iter()
+        .position(|c| get_attribute(c, "id") == Some("mid"));
     assert!(mid_idx.is_some());
     let idx = mid_idx.unwrap();
     assert!(idx > 0);
@@ -575,12 +704,14 @@ fn dom_insert_after() {
     set_attribute(&mut new_el, "id", "mid");
     insert_after(parent, a_id, new_el);
 
-    let element_children: Vec<&WebCore> = parent.children.iter()
+    let element_children: Vec<&WebCore> = parent
+        .children
+        .iter()
         .filter(|c| !c.is_text_node())
         .collect();
-    let mid_idx = element_children.iter().position(|c| {
-        get_attribute(c, "id") == Some("mid")
-    });
+    let mid_idx = element_children
+        .iter()
+        .position(|c| get_attribute(c, "id") == Some("mid"));
     assert!(mid_idx.is_some());
     let idx = mid_idx.unwrap();
     assert!(idx > 0);
@@ -703,7 +834,9 @@ fn dom_set_text_content_then_get_other() {
 
 #[test]
 fn dom_toggle_class_preserves_text() {
-    let mut doc = parse(r#"<div><div id="c1" class="card">Card 1 text</div><div id="c2" class="card">Card 2 text</div></div>"#);
+    let mut doc = parse(
+        r#"<div><div id="c1" class="card">Card 1 text</div><div id="c2" class="card">Card 2 text</div></div>"#,
+    );
 
     assert!(get_text_content(query_selector(&doc.root, "#c1").unwrap()).contains("Card 1"));
     assert!(get_text_content(query_selector(&doc.root, "#c2").unwrap()).contains("Card 2"));
@@ -742,7 +875,9 @@ fn dom_query_selector_by_tag_and_class() {
     let doc = parse(r#"<div><p class="x">P</p><span class="x">S</span></div>"#);
     // query_selector_all only supports simple selectors; "p.x" is compound.
     // Filter manually: all <p> that also have class "x"
-    let results: Vec<&WebCore> = doc.root.query_selector_all("p")
+    let results: Vec<&WebCore> = doc
+        .root
+        .query_selector_all("p")
         .into_iter()
         .filter(|b| has_class(b, "x"))
         .collect();
@@ -1062,12 +1197,18 @@ fn dom_html_event_drag_fields() {
 fn dom_event_listener_all_new_types_registrable() {
     let mut listeners = EventListeners::new();
     let types = [
-        HtmlEventType::MouseMove, HtmlEventType::ContextMenu,
-        HtmlEventType::DragStart, HtmlEventType::Drag,
-        HtmlEventType::DragEnter, HtmlEventType::DragOver,
-        HtmlEventType::DragLeave, HtmlEventType::Drop,
+        HtmlEventType::MouseMove,
+        HtmlEventType::ContextMenu,
+        HtmlEventType::DragStart,
+        HtmlEventType::Drag,
+        HtmlEventType::DragEnter,
+        HtmlEventType::DragOver,
+        HtmlEventType::DragLeave,
+        HtmlEventType::Drop,
         HtmlEventType::DragEnd,
-        HtmlEventType::KeyDown, HtmlEventType::KeyUp, HtmlEventType::KeyPress,
+        HtmlEventType::KeyDown,
+        HtmlEventType::KeyUp,
+        HtmlEventType::KeyPress,
         HtmlEventType::Scroll,
     ];
     let selectors = ["#t", ".c", "p"];
@@ -1088,14 +1229,25 @@ fn dom_event_listener_all_new_types_registrable() {
 // FindElementsByText (manual implementation)
 // ============================================================
 
-fn find_elements_by_text<'a>(root: &'a WebCore, needle: &str, case_sensitive: bool) -> Vec<&'a WebCore> {
+fn find_elements_by_text<'a>(
+    root: &'a WebCore,
+    needle: &str,
+    case_sensitive: bool,
+) -> Vec<&'a WebCore> {
     let mut out = Vec::new();
     collect_by_text(root, needle, case_sensitive, &mut out);
     out
 }
 
-fn collect_by_text<'a>(node: &'a WebCore, needle: &str, case_sensitive: bool, out: &mut Vec<&'a WebCore>) {
-    if needle.is_empty() { return; }
+fn collect_by_text<'a>(
+    node: &'a WebCore,
+    needle: &str,
+    case_sensitive: bool,
+    out: &mut Vec<&'a WebCore>,
+) {
+    if needle.is_empty() {
+        return;
+    }
     let text = get_text_content(node);
     let matches = if case_sensitive {
         text.contains(needle)
@@ -1130,7 +1282,9 @@ fn dom_find_elements_by_text_case_sensitive() {
     let doc = parse(r#"<div><p>Hello WORLD</p><p>world peace</p></div>"#);
     let results = find_elements_by_text(&doc.root, "WORLD", true);
     // At least one result should contain "WORLD"
-    let found_upper = results.iter().any(|b| get_text_content(b).contains("WORLD"));
+    let found_upper = results
+        .iter()
+        .any(|b| get_text_content(b).contains("WORLD"));
     assert!(found_upper);
 }
 
@@ -1189,12 +1343,20 @@ fn dom_get_child_index() {
     let div = doc.root.query_selector_all("div");
     assert!(!div.is_empty());
     let parent = div[0];
-    let element_children: Vec<&WebCore> = parent.children.iter()
+    let element_children: Vec<&WebCore> = parent
+        .children
+        .iter()
         .filter(|c| !c.is_text_node())
         .collect();
-    let idx_a = element_children.iter().position(|c| get_attribute(c, "id") == Some("a"));
-    let idx_b = element_children.iter().position(|c| get_attribute(c, "id") == Some("b"));
-    let idx_c = element_children.iter().position(|c| get_attribute(c, "id") == Some("c"));
+    let idx_a = element_children
+        .iter()
+        .position(|c| get_attribute(c, "id") == Some("a"));
+    let idx_b = element_children
+        .iter()
+        .position(|c| get_attribute(c, "id") == Some("b"));
+    let idx_c = element_children
+        .iter()
+        .position(|c| get_attribute(c, "id") == Some("c"));
     assert_eq!(idx_a, Some(0));
     assert_eq!(idx_b, Some(1));
     assert_eq!(idx_c, Some(2));

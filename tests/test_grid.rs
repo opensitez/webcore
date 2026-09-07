@@ -1,12 +1,16 @@
 // Grid tests – ported from cpptests/test_grid.cpp
+use webcore::css::apply_property;
 use webcore::types::*;
 use webcore::{load_html, parse_html};
-use webcore::css::apply_property;
 
 fn find_box<'a>(root: &'a WebCore, pred: &dyn Fn(&WebCore) -> bool) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for child in &root.children {
-        if let Some(found) = find_box(child, pred) { return Some(found); }
+        if let Some(found) = find_box(child, pred) {
+            return Some(found);
+        }
     }
     None
 }
@@ -94,48 +98,69 @@ fn grid_column_span() {
 fn grid_template_columns_two_fixed() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "grid-template-columns", "100px 200px");
-    assert_eq!(style.grid_template_columns.len(), 2);
-    assert_eq!(style.grid_template_columns[0].kind, GridTrackKind::Fixed);
-    assert!((style.grid_template_columns[0].value - 100.0).abs() < 1.0);
-    assert_eq!(style.grid_template_columns[1].kind, GridTrackKind::Fixed);
-    assert!((style.grid_template_columns[1].value - 200.0).abs() < 1.0);
+    assert_eq!(style.rare().grid_template_columns.len(), 2);
+    assert_eq!(
+        style.rare().grid_template_columns[0].kind,
+        GridTrackKind::Fixed
+    );
+    assert!((style.rare().grid_template_columns[0].value - 100.0).abs() < 1.0);
+    assert_eq!(
+        style.rare().grid_template_columns[1].kind,
+        GridTrackKind::Fixed
+    );
+    assert!((style.rare().grid_template_columns[1].value - 200.0).abs() < 1.0);
 }
 
 #[test]
 fn grid_template_columns_fr() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "grid-template-columns", "1fr 2fr");
-    assert_eq!(style.grid_template_columns.len(), 2);
-    assert_eq!(style.grid_template_columns[0].kind, GridTrackKind::Fractional);
-    assert!((style.grid_template_columns[0].value - 1.0).abs() < 0.01);
-    assert_eq!(style.grid_template_columns[1].kind, GridTrackKind::Fractional);
-    assert!((style.grid_template_columns[1].value - 2.0).abs() < 0.01);
+    assert_eq!(style.rare().grid_template_columns.len(), 2);
+    assert_eq!(
+        style.rare().grid_template_columns[0].kind,
+        GridTrackKind::Fractional
+    );
+    assert!((style.rare().grid_template_columns[0].value - 1.0).abs() < 0.01);
+    assert_eq!(
+        style.rare().grid_template_columns[1].kind,
+        GridTrackKind::Fractional
+    );
+    assert!((style.rare().grid_template_columns[1].value - 2.0).abs() < 0.01);
 }
 
 #[test]
 fn grid_template_rows_fixed() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "grid-template-rows", "50px 100px");
-    assert_eq!(style.grid_template_rows.len(), 2);
-    assert_eq!(style.grid_template_rows[0].kind, GridTrackKind::Fixed);
-    assert!((style.grid_template_rows[0].value - 50.0).abs() < 1.0);
+    assert_eq!(style.rare().grid_template_rows.len(), 2);
+    assert_eq!(
+        style.rare().grid_template_rows[0].kind,
+        GridTrackKind::Fixed
+    );
+    assert!((style.rare().grid_template_rows[0].value - 50.0).abs() < 1.0);
 }
 
 #[test]
 fn grid_template_columns_auto() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "grid-template-columns", "auto auto");
-    assert_eq!(style.grid_template_columns.len(), 2);
-    assert_eq!(style.grid_template_columns[0].kind, GridTrackKind::Auto);
+    assert_eq!(style.rare().grid_template_columns.len(), 2);
+    assert_eq!(
+        style.rare().grid_template_columns[0].kind,
+        GridTrackKind::Auto
+    );
 }
 
 #[test]
 fn grid_template_columns_repeat() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "grid-template-columns", "repeat(3, 1fr)");
-    assert_eq!(style.grid_template_columns.len(), 3);
+    assert_eq!(style.rare().grid_template_columns.len(), 3);
     for i in 0..3 {
-        assert_eq!(style.grid_template_columns[i].kind, GridTrackKind::Fractional);
+        assert_eq!(
+            style.rare().grid_template_columns[i].kind,
+            GridTrackKind::Fractional
+        );
     }
 }
 
@@ -143,62 +168,128 @@ fn grid_template_columns_repeat() {
 fn grid_repeat_expands_correctly() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "grid-template-columns", "repeat(4, 50px)");
-    assert_eq!(style.grid_template_columns.len(), 4);
+    assert_eq!(style.rare().grid_template_columns.len(), 4);
     for i in 0..4 {
-        assert_eq!(style.grid_template_columns[i].kind, GridTrackKind::Fixed);
-        assert!(style.grid_template_columns[i].value > 49.0 && style.grid_template_columns[i].value < 51.0);
+        assert_eq!(
+            style.rare().grid_template_columns[i].kind,
+            GridTrackKind::Fixed
+        );
+        assert!(
+            style.rare().grid_template_columns[i].value > 49.0
+                && style.rare().grid_template_columns[i].value < 51.0
+        );
     }
 }
 
 #[test]
 fn grid_repeat_mixed_tracks() {
     let mut style = ComputedStyle::default();
-    apply_property(&mut style, "grid-template-columns", "100px repeat(2, 1fr) 50px");
-    assert_eq!(style.grid_template_columns.len(), 4);
-    assert_eq!(style.grid_template_columns[0].kind, GridTrackKind::Fixed);
-    assert_eq!(style.grid_template_columns[1].kind, GridTrackKind::Fractional);
-    assert_eq!(style.grid_template_columns[2].kind, GridTrackKind::Fractional);
-    assert_eq!(style.grid_template_columns[3].kind, GridTrackKind::Fixed);
+    apply_property(
+        &mut style,
+        "grid-template-columns",
+        "100px repeat(2, 1fr) 50px",
+    );
+    assert_eq!(style.rare().grid_template_columns.len(), 4);
+    assert_eq!(
+        style.rare().grid_template_columns[0].kind,
+        GridTrackKind::Fixed
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[1].kind,
+        GridTrackKind::Fractional
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[2].kind,
+        GridTrackKind::Fractional
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[3].kind,
+        GridTrackKind::Fixed
+    );
 }
 
 #[test]
 fn grid_template_columns_minmax() {
     let mut style = ComputedStyle::default();
-    apply_property(&mut style, "grid-template-columns", "minmax(100px, 1fr) 200px");
-    assert_eq!(style.grid_template_columns.len(), 2);
-    assert_eq!(style.grid_template_columns[0].kind, GridTrackKind::MinMax);
-    assert_eq!(style.grid_template_columns[0].min_kind, GridTrackKind::Fixed);
-    assert_eq!(style.grid_template_columns[0].max_kind, GridTrackKind::Fractional);
+    apply_property(
+        &mut style,
+        "grid-template-columns",
+        "minmax(100px, 1fr) 200px",
+    );
+    assert_eq!(style.rare().grid_template_columns.len(), 2);
+    assert_eq!(
+        style.rare().grid_template_columns[0].kind,
+        GridTrackKind::MinMax
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[0].min_kind,
+        GridTrackKind::Fixed
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[0].max_kind,
+        GridTrackKind::Fractional
+    );
 }
 
 #[test]
 fn grid_minmax_with_percent_min() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "grid-template-columns", "minmax(20%, 1fr)");
-    assert_eq!(style.grid_template_columns.len(), 1);
-    assert_eq!(style.grid_template_columns[0].kind, GridTrackKind::MinMax);
-    assert_eq!(style.grid_template_columns[0].min_kind, GridTrackKind::Percent);
-    assert_eq!(style.grid_template_columns[0].max_kind, GridTrackKind::Fractional);
+    assert_eq!(style.rare().grid_template_columns.len(), 1);
+    assert_eq!(
+        style.rare().grid_template_columns[0].kind,
+        GridTrackKind::MinMax
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[0].min_kind,
+        GridTrackKind::Percent
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[0].max_kind,
+        GridTrackKind::Fractional
+    );
 }
 
 #[test]
 fn grid_minmax_with_auto_min() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "grid-template-columns", "minmax(auto, 300px)");
-    assert_eq!(style.grid_template_columns.len(), 1);
-    assert_eq!(style.grid_template_columns[0].kind, GridTrackKind::MinMax);
-    assert_eq!(style.grid_template_columns[0].min_kind, GridTrackKind::Auto);
-    assert_eq!(style.grid_template_columns[0].max_kind, GridTrackKind::Fixed);
+    assert_eq!(style.rare().grid_template_columns.len(), 1);
+    assert_eq!(
+        style.rare().grid_template_columns[0].kind,
+        GridTrackKind::MinMax
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[0].min_kind,
+        GridTrackKind::Auto
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[0].max_kind,
+        GridTrackKind::Fixed
+    );
 }
 
 #[test]
 fn grid_minmax_min_content_max() {
     let mut style = ComputedStyle::default();
-    apply_property(&mut style, "grid-template-columns", "minmax(min-content, 1fr)");
-    assert_eq!(style.grid_template_columns.len(), 1);
-    assert_eq!(style.grid_template_columns[0].kind, GridTrackKind::MinMax);
-    assert_eq!(style.grid_template_columns[0].min_kind, GridTrackKind::MinContent);
-    assert_eq!(style.grid_template_columns[0].max_kind, GridTrackKind::Fractional);
+    apply_property(
+        &mut style,
+        "grid-template-columns",
+        "minmax(min-content, 1fr)",
+    );
+    assert_eq!(style.rare().grid_template_columns.len(), 1);
+    assert_eq!(
+        style.rare().grid_template_columns[0].kind,
+        GridTrackKind::MinMax
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[0].min_kind,
+        GridTrackKind::MinContent
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[0].max_kind,
+        GridTrackKind::Fractional
+    );
 }
 
 // ============================================================
@@ -210,18 +301,30 @@ fn grid_percent_columns_parsed() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "display", "grid");
     apply_property(&mut style, "grid-template-columns", "25% 75%");
-    assert_eq!(style.grid_template_columns.len(), 2);
-    assert_eq!(style.grid_template_columns[0].kind, GridTrackKind::Percent);
-    assert!(style.grid_template_columns[0].value > 24.0 && style.grid_template_columns[0].value < 26.0);
-    assert_eq!(style.grid_template_columns[1].kind, GridTrackKind::Percent);
+    assert_eq!(style.rare().grid_template_columns.len(), 2);
+    assert_eq!(
+        style.rare().grid_template_columns[0].kind,
+        GridTrackKind::Percent
+    );
+    assert!(
+        style.rare().grid_template_columns[0].value > 24.0
+            && style.rare().grid_template_columns[0].value < 26.0
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[1].kind,
+        GridTrackKind::Percent
+    );
 }
 
 #[test]
 fn grid_percent_row_height() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "grid-template-rows", "50% 50%");
-    assert_eq!(style.grid_template_rows.len(), 2);
-    assert_eq!(style.grid_template_rows[0].kind, GridTrackKind::Percent);
+    assert_eq!(style.rare().grid_template_rows.len(), 2);
+    assert_eq!(
+        style.rare().grid_template_rows[0].kind,
+        GridTrackKind::Percent
+    );
 }
 
 // ============================================================
@@ -232,37 +335,68 @@ fn grid_percent_row_height() {
 fn grid_min_content_parsed() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "grid-template-columns", "min-content 1fr");
-    assert_eq!(style.grid_template_columns.len(), 2);
-    assert_eq!(style.grid_template_columns[0].kind, GridTrackKind::MinContent);
-    assert_eq!(style.grid_template_columns[1].kind, GridTrackKind::Fractional);
+    assert_eq!(style.rare().grid_template_columns.len(), 2);
+    assert_eq!(
+        style.rare().grid_template_columns[0].kind,
+        GridTrackKind::MinContent
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[1].kind,
+        GridTrackKind::Fractional
+    );
 }
 
 #[test]
 fn grid_max_content_parsed() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "grid-template-columns", "max-content auto");
-    assert_eq!(style.grid_template_columns.len(), 2);
-    assert_eq!(style.grid_template_columns[0].kind, GridTrackKind::MaxContent);
-    assert_eq!(style.grid_template_columns[1].kind, GridTrackKind::Auto);
+    assert_eq!(style.rare().grid_template_columns.len(), 2);
+    assert_eq!(
+        style.rare().grid_template_columns[0].kind,
+        GridTrackKind::MaxContent
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[1].kind,
+        GridTrackKind::Auto
+    );
 }
 
 #[test]
 fn grid_fit_content_parsed() {
     let mut style = ComputedStyle::default();
-    apply_property(&mut style, "grid-template-columns", "fit-content(200px) 1fr");
-    assert_eq!(style.grid_template_columns.len(), 2);
-    assert_eq!(style.grid_template_columns[0].kind, GridTrackKind::FitContent);
-    assert!(style.grid_template_columns[0].value > 199.0 && style.grid_template_columns[0].value < 201.0);
+    apply_property(
+        &mut style,
+        "grid-template-columns",
+        "fit-content(200px) 1fr",
+    );
+    assert_eq!(style.rare().grid_template_columns.len(), 2);
+    assert_eq!(
+        style.rare().grid_template_columns[0].kind,
+        GridTrackKind::FitContent
+    );
+    assert!(
+        style.rare().grid_template_columns[0].value > 199.0
+            && style.rare().grid_template_columns[0].value < 201.0
+    );
 }
 
 #[test]
 fn grid_fit_content_percent() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "grid-template-columns", "fit-content(50%)");
-    assert_eq!(style.grid_template_columns.len(), 1);
-    assert_eq!(style.grid_template_columns[0].kind, GridTrackKind::FitContent);
-    assert_eq!(style.grid_template_columns[0].max_kind, GridTrackKind::Percent);
-    assert!(style.grid_template_columns[0].value > 49.0 && style.grid_template_columns[0].value < 51.0);
+    assert_eq!(style.rare().grid_template_columns.len(), 1);
+    assert_eq!(
+        style.rare().grid_template_columns[0].kind,
+        GridTrackKind::FitContent
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[0].max_kind,
+        GridTrackKind::Percent
+    );
+    assert!(
+        style.rare().grid_template_columns[0].value > 49.0
+            && style.rare().grid_template_columns[0].value < 51.0
+    );
 }
 
 // ============================================================
@@ -289,11 +423,21 @@ fn grid_area_numeric_four_values() {
 #[test]
 fn grid_template_areas_parsed() {
     let mut style = ComputedStyle::default();
-    apply_property(&mut style, "grid-template-areas", "'header header' 'sidebar main' 'footer footer'");
-    assert_eq!(style.grid_template_areas.len(), 3);
-    assert_eq!(style.grid_template_areas[0], vec!["header", "header"]);
-    assert_eq!(style.grid_template_areas[1], vec!["sidebar", "main"]);
-    assert_eq!(style.grid_template_areas[2], vec!["footer", "footer"]);
+    apply_property(
+        &mut style,
+        "grid-template-areas",
+        "'header header' 'sidebar main' 'footer footer'",
+    );
+    assert_eq!(style.rare().grid_template_areas.len(), 3);
+    assert_eq!(
+        style.rare().grid_template_areas[0],
+        vec!["header", "header"]
+    );
+    assert_eq!(style.rare().grid_template_areas[1], vec!["sidebar", "main"]);
+    assert_eq!(
+        style.rare().grid_template_areas[2],
+        vec!["footer", "footer"]
+    );
 }
 
 // ============================================================
@@ -381,11 +525,20 @@ fn grid_auto_rows_max_content() {
 fn grid_template_shorthand() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "grid-template", "100px 200px / 1fr 2fr");
-    assert_eq!(style.grid_template_rows.len(), 2);
-    assert_eq!(style.grid_template_columns.len(), 2);
-    assert_eq!(style.grid_template_rows[0].kind, GridTrackKind::Fixed);
-    assert_eq!(style.grid_template_columns[0].kind, GridTrackKind::Fractional);
-    assert_eq!(style.grid_template_columns[1].kind, GridTrackKind::Fractional);
+    assert_eq!(style.rare().grid_template_rows.len(), 2);
+    assert_eq!(style.rare().grid_template_columns.len(), 2);
+    assert_eq!(
+        style.rare().grid_template_rows[0].kind,
+        GridTrackKind::Fixed
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[0].kind,
+        GridTrackKind::Fractional
+    );
+    assert_eq!(
+        style.rare().grid_template_columns[1].kind,
+        GridTrackKind::Fractional
+    );
 }
 
 #[test]
@@ -393,17 +546,17 @@ fn grid_template_none() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "grid-template-columns", "1fr 1fr");
     apply_property(&mut style, "grid-template", "none");
-    assert_eq!(style.grid_template_columns.len(), 0);
-    assert_eq!(style.grid_template_rows.len(), 0);
+    assert_eq!(style.rare().grid_template_columns.len(), 0);
+    assert_eq!(style.rare().grid_template_rows.len(), 0);
 }
 
 #[test]
 fn grid_shorthand() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "grid", "auto / 1fr 1fr 1fr");
-    assert_eq!(style.grid_template_columns.len(), 3);
-    assert_eq!(style.grid_template_rows.len(), 1);
-    assert_eq!(style.grid_template_rows[0].kind, GridTrackKind::Auto);
+    assert_eq!(style.rare().grid_template_columns.len(), 3);
+    assert_eq!(style.rare().grid_template_rows.len(), 1);
+    assert_eq!(style.rare().grid_template_rows[0].kind, GridTrackKind::Auto);
 }
 
 // ============================================================
@@ -414,11 +567,21 @@ fn grid_shorthand() {
 fn grid_auto_fill_parses_pattern() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "display", "grid");
-    apply_property(&mut style, "grid-template-columns", "repeat(auto-fill, 150px)");
-    assert_eq!(style.auto_repeat_columns.len(), 1);
-    assert_eq!(style.auto_repeat_columns[0].kind, GridTrackKind::Fixed);
-    assert!(style.auto_repeat_columns[0].value > 149.0 && style.auto_repeat_columns[0].value < 151.0);
-    assert_eq!(style.grid_template_columns.len(), 0); // no explicit columns
+    apply_property(
+        &mut style,
+        "grid-template-columns",
+        "repeat(auto-fill, 150px)",
+    );
+    assert_eq!(style.rare().auto_repeat_columns.len(), 1);
+    assert_eq!(
+        style.rare().auto_repeat_columns[0].kind,
+        GridTrackKind::Fixed
+    );
+    assert!(
+        style.rare().auto_repeat_columns[0].value > 149.0
+            && style.rare().auto_repeat_columns[0].value < 151.0
+    );
+    assert_eq!(style.rare().grid_template_columns.len(), 0); // no explicit columns
 }
 
 // ============================================================
@@ -455,7 +618,9 @@ fn grid_two_column_layout() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: 1fr 1fr;\">\
            <div>A</div><div>B</div>\
-         </div>", 800.0);
+         </div>",
+        800.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid);
     assert!(grid.is_some());
     let grid = grid.unwrap();
@@ -474,7 +639,9 @@ fn grid_three_column_equal() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: 1fr 1fr 1fr;\">\
            <div>A</div><div>B</div><div>C</div>\
-         </div>", 900.0);
+         </div>",
+        900.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     assert!(grid.children.len() >= 3);
     let a = &grid.children[0];
@@ -491,7 +658,9 @@ fn grid_fixed_plus_fr() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: 200px 1fr;\">\
            <div>Fixed</div><div>Flex</div>\
-         </div>", 600.0);
+         </div>",
+        600.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     assert!(grid.children.len() >= 2);
     let fixed = &grid.children[0];
@@ -507,7 +676,9 @@ fn grid_two_by_two() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: 1fr 1fr;\">\
            <div>A</div><div>B</div><div>C</div><div>D</div>\
-         </div>", 400.0);
+         </div>",
+        400.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     assert!(grid.children.len() >= 4);
     let a = &grid.children[0];
@@ -523,7 +694,9 @@ fn grid_gap_property() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: 1fr 1fr; gap: 20px;\">\
            <div>A</div><div>B</div>\
-         </div>", 420.0);
+         </div>",
+        420.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let a = &grid.children[0];
     let b = &grid.children[1];
@@ -538,7 +711,9 @@ fn grid_row_and_column_gap() {
                       row-gap: 20px; column-gap: 10px;\">\
            <div>A</div><div>B</div>\
            <div>C</div><div>D</div>\
-         </div>", 400.0);
+         </div>",
+        400.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let a = &grid.children[0];
     let b = &grid.children[1];
@@ -560,7 +735,9 @@ fn grid_column_start_end_layout() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: 1fr 1fr 1fr;\">\
            <div style=\"grid-column-start: 2; grid-column-end: 4;\">Wide</div>\
-         </div>", 600.0);
+         </div>",
+        600.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let wide = &grid.children[0];
     // Spans columns 2-3, so ~400px
@@ -577,17 +754,25 @@ fn grid_template_rows_layout() {
         "<div style=\"display: grid; grid-template-columns: 1fr; \
                       grid-template-rows: 50px 100px;\">\
            <div>A</div><div>B</div>\
-         </div>", 400.0);
+         </div>",
+        400.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let elems: Vec<&WebCore> = grid.children.iter().filter(|c| c.tag != "#text").collect();
     let a = elems[0];
     let b = elems[1];
     // First row ~50px
-    assert!(a.layout.margin_rect.h >= 45.0 && a.layout.margin_rect.h <= 55.0,
-        "first row should be ~50px, got {}", a.layout.margin_rect.h);
+    assert!(
+        a.layout.margin_rect.h >= 45.0 && a.layout.margin_rect.h <= 55.0,
+        "first row should be ~50px, got {}",
+        a.layout.margin_rect.h
+    );
     // Second row ~100px
-    assert!(b.layout.margin_rect.h >= 95.0 && b.layout.margin_rect.h <= 105.0,
-        "second row should be ~100px, got {}", b.layout.margin_rect.h);
+    assert!(
+        b.layout.margin_rect.h >= 95.0 && b.layout.margin_rect.h <= 105.0,
+        "second row should be ~100px, got {}",
+        b.layout.margin_rect.h
+    );
 }
 
 // ============================================================
@@ -602,7 +787,9 @@ fn grid_area_layout() {
            <div style=\"grid-area: a;\">Header</div>\
            <div style=\"grid-area: b;\">Left</div>\
            <div style=\"grid-area: c;\">Right</div>\
-         </div>", 600.0);
+         </div>",
+        600.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let header = &grid.children[0];
     let left = &grid.children[1];
@@ -649,7 +836,9 @@ fn grid_percent_columns_layout() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: 50% 50%; width: 400px;\">\
            <div>A</div><div>B</div>\
-         </div>", 400.0);
+         </div>",
+        400.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let a = &grid.children[0];
     let b = &grid.children[1];
@@ -662,7 +851,9 @@ fn grid_mixed_percent_and_fr() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: 30% 1fr; width: 400px;\">\
            <div>A</div><div>B</div>\
-         </div>", 400.0);
+         </div>",
+        400.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let a = &grid.children[0];
     // 30% of 400 = 120
@@ -709,7 +900,9 @@ fn grid_min_content_layout() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: min-content 1fr; width: 400px;\">\
            <div>Hi</div><div>World</div>\
-         </div>", 400.0);
+         </div>",
+        400.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     // The fr column should get most space
     let b = &grid.children[1];
@@ -725,7 +918,9 @@ fn grid_minmax_row_height() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-rows: minmax(50px, 100px); width: 200px;\">\
            <div>Hi</div>\
-         </div>", 200.0);
+         </div>",
+        200.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let child = &grid.children[0];
     assert!(child.layout.margin_rect.h >= 50.0);
@@ -740,7 +935,9 @@ fn grid_justify_items_center_layout() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: 1fr; justify-items: center;\">\
            <div style=\"width: 200px;\">Center</div>\
-         </div>", 800.0);
+         </div>",
+        800.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     if grid.children.len() >= 1 {
         let child = &grid.children[0];
@@ -755,7 +952,9 @@ fn grid_justify_items_end_layout() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: 1fr; justify-items: end;\">\
            <div style=\"width: 200px;\">End</div>\
-         </div>", 800.0);
+         </div>",
+        800.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     if grid.children.len() >= 1 {
         let child = &grid.children[0];
@@ -768,7 +967,9 @@ fn grid_justify_self_override() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: 1fr; justify-items: start;\">\
            <div style=\"width: 200px; justify-self: end;\">End</div>\
-         </div>", 800.0);
+         </div>",
+        800.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     if grid.children.len() >= 1 {
         let child = &grid.children[0];
@@ -786,7 +987,9 @@ fn grid_align_items_center() {
         "<div style=\"display: grid; grid-template-columns: 1fr; \
                       grid-template-rows: 200px; align-items: center;\">\
            <div>Short</div>\
-         </div>", 800.0);
+         </div>",
+        800.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     if grid.children.len() >= 1 {
         let child = &grid.children[0];
@@ -800,7 +1003,9 @@ fn grid_align_self_end() {
         "<div style=\"display: grid; grid-template-columns: 1fr; \
                       grid-template-rows: 200px;\">\
            <div style=\"align-self: end;\">Bottom</div>\
-         </div>", 800.0);
+         </div>",
+        800.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     if grid.children.len() >= 1 {
         let child = &grid.children[0];
@@ -848,7 +1053,9 @@ fn grid_space_evenly_justify_content() {
         "<div style=\"display: grid; grid-template-columns: 50px 50px; \
                       justify-content: space-evenly; width: 200px;\">\
            <div>A</div><div>B</div>\
-         </div>", 200.0);
+         </div>",
+        200.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let a = &grid.children[0];
     let b = &grid.children[1];
@@ -862,7 +1069,9 @@ fn grid_align_content_center() {
         "<div style=\"display: grid; grid-template-columns: 1fr; height: 400px; \
                       align-content: center; align-items: start;\">\
            <div>A</div><div>B</div>\
-         </div>", 800.0);
+         </div>",
+        800.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     assert_eq!(grid.style.align_content, AlignContent::Center);
 }
@@ -873,7 +1082,9 @@ fn grid_align_content_space_between() {
         "<div style=\"display: grid; grid-template-columns: 1fr; \
                       height: 200px; align-content: space-between;\">\
            <div>A</div><div>B</div>\
-         </div>", 400.0);
+         </div>",
+        400.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let a = &grid.children[0];
     let b = &grid.children[1];
@@ -890,7 +1101,9 @@ fn grid_place_items_center() {
         "<div style=\"display: grid; grid-template-columns: 1fr; \
                       grid-template-rows: 200px; place-items: center center;\">\
            <div style=\"width: 100px;\">C</div>\
-         </div>", 800.0);
+         </div>",
+        800.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     if grid.children.len() >= 1 {
         let child = &grid.children[0];
@@ -921,7 +1134,9 @@ fn grid_auto_flow_column_layout() {
         "<div style=\"display: grid; grid-template-rows: 1fr 1fr; \
                       grid-template-columns: 1fr 1fr; grid-auto-flow: column;\">\
            <div>A</div><div>B</div><div>C</div><div>D</div>\
-         </div>", 800.0);
+         </div>",
+        800.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     if grid.children.len() >= 4 {
         let a = &grid.children[0];
@@ -948,7 +1163,9 @@ fn grid_dense_packing_fills_gaps() {
            <div style=\"grid-column: span 2;\">A</div>\
            <div style=\"grid-column: span 2;\">B</div>\
            <div>C</div>\
-         </div>", 900.0);
+         </div>",
+        900.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     if grid.children.len() >= 3 {
         let a = &grid.children[0];
@@ -967,7 +1184,9 @@ fn grid_sparse_packing_leaves_gaps() {
            <div style=\"grid-column: span 2;\">A</div>\
            <div style=\"grid-column: span 2;\">B</div>\
            <div>C</div>\
-         </div>", 900.0);
+         </div>",
+        900.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     if grid.children.len() >= 3 {
         let b = &grid.children[1];
@@ -984,7 +1203,9 @@ fn grid_explicit_items_dont_overlap_auto() {
            <div>A</div>\
            <div style=\"grid-column: 2; grid-row: 1;\">Explicit</div>\
            <div>C</div>\
-         </div>", 600.0);
+         </div>",
+        600.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     if grid.children.len() >= 3 {
         let a = &grid.children[0];
@@ -1006,7 +1227,9 @@ fn grid_order_property() {
         "<div style=\"display: grid; grid-template-columns: 1fr 1fr;\">\
            <div style=\"order: 2;\">Second</div>\
            <div style=\"order: 1;\">First</div>\
-         </div>", 400.0);
+         </div>",
+        400.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let dom_first = &grid.children[0]; // order: 2
     let dom_second = &grid.children[1]; // order: 1
@@ -1020,7 +1243,9 @@ fn grid_order_default_zero() {
            <div>A</div>\
            <div style=\"order: -1;\">B</div>\
            <div>C</div>\
-         </div>", 600.0);
+         </div>",
+        600.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let b = &grid.children[1]; // order: -1
     let a = &grid.children[0]; // order: 0
@@ -1036,7 +1261,9 @@ fn grid_auto_rows_layout() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: 1fr; grid-auto-rows: 80px;\">\
            <div>A</div><div>B</div>\
-         </div>", 400.0);
+         </div>",
+        400.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let b = &grid.children[1];
     assert!(b.layout.margin_rect.h >= 80.0);
@@ -1051,7 +1278,9 @@ fn grid_inline_grid_display() {
     let doc = load_html(
         "<span style=\"display: inline-grid; grid-template-columns: 50px 50px;\">\
            <span>A</span><span>B</span>\
-         </span>", 400.0);
+         </span>",
+        400.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::InlineGrid);
     assert!(grid.is_some());
 }
@@ -1066,7 +1295,9 @@ fn grid_col_span_with_auto_place() {
         "<div style=\"display: grid; grid-template-columns: 1fr 1fr 1fr;\">\
            <div style=\"grid-column: span 2;\">Wide</div>\
            <div>B</div>\
-         </div>", 600.0);
+         </div>",
+        600.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let wide = &grid.children[0];
     let b = &grid.children[1];
@@ -1081,7 +1312,9 @@ fn grid_row_span_with_explicit() {
                       grid-template-rows: 50px 50px;\">\
            <div style=\"grid-row: 1 / 3;\">Tall</div>\
            <div>B</div><div>C</div>\
-         </div>", 400.0);
+         </div>",
+        400.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let tall = &grid.children[0];
     assert!(tall.layout.margin_rect.h >= 100.0);
@@ -1098,7 +1331,9 @@ fn grid_auto_flow_column_dense_layout() {
                       grid-template-rows: 50px 50px; grid-auto-flow: column dense;\">\
            <div style=\"grid-row: span 2;\">Tall</div>\
            <div>B</div><div>C</div>\
-         </div>", 400.0);
+         </div>",
+        400.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let tall = &grid.children[0];
     let b = &grid.children[1];
@@ -1109,40 +1344,57 @@ fn grid_auto_flow_column_dense_layout() {
 fn grid_cell_stretch_border_box() {
     // Regression: with box-sizing: border-box, align-self: stretch was
     // double-subtracting padding/border from the cell height, making content_h = 0.
-    use webcore::{load_html};
-    use webcore::types::{WebCore, Display};
+    use webcore::load_html;
+    use webcore::types::{Display, WebCore};
 
     fn find_grid<'a>(root: &'a WebCore) -> Option<&'a WebCore> {
-        if root.style.display == Display::Grid { return Some(root); }
-        for c in &root.children { if let Some(g) = find_grid(c) { return Some(g); } }
+        if root.style.display == Display::Grid {
+            return Some(root);
+        }
+        for c in &root.children {
+            if let Some(g) = find_grid(c) {
+                return Some(g);
+            }
+        }
         None
     }
 
     // Without box-sizing: border-box — baseline
-    let doc = load_html(r#"<html><head></head><body>
+    let doc = load_html(
+        r#"<html><head></head><body>
 <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
   <div style="padding: 10px; border: 1px solid #aaa;">Cell 1</div>
   <div style="padding: 10px; border: 1px solid #aaa;">Cell 2</div>
   <div style="padding: 10px; border: 1px solid #aaa;">Cell 3</div>
-</div></body></html>"#, 900.0);
+</div></body></html>"#,
+        900.0,
+    );
     let grid = find_grid(&doc.root).unwrap();
     let cell = grid.children.iter().find(|c| c.tag == "div").unwrap();
     let h_no_bb = cell.layout.padding_rect.h;
 
     // With box-sizing: border-box globally (as in demo.html via * { box-sizing: border-box })
-    let doc = load_html(r#"<html><head><style>* { box-sizing: border-box; }</style></head><body>
+    let doc = load_html(
+        r#"<html><head><style>* { box-sizing: border-box; }</style></head><body>
 <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
   <div style="padding: 10px; border: 1px solid #aaa;">Cell 1</div>
   <div style="padding: 10px; border: 1px solid #aaa;">Cell 2</div>
   <div style="padding: 10px; border: 1px solid #aaa;">Cell 3</div>
-</div></body></html>"#, 900.0);
+</div></body></html>"#,
+        900.0,
+    );
     let grid = find_grid(&doc.root).unwrap();
     let cell = grid.children.iter().find(|c| c.tag == "div").unwrap();
     let h_bb = cell.layout.padding_rect.h;
 
     // Both should produce the same cell height — border-box shouldn't shrink cells to padding-only
-    assert!((h_bb - h_no_bb).abs() < 1.0,
-        "border-box cell height {h_bb} should match content-box height {h_no_bb}");
+    assert!(
+        (h_bb - h_no_bb).abs() < 1.0,
+        "border-box cell height {h_bb} should match content-box height {h_no_bb}"
+    );
     // And the height should include the text content (not just padding)
-    assert!(h_bb > 30.0, "cell should be taller than just padding (got {h_bb})");
+    assert!(
+        h_bb > 30.0,
+        "cell should be taller than just padding (got {h_bb})"
+    );
 }

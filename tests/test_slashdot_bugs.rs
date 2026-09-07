@@ -19,9 +19,13 @@ use webcore::load_html;
 use webcore::types::*;
 
 fn find<'a>(root: &'a WebCore, pred: &dyn Fn(&WebCore) -> bool) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for c in &root.children {
-        if let Some(b) = find(c, pred) { return Some(b); }
+        if let Some(b) = find(c, pred) {
+            return Some(b);
+        }
     }
     None
 }
@@ -33,12 +37,23 @@ fn find_attr<'a>(root: &'a WebCore, attr: &str, val: &str) -> Option<&'a WebCore
 #[allow(dead_code)]
 fn dump(root: &WebCore, depth: usize) {
     let indent = "  ".repeat(depth);
-    eprintln!("{}{} pos={:?} c=({:.0},{:.0} {:.0}x{:.0}) m=({:.0},{:.0} {:.0}x{:.0})",
-        indent, root.tag, root.style.position,
-        root.layout.content_rect.x, root.layout.content_rect.y, root.layout.content_rect.w, root.layout.content_rect.h,
-        root.layout.margin_rect.x, root.layout.margin_rect.y, root.layout.margin_rect.w, root.layout.margin_rect.h,
+    eprintln!(
+        "{}{} pos={:?} c=({:.0},{:.0} {:.0}x{:.0}) m=({:.0},{:.0} {:.0}x{:.0})",
+        indent,
+        root.tag,
+        root.style.position,
+        root.layout.content_rect.x,
+        root.layout.content_rect.y,
+        root.layout.content_rect.w,
+        root.layout.content_rect.h,
+        root.layout.margin_rect.x,
+        root.layout.margin_rect.y,
+        root.layout.margin_rect.w,
+        root.layout.margin_rect.h,
     );
-    for c in &root.children { dump(c, depth+1); }
+    for c in &root.children {
+        dump(c, depth + 1);
+    }
 }
 
 // ─── Issue 1: Absolute containing-block ───────────────────────────────────────
@@ -140,7 +155,8 @@ fn abs_no_positioned_ancestor_uses_viewport() {
     assert!(
         span.layout.content_rect.x < 20.0 && span.layout.content_rect.y < 20.0,
         "abs with no positioned ancestor should be at viewport origin, got ({},{})",
-        span.layout.content_rect.x, span.layout.content_rect.y
+        span.layout.content_rect.x,
+        span.layout.content_rect.y
     );
 }
 

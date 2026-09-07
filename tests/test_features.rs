@@ -7,14 +7,12 @@
 // the test is written as a comment block marked `// TODO: API not available`.
 // Tests that exercise APIs that *do* exist in Rust are fully ported.
 
+use webcore::dom::{
+    get_text_content, query_selector, query_selector_all, query_selector_mut, Editor, TextRange,
+};
+use webcore::layout::LayoutEngine;
 use webcore::types::*;
 use webcore::{load_html, parse_html};
-use webcore::layout::LayoutEngine;
-use webcore::dom::{
-    Editor, TextRange,
-    query_selector, query_selector_mut, query_selector_all,
-    get_text_content,
-};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -27,9 +25,13 @@ fn parse_and_layout(html: &str) -> Document {
 }
 
 fn find_box<'a, F: Fn(&WebCore) -> bool>(root: &'a WebCore, pred: &F) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for child in &root.children {
-        if let Some(b) = find_box(child, pred) { return Some(b); }
+        if let Some(b) = find_box(child, pred) {
+            return Some(b);
+        }
     }
     None
 }
@@ -43,7 +45,7 @@ fn count_boxes<F: Fn(&WebCore) -> bool>(root: &WebCore, pred: &F) -> usize {
 }
 
 fn set_caret(editor: &mut Editor, element: &WebCore, offset: usize) {
-    editor.caret_box  = Some(element.node_id);
+    editor.caret_box = Some(element.node_id);
     editor.collapse_to(offset);
 }
 
@@ -98,7 +100,8 @@ fn heading_has_bold_font_weight() {
     let h = h.unwrap();
     assert!(
         h.style.font_weight.is_bold(),
-        "h1 should have bold font-weight; got {:?}", h.style.font_weight
+        "h1 should have bold font-weight; got {:?}",
+        h.style.font_weight
     );
 }
 
@@ -124,7 +127,10 @@ fn image_src_preserved() {
     let img = find_box(&doc.root, &|b| b.tag == "img");
     assert!(img.is_some());
     let img = img.unwrap();
-    assert_eq!(img.attributes.get("src").map(|s| s.as_str()), Some("photo.jpg"));
+    assert_eq!(
+        img.attributes.get("src").map(|s| s.as_str()),
+        Some("photo.jpg")
+    );
 }
 
 #[test]
@@ -134,7 +140,10 @@ fn image_width_height_attributes() {
     assert!(img.is_some());
     let img = img.unwrap();
     assert_eq!(img.attributes.get("width").map(|s| s.as_str()), Some("200"));
-    assert_eq!(img.attributes.get("height").map(|s| s.as_str()), Some("150"));
+    assert_eq!(
+        img.attributes.get("height").map(|s| s.as_str()),
+        Some("150")
+    );
 }
 
 // ============================================================
@@ -160,8 +169,11 @@ fn ordered_list_list_style_type_decimal() {
     let li = find_box(&doc.root, &|b| b.tag == "li");
     assert!(li.is_some());
     let li = li.unwrap();
-    assert_eq!(li.style.list_style_type, ListStyleType::Decimal,
-        "ol > li should default to decimal list-style-type");
+    assert_eq!(
+        li.style.list_style_type,
+        ListStyleType::Decimal,
+        "ol > li should default to decimal list-style-type"
+    );
 }
 
 #[test]
@@ -203,8 +215,10 @@ fn toggle_bullet_list_off_removes_ul() {
         set_caret(&mut doc.editor, li, 0);
     }
     doc.editor.toggle_bullet_list(&mut doc.root);
-    assert!(query_selector(&doc.root, "ul").is_none(),
-        "toggle_bullet_list off should remove the <ul>");
+    assert!(
+        query_selector(&doc.root, "ul").is_none(),
+        "toggle_bullet_list off should remove the <ul>"
+    );
 }
 
 // ============================================================
@@ -227,7 +241,10 @@ fn increase_indent_adds_margin() {
     doc.editor.increase_indent(&mut doc.root, 40.0);
     let p = query_selector(&doc.root, "p").unwrap();
     match p.style.margin_left {
-        CssLength::Px(v) => assert!(v > 0.0, "margin-left should be positive after increase_indent"),
+        CssLength::Px(v) => assert!(
+            v > 0.0,
+            "margin-left should be positive after increase_indent"
+        ),
         _ => {} // zero default means pass too (unlikely to be px 0 explicitly)
     }
 }
@@ -243,8 +260,8 @@ fn decrease_indent_does_not_go_below_zero() {
     let p = query_selector(&doc.root, "p").unwrap();
     match &p.style.margin_left {
         CssLength::Px(v) => assert!(*v >= 0.0, "margin-left must not go negative"),
-        CssLength::Zero  => {} // ok
-        CssLength::Auto  => {} // ok — unchanged
+        CssLength::Zero => {} // ok
+        CssLength::Auto => {} // ok — unchanged
         other => panic!("unexpected margin_left: {:?}", other),
     }
 }
@@ -313,8 +330,11 @@ fn pre_whitespace_pre() {
     let doc = parse_and_layout("<pre>code here</pre>");
     let pre = find_box(&doc.root, &|b| b.tag == "pre");
     assert!(pre.is_some());
-    assert_eq!(pre.unwrap().style.white_space, WhiteSpace::Pre,
-        "pre element should have white-space: pre");
+    assert_eq!(
+        pre.unwrap().style.white_space,
+        WhiteSpace::Pre,
+        "pre element should have white-space: pre"
+    );
 }
 
 #[test]
@@ -323,7 +343,10 @@ fn code_block_text_preserved() {
     let pre = find_box(&doc.root, &|b| b.tag == "pre");
     assert!(pre.is_some());
     let text = get_text_content(pre.unwrap());
-    assert!(text.contains("fn main()"), "pre block should contain its text");
+    assert!(
+        text.contains("fn main()"),
+        "pre block should contain its text"
+    );
 }
 
 // ============================================================
@@ -377,7 +400,10 @@ fn table_colspan_attribute_preserved() {
     let doc = parse(r#"<table><tr><td colspan="2">AB</td></tr></table>"#);
     let td = find_box(&doc.root, &|b| b.tag == "td");
     assert!(td.is_some());
-    assert_eq!(td.unwrap().attributes.get("colspan").map(|s| s.as_str()), Some("2"));
+    assert_eq!(
+        td.unwrap().attributes.get("colspan").map(|s| s.as_str()),
+        Some("2")
+    );
 }
 
 // ============================================================
@@ -417,7 +443,10 @@ fn find_case_sensitive_miss() {
     let p = find_box(&doc.root, &|b| b.tag == "p").unwrap();
     let text = get_text_content(p);
     let pos = find_in_text(&text, "hello", true);
-    assert!(pos.is_none(), "case-sensitive 'hello' should not match 'Hello'");
+    assert!(
+        pos.is_none(),
+        "case-sensitive 'hello' should not match 'Hello'"
+    );
 }
 
 #[test]
@@ -436,7 +465,10 @@ fn find_whole_word_partial_no_match() {
     let needle = "Hell";
     // Simple whole-word check: needle not bounded by word-chars on both sides
     let whole_word_found = text.split_whitespace().any(|w| w == needle);
-    assert!(!whole_word_found, "'Hell' must not match as a whole word in 'Hello world'");
+    assert!(
+        !whole_word_found,
+        "'Hell' must not match as a whole word in 'Hello world'"
+    );
 }
 
 #[test]
@@ -480,33 +512,48 @@ fn replace_none_count() {
 fn rem_units_resolve_with_default() {
     let len = CssLength::Rem(2.0);
     let result = len.resolve(12.0, 0.0, 16.0);
-    assert!((result - 32.0).abs() < 0.01, "2rem * 16px root = 32px; got {}", result);
+    assert!(
+        (result - 32.0).abs() < 0.01,
+        "2rem * 16px root = 32px; got {}",
+        result
+    );
 }
 
 #[test]
 fn rem_units_resolve_custom_root() {
     let len = CssLength::Rem(1.5);
     let result = len.resolve(12.0, 0.0, 20.0);
-    assert!((result - 30.0).abs() < 0.01, "1.5rem * 20px root = 30px; got {}", result);
+    assert!(
+        (result - 30.0).abs() < 0.01,
+        "1.5rem * 20px root = 30px; got {}",
+        result
+    );
 }
 
 #[test]
 fn em_still_uses_parent() {
     let len = CssLength::Em(2.0);
     let result = len.resolve(14.0, 0.0, 20.0);
-    assert!((result - 28.0).abs() < 0.01, "2em * 14px parent = 28px; got {}", result);
+    assert!(
+        (result - 28.0).abs() < 0.01,
+        "2em * 14px parent = 28px; got {}",
+        result
+    );
 }
 
 #[test]
 fn rem_and_em_different_values() {
     // Same factor, different base → different result
     let rem = CssLength::Rem(2.0);
-    let em  = CssLength::Em(2.0);
+    let em = CssLength::Em(2.0);
     let rem_result = rem.resolve(14.0, 0.0, 16.0); // 32.0
-    let em_result  =  em.resolve(14.0, 0.0, 16.0); // 28.0
+    let em_result = em.resolve(14.0, 0.0, 16.0); // 28.0
     assert!((rem_result - 32.0).abs() < 0.01);
-    assert!((em_result  - 28.0).abs() < 0.01);
-    assert!((rem_result - em_result).abs() > 0.5, "rem and em should produce different results");
+    assert!((em_result - 28.0).abs() < 0.01);
+    assert!(
+        (rem_result - em_result).abs() > 0.5,
+        "rem and em should produce different results"
+    );
 }
 
 #[test]
@@ -522,7 +569,10 @@ fn px_length_ignores_root_font() {
     let result1 = len.resolve(12.0, 0.0, 16.0);
     let result2 = len.resolve(12.0, 0.0, 999.0); // different root font
     assert!((result1 - 50.0).abs() < 0.01);
-    assert!((result2 - 50.0).abs() < 0.01, "px must not depend on root font size");
+    assert!(
+        (result2 - 50.0).abs() < 0.01,
+        "px must not depend on root font size"
+    );
 }
 
 // ============================================================
@@ -541,7 +591,10 @@ fn aria_label_attribute_preserved() {
     let btn = find_box(&doc.root, &|b| b.tag == "button");
     assert!(btn.is_some());
     assert_eq!(
-        btn.unwrap().attributes.get("aria-label").map(|s| s.as_str()),
+        btn.unwrap()
+            .attributes
+            .get("aria-label")
+            .map(|s| s.as_str()),
         Some("Close dialog")
     );
 }
@@ -549,7 +602,9 @@ fn aria_label_attribute_preserved() {
 #[test]
 fn role_attribute_preserved() {
     let doc = parse(r#"<div role="navigation"><a href="/">Home</a></div>"#);
-    let nav = find_box(&doc.root, &|b| b.attributes.get("role").map(|s| s.as_str()) == Some("navigation"));
+    let nav = find_box(&doc.root, &|b| {
+        b.attributes.get("role").map(|s| s.as_str()) == Some("navigation")
+    });
     assert!(nav.is_some());
 }
 
@@ -559,7 +614,10 @@ fn aria_hidden_attribute_preserved() {
     let span = find_box(&doc.root, &|b| b.tag == "span");
     assert!(span.is_some());
     assert_eq!(
-        span.unwrap().attributes.get("aria-hidden").map(|s| s.as_str()),
+        span.unwrap()
+            .attributes
+            .get("aria-hidden")
+            .map(|s| s.as_str()),
         Some("true")
     );
 }
@@ -582,7 +640,10 @@ fn nested_list_outdent_to_block_removes_list() {
     }
     // Toggle on → creates <ul><li>
     doc.editor.toggle_bullet_list(&mut doc.root);
-    assert!(query_selector(&doc.root, "li").is_some(), "should have li after first toggle");
+    assert!(
+        query_selector(&doc.root, "li").is_some(),
+        "should have li after first toggle"
+    );
 
     // Toggle off → removes <ul><li>, converts back to block
     doc.editor.toggle_bullet_list(&mut doc.root);
@@ -608,13 +669,19 @@ fn supersub_toggle_superscript_off_via_style() {
 
     // Toggle superscript on
     set_style_property(span, "vertical-align", "super");
-    assert_eq!(span.style.vertical_align, VerticalAlign::Super,
-        "vertical-align should be Super after setting it");
+    assert_eq!(
+        span.style.vertical_align,
+        VerticalAlign::Super,
+        "vertical-align should be Super after setting it"
+    );
 
     // Toggle superscript off (reset to baseline)
     set_style_property(span, "vertical-align", "baseline");
-    assert_eq!(span.style.vertical_align, VerticalAlign::Baseline,
-        "vertical-align should return to Baseline after toggling off");
+    assert_eq!(
+        span.style.vertical_align,
+        VerticalAlign::Baseline,
+        "vertical-align should return to Baseline after toggling off"
+    );
 }
 
 // ── SuperSub::NoSelectionNoOp ────────────────────────────────────────────────
@@ -647,7 +714,8 @@ fn code_block_has_mono_font() {
     // Should contain a monospace family name
     assert!(
         font.contains("monospace") || font.contains("Courier") || font.contains("mono"),
-        "code element should use a monospace font; got {:?}", font
+        "code element should use a monospace font; got {:?}",
+        font
     );
 }
 
@@ -692,7 +760,7 @@ fn find_selects_match_correct_span() {
     let pos = text.to_lowercase().find(&needle.to_lowercase());
     assert!(pos.is_some());
     let start = pos.unwrap();
-    let end   = start + needle.len();
+    let end = start + needle.len();
     assert_eq!(end - start, 5, "matched span should equal needle length");
     // The matched slice must equal the needle (case-insensitive)
     assert_eq!(&text[start..end], "world");
@@ -711,7 +779,10 @@ fn replace_readonly_blocked() {
     } else {
         text.matches("Hello").count()
     };
-    assert_eq!(count, 0, "replace on a read-only document must return 0 replacements");
+    assert_eq!(
+        count, 0,
+        "replace on a read-only document must return 0 replacements"
+    );
 }
 
 // ── TableEdit::InsertColumn (column count concept) ────────────────────────────

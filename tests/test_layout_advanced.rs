@@ -4,8 +4,8 @@
 //
 // DeeplyNestedLayout and MixedFlowLayout use wxBitmap/wxMemoryDC — SKIPPED.
 
-use webcore::types::*;
 use webcore::css::apply_property;
+use webcore::types::*;
 use webcore::{load_html, parse_html};
 
 fn style_with(prop: &str, val: &str) -> ComputedStyle {
@@ -23,16 +23,24 @@ fn parse_and_layout(html: &str, vw: f32) -> Document {
 }
 
 fn find_box<'a, F: Fn(&WebCore) -> bool>(root: &'a WebCore, pred: &F) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for child in &root.children {
-        if let Some(b) = find_box(child, pred) { return Some(b); }
+        if let Some(b) = find_box(child, pred) {
+            return Some(b);
+        }
     }
     None
 }
 
 fn find_all<'a, F: Fn(&WebCore) -> bool>(root: &'a WebCore, pred: &F, out: &mut Vec<&'a WebCore>) {
-    if pred(root) { out.push(root); }
-    for child in &root.children { find_all(child, pred, out); }
+    if pred(root) {
+        out.push(root);
+    }
+    for child in &root.children {
+        find_all(child, pred, out);
+    }
 }
 
 // ============================================================
@@ -54,15 +62,19 @@ fn layout_adv_max_height_parsed() {
 #[test]
 fn layout_adv_min_height_percent() {
     let s = style_with("min-height", "50%");
-    assert!(matches!(s.min_height, CssLength::Percent(_)),
-        "min-height: 50% should parse as Percent");
+    assert!(
+        matches!(s.min_height, CssLength::Percent(_)),
+        "min-height: 50% should parse as Percent"
+    );
 }
 
 #[test]
 fn layout_adv_max_height_percent() {
     let s = style_with("max-height", "75%");
-    assert!(matches!(s.max_height, CssLength::Percent(_)),
-        "max-height: 75% should parse as Percent");
+    assert!(
+        matches!(s.max_height, CssLength::Percent(_)),
+        "max-height: 75% should parse as Percent"
+    );
 }
 
 // ============================================================
@@ -71,16 +83,16 @@ fn layout_adv_max_height_percent() {
 
 #[test]
 fn layout_adv_min_height_enforced() {
-    let doc = parse_and_layout(
-        "<div style='min-height: 200px;'>Short</div>",
-        800.0,
-    );
+    let doc = parse_and_layout("<div style='min-height: 200px;'>Short</div>", 800.0);
     let div = find_box(&doc.root, &|b: &WebCore| {
         b.tag == "div" && b.style.min_height == CssLength::Px(200.0)
     });
     assert!(div.is_some(), "div with min-height: 200px not found");
-    assert!(div.unwrap().layout.content_rect.h >= 200.0,
-        "min-height should enforce h >= 200, got {}", div.unwrap().layout.content_rect.h);
+    assert!(
+        div.unwrap().layout.content_rect.h >= 200.0,
+        "min-height should enforce h >= 200, got {}",
+        div.unwrap().layout.content_rect.h
+    );
 }
 
 #[test]
@@ -95,8 +107,11 @@ fn layout_adv_max_height_enforced() {
         b.tag == "div" && b.style.max_height != CssLength::None
     });
     assert!(div.is_some(), "div with max-height not found");
-    assert!(div.unwrap().layout.content_rect.h <= 50.0,
-        "max-height should cap h <= 50, got {}", div.unwrap().layout.content_rect.h);
+    assert!(
+        div.unwrap().layout.content_rect.h <= 50.0,
+        "max-height should cap h <= 50, got {}",
+        div.unwrap().layout.content_rect.h
+    );
 }
 
 // ============================================================
@@ -118,8 +133,11 @@ fn layout_adv_margin_collapsing_positive() {
     let b = divs[1];
     let content_gap = b.layout.content_rect.y - (a.layout.content_rect.y + a.layout.content_rect.h);
     // With margin collapsing: gap = max(30, 20) = 30, not 50
-    assert!(content_gap < 45.0,
-        "Collapsed margin should be ~30 not 50, got gap={}", content_gap);
+    assert!(
+        content_gap < 45.0,
+        "Collapsed margin should be ~30 not 50, got gap={}",
+        content_gap
+    );
 }
 
 #[test]
@@ -137,8 +155,11 @@ fn layout_adv_margin_collapsing_equal() {
     let b = divs[1];
     let content_gap = b.layout.content_rect.y - (a.layout.content_rect.y + a.layout.content_rect.h);
     // Should collapse to ~20, not 40
-    assert!(content_gap < 35.0,
-        "Equal margins should collapse to ~20, got gap={}", content_gap);
+    assert!(
+        content_gap < 35.0,
+        "Equal margins should collapse to ~20, got gap={}",
+        content_gap
+    );
 }
 
 // ============================================================
@@ -150,8 +171,11 @@ fn layout_adv_article_is_block() {
     let doc = parse("<article>Content</article>");
     let article = find_box(&doc.root, &|b: &WebCore| b.tag == "article");
     assert!(article.is_some(), "article element not found");
-    assert_eq!(article.unwrap().style.display, Display::Block,
-        "article should be Display::Block");
+    assert_eq!(
+        article.unwrap().style.display,
+        Display::Block,
+        "article should be Display::Block"
+    );
 }
 
 #[test]

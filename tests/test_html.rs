@@ -15,9 +15,13 @@ fn parse_and_layout(html: &str, vw: f32) -> Document {
 }
 
 fn find_box<'a, F: Fn(&WebCore) -> bool>(root: &'a WebCore, pred: &F) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for child in &root.children {
-        if let Some(b) = find_box(child, pred) { return Some(b); }
+        if let Some(b) = find_box(child, pred) {
+            return Some(b);
+        }
     }
     None
 }
@@ -70,7 +74,9 @@ fn html_multiple_children() {
 fn html_inline_style() {
     // InlineStyle: inline style color parsed into ComputedStyle.
     let doc = parse(r#"<p style="color: red;">Red text</p>"#);
-    let b = find_box(&doc.root, &|b: &WebCore| b.style.color == Color::rgb(255, 0, 0));
+    let b = find_box(&doc.root, &|b: &WebCore| {
+        b.style.color == Color::rgb(255, 0, 0)
+    });
     assert!(b.is_some());
 }
 
@@ -133,7 +139,10 @@ fn html_class_attribute() {
     // C++ uses b.className — Rust uses b.attributes.get("class").
     let doc = parse(r#"<div class="foo bar">Test</div>"#);
     let b = find_box(&doc.root, &|b: &WebCore| {
-        b.attributes.get("class").map(|v| v == "foo bar").unwrap_or(false)
+        b.attributes
+            .get("class")
+            .map(|v| v == "foo bar")
+            .unwrap_or(false)
     });
     assert!(b.is_some());
 }
@@ -194,9 +203,7 @@ fn html_utf8_basic() {
 #[test]
 fn html_charset_meta() {
     // CharsetMeta: charset meta doesn't break parsing.
-    let doc = parse(
-        r#"<html><head><meta charset="utf-8"></head><body><p>Test</p></body></html>"#,
-    );
+    let doc = parse(r#"<html><head><meta charset="utf-8"></head><body><p>Test</p></body></html>"#);
     assert!(doc_text(&doc).contains("Test"));
 }
 
@@ -280,9 +287,7 @@ fn html_css_background_matches_root() {
 #[test]
 fn html_body_css_matches_body() {
     // BodyCSSMatchesBody: html gets red, body gets blue.
-    let doc = parse(
-        r#"<style>html { color: red; } body { color: blue; }</style><p>Text</p>"#,
-    );
+    let doc = parse(r#"<style>html { color: red; } body { color: blue; }</style><p>Text</p>"#);
     assert_eq!(doc.root.style.color.r, 255);
     let body = get_body(&doc);
     assert!(body.is_some());
@@ -294,9 +299,7 @@ fn html_body_css_matches_body() {
 #[test]
 fn html_body_css_matches_without_explicit_tag() {
     // BodyCSSMatchesWithoutExplicitTag: implicit body still gets style.
-    let doc = parse(
-        r#"<style>body { color: red; background: #0d1117; }</style><p>Text</p>"#,
-    );
+    let doc = parse(r#"<style>body { color: red; background: #0d1117; }</style><p>Text</p>"#);
     let body = get_body(&doc);
     assert!(body.is_some());
     let body = body.unwrap();
@@ -393,10 +396,7 @@ fn html_body_css_font_family() {
 #[test]
 fn html_body_css_font_size() {
     // BodyCSSFontSize: 24pt font-size is larger than default.
-    let doc_default = parse_and_layout(
-        r#"<html><body><p>Text</p></body></html>"#,
-        800.0,
-    );
+    let doc_default = parse_and_layout(r#"<html><body><p>Text</p></body></html>"#, 800.0);
     let doc_big = parse_and_layout(
         r#"<html><head><style>body { font-size: 24pt; }</style></head><body><p>Text</p></body></html>"#,
         800.0,
@@ -407,7 +407,12 @@ fn html_body_css_font_size() {
     assert!(p_big.is_some());
     let size_default = p_default.unwrap().style.font_size.resolve(16.0, 0.0, 16.0);
     let size_big = p_big.unwrap().style.font_size.resolve(16.0, 0.0, 16.0);
-    assert!(size_big > size_default, "big font ({}) should exceed default ({})", size_big, size_default);
+    assert!(
+        size_big > size_default,
+        "big font ({}) should exceed default ({})",
+        size_big,
+        size_default
+    );
 }
 
 #[test]
@@ -532,10 +537,7 @@ fn html_body_background_used_for_canvas() {
 #[test]
 fn html_html_body_separate_margin() {
     // HtmlBodySeparateMargin: body margin set, root is html.
-    let doc = parse_and_layout(
-        r#"<style>body { margin: 20px; }</style><p>Text</p>"#,
-        800.0,
-    );
+    let doc = parse_and_layout(r#"<style>body { margin: 20px; }</style><p>Text</p>"#, 800.0);
     assert_eq!(doc.root.tag, "html");
     let body = get_body(&doc);
     assert!(body.is_some());
@@ -595,10 +597,7 @@ fn html_body_layout_position() {
 #[test]
 fn html_body_layout_with_explicit_margin() {
     // BodyLayoutWithExplicitMargin: 8px margin insets content.
-    let doc = parse_and_layout(
-        r#"<body style="margin: 8px;"><p>Text</p></body>"#,
-        800.0,
-    );
+    let doc = parse_and_layout(r#"<body style="margin: 8px;"><p>Text</p></body>"#, 800.0);
     let body = get_body(&doc);
     assert!(body.is_some());
     let body = body.unwrap();
@@ -712,9 +711,9 @@ fn html_body_no_margin_full_viewport() {
     let body = get_body(&doc);
     assert!(body.is_some());
     let body = body.unwrap();
-    assert_eq!(body.layout.content_rect.x, 8.0);   // UA body margin: 8px
+    assert_eq!(body.layout.content_rect.x, 8.0); // UA body margin: 8px
     assert_eq!(body.layout.content_rect.w, 1008.0); // 1024 - 2*8px
-    assert_eq!(body.layout.margin_rect.w, 1024.0);  // margin_rect spans full viewport
+    assert_eq!(body.layout.margin_rect.w, 1024.0); // margin_rect spans full viewport
 }
 
 // ============================================================
@@ -806,7 +805,10 @@ fn html_canvas_bg_html_overrides_body() {
     assert_eq!(doc.root.style.background_color, Color::rgb(0, 128, 0));
     let body = get_body(&doc);
     assert!(body.is_some());
-    assert_eq!(body.unwrap().style.background_color, Color::rgb(255, 255, 0));
+    assert_eq!(
+        body.unwrap().style.background_color,
+        Color::rgb(255, 255, 0)
+    );
 }
 
 #[test]
@@ -899,9 +901,8 @@ fn html_double_layout_table_in_body_with_padding() {
 #[test]
 fn html_head_content_not_rendered() {
     // HeadContentNotRendered: title text does not appear in rendered text.
-    let doc = parse(
-        r#"<html><head><title>My Page</title></head><body><p>Visible</p></body></html>"#,
-    );
+    let doc =
+        parse(r#"<html><head><title>My Page</title></head><body><p>Visible</p></body></html>"#);
     assert!(doc_text(&doc).contains("Visible"));
     assert!(!doc_text(&doc).contains("My Page"));
 }
@@ -919,9 +920,8 @@ fn html_title_content_suppressed() {
 #[test]
 fn html_script_content_suppressed() {
     // ScriptContentSuppressed: script text not in rendered output.
-    let doc = parse(
-        r#"<html><head><script>var x = 1;</script></head><body><p>Text</p></body></html>"#,
-    );
+    let doc =
+        parse(r#"<html><head><script>var x = 1;</script></head><body><p>Text</p></body></html>"#);
     assert!(!doc_text(&doc).contains("var x"));
     assert!(doc_text(&doc).contains("Text"));
 }
@@ -938,9 +938,7 @@ fn html_noscript_content_suppressed() {
 #[test]
 fn html_meta_charset_does_not_create_box() {
     // MetaCharsetDoesNotCreateBox: no meta box in tree.
-    let doc = parse(
-        r#"<html><head><meta charset="utf-8"></head><body><p>Text</p></body></html>"#,
-    );
+    let doc = parse(r#"<html><head><meta charset="utf-8"></head><body><p>Text</p></body></html>"#);
     let meta = find_box(&doc.root, &|b: &WebCore| b.tag == "meta");
     assert!(meta.is_none());
 }
@@ -1036,9 +1034,7 @@ fn html_title_extracted() {
 #[test]
 fn html_title_extracted_trimmed() {
     // TitleExtractedTrimmed: whitespace stripped from title.
-    let doc = parse(
-        r#"<html><head><title>  Spaces  </title></head><body></body></html>"#,
-    );
+    let doc = parse(r#"<html><head><title>  Spaces  </title></head><body></body></html>"#);
     assert_eq!(doc.title, "Spaces");
 }
 
@@ -1052,9 +1048,8 @@ fn html_title_empty_when_missing() {
 #[test]
 fn html_title_not_in_text() {
     // TitleNotInText: title extracted but not in rendered text.
-    let doc = parse(
-        r#"<html><head><title>Secret</title></head><body><p>Visible</p></body></html>"#,
-    );
+    let doc =
+        parse(r#"<html><head><title>Secret</title></head><body><p>Visible</p></body></html>"#);
     assert_eq!(doc.title, "Secret");
     assert!(!doc_text(&doc).contains("Secret"));
     assert!(doc_text(&doc).contains("Visible"));
@@ -1067,9 +1062,7 @@ fn html_title_not_in_text() {
 #[test]
 fn html_details_closed_hides_content() {
     // DetailsClosedHidesContent: non-summary children are display:none when closed.
-    let doc = parse(
-        r#"<details><summary>Click me</summary><p>Hidden content</p></details>"#,
-    );
+    let doc = parse(r#"<details><summary>Click me</summary><p>Hidden content</p></details>"#);
     let details = find_box(&doc.root, &|b: &WebCore| b.tag == "details");
     assert!(details.is_some());
     let details = details.unwrap();
@@ -1084,9 +1077,7 @@ fn html_details_closed_hides_content() {
 #[test]
 fn html_details_open_shows_content() {
     // DetailsOpenShowsContent: <details open> makes children visible.
-    let doc = parse(
-        r#"<details open><summary>Click me</summary><p>Visible content</p></details>"#,
-    );
+    let doc = parse(r#"<details open><summary>Click me</summary><p>Visible content</p></details>"#);
     let details = find_box(&doc.root, &|b: &WebCore| b.tag == "details");
     assert!(details.is_some());
     let details = details.unwrap();
@@ -1098,9 +1089,7 @@ fn html_details_open_shows_content() {
 #[test]
 fn html_summary_is_list_item() {
     // SummaryIsListItem: summary has display:list-item.
-    let doc = parse(
-        r#"<details><summary>Title</summary><p>Body</p></details>"#,
-    );
+    let doc = parse(r#"<details><summary>Title</summary><p>Body</p></details>"#);
     let summary = find_box(&doc.root, &|b: &WebCore| b.tag == "summary");
     assert!(summary.is_some());
     assert_eq!(summary.unwrap().style.display, Display::ListItem);
@@ -1110,32 +1099,32 @@ fn html_summary_is_list_item() {
 fn html_summary_disclosure_marker_closed() {
     // SummaryDisclosureMarkerClosed: Disclosure variant used for closed state.
     // Note: Rust uses a single Disclosure variant; C++ had DisclosureClosed/Open.
-    let doc = parse(
-        r#"<details><summary>Title</summary><p>Body</p></details>"#,
-    );
+    let doc = parse(r#"<details><summary>Title</summary><p>Body</p></details>"#);
     let summary = find_box(&doc.root, &|b: &WebCore| b.tag == "summary");
     assert!(summary.is_some());
-    assert_eq!(summary.unwrap().style.list_style_type, ListStyleType::Disclosure);
+    assert_eq!(
+        summary.unwrap().style.list_style_type,
+        ListStyleType::Disclosure
+    );
 }
 
 #[test]
 fn html_summary_disclosure_marker_open() {
     // SummaryDisclosureMarkerOpen: same Disclosure variant for open state.
-    let doc = parse(
-        r#"<details open><summary>Title</summary><p>Body</p></details>"#,
-    );
+    let doc = parse(r#"<details open><summary>Title</summary><p>Body</p></details>"#);
     let summary = find_box(&doc.root, &|b: &WebCore| b.tag == "summary");
     assert!(summary.is_some());
-    assert_eq!(summary.unwrap().style.list_style_type, ListStyleType::Disclosure);
+    assert_eq!(
+        summary.unwrap().style.list_style_type,
+        ListStyleType::Disclosure
+    );
 }
 
 #[test]
 fn html_details_summary_text_rendered() {
     // DetailsSummaryTextRendered: summary text visible in output.
     // Note: doc.text not available — use text_content().
-    let doc = parse(
-        r#"<details><summary>FAQ</summary><p>Answer here</p></details>"#,
-    );
+    let doc = parse(r#"<details><summary>FAQ</summary><p>Answer here</p></details>"#);
     assert!(doc_text(&doc).contains("FAQ"));
 }
 
@@ -1148,9 +1137,11 @@ fn html_details_multiple_children() {
     let details = find_box(&doc.root, &|b: &WebCore| b.tag == "details");
     assert!(details.is_some());
     let details = details.unwrap();
-    let hidden_count = details.children.iter().filter(|ch| {
-        ch.tag != "summary" && ch.style.display == Display::None
-    }).count();
+    let hidden_count = details
+        .children
+        .iter()
+        .filter(|ch| ch.tag != "summary" && ch.style.display == Display::None)
+        .count();
     assert_eq!(hidden_count, 3);
 }
 
@@ -1195,23 +1186,36 @@ fn html_attributes_map_custom_data() {
         b.attributes.contains_key("data-custom")
     });
     assert!(div.is_some());
-    assert_eq!(div.unwrap().attributes.get("data-custom").map(|s| s.as_str()), Some("value123"));
+    assert_eq!(
+        div.unwrap()
+            .attributes
+            .get("data-custom")
+            .map(|s| s.as_str()),
+        Some("value123")
+    );
 }
 
 #[test]
 fn html_attributes_map_multiple() {
     // AttributesMapMultiple: role, aria-label, tabindex preserved.
-    let doc = parse(
-        r##"<div id="x" role="button" aria-label="close" tabindex="0">X</div>"##,
-    );
+    let doc = parse(r##"<div id="x" role="button" aria-label="close" tabindex="0">X</div>"##);
     let div = find_box(&doc.root, &|b: &WebCore| {
         b.attributes.get("id").map(|v| v == "x").unwrap_or(false)
     });
     assert!(div.is_some());
     let div = div.unwrap();
-    assert_eq!(div.attributes.get("role").map(|s| s.as_str()), Some("button"));
-    assert_eq!(div.attributes.get("aria-label").map(|s| s.as_str()), Some("close"));
-    assert_eq!(div.attributes.get("tabindex").map(|s| s.as_str()), Some("0"));
+    assert_eq!(
+        div.attributes.get("role").map(|s| s.as_str()),
+        Some("button")
+    );
+    assert_eq!(
+        div.attributes.get("aria-label").map(|s| s.as_str()),
+        Some("close")
+    );
+    assert_eq!(
+        div.attributes.get("tabindex").map(|s| s.as_str()),
+        Some("0")
+    );
 }
 
 #[test]
@@ -1223,7 +1227,13 @@ fn html_attributes_map_inline_element() {
         b.tag == "span" && b.attributes.contains_key("data-type")
     });
     assert!(span.is_some());
-    assert_eq!(span.unwrap().attributes.get("data-type").map(|s| s.as_str()), Some("highlight"));
+    assert_eq!(
+        span.unwrap()
+            .attributes
+            .get("data-type")
+            .map(|s| s.as_str()),
+        Some("highlight")
+    );
 }
 
 #[test]
@@ -1234,7 +1244,10 @@ fn html_attributes_map_img() {
     assert!(img.is_some());
     let img = img.unwrap();
     assert_eq!(img.attributes.get("alt").map(|s| s.as_str()), Some("photo"));
-    assert_eq!(img.attributes.get("src").map(|s| s.as_str()), Some("test.jpg"));
+    assert_eq!(
+        img.attributes.get("src").map(|s| s.as_str()),
+        Some("test.jpg")
+    );
 }
 
 #[test]

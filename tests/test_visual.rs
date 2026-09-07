@@ -1,13 +1,17 @@
 // Visual property tests – ported from cpptests/test_visual.cpp
 // Render smoke and hit-test skipped (require widget / DC infrastructure).
+use webcore::css::{apply_property, Stylesheet};
 use webcore::types::*;
 use webcore::{load_html, parse_html};
-use webcore::css::{apply_property, Stylesheet};
 
 fn find_box<'a>(root: &'a WebCore, pred: &dyn Fn(&WebCore) -> bool) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for child in &root.children {
-        if let Some(found) = find_box(child, pred) { return Some(found); }
+        if let Some(found) = find_box(child, pred) {
+            return Some(found);
+        }
     }
     None
 }
@@ -19,7 +23,9 @@ fn find_box<'a>(root: &'a WebCore, pred: &dyn Fn(&WebCore) -> bool) -> Option<&'
 #[test]
 fn opacity_parsed_from_inline() {
     let doc = parse_html("<div style=\"opacity: 0.5;\">Semi</div>");
-    let b = find_box(&doc.root, &|b| b.style.opacity > 0.49 && b.style.opacity < 0.51);
+    let b = find_box(&doc.root, &|b| {
+        b.style.opacity > 0.49 && b.style.opacity < 0.51
+    });
     assert!(b.is_some());
 }
 
@@ -112,7 +118,9 @@ fn outline_individual() {
 #[test]
 fn outline_does_not_affect_layout() {
     let doc = load_html(
-        "<div style=\"width: 200px; outline: 5px solid red;\">Outlined</div>", 800.0);
+        "<div style=\"width: 200px; outline: 5px solid red;\">Outlined</div>",
+        800.0,
+    );
     let b = find_box(&doc.root, &|b| {
         b.tag == "div" && b.layout.content_rect.w >= 199.0 && b.layout.content_rect.w <= 201.0
     });
@@ -130,7 +138,9 @@ fn outline_does_not_affect_layout() {
 fn text_overflow_ellipsis() {
     let doc = parse_html(
         "<div style=\"text-overflow: ellipsis; overflow: hidden; white-space: nowrap;\">Long text</div>");
-    let b = find_box(&doc.root, &|b| b.style.text_overflow == TextOverflow::Ellipsis);
+    let b = find_box(&doc.root, &|b| {
+        b.style.text_overflow == TextOverflow::Ellipsis
+    });
     assert!(b.is_some());
 }
 
@@ -156,8 +166,10 @@ fn border_radius_parsed() {
 fn border_radius_zero_default() {
     let doc = parse_html("<div>Square</div>");
     let b = find_box(&doc.root, &|b| b.tag == "div").unwrap();
-    assert!(matches!(b.style.border_radius, CssLength::Px(v) if v < 0.01)
-        || matches!(b.style.border_radius, CssLength::Zero));
+    assert!(
+        matches!(b.style.border_radius, CssLength::Px(v) if v < 0.01)
+            || matches!(b.style.border_radius, CssLength::Zero)
+    );
 }
 
 // ============================================================
@@ -166,9 +178,8 @@ fn border_radius_zero_default() {
 
 #[test]
 fn box_shadow_parsed() {
-    let doc = parse_html(
-        "<div style=\"box-shadow: 5px 10px 15px rgba(0,0,0,0.5);\">Shadow</div>");
-    let b = find_box(&doc.root, &|b| b.style.box_shadow.is_some());
+    let doc = parse_html("<div style=\"box-shadow: 5px 10px 15px rgba(0,0,0,0.5);\">Shadow</div>");
+    let b = find_box(&doc.root, &|b| !b.style.box_shadow.is_empty());
     assert!(b.is_some());
 }
 
@@ -176,7 +187,7 @@ fn box_shadow_parsed() {
 fn box_shadow_none_default() {
     let doc = parse_html("<div>No shadow</div>");
     let b = find_box(&doc.root, &|b| b.tag == "div").unwrap();
-    assert!(b.style.box_shadow.is_none());
+    assert!(b.style.box_shadow.is_empty());
 }
 
 // ============================================================
@@ -204,9 +215,13 @@ fn visibility_visible() {
 #[test]
 fn linear_gradient_parsed() {
     let mut style = ComputedStyle::default();
-    apply_property(&mut style, "background", "linear-gradient(to bottom, red, blue)");
+    apply_property(
+        &mut style,
+        "background",
+        "linear-gradient(to bottom, red, blue)",
+    );
     assert_eq!(style.gradient_type, GradientType::Linear);
-    assert!(style.gradient_stops.len() >= 2);
+    assert!(style.rare().gradient_stops.len() >= 2);
 }
 
 // ============================================================
@@ -267,8 +282,7 @@ fn clip_path_ellipse_parsed() {
 
 #[test]
 fn clip_path_polygon_parsed() {
-    let doc = parse_html(
-        "<div style='clip-path: polygon(50% 0%, 100% 100%, 0% 100%);'>Test</div>");
+    let doc = parse_html("<div style='clip-path: polygon(50% 0%, 100% 100%, 0% 100%);'>Test</div>");
     let div = find_box(&doc.root, &|b| b.tag == "div").unwrap();
     assert_eq!(div.style.clip_path.kind, ClipPathKind::Polygon);
     assert_eq!(div.style.clip_path.points.len(), 3);
@@ -300,10 +314,16 @@ fn css_variable_resolution() {
         800.0,
     );
     let b = find_box(&doc.root, &|b| {
-        b.attributes.get("class").map(|c| c == "box").unwrap_or(false)
+        b.attributes
+            .get("class")
+            .map(|c| c == "box")
+            .unwrap_or(false)
             && b.style.background_color == Color::rgb(0, 255, 0)
     });
-    assert!(b.is_some(), "div.box should have green background from CSS variable");
+    assert!(
+        b.is_some(),
+        "div.box should have green background from CSS variable"
+    );
 }
 
 // ============================================================
@@ -320,10 +340,20 @@ fn pseudo_element_content() {
          <body><p>Content</p></body></html>",
         800.0,
     );
-    let before_box = find_box(&doc.root, &|b| b.tag == "p" && !b.style.before_content.is_empty());
-    assert!(before_box.is_some(), "p should have before_content from ::before rule");
-    let after_box = find_box(&doc.root, &|b| b.tag == "p" && !b.style.after_content.is_empty());
-    assert!(after_box.is_some(), "p should have after_content from ::after rule");
+    let before_box = find_box(&doc.root, &|b| {
+        b.tag == "p" && !b.style.before_content.is_empty()
+    });
+    assert!(
+        before_box.is_some(),
+        "p should have before_content from ::before rule"
+    );
+    let after_box = find_box(&doc.root, &|b| {
+        b.tag == "p" && !b.style.after_content.is_empty()
+    });
+    assert!(
+        after_box.is_some(),
+        "p should have after_content from ::after rule"
+    );
 }
 
 #[test]
@@ -340,10 +370,21 @@ fn pseudo_element_before_has_own_style() {
     let p = p.unwrap();
     assert_eq!(p.style.before_content, ">> ", "before_content text");
     let bs = p.style.before_style.as_deref();
-    assert!(bs.is_some(), "before_style should be Some — other declarations were dropped");
+    assert!(
+        bs.is_some(),
+        "before_style should be Some — other declarations were dropped"
+    );
     let bs = bs.unwrap();
-    assert_eq!(bs.color, Color::rgb(255, 0, 0), "::before color should be red");
-    assert_eq!(bs.font_weight, webcore::types::FontWeight::Bold, "::before font-weight should be bold");
+    assert_eq!(
+        bs.color,
+        Color::rgb(255, 0, 0),
+        "::before color should be red"
+    );
+    assert_eq!(
+        bs.font_weight,
+        webcore::types::FontWeight::Bold,
+        "::before font-weight should be bold"
+    );
 }
 
 #[test]
@@ -354,14 +395,20 @@ fn pseudo_element_after_has_own_style() {
         </style><p><span id="s">Done</span></p>"#,
         800.0,
     );
-    let s = find_box(&doc.root, &|b| b.attributes.get("id").map(|v| v == "s").unwrap_or(false));
+    let s = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v == "s").unwrap_or(false)
+    });
     assert!(s.is_some(), "span not found");
     let s = s.unwrap();
     assert_eq!(s.style.after_content, " OK");
     let as_ = s.style.after_style.as_deref();
     assert!(as_.is_some(), "after_style should be Some");
     let c = as_.unwrap().color;
-    assert_eq!((c.r, c.g, c.b), (0, 170, 0), "::after color should be #00aa00");
+    assert_eq!(
+        (c.r, c.g, c.b),
+        (0, 170, 0),
+        "::after color should be #00aa00"
+    );
     assert_eq!(as_.unwrap().font_style, webcore::types::FontStyle::Italic);
 }
 
@@ -383,7 +430,10 @@ fn pseudo_element_inherits_font_from_element() {
     let bs = p.style.before_style.as_deref();
     assert!(bs.is_some(), "before_style should be set");
     let f = bs.unwrap().font_size.resolve(16.0, 0.0, 16.0);
-    assert!((f - 20.0).abs() < 1.0, "::before should inherit font-size 20px, got {f}");
+    assert!(
+        (f - 20.0).abs() < 1.0,
+        "::before should inherit font-size 20px, got {f}"
+    );
 }
 
 #[test]
@@ -395,8 +445,14 @@ fn pseudo_element_does_not_nest() {
     );
     let p = find_box(&doc.root, &|b| b.tag == "p").unwrap();
     if let Some(bs) = p.style.before_style.as_deref() {
-        assert!(bs.before_style.is_none(), "pseudo-element style should not have nested before_style");
-        assert!(bs.after_style.is_none(),  "pseudo-element style should not have nested after_style");
+        assert!(
+            bs.before_style.is_none(),
+            "pseudo-element style should not have nested before_style"
+        );
+        assert!(
+            bs.after_style.is_none(),
+            "pseudo-element style should not have nested after_style"
+        );
     }
 }
 
@@ -407,9 +463,17 @@ fn pseudo_element_does_not_nest() {
 #[test]
 fn css_variables_in_root() {
     let mut ss = Stylesheet::default();
-    ss.parse_and_add(":root { --main-color: #ff0000; --gap: 10px; } p { color: var(--main-color); }");
-    assert!(ss.variables.contains_key("--main-color"), "should extract --main-color");
-    assert_eq!(ss.variables.get("--main-color").map(|s| s.as_str()), Some("#ff0000"));
+    ss.parse_and_add(
+        ":root { --main-color: #ff0000; --gap: 10px; } p { color: var(--main-color); }",
+    );
+    assert!(
+        ss.variables.contains_key("--main-color"),
+        "should extract --main-color"
+    );
+    assert_eq!(
+        ss.variables.get("--main-color").map(|s| s.as_str()),
+        Some("#ff0000")
+    );
     assert!(ss.variables.contains_key("--gap"), "should extract --gap");
 }
 
@@ -418,7 +482,10 @@ fn css_variable_with_fallback() {
     // A stylesheet with a variable reference that uses a fallback value must parse without error.
     let mut ss = Stylesheet::default();
     ss.parse_and_add(":root { --main: blue; } p { color: var(--missing, red); }");
-    assert!(!ss.rules.is_empty(), "stylesheet should have at least one rule");
+    assert!(
+        !ss.rules.is_empty(),
+        "stylesheet should have at least one rule"
+    );
 }
 
 // ============================================================
@@ -427,9 +494,8 @@ fn css_variable_with_fallback() {
 
 #[test]
 fn background_shorthand_cover_no_repeat() {
-    let doc = parse_html(
-        "<div style='background: #ccc url(test.png) center / cover no-repeat;'>X</div>",
-    );
+    let doc =
+        parse_html("<div style='background: #ccc url(test.png) center / cover no-repeat;'>X</div>");
     let div = find_box(&doc.root, &|b| b.tag == "div").unwrap();
     assert_eq!(div.style.background_size, BackgroundSize::Cover);
     assert_eq!(div.style.background_repeat, BackgroundRepeat::NoRepeat);
@@ -439,9 +505,7 @@ fn background_shorthand_cover_no_repeat() {
 
 #[test]
 fn background_shorthand_center_top() {
-    let doc = parse_html(
-        "<div style='background: url(img.jpg) center top no-repeat;'>X</div>",
-    );
+    let doc = parse_html("<div style='background: url(img.jpg) center top no-repeat;'>X</div>");
     let div = find_box(&doc.root, &|b| b.tag == "div").unwrap();
     assert_eq!(div.style.background_position_x, CssLength::Percent(50.0));
     assert_eq!(div.style.background_position_y, CssLength::Percent(0.0));
@@ -450,13 +514,10 @@ fn background_shorthand_center_top() {
 
 #[test]
 fn background_shorthand_contain() {
-    let doc = parse_html(
-        "<div style='background: url(x.png) center / contain;'>X</div>",
-    );
+    let doc = parse_html("<div style='background: url(x.png) center / contain;'>X</div>");
     let div = find_box(&doc.root, &|b| b.tag == "div").unwrap();
     assert_eq!(div.style.background_size, BackgroundSize::Contain);
 }
-
 
 // ============================================================
 // ::selection pseudo-element
@@ -470,12 +531,21 @@ fn selection_style_stored_on_element() {
         </style><p id="p">Hello</p>"#,
         800.0,
     );
-    let p = find_box(&doc.root, &|b| b.attributes.get("id").map(|v| v == "p").unwrap_or(false));
+    let p = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v == "p").unwrap_or(false)
+    });
     assert!(p.is_some(), "p not found");
     let ss = p.unwrap().style.selection_style.as_deref();
-    assert!(ss.is_some(), "::selection style should be stored on element");
+    assert!(
+        ss.is_some(),
+        "::selection style should be stored on element"
+    );
     let bg = ss.unwrap().background_color;
-    assert_eq!((bg.r, bg.g, bg.b), (255, 204, 0), "::selection background should be #ffcc00");
+    assert_eq!(
+        (bg.r, bg.g, bg.b),
+        (255, 204, 0),
+        "::selection background should be #ffcc00"
+    );
 }
 
 #[test]
@@ -488,16 +558,36 @@ fn selection_style_per_element_override() {
         </style><p id="p">Text</p><div id="d">Other</div>"#,
         800.0,
     );
-    let p = find_box(&doc.root, &|b| b.attributes.get("id").map(|v| v == "p").unwrap_or(false));
-    let d = find_box(&doc.root, &|b| b.attributes.get("id").map(|v| v == "d").unwrap_or(false));
-    let p_bg = p.unwrap().style.selection_style.as_deref().map(|s| s.background_color);
-    let d_bg = d.unwrap().style.selection_style.as_deref().map(|s| s.background_color);
+    let p = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v == "p").unwrap_or(false)
+    });
+    let d = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v == "d").unwrap_or(false)
+    });
+    let p_bg = p
+        .unwrap()
+        .style
+        .selection_style
+        .as_deref()
+        .map(|s| s.background_color);
+    let d_bg = d
+        .unwrap()
+        .style
+        .selection_style
+        .as_deref()
+        .map(|s| s.background_color);
     assert!(p_bg.is_some(), "p should have selection_style");
     assert!(d_bg.is_some(), "div should have selection_style");
-    assert_eq!((p_bg.unwrap().r, p_bg.unwrap().g, p_bg.unwrap().b), (255, 0, 0),
-        "p::selection should be red");
-    assert_eq!((d_bg.unwrap().r, d_bg.unwrap().g, d_bg.unwrap().b), (0, 0, 255),
-        "div::selection should fall back to blue");
+    assert_eq!(
+        (p_bg.unwrap().r, p_bg.unwrap().g, p_bg.unwrap().b),
+        (255, 0, 0),
+        "p::selection should be red"
+    );
+    assert_eq!(
+        (d_bg.unwrap().r, d_bg.unwrap().g, d_bg.unwrap().b),
+        (0, 0, 255),
+        "div::selection should fall back to blue"
+    );
 }
 
 // ============================================================
@@ -512,7 +602,9 @@ fn marker_style_stored_on_list_item() {
         </style><ul><li id="li">Item</li></ul>"#,
         800.0,
     );
-    let li = find_box(&doc.root, &|b| b.attributes.get("id").map(|v| v == "li").unwrap_or(false));
+    let li = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v == "li").unwrap_or(false)
+    });
     assert!(li.is_some(), "li not found");
     let ms = li.unwrap().style.marker_style.as_deref();
     assert!(ms.is_some(), "::marker style should be stored on <li>");
@@ -530,11 +622,16 @@ fn first_line_does_not_apply_to_element() {
         r#"<style>p::first-line { font-size: 99px; }</style><p id="p">Text</p>"#,
         800.0,
     );
-    let p = find_box(&doc.root, &|b| b.attributes.get("id").map(|v| v == "p").unwrap_or(false));
+    let p = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v == "p").unwrap_or(false)
+    });
     assert!(p.is_some());
     let fs = p.unwrap().style.font_size.resolve(16.0, 0.0, 16.0);
     // ::first-line should not set font-size to 99px on the element itself
-    assert!(fs < 50.0, "::first-line font-size leaked to element: {fs}px");
+    assert!(
+        fs < 50.0,
+        "::first-line font-size leaked to element: {fs}px"
+    );
 }
 
 #[test]
@@ -544,11 +641,17 @@ fn placeholder_does_not_apply_to_element() {
            <input id="inp" type="text">"#,
         800.0,
     );
-    let inp = find_box(&doc.root, &|b| b.attributes.get("id").map(|v| v == "inp").unwrap_or(false));
+    let inp = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v == "inp").unwrap_or(false)
+    });
     assert!(inp.is_some());
     // color should NOT be hotpink (placeholder style must not leak to the input element)
     let c = inp.unwrap().style.color;
-    assert_ne!((c.r, c.g, c.b), (255, 105, 180), "::placeholder color leaked to <input>");
+    assert_ne!(
+        (c.r, c.g, c.b),
+        (255, 105, 180),
+        "::placeholder color leaked to <input>"
+    );
 }
 
 // ============================================================
@@ -578,7 +681,8 @@ fn render_complex_smoke() {
          <div style=\"outline: 2px solid red;\">Outlined</div>\
          <div style=\"border-radius: 8px; background-color: #eee; padding: 10px;\">Rounded</div>\
          </body></html>",
-        800, 600,
+        800,
+        600,
     );
     // no panic → pass
 }
@@ -601,7 +705,8 @@ fn clip_path_render_smoke() {
     render_doc_visual(
         "<div style='width: 200px; height: 200px; background: red; \
          clip-path: circle(50% at 50% 50%);'>Clipped</div>",
-        800, 600,
+        800,
+        600,
     );
 }
 
@@ -611,6 +716,7 @@ fn clip_path_polygon_render_smoke() {
     render_doc_visual(
         "<div style='width: 200px; height: 200px; background: blue; \
          clip-path: polygon(50% 0%, 100% 100%, 0% 100%);'>Triangle</div>",
-        800, 600,
+        800,
+        600,
     );
 }

@@ -1,14 +1,18 @@
 // Text tests – ported from cpptests/test_text.cpp
 // Font-specific tests (wxFont Get/SetPointSize etc.) and dir="auto" detection
 // tests that use engine.ApplyStylesheet are skipped.
-use webcore::types::*;
-use webcore::parse_html;
 use webcore::css::apply_property;
+use webcore::parse_html;
+use webcore::types::*;
 
 fn find_box<'a>(root: &'a WebCore, pred: &dyn Fn(&WebCore) -> bool) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for child in &root.children {
-        if let Some(found) = find_box(child, pred) { return Some(found); }
+        if let Some(found) = find_box(child, pred) {
+            return Some(found);
+        }
     }
     None
 }
@@ -427,9 +431,9 @@ fn margin_inline_start_rtl() {
     let mut style = ComputedStyle::default();
     style.direction = Direction::RTL;
     apply_property(&mut style, "margin-inline-start", "10px");
-    apply_property(&mut style, "margin-inline-end",   "20px");
+    apply_property(&mut style, "margin-inline-end", "20px");
     // Rust maps inline-start → left and inline-end → right unconditionally
-    assert_eq!(style.margin_left,  CssLength::Px(10.0));
+    assert_eq!(style.margin_left, CssLength::Px(10.0));
     assert_eq!(style.margin_right, CssLength::Px(20.0));
 }
 
@@ -438,8 +442,8 @@ fn padding_inline_start_ltr() {
     let mut style = ComputedStyle::default();
     style.direction = Direction::LTR;
     apply_property(&mut style, "padding-inline-start", "15px");
-    apply_property(&mut style, "padding-inline-end",   "25px");
-    assert_eq!(style.padding_left,  CssLength::Px(15.0));
+    apply_property(&mut style, "padding-inline-end", "25px");
+    assert_eq!(style.padding_left, CssLength::Px(15.0));
     assert_eq!(style.padding_right, CssLength::Px(25.0));
 }
 
@@ -447,8 +451,8 @@ fn padding_inline_start_ltr() {
 fn padding_block_start_end() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "padding-block-start", "5px");
-    apply_property(&mut style, "padding-block-end",   "15px");
-    assert_eq!(style.padding_top,    CssLength::Px(5.0));
+    apply_property(&mut style, "padding-block-end", "15px");
+    assert_eq!(style.padding_top, CssLength::Px(5.0));
     assert_eq!(style.padding_bottom, CssLength::Px(15.0));
 }
 
@@ -456,8 +460,8 @@ fn padding_block_start_end() {
 fn margin_block_start_end() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "margin-block-start", "10px");
-    apply_property(&mut style, "margin-block-end",   "20px");
-    assert_eq!(style.margin_top,    CssLength::Px(10.0));
+    apply_property(&mut style, "margin-block-end", "20px");
+    assert_eq!(style.margin_top, CssLength::Px(10.0));
     assert_eq!(style.margin_bottom, CssLength::Px(20.0));
 }
 
@@ -471,8 +475,8 @@ fn margin_inline_start_ltr() {
     let mut style = ComputedStyle::default();
     style.direction = Direction::LTR;
     apply_property(&mut style, "margin-inline-start", "10px");
-    apply_property(&mut style, "margin-inline-end",   "20px");
-    assert_eq!(style.margin_left,  CssLength::Px(10.0));
+    apply_property(&mut style, "margin-inline-end", "20px");
+    assert_eq!(style.margin_left, CssLength::Px(10.0));
     assert_eq!(style.margin_right, CssLength::Px(20.0));
 }
 
@@ -496,32 +500,44 @@ fn bdo_element_unicode_bidi_override() {
     });
     // Also check inline runs of any box for the override
     fn walk_runs(root: &WebCore) -> bool {
-        if root.layout.inline_runs.iter().any(|r| r.style.unicode_bidi == UnicodeBidi::Override) {
+        if root
+            .layout
+            .inline_runs
+            .iter()
+            .any(|r| r.style.unicode_bidi == UnicodeBidi::Override)
+        {
             return true;
         }
         root.children.iter().any(walk_runs)
     }
     let found_run = walk_runs(&doc.root);
-    assert!(found_box.is_some() || found_run,
-        "expected unicode-bidi: override on bdo box or an inline run");
+    assert!(
+        found_box.is_some() || found_run,
+        "expected unicode-bidi: override on bdo box or an inline run"
+    );
 }
 
 #[test]
 fn bdi_element_unicode_bidi_isolate() {
     // <bdi> should produce a box or inline run with unicode-bidi: isolate
     let doc = parse_html("<p><bdi>Isolated</bdi></p>");
-    let found_box = find_box(&doc.root, &|b| {
-        b.style.unicode_bidi == UnicodeBidi::Isolate
-    });
+    let found_box = find_box(&doc.root, &|b| b.style.unicode_bidi == UnicodeBidi::Isolate);
     fn walk_runs(root: &WebCore) -> bool {
-        if root.layout.inline_runs.iter().any(|r| r.style.unicode_bidi == UnicodeBidi::Isolate) {
+        if root
+            .layout
+            .inline_runs
+            .iter()
+            .any(|r| r.style.unicode_bidi == UnicodeBidi::Isolate)
+        {
             return true;
         }
         root.children.iter().any(walk_runs)
     }
     let found_run = walk_runs(&doc.root);
-    assert!(found_box.is_some() || found_run,
-        "expected unicode-bidi: isolate on bdi box or an inline run");
+    assert!(
+        found_box.is_some() || found_run,
+        "expected unicode-bidi: isolate on bdi box or an inline run"
+    );
 }
 
 #[test]
@@ -529,8 +545,13 @@ fn font_family_monospace() {
     // font-family: monospace should be stored in the font_family field
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "font-family", "monospace");
-    assert!(!style.font_family.is_empty(),
-        "font_family should not be empty after setting monospace");
-    assert!(style.font_family.to_lowercase().contains("monospace"),
-        "font_family should contain 'monospace', got: {}", style.font_family);
+    assert!(
+        !style.font_family.is_empty(),
+        "font_family should not be empty after setting monospace"
+    );
+    assert!(
+        style.font_family.to_lowercase().contains("monospace"),
+        "font_family should contain 'monospace', got: {}",
+        style.font_family
+    );
 }

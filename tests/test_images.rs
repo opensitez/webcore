@@ -1,14 +1,18 @@
 // Image tests – ported from cpptests/test_images.cpp
 // Only object-fit parsing + img tag parsing are portable.
 // Image layout (bitmap, intrinsic dimensions, IsReplaced) skipped.
-use webcore::types::*;
-use webcore::parse_html;
 use webcore::css::apply_property;
+use webcore::parse_html;
+use webcore::types::*;
 
 fn find_box<'a>(root: &'a WebCore, pred: &dyn Fn(&WebCore) -> bool) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for child in &root.children {
-        if let Some(found) = find_box(child, pred) { return Some(found); }
+        if let Some(found) = find_box(child, pred) {
+            return Some(found);
+        }
     }
     None
 }
@@ -101,7 +105,9 @@ fn img_with_inline_style() {
 #[test]
 fn img_id_and_class() {
     let doc = parse_html("<img src=\"test.png\" id=\"logo\" class=\"banner\">");
-    let b = find_box(&doc.root, &|b| b.tag == "img" && b.get_attr("id") == Some("logo"));
+    let b = find_box(&doc.root, &|b| {
+        b.tag == "img" && b.get_attr("id") == Some("logo")
+    });
     assert!(b.is_some());
     assert_eq!(b.unwrap().get_attr("class"), Some("banner"));
 }
@@ -133,7 +139,7 @@ fn img_explicit_layout_dimensions() {
     );
     let b = find_box(&doc.root, &|b| b.tag == "img").unwrap();
     // Style must retain the specified values
-    assert_eq!(b.style.width,  webcore::types::CssLength::Px(200.0));
+    assert_eq!(b.style.width, webcore::types::CssLength::Px(200.0));
     assert_eq!(b.style.height, webcore::types::CssLength::Px(100.0));
 }
 
@@ -144,8 +150,10 @@ fn img_is_replaced_requires_image_data() {
     let doc = parse_html("<img src=\"test.png\">");
     let b = find_box(&doc.root, &|b| b.tag == "img").unwrap();
     // Without loading actual image bytes, image_data stays None
-    assert!(b.image_data.is_none(),
-        "img parsed without image bytes should have no image_data");
+    assert!(
+        b.image_data.is_none(),
+        "img parsed without image bytes should have no image_data"
+    );
 }
 
 #[test]
@@ -153,7 +161,7 @@ fn img_intrinsic_dimensions_from_attr() {
     // width/height HTML attributes should be stored as attributes on the box
     let doc = parse_html("<img src=\"test.png\" width=\"200\" height=\"100\">");
     let b = find_box(&doc.root, &|b| b.tag == "img").unwrap();
-    assert_eq!(b.get_attr("width"),  Some("200"));
+    assert_eq!(b.get_attr("width"), Some("200"));
     assert_eq!(b.get_attr("height"), Some("100"));
 }
 

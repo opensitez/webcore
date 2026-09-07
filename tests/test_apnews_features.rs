@@ -7,29 +7,42 @@
 // - <source> element display: none
 // - Percentage width in intrinsic sizing
 
-use webcore::types::*;
 use webcore::css::apply_property;
-use webcore::{parse_html, load_html, load_html_vp};
+use webcore::types::*;
+use webcore::{load_html, load_html_vp, parse_html};
 
 fn find_box<'a, F: Fn(&WebCore) -> bool>(root: &'a WebCore, pred: &F) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for child in &root.children {
-        if let Some(b) = find_box(child, pred) { return Some(b); }
+        if let Some(b) = find_box(child, pred) {
+            return Some(b);
+        }
     }
     None
 }
 
-fn find_box_mut<'a, F: Fn(&WebCore) -> bool>(root: &'a mut WebCore, pred: &F) -> Option<&'a mut WebCore> {
-    if pred(root) { return Some(root); }
+fn find_box_mut<'a, F: Fn(&WebCore) -> bool>(
+    root: &'a mut WebCore,
+    pred: &F,
+) -> Option<&'a mut WebCore> {
+    if pred(root) {
+        return Some(root);
+    }
     for child in &mut root.children {
-        if let Some(b) = find_box_mut(child, pred) { return Some(b); }
+        if let Some(b) = find_box_mut(child, pred) {
+            return Some(b);
+        }
     }
     None
 }
 
 fn collect_boxes<'a, F: Fn(&WebCore) -> bool>(root: &'a WebCore, pred: &F) -> Vec<&'a WebCore> {
     let mut result = Vec::new();
-    if pred(root) { result.push(root); }
+    if pred(root) {
+        result.push(root);
+    }
     for child in &root.children {
         result.extend(collect_boxes(child, pred));
     }
@@ -42,37 +55,43 @@ fn collect_boxes<'a, F: Fn(&WebCore) -> bool>(root: &'a WebCore, pred: &F) -> Ve
 
 #[test]
 fn picture_simple_source_sets_img_src() {
-    let doc = parse_html(r#"
+    let doc = parse_html(
+        r#"
         <picture>
             <source srcset="better.jpg">
             <img src="fallback.jpg">
         </picture>
-    "#);
+    "#,
+    );
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
     assert_eq!(img.get_attr("src"), Some("better.jpg"));
 }
 
 #[test]
 fn picture_skips_webp_source() {
-    let doc = parse_html(r#"
+    let doc = parse_html(
+        r#"
         <picture>
             <source type="image/webp" srcset="photo.webp">
             <source srcset="photo.jpg">
             <img src="fallback.jpg">
         </picture>
-    "#);
+    "#,
+    );
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
     assert_eq!(img.get_attr("src"), Some("photo.jpg"));
 }
 
 #[test]
 fn picture_falls_back_to_img_src_when_no_source_matches() {
-    let doc = parse_html(r#"
+    let doc = parse_html(
+        r#"
         <picture>
             <source type="image/webp" srcset="photo.webp">
             <img src="fallback.jpg">
         </picture>
-    "#);
+    "#,
+    );
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
     // Only webp source, which is skipped — img keeps its original src
     assert_eq!(img.get_attr("src"), Some("fallback.jpg"));
@@ -80,13 +99,15 @@ fn picture_falls_back_to_img_src_when_no_source_matches() {
 
 #[test]
 fn picture_skips_source_with_media_when_viewport_unknown() {
-    let doc = parse_html(r#"
+    let doc = parse_html(
+        r#"
         <picture>
             <source media="(min-width: 1024px)" srcset="large.jpg">
             <source srcset="small.jpg">
             <img src="fallback.jpg">
         </picture>
-    "#);
+    "#,
+    );
     // At parse time, viewport is 0 — media sources are skipped, unconditional wins
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
     assert_eq!(img.get_attr("src"), Some("small.jpg"));
@@ -95,50 +116,62 @@ fn picture_skips_source_with_media_when_viewport_unknown() {
 #[test]
 fn picture_with_viewport_selects_matching_media_source() {
     // load_html_vp runs with real viewport, so media queries evaluate
-    let doc = load_html_vp(r#"
+    let doc = load_html_vp(
+        r#"
         <picture>
             <source media="(min-width: 1024px)" srcset="large.jpg">
             <source srcset="small.jpg">
             <img src="fallback.jpg">
         </picture>
-    "#, 1200.0, 800.0);
+    "#,
+        1200.0,
+        800.0,
+    );
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
     assert_eq!(img.get_attr("src"), Some("large.jpg"));
 }
 
 #[test]
 fn picture_with_small_viewport_skips_large_media() {
-    let doc = load_html_vp(r#"
+    let doc = load_html_vp(
+        r#"
         <picture>
             <source media="(min-width: 1024px)" srcset="large.jpg">
             <source srcset="small.jpg">
             <img src="fallback.jpg">
         </picture>
-    "#, 800.0, 600.0);
+    "#,
+        800.0,
+        600.0,
+    );
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
     assert_eq!(img.get_attr("src"), Some("small.jpg"));
 }
 
 #[test]
 fn picture_img_gets_resolved_src() {
-    let doc = parse_html(r#"
+    let doc = parse_html(
+        r#"
         <picture>
             <source srcset="photo.jpg">
             <img src="fallback.jpg">
         </picture>
-    "#);
+    "#,
+    );
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
     assert!(img.get_attr("_resolved_src").is_some());
 }
 
 #[test]
 fn picture_srcset_with_width_descriptor() {
-    let doc = parse_html(r#"
+    let doc = parse_html(
+        r#"
         <picture>
             <source srcset="photo-320.jpg 320w, photo-640.jpg 640w">
             <img src="fallback.jpg">
         </picture>
-    "#);
+    "#,
+    );
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
     // Should pick the first URL from srcset
     assert_eq!(img.get_attr("src"), Some("photo-320.jpg"));
@@ -146,12 +179,14 @@ fn picture_srcset_with_width_descriptor() {
 
 #[test]
 fn picture_element_is_transparent_container() {
-    let doc = parse_html(r#"
+    let doc = parse_html(
+        r#"
         <picture>
             <source srcset="photo.jpg">
             <img src="fallback.jpg" width="100" height="50">
         </picture>
-    "#);
+    "#,
+    );
     let picture = find_box(&doc.root, &|b| b.tag == "picture").unwrap();
     assert!(picture.children.iter().any(|c| c.tag == "img"));
 }
@@ -162,12 +197,15 @@ fn picture_element_is_transparent_container() {
 
 #[test]
 fn source_element_is_hidden() {
-    let doc = load_html(r#"
+    let doc = load_html(
+        r#"
         <picture>
             <source srcset="photo.jpg">
             <img src="fallback.jpg">
         </picture>
-    "#, 800.0);
+    "#,
+        800.0,
+    );
     let source = find_box(&doc.root, &|b| b.tag == "source").unwrap();
     assert_eq!(source.style.display, Display::None);
 }
@@ -223,12 +261,16 @@ fn clip_auto_clears_rect() {
 #[test]
 fn clip_rect_zero_hides_element() {
     // clip: rect(0,0,0,0) should result in 0-area clip
-    let doc = load_html(r#"
+    let doc = load_html(
+        r#"
         <div style="position: absolute; clip: rect(0, 0, 0, 0);">Hidden</div>
-    "#, 800.0);
+    "#,
+        800.0,
+    );
     let div = find_box(&doc.root, &|b| {
         b.tag == "div" && b.style.clip_rect.is_some()
-    }).unwrap();
+    })
+    .unwrap();
     let cr = div.style.clip_rect.unwrap();
     // clip width = right - left = 0 - 0 = 0
     assert_eq!(cr[1] - cr[3], 0.0);
@@ -240,62 +282,84 @@ fn clip_rect_zero_hides_element() {
 
 #[test]
 fn custom_property_resolves_in_stylesheet_rule() {
-    let doc = load_html(r#"
+    let doc = load_html(
+        r#"
         <style>
             :root { --mycolor: red; }
             div { color: var(--mycolor); }
         </style>
         <div>Hello</div>
-    "#, 800.0);
+    "#,
+        800.0,
+    );
     let div = find_box(&doc.root, &|b| {
         b.tag == "div" && b.children.iter().any(|c| c.text.contains("Hello"))
-    }).unwrap();
+    })
+    .unwrap();
     assert_eq!(div.style.color, Color::rgb(255, 0, 0));
 }
 
 #[test]
 fn custom_property_camelcase_resolves() {
-    let doc = load_html(r#"
+    let doc = load_html(
+        r#"
         <style>
             :root { --myColor: red; }
             div { color: var(--myColor); }
         </style>
         <div>Hello</div>
-    "#, 800.0);
+    "#,
+        800.0,
+    );
     let div = find_box(&doc.root, &|b| {
         b.tag == "div" && b.children.iter().any(|c| c.text.contains("Hello"))
-    }).unwrap();
+    })
+    .unwrap();
     // CSS custom properties are case-sensitive — --myColor must match --myColor
     assert_eq!(div.style.color, Color::rgb(255, 0, 0));
 }
 
 #[test]
 fn custom_property_case_mismatch_does_not_resolve() {
-    let doc = load_html(r#"
+    let doc = load_html(
+        r#"
         <style>
             :root { --myColor: red; }
             .test { color: var(--mycolor); }
         </style>
         <div class="test">Hello</div>
-    "#, 800.0);
+    "#,
+        800.0,
+    );
     let div = find_box(&doc.root, &|b| {
-        b.attributes.get("class").map(|c| c == "test").unwrap_or(false)
-    }).unwrap();
+        b.attributes
+            .get("class")
+            .map(|c| c == "test")
+            .unwrap_or(false)
+    })
+    .unwrap();
     // --mycolor (lowercase) != --myColor — should NOT resolve to red
     assert_ne!(div.style.color, Color::rgb(255, 0, 0));
 }
 
 #[test]
 fn standard_property_is_case_insensitive() {
-    let doc = load_html(r#"
+    let doc = load_html(
+        r#"
         <style>
             .test { COLOR: red; }
         </style>
         <div class="test">Hello</div>
-    "#, 800.0);
+    "#,
+        800.0,
+    );
     let div = find_box(&doc.root, &|b| {
-        b.attributes.get("class").map(|c| c == "test").unwrap_or(false)
-    }).unwrap();
+        b.attributes
+            .get("class")
+            .map(|c| c == "test")
+            .unwrap_or(false)
+    })
+    .unwrap();
     assert_eq!(div.style.color, Color::rgb(255, 0, 0));
 }
 
@@ -307,14 +371,21 @@ fn standard_property_is_case_insensitive() {
 fn counter_reset_parsed() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "counter-reset", "section");
-    assert!(style.counter_reset.iter().any(|(name, _)| name == "section"));
+    assert!(style
+        .counter_reset
+        .iter()
+        .any(|(name, _)| name == "section"));
 }
 
 #[test]
 fn counter_reset_with_value() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "counter-reset", "section 5");
-    let (_, val) = style.counter_reset.iter().find(|(n, _)| n == "section").unwrap();
+    let (_, val) = style
+        .counter_reset
+        .iter()
+        .find(|(n, _)| n == "section")
+        .unwrap();
     assert_eq!(*val, 5);
 }
 
@@ -322,14 +393,21 @@ fn counter_reset_with_value() {
 fn counter_increment_parsed() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "counter-increment", "section");
-    assert!(style.counter_increment.iter().any(|(name, _)| name == "section"));
+    assert!(style
+        .counter_increment
+        .iter()
+        .any(|(name, _)| name == "section"));
 }
 
 #[test]
 fn counter_increment_with_value() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "counter-increment", "item 2");
-    let (_, val) = style.counter_increment.iter().find(|(n, _)| n == "item").unwrap();
+    let (_, val) = style
+        .counter_increment
+        .iter()
+        .find(|(n, _)| n == "item")
+        .unwrap();
     assert_eq!(*val, 2);
 }
 
@@ -339,35 +417,55 @@ fn counter_increment_with_value() {
 
 #[test]
 fn before_pseudo_becomes_grid_item() {
-    let doc = load_html(r#"
+    let doc = load_html(
+        r#"
         <style>
             .grid { display: grid; grid-template-columns: 30px auto; }
             .grid::before { content: "X"; }
         </style>
         <div class="grid"><span>Content</span></div>
-    "#, 800.0);
+    "#,
+        800.0,
+    );
     let grid = find_box(&doc.root, &|b| {
-        b.attributes.get("class").map(|c| c == "grid").unwrap_or(false)
-    }).unwrap();
+        b.attributes
+            .get("class")
+            .map(|c| c == "grid")
+            .unwrap_or(false)
+    })
+    .unwrap();
     // ::before should be inserted as a child box (grid item)
     let has_before = grid.children.iter().any(|c| c.tag == "::before");
-    assert!(has_before, "::before should be a child box in a grid container");
+    assert!(
+        has_before,
+        "::before should be a child box in a grid container"
+    );
 }
 
 #[test]
 fn before_pseudo_becomes_flex_item() {
-    let doc = load_html(r#"
+    let doc = load_html(
+        r#"
         <style>
             .flex { display: flex; }
             .flex::before { content: "X"; }
         </style>
         <div class="flex"><span>Content</span></div>
-    "#, 800.0);
+    "#,
+        800.0,
+    );
     let flex = find_box(&doc.root, &|b| {
-        b.attributes.get("class").map(|c| c == "flex").unwrap_or(false)
-    }).unwrap();
+        b.attributes
+            .get("class")
+            .map(|c| c == "flex")
+            .unwrap_or(false)
+    })
+    .unwrap();
     let has_before = flex.children.iter().any(|c| c.tag == "::before");
-    assert!(has_before, "::before should be a child box in a flex container");
+    assert!(
+        has_before,
+        "::before should be a child box in a flex container"
+    );
 }
 
 // ============================================================
@@ -378,13 +476,19 @@ fn before_pseudo_becomes_flex_item() {
 fn percentage_width_treated_as_auto_in_intrinsic() {
     // An element with width: 100% inside a shrink-to-fit context
     // should not collapse to 0
-    let doc = load_html(r#"
+    let doc = load_html(
+        r#"
         <div style="float: left;">
             <a style="display: block; width: 100%;">Link text here</a>
         </div>
-    "#, 800.0);
+    "#,
+        800.0,
+    );
     let link = find_box(&doc.root, &|b| b.tag == "a").unwrap();
-    assert!(link.layout.content_rect.w > 0.0, "width: 100% in intrinsic context should not be 0");
+    assert!(
+        link.layout.content_rect.w > 0.0,
+        "width: 100% in intrinsic context should not be 0"
+    );
 }
 
 // ============================================================
@@ -393,33 +497,45 @@ fn percentage_width_treated_as_auto_in_intrinsic() {
 
 #[test]
 fn calc_subtraction_works() {
-    let doc = load_html(r#"
+    let doc = load_html(
+        r#"
         <div style="width: calc(100% - 40px);">content</div>
-    "#, 800.0);
+    "#,
+        800.0,
+    );
     let div = find_box(&doc.root, &|b| {
         b.tag == "div" && b.children.iter().any(|c| c.text.contains("content"))
     });
     // Body has 8px margin on each side, so containing block = 800 - 16 = 784
     // calc(100% - 40px) = 784 - 40 = 744
     if let Some(d) = div {
-        assert!((d.layout.content_rect.w - 744.0).abs() < 2.0,
-            "calc(100% - 40px) at vw=800 should be ~744, got {}", d.layout.content_rect.w);
+        assert!(
+            (d.layout.content_rect.w - 744.0).abs() < 2.0,
+            "calc(100% - 40px) at vw=800 should be ~744, got {}",
+            d.layout.content_rect.w
+        );
     }
 }
 
 #[test]
 fn calc_multiple_subtractions() {
-    let doc = load_html(r#"
+    let doc = load_html(
+        r#"
         <div style="width: calc(100% - 40px - 60px);">content</div>
-    "#, 800.0);
+    "#,
+        800.0,
+    );
     let div = find_box(&doc.root, &|b| {
         b.tag == "div" && b.children.iter().any(|c| c.text.contains("content"))
     });
     // Body has 8px margin on each side, so containing block = 800 - 16 = 784
     // calc(100% - 40px - 60px) = 784 - 100 = 684
     if let Some(d) = div {
-        assert!((d.layout.content_rect.w - 684.0).abs() < 2.0,
-            "calc(100% - 40px - 60px) at vw=800 should be ~684, got {}", d.layout.content_rect.w);
+        assert!(
+            (d.layout.content_rect.w - 684.0).abs() < 2.0,
+            "calc(100% - 40px - 60px) at vw=800 should be ~684, got {}",
+            d.layout.content_rect.w
+        );
     }
 }
 
@@ -430,30 +546,37 @@ fn calc_multiple_subtractions() {
 #[test]
 fn flex_item_does_not_shrink_below_content() {
     // A flex item with text should not shrink to 0 width
-    let doc = load_html(r#"
+    let doc = load_html(
+        r#"
         <div style="display: flex; width: 200px;">
             <span>Hello World</span>
             <span>Other</span>
         </div>
-    "#, 800.0);
-    let spans = collect_boxes(&doc.root, &|b| {
-        b.tag == "span" && !b.text.is_empty()
-    });
+    "#,
+        800.0,
+    );
+    let spans = collect_boxes(&doc.root, &|b| b.tag == "span" && !b.text.is_empty());
     for span in &spans {
-        assert!(span.layout.content_rect.w > 0.0,
-            "flex item '{}' should not have 0 width", span.text);
+        assert!(
+            span.layout.content_rect.w > 0.0,
+            "flex item '{}' should not have 0 width",
+            span.text
+        );
     }
 }
 
 #[test]
 fn flex_item_with_overflow_hidden_can_shrink_to_zero() {
     // overflow: hidden disables the automatic minimum size
-    let doc = load_html(r#"
+    let doc = load_html(
+        r#"
         <div style="display: flex; width: 50px;">
             <span style="overflow: hidden; flex-shrink: 1;">Very long text that should be clipped</span>
             <span style="width: 50px; flex-shrink: 0;">Fixed</span>
         </div>
-    "#, 800.0);
+    "#,
+        800.0,
+    );
     // The first span should be allowed to shrink since it has overflow: hidden
     let span = find_box(&doc.root, &|b| {
         b.tag == "span" && b.children.iter().any(|c| c.text.contains("Very long"))
@@ -465,7 +588,8 @@ fn flex_item_with_overflow_hidden_can_shrink_to_zero() {
 #[test]
 fn flex_item_min_width_auto_prevents_text_at_zero() {
     // Simulate the AP News nav issue: flex items with text should have min-content width
-    let doc = load_html(r#"
+    let doc = load_html(
+        r#"
         <style>
             .nav { display: flex; width: 100px; }
             .nav-item { flex-shrink: 1; }
@@ -475,13 +599,20 @@ fn flex_item_min_width_auto_prevents_text_at_zero() {
             <div class="nav-item">Politics</div>
             <div class="nav-item">Sports</div>
         </div>
-    "#, 800.0);
+    "#,
+        800.0,
+    );
     let items = collect_boxes(&doc.root, &|b| {
-        b.attributes.get("class").map(|c| c == "nav-item").unwrap_or(false)
+        b.attributes
+            .get("class")
+            .map(|c| c == "nav-item")
+            .unwrap_or(false)
     });
     for item in &items {
-        assert!(item.layout.content_rect.w > 0.0,
-            "flex nav item should not collapse to 0 width");
+        assert!(
+            item.layout.content_rect.w > 0.0,
+            "flex nav item should not collapse to 0 width"
+        );
     }
 }
 
@@ -491,7 +622,8 @@ fn flex_item_min_width_auto_prevents_text_at_zero() {
 
 #[test]
 fn grid_before_counter_in_fixed_column() {
-    let doc = load_html(r#"
+    let doc = load_html(
+        r#"
         <style>
             .list { counter-reset: number; }
             .item {
@@ -507,9 +639,14 @@ fn grid_before_counter_in_fixed_column() {
             <div class="item"><span>First article title</span></div>
             <div class="item"><span>Second article title</span></div>
         </div>
-    "#, 400.0);
+    "#,
+        400.0,
+    );
     let items = collect_boxes(&doc.root, &|b| {
-        b.attributes.get("class").map(|c| c == "item").unwrap_or(false)
+        b.attributes
+            .get("class")
+            .map(|c| c == "item")
+            .unwrap_or(false)
     });
     assert!(items.len() >= 2, "should have at least 2 grid items");
     for item in &items {
@@ -519,8 +656,10 @@ fn grid_before_counter_in_fixed_column() {
         // The content span should have reasonable width (not 0, not full container)
         let content_span = item.children.iter().find(|c| c.tag == "span");
         if let Some(span) = content_span {
-            assert!(span.layout.content_rect.w > 30.0,
-                "content in auto column should be wider than 30px");
+            assert!(
+                span.layout.content_rect.w > 30.0,
+                "content in auto column should be wider than 30px"
+            );
         }
     }
 }
@@ -531,18 +670,34 @@ fn grid_before_counter_in_fixed_column() {
 
 #[test]
 fn evaluate_media_min_width_passes() {
-    assert!(webcore::css::evaluate_media("(min-width: 1024px)", 1200.0, 800.0));
+    assert!(webcore::css::evaluate_media(
+        "(min-width: 1024px)",
+        1200.0,
+        800.0
+    ));
 }
 
 #[test]
 fn evaluate_media_min_width_fails() {
-    assert!(!webcore::css::evaluate_media("(min-width: 1024px)", 800.0, 600.0));
+    assert!(!webcore::css::evaluate_media(
+        "(min-width: 1024px)",
+        800.0,
+        600.0
+    ));
 }
 
 #[test]
 fn evaluate_media_max_width() {
-    assert!(webcore::css::evaluate_media("(max-width: 768px)", 600.0, 400.0));
-    assert!(!webcore::css::evaluate_media("(max-width: 768px)", 1024.0, 768.0));
+    assert!(webcore::css::evaluate_media(
+        "(max-width: 768px)",
+        600.0,
+        400.0
+    ));
+    assert!(!webcore::css::evaluate_media(
+        "(max-width: 768px)",
+        1024.0,
+        768.0
+    ));
 }
 
 // ============================================================
@@ -552,7 +707,8 @@ fn evaluate_media_max_width() {
 #[test]
 fn descendant_selector_class_class() {
     // .Parent .Child { color: red }
-    let doc = load_html_vp(r#"
+    let doc = load_html_vp(
+        r#"
         <html><head><style>
         .Parent .Child { color: red; }
         </style></head>
@@ -562,19 +718,35 @@ fn descendant_selector_class_class() {
             </div>
             <div class="Child" id="non-target">Outside</div>
         </body></html>
-    "#, 800.0, 600.0);
-    let target = find_box(&doc.root, &|b| b.attributes.get("id").map_or(false, |v| v == "target")).unwrap();
-    assert_eq!(target.style.color.r, 255, "Descendant .Parent .Child should apply color:red");
+    "#,
+        800.0,
+        600.0,
+    );
+    let target = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map_or(false, |v| v == "target")
+    })
+    .unwrap();
+    assert_eq!(
+        target.style.color.r, 255,
+        "Descendant .Parent .Child should apply color:red"
+    );
     assert_eq!(target.style.color.g, 0);
 
-    let non_target = find_box(&doc.root, &|b| b.attributes.get("id").map_or(false, |v| v == "non-target")).unwrap();
-    assert_ne!(non_target.style.color.r, 255, ".Child outside .Parent should NOT get color:red");
+    let non_target = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map_or(false, |v| v == "non-target")
+    })
+    .unwrap();
+    assert_ne!(
+        non_target.style.color.r, 255,
+        ".Child outside .Parent should NOT get color:red"
+    );
 }
 
 #[test]
 fn descendant_selector_nested_deep() {
     // .Ancestor .Deep { display: block }
-    let doc = load_html_vp(r#"
+    let doc = load_html_vp(
+        r#"
         <html><head><style>
         .Ancestor .Deep { font-weight: bold; }
         </style></head>
@@ -587,15 +759,28 @@ fn descendant_selector_nested_deep() {
                 </div>
             </div>
         </body></html>
-    "#, 800.0, 600.0);
-    let deep = find_box(&doc.root, &|b| b.attributes.get("id").map_or(false, |v| v == "deep")).unwrap();
-    assert!(matches!(deep.style.font_weight, webcore::types::FontWeight::Bold | webcore::types::FontWeight::Value(700)), "Deeply nested descendant should match");
+    "#,
+        800.0,
+        600.0,
+    );
+    let deep = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map_or(false, |v| v == "deep")
+    })
+    .unwrap();
+    assert!(
+        matches!(
+            deep.style.font_weight,
+            webcore::types::FontWeight::Bold | webcore::types::FontWeight::Value(700)
+        ),
+        "Deeply nested descendant should match"
+    );
 }
 
 #[test]
 fn descendant_selector_tag_class() {
     // div .item { color: green }
-    let doc = load_html_vp(r#"
+    let doc = load_html_vp(
+        r#"
         <html><head><style>
         div .item { color: green; }
         </style></head>
@@ -604,8 +789,14 @@ fn descendant_selector_tag_class() {
                 <span class="item" id="inside">text</span>
             </div>
         </body></html>
-    "#, 800.0, 600.0);
-    let inside = find_box(&doc.root, &|b| b.attributes.get("id").map_or(false, |v| v == "inside")).unwrap();
+    "#,
+        800.0,
+        600.0,
+    );
+    let inside = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map_or(false, |v| v == "inside")
+    })
+    .unwrap();
     assert_eq!(inside.style.color.r, 0);
     assert_eq!(inside.style.color.g, 128);
 }
@@ -613,7 +804,8 @@ fn descendant_selector_tag_class() {
 #[test]
 fn child_combinator_direct() {
     // .Parent > .Child { color: blue }
-    let doc = load_html_vp(r#"
+    let doc = load_html_vp(
+        r#"
         <html><head><style>
         .Parent > .DirectChild { color: blue; }
         </style></head>
@@ -623,21 +815,43 @@ fn child_combinator_direct() {
                 <div><div class="DirectChild" id="indirect">text</div></div>
             </div>
         </body></html>
-    "#, 800.0, 600.0);
-    let direct = find_box(&doc.root, &|b| b.attributes.get("id").map_or(false, |v| v == "direct")).unwrap();
-    assert_eq!(direct.style.color.b, 255, "Direct child should match > combinator");
+    "#,
+        800.0,
+        600.0,
+    );
+    let direct = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map_or(false, |v| v == "direct")
+    })
+    .unwrap();
+    assert_eq!(
+        direct.style.color.b, 255,
+        "Direct child should match > combinator"
+    );
 
-    let indirect = find_box(&doc.root, &|b| b.attributes.get("id").map_or(false, |v| v == "indirect")).unwrap();
-    assert_ne!(indirect.style.color.b, 255, "Non-direct child should NOT match > combinator");
+    let indirect = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map_or(false, |v| v == "indirect")
+    })
+    .unwrap();
+    assert_ne!(
+        indirect.style.color.b, 255,
+        "Non-direct child should NOT match > combinator"
+    );
 }
 
 #[test]
 fn descendant_selector_parse_produces_combinator() {
     let sel = webcore::css::parse_selector(".Parent .Child");
     // Should be: [Class("Parent"), Combinator(Descendant), Class("Child")]
-    assert_eq!(sel.parts.len(), 3, "Expected 3 parts: class, combinator, class");
+    assert_eq!(
+        sel.parts.len(),
+        3,
+        "Expected 3 parts: class, combinator, class"
+    );
     assert!(matches!(&sel.parts[0], webcore::css::SelectorPart::Class(c) if c == "Parent"));
-    assert!(matches!(&sel.parts[1], webcore::css::SelectorPart::Combinator(webcore::css::Combinator::Descendant)));
+    assert!(matches!(
+        &sel.parts[1],
+        webcore::css::SelectorPart::Combinator(webcore::css::Combinator::Descendant)
+    ));
     assert!(matches!(&sel.parts[2], webcore::css::SelectorPart::Class(c) if c == "Child"));
 }
 
@@ -645,7 +859,8 @@ fn descendant_selector_parse_produces_combinator() {
 fn inherit_overrides_lower_specificity_rule() {
     // h1 UA default sets font-size: 2em.  Higher-specificity rule says font-size: inherit.
     // The inherit should win and use the parent's computed font-size (16px).
-    let doc = load_html_vp(r#"
+    let doc = load_html_vp(
+        r#"
         <html><head><style>
         .parent .child h1 { font-size: inherit; display: inline; }
         </style></head>
@@ -654,36 +869,68 @@ fn inherit_overrides_lower_specificity_rule() {
                 <h1 id="hdr">Hello</h1>
             </div></div>
         </body></html>
-    "#, 800.0, 600.0);
-    let hdr = find_box(&doc.root, &|b| b.attributes.get("id").map_or(false, |v| v == "hdr")).unwrap();
+    "#,
+        800.0,
+        600.0,
+    );
+    let hdr = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map_or(false, |v| v == "hdr")
+    })
+    .unwrap();
     // Parent (.child div) has default 16px font.  h1 with font-size:inherit should be 16px, not 2em=32px.
     let fs = hdr.style.font_size_px(16.0, 16.0);
-    assert!((fs - 16.0).abs() < 1.0, "h1 with font-size:inherit should be 16px, got {fs}");
-    assert!(matches!(hdr.style.display, webcore::types::Display::Inline), "h1 with display:inline from descendant selector");
+    assert!(
+        (fs - 16.0).abs() < 1.0,
+        "h1 with font-size:inherit should be 16px, got {fs}"
+    );
+    assert!(
+        matches!(hdr.style.display, webcore::types::Display::Inline),
+        "h1 with display:inline from descendant selector"
+    );
 }
 
 #[test]
 fn img_width_height_attributes() {
     // Image with explicit width/height attributes should have those dimensions
-    let doc = load_html_vp(r#"
+    let doc = load_html_vp(
+        r#"
         <html><head></head>
         <body>
             <img id="pic" src="nonexistent.png" width="200" height="150">
         </body></html>
-    "#, 800.0, 600.0);
-    let pic = find_box(&doc.root, &|b| b.attributes.get("id").map_or(false, |v| v == "pic")).unwrap();
+    "#,
+        800.0,
+        600.0,
+    );
+    let pic = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map_or(false, |v| v == "pic")
+    })
+    .unwrap();
     let w = pic.style.width.resolve(16.0, 800.0, 16.0);
     let h = pic.style.height.resolve(16.0, 600.0, 16.0);
-    assert!((w - 200.0).abs() < 1.0, "img width should be 200px from attribute, got {w}");
-    assert!((h - 150.0).abs() < 1.0, "img height should be 150px from attribute, got {h}");
-    assert_eq!(pic.layout.content_rect.w, 200.0, "img content_rect.w should be 200");
-    assert_eq!(pic.layout.content_rect.h, 150.0, "img content_rect.h should be 150");
+    assert!(
+        (w - 200.0).abs() < 1.0,
+        "img width should be 200px from attribute, got {w}"
+    );
+    assert!(
+        (h - 150.0).abs() < 1.0,
+        "img height should be 150px from attribute, got {h}"
+    );
+    assert_eq!(
+        pic.layout.content_rect.w, 200.0,
+        "img content_rect.w should be 200"
+    );
+    assert_eq!(
+        pic.layout.content_rect.h, 150.0,
+        "img content_rect.h should be 150"
+    );
 }
 
 #[test]
 fn img_width_height_inside_float() {
     // Image inside a float container — float should shrink-wrap to content
-    let doc = load_html_vp(r#"
+    let doc = load_html_vp(
+        r#"
         <html><head></head>
         <body>
             <div id="float-wrap" style="float:left;">
@@ -691,47 +938,95 @@ fn img_width_height_inside_float() {
             </div>
             <p>Text should wrap around the float.</p>
         </body></html>
-    "#, 800.0, 600.0);
-    let pic = find_box(&doc.root, &|b| b.attributes.get("id").map_or(false, |v| v == "pic2")).unwrap();
-    assert!(pic.layout.content_rect.w > 0.0, "img inside float should have non-zero width, got {}", pic.layout.content_rect.w);
-    assert!(pic.layout.content_rect.h > 0.0, "img inside float should have non-zero height, got {}", pic.layout.content_rect.h);
+    "#,
+        800.0,
+        600.0,
+    );
+    let pic = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map_or(false, |v| v == "pic2")
+    })
+    .unwrap();
+    assert!(
+        pic.layout.content_rect.w > 0.0,
+        "img inside float should have non-zero width, got {}",
+        pic.layout.content_rect.w
+    );
+    assert!(
+        pic.layout.content_rect.h > 0.0,
+        "img inside float should have non-zero height, got {}",
+        pic.layout.content_rect.h
+    );
 }
 
 #[test]
 fn img_inside_span_a_float() {
     // img inside span > a inside float — progressively add wrappers to find the failure
     // Test 1: img inside <a> inside float — works
-    let doc1 = load_html_vp(r##"
+    let doc1 = load_html_vp(
+        r##"
         <html><head></head><body>
             <div style="float:left;"><a href="/x"><img id="t1" src="x.png" width="120" height="162"></a></div>
         </body></html>
-    "##, 800.0, 600.0);
-    let t1 = find_box(&doc1.root, &|b| b.attributes.get("id").map_or(false, |v| v == "t1")).unwrap();
-    assert!(t1.layout.content_rect.w > 0.0, "t1: img in a in float should have width, got {}", t1.layout.content_rect.w);
+    "##,
+        800.0,
+        600.0,
+    );
+    let t1 = find_box(&doc1.root, &|b| {
+        b.attributes.get("id").map_or(false, |v| v == "t1")
+    })
+    .unwrap();
+    assert!(
+        t1.layout.content_rect.w > 0.0,
+        "t1: img in a in float should have width, got {}",
+        t1.layout.content_rect.w
+    );
 
     // Test 2: img inside span > a inside float
-    let doc2 = load_html_vp(r##"
+    let doc2 = load_html_vp(
+        r##"
         <html><head></head><body>
             <div style="float:left;"><span><a href="/x"><img id="t2" src="x.png" width="120" height="162"></a></span></div>
         </body></html>
-    "##, 800.0, 600.0);
-    let t2 = find_box(&doc2.root, &|b| b.attributes.get("id").map_or(false, |v| v == "t2")).unwrap();
-    assert!(t2.layout.content_rect.w > 0.0, "t2: img in span>a in float should have width, got {}", t2.layout.content_rect.w);
+    "##,
+        800.0,
+        600.0,
+    );
+    let t2 = find_box(&doc2.root, &|b| {
+        b.attributes.get("id").map_or(false, |v| v == "t2")
+    })
+    .unwrap();
+    assert!(
+        t2.layout.content_rect.w > 0.0,
+        "t2: img in span>a in float should have width, got {}",
+        t2.layout.content_rect.w
+    );
 
     // Test 3: img inside div > span > a inside float
-    let doc3 = load_html_vp(r##"
+    let doc3 = load_html_vp(
+        r##"
         <html><head></head><body>
             <div style="float:left;"><div><span><a href="/x"><img id="t3" src="x.png" width="120" height="162"></a></span></div></div>
         </body></html>
-    "##, 800.0, 600.0);
-    let t3 = find_box(&doc3.root, &|b| b.attributes.get("id").map_or(false, |v| v == "t3")).unwrap();
-    assert!(t3.layout.content_rect.w > 0.0, "t3: img in div>span>a in float should have width, got {}", t3.layout.content_rect.w);
+    "##,
+        800.0,
+        600.0,
+    );
+    let t3 = find_box(&doc3.root, &|b| {
+        b.attributes.get("id").map_or(false, |v| v == "t3")
+    })
+    .unwrap();
+    assert!(
+        t3.layout.content_rect.w > 0.0,
+        "t3: img in div>span>a in float should have width, got {}",
+        t3.layout.content_rect.w
+    );
 }
 
 #[test]
 fn descendant_selector_multi_level() {
     // .A .B .C { color: red }
-    let doc = load_html_vp(r#"
+    let doc = load_html_vp(
+        r#"
         <html><head><style>
         .A .B .C { color: red; }
         </style></head>
@@ -742,9 +1037,18 @@ fn descendant_selector_multi_level() {
                 </div>
             </div>
         </body></html>
-    "#, 800.0, 600.0);
-    let abc = find_box(&doc.root, &|b| b.attributes.get("id").map_or(false, |v| v == "abc")).unwrap();
-    assert_eq!(abc.style.color.r, 255, "Multi-level descendant .A .B .C should match");
+    "#,
+        800.0,
+        600.0,
+    );
+    let abc = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map_or(false, |v| v == "abc")
+    })
+    .unwrap();
+    assert_eq!(
+        abc.style.color.r, 255,
+        "Multi-level descendant .A .B .C should match"
+    );
 }
 
 // ============================================================
@@ -769,21 +1073,32 @@ fn li_display_inline_renders_horizontally() {
     assert_eq!(items.len(), 3, "expected 3 li elements");
     // All items should be display:inline from CSS override
     for (i, item) in items.iter().enumerate() {
-        assert_eq!(item.style.display, Display::Inline,
-            "li[{}] should be display:inline, got {:?}", i, item.style.display);
+        assert_eq!(
+            item.style.display,
+            Display::Inline,
+            "li[{}] should be display:inline, got {:?}",
+            i,
+            item.style.display
+        );
     }
     // All items should be on the same line (same Y position)
     let y0 = items[0].layout.margin_rect.y;
     for (i, item) in items.iter().enumerate() {
-        assert!((item.layout.margin_rect.y - y0).abs() < 2.0,
+        assert!(
+            (item.layout.margin_rect.y - y0).abs() < 2.0,
             "li[{}] at y={} should be at same y as li[0] at y={} (horizontal layout)",
-            i, item.layout.margin_rect.y, y0);
+            i,
+            item.layout.margin_rect.y,
+            y0
+        );
     }
 }
 
 fn find_all_boxes<'a>(root: &'a WebCore, pred: &dyn Fn(&WebCore) -> bool) -> Vec<&'a WebCore> {
     let mut result = Vec::new();
-    if pred(root) { result.push(root); }
+    if pred(root) {
+        result.push(root);
+    }
     for child in &root.children {
         result.extend(find_all_boxes(child, pred));
     }
@@ -808,15 +1123,23 @@ fn li_display_inline_block_renders_horizontally() {
     assert_eq!(items.len(), 3);
     let y0 = items[0].layout.margin_rect.y;
     for (i, item) in items.iter().enumerate() {
-        assert!((item.layout.margin_rect.y - y0).abs() < 2.0,
+        assert!(
+            (item.layout.margin_rect.y - y0).abs() < 2.0,
             "inline-block li[{}] at y={} should be at same y as li[0] at y={}",
-            i, item.layout.margin_rect.y, y0);
+            i,
+            item.layout.margin_rect.y,
+            y0
+        );
     }
     // x positions should increase (left to right)
-    assert!(items[1].layout.margin_rect.x > items[0].layout.margin_rect.x,
-        "li[1].x should be > li[0].x");
-    assert!(items[2].layout.margin_rect.x > items[1].layout.margin_rect.x,
-        "li[2].x should be > li[1].x");
+    assert!(
+        items[1].layout.margin_rect.x > items[0].layout.margin_rect.x,
+        "li[1].x should be > li[0].x"
+    );
+    assert!(
+        items[2].layout.margin_rect.x > items[1].layout.margin_rect.x,
+        "li[2].x should be > li[1].x"
+    );
 }
 
 // ============================================================
@@ -838,17 +1161,24 @@ fn sibling_blocks_do_not_overlap_vertically() {
         b.tag == "div" && b.style.width == CssLength::Px(400.0)
     });
     assert!(!container.is_empty(), "container div not found");
-    let divs: Vec<&WebCore> = container[0].children.iter()
+    let divs: Vec<&WebCore> = container[0]
+        .children
+        .iter()
         .filter(|b| b.tag == "div")
         .collect();
     assert_eq!(divs.len(), 3, "expected 3 child divs");
     // Each div's content_rect top must be >= previous div's content_rect bottom
     for i in 1..divs.len() {
-        let prev_bottom = divs[i-1].layout.content_rect.y + divs[i-1].layout.content_rect.h;
+        let prev_bottom = divs[i - 1].layout.content_rect.y + divs[i - 1].layout.content_rect.h;
         let curr_top = divs[i].layout.content_rect.y;
-        assert!(curr_top >= prev_bottom - 1.0,
+        assert!(
+            curr_top >= prev_bottom - 1.0,
             "div[{}] top ({:.1}) overlaps div[{}] bottom ({:.1})",
-            i, curr_top, i-1, prev_bottom);
+            i,
+            curr_top,
+            i - 1,
+            prev_bottom
+        );
     }
 }
 
@@ -883,22 +1213,31 @@ fn wikipedia_article_count_text_no_overlap() {
         </div>
     "#;
     let doc = load_html(html, 1280.0);
-    
-    let count = find_all_boxes(&doc.root, &|b| 
-        b.attributes.get("id").map(|v| v == "articlecount").unwrap_or(false)
-    );
-    let lower = find_all_boxes(&doc.root, &|b|
-        b.attributes.get("id").map(|v| v == "mp-lower").unwrap_or(false)
-    );
-    
+
+    let count = find_all_boxes(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|v| v == "articlecount")
+            .unwrap_or(false)
+    });
+    let lower = find_all_boxes(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|v| v == "mp-lower")
+            .unwrap_or(false)
+    });
+
     assert!(!count.is_empty(), "articlecount not found");
     assert!(!lower.is_empty(), "mp-lower not found");
-    
+
     let count_bottom = count[0].layout.border_rect.y + count[0].layout.border_rect.h;
     let lower_top = lower[0].layout.border_rect.y;
-    assert!(lower_top >= count_bottom - 1.0,
+    assert!(
+        lower_top >= count_bottom - 1.0,
         "mp-lower top ({:.1}) overlaps articlecount bottom ({:.1})",
-        lower_top, count_bottom);
+        lower_top,
+        count_bottom
+    );
 }
 
 // ============================================================
@@ -926,21 +1265,34 @@ fn wikipedia_tabs_horizontal_layout() {
     let doc = load_html(html, 1280.0);
     let items: Vec<&WebCore> = find_all_boxes(&doc.root, &|b| b.tag == "li");
     assert_eq!(items.len(), 3, "expected 3 li tabs");
-    
+
     // All tabs must be on the same Y line
     let y0 = items[0].layout.border_rect.y;
     for (i, item) in items.iter().enumerate() {
-        assert!((item.layout.border_rect.y - y0).abs() < 2.0,
+        assert!(
+            (item.layout.border_rect.y - y0).abs() < 2.0,
             "tab[{}] '{}' at y={:.1} should be at same y as tab[0] at y={:.1}",
-            i, item.children.first().and_then(|c| c.children.first()).map(|t| t.text.as_str()).unwrap_or("?"),
-            item.layout.border_rect.y, y0);
+            i,
+            item.children
+                .first()
+                .and_then(|c| c.children.first())
+                .map(|t| t.text.as_str())
+                .unwrap_or("?"),
+            item.layout.border_rect.y,
+            y0
+        );
     }
-    
+
     // X positions must increase
     for i in 1..items.len() {
-        assert!(items[i].layout.border_rect.x > items[i-1].layout.border_rect.x,
+        assert!(
+            items[i].layout.border_rect.x > items[i - 1].layout.border_rect.x,
             "tab[{}].x ({:.1}) should be > tab[{}].x ({:.1})",
-            i, items[i].layout.border_rect.x, i-1, items[i-1].layout.border_rect.x);
+            i,
+            items[i].layout.border_rect.x,
+            i - 1,
+            items[i - 1].layout.border_rect.x
+        );
     }
 }
 
@@ -968,20 +1320,29 @@ fn floated_list_items_horizontal() {
     let doc = load_html(html, 1280.0);
     let items: Vec<&WebCore> = find_all_boxes(&doc.root, &|b| b.tag == "li");
     assert_eq!(items.len(), 3, "expected 3 tab li elements");
-    
+
     // Floated items must all be on the same line
     let y0 = items[0].layout.border_rect.y;
     for (i, item) in items.iter().enumerate() {
-        assert!((item.layout.border_rect.y - y0).abs() < 5.0,
+        assert!(
+            (item.layout.border_rect.y - y0).abs() < 5.0,
             "floated li[{}] at y={:.1} should be same line as li[0] at y={:.1}",
-            i, item.layout.border_rect.y, y0);
+            i,
+            item.layout.border_rect.y,
+            y0
+        );
     }
-    
+
     // X positions must increase (left to right)
     for i in 1..items.len() {
-        assert!(items[i].layout.border_rect.x > items[i-1].layout.border_rect.x,
+        assert!(
+            items[i].layout.border_rect.x > items[i - 1].layout.border_rect.x,
             "floated li[{}].x ({:.1}) should be > li[{}].x ({:.1})",
-            i, items[i].layout.border_rect.x, i-1, items[i-1].layout.border_rect.x);
+            i,
+            items[i].layout.border_rect.x,
+            i - 1,
+            items[i - 1].layout.border_rect.x
+        );
     }
 }
 
@@ -1027,58 +1388,98 @@ fn inline_ul_li_text_renders_with_width() {
     );
     let doc = load_html(html, 800.0);
     // Find the hlist inline div
-    let hlist = find_all_boxes(&doc.root, &|b|
-        b.attributes.get("class").map(|c| c.contains("hlist")).unwrap_or(false)
-    );
+    let hlist = find_all_boxes(&doc.root, &|b| {
+        b.attributes
+            .get("class")
+            .map(|c| c.contains("hlist"))
+            .unwrap_or(false)
+    });
     assert!(!hlist.is_empty(), "hlist div not found");
-    eprintln!("hlist div: display={:?} x={:.1} y={:.1} w={:.1} h={:.1} lines={}",
-        hlist[0].style.display, hlist[0].layout.content_rect.x, hlist[0].layout.content_rect.y,
-        hlist[0].layout.content_rect.w, hlist[0].layout.content_rect.h, hlist[0].layout.line_cache.len());
+    eprintln!(
+        "hlist div: display={:?} x={:.1} y={:.1} w={:.1} h={:.1} lines={}",
+        hlist[0].style.display,
+        hlist[0].layout.content_rect.x,
+        hlist[0].layout.content_rect.y,
+        hlist[0].layout.content_rect.w,
+        hlist[0].layout.content_rect.h,
+        hlist[0].layout.line_cache.len()
+    );
     // Check the ul inside
     let ul = find_all_boxes(hlist[0], &|b| b.tag == "ul");
     if !ul.is_empty() {
-        eprintln!("  ul: display={:?} w={:.1} h={:.1} lines={}", ul[0].style.display, ul[0].layout.content_rect.w, ul[0].layout.content_rect.h, ul[0].layout.line_cache.len());
+        eprintln!(
+            "  ul: display={:?} w={:.1} h={:.1} lines={}",
+            ul[0].style.display,
+            ul[0].layout.content_rect.w,
+            ul[0].layout.content_rect.h,
+            ul[0].layout.line_cache.len()
+        );
     }
 
     // Find the inner li items (display:inline ones from hlist)
     let inner_lis: Vec<&WebCore> = find_all_boxes(hlist[0], &|b| b.tag == "li");
     eprintln!("inner lis: {}", inner_lis.len());
     for (i, li) in inner_lis.iter().enumerate() {
-        let text = li.children.first()
+        let text = li
+            .children
+            .first()
             .and_then(|a| a.children.first())
             .and_then(|s| s.children.first())
-            .map(|t| t.text.as_str()).unwrap_or("?");
-        eprintln!("  li[{}] display={:?} y={:.1} h={:.1} text={}",
-            i, li.style.display, li.layout.content_rect.y, li.layout.content_rect.h, text);
+            .map(|t| t.text.as_str())
+            .unwrap_or("?");
+        eprintln!(
+            "  li[{}] display={:?} y={:.1} h={:.1} text={}",
+            i, li.style.display, li.layout.content_rect.y, li.layout.content_rect.h, text
+        );
     }
 
     // The container <li> (parent of hlist) should have enough height for all content
-    let outer_li = find_all_boxes(&doc.root, &|b|
-        b.tag == "li" && b.children.iter().any(|c|
-            c.attributes.get("class").map(|cl| cl.contains("wikipedia-languages-count")).unwrap_or(false)
-        )
-    );
+    let outer_li = find_all_boxes(&doc.root, &|b| {
+        b.tag == "li"
+            && b.children.iter().any(|c| {
+                c.attributes
+                    .get("class")
+                    .map(|cl| cl.contains("wikipedia-languages-count"))
+                    .unwrap_or(false)
+            })
+    });
     assert!(!outer_li.is_empty(), "outer li not found");
-    eprintln!("outer li: y={:.1} h={:.1}", outer_li[0].layout.content_rect.y, outer_li[0].layout.content_rect.h);
+    eprintln!(
+        "outer li: y={:.1} h={:.1}",
+        outer_li[0].layout.content_rect.y, outer_li[0].layout.content_rect.h
+    );
 
     // The languages text must be visible (height > 0)
-    assert!(outer_li[0].layout.content_rect.h > 30.0,
+    assert!(
+        outer_li[0].layout.content_rect.h > 30.0,
         "outer li height ({:.1}) should be > 30 (count bar + language links)",
-        outer_li[0].layout.content_rect.h);
+        outer_li[0].layout.content_rect.h
+    );
 
     // Check line_cache for text content
-    eprintln!("outer li line_cache: {} lines", outer_li[0].layout.line_cache.len());
+    eprintln!(
+        "outer li line_cache: {} lines",
+        outer_li[0].layout.line_cache.len()
+    );
     for (i, line) in outer_li[0].layout.line_cache.iter().enumerate() {
-        eprintln!("  line[{}] x={:.1} y={:.1} w={:.1} h={:.1}", i, line.x, line.y, line.width, line.height);
+        eprintln!(
+            "  line[{}] x={:.1} y={:.1} w={:.1} h={:.1}",
+            i, line.x, line.y, line.width, line.height
+        );
     }
 
     // No two lines should overlap vertically
     let lines = &outer_li[0].layout.line_cache;
     for i in 1..lines.len() {
-        let prev_bottom = lines[i-1].y + lines[i-1].height;
-        assert!(lines[i].y >= prev_bottom - 1.0,
+        let prev_bottom = lines[i - 1].y + lines[i - 1].height;
+        assert!(
+            lines[i].y >= prev_bottom - 1.0,
             "line[{}] y={:.1} overlaps line[{}] bottom={:.1}",
-            i, lines[i].y, i-1, prev_bottom);
+            i,
+            lines[i].y,
+            i - 1,
+            prev_bottom
+        );
     }
 }
 
@@ -1111,17 +1512,29 @@ fn float_container_shrinkwrap_contains_all_float_children() {
     // All items must be on the same Y line (not wrapping)
     let y0 = items[0].layout.border_rect.y;
     for (i, item) in items.iter().enumerate() {
-        eprintln!("li[{}] x={:.1} y={:.1} w={:.1}", i, item.layout.border_rect.x, item.layout.border_rect.y, item.layout.border_rect.w);
-        assert!((item.layout.border_rect.y - y0).abs() < 2.0,
+        eprintln!(
+            "li[{}] x={:.1} y={:.1} w={:.1}",
+            i, item.layout.border_rect.x, item.layout.border_rect.y, item.layout.border_rect.w
+        );
+        assert!(
+            (item.layout.border_rect.y - y0).abs() < 2.0,
             "float li[{}] at y={:.1} should be same y as li[0] at y={:.1}",
-            i, item.layout.border_rect.y, y0);
+            i,
+            item.layout.border_rect.y,
+            y0
+        );
     }
 
     // X positions must increase
     for i in 1..items.len() {
-        assert!(items[i].layout.border_rect.x > items[i-1].layout.border_rect.x + 5.0,
+        assert!(
+            items[i].layout.border_rect.x > items[i - 1].layout.border_rect.x + 5.0,
             "float li[{}].x ({:.1}) should be right of li[{}].x ({:.1})",
-            i, items[i].layout.border_rect.x, i-1, items[i-1].layout.border_rect.x);
+            i,
+            items[i].layout.border_rect.x,
+            i - 1,
+            items[i - 1].layout.border_rect.x
+        );
     }
 }
 
@@ -1151,30 +1564,46 @@ fn wikipedia_exact_tabs_structure() {
     let doc = load_html(html, 1280.0);
     let items: Vec<&WebCore> = find_all_boxes(&doc.root, &|b| b.tag == "li");
     assert_eq!(items.len(), 3, "expected 3 tab li elements");
-    
+
     // Debug output
     for (i, item) in items.iter().enumerate() {
-        eprintln!("li[{}] display={:?} float={:?} x={:.1} y={:.1} w={:.1} h={:.1}",
-            i, item.style.display, item.style.float,
-            item.layout.border_rect.x, item.layout.border_rect.y,
-            item.layout.border_rect.w, item.layout.border_rect.h);
+        eprintln!(
+            "li[{}] display={:?} float={:?} x={:.1} y={:.1} w={:.1} h={:.1}",
+            i,
+            item.style.display,
+            item.style.float,
+            item.layout.border_rect.x,
+            item.layout.border_rect.y,
+            item.layout.border_rect.w,
+            item.layout.border_rect.h
+        );
     }
-    
+
     // All items must be on the same Y line
     let y0 = items[0].layout.border_rect.y;
     for (i, item) in items.iter().enumerate() {
-        assert!((item.layout.border_rect.y - y0).abs() < 5.0,
+        assert!(
+            (item.layout.border_rect.y - y0).abs() < 5.0,
             "tab li[{}] at y={:.1} should be same y as li[0] at y={:.1}",
-            i, item.layout.border_rect.y, y0);
+            i,
+            item.layout.border_rect.y,
+            y0
+        );
     }
-    
+
     // X positions must be different and increasing
-    assert!(items[1].layout.border_rect.x > items[0].layout.border_rect.x + 5.0,
+    assert!(
+        items[1].layout.border_rect.x > items[0].layout.border_rect.x + 5.0,
         "li[1].x ({:.1}) should be well right of li[0].x ({:.1})",
-        items[1].layout.border_rect.x, items[0].layout.border_rect.x);
-    assert!(items[2].layout.border_rect.x > items[1].layout.border_rect.x + 5.0,
+        items[1].layout.border_rect.x,
+        items[0].layout.border_rect.x
+    );
+    assert!(
+        items[2].layout.border_rect.x > items[1].layout.border_rect.x + 5.0,
         "li[2].x ({:.1}) should be well right of li[1].x ({:.1})",
-        items[2].layout.border_rect.x, items[1].layout.border_rect.x);
+        items[2].layout.border_rect.x,
+        items[1].layout.border_rect.x
+    );
 }
 
 // ============================================================
@@ -1193,18 +1622,28 @@ fn text_after_float_does_not_overlap() {
     "#;
     let doc = load_html(html, 800.0);
     let paras: Vec<&WebCore> = find_all_boxes(&doc.root, &|b| b.tag == "p");
-    assert!(paras.len() >= 3, "expected at least 3 paragraphs, got {}", paras.len());
-    
+    assert!(
+        paras.len() >= 3,
+        "expected at least 3 paragraphs, got {}",
+        paras.len()
+    );
+
     // Each paragraph's border_rect must not overlap the previous
     for i in 1..paras.len() {
-        let prev_bottom = paras[i-1].layout.border_rect.y + paras[i-1].layout.border_rect.h;
+        let prev_bottom = paras[i - 1].layout.border_rect.y + paras[i - 1].layout.border_rect.h;
         let curr_top = paras[i].layout.border_rect.y;
         // Allow margin collapsing: use content_rect for tighter check
-        let prev_content_bottom = paras[i-1].layout.content_rect.y + paras[i-1].layout.content_rect.h;
+        let prev_content_bottom =
+            paras[i - 1].layout.content_rect.y + paras[i - 1].layout.content_rect.h;
         let curr_content_top = paras[i].layout.content_rect.y;
-        assert!(curr_content_top >= prev_content_bottom - 1.0,
+        assert!(
+            curr_content_top >= prev_content_bottom - 1.0,
             "p[{}] content top ({:.1}) overlaps p[{}] content bottom ({:.1})",
-            i, curr_content_top, i-1, prev_content_bottom);
+            i,
+            curr_content_top,
+            i - 1,
+            prev_content_bottom
+        );
     }
 }
 
@@ -1243,22 +1682,25 @@ fn two_column_float_layout_no_overlap() {
         "</div>",
     );
     let doc = load_html(html, 1280.0);
-    
+
     // Find all h2 and p elements
     let h2s: Vec<&WebCore> = find_all_boxes(&doc.root, &|b| b.tag == "h2");
     let ps: Vec<&WebCore> = find_all_boxes(&doc.root, &|b| b.tag == "p");
-    
+
     // Within each section, h2 must be above its p
     // "On this day" h2 and p must be below all floated content
     let last_h2 = h2s.last().unwrap();
     let last_p = ps.last().unwrap();
-    assert!(last_p.layout.content_rect.y > last_h2.layout.content_rect.y,
+    assert!(
+        last_p.layout.content_rect.y > last_h2.layout.content_rect.y,
         "last p.y ({:.1}) should be below last h2.y ({:.1})",
-        last_p.layout.content_rect.y, last_h2.layout.content_rect.y);
-    
+        last_p.layout.content_rect.y,
+        last_h2.layout.content_rect.y
+    );
+
     // No two paragraphs in the same column should overlap
     for i in 0..ps.len() {
-        for j in (i+1)..ps.len() {
+        for j in (i + 1)..ps.len() {
             let a = &ps[i].layout.content_rect;
             let b = &ps[j].layout.content_rect;
             // Only check overlap if they're in the same horizontal region
@@ -1294,22 +1736,36 @@ fn bidi_dir_ltr_no_text_overlap() {
     );
     let doc = load_html(html, 800.0);
     let paras: Vec<&WebCore> = find_all_boxes(&doc.root, &|b| b.tag == "p");
-    assert!(paras.len() >= 3, "expected 3 paragraphs, got {}", paras.len());
-    
+    assert!(
+        paras.len() >= 3,
+        "expected 3 paragraphs, got {}",
+        paras.len()
+    );
+
     for (i, p) in paras.iter().enumerate() {
-        eprintln!("p[{}] y={:.1} h={:.1} content_y={:.1} content_h={:.1} lines={}",
-            i, p.layout.margin_rect.y, p.layout.margin_rect.h,
-            p.layout.content_rect.y, p.layout.content_rect.h,
-            p.layout.line_cache.len());
+        eprintln!(
+            "p[{}] y={:.1} h={:.1} content_y={:.1} content_h={:.1} lines={}",
+            i,
+            p.layout.margin_rect.y,
+            p.layout.margin_rect.h,
+            p.layout.content_rect.y,
+            p.layout.content_rect.h,
+            p.layout.line_cache.len()
+        );
     }
-    
+
     // Check no overlap in content_rect
     for i in 1..paras.len() {
-        let prev_bottom = paras[i-1].layout.content_rect.y + paras[i-1].layout.content_rect.h;
+        let prev_bottom = paras[i - 1].layout.content_rect.y + paras[i - 1].layout.content_rect.h;
         let curr_top = paras[i].layout.content_rect.y;
-        assert!(curr_top >= prev_bottom - 1.0,
+        assert!(
+            curr_top >= prev_bottom - 1.0,
             "p[{}] content_top ({:.1}) overlaps p[{}] content_bottom ({:.1})",
-            i, curr_top, i-1, prev_bottom);
+            i,
+            curr_top,
+            i - 1,
+            prev_bottom
+        );
     }
 }
 
@@ -1328,25 +1784,35 @@ fn inline_elements_with_dir_no_overlap() {
         "</html>",
     );
     let doc = load_html(html, 800.0);
-    
-    let container = find_all_boxes(&doc.root, &|b| 
+
+    let container = find_all_boxes(&doc.root, &|b| {
         b.tag == "div" && b.style.width == CssLength::Px(400.0)
-    );
+    });
     assert!(!container.is_empty());
-    let divs: Vec<&WebCore> = container[0].children.iter()
+    let divs: Vec<&WebCore> = container[0]
+        .children
+        .iter()
         .filter(|c| c.tag == "div")
         .collect();
-    
+
     for (i, d) in divs.iter().enumerate() {
-        eprintln!("div[{}] y={:.1} h={:.1}", i, d.layout.content_rect.y, d.layout.content_rect.h);
+        eprintln!(
+            "div[{}] y={:.1} h={:.1}",
+            i, d.layout.content_rect.y, d.layout.content_rect.h
+        );
     }
-    
+
     for i in 1..divs.len() {
-        let prev_bottom = divs[i-1].layout.content_rect.y + divs[i-1].layout.content_rect.h;
+        let prev_bottom = divs[i - 1].layout.content_rect.y + divs[i - 1].layout.content_rect.h;
         let curr_top = divs[i].layout.content_rect.y;
-        assert!(curr_top >= prev_bottom - 1.0,
+        assert!(
+            curr_top >= prev_bottom - 1.0,
             "div[{}] top ({:.1}) overlaps div[{}] bottom ({:.1})",
-            i, curr_top, i-1, prev_bottom);
+            i,
+            curr_top,
+            i - 1,
+            prev_bottom
+        );
     }
 }
 
@@ -1380,32 +1846,44 @@ fn table_layout_cells_no_overlap() {
         "</div>",
     );
     let doc = load_html(html, 1280.0);
-    
+
     // "On this day" section must be below the table
     let h2s: Vec<&WebCore> = find_all_boxes(&doc.root, &|b| b.tag == "h2");
     let table = find_all_boxes(&doc.root, &|b| b.tag == "table");
     assert!(!table.is_empty(), "table not found");
-    
+
     let table_bottom = table[0].layout.border_rect.y + table[0].layout.border_rect.h;
     // Find "On this day" h2 - should be the last one
     let last_h2 = h2s.last().unwrap();
-    eprintln!("table bottom: {:.1}, last h2 y: {:.1}", table_bottom, last_h2.layout.border_rect.y);
-    assert!(last_h2.layout.border_rect.y >= table_bottom - 1.0,
+    eprintln!(
+        "table bottom: {:.1}, last h2 y: {:.1}",
+        table_bottom, last_h2.layout.border_rect.y
+    );
+    assert!(
+        last_h2.layout.border_rect.y >= table_bottom - 1.0,
         "last h2 y ({:.1}) should be below table bottom ({:.1})",
-        last_h2.layout.border_rect.y, table_bottom);
-    
+        last_h2.layout.border_rect.y,
+        table_bottom
+    );
+
     // Within left column, h2 and p should not overlap
     let tds: Vec<&WebCore> = find_all_boxes(&doc.root, &|b| b.tag == "td");
     for td in &tds {
-        let children: Vec<&WebCore> = td.children.iter()
-            .filter(|c| c.tag != "#text")
-            .collect();
+        let children: Vec<&WebCore> = td.children.iter().filter(|c| c.tag != "#text").collect();
         for i in 1..children.len() {
-            let prev_bottom = children[i-1].layout.content_rect.y + children[i-1].layout.content_rect.h;
+            let prev_bottom =
+                children[i - 1].layout.content_rect.y + children[i - 1].layout.content_rect.h;
             let curr_top = children[i].layout.content_rect.y;
-            assert!(curr_top >= prev_bottom - 1.0,
+            assert!(
+                curr_top >= prev_bottom - 1.0,
                 "child[{}] ({}) top ({:.1}) overlaps child[{}] ({}) bottom ({:.1}) in td",
-                i, children[i].tag, curr_top, i-1, children[i-1].tag, prev_bottom);
+                i,
+                children[i].tag,
+                curr_top,
+                i - 1,
+                children[i - 1].tag,
+                prev_bottom
+            );
         }
     }
 }
@@ -1419,11 +1897,15 @@ fn table_layout_cells_no_overlap() {
 fn wikipedia_real_page_no_major_overlaps() {
     let html = match std::fs::read_to_string("/tmp/wiki_full.html") {
         Ok(h) => h,
-        Err(_) => { eprintln!("SKIP: /tmp/wiki_full.html not found"); return; }
+        Err(_) => {
+            eprintln!("SKIP: /tmp/wiki_full.html not found");
+            return;
+        }
     };
     let css_text = std::fs::read_to_string("/tmp/wiki_css.css").unwrap_or_default();
-    
-    let mut doc = webcore::html::parse_html_with_base(&html, "https://en.wikipedia.org/wiki/Main_Page");
+
+    let mut doc =
+        webcore::html::parse_html_with_base(&html, "https://en.wikipedia.org/wiki/Main_Page");
     doc.stylesheet.parse_and_add(&css_text);
     doc.viewport_w = 1280.0;
     doc.viewport_h = 900.0;
@@ -1433,45 +1915,61 @@ fn wikipedia_real_page_no_major_overlaps() {
         eng.viewport_h = 900.0;
         eng.layout(&mut doc, 1280.0);
     }
-    
+
     // Check for overlapping block siblings
     let mut overlaps = Vec::new();
     check_block_overlaps(&doc.root, &mut overlaps);
-    
+
     for (i, overlap) in overlaps.iter().enumerate().take(20) {
         eprintln!("[OVERLAP] {}", overlap);
     }
-    
+
     // We expect no major overlaps (>10px) in the main content area
     let major = overlaps.iter().filter(|o| o.contains("MAJOR")).count();
-    assert!(major == 0, "Found {} major overlaps (>20px) on Wikipedia page", major);
+    assert!(
+        major == 0,
+        "Found {} major overlaps (>20px) on Wikipedia page",
+        major
+    );
 }
 
 fn check_block_overlaps(node: &WebCore, overlaps: &mut Vec<String>) {
-    let block_children: Vec<&WebCore> = node.children.iter()
-        .filter(|c| c.tag != "#text" && c.style.is_block_level() 
+    let block_children: Vec<&WebCore> = node
+        .children
+        .iter()
+        .filter(|c| {
+            c.tag != "#text"
+                && c.style.is_block_level()
                 && c.style.float == Float::None
                 && !matches!(c.style.position, Position::Absolute | Position::Fixed)
-                && c.layout.content_rect.h > 0.0)
+                && c.layout.content_rect.h > 0.0
+        })
         .collect();
-    
+
     for i in 1..block_children.len() {
-        let prev = &block_children[i-1];
+        let prev = &block_children[i - 1];
         let curr = &block_children[i];
         let prev_bottom = prev.layout.content_rect.y + prev.layout.content_rect.h;
         let curr_top = curr.layout.content_rect.y;
         let overlap = prev_bottom - curr_top;
-        
+
         if overlap > 5.0 {
             let severity = if overlap > 20.0 { "MAJOR" } else { "minor" };
-            overlaps.push(format!("{}: {:.0}px overlap - <{}> (y={:.0} h={:.0}) -> <{}> (y={:.0} h={:.0}) in <{}>",
-                severity, overlap,
-                prev.tag, prev.layout.content_rect.y, prev.layout.content_rect.h,
-                curr.tag, curr.layout.content_rect.y, curr.layout.content_rect.h,
-                node.tag));
+            overlaps.push(format!(
+                "{}: {:.0}px overlap - <{}> (y={:.0} h={:.0}) -> <{}> (y={:.0} h={:.0}) in <{}>",
+                severity,
+                overlap,
+                prev.tag,
+                prev.layout.content_rect.y,
+                prev.layout.content_rect.h,
+                curr.tag,
+                curr.layout.content_rect.y,
+                curr.layout.content_rect.h,
+                node.tag
+            ));
         }
     }
-    
+
     for child in &node.children {
         check_block_overlaps(child, overlaps);
     }
@@ -1495,13 +1993,19 @@ fn rtl_text_align_defaults_to_right() {
     assert!(!p.is_empty(), "p element not found");
     // In RTL, text-align:start resolves to right, so text should be
     // right-aligned: the line's x + width should reach near the right edge
-    assert!(!p[0].layout.line_cache.is_empty(), "p should have line cache");
+    assert!(
+        !p[0].layout.line_cache.is_empty(),
+        "p should have line cache"
+    );
     let line = &p[0].layout.line_cache[0];
     let right_edge = p[0].layout.content_rect.x + p[0].layout.content_rect.w;
     let line_right = line.x + line.width;
-    assert!(line_right > right_edge - 5.0,
+    assert!(
+        line_right > right_edge - 5.0,
         "RTL text should be right-aligned: line_right={:.1} vs content_right={:.1}",
-        line_right, right_edge);
+        line_right,
+        right_edge
+    );
 }
 
 // ============================================================
@@ -1518,20 +2022,26 @@ fn rtl_flex_row_items_flow_right_to_left() {
         "</div>",
     );
     let doc = load_html(html, 800.0);
-    let items: Vec<&WebCore> = find_all_boxes(&doc.root, &|b|
+    let items: Vec<&WebCore> = find_all_boxes(&doc.root, &|b| {
         b.style.width == CssLength::Px(100.0) && b.style.height == CssLength::Px(50.0)
-    );
+    });
     assert_eq!(items.len(), 3, "expected 3 flex items");
     // In RTL flex row, first item should be on the RIGHT
-    assert!(items[0].layout.content_rect.x > items[1].layout.content_rect.x,
+    assert!(
+        items[0].layout.content_rect.x > items[1].layout.content_rect.x,
         "RTL flex: item A ({:.0}) should be right of item B ({:.0})",
-        items[0].layout.content_rect.x, items[1].layout.content_rect.x);
-    assert!(items[1].layout.content_rect.x > items[2].layout.content_rect.x,
+        items[0].layout.content_rect.x,
+        items[1].layout.content_rect.x
+    );
+    assert!(
+        items[1].layout.content_rect.x > items[2].layout.content_rect.x,
         "RTL flex: item B ({:.0}) should be right of item C ({:.0})",
-        items[1].layout.content_rect.x, items[2].layout.content_rect.x);
+        items[1].layout.content_rect.x,
+        items[2].layout.content_rect.x
+    );
 }
 
-// ============================================================  
+// ============================================================
 // Inline text in nested spans must not have zero width
 // ============================================================
 
@@ -1545,18 +2055,20 @@ fn inline_text_in_nested_spans_has_width() {
         "</div>",
     );
     let doc = load_html(html, 800.0);
-    let container = find_all_boxes(&doc.root, &|b|
-        b.style.width == CssLength::Px(400.0)
-    );
+    let container = find_all_boxes(&doc.root, &|b| b.style.width == CssLength::Px(400.0));
     assert!(!container.is_empty());
     // The container should have line cache with text
-    assert!(!container[0].layout.line_cache.is_empty(),
-        "container should have lines");
+    assert!(
+        !container[0].layout.line_cache.is_empty(),
+        "container should have lines"
+    );
     let line = &container[0].layout.line_cache[0];
     // Line should have non-trivial width (both words rendered)
-    assert!(line.width > 50.0,
+    assert!(
+        line.width > 50.0,
         "line width ({:.1}) should be > 50 (two words visible)",
-        line.width);
+        line.width
+    );
 }
 
 // ============================================================
@@ -1567,16 +2079,17 @@ fn inline_text_in_nested_spans_has_width() {
 fn newlines_between_inline_elements_render_as_spaces() {
     let html = "<div style='width:400px'>\n<span>Hello</span>\n<span>World</span>\n</div>";
     let doc = load_html(html, 800.0);
-    let container = find_all_boxes(&doc.root, &|b|
-        b.style.width == CssLength::Px(400.0)
-    );
+    let container = find_all_boxes(&doc.root, &|b| b.style.width == CssLength::Px(400.0));
     assert!(!container.is_empty());
     assert!(!container[0].layout.line_cache.is_empty());
     let line = &container[0].layout.line_cache[0];
     // "Hello World" with a space between should be wider than "HelloWorld"
     // The space from the newline between </span> and <span> should add width
-    assert!(line.width > 60.0,
-        "line width ({:.1}) should include space between words", line.width);
+    assert!(
+        line.width > 60.0,
+        "line width ({:.1}) should include space between words",
+        line.width
+    );
 }
 
 // ============================================================
@@ -1603,9 +2116,11 @@ fn absolute_child_does_not_inflate_flex_parent() {
     let flex = find_all_boxes(&doc.root, &|b| b.style.display == Display::Flex);
     assert!(!flex.is_empty());
     // Flex container height should be ~1 line of text (~20px), NOT 300px+
-    assert!(flex[0].layout.content_rect.h < 50.0,
+    assert!(
+        flex[0].layout.content_rect.h < 50.0,
         "flex container height ({:.1}) should be < 50 (absolute dropdown should not inflate it)",
-        flex[0].layout.content_rect.h);
+        flex[0].layout.content_rect.h
+    );
 }
 
 // ============================================================
@@ -1626,20 +2141,31 @@ fn visibility_hidden_opacity_zero_not_painted() {
     );
     let doc = load_html(html, 800.0);
     // The hidden div should be absolute and not affect flow
-    let visible_divs: Vec<&WebCore> = find_all_boxes(&doc.root, &|b|
-        b.tag == "div" && b.style.visibility && b.layout.content_rect.h > 0.0
-        && !matches!(b.style.position, Position::Absolute | Position::Fixed)
-    );
+    let visible_divs: Vec<&WebCore> = find_all_boxes(&doc.root, &|b| {
+        b.tag == "div"
+            && b.style.visibility
+            && b.layout.content_rect.h > 0.0
+            && !matches!(b.style.position, Position::Absolute | Position::Fixed)
+    });
     // "Visible text" and "More visible text" should not overlap
-    let texts: Vec<&WebCore> = visible_divs.iter()
-        .filter(|b| b.children.iter().any(|c| c.tag == "#text" && !c.text.trim().is_empty()))
-        .cloned().collect();
+    let texts: Vec<&WebCore> = visible_divs
+        .iter()
+        .filter(|b| {
+            b.children
+                .iter()
+                .any(|c| c.tag == "#text" && !c.text.trim().is_empty())
+        })
+        .cloned()
+        .collect();
     if texts.len() >= 2 {
         let first_bottom = texts[0].layout.content_rect.y + texts[0].layout.content_rect.h;
         let second_top = texts[1].layout.content_rect.y;
-        assert!(second_top >= first_bottom - 1.0,
+        assert!(
+            second_top >= first_bottom - 1.0,
             "visible divs should not overlap: first bottom={:.1}, second top={:.1}",
-            first_bottom, second_top);
+            first_bottom,
+            second_top
+        );
     }
 }
 
@@ -1660,23 +2186,29 @@ fn rtl_inline_text_has_visible_position() {
         "</body></html>",
     );
     let doc = load_html(html, 800.0);
-    let container = find_all_boxes(&doc.root, &|b|
-        b.style.width == CssLength::Px(600.0)
-    );
+    let container = find_all_boxes(&doc.root, &|b| b.style.width == CssLength::Px(600.0));
     assert!(!container.is_empty());
     // Container must have line cache with content
-    assert!(!container[0].layout.line_cache.is_empty(),
-        "container should have line cache for inline text");
+    assert!(
+        !container[0].layout.line_cache.is_empty(),
+        "container should have line cache for inline text"
+    );
     let line = &container[0].layout.line_cache[0];
     // Line must have visible width
-    assert!(line.width > 30.0,
-        "RTL inline text line width ({:.1}) should be > 30", line.width);
+    assert!(
+        line.width > 30.0,
+        "RTL inline text line width ({:.1}) should be > 30",
+        line.width
+    );
     // In RTL, text should be near the RIGHT edge of the container
     let container_right = container[0].layout.content_rect.x + container[0].layout.content_rect.w;
     let line_right = line.x + line.width;
-    assert!((line_right - container_right).abs() < 5.0,
+    assert!(
+        (line_right - container_right).abs() < 5.0,
         "RTL text should be right-aligned: line_right={:.1} container_right={:.1}",
-        line_right, container_right);
+        line_right,
+        container_right
+    );
 }
 
 // ============================================================
@@ -1696,12 +2228,16 @@ fn svg_in_inline_block_has_dimensions() {
     let doc = load_html(html, 800.0);
     let svg = find_all_boxes(&doc.root, &|b| b.tag == "svg");
     assert!(!svg.is_empty(), "svg not found");
-    assert!(svg[0].layout.content_rect.w >= 55.0,
+    assert!(
+        svg[0].layout.content_rect.w >= 55.0,
         "svg width ({:.1}) should be >= 55 (from width=60 attr)",
-        svg[0].layout.content_rect.w);
-    assert!(svg[0].layout.content_rect.h >= 35.0,
+        svg[0].layout.content_rect.w
+    );
+    assert!(
+        svg[0].layout.content_rect.h >= 35.0,
         "svg height ({:.1}) should be >= 35 (from height=40 attr)",
-        svg[0].layout.content_rect.h);
+        svg[0].layout.content_rect.h
+    );
 }
 
 // ============================================================
@@ -1730,42 +2266,60 @@ fn text_in_link_inside_flex_item_is_on_screen() {
         "</body></html>",
     );
     let doc = load_html(html, 800.0);
-    let spans: Vec<&WebCore> = find_all_boxes(&doc.root, &|b|
+    let spans: Vec<&WebCore> = find_all_boxes(&doc.root, &|b| {
         b.tag == "span" && !b.children.is_empty() && b.children[0].tag == "#text"
-    );
+    });
     for (i, span) in spans.iter().enumerate() {
         let text = &span.children[0].text;
-        eprintln!("span[{}] '{}' x={:.1} y={:.1} w={:.1} h={:.1}",
-            i, text, span.layout.content_rect.x, span.layout.content_rect.y,
-            span.layout.content_rect.w, span.layout.content_rect.h);
+        eprintln!(
+            "span[{}] '{}' x={:.1} y={:.1} w={:.1} h={:.1}",
+            i,
+            text,
+            span.layout.content_rect.x,
+            span.layout.content_rect.y,
+            span.layout.content_rect.w,
+            span.layout.content_rect.h
+        );
     }
     // ALL text spans must be within the 800px viewport, not off-screen
     for (i, span) in spans.iter().enumerate() {
         let text = &span.children[0].text;
         // Inline spans may have 0x0 content_rect — check their parent <a>
         // or check the containing flex item's position
-        let li = find_all_boxes(&doc.root, &|b|
+        let li = find_all_boxes(&doc.root, &|b| {
             b.tag == "li" && b.style.display == Display::Flex
-        );
+        });
         if i < li.len() {
-            assert!(li[i].layout.content_rect.x < 800.0 && li[i].layout.content_rect.x >= 0.0,
+            assert!(
+                li[i].layout.content_rect.x < 800.0 && li[i].layout.content_rect.x >= 0.0,
                 "li[{}] for '{}' x={:.1} should be on-screen (0..800)",
-                i, text, li[i].layout.content_rect.x);
-            assert!(li[i].layout.content_rect.w > 5.0,
+                i,
+                text,
+                li[i].layout.content_rect.x
+            );
+            assert!(
+                li[i].layout.content_rect.w > 5.0,
                 "li[{}] for '{}' w={:.1} should have visible width",
-                i, text, li[i].layout.content_rect.w);
+                i,
+                text,
+                li[i].layout.content_rect.w
+            );
         }
     }
     // The <a> elements must have non-zero width (text is visible)
-    let links: Vec<&WebCore> = find_all_boxes(&doc.root, &|b|
+    let links: Vec<&WebCore> = find_all_boxes(&doc.root, &|b| {
         b.tag == "a" && b.attributes.get("href").is_some()
-    );
+    });
     assert!(links.len() >= 3);
     for (i, link) in links.iter().enumerate() {
         // Either the link itself or the flex parent should have width
-        assert!(link.layout.content_rect.w > 0.0 || link.layout.margin_rect.w > 0.0,
+        assert!(
+            link.layout.content_rect.w > 0.0 || link.layout.margin_rect.w > 0.0,
             "link[{}] should have non-zero width (text must be visible), w={:.1} mw={:.1}",
-            i, link.layout.content_rect.w, link.layout.margin_rect.w);
+            i,
+            link.layout.content_rect.w,
+            link.layout.margin_rect.w
+        );
     }
 }
 
@@ -1784,34 +2338,46 @@ fn rtl_grid_columns_flow_right_to_left() {
         "</body></html>",
     );
     let doc = load_html(html, 1000.0);
-    let main = find_all_boxes(&doc.root, &|b|
+    let main = find_all_boxes(&doc.root, &|b| {
         b.attributes.get("id").map(|v| v == "main").unwrap_or(false)
-    );
-    let side = find_all_boxes(&doc.root, &|b|
+    });
+    let side = find_all_boxes(&doc.root, &|b| {
         b.attributes.get("id").map(|v| v == "side").unwrap_or(false)
-    );
+    });
     assert!(!main.is_empty() && !side.is_empty());
     // In RTL, "main" (first in DOM, 2fr) should be on the RIGHT
     // "side" (second, 1fr) should be on the LEFT
-    assert!(main[0].layout.content_rect.x > side[0].layout.content_rect.x,
+    assert!(
+        main[0].layout.content_rect.x > side[0].layout.content_rect.x,
         "RTL grid: main ({:.0}) should be right of side ({:.0})",
-        main[0].layout.content_rect.x, side[0].layout.content_rect.x);
+        main[0].layout.content_rect.x,
+        side[0].layout.content_rect.x
+    );
     // Both must be within the 900px container — no overflow
     let grid = find_all_boxes(&doc.root, &|b| b.style.display == Display::Grid);
     assert!(!grid.is_empty());
     let grid_right = grid[0].layout.content_rect.x + grid[0].layout.content_rect.w;
     let main_right = main[0].layout.content_rect.x + main[0].layout.content_rect.w;
     let side_right = side[0].layout.content_rect.x + side[0].layout.content_rect.w;
-    assert!(main_right <= grid_right + 1.0,
+    assert!(
+        main_right <= grid_right + 1.0,
         "RTL grid: main right edge ({:.0}) must not exceed grid right ({:.0})",
-        main_right, grid_right);
-    assert!(side[0].layout.content_rect.x >= grid[0].layout.content_rect.x - 1.0,
+        main_right,
+        grid_right
+    );
+    assert!(
+        side[0].layout.content_rect.x >= grid[0].layout.content_rect.x - 1.0,
         "RTL grid: side left edge ({:.0}) must not be before grid left ({:.0})",
-        side[0].layout.content_rect.x, grid[0].layout.content_rect.x);
+        side[0].layout.content_rect.x,
+        grid[0].layout.content_rect.x
+    );
     // Widths: main should be ~2x side (2fr vs 1fr minus gap)
-    assert!(main[0].layout.content_rect.w > side[0].layout.content_rect.w * 1.5,
+    assert!(
+        main[0].layout.content_rect.w > side[0].layout.content_rect.w * 1.5,
         "RTL grid: main width ({:.0}) should be ~2x side width ({:.0})",
-        main[0].layout.content_rect.w, side[0].layout.content_rect.w);
+        main[0].layout.content_rect.w,
+        side[0].layout.content_rect.w
+    );
 }
 
 // ============================================================
@@ -1828,15 +2394,20 @@ fn css_var_background_color_applied() {
         "<div class='header'>Header</div>",
     );
     let doc = load_html(html, 800.0);
-    let header = find_all_boxes(&doc.root, &|b|
-        b.attributes.get("class").map(|c| c.contains("header")).unwrap_or(false)
-    );
+    let header = find_all_boxes(&doc.root, &|b| {
+        b.attributes
+            .get("class")
+            .map(|c| c.contains("header"))
+            .unwrap_or(false)
+    });
     assert!(!header.is_empty());
     // Background color should be resolved from the CSS variable
     let bg = header[0].style.background_color;
-    assert!(bg.a > 0,
+    assert!(
+        bg.a > 0,
         "header background should be opaque (from CSS var), got alpha={}",
-        bg.a);
+        bg.a
+    );
     assert_eq!(bg.r, 0x1a, "header bg red={} expected 0x1a", bg.r);
 }
 
@@ -1853,14 +2424,19 @@ fn sticky_element_does_not_add_extra_height() {
         "</div>",
     );
     let doc = load_html(html, 800.0);
-    let content = find_all_boxes(&doc.root, &|b|
-        b.attributes.get("id").map(|v| v == "content").unwrap_or(false)
-    );
+    let content = find_all_boxes(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|v| v == "content")
+            .unwrap_or(false)
+    });
     assert!(!content.is_empty());
     // Content should start at y=60 (right after the sticky nav)
-    assert!(content[0].layout.content_rect.y < 80.0,
+    assert!(
+        content[0].layout.content_rect.y < 80.0,
         "content y ({:.1}) should be < 80 (right after 60px sticky nav)",
-        content[0].layout.content_rect.y);
+        content[0].layout.content_rect.y
+    );
 }
 
 // ============================================================
@@ -1880,9 +2456,15 @@ fn rtl_grid_12col_items_within_container() {
     );
     let doc = load_html(html, 1280.0);
     let grid = find_all_boxes(&doc.root, &|b| b.style.display == Display::Grid);
-    let hero = find_all_boxes(&doc.root, &|b| b.attributes.get("id").map(|v| v == "hero").unwrap_or(false));
-    let mid = find_all_boxes(&doc.root, &|b| b.attributes.get("id").map(|v| v == "mid").unwrap_or(false));
-    let side = find_all_boxes(&doc.root, &|b| b.attributes.get("id").map(|v| v == "side").unwrap_or(false));
+    let hero = find_all_boxes(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v == "hero").unwrap_or(false)
+    });
+    let mid = find_all_boxes(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v == "mid").unwrap_or(false)
+    });
+    let side = find_all_boxes(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v == "side").unwrap_or(false)
+    });
     assert!(!grid.is_empty() && !hero.is_empty() && !mid.is_empty() && !side.is_empty());
 
     let g = &grid[0].layout.content_rect;
@@ -1896,16 +2478,38 @@ fn rtl_grid_12col_items_within_container() {
     eprintln!("side: x={:.0} w={:.0} right={:.0}", s.x, s.w, s.x + s.w);
 
     // No item may overflow the grid container
-    assert!(h.x + h.w <= g.x + g.w + 1.0,
-        "hero right ({:.0}) overflows grid right ({:.0})", h.x + h.w, g.x + g.w);
-    assert!(s.x >= g.x - 1.0,
-        "side left ({:.0}) before grid left ({:.0})", s.x, g.x);
+    assert!(
+        h.x + h.w <= g.x + g.w + 1.0,
+        "hero right ({:.0}) overflows grid right ({:.0})",
+        h.x + h.w,
+        g.x + g.w
+    );
+    assert!(
+        s.x >= g.x - 1.0,
+        "side left ({:.0}) before grid left ({:.0})",
+        s.x,
+        g.x
+    );
     // RTL: hero (first in DOM) must be rightmost
-    assert!(h.x > m.x, "hero x ({:.0}) should be > mid x ({:.0})", h.x, m.x);
-    assert!(m.x > s.x, "mid x ({:.0}) should be > side x ({:.0})", m.x, s.x);
+    assert!(
+        h.x > m.x,
+        "hero x ({:.0}) should be > mid x ({:.0})",
+        h.x,
+        m.x
+    );
+    assert!(
+        m.x > s.x,
+        "mid x ({:.0}) should be > side x ({:.0})",
+        m.x,
+        s.x
+    );
     // Widths: hero=6fr, mid=3fr, side=3fr
-    assert!((h.w - m.w * 2.0).abs() < 5.0,
-        "hero width ({:.0}) should be ~2x mid width ({:.0})", h.w, m.w);
+    assert!(
+        (h.w - m.w * 2.0).abs() < 5.0,
+        "hero width ({:.0}) should be ~2x mid width ({:.0})",
+        h.w,
+        m.w
+    );
 }
 
 // ============================================================
@@ -1926,19 +2530,32 @@ fn rtl_grid_narrow_column_wraps_text() {
         "</body></html>",
     );
     let doc = load_html(html, 1000.0);
-    let sidebar = find_all_boxes(&doc.root, &|b|
-        b.attributes.get("id").map(|v| v == "sidebar").unwrap_or(false)
-    );
+    let sidebar = find_all_boxes(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|v| v == "sidebar")
+            .unwrap_or(false)
+    });
     assert!(!sidebar.is_empty());
     // Sidebar should be ~25% of 800 = ~195px wide — enough for Arabic text
-    assert!(sidebar[0].layout.content_rect.w > 150.0,
-        "sidebar width ({:.1}) should be > 150px", sidebar[0].layout.content_rect.w);
+    assert!(
+        sidebar[0].layout.content_rect.w > 150.0,
+        "sidebar width ({:.1}) should be > 150px",
+        sidebar[0].layout.content_rect.w
+    );
     // Sidebar children should have content (not single-char truncation)
-    let divs: Vec<&WebCore> = sidebar[0].children.iter()
-        .filter(|c| c.tag == "div").collect();
+    let divs: Vec<&WebCore> = sidebar[0]
+        .children
+        .iter()
+        .filter(|c| c.tag == "div")
+        .collect();
     for (i, d) in divs.iter().enumerate() {
-        assert!(d.layout.content_rect.h > 10.0,
-            "sidebar div[{}] height ({:.1}) should be > 10", i, d.layout.content_rect.h);
+        assert!(
+            d.layout.content_rect.h > 10.0,
+            "sidebar div[{}] height ({:.1}) should be > 10",
+            i,
+            d.layout.content_rect.h
+        );
     }
 }
 
@@ -1961,14 +2578,22 @@ fn dark_header_background_renders() {
         "</div>",
     );
     let doc = load_html(html, 800.0);
-    let container = find_all_boxes(&doc.root, &|b|
-        b.attributes.get("class").map(|c| c.contains("header-container")).unwrap_or(false)
-    );
+    let container = find_all_boxes(&doc.root, &|b| {
+        b.attributes
+            .get("class")
+            .map(|c| c.contains("header-container"))
+            .unwrap_or(false)
+    });
     assert!(!container.is_empty());
     let bg = container[0].style.background_color;
     assert!(bg.a > 0, "header bg should be opaque, got alpha={}", bg.a);
-    assert!(bg.r < 50 && bg.g < 50 && bg.b < 80,
-        "header bg should be dark, got r={} g={} b={}", bg.r, bg.g, bg.b);
+    assert!(
+        bg.r < 50 && bg.g < 50 && bg.b < 80,
+        "header bg should be dark, got r={} g={} b={}",
+        bg.r,
+        bg.g,
+        bg.b
+    );
 }
 
 // ============================================================
@@ -1987,15 +2612,23 @@ fn text_next_to_before_pseudo_is_visible() {
     let h2 = find_all_boxes(&doc.root, &|b| b.tag == "h2");
     assert!(!h2.is_empty());
     // h2 must have visible height (text + before pseudo)
-    assert!(h2[0].layout.content_rect.h > 15.0,
-        "h2 height ({:.1}) should be > 15", h2[0].layout.content_rect.h);
+    assert!(
+        h2[0].layout.content_rect.h > 15.0,
+        "h2 height ({:.1}) should be > 15",
+        h2[0].layout.content_rect.h
+    );
     // h2 must have line_cache with text content
-    assert!(!h2[0].layout.line_cache.is_empty(),
-        "h2 should have line_cache for text");
+    assert!(
+        !h2[0].layout.line_cache.is_empty(),
+        "h2 should have line_cache for text"
+    );
     let line = &h2[0].layout.line_cache[0];
     // Line width should include both the ::before and the text
-    assert!(line.width > 20.0,
-        "h2 line width ({:.1}) should be > 20 (before + text)", line.width);
+    assert!(
+        line.width > 20.0,
+        "h2 line width ({:.1}) should be > 20 (before + text)",
+        line.width
+    );
 }
 
 // ============================================================
@@ -2014,14 +2647,18 @@ fn inline_text_with_block_before_pseudo_renders() {
     let h2 = find_all_boxes(&doc.root, &|b| b.tag == "h2");
     assert!(!h2.is_empty());
     for (i, c) in h2[0].children.iter().enumerate() {
-        eprintln!("  h2 child[{}] tag={} display={:?} y={:.1} h={:.1}",
-            i, c.tag, c.style.display, c.layout.content_rect.y, c.layout.content_rect.h);
+        eprintln!(
+            "  h2 child[{}] tag={} display={:?} y={:.1} h={:.1}",
+            i, c.tag, c.style.display, c.layout.content_rect.y, c.layout.content_rect.h
+        );
     }
     // h2 height should account for both the ::before block and the text
     // ::before(block) ~ 28.8px + "Section Title" ~ 28.8px = ~57.6
-    assert!(h2[0].layout.content_rect.h > 40.0,
+    assert!(
+        h2[0].layout.content_rect.h > 40.0,
         "h2 height ({:.1}) should be > 40 (block before + text line)",
-        h2[0].layout.content_rect.h);
+        h2[0].layout.content_rect.h
+    );
 }
 
 // ============================================================
@@ -2051,21 +2688,35 @@ fn absolute_before_pseudo_does_not_hide_text() {
     let h2 = find_all_boxes(&doc.root, &|b| b.tag == "h2");
     assert!(!h2.is_empty());
 
-    eprintln!("h2: h={:.1} lines={} children={}", 
-        h2[0].layout.content_rect.h, h2[0].layout.line_cache.len(), h2[0].children.len());
+    eprintln!(
+        "h2: h={:.1} lines={} children={}",
+        h2[0].layout.content_rect.h,
+        h2[0].layout.line_cache.len(),
+        h2[0].children.len()
+    );
     for (i, c) in h2[0].children.iter().enumerate() {
-        eprintln!("  child[{}] tag={} display={:?} pos={:?} w={:.1} h={:.1}",
-            i, c.tag, c.style.display, c.style.position,
-            c.layout.content_rect.w, c.layout.content_rect.h);
+        eprintln!(
+            "  child[{}] tag={} display={:?} pos={:?} w={:.1} h={:.1}",
+            i,
+            c.tag,
+            c.style.display,
+            c.style.position,
+            c.layout.content_rect.w,
+            c.layout.content_rect.h
+        );
     }
 
     // h2 must have line_cache (text is rendered)
-    assert!(!h2[0].layout.line_cache.is_empty(),
-        "h2 must have line_cache — text 'اختيارات المحررين' should be visible");
+    assert!(
+        !h2[0].layout.line_cache.is_empty(),
+        "h2 must have line_cache — text 'اختيارات المحررين' should be visible"
+    );
     // h2 height must include the text line
-    assert!(h2[0].layout.content_rect.h >= 18.0,
+    assert!(
+        h2[0].layout.content_rect.h >= 18.0,
         "h2 height ({:.1}) must be >= font-size 18",
-        h2[0].layout.content_rect.h);
+        h2[0].layout.content_rect.h
+    );
 }
 
 // ============================================================
@@ -2099,19 +2750,32 @@ fn rtl_card_title_text_not_clipped_to_single_char() {
     let doc = load_html(html, 400.0);
     let h3 = find_all_boxes(&doc.root, &|b| b.tag == "h3");
     assert!(!h3.is_empty());
-    eprintln!("h3: x={:.0} w={:.0} h={:.0} lines={}",
-        h3[0].layout.content_rect.x, h3[0].layout.content_rect.w,
-        h3[0].layout.content_rect.h, h3[0].layout.line_cache.len());
+    eprintln!(
+        "h3: x={:.0} w={:.0} h={:.0} lines={}",
+        h3[0].layout.content_rect.x,
+        h3[0].layout.content_rect.w,
+        h3[0].layout.content_rect.h,
+        h3[0].layout.line_cache.len()
+    );
     for (i, line) in h3[0].layout.line_cache.iter().enumerate() {
-        eprintln!("  line[{}] x={:.0} w={:.0} h={:.0}", i, line.x, line.width, line.height);
+        eprintln!(
+            "  line[{}] x={:.0} w={:.0} h={:.0}",
+            i, line.x, line.width, line.height
+        );
     }
     // h3 must have line_cache
-    assert!(!h3[0].layout.line_cache.is_empty(), "h3 must have text lines");
+    assert!(
+        !h3[0].layout.line_cache.is_empty(),
+        "h3 must have text lines"
+    );
     // Each line must have substantial width — not just 1 character
     for (i, line) in h3[0].layout.line_cache.iter().enumerate() {
-        assert!(line.width > 30.0,
+        assert!(
+            line.width > 30.0,
             "h3 line[{}] width ({:.1}) should be > 30 (not single-char clipping)",
-            i, line.width);
+            i,
+            line.width
+        );
     }
 }
 
@@ -2155,9 +2819,11 @@ fn grid_minmax_0_1fr_with_template_areas() {
     // p1 (hero) should span 2 columns = ~50% of 1248 = ~600px
     let hero_w = items[0].layout.content_rect.w;
     eprintln!("hero w={:.0} (expect ~600)", hero_w);
-    assert!(hero_w > 500.0,
+    assert!(
+        hero_w > 500.0,
         "hero width ({:.0}) should be > 500 (spans 2 of 4 columns)",
-        hero_w);
+        hero_w
+    );
 
     // p2, p3 should each be ~25% = ~300px
     let p2_w = items[1].layout.content_rect.w;
@@ -2169,7 +2835,11 @@ fn grid_minmax_0_1fr_with_template_areas() {
     // p6 spans 3 columns = ~75%
     let p6_w = items[5].layout.content_rect.w;
     eprintln!("p6 w={:.0} (expect ~900)", p6_w);
-    assert!(p6_w > 700.0, "p6 width ({:.0}) should be > 700 (spans 3 cols)", p6_w);
+    assert!(
+        p6_w > 700.0,
+        "p6 width ({:.0}) should be > 700 (spans 3 cols)",
+        p6_w
+    );
 }
 
 // ============================================================
@@ -2195,23 +2865,31 @@ fn supports_display_grid_applies_styles() {
         "</ul>",
     );
     let doc = load_html(html, 1280.0);
-    let grid = find_all_boxes(&doc.root, &|b|
-        b.attributes.get("class").map(|c| c == "grid").unwrap_or(false)
-    );
+    let grid = find_all_boxes(&doc.root, &|b| {
+        b.attributes
+            .get("class")
+            .map(|c| c == "grid")
+            .unwrap_or(false)
+    });
     assert!(!grid.is_empty());
     // @supports should override flex to grid
     eprintln!("grid display={:?}", grid[0].style.display);
-    assert!(grid[0].style.display == Display::Grid,
+    assert!(
+        grid[0].style.display == Display::Grid,
         "grid should be display:Grid from @supports, got {:?}",
-        grid[0].style.display);
+        grid[0].style.display
+    );
     // Each item should be ~25% of 1248 = ~300px (4 columns)
     let items: Vec<&WebCore> = find_all_boxes(&doc.root, &|b| b.tag == "li");
     assert_eq!(items.len(), 4);
     for (i, item) in items.iter().enumerate() {
         eprintln!("li[{}] w={:.0}", i, item.layout.content_rect.w);
-        assert!(item.layout.content_rect.w > 250.0,
+        assert!(
+            item.layout.content_rect.w > 250.0,
             "li[{}] width ({:.0}) should be > 250 (1/4 of grid)",
-            i, item.layout.content_rect.w);
+            i,
+            item.layout.content_rect.w
+        );
     }
 }
 
@@ -2233,14 +2911,19 @@ fn media_inside_supports_applies() {
         "<div class='box'>Test</div>",
     );
     let doc = load_html(html, 1280.0);
-    let b = find_all_boxes(&doc.root, &|b|
-        b.attributes.get("class").map(|c| c == "box").unwrap_or(false)
-    );
+    let b = find_all_boxes(&doc.root, &|b| {
+        b.attributes
+            .get("class")
+            .map(|c| c == "box")
+            .unwrap_or(false)
+    });
     assert!(!b.is_empty());
     eprintln!("box w={:.0} (expect 400)", b[0].layout.content_rect.w);
-    assert!(b[0].layout.content_rect.w > 300.0,
+    assert!(
+        b[0].layout.content_rect.w > 300.0,
         "box width ({:.0}) should be 400 from @media inside @supports",
-        b[0].layout.content_rect.w);
+        b[0].layout.content_rect.w
+    );
 }
 
 // ============================================================
@@ -2260,13 +2943,19 @@ fn svg_viewbox_computes_width_from_height() {
     let doc = load_html(html, 800.0);
     let svg = find_all_boxes(&doc.root, &|b| b.tag == "svg");
     assert!(!svg.is_empty());
-    eprintln!("svg: w={:.1} h={:.1} viewbox_w={} viewbox_h={}",
-        svg[0].layout.content_rect.w, svg[0].layout.content_rect.h,
-        svg[0].svg_viewbox_w, svg[0].svg_viewbox_h);
+    eprintln!(
+        "svg: w={:.1} h={:.1} viewbox_w={} viewbox_h={}",
+        svg[0].layout.content_rect.w,
+        svg[0].layout.content_rect.h,
+        svg[0].svg_viewbox_w,
+        svg[0].svg_viewbox_h
+    );
     // Width should be computed from viewBox aspect ratio: 28 * 112/32 = 98
-    assert!(svg[0].layout.content_rect.w > 80.0,
+    assert!(
+        svg[0].layout.content_rect.w > 80.0,
         "SVG width ({:.1}) should be > 80 (computed from viewBox 112:32 at h=28)",
-        svg[0].layout.content_rect.w);
+        svg[0].layout.content_rect.w
+    );
 }
 
 // ============================================================
@@ -2287,9 +2976,12 @@ fn transform_translatex_hides_element_off_screen() {
         "</div>",
     );
     let doc = load_html(html, 1000.0);
-    let main = find_all_boxes(&doc.root, &|b|
-        b.attributes.get("class").map(|c| c == "main").unwrap_or(false)
-    );
+    let main = find_all_boxes(&doc.root, &|b| {
+        b.attributes
+            .get("class")
+            .map(|c| c == "main")
+            .unwrap_or(false)
+    });
     assert!(!main.is_empty());
     // Main content should start near x=0, not pushed right by the hidden nav
     // (transform:translateX(-100%) moves it off-screen visually)
@@ -2325,8 +3017,12 @@ fn flex_nav_links_on_one_line() {
     assert!(links.len() >= 7);
     let y0 = links[0].layout.border_rect.y;
     for (i, link) in links.iter().enumerate() {
-        assert!((link.layout.border_rect.y - y0).abs() < 5.0,
+        assert!(
+            (link.layout.border_rect.y - y0).abs() < 5.0,
             "nav link[{}] at y={:.0} should be same line as [0] at y={:.0}",
-            i, link.layout.border_rect.y, y0);
+            i,
+            link.layout.border_rect.y,
+            y0
+        );
     }
 }

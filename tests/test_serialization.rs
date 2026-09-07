@@ -1,7 +1,7 @@
 // Serialization tests – ported from cpptests/test_serialization.cpp
+use webcore::html::serialize_html;
 use webcore::types::*;
 use webcore::{load_html, parse_html};
-use webcore::html::serialize_html;
 
 /// Parse → Serialize helper
 fn serialize(input: &str) -> String {
@@ -223,7 +223,8 @@ fn object_fit_style_preserved() {
 fn stylesheet_preserved() {
     let html = serialize(
         "<html><head><style>.test { color: red; }</style></head>\
-         <body><div class=\"test\">Styled</div></body></html>");
+         <body><div class=\"test\">Styled</div></body></html>",
+    );
     assert!(html.contains("color"));
 }
 
@@ -231,7 +232,8 @@ fn stylesheet_preserved() {
 fn stylesheet_heading_with_color() {
     let html = serialize(
         "<html><head><style>h1 { color: blue; }</style></head>\
-         <body><h1>Title</h1></body></html>");
+         <body><h1>Title</h1></body></html>",
+    );
     assert!(html.contains("h1"));
     assert!(html.contains("color"));
 }
@@ -240,7 +242,8 @@ fn stylesheet_heading_with_color() {
 fn selector_with_class() {
     let html = serialize(
         "<html><head><style>div.box { background-color: yellow; }</style></head>\
-         <body><div class=\"box\">Box</div></body></html>");
+         <body><div class=\"box\">Box</div></body></html>",
+    );
     assert!(html.contains(".box"));
 }
 
@@ -248,7 +251,8 @@ fn selector_with_class() {
 fn selector_with_id() {
     let html = serialize(
         "<html><head><style>#header { font-size: 24px; }</style></head>\
-         <body><div id=\"header\">Header</div></body></html>");
+         <body><div id=\"header\">Header</div></body></html>",
+    );
     assert!(html.contains("#header"));
 }
 
@@ -256,7 +260,8 @@ fn selector_with_id() {
 fn child_combinator_selector() {
     let html = serialize(
         "<html><head><style>div > p { color: green; }</style></head>\
-         <body><div><p>Text</p></div></body></html>");
+         <body><div><p>Text</p></div></body></html>",
+    );
     assert!(html.contains(">"));
 }
 
@@ -306,8 +311,7 @@ fn double_round_trip() {
 
 #[test]
 fn double_round_trip_with_styles() {
-    let original =
-        "<div style=\"width: 200px; background-color: #ff0000;\">\
+    let original = "<div style=\"width: 200px; background-color: #ff0000;\">\
          <p style=\"text-align: center;\">Styled</p></div>";
     let doc1 = parse_html(original);
     let ser1 = serialize_html(&doc1);
@@ -318,8 +322,7 @@ fn double_round_trip_with_styles() {
 
 #[test]
 fn double_round_trip_table() {
-    let original =
-        "<table><tr><td colspan=\"2\">Header</td></tr>\
+    let original = "<table><tr><td colspan=\"2\">Header</td></tr>\
          <tr><td>A</td><td>B</td></tr></table>";
     let doc1 = parse_html(original);
     let ser1 = serialize_html(&doc1);
@@ -330,8 +333,7 @@ fn double_round_trip_table() {
 
 #[test]
 fn double_round_trip_stylesheet() {
-    let original =
-        "<html><head><style>\
+    let original = "<html><head><style>\
          .box { color: red; margin: 10px; }\
          </style></head>\
          <body><div class=\"box\">Content</div></body></html>";
@@ -440,7 +442,9 @@ fn lang_attribute_round_trip() {
 #[test]
 fn attributes_preserved_after_layout_round_trip() {
     let doc1 = load_html(
-        "<div data-info=\"test\" title=\"hello\">content</div>", 800.0);
+        "<div data-info=\"test\" title=\"hello\">content</div>",
+        800.0,
+    );
     let serialized = serialize_html(&doc1);
     assert!(serialized.contains("data-info=\"test\""));
     assert!(serialized.contains("title=\"hello\""));
@@ -541,7 +545,8 @@ fn multi_rule_stylesheet() {
          h1 { color: blue; }\
          p { margin: 10px; }\
          </style></head>\
-         <body><h1>Title</h1><p>Body</p></body></html>");
+         <body><h1>Title</h1><p>Body</p></body></html>",
+    );
     assert!(html.contains("h1"));
     assert!(html.contains("color"));
 }
@@ -579,14 +584,19 @@ fn unknown_pseudo_element_survives_roundtrip() {
     let doc = webcore::load_html(html, 800.0);
     let out = serialize_html(&doc);
 
-    assert!(out.contains("::-webkit-scrollbar"),
-        "`::-webkit-scrollbar` rule was dropped during serialization");
-    assert!(out.contains("::-webkit-scrollbar-track"),
-        "`::-webkit-scrollbar-track` rule was dropped");
-    assert!(out.contains("::-webkit-scrollbar-thumb"),
-        "`::-webkit-scrollbar-thumb` rule was dropped");
-    assert!(out.contains("::cue"),
-        "`::cue` rule was dropped");
+    assert!(
+        out.contains("::-webkit-scrollbar"),
+        "`::-webkit-scrollbar` rule was dropped during serialization"
+    );
+    assert!(
+        out.contains("::-webkit-scrollbar-track"),
+        "`::-webkit-scrollbar-track` rule was dropped"
+    );
+    assert!(
+        out.contains("::-webkit-scrollbar-thumb"),
+        "`::-webkit-scrollbar-thumb` rule was dropped"
+    );
+    assert!(out.contains("::cue"), "`::cue` rule was dropped");
 }
 
 #[test]
@@ -603,9 +613,9 @@ p::first-line { font-size: 18px; }
     let doc = webcore::load_html(html, 800.0);
     let out = serialize_html(&doc);
 
-    assert!(out.contains("p::before"),  "p::before lost");
-    assert!(out.contains("p::after"),   "p::after lost");
-    assert!(out.contains("::selection"),"::selection lost");
+    assert!(out.contains("p::before"), "p::before lost");
+    assert!(out.contains("p::after"), "p::after lost");
+    assert!(out.contains("::selection"), "::selection lost");
     assert!(out.contains("li::marker"), "li::marker lost");
     assert!(out.contains("p::first-line"), "p::first-line lost");
 }

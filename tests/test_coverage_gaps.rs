@@ -2,8 +2,8 @@
 // Coverage gap tests for table cell block layout, BR line breaks, rect consistency.
 // Widget-specific tests (InsertHR, Backspace, etc.) are omitted.
 
-use webcore::types::*;
 use webcore::load_html;
+use webcore::types::*;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -12,9 +12,13 @@ fn parse_and_layout(html: &str, viewport_width: f32) -> Document {
 }
 
 fn find_box<'a, F: Fn(&WebCore) -> bool>(root: &'a WebCore, pred: &F) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for child in &root.children {
-        if let Some(b) = find_box(child, pred) { return Some(b); }
+        if let Some(b) = find_box(child, pred) {
+            return Some(b);
+        }
     }
     None
 }
@@ -26,9 +30,13 @@ fn find_all_boxes<'a, F: Fn(&WebCore) -> bool>(root: &'a WebCore, pred: &F) -> V
 }
 
 fn collect_matching<'a, F: Fn(&WebCore) -> bool>(
-    node: &'a WebCore, pred: &F, out: &mut Vec<&'a WebCore>
+    node: &'a WebCore,
+    pred: &F,
+    out: &mut Vec<&'a WebCore>,
 ) {
-    if pred(node) { out.push(node); }
+    if pred(node) {
+        out.push(node);
+    }
     for child in &node.children {
         collect_matching(child, pred, out);
     }
@@ -50,10 +58,15 @@ fn cell_blocks_multiple_block_children_stack() {
     assert!(td.is_some(), "td not found");
     let td = td.unwrap();
 
-    let blocks: Vec<&WebCore> = td.children.iter()
+    let blocks: Vec<&WebCore> = td
+        .children
+        .iter()
         .filter(|ch| ch.style.display != Display::None)
         .collect();
-    assert!(blocks.len() >= 3, "expected at least 3 block children in td");
+    assert!(
+        blocks.len() >= 3,
+        "expected at least 3 block children in td"
+    );
 
     // Each subsequent child's contentRect must not overlap the previous
     for i in 1..blocks.len() {
@@ -61,7 +74,10 @@ fn cell_blocks_multiple_block_children_stack() {
         assert!(
             blocks[i].layout.content_rect.y >= prev_bottom,
             "block {} overlaps block {} ({} < {})",
-            i, i - 1, blocks[i].layout.content_rect.y, prev_bottom
+            i,
+            i - 1,
+            blocks[i].layout.content_rect.y,
+            prev_bottom
         );
     }
 
@@ -171,15 +187,18 @@ fn cell_blocks_nested_table_with_hr_in_outer_cell() {
     assert!(tds.len() >= 2);
 
     // Find the outer td (the one with an HR child)
-    let outer_td = tds.iter().find(|td| {
-        find_box(td, &|b: &WebCore| b.tag == "hr").is_some()
-    });
+    let outer_td = tds
+        .iter()
+        .find(|td| find_box(td, &|b: &WebCore| b.tag == "hr").is_some());
     assert!(outer_td.is_some());
     let outer_td = outer_td.unwrap();
 
     let hr = find_box(outer_td, &|b: &WebCore| b.tag == "hr").unwrap();
     let inner_table = find_box(outer_td, &|b: &WebCore| b.tag == "table").unwrap();
-    assert!(hr.layout.content_rect.y >= inner_table.layout.content_rect.y + inner_table.layout.content_rect.h);
+    assert!(
+        hr.layout.content_rect.y
+            >= inner_table.layout.content_rect.y + inner_table.layout.content_rect.h
+    );
 }
 
 // ============================================================
@@ -212,7 +231,10 @@ fn cell_blocks_rect_consistency_after_offset() {
     }
 
     // Second div must be below first div
-    assert!(divs[1].layout.content_rect.y >= divs[0].layout.content_rect.y + divs[0].layout.content_rect.h);
+    assert!(
+        divs[1].layout.content_rect.y
+            >= divs[0].layout.content_rect.y + divs[0].layout.content_rect.h
+    );
 }
 
 // ============================================================
@@ -224,7 +246,10 @@ fn br_line_break_br_at_start() {
     let doc = parse_and_layout("<p><br>Text</p>", 800.0);
     let p = find_box(&doc.root, &|b: &WebCore| b.tag == "p");
     assert!(p.is_some());
-    assert!(p.unwrap().layout.line_cache.len() >= 2, "BR at start should produce at least 2 lines");
+    assert!(
+        p.unwrap().layout.line_cache.len() >= 2,
+        "BR at start should produce at least 2 lines"
+    );
 }
 
 // ============================================================
@@ -236,7 +261,10 @@ fn br_line_break_br_at_end() {
     let doc = parse_and_layout("<p>Text<br></p>", 800.0);
     let p = find_box(&doc.root, &|b: &WebCore| b.tag == "p");
     assert!(p.is_some());
-    assert!(p.unwrap().layout.line_cache.len() >= 2, "BR at end should produce at least 2 lines");
+    assert!(
+        p.unwrap().layout.line_cache.len() >= 2,
+        "BR at end should produce at least 2 lines"
+    );
 }
 
 // ============================================================
@@ -248,7 +276,10 @@ fn br_line_break_multiple_brs() {
     let doc = parse_and_layout("<p>A<br><br><br>B</p>", 800.0);
     let p = find_box(&doc.root, &|b: &WebCore| b.tag == "p");
     assert!(p.is_some());
-    assert!(p.unwrap().layout.line_cache.len() >= 4, "A<br><br><br>B should produce 4 lines");
+    assert!(
+        p.unwrap().layout.line_cache.len() >= 4,
+        "A<br><br><br>B should produce 4 lines"
+    );
 }
 
 // ============================================================
@@ -257,10 +288,7 @@ fn br_line_break_multiple_brs() {
 
 #[test]
 fn br_line_break_br_breaks_before_width_fill() {
-    let doc = parse_and_layout(
-        "<div style='width:500px;'>A<br>B</div>",
-        800.0,
-    );
+    let doc = parse_and_layout("<div style='width:500px;'>A<br>B</div>", 800.0);
     // Text is in #text child nodes, not in div.text — find the div by line_cache
     let div = find_box(&doc.root, &|b: &WebCore| {
         b.tag == "div" && b.layout.line_cache.len() >= 2
@@ -353,7 +381,10 @@ fn cell_blocks_colspan_cell_with_block_children() {
         800.0,
     );
     let wide_cell = find_box(&doc.root, &|b: &WebCore| {
-        b.attributes.get("colspan").map(|v| v == "2").unwrap_or(false)
+        b.attributes
+            .get("colspan")
+            .map(|v| v == "2")
+            .unwrap_or(false)
     });
     assert!(wide_cell.is_some(), "colspan=2 cell not found");
     let wide_cell = wide_cell.unwrap();
@@ -365,10 +396,17 @@ fn cell_blocks_colspan_cell_with_block_children() {
 
     let hr = hr.unwrap();
     let p = p.unwrap();
-    assert!(hr.layout.content_rect.y >= p.layout.content_rect.y + p.layout.content_rect.h,
+    assert!(
+        hr.layout.content_rect.y >= p.layout.content_rect.y + p.layout.content_rect.h,
         "hr ({}) should be below p ({}+{})",
-        hr.layout.content_rect.y, p.layout.content_rect.y, p.layout.content_rect.h);
-    assert!(hr.layout.content_rect.w > 0.0, "hr should have positive width");
+        hr.layout.content_rect.y,
+        p.layout.content_rect.y,
+        p.layout.content_rect.h
+    );
+    assert!(
+        hr.layout.content_rect.w > 0.0,
+        "hr should have positive width"
+    );
 }
 
 // ============================================================
@@ -385,7 +423,10 @@ fn cell_blocks_rowspan_cell_with_block_children() {
         800.0,
     );
     let tall_cell = find_box(&doc.root, &|b: &WebCore| {
-        b.attributes.get("rowspan").map(|v| v == "2").unwrap_or(false)
+        b.attributes
+            .get("rowspan")
+            .map(|v| v == "2")
+            .unwrap_or(false)
     });
     assert!(tall_cell.is_some(), "rowspan=2 cell not found");
     let tall_cell = tall_cell.unwrap();
@@ -396,8 +437,10 @@ fn cell_blocks_rowspan_cell_with_block_children() {
     assert!(div.is_some());
     let hr = hr.unwrap();
     let div = div.unwrap();
-    assert!(hr.layout.content_rect.y >= div.layout.content_rect.y + div.layout.content_rect.h,
-        "hr should be below div in rowspan cell");
+    assert!(
+        hr.layout.content_rect.y >= div.layout.content_rect.y + div.layout.content_rect.h,
+        "hr should be below div in rowspan cell"
+    );
 }
 
 // ============================================================
@@ -415,7 +458,10 @@ fn br_line_break_br_followed_by_wrapping_text() {
     let div = find_box(&doc.root, &|b: &WebCore| {
         b.tag == "div" && b.layout.line_cache.len() >= 3
     });
-    assert!(div.is_some(), "expected div with >= 3 lines from BR + wrapping");
+    assert!(
+        div.is_some(),
+        "expected div with >= 3 lines from BR + wrapping"
+    );
 }
 
 // ============================================================
@@ -424,10 +470,7 @@ fn br_line_break_br_followed_by_wrapping_text() {
 
 #[test]
 fn br_line_break_br_zero_width_doesnt_affect_wrap() {
-    let doc = parse_and_layout(
-        "<div style='width:50px;'>AAAA<br>BB</div>",
-        800.0,
-    );
+    let doc = parse_and_layout("<div style='width:50px;'>AAAA<br>BB</div>", 800.0);
     // Should produce exactly 2 lines: "AAAA+BR" and "BB"
     // BR shouldn't cause AAAA to wrap when it fits on one line
     let div = find_box(&doc.root, &|b: &WebCore| {
@@ -446,8 +489,10 @@ fn br_line_break_br_inside_styled_span() {
     let p = find_box(&doc.root, &|b: &WebCore| b.tag == "p");
     assert!(p.is_some(), "p element must exist");
     // Must not panic; line_cache should be >= 1 (at least one line)
-    assert!(p.unwrap().layout.line_cache.len() >= 1,
-        "bold text with BR must produce at least 1 line");
+    assert!(
+        p.unwrap().layout.line_cache.len() >= 1,
+        "bold text with BR must produce at least 1 line"
+    );
 }
 
 // ============================================================
@@ -472,9 +517,12 @@ fn cell_valign_middle_with_block_children() {
     assert!(cell.is_some(), "cell with vertical-align:middle not found");
     let cell = cell.unwrap();
     // The cell's content area must be >= its padding area y (offset applied correctly)
-    assert!(cell.layout.content_rect.y >= cell.layout.padding_rect.y,
+    assert!(
+        cell.layout.content_rect.y >= cell.layout.padding_rect.y,
         "contentRect.y ({}) should be >= paddingRect.y ({})",
-        cell.layout.content_rect.y, cell.layout.padding_rect.y);
+        cell.layout.content_rect.y,
+        cell.layout.padding_rect.y
+    );
 }
 
 // ============================================================
@@ -502,7 +550,7 @@ fn cell_valign_bottom_with_block_children() {
     let resolved_pad_border_top = cell.layout.resolved_pad_top + cell.layout.resolved_border_top;
     assert!(
         cell.layout.content_rect.y > resolved_pad_border_top
-        || cell.layout.content_rect.y >= cell.layout.padding_rect.y,
+            || cell.layout.content_rect.y >= cell.layout.padding_rect.y,
         "bottom-aligned cell should shift content down"
     );
 }
@@ -530,11 +578,16 @@ fn cell_valign_top_with_block_children() {
     let td = td.unwrap();
 
     // First visible block child should be near the top of the cell content area
-    let first_child = td.children.iter()
+    let first_child = td
+        .children
+        .iter()
         .find(|ch| ch.style.display != Display::None);
     if let Some(child) = first_child {
-        assert!(child.layout.content_rect.y < 30.0,
-            "top-aligned first child y ({}) should be < 30", child.layout.content_rect.y);
+        assert!(
+            child.layout.content_rect.y < 30.0,
+            "top-aligned first child y ({}) should be < 30",
+            child.layout.content_rect.y
+        );
     }
 }
 
@@ -564,7 +617,11 @@ fn cell_padding_with_block_children_layout() {
     // div is first child in padded cell — absolute y >= 0
     assert!(div.layout.content_rect.y >= 0.0);
     // hr must be below div
-    assert!(hr.layout.content_rect.y >= div.layout.content_rect.y + div.layout.content_rect.h,
+    assert!(
+        hr.layout.content_rect.y >= div.layout.content_rect.y + div.layout.content_rect.h,
         "hr ({}) should be below div ({}+{})",
-        hr.layout.content_rect.y, div.layout.content_rect.y, div.layout.content_rect.h);
+        hr.layout.content_rect.y,
+        div.layout.content_rect.y,
+        div.layout.content_rect.h
+    );
 }

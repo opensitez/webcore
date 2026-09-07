@@ -1,9 +1,9 @@
 // Tests for navigation: hit testing, offset-to-point, and line collection.
 
-use webcore::types::*;
-use webcore::parse_html;
-use webcore::layout::LayoutEngine;
 use webcore::layout::hit_test::*;
+use webcore::layout::LayoutEngine;
+use webcore::parse_html;
+use webcore::types::*;
 
 fn layout(html: &str, width: f32) -> Document {
     webcore::load_html(html, width)
@@ -48,7 +48,7 @@ fn nav_caret_x_roundtrip() {
     // Hit roughly in the middle of "Hello"
     let hit = point_to_hit(&doc.root, (20.0, 5.0), 0).unwrap();
     let pt = offset_to_point(&doc.root, hit.node_id, hit.local_offset, 0.0, 0.0).unwrap();
-    
+
     // X should be close to 20.0
     assert!((pt.0 - 20.0).abs() < 20.0);
 }
@@ -65,10 +65,18 @@ fn nav_wrapped_text_multiple_lines() {
     // Text starts at y=0. At 100px wide there are many wrapped lines (each ~16px).
     // y=5 hits line 1, y=100 hits line 7+. The resolved y coords must be >20px apart.
     let hit_start = point_to_hit(&doc.root, (5.0, 5.0), 0).unwrap();
-    let hit_end   = point_to_hit(&doc.root, (5.0, 100.0), 0).unwrap();
+    let hit_end = point_to_hit(&doc.root, (5.0, 100.0), 0).unwrap();
 
-    let pt_start = offset_to_point(&doc.root, hit_start.node_id, hit_start.local_offset, 0.0, 0.0).unwrap();
-    let pt_end   = offset_to_point(&doc.root, hit_end.node_id, hit_end.local_offset, 0.0, 0.0).unwrap();
+    let pt_start = offset_to_point(
+        &doc.root,
+        hit_start.node_id,
+        hit_start.local_offset,
+        0.0,
+        0.0,
+    )
+    .unwrap();
+    let pt_end =
+        offset_to_point(&doc.root, hit_end.node_id, hit_end.local_offset, 0.0, 0.0).unwrap();
 
     assert!(pt_end.1 > pt_start.1 + 20.0);
 }
@@ -76,14 +84,14 @@ fn nav_wrapped_text_multiple_lines() {
 #[test]
 fn nav_table_hit_test() {
     let doc = layout("<table><tr><td>A</td><td>B</td></tr></table>", 800.0);
-    
+
     // A and B should be at different X
     let hit_a = point_to_hit(&doc.root, (10.0, 10.0), 0).unwrap();
     let hit_b = point_to_hit(&doc.root, (500.0, 10.0), 0).unwrap();
-    
+
     let pt_a = offset_to_point(&doc.root, hit_a.node_id, hit_a.local_offset, 0.0, 0.0).unwrap();
     let pt_b = offset_to_point(&doc.root, hit_b.node_id, hit_b.local_offset, 0.0, 0.0).unwrap();
-    
+
     assert!((pt_a.1 - pt_b.1).abs() < 5.0);
     assert!(pt_b.0 > pt_a.0);
 }
@@ -102,7 +110,12 @@ fn nav_word_boundary_left_from_middle() {
     let mut pos = wpos + 2;
     while pos > 0 {
         let prev = floor_char_boundary(&text, pos - 1);
-        if text[prev..pos].chars().next().map(|c| c.is_alphanumeric()).unwrap_or(false) {
+        if text[prev..pos]
+            .chars()
+            .next()
+            .map(|c| c.is_alphanumeric())
+            .unwrap_or(false)
+        {
             pos = prev;
         } else {
             break;
@@ -117,7 +130,8 @@ fn nav_word_boundary_right_from_start() {
     let text = doc.root.text_content();
     let hpos = text.find("Hello").unwrap();
     let mut pos = hpos;
-    let chars: Vec<(usize, char)> = text[hpos..].char_indices()
+    let chars: Vec<(usize, char)> = text[hpos..]
+        .char_indices()
         .map(|(i, c)| (i + hpos, c))
         .collect();
     for (i, c) in &chars {
@@ -189,7 +203,12 @@ fn nav_word_selection_in_text() {
     // Go left
     while start > 0 {
         let prev = floor_char_boundary(&text, start - 1);
-        if text[prev..start].chars().next().map(|c| c.is_alphanumeric()).unwrap_or(false) {
+        if text[prev..start]
+            .chars()
+            .next()
+            .map(|c| c.is_alphanumeric())
+            .unwrap_or(false)
+        {
             start = prev;
         } else {
             break;
@@ -248,10 +267,10 @@ fn nav_heading_and_paragraph_ordering() {
     let doc = layout("<h1>Title</h1><p>Body text here</p>", 800.0);
     use webcore::dom::query_selector;
     let h1 = query_selector(&doc.root, "h1").unwrap();
-    let p  = query_selector(&doc.root, "p").unwrap();
+    let p = query_selector(&doc.root, "p").unwrap();
 
     let pt_h1 = offset_to_point(&doc.root, h1.node_id, 0, 0.0, 0.0);
-    let pt_p  = offset_to_point(&doc.root, p .node_id, 0, 0.0, 0.0);
+    let pt_p = offset_to_point(&doc.root, p.node_id, 0, 0.0, 0.0);
 
     assert!(pt_h1.is_some());
     assert!(pt_p.is_some());
@@ -272,37 +291,43 @@ fn nav_click_returns_distinct_offsets_per_box() {
         800.0,
     );
     let text = doc.root.text_content();
-    let after_pos  = text.find("After").expect("'After' not found");
-    let here_pos   = text.find("here").expect("'here' not found");
+    let after_pos = text.find("After").expect("'After' not found");
+    let here_pos = text.find("here").expect("'here' not found");
 
     // Find the <p> inside the second blockquote
     use webcore::dom::query_selector_all;
     let paras = query_selector_all(&doc.root, "p");
     // The last paragraph should contain "After text here"
-    let last_p = paras.iter().find(|p| p.text_content().contains("After")).copied();
+    let last_p = paras
+        .iter()
+        .find(|p| p.text_content().contains("After"))
+        .copied();
     assert!(last_p.is_some(), "did not find 'After text here' paragraph");
     let last_p = last_p.unwrap();
 
     // Get X for start of "After" and start of "here" within that paragraph
     let p_text = last_p.text_content();
     let local_after = p_text.find("After").unwrap_or(0);
-    let local_here  = p_text.find("here").unwrap_or(0);
+    let local_here = p_text.find("here").unwrap_or(0);
 
     let pt_after = offset_to_point(&doc.root, last_p.node_id, local_after, 0.0, 0.0);
-    let pt_here  = offset_to_point(&doc.root, last_p.node_id, local_here,  0.0, 0.0);
+    let pt_here = offset_to_point(&doc.root, last_p.node_id, local_here, 0.0, 0.0);
 
     assert!(pt_after.is_some());
     assert!(pt_here.is_some());
 
     let (xa, ya) = pt_after.unwrap();
-    let (xh, _)  = pt_here.unwrap();
+    let (xh, _) = pt_here.unwrap();
 
     // "After" should be to the left of "here" (same line, same Y)
-    assert!(xh > xa, "expected 'here' to be right of 'After', got xa={xa} xh={xh}");
+    assert!(
+        xh > xa,
+        "expected 'here' to be right of 'After', got xa={xa} xh={xh}"
+    );
 
     // Now click back at those screen positions
     let hit_after = point_to_hit(&doc.root, (xa + 2.0, ya + 5.0), 0);
-    let hit_here  = point_to_hit(&doc.root, (xh + 2.0, ya + 5.0), 0);
+    let hit_here = point_to_hit(&doc.root, (xh + 2.0, ya + 5.0), 0);
     assert!(hit_after.is_some());
     assert!(hit_here.is_some());
 
@@ -330,7 +355,10 @@ fn nav_click_on_each_paragraph_returns_distinct_offsets() {
     assert!(paras.len() >= 3);
 
     let find_para = |needle: &str| {
-        paras.iter().find(|p| p.text_content().contains(needle)).copied()
+        paras
+            .iter()
+            .find(|p| p.text_content().contains(needle))
+            .copied()
     };
     let pa = find_para("AAA").expect("AAA paragraph not found");
     let pb = find_para("BBB").expect("BBB paragraph not found");
@@ -377,13 +405,15 @@ fn nav_wrapped_text_line_ordering() {
     // A later character (well into the text, past likely wrapping)
     let text_len = p.text_content().len();
     let late_offset = (text_len * 3 / 4).min(text_len);
-    let pt_late  = offset_to_point(&doc.root, p.node_id, late_offset, 0.0, 0.0);
+    let pt_late = offset_to_point(&doc.root, p.node_id, late_offset, 0.0, 0.0);
 
     assert!(pt_start.is_some());
     assert!(pt_late.is_some());
     // Later in text should have higher Y (lower on screen) due to wrapping
-    assert!(pt_late.unwrap().1 > pt_start.unwrap().1,
-        "Expected wrapped text to have higher Y for later offset");
+    assert!(
+        pt_late.unwrap().1 > pt_start.unwrap().1,
+        "Expected wrapped text to have higher Y for later offset"
+    );
 }
 
 #[test]
@@ -407,15 +437,24 @@ fn nav_flex_items_at_different_x() {
     use webcore::dom::query_selector_all;
     let divs = query_selector_all(&doc.root, "div");
     // Find the flex children (they contain "Item A" and "Item B")
-    let ia = divs.iter().find(|d| d.text_content().trim() == "Item A").copied();
-    let ib = divs.iter().find(|d| d.text_content().trim() == "Item B").copied();
+    let ia = divs
+        .iter()
+        .find(|d| d.text_content().trim() == "Item A")
+        .copied();
+    let ib = divs
+        .iter()
+        .find(|d| d.text_content().trim() == "Item B")
+        .copied();
 
     if let (Some(ia), Some(ib)) = (ia, ib) {
         let pt_a = offset_to_point(&doc.root, ia.node_id, 0, 0.0, 0.0);
         let pt_b = offset_to_point(&doc.root, ib.node_id, 0, 0.0, 0.0);
         if let (Some(pa), Some(pb)) = (pt_a, pt_b) {
             // Flex row: items should be at roughly the same Y
-            assert!((pa.1 - pb.1).abs() < 5.0, "flex items should have similar Y");
+            assert!(
+                (pa.1 - pb.1).abs() < 5.0,
+                "flex items should have similar Y"
+            );
             // Item B should be to the right of Item A
             assert!(pb.0 > pa.0, "Item B should be right of Item A");
         }
@@ -424,7 +463,10 @@ fn nav_flex_items_at_different_x() {
 
 #[test]
 fn nav_list_items_at_increasing_y() {
-    let doc = layout("<ul><li>Item 1</li><li>Item 2</li><li>Item 3</li></ul>", 800.0);
+    let doc = layout(
+        "<ul><li>Item 1</li><li>Item 2</li><li>Item 3</li></ul>",
+        800.0,
+    );
     use webcore::dom::query_selector_all;
     let items = query_selector_all(&doc.root, "li");
     assert!(items.len() >= 3, "expected at least 3 list items");
@@ -442,7 +484,9 @@ fn nav_list_items_at_increasing_y() {
 // ─── Helper ───────────────────────────────────────────────────────────────────
 
 fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
-    while idx > 0 && !s.is_char_boundary(idx) { idx -= 1; }
+    while idx > 0 && !s.is_char_boundary(idx) {
+        idx -= 1;
+    }
     idx
 }
 
@@ -465,7 +509,10 @@ fn nav_empty_document_no_hit() {
 fn nav_single_char_document_hittable() {
     let doc = layout("<p>X</p>", 800.0);
     let hit = point_to_hit(&doc.root, (5.0, 5.0), 0);
-    assert!(hit.is_some(), "single-char document should produce a hit result");
+    assert!(
+        hit.is_some(),
+        "single-char document should produce a hit result"
+    );
     let pt = offset_to_point(&doc.root, doc.root.node_id, 0, 0.0, 0.0);
     assert!(pt.is_some());
 }
@@ -508,7 +555,8 @@ fn nav_all_lines_distinct_global_offsets() {
     let paras = query_selector_all(&doc.root, "p");
     assert!(paras.len() >= 3, "expected at least 3 paragraphs");
 
-    let pts: Vec<_> = paras.iter()
+    let pts: Vec<_> = paras
+        .iter()
         .filter_map(|p| offset_to_point(&doc.root, p.node_id, 0, 0.0, 0.0))
         .collect();
     assert!(pts.len() >= 3, "all paragraphs must have layout points");
@@ -516,9 +564,12 @@ fn nav_all_lines_distinct_global_offsets() {
     // Y positions must be strictly increasing (each block sits below the previous)
     for i in 1..pts.len() {
         assert!(
-            pts[i].1 >= pts[i-1].1,
+            pts[i].1 >= pts[i - 1].1,
             "paragraph {} Y ({}) must be >= paragraph {} Y ({})",
-            i, pts[i].1, i-1, pts[i-1].1
+            i,
+            pts[i].1,
+            i - 1,
+            pts[i - 1].1
         );
     }
 }
@@ -561,7 +612,10 @@ fn nav_click_on_deeply_nested_blockquote_last_line() {
     // The last list item should be hittable
     let last = items[items.len() - 1];
     let text = last.text_content();
-    assert!(text.contains("Vertical"), "last item should contain 'Vertical'");
+    assert!(
+        text.contains("Vertical"),
+        "last item should contain 'Vertical'"
+    );
 
     let pt = offset_to_point(&doc.root, last.node_id, 0, 0.0, 0.0);
     assert!(pt.is_some(), "last list item must have a layout point");
@@ -569,7 +623,10 @@ fn nav_click_on_deeply_nested_blockquote_last_line() {
     // Clicking at the point must return a hit
     if let Some((x, y)) = pt {
         let hit = point_to_hit(&doc.root, (x + 2.0, y + 2.0), 0);
-        assert!(hit.is_some(), "clicking on last list item must return a hit");
+        assert!(
+            hit.is_some(),
+            "clicking on last list item must return a hit"
+        );
     }
 }
 
@@ -587,19 +644,22 @@ fn nav_click_on_two_words_same_line_distinct_offsets() {
 
     let p_text = p.text_content();
     let pos_vert = p_text.find("Vertical").unwrap_or(0);
-    let pos_sep  = p_text.find("separators").unwrap_or(9);
+    let pos_sep = p_text.find("separators").unwrap_or(9);
 
     let pt_vert = offset_to_point(&doc.root, p.node_id, pos_vert, 0.0, 0.0);
-    let pt_sep  = offset_to_point(&doc.root, p.node_id, pos_sep,  0.0, 0.0);
+    let pt_sep = offset_to_point(&doc.root, p.node_id, pos_sep, 0.0, 0.0);
 
     assert!(pt_vert.is_some());
     assert!(pt_sep.is_some());
 
     let (xv, yv) = pt_vert.unwrap();
-    let (xs, _)  = pt_sep.unwrap();
+    let (xs, _) = pt_sep.unwrap();
 
     // "separators" starts after "Vertical ", so its X must be greater
-    assert!(xs > xv, "expected 'separators' to be right of 'Vertical'; xv={xv} xs={xs}");
+    assert!(
+        xs > xv,
+        "expected 'separators' to be right of 'Vertical'; xv={xv} xs={xs}"
+    );
 
     // Click at both X positions and verify different hit results
     let hit_v = point_to_hit(&doc.root, (xv + 1.0, yv + 2.0), 0);
@@ -610,7 +670,10 @@ fn nav_click_on_two_words_same_line_distinct_offsets() {
             hv.local_offset != hs.local_offset || hv.node_id != hs.node_id,
             "clicking at different X must yield different offsets"
         );
-        assert!(hv.local_offset < hs.local_offset, "'Vertical' offset must be less than 'separators'");
+        assert!(
+            hv.local_offset < hs.local_offset,
+            "'Vertical' offset must be less than 'separators'"
+        );
     }
 }
 
@@ -652,8 +715,11 @@ fn nav_find_line_for_offset_equivalent() {
     assert!(hit0.is_some());
     assert!(hit1.is_some());
     // Different paragraphs → different boxes
-    assert_ne!(hit0.unwrap().node_id, hit1.unwrap().node_id,
-        "clicking on different paragraphs must hit different boxes");
+    assert_ne!(
+        hit0.unwrap().node_id,
+        hit1.unwrap().node_id,
+        "clicking on different paragraphs must hit different boxes"
+    );
 }
 
 #[test]
@@ -663,14 +729,20 @@ fn nav_lines_sorted_by_y_equivalent() {
     use webcore::dom::query_selector_all;
     let paras = query_selector_all(&doc.root, "p");
     assert!(paras.len() >= 3);
-    let pts: Vec<_> = paras.iter()
+    let pts: Vec<_> = paras
+        .iter()
         .filter_map(|p| offset_to_point(&doc.root, p.node_id, 0, 0.0, 0.0))
         .collect();
     assert!(pts.len() >= 3, "all paragraphs must have layout points");
     for i in 1..pts.len() {
-        assert!(pts[i].1 >= pts[i-1].1,
+        assert!(
+            pts[i].1 >= pts[i - 1].1,
             "paragraph {} Y ({}) must be >= paragraph {} Y ({})",
-            i, pts[i].1, i-1, pts[i-1].1);
+            i,
+            pts[i].1,
+            i - 1,
+            pts[i - 1].1
+        );
     }
 }
 
@@ -679,11 +751,13 @@ fn nav_up_down_navigation_two_lines_equivalent() {
     // Simulates up/down navigation: offset in first line < offset in second line
     let doc = layout("<p>First line</p><p>Second line</p>", 800.0);
     let text = doc.root.text_content();
-    let pos_first  = text.find("First").expect("'First' not found");
+    let pos_first = text.find("First").expect("'First' not found");
     let pos_second = text.find("Second").expect("'Second' not found");
     // In the flat buffer, "First" must come before "Second"
-    assert!(pos_first < pos_second,
-        "global offset of 'First' ({pos_first}) must be less than 'Second' ({pos_second})");
+    assert!(
+        pos_first < pos_second,
+        "global offset of 'First' ({pos_first}) must be less than 'Second' ({pos_second})"
+    );
 }
 
 #[test]
@@ -698,10 +772,17 @@ fn nav_wrapped_text_multiple_lines_equivalent() {
     let text_len = p.text_content().len();
 
     let pt_start = offset_to_point(&doc.root, p.node_id, 0, 0.0, 0.0);
-    let pt_late  = offset_to_point(&doc.root, p.node_id,
-                                   (text_len * 3 / 4).min(text_len), 0.0, 0.0);
+    let pt_late = offset_to_point(
+        &doc.root,
+        p.node_id,
+        (text_len * 3 / 4).min(text_len),
+        0.0,
+        0.0,
+    );
     assert!(pt_start.is_some());
     assert!(pt_late.is_some());
-    assert!(pt_late.unwrap().1 >= pt_start.unwrap().1,
-        "later text in wrapped paragraph should have equal or greater Y");
+    assert!(
+        pt_late.unwrap().1 >= pt_start.unwrap().1,
+        "later text in wrapped paragraph should have equal or greater Y"
+    );
 }

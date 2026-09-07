@@ -1,12 +1,12 @@
 // Ported from cpptests/test_css.cpp
 // CSS declaration parsing, stylesheet parsing, selector parsing, property application.
 
-use webcore::types::*;
 use webcore::css::{
-    apply_property, parse_declarations, parse_selector, parse_stylesheet,
-    SelectorPart, Combinator, PseudoElement,
+    apply_property, parse_declarations, parse_selector, parse_stylesheet, Combinator,
+    PseudoElement, SelectorPart,
 };
 use webcore::parse_html;
+use webcore::types::*;
 
 fn style_with(prop: &str, val: &str) -> ComputedStyle {
     let mut style = ComputedStyle::default();
@@ -59,15 +59,14 @@ fn css_multiple_values() {
 
 #[test]
 fn css_stylesheet_rules() {
-    let rules = parse_stylesheet("p { color: blue; } .big { font-size: 24px; }")
-        .unwrap_or_default();
+    let rules =
+        parse_stylesheet("p { color: blue; } .big { font-size: 24px; }").unwrap_or_default();
     assert!(rules.len() >= 2);
 }
 
 #[test]
 fn css_stylesheet_multiple_selectors() {
-    let rules = parse_stylesheet("h1, h2, h3 { font-weight: bold; }")
-        .unwrap_or_default();
+    let rules = parse_stylesheet("h1, h2, h3 { font-weight: bold; }").unwrap_or_default();
     assert!(!rules.is_empty());
 }
 
@@ -76,38 +75,55 @@ fn css_variables_in_root() {
     let doc = parse_html(
         "<style>:root { --main-color: #ff0000; --gap: 10px; } p { color: var(--main-color); }</style>\
          <p>text</p>");
-    assert!(doc.stylesheet.variables.contains_key("--main-color"),
-        "--main-color variable should be stored");
-    assert_eq!(doc.stylesheet.variables.get("--main-color").map(|s| s.as_str()), Some("#ff0000"));
+    assert!(
+        doc.stylesheet.variables.contains_key("--main-color"),
+        "--main-color variable should be stored"
+    );
+    assert_eq!(
+        doc.stylesheet
+            .variables
+            .get("--main-color")
+            .map(|s| s.as_str()),
+        Some("#ff0000")
+    );
     assert!(doc.stylesheet.variables.contains_key("--gap"));
 }
 
 #[test]
 fn css_variable_with_fallback() {
-    let rules = parse_stylesheet("p { color: var(--missing, red); }")
-        .unwrap_or_default();
+    let rules = parse_stylesheet("p { color: var(--missing, red); }").unwrap_or_default();
     assert!(!rules.is_empty());
 }
 
 #[test]
 fn css_hover_rule() {
     let rules = parse_stylesheet("a:hover { color: red; }").unwrap_or_default();
-    assert!(rules.iter().any(|r| r.is_hover),
-        "a:hover rule should set is_hover=true");
+    assert!(
+        rules.iter().any(|r| r.is_hover),
+        "a:hover rule should set is_hover=true"
+    );
 }
 
 #[test]
 fn css_pseudo_element_before() {
     let rules = parse_stylesheet("p::before { content: \">\"; }").unwrap_or_default();
-    assert!(rules.iter().any(|r| r.pseudo_element == PseudoElement::Before),
-        "p::before rule should have pseudo_element == Before");
+    assert!(
+        rules
+            .iter()
+            .any(|r| r.pseudo_element == PseudoElement::Before),
+        "p::before rule should have pseudo_element == Before"
+    );
 }
 
 #[test]
 fn css_pseudo_element_after() {
     let rules = parse_stylesheet("p::after { content: \"<\"; }").unwrap_or_default();
-    assert!(rules.iter().any(|r| r.pseudo_element == PseudoElement::After),
-        "p::after rule should have pseudo_element == After");
+    assert!(
+        rules
+            .iter()
+            .any(|r| r.pseudo_element == PseudoElement::After),
+        "p::after rule should have pseudo_element == After"
+    );
 }
 
 // ============================================================
@@ -117,52 +133,82 @@ fn css_pseudo_element_after() {
 #[test]
 fn css_selector_with_class() {
     let sel = parse_selector("div.container");
-    assert!(sel.parts.iter().any(|p| matches!(p, SelectorPart::Tag(t) if t == "div")));
-    assert!(sel.parts.iter().any(|p| matches!(p, SelectorPart::Class(c) if c == "container")));
+    assert!(sel
+        .parts
+        .iter()
+        .any(|p| matches!(p, SelectorPart::Tag(t) if t == "div")));
+    assert!(sel
+        .parts
+        .iter()
+        .any(|p| matches!(p, SelectorPart::Class(c) if c == "container")));
 }
 
 #[test]
 fn css_selector_with_id() {
     let sel = parse_selector("#main");
-    assert!(sel.parts.iter().any(|p| matches!(p, SelectorPart::Id(id) if id == "main")));
+    assert!(sel
+        .parts
+        .iter()
+        .any(|p| matches!(p, SelectorPart::Id(id) if id == "main")));
 }
 
 #[test]
 fn css_selector_multiple_classes() {
     let sel = parse_selector(".foo.bar.baz");
-    let class_count = sel.parts.iter()
+    let class_count = sel
+        .parts
+        .iter()
         .filter(|p| matches!(p, SelectorPart::Class(_)))
         .count();
-    assert!(class_count >= 3,
-        "Expected at least 3 classes, got {}", class_count);
+    assert!(
+        class_count >= 3,
+        "Expected at least 3 classes, got {}",
+        class_count
+    );
 }
 
 #[test]
 fn css_descendant_combinator() {
     let sel = parse_selector("div p");
-    assert!(sel.parts.iter().any(|p| matches!(p, SelectorPart::Combinator(Combinator::Descendant))),
-        "div p should have a Descendant combinator");
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Combinator(Combinator::Descendant))),
+        "div p should have a Descendant combinator"
+    );
 }
 
 #[test]
 fn css_child_combinator() {
     let sel = parse_selector("div > p");
-    assert!(sel.parts.iter().any(|p| matches!(p, SelectorPart::Combinator(Combinator::Child))),
-        "div > p should have a Child combinator");
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Combinator(Combinator::Child))),
+        "div > p should have a Child combinator"
+    );
 }
 
 #[test]
 fn css_adjacent_sibling_combinator() {
     let sel = parse_selector("h1 + p");
-    assert!(sel.parts.iter().any(|p| matches!(p, SelectorPart::Combinator(Combinator::AdjacentSibling))),
-        "h1 + p should have an AdjacentSibling combinator");
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Combinator(Combinator::AdjacentSibling))),
+        "h1 + p should have an AdjacentSibling combinator"
+    );
 }
 
 #[test]
 fn css_general_sibling_combinator() {
     let sel = parse_selector("h1 ~ p");
-    assert!(sel.parts.iter().any(|p| matches!(p, SelectorPart::Combinator(Combinator::GeneralSibling))),
-        "h1 ~ p should have a GeneralSibling combinator");
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Combinator(Combinator::GeneralSibling))),
+        "h1 ~ p should have a GeneralSibling combinator"
+    );
 }
 
 #[test]
@@ -170,10 +216,18 @@ fn css_specificity_ordering() {
     let sel1 = parse_selector("#main");
     let sel2 = parse_selector(".container");
     let sel3 = parse_selector("div");
-    assert!(sel1.specificity() > sel2.specificity(),
-        "#main specificity ({}) should > .container ({})", sel1.specificity(), sel2.specificity());
-    assert!(sel2.specificity() > sel3.specificity(),
-        ".container specificity ({}) should > div ({})", sel2.specificity(), sel3.specificity());
+    assert!(
+        sel1.specificity() > sel2.specificity(),
+        "#main specificity ({}) should > .container ({})",
+        sel1.specificity(),
+        sel2.specificity()
+    );
+    assert!(
+        sel2.specificity() > sel3.specificity(),
+        ".container specificity ({}) should > div ({})",
+        sel2.specificity(),
+        sel3.specificity()
+    );
 }
 
 // ============================================================
@@ -214,7 +268,11 @@ fn css_overflow_property() {
 fn css_opacity_property() {
     let mut s = ComputedStyle::default();
     apply_property(&mut s, "opacity", "0.5");
-    assert!((s.opacity - 0.5).abs() < 0.01, "opacity 0.5 expected, got {}", s.opacity);
+    assert!(
+        (s.opacity - 0.5).abs() < 0.01,
+        "opacity 0.5 expected, got {}",
+        s.opacity
+    );
     apply_property(&mut s, "opacity", "0");
     assert!(s.opacity < 0.01, "opacity 0 expected, got {}", s.opacity);
     apply_property(&mut s, "opacity", "1");
@@ -256,13 +314,19 @@ fn css_text_overflow_property() {
 fn css_outline_properties() {
     let mut s = ComputedStyle::default();
     apply_property(&mut s, "outline-width", "2px");
-    assert!((s.outline_width - 2.0).abs() < 0.1, "outline-width 2px expected");
+    assert!(
+        (s.outline_width - 2.0).abs() < 0.1,
+        "outline-width 2px expected"
+    );
     apply_property(&mut s, "outline-style", "solid");
     assert_eq!(s.outline_style, BorderStyle::Solid);
     apply_property(&mut s, "outline-style", "dashed");
     assert_eq!(s.outline_style, BorderStyle::Dashed);
     apply_property(&mut s, "outline-offset", "3px");
-    assert!((s.outline_offset - 3.0).abs() < 0.1, "outline-offset 3px expected");
+    assert!(
+        (s.outline_offset - 3.0).abs() < 0.1,
+        "outline-offset 3px expected"
+    );
 }
 
 #[test]
@@ -346,14 +410,18 @@ fn css_list_style_type_property() {
 fn css_important_stripped_from_color() {
     let decls = parse_declarations("color: #ff0000 !important;");
     assert_eq!(decls.len(), 1);
-    assert_eq!(decls.get("color").map(|s| s.as_str()), Some("#ff0000"),
-        "!important should be stripped, leaving just the value");
+    assert_eq!(
+        decls.get("color").map(|s| s.as_str()),
+        Some("#ff0000"),
+        "!important should be stripped, leaving just the value"
+    );
 }
 
 #[test]
 fn css_important_stripped_from_multiple() {
     let decls = parse_declarations(
-        "background: #21262d !important; color: #6e7681 !important; cursor: default;");
+        "background: #21262d !important; color: #6e7681 !important; cursor: default;",
+    );
     assert_eq!(decls.len(), 3);
     assert_eq!(decls.get("background").map(|s| s.as_str()), Some("#21262d"));
     assert_eq!(decls.get("color").map(|s| s.as_str()), Some("#6e7681"));
@@ -364,21 +432,30 @@ fn css_important_stripped_from_multiple() {
 fn css_important_color_applied() {
     let doc = parse_html(
         "<html><head><style>.red { color: #ff0000 !important; }</style></head>\
-         <body><p class=\"red\">Text</p></body></html>");
+         <body><p class=\"red\">Text</p></body></html>",
+    );
     let p = find_box(&doc.root, &|b: &WebCore| b.tag == "p");
     assert!(p.is_some(), "p element should be found");
     let p = p.unwrap();
-    assert_eq!(p.style.color, Color::rgb(255, 0, 0),
-        "color: #ff0000 !important should be applied");
+    assert_eq!(
+        p.style.color,
+        Color::rgb(255, 0, 0),
+        "color: #ff0000 !important should be applied"
+    );
 }
 
 #[test]
 fn css_important_background_applied() {
     let doc = parse_html(
         "<html><head><style>.bg { background-color: #334155 !important; }</style></head>\
-         <body><div class=\"bg\">Box</div></body></html>");
+         <body><div class=\"bg\">Box</div></body></html>",
+    );
     let div = find_box(&doc.root, &|b: &WebCore| {
-        b.tag == "div" && b.attributes.get("class").map(|v| v == "bg").unwrap_or(false)
+        b.tag == "div"
+            && b.attributes
+                .get("class")
+                .map(|v| v == "bg")
+                .unwrap_or(false)
     });
     assert!(div.is_some(), "div.bg should be found");
     let c = div.unwrap().style.background_color;
@@ -397,13 +474,18 @@ fn css_important_beats_higher_specificity() {
            p { color: red !important; }\
            body p.special { color: blue; }\
          </style></head>\
-         <body><p class=\"special\">Text</p></body></html>");
-    let p = find_box(&doc.root, &|b: &WebCore| b.tag == "p"
-        && b.attributes.get("class").map_or(false, |v| v == "special"));
+         <body><p class=\"special\">Text</p></body></html>",
+    );
+    let p = find_box(&doc.root, &|b: &WebCore| {
+        b.tag == "p" && b.attributes.get("class").map_or(false, |v| v == "special")
+    });
     assert!(p.is_some());
     // !important (specificity 1) should beat normal (specificity 12)
-    assert_eq!(p.unwrap().style.color, Color::rgb(255, 0, 0),
-        "!important should override higher-specificity normal rule");
+    assert_eq!(
+        p.unwrap().style.color,
+        Color::rgb(255, 0, 0),
+        "!important should override higher-specificity normal rule"
+    );
 }
 
 #[test]
@@ -413,11 +495,15 @@ fn css_important_beats_inline_style() {
         "<html><head><style>\
            p { color: green !important; }\
          </style></head>\
-         <body><p style=\"color: blue;\">Text</p></body></html>");
+         <body><p style=\"color: blue;\">Text</p></body></html>",
+    );
     let p = find_box(&doc.root, &|b: &WebCore| b.tag == "p");
     assert!(p.is_some());
-    assert_eq!(p.unwrap().style.color, Color::rgb(0, 128, 0),
-        "!important in stylesheet should override inline style");
+    assert_eq!(
+        p.unwrap().style.color,
+        Color::rgb(0, 128, 0),
+        "!important in stylesheet should override inline style"
+    );
 }
 
 #[test]
@@ -427,11 +513,15 @@ fn css_inline_important_beats_stylesheet_important() {
         "<html><head><style>\
            p { color: green !important; }\
          </style></head>\
-         <body><p style=\"color: blue !important;\">Text</p></body></html>");
+         <body><p style=\"color: blue !important;\">Text</p></body></html>",
+    );
     let p = find_box(&doc.root, &|b: &WebCore| b.tag == "p");
     assert!(p.is_some());
-    assert_eq!(p.unwrap().style.color, Color::rgb(0, 0, 255),
-        "inline !important should beat stylesheet !important");
+    assert_eq!(
+        p.unwrap().style.color,
+        Color::rgb(0, 0, 255),
+        "inline !important should beat stylesheet !important"
+    );
 }
 
 #[test]
@@ -442,9 +532,11 @@ fn css_important_does_not_affect_other_properties() {
            p { color: red !important; background-color: yellow; }\
            p.x { color: blue; background-color: green; }\
          </style></head>\
-         <body><p class=\"x\">Text</p></body></html>");
-    let p = find_box(&doc.root, &|b: &WebCore| b.tag == "p"
-        && b.attributes.get("class").map_or(false, |v| v == "x"));
+         <body><p class=\"x\">Text</p></body></html>",
+    );
+    let p = find_box(&doc.root, &|b: &WebCore| {
+        b.tag == "p" && b.attributes.get("class").map_or(false, |v| v == "x")
+    });
     assert!(p.is_some());
     let p = p.unwrap();
     // color: red !important should win over color: blue (higher specificity)
@@ -455,9 +547,13 @@ fn css_important_does_not_affect_other_properties() {
 
 // ── find_box helper ───────────────────────────────────────────────────────────
 fn find_box<'a, F: Fn(&WebCore) -> bool>(root: &'a WebCore, pred: &F) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for child in &root.children {
-        if let Some(b) = find_box(child, pred) { return Some(b); }
+        if let Some(b) = find_box(child, pred) {
+            return Some(b);
+        }
     }
     None
 }

@@ -9,16 +9,20 @@
 //   - "Smoke" tests: parse + layout, assert no panic, check key invariants.
 //   - Hit-test tests: use the hit_test API from layout::hit_test.
 //   - Overflow tests: verify box dimensions after layout.
+use tiny_skia::Pixmap;
 use webcore::types::*;
 use webcore::{load_html, parse_html, Renderer};
-use tiny_skia::Pixmap;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn find_box<'a>(root: &'a WebCore, pred: &dyn Fn(&WebCore) -> bool) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for child in &root.children {
-        if let Some(found) = find_box(child, pred) { return Some(found); }
+        if let Some(found) = find_box(child, pred) {
+            return Some(found);
+        }
     }
     None
 }
@@ -36,15 +40,19 @@ fn hidden_box_layout_no_panic() {
         800.0,
     );
     // Hidden box exists in tree
-    let hidden = find_box(&doc.root, &|b| {
-        b.tag == "div" && !b.style.visibility
-    });
-    assert!(hidden.is_some(), "visibility:hidden div should exist in tree");
+    let hidden = find_box(&doc.root, &|b| b.tag == "div" && !b.style.visibility);
+    assert!(
+        hidden.is_some(),
+        "visibility:hidden div should exist in tree"
+    );
     // Visible box also exists
     let visible = find_box(&doc.root, &|b| {
         b.tag == "div" && b.style.visibility && b.layout.content_rect.h > 0.0
     });
-    assert!(visible.is_some(), "visible div should exist in tree with non-zero height");
+    assert!(
+        visible.is_some(),
+        "visible div should exist in tree with non-zero height"
+    );
 }
 
 #[test]
@@ -58,7 +66,10 @@ fn display_none_box_skipped_in_layout() {
     let none_box = find_box(&doc.root, &|b| {
         b.tag == "div" && b.style.display == Display::None
     });
-    assert!(none_box.is_some(), "display:none div should still be in box tree");
+    assert!(
+        none_box.is_some(),
+        "display:none div should still be in box tree"
+    );
     // Visible div should have positive height
     let visible = find_box(&doc.root, &|b| {
         b.tag == "div" && b.style.display != Display::None && b.layout.content_rect.h > 0.0
@@ -84,8 +95,11 @@ fn overflow_hidden_layout() {
     assert!(box_.is_some(), "overflow:hidden div not found");
     // Width should be close to 200px
     let w = box_.unwrap().layout.content_rect.w;
-    assert!(w >= 195.0 && w <= 205.0,
-        "overflow:hidden div width should be ~200px, got {}", w);
+    assert!(
+        w >= 195.0 && w <= 205.0,
+        "overflow:hidden div width should be ~200px, got {}",
+        w
+    );
 }
 
 #[test]
@@ -96,9 +110,7 @@ fn overflow_scroll_layout() {
          </div>",
         800.0,
     );
-    let box_ = find_box(&doc.root, &|b| {
-        b.style.overflow_x == Overflow::Scroll
-    });
+    let box_ = find_box(&doc.root, &|b| b.style.overflow_x == Overflow::Scroll);
     assert!(box_.is_some(), "overflow:scroll div not found");
 }
 
@@ -112,7 +124,9 @@ fn border_render_smoke() {
         "<div style=\"border: 2px solid red; width: 200px; height: 100px;\">Bordered</div>",
         800.0,
     );
-    let b = find_box(&doc.root, &|b| b.tag == "div" && b.layout.content_rect.w > 0.0);
+    let b = find_box(&doc.root, &|b| {
+        b.tag == "div" && b.layout.content_rect.w > 0.0
+    });
     assert!(b.is_some());
     let b = b.unwrap();
     assert_eq!(b.style.border_top_style, BorderStyle::Solid);
@@ -125,7 +139,9 @@ fn dashed_border_smoke() {
         "<div style=\"border: 3px dashed blue; width: 150px; height: 80px;\">Dashed</div>",
         800.0,
     );
-    let b = find_box(&doc.root, &|b| b.tag == "div" && b.layout.content_rect.w > 0.0);
+    let b = find_box(&doc.root, &|b| {
+        b.tag == "div" && b.layout.content_rect.w > 0.0
+    });
     assert!(b.is_some());
     assert_eq!(b.unwrap().style.border_top_style, BorderStyle::Dashed);
 }
@@ -136,7 +152,9 @@ fn dotted_border_smoke() {
         "<div style=\"border: 1px dotted green; width: 100px;\">Dotted</div>",
         800.0,
     );
-    let b = find_box(&doc.root, &|b| b.tag == "div" && b.layout.content_rect.w > 0.0);
+    let b = find_box(&doc.root, &|b| {
+        b.tag == "div" && b.layout.content_rect.w > 0.0
+    });
     assert!(b.is_some());
     assert_eq!(b.unwrap().style.border_top_style, BorderStyle::Dotted);
 }
@@ -148,7 +166,9 @@ fn rounded_border_smoke() {
          width: 200px; height: 100px;\">Rounded</div>",
         800.0,
     );
-    let b = find_box(&doc.root, &|b| b.tag == "div" && b.layout.content_rect.w > 0.0);
+    let b = find_box(&doc.root, &|b| {
+        b.tag == "div" && b.layout.content_rect.w > 0.0
+    });
     assert!(b.is_some());
     let b = b.unwrap();
     // border-radius should be parsed
@@ -169,7 +189,10 @@ fn box_shadow_render_smoke() {
     let b = find_box(&doc.root, &|b| b.tag == "div");
     assert!(b.is_some());
     // box-shadow should be parsed
-    assert!(b.unwrap().style.box_shadow.is_some(), "box-shadow should be parsed");
+    assert!(
+        !b.unwrap().style.box_shadow.is_empty(),
+        "box-shadow should be parsed"
+    );
 }
 
 // ============================================================
@@ -183,10 +206,15 @@ fn linear_gradient_render_smoke() {
          width: 300px; height: 100px;\">Gradient</div>",
         800.0,
     );
-    let b = find_box(&doc.root, &|b| b.tag == "div" && b.layout.content_rect.w > 0.0);
+    let b = find_box(&doc.root, &|b| {
+        b.tag == "div" && b.layout.content_rect.w > 0.0
+    });
     assert!(b.is_some());
-    assert_eq!(b.unwrap().style.gradient_type, GradientType::Linear,
-        "gradient_type should be Linear");
+    assert_eq!(
+        b.unwrap().style.gradient_type,
+        GradientType::Linear,
+        "gradient_type should be Linear"
+    );
 }
 
 // ============================================================
@@ -200,11 +228,16 @@ fn opacity_render_smoke() {
          width: 200px; height: 100px;\">Half transparent</div>",
         800.0,
     );
-    let b = find_box(&doc.root, &|b| b.tag == "div" && b.layout.content_rect.w > 0.0);
+    let b = find_box(&doc.root, &|b| {
+        b.tag == "div" && b.layout.content_rect.w > 0.0
+    });
     assert!(b.is_some());
     let opacity = b.unwrap().style.opacity;
-    assert!((opacity - 0.5).abs() < 0.01,
-        "opacity should be ~0.5, got {}", opacity);
+    assert!(
+        (opacity - 0.5).abs() < 0.01,
+        "opacity should be ~0.5, got {}",
+        opacity
+    );
 }
 
 #[test]
@@ -228,7 +261,9 @@ fn background_color_render_smoke() {
         "<div style=\"background-color: #336699; width: 200px; height: 100px;\">Colored</div>",
         800.0,
     );
-    let b = find_box(&doc.root, &|b| b.tag == "div" && b.layout.content_rect.w > 0.0);
+    let b = find_box(&doc.root, &|b| {
+        b.tag == "div" && b.layout.content_rect.w > 0.0
+    });
     assert!(b.is_some());
     let bg = b.unwrap().style.background_color;
     assert_eq!(bg.r, 0x33);
@@ -248,8 +283,10 @@ fn text_shadow_render_smoke() {
     );
     let p = find_box(&doc.root, &|b| b.tag == "p");
     assert!(p.is_some());
-    assert!(p.unwrap().style.text_shadow.is_some(),
-        "text-shadow should be parsed");
+    assert!(
+        p.unwrap().style.text_shadow.is_some(),
+        "text-shadow should be parsed"
+    );
 }
 
 // ============================================================
@@ -262,7 +299,9 @@ fn outline_render_smoke() {
         "<div style=\"outline: 2px solid red; width: 200px; height: 100px;\">Outlined</div>",
         800.0,
     );
-    let b = find_box(&doc.root, &|b| b.tag == "div" && b.layout.content_rect.w > 0.0);
+    let b = find_box(&doc.root, &|b| {
+        b.tag == "div" && b.layout.content_rect.w > 0.0
+    });
     assert!(b.is_some());
     let b = b.unwrap();
     // Outline should be parsed
@@ -270,8 +309,11 @@ fn outline_render_smoke() {
     assert_eq!(b.style.outline_style, BorderStyle::Solid);
     // Outline does NOT affect content_rect width (unlike border)
     let w = b.layout.content_rect.w;
-    assert!(w >= 195.0 && w <= 205.0,
-        "outline should not affect content width, got {}", w);
+    assert!(
+        w >= 195.0 && w <= 205.0,
+        "outline should not affect content width, got {}",
+        w
+    );
 }
 
 // ============================================================
@@ -290,8 +332,13 @@ fn mixed_styling_smoke() {
          </div>",
         800.0,
     );
-    let div = find_box(&doc.root, &|b| b.tag == "div" && b.layout.content_rect.w > 0.0);
-    assert!(div.is_some(), "outer div must exist and have positive width");
+    let div = find_box(&doc.root, &|b| {
+        b.tag == "div" && b.layout.content_rect.w > 0.0
+    });
+    assert!(
+        div.is_some(),
+        "outer div must exist and have positive width"
+    );
 }
 
 #[test]
@@ -324,16 +371,29 @@ fn scrolled_viewport_smoke() {
     );
     let mut ps = Vec::new();
     fn collect<'a>(root: &'a WebCore, out: &mut Vec<&'a WebCore>) {
-        if root.tag == "p" { out.push(root); }
-        for c in &root.children { collect(c, out); }
+        if root.tag == "p" {
+            out.push(root);
+        }
+        for c in &root.children {
+            collect(c, out);
+        }
     }
     collect(&doc.root, &mut ps);
-    assert!(ps.len() >= 8, "should have 8 <p> elements, got {}", ps.len());
+    assert!(
+        ps.len() >= 8,
+        "should have 8 <p> elements, got {}",
+        ps.len()
+    );
     // Consecutive paragraphs should be stacked (later ones have greater y)
     for i in 1..ps.len() {
-        assert!(ps[i].layout.content_rect.y > ps[i - 1].layout.content_rect.y,
+        assert!(
+            ps[i].layout.content_rect.y > ps[i - 1].layout.content_rect.y,
             "p[{}] y ({}) should be > p[{}] y ({})",
-            i, ps[i].layout.content_rect.y, i - 1, ps[i - 1].layout.content_rect.y);
+            i,
+            ps[i].layout.content_rect.y,
+            i - 1,
+            ps[i - 1].layout.content_rect.y
+        );
     }
 }
 
@@ -343,8 +403,10 @@ fn selection_highlight_smoke() {
     let doc = load_html("<p>Hello World</p>", 800.0);
     let p = find_box(&doc.root, &|b| b.tag == "p");
     assert!(p.is_some());
-    assert!(p.unwrap().layout.content_rect.h > 0.0,
-        "paragraph should have positive height after layout");
+    assert!(
+        p.unwrap().layout.content_rect.h > 0.0,
+        "paragraph should have positive height after layout"
+    );
 }
 
 // ============================================================
@@ -381,7 +443,10 @@ fn gradient_background_covers_element_at_scale_1() {
     let pixmap = render_doc(html, 200, 100, 1.0);
     // The center of the div (50, 25) should NOT be white
     let (r, g, b, _) = pixel_at(&pixmap, 50, 25, 1.0);
-    assert!(r > 0 || b > 0, "center of gradient div should have color, got ({r},{g},{b})");
+    assert!(
+        r > 0 || b > 0,
+        "center of gradient div should have color, got ({r},{g},{b})"
+    );
     // The left edge should be more red than blue
     let (lr, _lg, lb, _) = pixel_at(&pixmap, 5, 25, 1.0);
     assert!(lr > lb, "left edge should be more red, got r={lr} b={lb}");
@@ -399,14 +464,18 @@ fn gradient_background_covers_element_at_scale_2() {
                  background: linear-gradient(to right, #ff0000, #0000ff);\"></div>";
     let pixmap = render_doc(html, 200, 100, 2.0);
     let (r, g, b, _) = pixel_at(&pixmap, 50, 25, 2.0);
-    assert!(r > 0 || b > 0,
-        "center of gradient div should have color at scale 2, got ({r},{g},{b})");
+    assert!(
+        r > 0 || b > 0,
+        "center of gradient div should have color at scale 2, got ({r},{g},{b})"
+    );
     // At scale 2 the physical size is 400×200; physical pixel (100,50) is the center.
     // That should NOT be pure white (which would indicate the gradient was drawn
     // at the wrong (unscaled) position).
     let (r2, g2, b2, _) = pixel_at(&pixmap, 50, 25, 2.0);
-    assert!(r2 > 0 || b2 > 0,
-        "gradient at scale 2 should not be white at logical center");
+    assert!(
+        r2 > 0 || b2 > 0,
+        "gradient at scale 2 should not be white at logical center"
+    );
 }
 
 #[test]
@@ -425,7 +494,9 @@ fn gradient_background_position_matches_scale_1_and_2() {
     // Colors should be in the same general range (within 30 units)
     let dr = (r1 as i32 - r2 as i32).abs();
     let db = (b1 as i32 - b2 as i32).abs();
-    assert!(dr < 30 && db < 30,
+    assert!(
+        dr < 30 && db < 30,
         "scale 1 and 2 should produce similar colors at same logical pos: \
-         scale1=({r1},{b1}) scale2=({r2},{b2})");
+         scale1=({r1},{b1}) scale2=({r2},{b2})"
+    );
 }

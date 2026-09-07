@@ -3,8 +3,8 @@
 // Note: display:contents, flow-root, inline-table, ruby-base are omitted
 // (not yet in Rust Display enum).
 
-use webcore::types::*;
 use webcore::css::apply_property;
+use webcore::types::*;
 use webcore::{load_html, parse_html};
 
 fn parse(html: &str) -> Document {
@@ -16,9 +16,13 @@ fn parse_and_layout(html: &str, viewport_width: f32) -> Document {
 }
 
 fn find_box<'a, F: Fn(&WebCore) -> bool>(root: &'a WebCore, pred: &F) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for child in &root.children {
-        if let Some(b) = find_box(child, pred) { return Some(b); }
+        if let Some(b) = find_box(child, pred) {
+            return Some(b);
+        }
     }
     None
 }
@@ -191,14 +195,15 @@ fn display_flow_root_parsed() {
 #[test]
 fn display_flow_root_block_level() {
     // flow-root should be block-level
-    let doc = parse(
-        "<div><div id='fr' style='display:flow-root'>content</div></div>",
-    );
+    let doc = parse("<div><div id='fr' style='display:flow-root'>content</div></div>");
     let fr = find_box(&doc.root, &|b: &WebCore| {
         b.attributes.get("id").map(|v| v == "fr").unwrap_or(false)
     });
     assert!(fr.is_some(), "flow-root div not found");
-    assert!(fr.unwrap().style.is_block_level(), "flow-root should be block-level");
+    assert!(
+        fr.unwrap().style.is_block_level(),
+        "flow-root should be block-level"
+    );
 }
 
 #[test]
@@ -217,8 +222,11 @@ fn display_flow_root_establishes_bfc() {
     });
     assert!(fr.is_some(), "flow-root div not found");
     // flow-root should expand to contain the float (at least 49px tall)
-    assert!(fr.unwrap().layout.content_rect.h >= 49.0,
-        "flow-root should contain float, height was {}", fr.unwrap().layout.content_rect.h);
+    assert!(
+        fr.unwrap().layout.content_rect.h >= 49.0,
+        "flow-root should contain float, height was {}",
+        fr.unwrap().layout.content_rect.h
+    );
 }
 
 #[test]
@@ -236,13 +244,19 @@ fn display_flow_root_no_margin_collapse() {
         b.attributes.get("id").map(|v| v == "fr").unwrap_or(false)
     });
     let inner = find_box(&doc.root, &|b: &WebCore| {
-        b.attributes.get("id").map(|v| v == "inner").unwrap_or(false)
+        b.attributes
+            .get("id")
+            .map(|v| v == "inner")
+            .unwrap_or(false)
     });
     assert!(fr.is_some(), "flow-root not found");
     assert!(inner.is_some(), "inner not found");
     // The flow-root should be tall enough to contain inner + its margin (30 + 10 = 40)
-    assert!(fr.unwrap().layout.content_rect.h >= 40.0,
-        "flow-root height should be >= 40, got {}", fr.unwrap().layout.content_rect.h);
+    assert!(
+        fr.unwrap().layout.content_rect.h >= 40.0,
+        "flow-root height should be >= 40, got {}",
+        fr.unwrap().layout.content_rect.h
+    );
 }
 
 // ============================================================
@@ -260,7 +274,10 @@ fn display_ruby_is_inline_level() {
         b.attributes.get("id").map(|v| v == "r").unwrap_or(false)
     });
     assert!(r.is_some(), "ruby div not found");
-    assert!(r.unwrap().style.is_inline_level(), "display:ruby should be inline-level");
+    assert!(
+        r.unwrap().style.is_inline_level(),
+        "display:ruby should be inline-level"
+    );
 }
 
 #[test]
@@ -328,8 +345,11 @@ fn display_inline_block_same_line_as_text() {
     });
     assert!(ib.is_some(), "inline-block span not found");
     // Its Y should be near the top — same line as "Hello" (< 60px)
-    assert!(ib.unwrap().layout.content_rect.y < 60.0,
-        "inline-block should be on first line, y={}", ib.unwrap().layout.content_rect.y);
+    assert!(
+        ib.unwrap().layout.content_rect.y < 60.0,
+        "inline-block should be on first line, y={}",
+        ib.unwrap().layout.content_rect.y
+    );
 }
 
 #[test]
@@ -348,7 +368,10 @@ fn display_inline_block_layout_stable_on_relayout() {
             b.attributes.get("id").map(|v| v == "ib").unwrap_or(false)
         });
         assert!(ib.is_some(), "ib not found after first layout");
-        (ib.unwrap().layout.content_rect.y, ib.unwrap().layout.content_rect.h)
+        (
+            ib.unwrap().layout.content_rect.y,
+            ib.unwrap().layout.content_rect.h,
+        )
     };
     // Re-layout
     engine.layout(&mut doc, 400.0);
@@ -357,7 +380,10 @@ fn display_inline_block_layout_stable_on_relayout() {
             b.attributes.get("id").map(|v| v == "ib").unwrap_or(false)
         });
         assert!(ib.is_some(), "ib not found after second layout");
-        (ib.unwrap().layout.content_rect.y, ib.unwrap().layout.content_rect.h)
+        (
+            ib.unwrap().layout.content_rect.y,
+            ib.unwrap().layout.content_rect.h,
+        )
     };
     assert_eq!(y1, y2, "Y position should be stable across re-layout");
     assert_eq!(h1, h2, "height should be stable across re-layout");

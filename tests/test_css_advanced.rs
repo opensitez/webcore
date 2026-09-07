@@ -1,8 +1,8 @@
 // Ported from cpptests/test_css_advanced.cpp
 // Advanced CSS property parsing tests
 
-use webcore::types::*;
 use webcore::css::apply_property;
+use webcore::types::*;
 
 fn style_with(prop: &str, val: &str) -> ComputedStyle {
     let mut style = ComputedStyle::default();
@@ -57,7 +57,7 @@ fn css_adv_text_shadow_default_color() {
 #[test]
 fn css_adv_box_shadow_with_spread() {
     let s = style_with("box-shadow", "2px 3px 4px 5px black");
-    let bs = s.box_shadow.as_ref().expect("box-shadow should be set");
+    let bs = s.box_shadow.first().expect("box-shadow should be set");
     assert_eq!(bs.offset_x, 2.0);
     assert_eq!(bs.offset_y, 3.0);
     assert_eq!(bs.blur, 4.0);
@@ -67,7 +67,7 @@ fn css_adv_box_shadow_with_spread() {
 #[test]
 fn css_adv_box_shadow_inset() {
     let s = style_with("box-shadow", "inset 2px 3px 4px black");
-    let bs = s.box_shadow.as_ref().expect("box-shadow should be set");
+    let bs = s.box_shadow.first().expect("box-shadow should be set");
     assert!(bs.inset);
     assert_eq!(bs.offset_x, 2.0);
     assert_eq!(bs.offset_y, 3.0);
@@ -77,9 +77,9 @@ fn css_adv_box_shadow_inset() {
 fn css_adv_box_shadow_none() {
     let mut s = ComputedStyle::default();
     apply_property(&mut s, "box-shadow", "2px 3px black");
-    assert!(s.box_shadow.is_some());
+    assert!(!s.box_shadow.is_empty());
     apply_property(&mut s, "box-shadow", "none");
-    assert!(s.box_shadow.is_none());
+    assert!(s.box_shadow.is_empty());
 }
 
 // ============================================================
@@ -372,7 +372,7 @@ fn css_adv_list_style_shorthand() {
 fn css_adv_linear_gradient_two_stops() {
     let s = style_with("background-image", "linear-gradient(to right, red, blue)");
     assert_eq!(s.gradient_type, GradientType::Linear);
-    assert!(s.gradient_stops.len() >= 2);
+    assert!(s.rare().gradient_stops.len() >= 2);
 }
 
 #[test]
@@ -490,28 +490,28 @@ fn css_adv_container_shorthand_size_only() {
 #[test]
 fn css_adv_margin_inline_shorthand() {
     let s = style_with("margin-inline", "10px");
-    assert_eq!(s.margin_left,  CssLength::Px(10.0));
+    assert_eq!(s.margin_left, CssLength::Px(10.0));
     assert_eq!(s.margin_right, CssLength::Px(10.0));
 }
 
 #[test]
 fn css_adv_padding_inline_shorthand() {
     let s = style_with("padding-inline", "15px");
-    assert_eq!(s.padding_left,  CssLength::Px(15.0));
+    assert_eq!(s.padding_left, CssLength::Px(15.0));
     assert_eq!(s.padding_right, CssLength::Px(15.0));
 }
 
 #[test]
 fn css_adv_margin_block_shorthand() {
     let s = style_with("margin-block", "20px");
-    assert_eq!(s.margin_top,    CssLength::Px(20.0));
+    assert_eq!(s.margin_top, CssLength::Px(20.0));
     assert_eq!(s.margin_bottom, CssLength::Px(20.0));
 }
 
 #[test]
 fn css_adv_padding_block_shorthand() {
     let s = style_with("padding-block", "25px");
-    assert_eq!(s.padding_top,    CssLength::Px(25.0));
+    assert_eq!(s.padding_top, CssLength::Px(25.0));
     assert_eq!(s.padding_bottom, CssLength::Px(25.0));
 }
 
@@ -558,10 +558,17 @@ fn css_adv_hover_background_color() {
     use webcore::parse_html;
     let doc = parse_html(
         "<html><head><style>div:hover { background-color: yellow; }</style></head>\
-         <body><div>x</div></body></html>");
+         <body><div>x</div></body></html>",
+    );
     fn find<'a>(b: &'a webcore::types::WebCore, tag: &str) -> Option<&'a webcore::types::WebCore> {
-        if b.tag == tag { return Some(b); }
-        for c in &b.children { if let Some(f) = find(c, tag) { return Some(f); } }
+        if b.tag == tag {
+            return Some(b);
+        }
+        for c in &b.children {
+            if let Some(f) = find(c, tag) {
+                return Some(f);
+            }
+        }
         None
     }
     let div = find(&doc.root, "div").expect("div");
@@ -574,10 +581,17 @@ fn css_adv_hover_color() {
     use webcore::parse_html;
     let doc = parse_html(
         "<html><head><style>div:hover { color: green; }</style></head>\
-         <body><div>x</div></body></html>");
+         <body><div>x</div></body></html>",
+    );
     fn find<'a>(b: &'a webcore::types::WebCore, tag: &str) -> Option<&'a webcore::types::WebCore> {
-        if b.tag == tag { return Some(b); }
-        for c in &b.children { if let Some(f) = find(c, tag) { return Some(f); } }
+        if b.tag == tag {
+            return Some(b);
+        }
+        for c in &b.children {
+            if let Some(f) = find(c, tag) {
+                return Some(f);
+            }
+        }
         None
     }
     let div = find(&doc.root, "div").expect("div");
@@ -634,8 +648,7 @@ use webcore::css::parse_stylesheet;
 
 #[test]
 fn css_adv_media_query_parsed() {
-    let rules = parse_stylesheet(
-        "@media (max-width: 600px) { .small { color: red; } }")
+    let rules = parse_stylesheet("@media (max-width: 600px) { .small { color: red; } }")
         .unwrap_or_default();
     assert_eq!(rules.len(), 1);
     assert!(rules[0].media_condition.contains("max-width"));
@@ -643,9 +656,9 @@ fn css_adv_media_query_parsed() {
 
 #[test]
 fn css_adv_media_query_multiple_rules() {
-    let rules = parse_stylesheet(
-        "@media (min-width: 800px) { .a { color: red; } .b { color: blue; } }")
-        .unwrap_or_default();
+    let rules =
+        parse_stylesheet("@media (min-width: 800px) { .a { color: red; } .b { color: blue; } }")
+            .unwrap_or_default();
     assert_eq!(rules.len(), 2);
     assert!(!rules[0].media_condition.is_empty());
     assert!(!rules[1].media_condition.is_empty());
@@ -655,17 +668,17 @@ fn css_adv_media_query_multiple_rules() {
 fn css_adv_media_query_with_normal_rules() {
     let rules = parse_stylesheet(
         "p { color: black; } \
-         @media (max-width: 600px) { p { color: red; } }")
-        .unwrap_or_default();
+         @media (max-width: 600px) { p { color: red; } }",
+    )
+    .unwrap_or_default();
     assert_eq!(rules.len(), 2);
-    assert!(rules[0].media_condition.is_empty());   // unconditional
-    assert!(!rules[1].media_condition.is_empty());   // conditional
+    assert!(rules[0].media_condition.is_empty()); // unconditional
+    assert!(!rules[1].media_condition.is_empty()); // conditional
 }
 
 #[test]
 fn css_adv_media_query_screen_type() {
-    let rules = parse_stylesheet(
-        "@media screen and (max-width: 500px) { .x { display: none; } }")
+    let rules = parse_stylesheet("@media screen and (max-width: 500px) { .x { display: none; } }")
         .unwrap_or_default();
     assert_eq!(rules.len(), 1);
     assert!(!rules[0].media_condition.is_empty());
@@ -673,9 +686,9 @@ fn css_adv_media_query_screen_type() {
 
 #[test]
 fn css_adv_media_query_nested() {
-    let rules = parse_stylesheet(
-        "@media screen { @media (max-width: 500px) { .x { color: red; } } }")
-        .unwrap_or_default();
+    let rules =
+        parse_stylesheet("@media screen { @media (max-width: 500px) { .x { color: red; } } }")
+            .unwrap_or_default();
     assert_eq!(rules.len(), 1);
     // Should have combined condition containing both terms
     assert!(rules[0].media_condition.contains("screen"));
@@ -691,8 +704,8 @@ fn css_adv_margin_inline_start_ltr() {
     let mut s = ComputedStyle::default();
     s.direction = Direction::LTR;
     apply_property(&mut s, "margin-inline-start", "10px");
-    apply_property(&mut s, "margin-inline-end",   "20px");
-    assert_eq!(s.margin_left,  CssLength::Px(10.0));
+    apply_property(&mut s, "margin-inline-end", "20px");
+    assert_eq!(s.margin_left, CssLength::Px(10.0));
     assert_eq!(s.margin_right, CssLength::Px(20.0));
 }
 
@@ -700,8 +713,8 @@ fn css_adv_margin_inline_start_ltr() {
 fn css_adv_padding_block_start_end() {
     let mut s = ComputedStyle::default();
     apply_property(&mut s, "padding-block-start", "5px");
-    apply_property(&mut s, "padding-block-end",   "15px");
-    assert_eq!(s.padding_top,    CssLength::Px(5.0));
+    apply_property(&mut s, "padding-block-end", "15px");
+    assert_eq!(s.padding_top, CssLength::Px(5.0));
     assert_eq!(s.padding_bottom, CssLength::Px(15.0));
 }
 
@@ -709,8 +722,8 @@ fn css_adv_padding_block_start_end() {
 fn css_adv_margin_block_start_end() {
     let mut s = ComputedStyle::default();
     apply_property(&mut s, "margin-block-start", "10px");
-    apply_property(&mut s, "margin-block-end",   "20px");
-    assert_eq!(s.margin_top,    CssLength::Px(10.0));
+    apply_property(&mut s, "margin-block-end", "20px");
+    assert_eq!(s.margin_top, CssLength::Px(10.0));
     assert_eq!(s.margin_bottom, CssLength::Px(20.0));
 }
 

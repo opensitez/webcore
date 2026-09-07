@@ -1,12 +1,16 @@
 // List tests – ported from cpptests/test_lists.cpp
+use webcore::css::apply_property;
 use webcore::types::*;
 use webcore::{load_html, parse_html};
-use webcore::css::apply_property;
 
 fn find_box<'a>(root: &'a WebCore, pred: &dyn Fn(&WebCore) -> bool) -> Option<&'a WebCore> {
-    if pred(root) { return Some(root); }
+    if pred(root) {
+        return Some(root);
+    }
     for child in &root.children {
-        if let Some(found) = find_box(child, pred) { return Some(found); }
+        if let Some(found) = find_box(child, pred) {
+            return Some(found);
+        }
     }
     None
 }
@@ -20,7 +24,9 @@ fn count_boxes(root: &WebCore, pred: &dyn Fn(&WebCore) -> bool) -> usize {
 }
 
 fn walk_boxes<'a>(root: &'a WebCore, out: &mut Vec<&'a WebCore>, pred: &dyn Fn(&WebCore) -> bool) {
-    if pred(root) { out.push(root); }
+    if pred(root) {
+        out.push(root);
+    }
     for child in &root.children {
         walk_boxes(child, out, pred);
     }
@@ -106,7 +112,8 @@ fn nested_list() {
            <li>Parent\
              <ul><li>Child</li></ul>\
            </li>\
-         </ul>");
+         </ul>",
+    );
     let li_count = count_boxes(&doc.root, &|b| b.tag == "li");
     assert!(li_count >= 2);
 }
@@ -144,7 +151,9 @@ fn dd_element() {
 #[test]
 fn list_items_stacked() {
     let doc = load_html(
-        "<ul><li>First</li><li>Second</li><li>Third</li></ul>", 800.0);
+        "<ul><li>First</li><li>Second</li><li>Third</li></ul>",
+        800.0,
+    );
     let mut items = Vec::new();
     walk_boxes(&doc.root, &mut items, &|b| b.tag == "li");
     assert!(items.len() >= 2);
@@ -172,7 +181,9 @@ fn ordered_list_index() {
 fn custom_list_style_circle() {
     // Parse with an inherited list-style-type: circle; verify li is found
     let doc = load_html(
-        "<ul style=\"list-style-type: circle;\"><li>Item</li></ul>", 800.0);
+        "<ul style=\"list-style-type: circle;\"><li>Item</li></ul>",
+        800.0,
+    );
     let li = find_box(&doc.root, &|b| b.tag == "li");
     assert!(li.is_some());
 }
@@ -188,13 +199,18 @@ fn custom_list_style_circle() {
 fn unordered_list_render_equivalent() {
     // Verify that a multi-item UL lays out correctly — structural smoke test
     let doc = load_html(
-        "<ul><li>Item A</li><li>Item B</li><li>Item C</li></ul>", 800.0);
+        "<ul><li>Item A</li><li>Item B</li><li>Item C</li></ul>",
+        800.0,
+    );
     let mut items = Vec::new();
     walk_boxes(&doc.root, &mut items, &|b| b.tag == "li");
     assert!(items.len() >= 3, "expected at least 3 li elements");
     // All items should have non-zero height after layout
     for item in &items {
-        assert!(item.layout.content_rect.h >= 0.0, "li should have non-negative height");
+        assert!(
+            item.layout.content_rect.h >= 0.0,
+            "li should have non-negative height"
+        );
     }
 }
 
@@ -202,14 +218,18 @@ fn unordered_list_render_equivalent() {
 fn ordered_list_render_equivalent() {
     // Verify that an OL with decimal markers lays out correctly
     let doc = load_html(
-        "<ol><li>First</li><li>Second</li><li>Third</li></ul>", 800.0);
+        "<ol><li>First</li><li>Second</li><li>Third</li></ul>",
+        800.0,
+    );
     let mut items = Vec::new();
     walk_boxes(&doc.root, &mut items, &|b| b.tag == "li");
     assert!(items.len() >= 3, "expected at least 3 ol li elements");
     // Items should be stacked vertically (second below first)
     if items.len() >= 2 {
-        assert!(items[1].layout.content_rect.y >= items[0].layout.content_rect.y,
-            "second item should be at or below first");
+        assert!(
+            items[1].layout.content_rect.y >= items[0].layout.content_rect.y,
+            "second item should be at or below first"
+        );
     }
 }
 
@@ -222,9 +242,14 @@ fn nested_list_render_equivalent() {
              <ol><li>Nested 1</li><li>Nested 2</li></ol>\
            </li>\
            <li>Another item</li>\
-         </ul>", 800.0);
+         </ul>",
+        800.0,
+    );
     let li_count = count_boxes(&doc.root, &|b| b.tag == "li");
-    assert!(li_count >= 3, "expected at least 3 li elements (1 parent + 2 nested + 1 sibling)");
+    assert!(
+        li_count >= 3,
+        "expected at least 3 li elements (1 parent + 2 nested + 1 sibling)"
+    );
     // The nested ol should exist
     let ol = find_box(&doc.root, &|b| b.tag == "ol");
     assert!(ol.is_some(), "expected a nested ol element");
