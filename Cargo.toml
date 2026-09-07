@@ -1,6 +1,6 @@
 [package]
 name = "webcore"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "HTML/CSS editor and renderer in Rust using tiny-skia"
 license = "GPL-3.0-or-later OR LicenseRef-Commercial"
@@ -65,6 +65,7 @@ softbuffer = "0.4"
 bytemuck = "1"
 raw-window-handle = "0.6"
 cosmic-text = "0.18.2"
+fontdb = "0.23.0"
 # Glyph OUTLINES, for `strokeText`. Already in the tree as cosmic-text's own
 # dependency at this exact version — naming it here does not add a crate, it
 # makes the outline API reachable. cosmic-text re-exports the rasteriser
@@ -76,7 +77,6 @@ swash = "0.2"
 base64 = "0.21"
 unicode-bidi = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
-resvg = "0.44"
 encoding_rs = "0.8"
 rand = "0.8"
 reqwest = { version = "0.12", features = ["blocking", "gzip", "brotli", "deflate"] }
