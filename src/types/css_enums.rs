@@ -124,6 +124,7 @@ impl Default for BorderStyle {
 pub enum Overflow {
     Visible,
     Hidden,
+    Clip,
     Scroll,
     Auto,
 }
@@ -231,7 +232,7 @@ impl Default for TextAlign {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum VerticalAlign {
     Baseline,
     Top,
@@ -241,6 +242,7 @@ pub enum VerticalAlign {
     TextBottom,
     Sub,
     Super,
+    Length(CssLength),
 }
 
 impl Default for VerticalAlign {
@@ -255,6 +257,9 @@ pub enum TextTransform {
     Uppercase,
     Lowercase,
     Capitalize,
+    FullWidth,
+    FullSizeKana,
+    MathAuto,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

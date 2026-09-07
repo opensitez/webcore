@@ -68,6 +68,16 @@ pub(crate) fn extract_transitionable_style(s: &ComputedStyle) -> HashMap<String,
         "visibility".into(),
         format!("{:?}", s.visibility).to_ascii_lowercase(),
     );
+    m.insert("display".into(), transition_display(s.display));
+    m.insert(
+        "content-visibility".into(),
+        match s.content_visibility {
+            ContentVisibility::Visible => "visible",
+            ContentVisibility::Auto => "auto",
+            ContentVisibility::Hidden => "hidden",
+        }
+        .to_string(),
+    );
     m.insert("color".into(), color_to_rgba(s.color));
     m.insert("background-color".into(), color_to_rgba(s.background_color));
     m.insert("border-top-color".into(), color_to_rgba(s.border_top_color));
@@ -138,6 +148,34 @@ pub(crate) fn extract_transitionable_style(s: &ComputedStyle) -> HashMap<String,
     m.insert("column-gap".into(), transition_length(&s.column_gap));
     m.insert("flex-basis".into(), transition_length(&s.flex_basis));
     m
+}
+
+fn transition_display(display: Display) -> String {
+    match display {
+        Display::None => "none",
+        Display::Block => "block",
+        Display::Inline => "inline",
+        Display::InlineBlock => "inline-block",
+        Display::Flex => "flex",
+        Display::InlineFlex => "inline-flex",
+        Display::Grid => "grid",
+        Display::InlineGrid => "inline-grid",
+        Display::Table => "table",
+        Display::TableRow => "table-row",
+        Display::TableCell | Display::TableHeaderCell => "table-cell",
+        Display::TableRowGroup => "table-row-group",
+        Display::TableHeaderGroup => "table-header-group",
+        Display::TableFooterGroup => "table-footer-group",
+        Display::TableColumnGroup => "table-column-group",
+        Display::TableColumn => "table-column",
+        Display::TableCaption => "table-caption",
+        Display::ListItem => "list-item",
+        Display::Ruby => "ruby",
+        Display::RubyText => "ruby-text",
+        Display::FlowRoot => "flow-root",
+        Display::Contents => "contents",
+    }
+    .to_string()
 }
 
 fn transition_length(v: &CssLength) -> String {
@@ -253,6 +291,44 @@ pub(crate) fn interpolate_property_value(prop: &str, from: &str, to: &str, t: f3
     interpolate_value(from, to, t)
 }
 
+pub(crate) fn is_discrete_transition_property(prop: &str) -> bool {
+    matches!(prop, "display" | "content-visibility")
+}
+
+pub(crate) fn discrete_transition_value(prop: &str, from: &str, to: &str, t: f32) -> String {
+    match prop {
+        "display" => {
+            if from == "none" && to != "none" {
+                to.to_string()
+            } else if to == "none" && from != "none" {
+                if t >= 1.0 { to } else { from }.to_string()
+            } else if t < 0.5 {
+                from.to_string()
+            } else {
+                to.to_string()
+            }
+        }
+        "content-visibility" => {
+            if from == "hidden" && to != "hidden" {
+                to.to_string()
+            } else if to == "hidden" && from != "hidden" {
+                if t >= 1.0 { to } else { from }.to_string()
+            } else if t < 0.5 {
+                from.to_string()
+            } else {
+                to.to_string()
+            }
+        }
+        _ => {
+            if t < 0.5 {
+                from.to_string()
+            } else {
+                to.to_string()
+            }
+        }
+    }
+}
+
 /// Interpolate between two CSS value strings.
 /// Handles `rgba(…)` colors and strings containing numbers.
 pub(crate) fn interpolate_value(from: &str, to: &str, t: f32) -> String {
@@ -277,42 +353,89 @@ fn transform_identity(transform: &str) -> String {
     if s.is_empty() || s == "none" {
         return String::new();
     }
-    // Find the function name and argument count.
-    if let Some(open) = s.find('(') {
-        let func = &s[..open];
-        let inner = s[open + 1..].trim_end_matches(')');
-        let arg_count = inner.split(',').count();
-        // scale identity is 1, everything else is 0.
+
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(open) = rest.find('(') {
+        let func = rest[..open].trim();
+        if func.is_empty() {
+            break;
+        }
+        let mut depth = 0usize;
+        let mut close = None;
+        for (i, ch) in rest[open..].char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        close = Some(open + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else { break };
+        let inner = &rest[open + 1..close];
         let identity_val = if func.starts_with("scale") { "1" } else { "0" };
-        // Preserve units from the original arguments.
-        let units: Vec<&str> = inner
-            .split(',')
-            .map(|a| {
-                let a = a.trim();
-                // Strip leading minus/digits/dot to find the unit suffix.
-                let num_end = a
-                    .bytes()
-                    .position(|b| b.is_ascii_alphabetic())
-                    .unwrap_or(a.len());
-                &a[num_end..]
-            })
+        let args: Vec<String> = split_transform_args(inner)
+            .into_iter()
+            .map(|arg| format!("{}{}", identity_val, transform_arg_unit(arg)))
             .collect();
-        let args: Vec<String> = (0..arg_count)
-            .map(|i| format!("{}{}", identity_val, units.get(i).unwrap_or(&"")))
-            .collect();
-        format!("{}({})", func, args.join(", "))
-    } else {
-        String::new()
+        out.push(format!("{}({})", func, args.join(", ")));
+        rest = rest[close + 1..].trim_start();
     }
+    out.join(" ")
+}
+
+fn split_transform_args(inner: &str) -> Vec<&str> {
+    let comma_parts: Vec<&str> = inner
+        .split(',')
+        .map(str::trim)
+        .filter(|arg| !arg.is_empty())
+        .collect();
+    if comma_parts.len() > 1 {
+        comma_parts
+    } else {
+        inner.split_whitespace().collect()
+    }
+}
+
+fn transform_arg_unit(arg: &str) -> &str {
+    let arg = arg.trim();
+    let mut seen_digit = false;
+    for (idx, ch) in arg.char_indices() {
+        if ch == '+' || ch == '-' || ch == '.' || ch.is_ascii_digit() {
+            if ch.is_ascii_digit() {
+                seen_digit = true;
+            }
+            continue;
+        }
+        if seen_digit {
+            return &arg[idx..];
+        }
+    }
+    ""
 }
 
 fn interpolate_color(from: &str, to: &str, t: f32) -> Option<String> {
     let (fr, fg, fb, fa) = parse_rgba(from)?;
     let (tr, tg, tb, ta) = parse_rgba(to)?;
-    let r = lerp(fr, tr, t).round() as u8;
-    let g = lerp(fg, tg, t).round() as u8;
-    let b = lerp(fb, tb, t).round() as u8;
     let a = lerp(fa, ta, t);
+    let pr = lerp(fr * fa, tr * ta, t);
+    let pg = lerp(fg * fa, tg * ta, t);
+    let pb = lerp(fb * fa, tb * ta, t);
+    let unpremul = |c: f32| {
+        if a <= 0.0 {
+            0
+        } else {
+            (c / a).round().clamp(0.0, 255.0) as u8
+        }
+    };
+    let r = unpremul(pr);
+    let g = unpremul(pg);
+    let b = unpremul(pb);
     Some(format!("rgba({},{},{},{:.4})", r, g, b, a))
 }
 
@@ -342,16 +465,35 @@ fn interpolate_numeric(from: &str, to: &str, t: f32) -> String {
 
     let mut result = from.to_string();
     // Replace in reverse order so byte offsets remain valid.
-    for ((start, end, fv), (_, _, tv)) in from_nums.iter().zip(to_nums.iter()).rev() {
+    for ((start, end, fv), (_, to_end, tv)) in from_nums.iter().zip(to_nums.iter()).rev() {
         let v = lerp(*fv, *tv, t);
-        let s = if v == v.floor() && v.abs() < 1e9 {
+        let mut s = if v == v.floor() && v.abs() < 1e9 {
             format!("{}", v as i64)
         } else {
             format!("{:.4}", v)
         };
+        let from_unit = numeric_unit_after(from, *end);
+        let to_unit = numeric_unit_after(to, *to_end);
+        if from_unit.is_empty() && !to_unit.is_empty() && fv.abs() < 1e-6 {
+            s.push_str(to_unit);
+        }
         result.replace_range(start..end, &s);
     }
     result
+}
+
+fn numeric_unit_after(s: &str, end: usize) -> &str {
+    let bytes = s.as_bytes();
+    let mut i = end;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if ch == b'%' || ch.is_ascii_alphabetic() {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    &s[end..i]
 }
 
 /// Extract `(start_byte, end_byte, value)` for every number in `s`.

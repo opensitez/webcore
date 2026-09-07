@@ -22,6 +22,8 @@ pub const CURRENT_COLOR_OUTLINE: u16 = 1 << 4;
 pub const CURRENT_COLOR_BACKGROUND: u16 = 1 << 5;
 pub const CURRENT_COLOR_TEXT_DECOR: u16 = 1 << 6;
 pub const CURRENT_COLOR_CARET: u16 = 1 << 7;
+pub const CURRENT_COLOR_SVG_FILL: u16 = 1 << 8;
+pub const CURRENT_COLOR_SVG_STROKE: u16 = 1 << 9;
 
 #[derive(Clone, Debug, Default)]
 pub struct RareStyle {
@@ -44,6 +46,7 @@ pub struct RareStyle {
     pub font_variation_settings: Vec<(String, f32)>,
     pub font_feature_settings: Vec<(String, u32)>,
     pub quotes: Vec<String>,
+    pub content: String,
     pub filter: String,
     pub backdrop_filter: String,
     pub mask_image_url: String,
@@ -93,6 +96,7 @@ impl RareStyle {
         font_variation_settings: Vec::new(),
         font_feature_settings: Vec::new(),
         quotes: Vec::new(),
+        content: String::new(),
         filter: String::new(),
         backdrop_filter: String::new(),
         mask_image_url: String::new(),
@@ -192,6 +196,8 @@ pub struct ComputedStyle {
     // Typography
     pub color: Color,
     pub background_color: Color,
+    pub svg_fill: Option<Color>,
+    pub svg_stroke: Option<Color>,
     pub font_family: String,
     pub font_size: CssLength,
     pub font_weight: FontWeight,
@@ -212,6 +218,7 @@ pub struct ComputedStyle {
 
     // List
     pub list_style_type: ListStyleType,
+    pub custom_list_style_type: String,
     pub list_style_position: ListStylePosition,
     pub list_index: i32,
 
@@ -265,6 +272,13 @@ pub struct ComputedStyle {
     // Gradient background
     pub gradient_type: GradientType,
     pub gradient_angle: f32,
+    pub gradient_direction: GradientDirection,
+    pub gradient_radial_shape: GradientRadialShape,
+    pub gradient_radial_size: GradientRadialSize,
+    pub gradient_radial_radius_x: CssLength,
+    pub gradient_radial_radius_y: CssLength,
+    pub gradient_radial_position_x: CssLength,
+    pub gradient_radial_position_y: CssLength,
 
     // Background image / position / repeat / size
     pub background_size: BackgroundSize,
@@ -282,8 +296,16 @@ pub struct ComputedStyle {
 
     // Text effects
     pub text_overflow: TextOverflow,
+    pub text_overflow_string: String,
     pub text_shadow: Option<TextShadow>,
     pub small_caps: bool,
+    pub font_variant_alternates: String,
+    pub font_variant_caps: String,
+    pub font_variant_east_asian: String,
+    pub font_variant_emoji: String,
+    pub font_variant_ligatures: String,
+    pub font_variant_numeric: String,
+    pub font_variant_position: String,
 
     // Object fit for replaced elements
     pub object_fit: ObjectFit,
@@ -302,6 +324,8 @@ pub struct ComputedStyle {
     pub placeholder_style: Option<Box<ComputedStyle>>,
     /// Style for ::marker (color / font / content for list markers).
     pub marker_style: Option<Box<ComputedStyle>>,
+    /// Style for ::backdrop (modal/top-layer backdrop paint).
+    pub backdrop_style: Option<Box<ComputedStyle>>,
 
     // Caret and scrollbar theming
     pub caret_color: Option<Color>,
@@ -327,6 +351,10 @@ pub struct ComputedStyle {
     pub border_top_right_radius: CssLength,
     pub border_bottom_left_radius: CssLength,
     pub border_bottom_right_radius: CssLength,
+    pub border_top_left_radius_y: CssLength,
+    pub border_top_right_radius_y: CssLength,
+    pub border_bottom_right_radius_y: CssLength,
+    pub border_bottom_left_radius_y: CssLength,
 
     // Background image URL
     pub background_image_url: String,
@@ -393,16 +421,24 @@ pub struct ComputedStyle {
     pub background_blend_mode: String,
     pub overflow_anchor: String,
     pub overflow_clip_margin: String,
+    pub anchor_name: String,
+    pub position_anchor: String,
+    pub view_transition_name: String,
+    pub animation_timeline: String,
+    pub scroll_timeline: String,
+    pub offset_path: String,
     pub scrollbar_width: String,
     pub scrollbar_gutter: String,
     pub appearance: String,
     pub field_sizing: String,
     pub interpolate_size: String,
     pub margin_trim: String,
+    pub forced_color_adjust: String,
 
     // Scroll snap
     pub scroll_snap_type: ScrollSnapType,
     pub scroll_snap_align: ScrollSnapAlign,
+    pub scroll_snap_stop: String,
 
     // Overscroll chaining
     pub overscroll_behavior_x: OverscrollBehavior,
@@ -461,6 +497,10 @@ pub struct ComputedStyle {
     pub css_scale: CssTransform,
     pub css_transform: CssTransform,
     pub transform_box: String,
+    pub transform_style_3d: String,
+    pub perspective: String,
+    pub perspective_origin: String,
+    pub backface_visibility: String,
     pub css_filter: CssFilters,
 
     // Text underline offset
@@ -524,6 +564,41 @@ pub enum GradientType {
 impl Default for GradientType {
     fn default() -> Self {
         Self::None
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GradientDirection {
+    Angle(f32),
+    Corner { x: i8, y: i8 },
+}
+impl Default for GradientDirection {
+    fn default() -> Self {
+        Self::Angle(180.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GradientRadialShape {
+    Circle,
+    Ellipse,
+}
+impl Default for GradientRadialShape {
+    fn default() -> Self {
+        Self::Ellipse
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GradientRadialSize {
+    ClosestSide,
+    FarthestSide,
+    ClosestCorner,
+    FarthestCorner,
+}
+impl Default for GradientRadialSize {
+    fn default() -> Self {
+        Self::FarthestCorner
     }
 }
 

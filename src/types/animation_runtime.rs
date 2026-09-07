@@ -8,11 +8,74 @@ use crate::html::*;
 use crate::layout::LayoutEngine;
 use std::collections::{HashMap, HashSet};
 
+fn find_node_by_id<'a>(node: &'a WebCore, id: u32) -> Option<&'a WebCore> {
+    if node.node_id == id {
+        return Some(node);
+    }
+    for child in &node.children {
+        if let Some(found) = find_node_by_id(child, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn keyframes_with_synthesized_endpoints(
+    stops: &[KeyframeStop],
+    underlying: &HashMap<String, String>,
+) -> Vec<KeyframeStop> {
+    if stops.is_empty() {
+        return Vec::new();
+    }
+    let mut out = stops.to_vec();
+    let mut animated_props: Vec<String> = Vec::new();
+    for stop in stops {
+        for (prop, _) in &stop.properties {
+            if !animated_props.iter().any(|p| p == prop) {
+                animated_props.push(prop.clone());
+            }
+        }
+    }
+    if stops.first().map_or(true, |s| s.offset > 0.0) {
+        let properties = animated_props
+            .iter()
+            .filter_map(|prop| {
+                underlying
+                    .get(prop)
+                    .map(|value| (prop.clone(), value.clone()))
+            })
+            .collect();
+        out.insert(
+            0,
+            KeyframeStop {
+                offset: 0.0,
+                properties,
+            },
+        );
+    }
+    if stops.last().map_or(true, |s| s.offset < 1.0) {
+        let properties = animated_props
+            .iter()
+            .filter_map(|prop| {
+                underlying
+                    .get(prop)
+                    .map(|value| (prop.clone(), value.clone()))
+            })
+            .collect();
+        out.push(KeyframeStop {
+            offset: 1.0,
+            properties,
+        });
+    }
+    out
+}
+
 impl Document {
     /// Walk the tree and ensure an `AnimState` exists for every element that
     /// currently has an `animation` property.  Call this after each cascade pass.
     pub fn sync_animations(&mut self, now: std::time::Instant) {
         let mut current: Vec<(u32, ParsedAnimation)> = Vec::new();
+        let mut started_events: Vec<u32> = Vec::new();
         fn collect(node: &WebCore, out: &mut Vec<(u32, ParsedAnimation)>) {
             let id = node.node_id;
             for a in &node.style.rare().animations {
@@ -35,7 +98,11 @@ impl Document {
                     element_id: *id,
                     animation: anim.clone(),
                     start_time: now,
+                    last_iteration_event: 0,
                 });
+                if anim.delay_ms <= 0.0 {
+                    started_events.push(*id);
+                }
             }
         }
 
@@ -45,6 +112,11 @@ impl Document {
                 .iter()
                 .any(|(id, a)| *id == s.element_id && a.name == s.animation.name)
         });
+
+        for target in started_events {
+            let mut event = crate::dom::events::DomEvent::new("animationstart", target);
+            self.dispatch_dom_event(&mut event);
+        }
     }
 
     /// Detect CSS property changes caused by the cascade and start transitions.
@@ -54,6 +126,8 @@ impl Document {
     pub fn sync_transitions(&mut self, now: std::time::Instant, cascade_ran: bool) {
         let hovered = self.hovered_box;
         let mut current: Vec<(u32, Vec<ParsedTransition>, HashMap<String, String>)> = Vec::new();
+        let mut started_events: Vec<(u32, bool)> = Vec::new();
+        let mut cancelled_events: Vec<u32> = Vec::new();
         fn collect(
             node: &WebCore,
             hovered: u32,
@@ -138,6 +212,9 @@ impl Document {
                         // Uncomment to debug: eprintln!("[TR-SKIP] {} same={:?}", prop, cur);
                         continue;
                     }
+                    if is_discrete_transition_property(prop) && !tr.allow_discrete {
+                        continue;
+                    }
 
                     // Already transitioning to this value?
                     let already = self
@@ -160,19 +237,55 @@ impl Document {
                         .map(|(_, v)| v.as_str())
                         .unwrap_or(prv);
                     let entry = self.transition_states.entry(*elem_id).or_default();
+                    let replaced = entry.iter().find(|t| t.property == prop).cloned();
+                    let mut duration_ms = tr.duration_ms;
+                    let mut reversing_adjusted_start_value = prv.to_string();
+                    let mut reversing_shortening_factor = 1.0;
+                    if let Some(old) = &replaced {
+                        reversing_adjusted_start_value = old.from_value.clone();
+                        if cur == old.reversing_adjusted_start_value && old.duration_ms > 0.0 {
+                            let elapsed = now.duration_since(old.start_time).as_secs_f32() * 1000.0;
+                            let progress =
+                                ((elapsed - old.delay_ms) / old.duration_ms).clamp(0.0, 1.0);
+                            reversing_shortening_factor =
+                                (progress * old.reversing_shortening_factor).clamp(0.0, 1.0);
+                            duration_ms = tr.duration_ms * reversing_shortening_factor;
+                        }
+                    }
+                    let before_replace = entry.len();
                     entry.retain(|t| t.property != prop);
+                    if entry.len() != before_replace {
+                        cancelled_events.push(*elem_id);
+                    }
                     entry.push(TransitionState {
                         property: prop.to_string(),
                         from_value: from_val.to_string(),
                         to_value: cur.to_string(),
+                        reversing_adjusted_start_value,
+                        reversing_shortening_factor,
                         start_time: now,
-                        duration_ms: tr.duration_ms,
+                        duration_ms,
                         delay_ms: tr.delay_ms,
                         timing_fn: tr.timing_fn.clone(),
+                        allow_discrete: tr.allow_discrete,
                     });
+                    started_events.push((*elem_id, tr.delay_ms <= 0.0));
                 }
             }
             self.prev_styles.insert(*elem_id, cur_vals.clone());
+        }
+
+        for target in cancelled_events {
+            let mut cancel = crate::dom::events::DomEvent::new("transitioncancel", target);
+            self.dispatch_dom_event(&mut cancel);
+        }
+        for (target, start_now) in started_events {
+            let mut run = crate::dom::events::DomEvent::new("transitionrun", target);
+            self.dispatch_dom_event(&mut run);
+            if start_now {
+                let mut start = crate::dom::events::DomEvent::new("transitionstart", target);
+                self.dispatch_dom_event(&mut start);
+            }
         }
     }
 
@@ -183,10 +296,30 @@ impl Document {
         self.animation_overrides.clear();
         let keyframes = self.stylesheet.keyframes.clone();
         let mut still_running = false;
+        let mut finished_events: Vec<(&'static str, u32)> = Vec::new();
+        let mut iteration_events: Vec<u32> = Vec::new();
 
         // ── CSS Animations ───────────────────────────────────────────────────
         let mut done: Vec<usize> = Vec::new();
-        for (idx, state) in self.active_animations.iter().enumerate() {
+        for (idx, state) in self.active_animations.iter_mut().enumerate() {
+            if state.animation.play_state_paused {
+                if matches!(
+                    state.animation.fill_mode,
+                    FillMode::Backwards | FillMode::Both
+                ) {
+                    if let Some(kf) = keyframes.get(&state.animation.name) {
+                        if let Some(first) = kf.first() {
+                            let entry = self
+                                .animation_overrides
+                                .entry(state.element_id)
+                                .or_default();
+                            entry.extend(first.properties.clone());
+                        }
+                    }
+                }
+                continue;
+            }
+
             let elapsed_ms = now.duration_since(state.start_time).as_secs_f32() * 1000.0;
             let delayed_ms = elapsed_ms - state.animation.delay_ms;
 
@@ -220,6 +353,7 @@ impl Document {
             let iteration = total_progress.floor();
             let t_frac = total_progress.fract();
             let iteration_count = state.animation.iteration_count;
+            let completed_iterations = iteration as u32;
 
             if !iteration_count.is_infinite() && delayed_ms >= duration * iteration_count {
                 // Finished: apply forwards fill if needed.
@@ -228,6 +362,10 @@ impl Document {
                     FillMode::Forwards | FillMode::Both
                 ) {
                     if let Some(kf) = keyframes.get(&state.animation.name) {
+                        let underlying = find_node_by_id(&self.root, state.element_id)
+                            .map(|node| extract_transitionable_style(&node.style))
+                            .unwrap_or_default();
+                        let stops = keyframes_with_synthesized_endpoints(kf, &underlying);
                         let endpoint_frac = iteration_count.fract();
                         let final_iteration = if endpoint_frac == 0.0 {
                             (iteration_count - 1.0).max(0.0).floor()
@@ -257,7 +395,7 @@ impl Document {
                                 }
                             }
                         };
-                        let props = interpolate_keyframe_stops(kf, final_t);
+                        let props = interpolate_keyframe_stops(&stops, final_t);
                         let entry = self
                             .animation_overrides
                             .entry(state.element_id)
@@ -265,10 +403,17 @@ impl Document {
                         entry.extend(props);
                     }
                 }
+                finished_events.push(("animationend", state.element_id));
                 done.push(idx);
                 continue;
             }
             still_running = true;
+            if completed_iterations > state.last_iteration_event {
+                for _ in state.last_iteration_event..completed_iterations {
+                    iteration_events.push(state.element_id);
+                }
+                state.last_iteration_event = completed_iterations;
+            }
 
             let effective_t = match state.animation.direction {
                 AnimDirection::Normal => t_frac,
@@ -291,7 +436,11 @@ impl Document {
             let eased = apply_easing(&state.animation.timing_fn, effective_t);
 
             if let Some(kf) = keyframes.get(&state.animation.name) {
-                let props = interpolate_keyframe_stops(kf, eased);
+                let underlying = find_node_by_id(&self.root, state.element_id)
+                    .map(|node| extract_transitionable_style(&node.style))
+                    .unwrap_or_default();
+                let stops = keyframes_with_synthesized_endpoints(kf, &underlying);
+                let props = interpolate_keyframe_stops(&stops, eased);
                 let entry = self
                     .animation_overrides
                     .entry(state.element_id)
@@ -301,6 +450,10 @@ impl Document {
         }
         for idx in done.into_iter().rev() {
             self.active_animations.remove(idx);
+        }
+        for target in iteration_events {
+            let mut event = crate::dom::events::DomEvent::new("animationiteration", target);
+            self.dispatch_dom_event(&mut event);
         }
 
         // ── CSS Transitions ──────────────────────────────────────────────────
@@ -333,14 +486,18 @@ impl Document {
                     // correctly-reverted base color.
                     let entry = self.animation_overrides.entry(*elem_id).or_default();
                     entry.push((tr.property.clone(), tr.to_value.clone()));
+                    finished_events.push(("transitionend", *elem_id));
                     done_trs.push(i);
                     continue;
                 }
 
                 still_running = true;
                 let eased = apply_easing(&tr.timing_fn, progress);
-                let interp =
-                    interpolate_property_value(&tr.property, &tr.from_value, &tr.to_value, eased);
+                let interp = if tr.allow_discrete && is_discrete_transition_property(&tr.property) {
+                    discrete_transition_value(&tr.property, &tr.from_value, &tr.to_value, eased)
+                } else {
+                    interpolate_property_value(&tr.property, &tr.from_value, &tr.to_value, eased)
+                };
                 let entry = self.animation_overrides.entry(*elem_id).or_default();
                 entry.push((tr.property.clone(), interp));
             }
@@ -369,6 +526,11 @@ impl Document {
                 }
             }
             mark_dirty(&mut self.root, &self.animation_overrides);
+        }
+
+        for (event_type, target) in finished_events {
+            let mut event = crate::dom::events::DomEvent::new(event_type, target);
+            self.dispatch_dom_event(&mut event);
         }
     }
 }

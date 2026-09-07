@@ -116,6 +116,7 @@ pub struct AnimState {
     pub element_id: u32,
     pub animation: ParsedAnimation,
     pub start_time: std::time::Instant,
+    pub last_iteration_event: u32,
 }
 
 /// Runtime state for one active CSS transition on one property of one element.
@@ -124,8 +125,11 @@ pub struct TransitionState {
     pub property: String,
     pub from_value: String,
     pub to_value: String,
+    pub reversing_adjusted_start_value: String,
+    pub reversing_shortening_factor: f32,
     pub start_time: std::time::Instant,
     pub duration_ms: f32,
     pub delay_ms: f32,
     pub timing_fn: EasingFn,
+    pub allow_discrete: bool,
 }

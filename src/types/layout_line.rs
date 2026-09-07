@@ -28,6 +28,9 @@ pub struct LayoutLine {
     pub visual_segments: Vec<VisualSegment>,
     /// Per-character-boundary x positions relative to `self.x + text_x_offset`, in logical pixels.
     pub char_x: Vec<f32>,
+    /// True when this is the final visible line of a clamped block and later
+    /// line content was omitted.
+    pub has_clamped_continuation: bool,
     /// Fingerprint of everything `char_x` was shaped from — the line's text,
     /// the styles of the runs covering it, the justification spacing and the
     /// device scale.

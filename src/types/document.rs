@@ -16,6 +16,17 @@ pub enum PickerKind {
     Calendar,
 }
 
+#[derive(Clone, Debug)]
+pub struct SmoothScrollState {
+    pub element_id: u32,
+    pub start_x: f32,
+    pub start_y: f32,
+    pub target_x: f32,
+    pub target_y: f32,
+    pub start_time: std::time::Instant,
+    pub duration: std::time::Duration,
+}
+
 pub struct Document {
     pub root: WebCore,
     pub stylesheet: Stylesheet,
@@ -208,6 +219,8 @@ pub struct Document {
     pub(crate) animation_overrides: HashMap<u32, Vec<(String, String)>>,
     /// Set by `tick_animations`; tells the host to request another render frame.
     pub needs_animation_frame: bool,
+    /// Active `scroll-behavior:smooth` element scrolls.
+    pub(crate) smooth_scrolls: Vec<SmoothScrollState>,
     /// Set when `hovered_box` changes; cleared by `layout()` after running `sync_transitions`.
     pub hover_changed: bool,
     /// Node IDs of elements that have hover-dependent CSS rules.
@@ -729,6 +742,7 @@ impl Clone for Document {
             cascade_styles: self.cascade_styles.clone(),
             animation_overrides: self.animation_overrides.clone(),
             needs_animation_frame: self.needs_animation_frame,
+            smooth_scrolls: self.smooth_scrolls.clone(),
             hover_changed: self.hover_changed,
             hover_sensitive_nodes: self.hover_sensitive_nodes.clone(),
             style_dirty: self.style_dirty,

@@ -210,7 +210,7 @@ impl CanvasContext {
 
     /// Copy pixel buffer to an WebCore's image_data for rendering.
     pub fn apply_to_node(&self, node: &mut WebCore) {
-        node.image_data = Some(self.pixels.clone());
+        node.image_data = Some(std::sync::Arc::new(self.pixels.clone()));
         node.image_width = self.width;
         node.image_height = self.height;
     }
@@ -265,6 +265,10 @@ pub struct MatchedRule {
     pub specificity: u32,
     /// Source: "ua" for user-agent, or the stylesheet URL/index
     pub source: String,
+    /// Cascade layer name, empty for unlayered rules.
+    pub layer: String,
+    /// Resolved cascade layer rank; u32::MAX means unlayered.
+    pub layer_rank: u32,
 }
 
 impl WebCore {
@@ -327,6 +331,7 @@ impl WebCore {
             dirty_selectedness: false,
             value_state: None,
             dirty_value: false,
+            autofilled: false,
             input_cursor: 0,
             input_sel_anchor: 0,
             input_sel_direction: SelectionDirection::None,

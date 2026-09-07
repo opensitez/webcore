@@ -19,7 +19,8 @@ impl Document {
         self.hovered_box = 0;
         self.active_box = 0;
         self.stylesheet.rebuild_index();
-        crate::css::apply_cascade_vp(
+        let target_id = self.fragment_target_id();
+        crate::css::apply_cascade_vp_hover_target_url(
             &mut self.root,
             &self.stylesheet,
             None,
@@ -28,6 +29,9 @@ impl Document {
             self.viewport_h,
             self.focused_box,
             self.keyboard_focus,
+            &std::collections::HashSet::new(),
+            target_id,
+            &self.base_url,
         );
     }
 
@@ -37,7 +41,8 @@ impl Document {
         self.hovered_box = 0;
         self.active_box = 0;
         self.stylesheet.rebuild_index();
-        crate::css::apply_cascade_vp(
+        let target_id = self.fragment_target_id();
+        crate::css::apply_cascade_vp_hover_target_url(
             &mut self.root,
             &self.stylesheet,
             None,
@@ -46,6 +51,9 @@ impl Document {
             self.viewport_h,
             self.focused_box,
             self.keyboard_focus,
+            &std::collections::HashSet::new(),
+            target_id,
+            &self.base_url,
         );
     }
 

@@ -37,6 +37,8 @@ pub struct LayoutBox {
     pub scroll_top: f32,
     pub scroll_left: f32,
 
+    /// Static x position for absolutely positioned elements (set during parent layout).
+    pub abs_static_x: Option<f32>,
     /// Static y position for absolutely positioned elements (set during parent layout).
     pub abs_static_y: Option<f32>,
 
@@ -83,6 +85,7 @@ impl Default for LayoutBox {
             scroll_width: 0.0,
             scroll_top: 0.0,
             scroll_left: 0.0,
+            abs_static_x: None,
             abs_static_y: None,
             layout_dirty: false,
             intrinsic_dirty: false,

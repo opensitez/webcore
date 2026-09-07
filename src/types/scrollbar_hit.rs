@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 ///
 /// Recurses depth-first (children first) so the innermost scrollable element wins.
 /// On hit: optionally jump-scrolls to the click position, then writes a
-/// `ScrollbarDrag` with `kind = Element(raw ptr)` into `drag_out`.
+/// `ScrollbarDrag` with the matching element scrollbar axis into `drag_out`.
 pub(crate) fn scrollbar_hit_test(
     node: &mut WebCore,
     screen_x: f32,
@@ -52,10 +52,14 @@ pub(crate) fn scrollbar_hit_test(
     let cr = node.layout.content_rect;
     let pr = node.layout.padding_rect;
     let prx = pr.x - sx;
+    let cx = cr.x - sx;
+    let pry = pr.y - sy;
     let cy = cr.y - sy;
 
     let show_v = node.style.overflow_y == Overflow::Scroll
         || (node.style.overflow_y == Overflow::Auto && node.layout.scroll_height > cr.h);
+    let show_h = node.style.overflow_x == Overflow::Scroll
+        || (node.style.overflow_x == Overflow::Auto && node.layout.scroll_width > cr.w);
     let sbw = node.style.scrollbar_width_px();
 
     if show_v && node.layout.scroll_height > cr.h && sbw > 0.0 {
@@ -84,9 +88,57 @@ pub(crate) fn scrollbar_hit_test(
             }
 
             *drag_out = Some(ScrollbarDrag {
-                kind: ScrollbarDragKind::Element(node.node_id),
+                kind: ScrollbarDragKind::ElementVertical(node.node_id),
+                start_mouse_x: screen_x,
                 start_mouse_y: screen_y,
                 start_scroll: node.layout.scroll_top,
+                scroll_per_px,
+            });
+            return true;
+        }
+    }
+
+    if show_h && node.layout.scroll_width > cr.w && sbw > 0.0 {
+        let track_w = (cr.w
+            - if show_v && node.layout.scroll_height > cr.h {
+                sbw
+            } else {
+                0.0
+            })
+        .max(0.0);
+        let track_y = pry + pr.h - sbw;
+        if track_w > 0.0
+            && screen_x >= cx
+            && screen_x < cx + track_w
+            && screen_y >= track_y
+            && screen_y < track_y + sbw
+        {
+            let thumb_w = (track_w * cr.w / node.layout.scroll_width)
+                .max(20.0)
+                .min(track_w);
+            let max_s = node.layout.scroll_width - cr.w;
+            let scroll_per_px = if track_w - thumb_w > 0.0 {
+                max_s / (track_w - thumb_w)
+            } else {
+                0.0
+            };
+            let thumb_x = if max_s > 0.0 {
+                node.layout.scroll_left * (track_w - thumb_w) / max_s
+            } else {
+                0.0
+            };
+            let local_x = screen_x - cx;
+
+            if !(local_x >= thumb_x && local_x < thumb_x + thumb_w) {
+                let new_thumb_x = (local_x - thumb_w * 0.5).clamp(0.0, track_w - thumb_w);
+                node.layout.scroll_left = (new_thumb_x * scroll_per_px).clamp(0.0, max_s);
+            }
+
+            *drag_out = Some(ScrollbarDrag {
+                kind: ScrollbarDragKind::ElementHorizontal(node.node_id),
+                start_mouse_x: screen_x,
+                start_mouse_y: screen_y,
+                start_scroll: node.layout.scroll_left,
                 scroll_per_px,
             });
             return true;

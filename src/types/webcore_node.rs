@@ -53,17 +53,17 @@ pub struct WebCore {
     /// was serialized into the markup. Internal state may look however it
     /// likes, but not by pretending to be a content attribute.
     pub resolved_src: String,
-    pub image_data: Option<Vec<u8>>,
+    pub image_data: Option<std::sync::Arc<Vec<u8>>>,
     pub image_width: u32,
     pub image_height: u32,
 
     // Background image pixel data (RGBA8, row-major)
-    pub bg_image_data: Option<Vec<u8>>,
+    pub bg_image_data: Option<std::sync::Arc<Vec<u8>>>,
     pub bg_image_width: u32,
     pub bg_image_height: u32,
 
     // CSS mask-image data (SVG rasterized to alpha mask)
-    pub mask_image_data: Option<Vec<u8>>,
+    pub mask_image_data: Option<std::sync::Arc<Vec<u8>>>,
     pub mask_image_width: u32,
     pub mask_image_height: u32,
 
@@ -121,6 +121,9 @@ pub struct WebCore {
     /// The **dirty value flag** (HTML §4.10.18.1). Once raised, the `value`
     /// content attribute no longer drives the value.
     pub dirty_value: bool,
+    /// Whether the user agent has autofilled this control. This is browser
+    /// state, not a content attribute, and is what `:autofill` matches.
+    pub autofilled: bool,
     /// Cursor position (char index) within the input's value string.
     pub input_cursor: usize,
     /// Selection anchor (char index). When equal to input_cursor, no selection.
@@ -236,7 +239,7 @@ impl WebCore {
     /// deliberately absent — sharing already requires a leaf.
     pub fn selector_state_key(&self, focused_box: u32) -> String {
         format!(
-            "{:?}|{}|{}|{}|{}",
+            "{:?}|{}|{}|{}|{}|{}",
             self.top_layer_kind,
             self.checkedness,
             self.value_state.as_deref().unwrap_or(""),
@@ -244,6 +247,7 @@ impl WebCore {
                 .get("indeterminate")
                 .map(String::as_str)
                 .unwrap_or(""),
+            self.autofilled,
             self.node_id != 0 && self.node_id == focused_box,
         )
     }

@@ -70,6 +70,7 @@ impl Document {
             cascade_styles: HashMap::new(),
             animation_overrides: HashMap::new(),
             needs_animation_frame: false,
+            smooth_scrolls: Vec::new(),
             hover_changed: false,
             hover_sensitive_nodes: HashSet::new(),
             style_dirty: false,
@@ -254,7 +255,7 @@ impl Document {
             if !is_root
                 && matches!(
                     node.style.overflow_y,
-                    Overflow::Hidden | Overflow::Scroll | Overflow::Auto
+                    Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
                 )
             {
                 return;
@@ -270,7 +271,7 @@ impl Document {
 
     pub fn viewport_y_scroll_locked(&self) -> bool {
         fn locks(style: &ComputedStyle) -> bool {
-            matches!(style.overflow_y, Overflow::Hidden)
+            matches!(style.overflow_y, Overflow::Hidden | Overflow::Clip)
         }
         if locks(&self.root.style) {
             return true;

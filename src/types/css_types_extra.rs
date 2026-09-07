@@ -439,6 +439,8 @@ impl Default for ComputedStyle {
 
             color: Color::BLACK,
             background_color: Color::TRANSPARENT,
+            svg_fill: Some(Color::BLACK),
+            svg_stroke: None,
             font_family: String::from("sans-serif"),
             font_size: CssLength::Px(16.0),
             font_weight: FontWeight::Normal,
@@ -458,6 +460,7 @@ impl Default for ComputedStyle {
             direction: Direction::LTR,
 
             list_style_type: ListStyleType::None,
+            custom_list_style_type: String::new(),
             list_style_position: ListStylePosition::Outside,
             list_index: 0,
 
@@ -507,6 +510,13 @@ impl Default for ComputedStyle {
 
             gradient_type: GradientType::None,
             gradient_angle: 180.0,
+            gradient_direction: GradientDirection::Angle(180.0),
+            gradient_radial_shape: GradientRadialShape::Ellipse,
+            gradient_radial_size: GradientRadialSize::FarthestCorner,
+            gradient_radial_radius_x: CssLength::Auto,
+            gradient_radial_radius_y: CssLength::Auto,
+            gradient_radial_position_x: CssLength::Percent(50.0),
+            gradient_radial_position_y: CssLength::Percent(50.0),
 
             background_size: BackgroundSize::Auto,
             background_size_w: CssLength::Auto,
@@ -521,8 +531,16 @@ impl Default for ComputedStyle {
             outline_offset: 0.0,
 
             text_overflow: TextOverflow::Clip,
+            text_overflow_string: String::new(),
             text_shadow: None,
             small_caps: false,
+            font_variant_alternates: String::from("normal"),
+            font_variant_caps: String::from("normal"),
+            font_variant_east_asian: String::from("normal"),
+            font_variant_emoji: String::from("normal"),
+            font_variant_ligatures: String::from("normal"),
+            font_variant_numeric: String::from("normal"),
+            font_variant_position: String::from("normal"),
 
             object_fit: ObjectFit::Fill,
 
@@ -534,6 +552,7 @@ impl Default for ComputedStyle {
             selection_style: None,
             placeholder_style: None,
             marker_style: None,
+            backdrop_style: None,
 
             caret_color: None,
             scrollbar_thumb_color: None,
@@ -556,6 +575,10 @@ impl Default for ComputedStyle {
             border_top_right_radius: CssLength::Zero,
             border_bottom_left_radius: CssLength::Zero,
             border_bottom_right_radius: CssLength::Zero,
+            border_top_left_radius_y: CssLength::Zero,
+            border_top_right_radius_y: CssLength::Zero,
+            border_bottom_right_radius_y: CssLength::Zero,
+            border_bottom_left_radius_y: CssLength::Zero,
 
             background_image_url: String::new(),
 
@@ -606,15 +629,23 @@ impl Default for ComputedStyle {
             background_blend_mode: String::from("normal"),
             overflow_anchor: String::from("auto"),
             overflow_clip_margin: String::from("0px"),
+            anchor_name: String::from("none"),
+            position_anchor: String::from("auto"),
+            view_transition_name: String::from("none"),
+            animation_timeline: String::from("auto"),
+            scroll_timeline: String::from("none"),
+            offset_path: String::from("none"),
             scrollbar_width: String::from("auto"),
             scrollbar_gutter: String::from("auto"),
             appearance: String::from("auto"),
             field_sizing: String::from("fixed"),
             interpolate_size: String::from("numeric-only"),
             margin_trim: String::from("none"),
+            forced_color_adjust: String::from("auto"),
 
             scroll_snap_type: ScrollSnapType::none(),
             scroll_snap_align: ScrollSnapAlign::None,
+            scroll_snap_stop: String::from("normal"),
             overscroll_behavior_x: OverscrollBehavior::Auto,
             overscroll_behavior_y: OverscrollBehavior::Auto,
 
@@ -662,6 +693,10 @@ impl Default for ComputedStyle {
             css_scale: CssTransform::default(),
             css_transform: CssTransform::default(),
             transform_box: String::from("border-box"),
+            transform_style_3d: String::from("flat"),
+            perspective: String::from("none"),
+            perspective_origin: String::from("50% 50%"),
+            backface_visibility: String::from("visible"),
             css_filter: CssFilters::default(),
 
             text_underline_offset: CssLength::Auto,
@@ -733,11 +768,11 @@ impl ComputedStyle {
             || !matches!(self.float, Float::None)
             || matches!(
                 self.overflow_x,
-                Overflow::Hidden | Overflow::Scroll | Overflow::Auto
+                Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
             )
             || matches!(
                 self.overflow_y,
-                Overflow::Hidden | Overflow::Scroll | Overflow::Auto
+                Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
             )
             || matches!(
                 self.display,
