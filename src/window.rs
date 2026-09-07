@@ -40,10 +40,29 @@ pub struct BrowsingContext {
     /// counterpart — a page cannot see where its window sits on screen.
     pub screen_x: f64,
     pub screen_y: f64,
+    /// The host viewport. The document also stores layout dimensions, but
+    /// layout may grow its height to the laid-out content. Window APIs report
+    /// the viewport itself.
+    pub viewport_w: f64,
+    pub viewport_h: f64,
     /// `window.devicePixelRatio`.
     pub device_pixel_ratio: f64,
     /// `window.closed`.
     pub closed: bool,
+}
+
+/// `window.visualViewport`, projected from the layout viewport state this
+/// engine already owns. There is no pinch-zoom viewport split yet, so `scale`
+/// is `1` and visual/layout dimensions are the same.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VisualViewport {
+    pub width: f64,
+    pub height: f64,
+    pub scale: f64,
+    pub offset_left: f64,
+    pub offset_top: f64,
+    pub page_left: f64,
+    pub page_top: f64,
 }
 
 #[derive(Default)]
@@ -104,6 +123,8 @@ pub fn open(target: &str, features: &str) -> WindowId {
             name: target.to_string(),
             screen_x: f.get("left").copied().unwrap_or(0.0),
             screen_y: f.get("top").copied().unwrap_or(0.0),
+            viewport_w: width,
+            viewport_h: height,
             device_pixel_ratio: 1.0,
             closed: false,
         },
@@ -147,6 +168,8 @@ pub fn adopt(document_id: DocumentId, name: &str) -> WindowId {
             name: name.to_string(),
             screen_x: 0.0,
             screen_y: 0.0,
+            viewport_w: 800.0,
+            viewport_h: 600.0,
             device_pixel_ratio: 1.0,
             closed: false,
         },
@@ -219,18 +242,12 @@ pub fn focus(id: WindowId) {
 
 /// `window.innerWidth` — the viewport width, read back off the document.
 pub fn inner_width(id: WindowId) -> f64 {
-    match document(id).and_then(|d| registry::with_document(d, |doc| doc.viewport().0)) {
-        Some(w) => f64::from(w),
-        None => 0.0,
-    }
+    with_window(id, |w| if w.closed { 0.0 } else { w.viewport_w }).unwrap_or(0.0)
 }
 
 /// `window.innerHeight`.
 pub fn inner_height(id: WindowId) -> f64 {
-    match document(id).and_then(|d| registry::with_document(d, |doc| doc.viewport().1)) {
-        Some(h) => f64::from(h),
-        None => 0.0,
-    }
+    with_window(id, |w| if w.closed { 0.0 } else { w.viewport_h }).unwrap_or(0.0)
 }
 
 /// `window.matchMedia(query)`.
@@ -241,6 +258,14 @@ pub fn match_media(id: WindowId, query: &str) -> Option<crate::dom::api::MediaQu
 /// `window.resizeTo(width, height)`. Writes the document's viewport, which is
 /// what `innerWidth`/`innerHeight` then report — one measurement, not two.
 pub fn resize_to(id: WindowId, width: f64, height: f64) {
+    if let Ok(mut ctx) = contexts().lock() {
+        if let Some(w) = ctx.windows.get_mut(&id) {
+            if !w.closed {
+                w.viewport_w = width;
+                w.viewport_h = height;
+            }
+        }
+    }
     if let Some(d) = document(id) {
         registry::with_document(d, |doc| doc.set_viewport(width as f32, height as f32));
     }
@@ -261,6 +286,25 @@ pub fn set_device_pixel_ratio(id: WindowId, ratio: f64) {
             }
         }
     }
+}
+
+/// `window.visualViewport`.
+pub fn visual_viewport(id: WindowId) -> Option<VisualViewport> {
+    let (document_id, closed, width, height) = with_window(id, |w| {
+        (w.document_id, w.closed, w.viewport_w, w.viewport_h)
+    })?;
+    if closed {
+        return None;
+    }
+    registry::with_document(document_id, |doc| VisualViewport {
+        width,
+        height,
+        scale: 1.0,
+        offset_left: 0.0,
+        offset_top: 0.0,
+        page_left: f64::from(doc.scroll_x),
+        page_top: f64::from(doc.scroll_y),
+    })
 }
 
 /// `window.screenX`.

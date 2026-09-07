@@ -60,10 +60,11 @@ pub mod layout;
 pub mod markdown;
 pub mod platform;
 pub mod renderer;
+pub mod svg;
 pub mod widgets;
 /// WHATWG HTML §7 — browsing contexts and the `Window` interface.
 pub mod window;
-pub mod woff2;
+pub mod woff;
 
 #[cfg(test)]
 pub mod tests;
@@ -169,7 +170,13 @@ pub fn load_html_reusing(
 
     let t0 = std::time::Instant::now();
     let mut doc = parse_html_with_hooks(html, base_url, move |tag, attrs| {
-        if tag == "link" && attrs.get("rel").map(|s| s == "stylesheet").unwrap_or(false) {
+        if tag == "link"
+            && attrs
+                .get("rel")
+                .map(|s| s.eq_ignore_ascii_case("stylesheet"))
+                .unwrap_or(false)
+            && !attrs.contains_key("disabled")
+        {
             if let Some(href) = attrs.get("href") {
                 let abs = resolve_css_url(&base_owned, href);
                 let media = attrs.get("media").cloned().unwrap_or_default();
@@ -260,7 +267,7 @@ pub fn load_html_reusing(
     eprintln!("  Layout: {:.0}ms", t3.elapsed().as_millis());
 
     // Post-layout: load background images (layout may re-run cascade with viewport)
-    html::load_background_images(&mut doc.root, &doc.base_url.clone());
+    svg::load_background_images(&mut doc.root, &doc.base_url.clone());
     // Fire DOMContentLoaded — listeners registered before load_html can react.
     let evt = dom::HtmlEvent::new(dom::HtmlEventType::DOMContentLoaded);
     doc.dispatch_input_event(evt);

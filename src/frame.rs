@@ -308,18 +308,10 @@ impl EngineFrame {
 
     /// Set scroll position absolutely.
     pub fn scroll_to(&mut self, x: f32, y: f32) {
-        let doc_h = crate::types::Document::scroll_height(&self.doc.root)
-            .max(self.doc.root.layout.margin_rect.h);
-        let doc_w = self.doc.root.layout.margin_rect.w;
-        let new_y = if self.doc.viewport_y_scroll_locked() {
-            self.doc.scroll_y
-        } else {
-            y.max(0.0).min((doc_h - self.viewport_h).max(0.0))
-        };
-        let new_x = x.max(0.0).min((doc_w - self.viewport_w).max(0.0));
-        if (new_y - self.doc.scroll_y).abs() > 0.01 || (new_x - self.doc.scroll_x).abs() > 0.01 {
-            self.doc.scroll_y = new_y;
-            self.doc.scroll_x = new_x;
+        if self
+            .doc
+            .viewport_scroll_to(x, y, self.viewport_w, self.viewport_h)
+        {
             self.needs_paint = true;
         }
     }
@@ -745,12 +737,15 @@ impl EngineFrame {
             // Create a transition state
             let transition = crate::types::TransitionState {
                 property: property.to_string(),
-                from_value: current,
+                from_value: current.clone(),
                 to_value: target_value.to_string(),
+                reversing_adjusted_start_value: current,
+                reversing_shortening_factor: 1.0,
                 start_time: std::time::Instant::now(),
                 duration_ms,
                 delay_ms: 0.0,
                 timing_fn: easing,
+                allow_discrete: false,
             };
 
             // Add to document's active transitions
