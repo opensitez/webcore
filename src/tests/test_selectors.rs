@@ -849,3 +849,93 @@ fn open_and_closed_match_details_state() {
         (4, 5, 6)
     );
 }
+
+#[test]
+fn target_and_target_within_match_document_fragment() {
+    let mut doc = crate::html::parse_html_with_base(
+        "<style>\
+             :target { color: rgb(1,2,3) }\
+             section:target-within { background-color: rgb(4,5,6) }\
+         </style>\
+         <section id=outer><p id=hit>target</p></section>\
+         <section id=other><p>other</p></section>",
+        "https://example.test/page#hit",
+    );
+    crate::layout::LayoutEngine::new().layout(&mut doc, 400.0);
+
+    fn by_id<'a>(n: &'a crate::types::WebCore, id: &str) -> Option<&'a crate::types::WebCore> {
+        if n.attributes.get("id").map(String::as_str) == Some(id) {
+            return Some(n);
+        }
+        for c in &n.children {
+            if let Some(f) = by_id(c, id) {
+                return Some(f);
+            }
+        }
+        None
+    }
+
+    let target = by_id(&doc.root, "hit").unwrap();
+    let outer = by_id(&doc.root, "outer").unwrap();
+    let other = by_id(&doc.root, "other").unwrap();
+    assert_eq!(
+        (
+            target.style.color.r,
+            target.style.color.g,
+            target.style.color.b
+        ),
+        (1, 2, 3)
+    );
+    assert_eq!(
+        (
+            outer.style.background_color.r,
+            outer.style.background_color.g,
+            outer.style.background_color.b
+        ),
+        (4, 5, 6)
+    );
+    assert_ne!(
+        (
+            other.style.background_color.r,
+            other.style.background_color.g,
+            other.style.background_color.b
+        ),
+        (4, 5, 6)
+    );
+}
+
+#[test]
+fn local_link_matches_same_document_urls() {
+    let mut doc = crate::html::parse_html_with_base(
+        "<style>\
+             a:local-link { color: rgb(1,2,3) }\
+         </style>\
+         <a id=hash href=\"#section\">hash</a>\
+         <a id=absolute href=\"https://example.test/dir/page.html?x=1#other\">absolute</a>\
+         <a id=query href=\"https://example.test/dir/page.html?x=2#section\">query</a>\
+         <a id=other href=\"https://example.test/dir/other.html#section\">other</a>",
+        "https://example.test/dir/page.html?x=1#section",
+    );
+    crate::layout::LayoutEngine::new().layout(&mut doc, 400.0);
+
+    fn color_of(doc: &crate::types::Document, id: &str) -> (u8, u8, u8) {
+        fn by_id<'a>(n: &'a crate::types::WebCore, id: &str) -> Option<&'a crate::types::WebCore> {
+            if n.attributes.get("id").map(String::as_str) == Some(id) {
+                return Some(n);
+            }
+            for c in &n.children {
+                if let Some(f) = by_id(c, id) {
+                    return Some(f);
+                }
+            }
+            None
+        }
+        let style = &by_id(&doc.root, id).unwrap().style;
+        (style.color.r, style.color.g, style.color.b)
+    }
+
+    assert_eq!(color_of(&doc, "hash"), (1, 2, 3));
+    assert_eq!(color_of(&doc, "absolute"), (1, 2, 3));
+    assert_ne!(color_of(&doc, "query"), (1, 2, 3));
+    assert_ne!(color_of(&doc, "other"), (1, 2, 3));
+}

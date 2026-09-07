@@ -187,6 +187,88 @@ fn element_scroll_to_dispatches_scroll_event_when_offset_changes() {
 }
 
 #[test]
+fn scroll_behavior_smooth_animates_element_scroll_to() {
+    let mut doc = layout(
+        r#"<html><head><style>
+        #box { overflow: auto; width: 100px; height: 60px; scroll-behavior: smooth; }
+        #inner { width: 300px; height: 300px; }
+    </style></head><body><div id=box><div id=inner></div></div></body></html>"#,
+    );
+    let box_id = query(&doc, "#box").unwrap().node_id;
+    let count = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let seen = count.clone();
+    doc.add_event_listener(
+        box_id,
+        "scroll",
+        Box::new(move |_, _| {
+            *seen.lock().unwrap() += 1;
+        }),
+        crate::dom::events::ListenerOptions::default(),
+    );
+
+    doc.element_scroll_to(box_id, 0.0, 100.0);
+    assert_eq!(
+        doc.element_scroll_top(box_id),
+        0.0,
+        "smooth scroll starts from the current offset instead of jumping"
+    );
+    assert!(doc.needs_animation_frame, "smooth scroll asks for frames");
+
+    let finish = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    doc.tick_smooth_scrolls(finish);
+
+    assert!(
+        (doc.element_scroll_top(box_id) - 100.0).abs() < 0.5,
+        "smooth scroll reaches the clamped target"
+    );
+    assert_eq!(
+        *count.lock().unwrap(),
+        1,
+        "smooth scroll dispatches scroll when the tick moves the offset"
+    );
+}
+
+#[test]
+fn scroll_behavior_smooth_animates_viewport_scroll_to() {
+    let mut doc = layout(
+        r#"<html><head><style>
+        html { scroll-behavior: smooth; }
+        body { margin: 0; height: 900px; }
+    </style></head><body><div style="height:900px"></div></body></html>"#,
+    );
+    let count = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let seen = count.clone();
+    doc.add_event_listener(
+        doc.window_target(),
+        "scroll",
+        Box::new(move |_, _| {
+            *seen.lock().unwrap() += 1;
+        }),
+        crate::dom::events::ListenerOptions::default(),
+    );
+
+    assert!(doc.viewport_scroll_to(0.0, 120.0, 400.0, 300.0));
+    assert_eq!(
+        doc.scroll_y, 0.0,
+        "smooth viewport scroll starts from the current offset instead of jumping"
+    );
+    assert!(doc.needs_animation_frame, "smooth scroll asks for frames");
+
+    let finish = std::time::Instant::now() + std::time::Duration::from_millis(300);
+    doc.tick_smooth_scrolls(finish);
+
+    assert!(
+        (doc.scroll_y - 120.0).abs() < 0.5,
+        "smooth viewport scroll reaches the target"
+    );
+    assert_eq!(
+        *count.lock().unwrap(),
+        1,
+        "smooth viewport scroll dispatches a window scroll event"
+    );
+}
+
+#[test]
 fn horizontal_wheel_scrolls_overflow_x_container() {
     let mut doc = layout(
         r#"<html><head><style>
@@ -206,6 +288,118 @@ fn horizontal_wheel_scrolls_overflow_x_container() {
         after > before,
         "scroll_left {} must increase after horizontal wheel",
         after
+    );
+}
+
+#[test]
+fn wheel_scroll_dispatches_scroll_event_on_scrolled_element() {
+    let mut doc = layout(
+        r#"<html><head><style>
+        #box { overflow: auto; width: 100px; height: 60px; position: absolute; top: 0; left: 0; }
+        #inner { width: 300px; height: 300px; }
+    </style></head><body><div id=box><div id=inner></div></div></body></html>"#,
+    );
+    let box_id = query(&doc, "#box").unwrap().node_id;
+    let count = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let seen = count.clone();
+    doc.add_event_listener(
+        box_id,
+        "scroll",
+        Box::new(move |_, _| {
+            *seen.lock().unwrap() += 1;
+        }),
+        crate::dom::events::ListenerOptions::default(),
+    );
+
+    assert!(doc.process_wheel_event((50.0, 50.0), -40.0));
+
+    assert_eq!(
+        *count.lock().unwrap(),
+        1,
+        "wheel-scrolled element should receive a scroll event"
+    );
+}
+
+#[test]
+fn horizontal_element_scrollbar_drag_updates_scroll_left() {
+    let mut doc = layout(
+        r#"<html><head><style>
+        html, body { margin: 0; padding: 0; }
+        #box { overflow-x: scroll; overflow-y: hidden;
+               width: 40px; height: 40px; white-space: nowrap;
+               position: absolute; top: 0; left: 0; }
+        #inner { display: inline-block; width: 120px; height: 20px; }
+    </style></head><body>
+        <div id="box"><div id="inner"></div></div>
+    </body></html>"#,
+    );
+
+    assert!(doc.process_scrollbar_event(
+        crate::dom::HtmlEventType::MouseDown,
+        5.0,
+        35.0,
+        400.0,
+        300.0
+    ));
+    assert!(doc.process_scrollbar_event(
+        crate::dom::HtmlEventType::MouseMove,
+        15.0,
+        35.0,
+        400.0,
+        300.0
+    ));
+
+    let after = query(&doc, "#box").unwrap().layout.scroll_left;
+    assert!(
+        after > 0.0,
+        "horizontal scrollbar drag should update scroll_left, got {after}"
+    );
+}
+
+#[test]
+fn element_scrollbar_drag_dispatches_scroll_event_on_scrolled_element() {
+    let mut doc = layout(
+        r#"<html><head><style>
+        html, body { margin: 0; padding: 0; }
+        #box { overflow-x: scroll; overflow-y: hidden;
+               width: 40px; height: 40px; white-space: nowrap;
+               position: absolute; top: 0; left: 0; }
+        #inner { display: inline-block; width: 120px; height: 20px; }
+    </style></head><body>
+        <div id="box"><div id="inner"></div></div>
+    </body></html>"#,
+    );
+    let box_id = query(&doc, "#box").unwrap().node_id;
+    let count = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let seen = count.clone();
+    doc.add_event_listener(
+        box_id,
+        "scroll",
+        Box::new(move |_, _| {
+            *seen.lock().unwrap() += 1;
+        }),
+        crate::dom::events::ListenerOptions::default(),
+    );
+
+    assert!(doc.process_scrollbar_event(
+        crate::dom::HtmlEventType::MouseDown,
+        5.0,
+        35.0,
+        400.0,
+        300.0
+    ));
+    assert!(doc.process_scrollbar_event(
+        crate::dom::HtmlEventType::MouseMove,
+        15.0,
+        35.0,
+        400.0,
+        300.0
+    ));
+
+    assert_eq!(
+        *count.lock().unwrap(),
+        1,
+        "drag-scrolled element should receive a scroll event"
     );
 }
 

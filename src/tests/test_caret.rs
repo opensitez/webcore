@@ -46,6 +46,69 @@ fn find_box_with_lines(root: &WebCore) -> Option<&WebCore> {
     None
 }
 
+#[test]
+fn user_select_none_blocks_mouse_selection() {
+    let mut doc = load_with_fonts(
+        r#"<style>
+             body { margin: 0; font: 16px/20px sans-serif; }
+             #no { user-select: none; }
+           </style>
+           <div id="no">not selectable</div>
+           <div id="yes">selectable</div>"#,
+    );
+
+    let no = doc.get_element_by_id("no").unwrap();
+    let yes = doc.get_element_by_id("yes").unwrap();
+    let no_rect = doc.get_box_by_id(no).unwrap().layout.border_rect;
+    let yes_rect = doc.get_box_by_id(yes).unwrap().layout.border_rect;
+
+    let blocked = doc.editor.handle_mouse_event(
+        &doc.root,
+        HtmlEventType::MouseDown,
+        (no_rect.x + 4.0, no_rect.y + no_rect.h * 0.5),
+        0,
+    );
+    assert!(!blocked);
+    assert_eq!(doc.editor.caret_box, None);
+
+    let allowed = doc.editor.handle_mouse_event(
+        &doc.root,
+        HtmlEventType::MouseDown,
+        (yes_rect.x + 4.0, yes_rect.y + yes_rect.h * 0.5),
+        0,
+    );
+    assert!(allowed);
+    assert!(doc.editor.caret_box.is_some());
+}
+
+#[test]
+fn user_select_all_selects_the_whole_element() {
+    let mut doc = load_with_fonts(
+        r#"<style>
+             body { margin: 0; font: 16px/20px sans-serif; }
+             #all { user-select: all; }
+           </style>
+           <div id="all">select all text</div>"#,
+    );
+
+    let all = doc.get_element_by_id("all").unwrap();
+    let rect = doc.get_box_by_id(all).unwrap().layout.border_rect;
+
+    let selected = doc.editor.handle_mouse_event(
+        &doc.root,
+        HtmlEventType::MouseDown,
+        (rect.x + 4.0, rect.y + rect.h * 0.5),
+        0,
+    );
+
+    assert!(selected);
+    assert_eq!(doc.editor.caret_box, Some(all));
+    assert_eq!(
+        doc.editor.sel_args(),
+        (Some(0), Some("select all text".len()))
+    );
+}
+
 // ─── char_x population ───────────────────────────────────────────────────────
 
 #[test]

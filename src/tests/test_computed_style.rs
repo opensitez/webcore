@@ -173,24 +173,21 @@ fn an_inset_is_the_used_value_only_on_a_positioned_box() {
 fn an_uncovered_property_still_falls_back_to_the_inline_style() {
     // ⛔ The BOUNDARY, asserted rather than left to be discovered. A property
     // outside the covered set fails SILENTLY — it answers the inline value or
-    // nothing, and looks no different from one that is handled. `float` is
-    // deliberately outside it: CSS 2.1 §9.7 computes it to `none` on a
-    // positioned box, the cascade does not apply that, and answering `"none"`
-    // here would leave `get_computed_style(id).float` disagreeing with this.
+    // nothing, and looks no different from one that is handled.
     let mut renderer = crate::Renderer::new();
     let mut d = renderer.load_html(
-        "<div id=inline style='float:left'>x</div><div id=sheet>y</div>",
+        "<div id=inline style='-webcore-test-prop:left'>x</div><div id=sheet>y</div>",
         800.0,
     );
     let inline = d.get_element_by_id("inline").unwrap();
     let sheet = d.get_element_by_id("sheet").unwrap();
     assert_eq!(
-        d.computed_style_property(inline, "float"),
+        d.computed_style_property(inline, "-webcore-test-prop"),
         "left",
         "the inline value"
     );
     assert_eq!(
-        d.computed_style_property(sheet, "float"),
+        d.computed_style_property(sheet, "-webcore-test-prop"),
         "",
         "and nothing otherwise"
     );

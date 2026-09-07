@@ -225,6 +225,36 @@ fn container_query_width_changes_box_size() {
 }
 
 #[test]
+fn container_queries_rerun_until_dependent_container_sizes_settle() {
+    let doc = parse_and_layout(
+        r#"<html><head><style>
+          .outer { container-type: inline-size; width: 200px; }
+          .middle { container-type: inline-size; width: 100px; }
+          .target { width: 20px; }
+          @container (min-width: 150px) {
+            .middle { width: 300px; }
+          }
+          @container (min-width: 250px) {
+            .target { width: 120px; }
+          }
+        </style></head><body style="margin:0">
+          <div class="outer">
+            <div class="middle">
+              <div id="target" class="target">x</div>
+            </div>
+          </div>
+        </body></html>"#,
+        800.0,
+    );
+    let target = find_by_id(&doc.root, "target").expect("target");
+    assert!(
+        (target.layout.border_rect.w - 120.0).abs() < 1.0,
+        "second-pass container query should see the resized middle container, got {}",
+        target.layout.border_rect.w
+    );
+}
+
+#[test]
 fn inline_size_container_does_not_answer_height_queries() {
     let doc = parse_and_layout(
         r#"<html><head><style>
@@ -273,6 +303,65 @@ fn unsupported_container_style_queries_fail_closed() {
         Color::rgb(255, 0, 0),
         "unsupported style queries must not fail open and apply inner rules"
     );
+}
+
+#[test]
+fn container_style_query_matches_computed_container_style() {
+    let html = r#"
+        <style>
+          .outer { container-type: size; width: 300px; height: 200px; display: block; }
+          .target { color: red; }
+          @container style(display: block) {
+            .target { color: green; }
+          }
+        </style>
+        <div class="outer"><div id="target" class="target">x</div></div>
+    "#;
+    let doc = parse_and_layout(html, 800.0);
+    let target = find_by_id(&doc.root, "target").expect("target");
+
+    assert_eq!(target.style.color, Color::rgb(0, 128, 0));
+}
+
+#[test]
+fn container_style_query_can_be_combined_with_size_conditions() {
+    let html = r#"
+        <style>
+          .outer {
+            container-type: size;
+            width: 300px;
+            height: 200px;
+            background-color: rgb(1, 2, 3);
+          }
+          .target { color: red; }
+          @container (min-width: 250px) and style(background-color: rgb(1, 2, 3)) {
+            .target { color: green; }
+          }
+        </style>
+        <div class="outer"><div id="target" class="target">x</div></div>
+    "#;
+    let doc = parse_and_layout(html, 800.0);
+    let target = find_by_id(&doc.root, "target").expect("target");
+
+    assert_eq!(target.style.color, Color::rgb(0, 128, 0));
+}
+
+#[test]
+fn container_style_query_matches_color_values() {
+    let html = r#"
+        <style>
+          .outer { container-type: size; width: 300px; height: 200px; color: rgb(255, 0, 0); }
+          .target { color: red; }
+          @container style(color: rgb(255, 0, 0)) {
+            .target { color: green; }
+          }
+        </style>
+        <div class="outer"><div id="target" class="target">x</div></div>
+    "#;
+    let doc = parse_and_layout(html, 800.0);
+    let target = find_by_id(&doc.root, "target").expect("target");
+
+    assert_eq!(target.style.color, Color::rgb(0, 128, 0));
 }
 
 #[test]

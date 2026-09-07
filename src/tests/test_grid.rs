@@ -1,10 +1,23 @@
-use crate::tests::harness::{find_box, parse_and_layout};
+use crate::layout::LayoutEngine;
+use crate::tests::harness::{find_box, parse, parse_and_layout};
 use crate::types::*;
 
 pub fn find_by_id<'a>(node: &'a WebCore, id: &str) -> Option<&'a WebCore> {
     find_box(node, &|b| {
         b.attributes.get("id").map(|s| s == id).unwrap_or(false)
     })
+}
+
+fn find_by_id_mut<'a>(node: &'a mut WebCore, id: &str) -> Option<&'a mut WebCore> {
+    if node.attributes.get("id").map(|s| s == id).unwrap_or(false) {
+        return Some(node);
+    }
+    for child in &mut node.children {
+        if let Some(found) = find_by_id_mut(child, id) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 #[test]
@@ -95,6 +108,194 @@ fn subgrid_columns_flag_set_in_style() {
         "subgrid_columns flag must be set"
     );
     assert!(!sub.style.subgrid_rows, "subgrid_rows must not be set");
+}
+
+#[test]
+fn grid_repeat_count_can_come_from_same_rule_custom_property() {
+    let doc = parse_and_layout(
+        r#"<html><body style="margin:0">
+          <style>
+            .grid {
+              --cols: 12;
+              display: grid;
+              grid-template-columns: repeat(var(--cols), 1fr);
+              column-gap: 24px;
+              width: 888px;
+            }
+            .hero {
+              display: grid;
+              grid-template-columns: subgrid;
+              grid-column: 1 / -1;
+            }
+            .lead { grid-column: 1 / 9; height: 20px; }
+            .rail { grid-column: 9 / 13; height: 20px; }
+          </style>
+          <section class="grid">
+            <div id="hero" class="hero">
+              <div id="lead" class="lead"></div>
+              <div id="rail" class="rail"></div>
+            </div>
+          </section>
+        </body></html>"#,
+        1000.0,
+    );
+
+    let hero = find_by_id(&doc.root, "hero").expect("hero");
+    let lead = find_by_id(&doc.root, "lead").expect("lead");
+    let rail = find_by_id(&doc.root, "rail").expect("rail");
+
+    assert!(
+        (hero.layout.content_rect.w - 888.0).abs() < 0.5,
+        "subgrid item should inherit the 12-column parent width, got {}",
+        hero.layout.content_rect.w
+    );
+    assert!(
+        (lead.layout.content_rect.w - 584.0).abs() < 0.5,
+        "lead spans 8 tracks plus 7 gaps: got {}",
+        lead.layout.content_rect.w
+    );
+    assert!(
+        (rail.layout.content_rect.x - 608.0).abs() < 0.5,
+        "rail should start after 8 tracks plus 8 gaps: got x={}",
+        rail.layout.content_rect.x
+    );
+}
+
+#[test]
+fn grid_full_span_subgrid_with_fluid_image_does_not_inflate_fr_tracks() {
+    let mut doc = parse(
+        r#"<html><body style="margin:0">
+          <style>
+            .grid {
+              --cols: 12;
+              display: grid;
+              grid-template-columns: repeat(var(--cols), 1fr);
+              column-gap: 24px;
+              width: 888px;
+            }
+            .hero.yf-1nj5315 {
+              --img-aspect-ratio: 16 / 9;
+              --img-object-fit: cover;
+              --img-width: 100%;
+              display: grid;
+              grid-template-columns: subgrid;
+              grid-column: 1 / -1;
+            }
+            @media only screen and (min-width: 768px) {
+              .lead.yf-1nj5315 { grid-column: 1 / 7; grid-row: 1; }
+            }
+            @media only screen and (min-width: 1050px) {
+              .lead.yf-1nj5315 { grid-column: 1 / 13; }
+            }
+            @media only screen and (min-width: 1280px) {
+              .lead.yf-1nj5315 { grid-column: 1 / 9; }
+            }
+            .lead-story.yf-mr8u9k {
+              display: grid;
+              grid-template-columns: 1fr;
+              gap: 16px;
+            }
+            @media only screen and (min-width: 768px) {
+              .lead-story.yf-mr8u9k {
+                grid-template-columns: 1fr 1fr;
+                gap: 24px;
+                align-items: start;
+              }
+            }
+            @media only screen and (min-width: 1280px) {
+              .lead-story.yf-mr8u9k {
+                grid-template-columns: 1fr;
+                gap: 24px;
+                align-items: unset;
+              }
+            }
+            .story-img-wrapper {
+              position: relative;
+              height: min-content;
+              width: 100%;
+            }
+            .story-img { display: block; width: var(--img-width, unset); height: auto; }
+            img.yf-1ev0m0b {
+              aspect-ratio: var(--img-aspect-ratio, unset);
+              object-fit: var(--img-object-fit, unset);
+            }
+            .rail { grid-column: 9 / 13; height: 20px; }
+          </style>
+          <section id="grid" class="grid">
+            <div id="hero" class="hero yf-1nj5315">
+              <section id="lead" class="section lead yf-1nj5315">
+                <div id="lead-story" class="lead-story yf-mr8u9k">
+                  <div id="visual" class="visual">
+                    <a id="wrap" class="story-img-wrapper">
+                      <img id="pic" class="story-img yf-1ev0m0b" src="" width="1312" height="738">
+                    </a>
+                  </div>
+                </div>
+              </section>
+              <div id="rail" class="rail"></div>
+            </div>
+          </section>
+        </body></html>"#,
+    );
+    let pic = find_by_id_mut(&mut doc.root, "pic").expect("pic");
+    pic.image_width = 1312;
+    pic.image_height = 738;
+    pic.image_data = Some(std::sync::Arc::new(vec![0xff; 1312 * 738 * 4]));
+    LayoutEngine::new().layout(&mut doc, 1280.0);
+
+    let grid = find_by_id(&doc.root, "grid").expect("grid");
+    let hero = find_by_id(&doc.root, "hero").expect("hero");
+    let lead = find_by_id(&doc.root, "lead").expect("lead");
+    let lead_story = find_by_id(&doc.root, "lead-story").expect("lead story");
+    let visual = find_by_id(&doc.root, "visual").expect("visual");
+    let wrap = find_by_id(&doc.root, "wrap").expect("wrap");
+    let pic = find_by_id(&doc.root, "pic").expect("pic");
+    let rail = find_by_id(&doc.root, "rail").expect("rail");
+
+    assert!(
+        (grid.layout.content_rect.w - 888.0).abs() < 0.5,
+        "outer grid should keep its definite width, got {}",
+        grid.layout.content_rect.w
+    );
+    assert!(
+        (hero.layout.content_rect.w - 888.0).abs() < 0.5,
+        "full-span subgrid should not grow to image natural width, got {}",
+        hero.layout.content_rect.w
+    );
+    assert!(
+        (lead.layout.content_rect.w - 584.0).abs() < 0.5,
+        "lead should use 8 inherited tracks plus 7 gaps, got {}",
+        lead.layout.content_rect.w
+    );
+    assert!(
+        (lead_story.layout.content_rect.w - lead.layout.content_rect.w).abs() < 0.5,
+        "inner lead-story grid should stay constrained by the lead column, got {} vs {}",
+        lead_story.layout.content_rect.w,
+        lead.layout.content_rect.w
+    );
+    assert!(
+        (visual.layout.content_rect.w - lead.layout.content_rect.w).abs() < 0.5,
+        "visual grid item should stay constrained by the lead column, got {} vs {}",
+        visual.layout.content_rect.w,
+        lead.layout.content_rect.w
+    );
+    assert!(
+        (wrap.layout.content_rect.w - lead.layout.content_rect.w).abs() < 0.5,
+        "fluid image wrapper should stay constrained by the lead column, got {} vs {}",
+        wrap.layout.content_rect.w,
+        lead.layout.content_rect.w
+    );
+    assert!(
+        (pic.layout.content_rect.w - lead.layout.content_rect.w).abs() < 0.5,
+        "fluid image should resolve against the lead column span, got {} vs {}",
+        pic.layout.content_rect.w,
+        lead.layout.content_rect.w
+    );
+    assert!(
+        (rail.layout.content_rect.x - 608.0).abs() < 0.5,
+        "rail should start in column 9, got x={}",
+        rail.layout.content_rect.x
+    );
 }
 
 #[test]

@@ -189,6 +189,27 @@ fn host_with_an_argument_matches_only_when_the_host_does() {
 }
 
 #[test]
+fn host_argument_descendant_selector_styles_shadow_descendant() {
+    let d = laid_out(
+        "<div id=A class=big><template shadowrootmode=open>\
+         <style>:host(.big) p { color: rgb(7, 8, 9); height: 20px }</style>\
+         <p id=p>s</p></template></div>",
+    );
+    let host = find_shadow(&d.root, "A").unwrap();
+    let p = find_shadow(&d.root, "p").unwrap();
+    assert_eq!(
+        p.style.color,
+        crate::types::Color::rgb(7, 8, 9),
+        ":host(.big) p should style the shadow descendant"
+    );
+    assert_ne!(
+        host.style.color,
+        crate::types::Color::rgb(7, 8, 9),
+        "the descendant selector must not be applied as a host-only rule"
+    );
+}
+
+#[test]
 fn projected_slot_content_is_laid_out() {
     let d = laid_out(
         "<div id=host><template shadowrootmode=open>\

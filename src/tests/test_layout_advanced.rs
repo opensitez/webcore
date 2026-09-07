@@ -23,6 +23,322 @@ fn layoutadv_max_height_parsed() {
 }
 
 #[test]
+fn margin_trim_block_start_removes_first_child_margin() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        .box { margin-trim: block-start; border: 1px solid black; width: 100px; }
+        .child { margin-top: 20px; height: 10px; }
+        </style>
+        <div class="box"><div id="child" class="child"></div></div>
+        "#,
+        200.0,
+    );
+    let parent = find_box(&doc.root, &|b| {
+        b.tag == "div" && b.attributes.get("class") == Some(&"box".to_string())
+    })
+    .unwrap();
+    let child = find_box(&doc.root, &|b| {
+        b.attributes.get("id") == Some(&"child".to_string())
+    })
+    .unwrap();
+    assert!(
+        (child.layout.border_rect.y - parent.layout.content_rect.y).abs() < 0.5,
+        "first child top margin should be trimmed at the parent's block-start edge"
+    );
+}
+
+#[test]
+fn margin_trim_block_end_removes_last_child_margin_from_parent_height() {
+    let mut renderer = crate::Renderer::new();
+    let without_trim = renderer.load_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        .box { border: 1px solid black; width: 100px; }
+        .child { height: 10px; margin-bottom: 20px; }
+        </style>
+        <div class="box"><div class="child"></div></div>
+        "#,
+        200.0,
+    );
+    let with_trim = renderer.load_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        .box { margin-trim: block-end; border: 1px solid black; width: 100px; }
+        .child { height: 10px; margin-bottom: 20px; }
+        </style>
+        <div class="box"><div class="child"></div></div>
+        "#,
+        200.0,
+    );
+    let normal = find_box(&without_trim.root, &|b| {
+        b.tag == "div" && b.attributes.get("class") == Some(&"box".to_string())
+    })
+    .unwrap();
+    let trimmed = find_box(&with_trim.root, &|b| {
+        b.tag == "div" && b.attributes.get("class") == Some(&"box".to_string())
+    })
+    .unwrap();
+    assert!(
+        normal.layout.border_rect.h - trimmed.layout.border_rect.h > 15.0,
+        "block-end trimming should remove the last child bottom margin from parent height; normal={} trimmed={}",
+        normal.layout.border_rect.h,
+        trimmed.layout.border_rect.h
+    );
+}
+
+#[test]
+fn inline_replaced_image_uses_percent_width_and_css_aspect_ratio() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+        * { box-sizing: border-box; }
+        .wrap { width: 320px; }
+        img { width: 100%; aspect-ratio: 16 / 9; display: inline; }
+        </style>
+        <div class="wrap"><a><img id="pic" src=""></a></div>
+        "#,
+        800.0,
+    );
+    let img = find_box(&doc.root, &|b| {
+        b.tag == "img" && b.attributes.get("id") == Some(&"pic".to_string())
+    })
+    .unwrap();
+    assert!(
+        (img.layout.border_rect.w - 320.0).abs() < 0.5,
+        "inline replaced image should use the containing width; got {}",
+        img.layout.border_rect.w
+    );
+    assert!(
+        (img.layout.border_rect.h - 180.0).abs() < 0.5,
+        "inline replaced image should transfer height from aspect-ratio; got {}",
+        img.layout.border_rect.h
+    );
+}
+
+#[test]
+fn margin_trim_inline_start_removes_first_child_margin() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        .box { margin-trim: inline-start; border: 1px solid black; width: 100px; }
+        .child { margin-left: 20px; width: 10px; height: 10px; }
+        </style>
+        <div class="box"><div id="child" class="child"></div></div>
+        "#,
+        200.0,
+    );
+    let parent = find_box(&doc.root, &|b| {
+        b.tag == "div" && b.attributes.get("class") == Some(&"box".to_string())
+    })
+    .unwrap();
+    let child = find_box(&doc.root, &|b| {
+        b.attributes.get("id") == Some(&"child".to_string())
+    })
+    .unwrap();
+    assert!(
+        (child.layout.border_rect.x - parent.layout.content_rect.x).abs() < 0.5,
+        "inline-start trimming should remove the first child start margin"
+    );
+}
+
+#[test]
+fn margin_trim_inline_end_removes_last_child_margin_from_scroll_width() {
+    let mut renderer = crate::Renderer::new();
+    let without_trim = renderer.load_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        .box { width: 20px; overflow: auto; }
+        .child { width: 30px; height: 10px; margin-right: 40px; }
+        </style>
+        <div class="box"><div class="child"></div></div>
+        "#,
+        200.0,
+    );
+    let with_trim = renderer.load_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        .box { margin-trim: inline-end; width: 20px; overflow: auto; }
+        .child { width: 30px; height: 10px; margin-right: 40px; }
+        </style>
+        <div class="box"><div class="child"></div></div>
+        "#,
+        200.0,
+    );
+    let normal = find_box(&without_trim.root, &|b| {
+        b.tag == "div" && b.attributes.get("class") == Some(&"box".to_string())
+    })
+    .unwrap();
+    let trimmed = find_box(&with_trim.root, &|b| {
+        b.tag == "div" && b.attributes.get("class") == Some(&"box".to_string())
+    })
+    .unwrap();
+    assert!(
+        normal.layout.scroll_width - trimmed.layout.scroll_width > 35.0,
+        "inline-end trimming should remove the last child end margin from scroll width; normal={} trimmed={}",
+        normal.layout.scroll_width,
+        trimmed.layout.scroll_width
+    );
+}
+
+#[test]
+fn text_wrap_balance_rebalances_last_line_width() {
+    let html = |wrap: &str| {
+        format!(
+            r#"
+            <style>
+            * {{ margin: 0; padding: 0; }}
+            #box {{
+                width: 165px;
+                font: 16px sans-serif;
+                text-wrap: {wrap};
+            }}
+            </style>
+            <div id="box">alpha beta gamma delta epsilon</div>
+            "#
+        )
+    };
+    let mut renderer = crate::Renderer::new();
+    let normal_doc = renderer.load_html(&html("wrap"), 400.0);
+    let balanced_doc = renderer.load_html(&html("balance"), 400.0);
+    let normal = find_box(&normal_doc.root, &|b| {
+        b.attributes.get("id") == Some(&"box".to_string())
+    })
+    .unwrap();
+    let balanced = find_box(&balanced_doc.root, &|b| {
+        b.attributes.get("id") == Some(&"box".to_string())
+    })
+    .unwrap();
+
+    assert_eq!(normal.layout.line_cache.len(), 2);
+    assert_eq!(balanced.layout.line_cache.len(), 2);
+    let normal_last = normal.layout.line_cache.last().unwrap().width;
+    let balanced_last = balanced.layout.line_cache.last().unwrap().width;
+    assert!(
+        balanced_last > normal_last + 20.0,
+        "balanced text should avoid a short leftover line: normal={normal_last}, balanced={balanced_last}"
+    );
+}
+
+#[test]
+fn text_wrap_pretty_avoids_single_word_last_line_when_possible() {
+    let html = |wrap: &str| {
+        format!(
+            r#"
+            <style>
+            * {{ margin: 0; padding: 0; }}
+            #box {{
+                width: 165px;
+                font: 16px sans-serif;
+                text-wrap: {wrap};
+            }}
+            </style>
+            <div id="box">alpha beta gamma delta epsilon</div>
+            "#
+        )
+    };
+    let mut renderer = crate::Renderer::new();
+    let normal_doc = renderer.load_html(&html("wrap"), 400.0);
+    let pretty_doc = renderer.load_html(&html("pretty"), 400.0);
+    let normal = find_box(&normal_doc.root, &|b| {
+        b.attributes.get("id") == Some(&"box".to_string())
+    })
+    .unwrap();
+    let pretty = find_box(&pretty_doc.root, &|b| {
+        b.attributes.get("id") == Some(&"box".to_string())
+    })
+    .unwrap();
+
+    assert_eq!(normal.layout.line_cache.len(), 2);
+    assert_eq!(pretty.layout.line_cache.len(), 2);
+    let normal_last = normal.layout.line_cache.last().unwrap().width;
+    let pretty_last = pretty.layout.line_cache.last().unwrap().width;
+    assert!(
+        pretty_last > normal_last + 20.0,
+        "pretty text should avoid a single-word final line when it can: normal={normal_last}, pretty={pretty_last}"
+    );
+}
+
+#[test]
+fn percentage_line_height_uses_font_size_for_line_boxes() {
+    let doc = parse_and_layout(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        h2 { font-size: 22px; line-height: 140%; }
+        </style>
+        <h2 id="title">Eugenics and the Nihilism of Law-and-Order Politics</h2>
+        <p id="after">After</p>
+        "#,
+        360.0,
+    );
+    let title = find_box(&doc.root, &|b| {
+        b.attributes.get("id") == Some(&"title".to_string())
+    })
+    .unwrap();
+    let after = find_box(&doc.root, &|b| {
+        b.attributes.get("id") == Some(&"after".to_string())
+    })
+    .unwrap();
+
+    assert!(
+        title.layout.content_rect.h > 30.0,
+        "percentage line-height should reserve font-size-based line box height, got {}",
+        title.layout.content_rect.h
+    );
+    assert!(
+        after.layout.content_rect.y >= title.layout.content_rect.y + title.layout.content_rect.h,
+        "following content must be placed after the heading line box; title={:?} after={:?}",
+        title.layout.content_rect,
+        after.layout.content_rect
+    );
+}
+
+#[test]
+fn variable_percentage_line_height_uses_font_size_for_line_boxes() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+        :root { --lh-title: 125%; }
+        * { margin: 0; padding: 0; }
+        .text { font-size: 24px; line-height: var(--lh-title); }
+        </style>
+        <h2 id="title" class="text">She Wrote Me a Letter</h2>
+        <p id="after">After</p>
+        "#,
+        360.0,
+    );
+    let title = find_box(&doc.root, &|b| {
+        b.attributes.get("id") == Some(&"title".to_string())
+    })
+    .unwrap();
+    let after = find_box(&doc.root, &|b| {
+        b.attributes.get("id") == Some(&"after".to_string())
+    })
+    .unwrap();
+
+    assert!(
+        title.layout.content_rect.h >= 29.0,
+        "var() percentage line-height should resolve against font size, got {}",
+        title.layout.content_rect.h
+    );
+    assert!(
+        after.layout.content_rect.y >= title.layout.content_rect.y + title.layout.content_rect.h,
+        "following content must not overlap a var() percentage line-height heading"
+    );
+}
+
+#[test]
 fn layoutadv_min_height_percent() {
     let mut s = ComputedStyle::default();
     apply_property(&mut s, "min-height", "50%");
@@ -367,6 +683,18 @@ fn find_by_id<'a>(node: &'a WebCore, id: &str) -> Option<&'a WebCore> {
     None
 }
 
+fn find_by_id_mut<'a>(node: &'a mut WebCore, id: &str) -> Option<&'a mut WebCore> {
+    if node.attributes.get("id").map(|s| s == id).unwrap_or(false) {
+        return Some(node);
+    }
+    for child in &mut node.children {
+        if let Some(b) = find_by_id_mut(child, id) {
+            return Some(b);
+        }
+    }
+    None
+}
+
 /// Flex-stretch: sidebar fills the full viewport height on initial layout.
 #[test]
 fn flex_stretch_sidebar_fills_height_initial() {
@@ -552,6 +880,83 @@ fn layoutadv_replaced_intrinsic_width_defaults_to_natural() {
     assert_eq!(engine.max_content_width(card, 16.0, 16.0), 640.0);
 }
 
+#[test]
+fn inline_block_image_wrapper_obeys_max_width_percent() {
+    let mut doc = parse(
+        "<style>
+           #lead { width: 584px; }
+           #wrap { display: inline-block; max-width: 100%; position: relative; }
+           img { display: block; max-width: 100%; height: auto; }
+         </style>
+         <div id=lead><a id=wrap><img id=pic src=x.webp></a></div>",
+    );
+    assert_eq!(set_natural_size(&mut doc.root, 1312, 738), 1);
+
+    let mut engine = LayoutEngine::new();
+    engine.layout(&mut doc, 1280.0);
+
+    let wrap = find_box(&doc.root, &|n: &WebCore| {
+        n.attributes.get("id").map(String::as_str) == Some("wrap")
+    })
+    .expect("wrapper");
+    assert!(
+        (wrap.layout.content_rect.w - 584.0).abs() < 1.0,
+        "inline-block image wrapper should be clamped by max-width:100%; got {}",
+        wrap.layout.content_rect.w
+    );
+    assert!(
+        (wrap.layout.content_rect.h - 329.0).abs() < 2.0,
+        "inline-block image wrapper should keep the image aspect ratio after clamp; got {}",
+        wrap.layout.content_rect.h
+    );
+
+    let pic = find_box(&doc.root, &|n: &WebCore| {
+        n.attributes.get("id").map(String::as_str) == Some("pic")
+    })
+    .expect("pic");
+    assert!(
+        (pic.layout.content_rect.w - 584.0).abs() < 1.0,
+        "child image should be laid out at the clamped wrapper width; got {}",
+        pic.layout.content_rect.w
+    );
+}
+
+#[test]
+fn dirty_loaded_image_reflows_fit_content_wrapper() {
+    let mut doc = parse(
+        "<style>
+           #lead { --img-width: 100%; width: 584px; }
+           #wrap { display: inline-block; position: relative; height: min-content; width: 100%; }
+           img { display: block; width: var(--img-width, unset); height: auto; }
+         </style>
+         <div id=lead><a id=wrap><img id=pic src=x.webp></a></div>",
+    );
+
+    let mut engine = LayoutEngine::new();
+    engine.layout(&mut doc, 1280.0);
+    assert!(
+        (find_by_id(&doc.root, "wrap").unwrap().layout.content_rect.w - 584.0).abs() < 1.0,
+        "width:100% wrapper should resolve against its container before image dimensions arrive"
+    );
+
+    let pic = find_by_id_mut(&mut doc.root, "pic").expect("pic");
+    pic.image_width = 1312;
+    pic.image_height = 738;
+    pic.image_data = Some(std::sync::Arc::new(vec![0xff; 1312 * 738 * 4]));
+    pic.layout.layout_dirty = true;
+    pic.layout.cached_intrinsic_w.set(f32::NAN);
+    pic.layout.intrinsic_dirty = true;
+
+    engine.layout_no_cascade(&mut doc, 1280.0);
+
+    let wrap = find_by_id(&doc.root, "wrap").expect("wrapper");
+    assert!(
+        (wrap.layout.content_rect.w - 584.0).abs() < 1.0,
+        "loaded image should dirty ancestors and reflow wrapper to max-width:100%; got {}",
+        wrap.layout.content_rect.w
+    );
+}
+
 /// The end-to-end shape of the tikshbila.com gallery: wrapping flex items whose
 /// only sizeable content is a photo shown at a fixed height.
 #[test]
@@ -651,6 +1056,44 @@ fn layoutadv_max_content_width_counts_inter_word_spaces() {
     assert!(
         spaced > joined + 4.0,
         "the two spaces were not measured: 'Faire un don' {spaced} vs 'Faireundon' {joined}"
+    );
+}
+
+#[test]
+fn layoutadv_max_content_width_counts_css_text_spacing() {
+    let mut renderer = crate::renderer::Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+        #plain, #spaced { display: inline-block; font-size: 16px; }
+        #spaced { letter-spacing: 4px; word-spacing: 10px; }
+        </style>
+        <div id=plain>a b</div><div id=spaced>a b</div>
+    "#,
+        800.0,
+    );
+    let engine = renderer.layout_engine();
+    let find = |id: &str| {
+        fn walk<'a>(n: &'a WebCore, id: &str) -> Option<&'a WebCore> {
+            if n.attributes.get("id").map(String::as_str) == Some(id) {
+                return Some(n);
+            }
+            for c in &n.children {
+                if let Some(f) = walk(c, id) {
+                    return Some(f);
+                }
+            }
+            None
+        }
+        walk(&doc.root, id).unwrap()
+    };
+    let plain = engine.max_content_width(find("plain"), 16.0, 16.0);
+    let spaced = engine.max_content_width(find("spaced"), 16.0, 16.0);
+    let added = spaced - plain;
+    assert!(
+        (21.5..=23.0).contains(&added),
+        "three letters/spaces at 4px plus one word gap at 10px should add 22px; \
+         plain={plain} spaced={spaced} added={added}"
     );
 }
 
@@ -1012,6 +1455,28 @@ fn break_before_column_forces_a_new_column() {
     assert!(
         (b.layout.margin_rect.x - a.layout.margin_rect.x).abs() > 1.0,
         "break-before:column on b must move it to a new column (a.x={}, b.x={})",
+        a.layout.margin_rect.x,
+        b.layout.margin_rect.x
+    );
+}
+
+#[test]
+fn break_inside_avoid_keeps_plain_wrapper_in_one_column() {
+    let html = r#"
+        <div style="column-fill:auto; column-count:2; height:50px; width:200px; column-gap:0;">
+          <div id="group" style="break-inside:avoid">
+            <div id="a" style="height:30px">a</div>
+            <div id="b" style="height:30px">b</div>
+          </div>
+          <div id="c" style="height:10px">c</div>
+        </div>
+    "#;
+    let doc = parse_and_layout(html, 900.0);
+    let a = find_by_id(&doc.root, "a").unwrap();
+    let b = find_by_id(&doc.root, "b").unwrap();
+    assert!(
+        (a.layout.margin_rect.x - b.layout.margin_rect.x).abs() < 0.5,
+        "break-inside:avoid group children must stay in the same column, got a.x={} b.x={}",
         a.layout.margin_rect.x,
         b.layout.margin_rect.x
     );

@@ -494,12 +494,27 @@ fn interpolate_value_rgba_color() {
 }
 
 #[test]
+fn interpolate_value_rgba_uses_premultiplied_colors() {
+    let mid = interpolate_value("rgba(0,0,0,0.0000)", "rgba(255,0,0,1.0000)", 0.5);
+    assert_eq!(
+        mid, "rgba(255,0,0,0.5000)",
+        "fade-in from transparent must keep the target hue instead of darkening through black"
+    );
+}
+
+#[test]
 fn interpolate_value_snaps_on_mismatch() {
     // Different token count → snap
     let result = interpolate_value("red", "blue", 0.3);
     assert_eq!(result, "red");
     let result2 = interpolate_value("red", "blue", 0.7);
     assert_eq!(result2, "blue");
+}
+
+#[test]
+fn transform_interpolation_unitless_zero_adopts_percentage_unit() {
+    let result = interpolate_value("translateX(0)", "translateX(100%)", 0.5);
+    assert_eq!(result, "translateX(50%)");
 }
 
 // ── @keyframes stop interpolation ─────────────────────────────────────────────
@@ -710,17 +725,110 @@ fn transition_behavior_allow_discrete_is_parsed_and_stored() {
 }
 
 #[test]
+fn transition_longhands_match_comma_lists_by_index() {
+    let mut s = ComputedStyle::default();
+    crate::css::apply_property(&mut s, "transition-property", "opacity, transform");
+    crate::css::apply_property(&mut s, "transition-duration", "200ms, .5s");
+    crate::css::apply_property(
+        &mut s,
+        "transition-timing-function",
+        "ease-in, cubic-bezier(.4, 0, .2, 1)",
+    );
+    crate::css::apply_property(&mut s, "transition-delay", "50ms, 100ms");
+    crate::css::apply_property(&mut s, "transition-behavior", "normal, allow-discrete");
+
+    let transitions = &s.rare().transitions;
+    assert_eq!(transitions.len(), 2);
+    assert_eq!(transitions[0].property, "opacity");
+    assert_eq!(transitions[1].property, "transform");
+    assert!((transitions[0].duration_ms - 200.0).abs() < 0.1);
+    assert!((transitions[1].duration_ms - 500.0).abs() < 0.1);
+    assert_eq!(transitions[0].timing_fn, EasingFn::EaseIn);
+    assert_eq!(
+        transitions[1].timing_fn,
+        EasingFn::CubicBezier(0.4, 0.0, 0.2, 1.0)
+    );
+    assert!((transitions[0].delay_ms - 50.0).abs() < 0.1);
+    assert!((transitions[1].delay_ms - 100.0).abs() < 0.1);
+    assert!(!transitions[0].allow_discrete);
+    assert!(transitions[1].allow_discrete);
+}
+
+#[test]
+fn animation_longhands_match_comma_lists_by_index() {
+    let mut s = ComputedStyle::default();
+    crate::css::apply_property(&mut s, "animation-name", "fade, spin");
+    crate::css::apply_property(&mut s, "animation-duration", "200ms, .5s");
+    crate::css::apply_property(
+        &mut s,
+        "animation-timing-function",
+        "ease-out, cubic-bezier(.4, 0, .2, 1)",
+    );
+    crate::css::apply_property(&mut s, "animation-delay", "50ms, 100ms");
+    crate::css::apply_property(&mut s, "animation-iteration-count", "2, infinite");
+    crate::css::apply_property(&mut s, "animation-direction", "reverse, alternate");
+    crate::css::apply_property(&mut s, "animation-fill-mode", "forwards, both");
+    crate::css::apply_property(&mut s, "animation-play-state", "running, paused");
+    crate::css::apply_property(&mut s, "animation-composition", "add, accumulate");
+
+    let animations = &s.rare().animations;
+    assert_eq!(animations.len(), 2);
+    assert_eq!(animations[0].name, "fade");
+    assert_eq!(animations[1].name, "spin");
+    assert!((animations[0].duration_ms - 200.0).abs() < 0.1);
+    assert!((animations[1].duration_ms - 500.0).abs() < 0.1);
+    assert_eq!(animations[0].timing_fn, EasingFn::EaseOut);
+    assert_eq!(
+        animations[1].timing_fn,
+        EasingFn::CubicBezier(0.4, 0.0, 0.2, 1.0)
+    );
+    assert!((animations[0].delay_ms - 50.0).abs() < 0.1);
+    assert!((animations[1].delay_ms - 100.0).abs() < 0.1);
+    assert_eq!(animations[0].iteration_count, 2.0);
+    assert!(animations[1].iteration_count.is_infinite());
+    assert_eq!(animations[0].direction, AnimDirection::Reverse);
+    assert_eq!(animations[1].direction, AnimDirection::Alternate);
+    assert_eq!(animations[0].fill_mode, FillMode::Forwards);
+    assert_eq!(animations[1].fill_mode, FillMode::Both);
+    assert!(!animations[0].play_state_paused);
+    assert!(animations[1].play_state_paused);
+    assert_eq!(animations[0].composition, AnimationComposition::Add);
+    assert_eq!(animations[1].composition, AnimationComposition::Accumulate);
+}
+
+#[test]
+fn transform_interpolation_synthesizes_multi_function_identity() {
+    let value = crate::types::animation_helpers::interpolate_value(
+        "none",
+        "translate(-50%, -50%) rotate(45deg)",
+        0.0,
+    );
+    assert_eq!(value, "translate(0%, 0%) rotate(0deg)");
+
+    let value =
+        crate::types::animation_helpers::interpolate_value("none", "scale(1.5) rotate(45deg)", 0.0);
+    assert_eq!(value, "scale(1) rotate(0deg)");
+}
+
+#[test]
 fn transitionable_style_includes_common_length_and_side_color_properties() {
     let mut s = ComputedStyle::default();
     crate::css::apply_property(&mut s, "width", "10px");
     crate::css::apply_property(&mut s, "left", "25%");
     crate::css::apply_property(&mut s, "border-left-color", "red");
     crate::css::apply_property(&mut s, "gap", "2em");
+    crate::css::apply_property(&mut s, "display", "grid");
+    crate::css::apply_property(&mut s, "content-visibility", "hidden");
 
     let values = extract_transitionable_style(&s);
     assert_eq!(values.get("width").map(String::as_str), Some("10px"));
     assert_eq!(values.get("left").map(String::as_str), Some("25%"));
     assert_eq!(values.get("gap").map(String::as_str), Some("2em"));
+    assert_eq!(values.get("display").map(String::as_str), Some("grid"));
+    assert_eq!(
+        values.get("content-visibility").map(String::as_str),
+        Some("hidden")
+    );
     assert!(values.contains_key("border-left-color"));
 }
 
@@ -771,6 +879,36 @@ fn sync_animations_starts_state() {
 }
 
 #[test]
+fn sync_animations_dispatches_animationstart_when_animation_is_created() {
+    let html = r#"<html><head><style>
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to   { transform: rotate(360deg); }
+        }
+        #box { animation: spin 1s linear 1; }
+    </style></head><body><div id="box">hi</div></body></html>"#;
+
+    let mut doc = parse_html(html);
+    let id = doc.get_element_by_id("box").unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let counter = std::sync::Arc::clone(&seen);
+    doc.add_event_listener(
+        id,
+        "animationstart",
+        Box::new(move |_, _| {
+            *counter.lock().unwrap() += 1;
+        }),
+        Default::default(),
+    );
+
+    let mut engine = LayoutEngine::new();
+    engine.layout(&mut doc, 800.0);
+
+    assert_eq!(*seen.lock().unwrap(), 1);
+    assert_eq!(doc.active_animations[0].animation.name, "spin");
+}
+
+#[test]
 fn sync_animations_does_not_duplicate() {
     let mut doc = doc_with_animation("animation: spin 2s linear infinite;");
     let count_before = doc.active_animations.len();
@@ -810,6 +948,32 @@ fn tick_animations_produces_overrides() {
 }
 
 #[test]
+fn one_sided_to_keyframe_starts_from_underlying_style() {
+    let html = r#"<html><head><style>
+        @keyframes fade-out { to { opacity: 0; } }
+        .box { opacity: 1; animation: fade-out 1s linear; }
+    </style></head><body><div class="box">hi</div></body></html>"#;
+
+    let mut doc = parse_html(html);
+    let mut engine = LayoutEngine::new();
+    engine.layout(&mut doc, 800.0);
+    let start = doc.active_animations[0].start_time;
+    doc.tick_animations(start + Duration::from_millis(500));
+
+    let opacity = doc
+        .animation_overrides
+        .values()
+        .flat_map(|props| props.iter())
+        .find(|(name, _)| name == "opacity")
+        .and_then(|(_, value)| value.parse::<f32>().ok())
+        .expect("opacity override");
+    assert!(
+        (opacity - 0.5).abs() < 0.05,
+        "to-only keyframe should interpolate from underlying opacity 1 to 0, got {opacity}"
+    );
+}
+
+#[test]
 fn tick_animations_needs_more_frames_while_running() {
     let mut doc = doc_with_animation("animation: spin 1s linear infinite;");
     let now = doc.active_animations[0].start_time + Duration::from_millis(100);
@@ -828,6 +992,87 @@ fn tick_animations_finished_when_done() {
         doc.active_animations.is_empty(),
         "finished animation should be removed"
     );
+}
+
+#[test]
+fn tick_animations_dispatches_animationend_when_animation_finishes() {
+    let mut doc = doc_with_animation("animation: spin 0.1s linear 1;");
+    let id = doc.active_animations[0].element_id;
+    let start = doc.active_animations[0].start_time;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let counter = std::sync::Arc::clone(&seen);
+    doc.add_event_listener(
+        id,
+        "animationend",
+        Box::new(move |_, _| {
+            *counter.lock().unwrap() += 1;
+        }),
+        Default::default(),
+    );
+
+    doc.tick_animations(start + Duration::from_millis(500));
+
+    assert_eq!(*seen.lock().unwrap(), 1);
+}
+
+#[test]
+fn tick_animations_dispatches_animationiteration_on_completed_non_final_cycle() {
+    let mut doc = doc_with_animation("animation: spin 0.1s linear 3;");
+    let id = doc.active_animations[0].element_id;
+    let start = doc.active_animations[0].start_time;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let counter = std::sync::Arc::clone(&seen);
+    doc.add_event_listener(
+        id,
+        "animationiteration",
+        Box::new(move |_, _| {
+            *counter.lock().unwrap() += 1;
+        }),
+        Default::default(),
+    );
+
+    doc.tick_animations(start + Duration::from_millis(125));
+    doc.tick_animations(start + Duration::from_millis(150));
+
+    assert_eq!(*seen.lock().unwrap(), 1);
+    assert_eq!(doc.active_animations[0].last_iteration_event, 1);
+}
+
+#[test]
+fn tick_animations_dispatches_transitionend_when_transition_finishes() {
+    let mut doc = parse_html("<div id='box'></div>");
+    let id = doc.get_element_by_id("box").unwrap();
+    let start = Instant::now();
+    doc.transition_states
+        .entry(id)
+        .or_default()
+        .push(TransitionState {
+            property: "opacity".into(),
+            from_value: "0".into(),
+            to_value: "1".into(),
+            reversing_adjusted_start_value: "0".into(),
+            reversing_shortening_factor: 1.0,
+            start_time: start,
+            duration_ms: 100.0,
+            delay_ms: 0.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: false,
+        });
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let counter = std::sync::Arc::clone(&seen);
+    doc.add_event_listener(
+        id,
+        "transitionend",
+        Box::new(move |_, _| {
+            *counter.lock().unwrap() += 1;
+        }),
+        Default::default(),
+    );
+
+    doc.tick_animations(start + Duration::from_millis(150));
+
+    assert_eq!(*seen.lock().unwrap(), 1);
+    assert!(!doc.transition_states.contains_key(&id));
 }
 
 #[test]
@@ -889,6 +1134,35 @@ fn tick_animations_backwards_fill_during_delay() {
     assert!(
         has_opacity,
         "backwards fill should apply 'from' keyframe during delay"
+    );
+}
+
+#[test]
+fn paused_animation_does_not_advance_or_request_frames() {
+    let mut doc = doc_with_animation("animation: fade 1s linear both paused;");
+    let id = doc.active_animations[0].element_id;
+    let now = doc.active_animations[0].start_time + Duration::from_millis(500);
+
+    doc.tick_animations(now);
+
+    assert_eq!(
+        doc.active_animations.len(),
+        1,
+        "paused animation stays active"
+    );
+    assert!(
+        !doc.needs_animation_frame,
+        "a paused animation should not schedule another frame"
+    );
+    let opacity = doc
+        .animation_overrides
+        .get(&id)
+        .and_then(|props| props.iter().find(|(k, _)| k == "opacity"))
+        .and_then(|(_, v)| v.parse::<f32>().ok())
+        .expect("paused both-fill animation should hold the first keyframe");
+    assert!(
+        opacity < 0.05,
+        "paused animation should hold at the start, got {opacity}"
     );
 }
 
@@ -1021,6 +1295,169 @@ fn transition_state_starts_on_style_change() {
 }
 
 #[test]
+fn sync_transitions_dispatches_transitionrun_and_transitionstart_when_created() {
+    let mut doc = parse_html("<div id='box'></div>");
+    let id = doc.get_element_by_id("box").unwrap();
+    {
+        let node = doc.get_box_by_id_mut(id).unwrap();
+        let style = std::sync::Arc::make_mut(&mut node.style);
+        style.opacity = 1.0;
+        style.rare_mut().transitions.push(ParsedTransition {
+            property: "opacity".into(),
+            duration_ms: 100.0,
+            delay_ms: 0.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: false,
+        });
+    }
+    let mut prev = std::collections::HashMap::new();
+    prev.insert("opacity".to_string(), "0".to_string());
+    doc.prev_styles.insert(id, prev);
+
+    let seen_run = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let counter_run = std::sync::Arc::clone(&seen_run);
+    doc.add_event_listener(
+        id,
+        "transitionrun",
+        Box::new(move |_, _| {
+            *counter_run.lock().unwrap() += 1;
+        }),
+        Default::default(),
+    );
+    let seen_start = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let counter_start = std::sync::Arc::clone(&seen_start);
+    doc.add_event_listener(
+        id,
+        "transitionstart",
+        Box::new(move |_, _| {
+            *counter_start.lock().unwrap() += 1;
+        }),
+        Default::default(),
+    );
+
+    doc.sync_transitions(Instant::now(), true);
+
+    assert_eq!(*seen_run.lock().unwrap(), 1);
+    assert_eq!(*seen_start.lock().unwrap(), 1);
+    assert!(doc.transition_states.contains_key(&id));
+}
+
+#[test]
+fn sync_transitions_dispatches_transitioncancel_when_replacing_running_transition() {
+    let mut doc = parse_html("<div id='box'></div>");
+    let id = doc.get_element_by_id("box").unwrap();
+    {
+        let node = doc.get_box_by_id_mut(id).unwrap();
+        let style = std::sync::Arc::make_mut(&mut node.style);
+        style.opacity = 1.0;
+        style.rare_mut().transitions.push(ParsedTransition {
+            property: "opacity".into(),
+            duration_ms: 100.0,
+            delay_ms: 0.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: false,
+        });
+    }
+    let start = Instant::now();
+    doc.transition_states
+        .entry(id)
+        .or_default()
+        .push(TransitionState {
+            property: "opacity".into(),
+            from_value: "0".into(),
+            to_value: "0.5".into(),
+            reversing_adjusted_start_value: "0".into(),
+            reversing_shortening_factor: 1.0,
+            start_time: start,
+            duration_ms: 100.0,
+            delay_ms: 0.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: false,
+        });
+    let mut prev = std::collections::HashMap::new();
+    prev.insert("opacity".to_string(), "0".to_string());
+    doc.prev_styles.insert(id, prev);
+
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let counter = std::sync::Arc::clone(&seen);
+    doc.add_event_listener(
+        id,
+        "transitioncancel",
+        Box::new(move |_, _| {
+            *counter.lock().unwrap() += 1;
+        }),
+        Default::default(),
+    );
+
+    doc.sync_transitions(start + Duration::from_millis(10), true);
+
+    assert_eq!(*seen.lock().unwrap(), 1);
+    assert_eq!(
+        doc.transition_states
+            .get(&id)
+            .and_then(|states| states.iter().find(|state| state.property == "opacity"))
+            .map(|state| state.to_value.as_str()),
+        Some("1")
+    );
+}
+
+#[test]
+fn reversing_transition_uses_shortened_duration() {
+    let mut doc = parse_html("<div id='box'></div>");
+    let id = doc.get_element_by_id("box").unwrap();
+    {
+        let node = doc.get_box_by_id_mut(id).unwrap();
+        let style = std::sync::Arc::make_mut(&mut node.style);
+        style.opacity = 0.0;
+        style.rare_mut().transitions.push(ParsedTransition {
+            property: "opacity".into(),
+            duration_ms: 1000.0,
+            delay_ms: 0.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: false,
+        });
+    }
+    let start = Instant::now();
+    doc.transition_states
+        .entry(id)
+        .or_default()
+        .push(TransitionState {
+            property: "opacity".into(),
+            from_value: "0".into(),
+            to_value: "1".into(),
+            reversing_adjusted_start_value: "0".into(),
+            reversing_shortening_factor: 1.0,
+            start_time: start,
+            duration_ms: 1000.0,
+            delay_ms: 0.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: false,
+        });
+    doc.animation_overrides
+        .entry(id)
+        .or_default()
+        .push(("opacity".into(), "0.2".into()));
+    let mut prev = std::collections::HashMap::new();
+    prev.insert("opacity".to_string(), "1".to_string());
+    doc.prev_styles.insert(id, prev);
+
+    doc.sync_transitions(start + Duration::from_millis(200), true);
+
+    let state = doc
+        .transition_states
+        .get(&id)
+        .and_then(|states| states.iter().find(|state| state.property == "opacity"))
+        .expect("replacement transition");
+    assert_eq!(state.from_value, "0.2");
+    assert_eq!(state.to_value, "0");
+    assert!(
+        (state.duration_ms - 200.0).abs() < 1.0,
+        "reversal should use remaining travelled fraction, got {}ms",
+        state.duration_ms
+    );
+}
+
+#[test]
 fn transition_interpolates_between_values() {
     use std::collections::HashMap;
 
@@ -1035,10 +1472,13 @@ fn transition_interpolates_between_values() {
             property: "opacity".to_string(),
             from_value: "0".to_string(),
             to_value: "1".to_string(),
+            reversing_adjusted_start_value: "0".to_string(),
+            reversing_shortening_factor: 1.0,
             start_time: start,
             duration_ms: 500.0,
             delay_ms: 0.0,
             timing_fn: EasingFn::Linear,
+            allow_discrete: false,
         }],
     );
 
@@ -1056,6 +1496,45 @@ fn transition_interpolates_between_values() {
 }
 
 #[test]
+fn allow_discrete_display_transition_keeps_box_visible_until_end() {
+    let mut doc = parse_html("<html><body></body></html>");
+    let elem_id: u32 = 0xD15C;
+    let start = Instant::now();
+
+    doc.transition_states.insert(
+        elem_id,
+        vec![TransitionState {
+            property: "display".to_string(),
+            from_value: "block".to_string(),
+            to_value: "none".to_string(),
+            reversing_adjusted_start_value: "block".to_string(),
+            reversing_shortening_factor: 1.0,
+            start_time: start,
+            duration_ms: 1000.0,
+            delay_ms: 0.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: true,
+        }],
+    );
+
+    doc.tick_animations(start + Duration::from_millis(500));
+    let mid = doc
+        .animation_overrides
+        .get(&elem_id)
+        .and_then(|props| props.iter().find(|(k, _)| k == "display"))
+        .map(|(_, v)| v.as_str());
+    assert_eq!(mid, Some("block"));
+
+    doc.tick_animations(start + Duration::from_millis(1000));
+    let end = doc
+        .animation_overrides
+        .get(&elem_id)
+        .and_then(|props| props.iter().find(|(k, _)| k == "display"))
+        .map(|(_, v)| v.as_str());
+    assert_eq!(end, Some("none"));
+}
+
+#[test]
 fn transition_completes_and_is_removed() {
     let mut doc = parse_html("<html><body></body></html>");
     let elem_id: u32 = 0xBEEF;
@@ -1067,10 +1546,13 @@ fn transition_completes_and_is_removed() {
             property: "opacity".to_string(),
             from_value: "0".to_string(),
             to_value: "1".to_string(),
+            reversing_adjusted_start_value: "0".to_string(),
+            reversing_shortening_factor: 1.0,
             start_time: start,
             duration_ms: 500.0,
             delay_ms: 0.0,
             timing_fn: EasingFn::Linear,
+            allow_discrete: false,
         }],
     );
 
@@ -1099,10 +1581,13 @@ fn transition_delay_applies_from_value() {
             property: "opacity".to_string(),
             from_value: "0".to_string(),
             to_value: "1".to_string(),
+            reversing_adjusted_start_value: "0".to_string(),
+            reversing_shortening_factor: 1.0,
             start_time: start,
             duration_ms: 500.0,
             delay_ms: 300.0, // 300ms delay
             timing_fn: EasingFn::Linear,
+            allow_discrete: false,
         }],
     );
 

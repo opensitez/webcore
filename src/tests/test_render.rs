@@ -240,6 +240,238 @@ fn pixel(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8, u8) {
     (r, g, b, a)
 }
 
+#[test]
+fn svg_stroke_current_color_does_not_get_filled() {
+    let pm = render_html(
+        r#"
+        <style>
+          body { margin: 0; background: white; }
+          svg { color: rgb(0, 128, 0); }
+        </style>
+        <svg width="80" height="40" viewBox="0 0 80 40">
+          <path d="M5 5 L75 5 L75 35 Z" stroke="currentColor" stroke-width="4"/>
+        </svg>
+        "#,
+        90,
+        50,
+    );
+
+    let (sr, sg, sb, _) = pixel(&pm, 40, 5);
+    assert!(
+        sg > sr && sg > sb,
+        "stroke should resolve currentColor through SVG rasterization; got rgb({sr}, {sg}, {sb})"
+    );
+
+    let (ir, ig, ib, _) = pixel(&pm, 60, 20);
+    assert!(
+        ir > 240 && ig > 240 && ib > 240,
+        "stroke-only SVG path must not receive an injected fill; got rgb({ir}, {ig}, {ib})"
+    );
+}
+
+#[test]
+fn box_shadow_blur_softens_outside_the_shadow_rect() {
+    let pm = render_html(
+        r#"
+        <style>
+          body { margin: 0; background: white; }
+          #box { margin: 40px; width: 40px; height: 40px; background: white; box-shadow: 0 0 12px black; }
+        </style>
+        <div id="box"></div>
+        "#,
+        140,
+        140,
+    );
+    let (r, g, b, _a) = pixel(&pm, 35, 60);
+
+    assert!(
+        r < 250 && g < 250 && b < 250,
+        "blurred box-shadow should paint soft pixels outside the box edge; got rgb({r}, {g}, {b})"
+    );
+}
+
+#[test]
+fn text_shadow_blur_softens_outside_the_glyphs() {
+    let pm = render_html(
+        r#"
+        <style>
+          body { margin: 0; background: white; }
+          #text { margin-left: 24px; margin-top: 16px; color: transparent; text-shadow: 0 0 8px black; font: 48px/56px sans-serif; }
+        </style>
+        <div id="text">MM</div>
+        "#,
+        180,
+        100,
+    );
+
+    let mut found_soft_shadow = false;
+    for x in 12..22 {
+        for y in 25..70 {
+            let (r, g, b, _a) = pixel(&pm, x, y);
+            if r < 250 && g < 250 && b < 250 {
+                found_soft_shadow = true;
+                break;
+            }
+        }
+        if found_soft_shadow {
+            break;
+        }
+    }
+
+    assert!(
+        found_soft_shadow,
+        "blurred text-shadow should paint soft pixels outside the glyph origin"
+    );
+}
+
+#[test]
+fn render_contenteditable_selection_uses_selection_background() {
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"<style>
+           body { margin: 0; background: white; }
+           #ed { font: 20px/24px sans-serif; color: black; }
+           #ed::selection { background-color: rgb(255, 0, 0); color: white; }
+           </style>
+           <div id="ed" contenteditable>hello world</div>"#,
+        240.0,
+    );
+    let ed = doc.get_element_by_id("ed").unwrap();
+    doc.editor.caret_box = Some(ed);
+    doc.editor.caret_local = 5;
+    doc.editor.sel_start = 0;
+    doc.editor.sel_end = 5;
+    doc.editor.caret_visible = false;
+
+    let line = doc
+        .get_box_by_id(ed)
+        .unwrap()
+        .layout
+        .line_cache
+        .first()
+        .cloned()
+        .expect("contenteditable text should have a line");
+    let x = (line.x + line.char_x.get(2).copied().unwrap_or(20.0)).round() as u32;
+    let y = (line.y + line.height / 2.0).round() as u32;
+
+    let mut pixmap = Pixmap::new(240, 80).unwrap();
+    renderer.render(&mut doc, &mut pixmap, 1.0);
+    let (r, g, b, a) = pixel(&pixmap, x, y);
+
+    assert!(
+        a > 0 && r > 200 && g < 80 && b < 80,
+        "::selection background should paint red at ({x},{y}), got rgba({r},{g},{b},{a})"
+    );
+}
+
+#[test]
+fn render_contenteditable_selection_uses_selection_foreground() {
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"<style>
+           body { margin: 0; background: white; }
+           #ed { font: 48px/56px sans-serif; color: black; }
+           #ed::selection { background-color: black; color: rgb(0, 255, 0); }
+           </style>
+           <div id="ed" contenteditable>MMMM</div>"#,
+        240.0,
+    );
+    let ed = doc.get_element_by_id("ed").unwrap();
+    doc.editor.caret_box = Some(ed);
+    doc.editor.caret_local = 4;
+    doc.editor.sel_start = 0;
+    doc.editor.sel_end = 4;
+    doc.editor.caret_visible = false;
+
+    let mut pixmap = Pixmap::new(240, 90).unwrap();
+    renderer.render(&mut doc, &mut pixmap, 1.0);
+
+    let mut green_pixels = 0usize;
+    for y in 0..70 {
+        for x in 0..180 {
+            let (r, g, b, a) = pixel(&pixmap, x, y);
+            if a > 0 && g > 160 && r < 80 && b < 80 {
+                green_pixels += 1;
+            }
+        }
+    }
+
+    assert!(
+        green_pixels > 20,
+        "::selection foreground should repaint selected text green; found {green_pixels} green pixels"
+    );
+}
+
+#[test]
+fn element_scrollbar_color_paints_track_and_thumb() {
+    let pm = render_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        #scroller {
+            width: 40px;
+            height: 40px;
+            overflow-y: scroll;
+            scrollbar-color: rgb(255, 0, 0) rgb(0, 255, 0);
+            background: white;
+        }
+        #content { height: 120px; }
+        </style>
+        <div id="scroller"><div id="content"></div></div>
+    "#,
+        80,
+        80,
+    );
+
+    let (tr, tg, tb, _) = pixel(&pm, 35, 30);
+    assert!(
+        tg > 180 && tr < 80 && tb < 80,
+        "scrollbar track should use scrollbar-color track, got rgba({tr},{tg},{tb},_)"
+    );
+
+    let (r, g, b, _) = pixel(&pm, 35, 5);
+    assert!(
+        r > 180 && g < 80 && b < 80,
+        "scrollbar thumb should use scrollbar-color thumb, got rgba({r},{g},{b},_)"
+    );
+}
+
+#[test]
+fn horizontal_element_scrollbar_color_paints_track_and_thumb() {
+    let pm = render_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        #scroller {
+            width: 40px;
+            height: 40px;
+            overflow-x: scroll;
+            overflow-y: hidden;
+            white-space: nowrap;
+            scrollbar-color: rgb(255, 0, 0) rgb(0, 255, 0);
+            background: white;
+        }
+        #content { display: inline-block; width: 120px; height: 20px; }
+        </style>
+        <div id="scroller"><div id="content"></div></div>
+    "#,
+        80,
+        80,
+    );
+
+    let (tr, tg, tb, _) = pixel(&pm, 30, 35);
+    assert!(
+        tg > 180 && tr < 80 && tb < 80,
+        "horizontal scrollbar track should use scrollbar-color track, got rgba({tr},{tg},{tb},_)"
+    );
+
+    let (r, g, b, _) = pixel(&pm, 5, 35);
+    assert!(
+        r > 180 && g < 80 && b < 80,
+        "horizontal scrollbar thumb should use scrollbar-color thumb, got rgba({r},{g},{b},_)"
+    );
+}
+
 // ── Flex nav: li items inside a flex ul must not overlap ──────────────────────
 
 #[test]
@@ -428,6 +660,161 @@ fn render_blend_normal_vs_multiply_differ() {
     let multiply_luma = mr as u32 + mg as u32 + mb as u32;
     assert!(multiply_luma < normal_luma,
         "multiply should be darker than normal; normal_luma={normal_luma} multiply_luma={multiply_luma}");
+}
+
+#[test]
+fn background_blend_mode_multiplies_gradient_over_background_color() {
+    let normal_pm = render_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        .box {
+            width: 80px;
+            height: 80px;
+            background-color: #ff0000;
+            background-image: linear-gradient(#0000ff, #0000ff);
+            background-blend-mode: normal;
+        }
+        </style>
+        <div class="box"></div>
+    "#,
+        100,
+        100,
+    );
+    let multiply_pm = render_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        .box {
+            width: 80px;
+            height: 80px;
+            background-color: #ff0000;
+            background-image: linear-gradient(#0000ff, #0000ff);
+            background-blend-mode: multiply;
+        }
+        </style>
+        <div class="box"></div>
+    "#,
+        100,
+        100,
+    );
+
+    let (nr, ng, nb, _) = pixel(&normal_pm, 40, 40);
+    let (mr, mg, mb, _) = pixel(&multiply_pm, 40, 40);
+    assert!(
+        nb > 200 && nr < 40 && ng < 40,
+        "normal background blend should paint the blue gradient, got ({nr},{ng},{nb})"
+    );
+    assert!(
+        mr < 40 && mg < 40 && mb < 40,
+        "multiply should blend the blue gradient with the red background to black, got ({mr},{mg},{mb})"
+    );
+}
+
+#[test]
+fn text_decoration_skip_ink_auto_leaves_descender_gap() {
+    let auto_pm = render_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        body { background: white; }
+        p {
+            color: black;
+            font-size: 40px;
+            line-height: 1;
+            text-decoration: underline;
+            text-decoration-color: red;
+            text-decoration-thickness: 4px;
+            text-decoration-skip-ink: auto;
+        }
+        </style>
+        <p>ag</p>
+    "#,
+        120,
+        70,
+    );
+    let none_pm = render_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        body { background: white; }
+        p {
+            color: black;
+            font-size: 40px;
+            line-height: 1;
+            text-decoration: underline;
+            text-decoration-color: red;
+            text-decoration-thickness: 4px;
+            text-decoration-skip-ink: none;
+        }
+        </style>
+        <p>ag</p>
+    "#,
+        120,
+        70,
+    );
+
+    let red_pixels = |pm: &Pixmap| {
+        let mut count = 0usize;
+        for y in 30..60 {
+            for x in 35..80 {
+                let (r, g, b, _) = pixel(pm, x, y);
+                if r > 200 && g < 80 && b < 80 {
+                    count += 1;
+                }
+            }
+        }
+        count
+    };
+    let auto_red = red_pixels(&auto_pm);
+    let none_red = red_pixels(&none_pm);
+    assert!(
+        none_red > auto_red + 20,
+        "skip-ink:none should paint more continuous underline pixels under descenders; auto={auto_red}, none={none_red}"
+    );
+}
+
+#[test]
+fn blend_mode_composites_into_enclosing_filter_layer() {
+    let pm = render_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #ff0000; }
+        .group { width: 80px; height: 80px; background: #00ff00; filter: brightness(1); position: relative; }
+        .blend { position: absolute; inset: 0; background: #0000ff; mix-blend-mode: multiply; }
+        </style>
+        <div class="group"><div class="blend"></div></div>
+    "#,
+        100,
+        100,
+    );
+    let (r, g, b, _) = pixel(&pm, 40, 40);
+    assert!(
+        r < 30 && g < 30 && b < 30,
+        "blue multiply should blend inside the green filtered group, got ({r},{g},{b})"
+    );
+}
+
+#[test]
+fn same_element_filter_runs_before_mix_blend_mode() {
+    let pm = render_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #ff0000; }
+        .box { width: 80px; height: 80px; background: #0000ff; filter: grayscale(1); mix-blend-mode: screen; }
+        </style>
+        <div class="box"></div>
+    "#,
+        100,
+        100,
+    );
+    let (r, g, b, _) = pixel(&pm, 40, 40);
+    assert!(
+        r > 220 && (5..=60).contains(&g) && (5..=60).contains(&b),
+        "filter should grayscale blue to its low luminance before screen blending with red, got ({r},{g},{b})"
+    );
 }
 
 // ── Blend mode: with radial gradient ─────────────────────────────────────────
@@ -762,6 +1149,31 @@ fn render_gradient_opacity_applied() {
     );
 }
 
+#[test]
+fn render_opacity_composites_descendants_as_one_group() {
+    let pm = render_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: white; }
+        .group { position: relative; width: 100px; height: 100px; opacity: 0.5; }
+        .a, .b { position: absolute; top: 0; width: 70px; height: 100px; }
+        .a { left: 0; background: red; }
+        .b { left: 30px; background: blue; }
+        </style>
+        <div class="group"><div class="a"></div><div class="b"></div></div>
+    "#,
+        120,
+        120,
+    );
+
+    let (_, overlap_g, overlap_b, _) = pixel(&pm, 50, 50);
+    assert!(
+        overlap_g > 105 && overlap_b > 220,
+        "opacity must composite the children as one group over white, got g={overlap_g} b={overlap_b}"
+    );
+}
+
 // ── Absolute all-auto insets inside flex container: positioned inside container ──
 
 /// Regression: position:absolute children with all insets auto inside a flex container
@@ -848,6 +1260,80 @@ fn layout_abs_all_auto_in_flex_centered() {
         (child.layout.border_rect.y - 80.0).abs() < 2.0,
         "abs child y should be ~80 (centered), got {}",
         child.layout.border_rect.y
+    );
+}
+
+#[test]
+fn absolute_static_position_uses_inline_flow_x_when_horizontal_insets_auto() {
+    use super::harness::find_box;
+
+    let doc = parse_and_layout(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font: 16px/20px monospace; }
+        .wrap { position: relative; width: 300px; height: 80px; }
+        .abs { position: absolute; width: 20px; height: 20px; }
+        </style>
+        <div class="wrap"><span id="lead">abcd</span><span class="abs"></span></div>
+    "#,
+        320.0,
+    );
+    let lead = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "lead")
+    })
+    .expect("lead not found");
+    let abs = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("class")
+            .is_some_and(|class| class == "abs")
+    })
+    .expect("abs not found");
+
+    let expected_x = lead.layout.margin_rect.x + lead.layout.margin_rect.w;
+    assert!(
+        (abs.layout.border_rect.x - expected_x).abs() < 2.0,
+        "absolute all-auto x should follow its inline static position: got {}, expected {}",
+        abs.layout.border_rect.x,
+        expected_x
+    );
+}
+
+#[test]
+fn absolute_over_constrained_horizontal_insets_follow_direction() {
+    use super::harness::find_box;
+
+    let doc = parse_and_layout(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        .wrap { position: relative; width: 200px; height: 60px; }
+        .box { position: absolute; left: 20px; right: 30px; width: 40px; height: 20px; }
+        #rtl { direction: rtl; }
+        </style>
+        <div id="ltr" class="wrap"><div id="a" class="box"></div></div>
+        <div id="rtl" class="wrap"><div id="b" class="box"></div></div>
+    "#,
+        260.0,
+    );
+    let a = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "a")
+    })
+    .expect("ltr abs not found");
+    let b = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "b")
+    })
+    .expect("rtl abs not found");
+
+    assert!(
+        (a.layout.border_rect.x - 20.0).abs() < 1.0,
+        "LTR over-constrained abs should honor left, got {}",
+        a.layout.border_rect.x
+    );
+    assert!(
+        (b.layout.border_rect.x - 130.0).abs() < 1.0,
+        "RTL over-constrained abs should honor right, got {}",
+        b.layout.border_rect.x
     );
 }
 
@@ -1117,6 +1603,38 @@ fn render_linear_gradient_135deg_line_crosses_the_centre() {
     assert!(is_blue(115, 30), "(115,30) is below-right of the boundary");
     assert!(is_red(105, 10), "(105,10) is above-left of the boundary");
     assert!(is_blue(135, 10), "(135,10) is below-right of the boundary");
+}
+
+#[test]
+fn render_linear_gradient_corner_keyword_uses_box_aspect_ratio() {
+    let pm = render_html(
+        r#"
+        <style>* { margin:0; padding:0 }
+        body { background: white }
+        .bar { width: 200px; height: 40px;
+               background: linear-gradient(to top right, #ff0000 0%, #ff0000 50%,
+                                                          #0000ff 50%, #0000ff 100%); }
+        </style><div class="bar"></div>
+    "#,
+        200,
+        40,
+    );
+    let is_red = |x, y| {
+        let (r, g, b, _) = pixel(&pm, x, y);
+        r > 200 && g < 60 && b < 60
+    };
+    let is_blue = |x, y| {
+        let (r, g, b, _) = pixel(&pm, x, y);
+        b > 200 && r < 60 && g < 60
+    };
+    assert!(
+        is_red(90, 30),
+        "wide-box corner gradient keeps lower-left red"
+    );
+    assert!(
+        is_blue(110, 10),
+        "wide-box corner gradient keeps upper-right blue"
+    );
 }
 
 /// Axis-aligned gradients, which already worked, must keep working.
@@ -1615,5 +2133,36 @@ fn word_spacing_reaches_painted_word_positions() {
     assert!(
         spaced_width > plain_width + 18,
         "word-spacing should widen the painted word bounds; plain={plain_width} spaced={spaced_width}"
+    );
+}
+
+#[test]
+fn flex_container_direct_text_child_paints() {
+    let pm = render_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        body { background: white; }
+        h2 { display: flex; align-items: center; height: 46px; font-size: 18px; color: rgb(35,42,49); }
+        </style>
+        <h2>Top Stories</h2>
+    "#,
+        180,
+        80,
+    );
+
+    let mut dark_pixels = 0usize;
+    for y in 0..70u32 {
+        for x in 0..170u32 {
+            let (r, g, b, a) = pixel(&pm, x, y);
+            if a > 0 && r < 90 && g < 100 && b < 110 {
+                dark_pixels += 1;
+            }
+        }
+    }
+
+    assert!(
+        dark_pixels > 20,
+        "direct text child of a flex container should paint; dark pixels={dark_pixels}"
     );
 }

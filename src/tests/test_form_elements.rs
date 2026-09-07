@@ -87,6 +87,78 @@ fn text_input_has_width() {
 }
 
 #[test]
+fn field_sizing_content_sizes_text_input_from_value() {
+    let fixed_doc = layout_html(r#"<input type="text" value="short">"#, 400.0);
+    let fixed = find_by_tag(&fixed_doc.root, "input").unwrap();
+    let content_doc = layout_html(
+        r#"<input type="text" value="short" style="width:auto;field-sizing:content">"#,
+        400.0,
+    );
+    let content = find_by_tag(&content_doc.root, "input").unwrap();
+    let long_doc = layout_html(
+        r#"<input type="text" value="a much longer value" style="width:auto;field-sizing:content">"#,
+        400.0,
+    );
+    let long = find_by_tag(&long_doc.root, "input").unwrap();
+
+    assert!(
+        content.layout.content_rect.w < fixed.layout.content_rect.w,
+        "content-sized input should shrink below the UA fixed width: content={}, fixed={}",
+        content.layout.content_rect.w,
+        fixed.layout.content_rect.w
+    );
+    assert!(
+        long.layout.content_rect.w > content.layout.content_rect.w,
+        "content-sized input should grow with its value"
+    );
+}
+
+#[test]
+fn field_sizing_content_sizes_textarea_from_longest_line() {
+    let short_doc = layout_html(
+        r#"<textarea style="width:auto;field-sizing:content">short</textarea>"#,
+        400.0,
+    );
+    let short = find_by_tag(&short_doc.root, "textarea").unwrap();
+    let long_doc = layout_html(
+        r#"<textarea style="width:auto;field-sizing:content">short
+much longer textarea line</textarea>"#,
+        400.0,
+    );
+    let long = find_by_tag(&long_doc.root, "textarea").unwrap();
+
+    assert!(
+        long.layout.content_rect.w > short.layout.content_rect.w + 40.0,
+        "content-sized textarea should size inline axis from the longest line; short={} long={}",
+        short.layout.content_rect.w,
+        long.layout.content_rect.w
+    );
+}
+
+#[test]
+fn field_sizing_content_sizes_textarea_block_axis_from_lines() {
+    let one_line_doc = layout_html(
+        r#"<textarea style="height:auto;field-sizing:content">one</textarea>"#,
+        400.0,
+    );
+    let one_line = find_by_tag(&one_line_doc.root, "textarea").unwrap();
+    let three_line_doc = layout_html(
+        r#"<textarea style="height:auto;field-sizing:content">one
+two
+three</textarea>"#,
+        400.0,
+    );
+    let three_lines = find_by_tag(&three_line_doc.root, "textarea").unwrap();
+
+    assert!(
+        three_lines.layout.content_rect.h > one_line.layout.content_rect.h * 2.0,
+        "content-sized textarea should size block axis from line count; one={} three={}",
+        one_line.layout.content_rect.h,
+        three_lines.layout.content_rect.h
+    );
+}
+
+#[test]
 fn text_input_has_height() {
     let doc = layout_html(r#"<input type="text">"#, 400.0);
     let input = find_by_tag(&doc.root, "input").unwrap();

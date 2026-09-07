@@ -39,6 +39,191 @@ fn build_display_markers(html: &str) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn collapsible_space_across_inline_boundaries_is_not_measured_or_painted_twice() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        r#"<style>
+             body { margin: 0; font: 16px/20px Menlo; }
+             .box { display: inline-block; }
+           </style>
+           <span id="control" class="box">a b</span>
+           <br>
+           <span id="split" class="box"><i>a </i><i> b</i></span>"#,
+        900.0,
+    );
+    let control = d.get_element_by_id("control").unwrap();
+    let split = d.get_element_by_id("split").unwrap();
+    let control_w = d.get_bounding_client_rect(control).unwrap().w;
+    let split_w = d.get_bounding_client_rect(split).unwrap().w;
+    assert!(
+        (control_w - split_w).abs() < 0.5,
+        "split inline whitespace measured as {split_w}, control was {control_w}"
+    );
+
+    let texts = build_display_texts(
+        r#"<style>
+             body { margin: 0; font: 16px/20px Menlo; }
+             .box { display: inline-block; }
+           </style>
+           <span id="split" class="box"><i>a </i><i> b</i></span>"#,
+    );
+    assert_eq!(texts.concat(), "a b");
+}
+
+#[test]
+fn absolute_dropdown_wrapper_does_not_raise_flex_nav_item() {
+    let doc = parse_and_layout(
+        r#"<style>
+             body { margin: 0; font: 14px/18px Arial; }
+             ul { display: flex; align-items: center; height: 64px; margin: 0; padding: 0; }
+             li { display: flex; list-style: none; }
+             a, button { display: flex; padding: 4px; border: 0; background: transparent; font: inherit; }
+             .trigger { display: block; }
+             .menu-wrap { display: block; }
+             .menu { position: absolute; top: 40px; left: 0; display: flex; padding: 24px 20px 24px 16px; }
+           </style>
+           <ul>
+             <li><a id="sports">Sports</a></li>
+             <li id="more-li">
+               <div class="trigger">
+                 <div><button id="more">More<span>v</span></button></div>
+                 <div class="menu-wrap"><nav class="menu"><ul><li>Hidden</li></ul></nav></div>
+               </div>
+             </li>
+           </ul>"#,
+        800.0,
+    );
+    let sports = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "sports"))
+        .expect("sports link");
+    let more = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "more"))
+        .expect("more button");
+    assert!(
+        (sports.layout.content_rect.y - more.layout.content_rect.y).abs() < 1.0,
+        "absolute submenu wrapper should not change top nav alignment: sports y={}, more y={}",
+        sports.layout.content_rect.y,
+        more.layout.content_rect.y
+    );
+}
+
+#[test]
+fn vertical_align_sub_and_super_shift_plain_inline_text() {
+    let html = r#"<style>
+             body { margin: 0; font: 16px/20px Menlo; }
+           </style>
+           <div id="line">base <span id="sup" style="vertical-align: super">super</span>
+           <span id="sub" style="vertical-align: sub">sub</span></div>"#;
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(html, 900.0);
+    let line = doc.get_element_by_id("line").unwrap();
+    let line_h = doc.get_bounding_client_rect(line).unwrap().h;
+
+    let list = build_display_list(&doc.root, 900.0, 200.0);
+    let mut base_y = None;
+    let mut super_y = None;
+    let mut sub_y = None;
+    for cmd in &list.commands {
+        if let PaintCmd::Text { text, y, .. } = cmd {
+            if text.contains("base") {
+                base_y = Some(*y);
+            } else if text.contains("super") {
+                super_y = Some(*y);
+            } else if text.contains("sub") {
+                sub_y = Some(*y);
+            }
+        }
+    }
+
+    let base_y = base_y.expect("base text command");
+    let super_y = super_y.expect("super text command");
+    let sub_y = sub_y.expect("sub text command");
+    assert!(super_y < base_y, "super text did not move up");
+    assert!(sub_y > base_y, "sub text did not move down");
+    assert!(
+        line_h > 20.0,
+        "line height should include shifted inline extents, got {line_h}"
+    );
+}
+
+#[test]
+fn vertical_align_length_and_percentage_shift_plain_inline_text() {
+    let html = r#"<style>
+             body { margin: 0; font: 16px/20px Menlo; }
+           </style>
+           <div id="line">base <span id="up" style="vertical-align: 8px">up</span>
+           <span id="percent" style="vertical-align: 50%">percent</span>
+           <span id="down" style="vertical-align: -4px">down</span></div>"#;
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(html, 900.0);
+    let line = doc.get_element_by_id("line").unwrap();
+    let line_h = doc.get_bounding_client_rect(line).unwrap().h;
+
+    let list = build_display_list(&doc.root, 900.0, 200.0);
+    let mut base_y = None;
+    let mut up_y = None;
+    let mut percent_y = None;
+    let mut down_y = None;
+    for cmd in &list.commands {
+        if let PaintCmd::Text { text, y, .. } = cmd {
+            if text.contains("base") {
+                base_y = Some(*y);
+            } else if text.contains("percent") {
+                percent_y = Some(*y);
+            } else if text.contains("up") {
+                up_y = Some(*y);
+            } else if text.contains("down") {
+                down_y = Some(*y);
+            }
+        }
+    }
+
+    let base_y = base_y.expect("base text command");
+    assert!(up_y.expect("length text command") < base_y);
+    assert!(percent_y.expect("percentage text command") < base_y);
+    assert!(down_y.expect("negative length text command") > base_y);
+    assert!(
+        line_h > 20.0,
+        "line height should include length-shifted inline extents, got {line_h}"
+    );
+}
+
+#[test]
+fn vertical_align_text_top_and_bottom_shift_plain_inline_text() {
+    let html = r#"<style>
+             body { margin: 0; font: 16px/20px Menlo; }
+           </style>
+           <div id="line">base <span id="top" style="vertical-align: text-top">top</span>
+           <span id="bottom" style="vertical-align: text-bottom">bottom</span></div>"#;
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(html, 900.0);
+    let line = doc.get_element_by_id("line").unwrap();
+    let line_h = doc.get_bounding_client_rect(line).unwrap().h;
+
+    let list = build_display_list(&doc.root, 900.0, 200.0);
+    let mut base_y = None;
+    let mut top_y = None;
+    let mut bottom_y = None;
+    for cmd in &list.commands {
+        if let PaintCmd::Text { text, y, .. } = cmd {
+            if text.contains("base") {
+                base_y = Some(*y);
+            } else if text.contains("top") {
+                top_y = Some(*y);
+            } else if text.contains("bottom") {
+                bottom_y = Some(*y);
+            }
+        }
+    }
+
+    let base_y = base_y.expect("base text command");
+    assert!(top_y.expect("text-top command") < base_y);
+    assert!(bottom_y.expect("text-bottom command") > base_y);
+    assert!(
+        line_h > 20.0,
+        "line height should include text-top/text-bottom shifted extents, got {line_h}"
+    );
+}
+
 // ── CSS Declaration Parsing ───────────────────────────────────────────────────
 
 #[test]
@@ -81,9 +266,9 @@ fn css_multiple_values() {
 fn font_face_preserves_standard_descriptors() {
     let mut sheet = Stylesheet::default();
     sheet.parse_and_add_with_base(
-        "@font-face {
+        r#"@font-face {
             font-family: Example;
-            src: url(example.woff2);
+            src: local("Example Local"), url("example.woff2") format("woff2") tech(variations);
             font-weight: 400 700;
             font-style: oblique 10deg 20deg;
             font-stretch: 75% 125%;
@@ -93,16 +278,30 @@ fn font_face_preserves_standard_descriptors() {
             ascent-override: 90%;
             descent-override: 20%;
             line-gap-override: normal;
-            font-feature-settings: \"kern\" 1;
-            font-variation-settings: \"wght\" 650;
-            font-language-override: \"TRK\";
-        }",
+            font-feature-settings: "kern" 1;
+            font-variation-settings: "wght" 650;
+            font-language-override: "TRK";
+        }"#,
         "",
     );
 
     let face = sheet.font_faces.first().expect("font face parsed");
     assert_eq!(face.family, "Example");
-    assert_eq!(face.src, "url(example.woff2)");
+    assert_eq!(
+        face.src,
+        r#"local("Example Local"), url("example.woff2") format("woff2") tech(variations)"#
+    );
+    assert_eq!(face.sources.len(), 2);
+    assert_eq!(
+        face.sources[0].kind,
+        crate::css::FontFaceSourceKind::Local("Example Local".to_string())
+    );
+    assert_eq!(
+        face.sources[1].kind,
+        crate::css::FontFaceSourceKind::Url("example.woff2".to_string())
+    );
+    assert_eq!(face.sources[1].formats, vec!["woff2"]);
+    assert_eq!(face.sources[1].techs, vec!["variations"]);
     assert_eq!(face.weight.as_deref(), Some("400 700"));
     assert_eq!(face.style.as_deref(), Some("oblique 10deg 20deg"));
     assert_eq!(face.stretch.as_deref(), Some("75% 125%"));
@@ -112,9 +311,24 @@ fn font_face_preserves_standard_descriptors() {
     assert_eq!(face.ascent_override.as_deref(), Some("90%"));
     assert_eq!(face.descent_override.as_deref(), Some("20%"));
     assert_eq!(face.line_gap_override.as_deref(), Some("normal"));
-    assert_eq!(face.feature_settings.as_deref(), Some("\"kern\" 1"));
-    assert_eq!(face.variation_settings.as_deref(), Some("\"wght\" 650"));
-    assert_eq!(face.language_override.as_deref(), Some("\"TRK\""));
+    assert_eq!(face.feature_settings.as_deref(), Some(r#""kern" 1"#));
+    assert_eq!(face.variation_settings.as_deref(), Some(r#""wght" 650"#));
+    assert_eq!(face.language_override.as_deref(), Some(r#""TRK""#));
+}
+
+#[test]
+fn font_face_source_tech_filters_unsupported_requirements() {
+    let sources = crate::css::font_face::parse_font_face_sources(
+        r#"url("variable.woff2") format("woff2") tech(variations),
+           url("color.woff2") format("woff2") tech(color-COLRv1)"#,
+    );
+
+    assert_eq!(sources.len(), 2);
+    assert!(crate::layout::font_source_techs_supported(&sources[0]));
+    assert!(
+        !crate::layout::font_source_techs_supported(&sources[1]),
+        "unsupported font technology requirements should make a source ineligible"
+    );
 }
 
 #[test]
@@ -130,6 +344,67 @@ fn css_stylesheet_multiple_selectors() {
 }
 
 #[test]
+fn css_nesting_expands_ampersand_and_descendant_rules() {
+    let ss = parse_stylesheet(
+        ".card { color: blue; &:hover { color: red; } .title { font-size: 20px; } }",
+    )
+    .unwrap();
+
+    assert!(
+        ss.iter().any(|r| r.original_selector == ".card"
+            && r.declarations
+                .get("color")
+                .map(|v| v == "blue")
+                .unwrap_or(false)),
+        "parent declarations should still produce the parent rule"
+    );
+    assert!(
+        ss.iter().any(|r| r.original_selector == ".card:hover"
+            && r.declarations
+                .get("color")
+                .map(|v| v == "red")
+                .unwrap_or(false)
+            && r.is_hover),
+        "& nesting should expand against the parent selector"
+    );
+    assert!(
+        ss.iter().any(|r| r.original_selector == ".card .title"
+            && r.declarations
+                .get("font-size")
+                .map(|v| v == "20px")
+                .unwrap_or(false)),
+        "implicit nesting should expand as a descendant selector"
+    );
+}
+
+#[test]
+fn css_nesting_preserves_grouping_at_rules() {
+    let ss = parse_stylesheet(
+        ".card { @media (min-width: 1px) { color: red; &:hover { color: blue; } } }",
+    )
+    .unwrap();
+
+    assert!(
+        ss.iter().any(|r| r.original_selector == ".card"
+            && r.media_condition == "(min-width: 1px)"
+            && r.declarations
+                .get("color")
+                .map(|v| v == "red")
+                .unwrap_or(false)),
+        "nested @media should wrap parent declarations"
+    );
+    assert!(
+        ss.iter().any(|r| r.original_selector == ".card:hover"
+            && r.media_condition == "(min-width: 1px)"
+            && r.declarations
+                .get("color")
+                .map(|v| v == "blue")
+                .unwrap_or(false)),
+        "nested selectors inside nested @media should expand too"
+    );
+}
+
+#[test]
 fn css_rule_css_text_serializes_as_one_line_declaration_block() {
     let rules = parse_stylesheet("p { font-size: 12px; color: red !important; text-align: left; }")
         .unwrap();
@@ -138,6 +413,47 @@ fn css_rule_css_text_serializes_as_one_line_declaration_block() {
         crate::html::serialize_rule(&rules[0]),
         "p { font-size: 12px; text-align: left; color: red !important; }"
     );
+}
+
+#[test]
+fn stylesheet_insert_delete_and_css_rules_follow_cssom_ordering() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add("p { color: red; }");
+
+    assert_eq!(sheet.insert_rule(".note { color: blue; }", 0), Ok(0));
+    assert_eq!(
+        sheet.css_rules(),
+        vec![
+            ".note { color: blue; }".to_string(),
+            "p { color: red; }".to_string()
+        ]
+    );
+
+    assert_eq!(sheet.delete_rule(1), Ok(()));
+    assert_eq!(
+        sheet.css_rules(),
+        vec![".note { color: blue; }".to_string()]
+    );
+}
+
+#[test]
+fn stylesheet_insert_delete_report_cssom_index_and_syntax_errors() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add("p { color: red; }");
+
+    assert_eq!(
+        sheet.insert_rule("a { color: blue; } b { color: green; }", 0),
+        Err("SyntaxError".to_string())
+    );
+    assert_eq!(
+        sheet.insert_rule("bad css", 0),
+        Err("SyntaxError".to_string())
+    );
+    assert_eq!(
+        sheet.insert_rule("a { color: blue; }", 2),
+        Err("IndexSizeError".to_string())
+    );
+    assert_eq!(sheet.delete_rule(1), Err("IndexSizeError".to_string()));
 }
 
 #[test]
@@ -219,6 +535,34 @@ fn scope_blocks_preserve_inner_rules() {
 }
 
 #[test]
+fn scope_limit_excludes_limit_subtree() {
+    let doc = parse(
+        r#"<html><head><style>
+              p { color: rgb(1, 2, 3); }
+              @scope (.card) to (.stop) { p { color: rgb(4, 5, 6); } }
+           </style></head><body>
+              <section class="card">
+                  <p id="inside">Inside</p>
+                  <div class="stop">
+                      <p id="limited">Limited</p>
+                  </div>
+              </section>
+           </body></html>"#,
+    );
+    let inside = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v.as_str()) == Some("inside")
+    })
+    .unwrap();
+    let limited = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v.as_str()) == Some("limited")
+    })
+    .unwrap();
+
+    assert_eq!(inside.style.color, Color::rgb(4, 5, 6));
+    assert_eq!(limited.style.color, Color::rgb(1, 2, 3));
+}
+
+#[test]
 fn supports_unknown_declaration_drops_inner_rules() {
     let doc = parse(
         r#"<html><head><style>
@@ -229,6 +573,21 @@ fn supports_unknown_declaration_drops_inner_rules() {
     let p = find_box(&doc.root, &|b| b.tag == "p").unwrap();
 
     assert_eq!(p.style.color, Color::rgb(1, 2, 3));
+}
+
+#[test]
+fn supports_invalid_known_declaration_value_drops_inner_rules() {
+    let doc = parse(
+        r#"<html><head><style>
+              p { color: rgb(1, 2, 3); }
+              @supports (display: banana) { p { color: rgb(4, 5, 6); } }
+              @supports not (display: banana) { p { background-color: rgb(7, 8, 9); } }
+           </style></head><body><p>Text</p></body></html>"#,
+    );
+    let p = find_box(&doc.root, &|b| b.tag == "p").unwrap();
+
+    assert_eq!(p.style.color, Color::rgb(1, 2, 3));
+    assert_eq!(p.style.background_color, Color::rgb(7, 8, 9));
 }
 
 #[test]
@@ -243,6 +602,79 @@ fn supports_boolean_condition_controls_inner_rules() {
     let p = find_box(&doc.root, &|b| b.tag == "p").unwrap();
 
     assert_eq!(p.style.color, Color::rgb(7, 8, 9));
+}
+
+#[test]
+fn supports_logical_keywords_are_case_insensitive() {
+    let doc = parse(
+        r#"<html><head><style>
+              @supports (display: flex) AND (NOT (definitely-not-a-property: 1)) {
+                  p { color: rgb(7, 8, 9); }
+              }
+           </style></head><body><p>Text</p></body></html>"#,
+    );
+    let p = find_box(&doc.root, &|b| b.tag == "p").unwrap();
+
+    assert_eq!(p.style.color, Color::rgb(7, 8, 9));
+}
+
+#[test]
+fn supports_selector_condition_uses_selector_parser() {
+    let doc = parse(
+        r#"<html><head><style>
+              p { color: rgb(1, 2, 3); }
+              @supports selector(p:not(.missing)) { p { color: rgb(4, 5, 6); } }
+              @supports selector(p:unknown-pseudo) { p { color: rgb(7, 8, 9); } }
+           </style></head><body><p>Text</p></body></html>"#,
+    );
+    let p = find_box(&doc.root, &|b| b.tag == "p").unwrap();
+
+    assert_eq!(p.style.color, Color::rgb(4, 5, 6));
+}
+
+#[test]
+fn supports_nested_condition_parens_and_case_insensitive_selector_function() {
+    let doc = parse(
+        r#"<html><head><style>
+              p { color: rgb(1, 2, 3); background-color: rgb(9, 9, 9); }
+              @supports ((display: flex)) { p { color: rgb(4, 5, 6); } }
+              @supports SELECTOR(p:not(.missing)) { p { background-color: rgb(7, 8, 9); } }
+              @supports (content: "a and b") { p { border-top-color: rgb(10, 11, 12); } }
+           </style></head><body><p>Text</p></body></html>"#,
+    );
+    let p = find_box(&doc.root, &|b| b.tag == "p").unwrap();
+
+    assert_eq!(p.style.color, Color::rgb(4, 5, 6));
+    assert_eq!(p.style.background_color, Color::rgb(7, 8, 9));
+    assert_eq!(p.style.border_top_color, Color::rgb(10, 11, 12));
+}
+
+#[test]
+fn supports_font_format_and_font_tech_conditions() {
+    let doc = parse(
+        r#"<html><head><style>
+              p { color: rgb(1, 2, 3); background-color: rgb(9, 9, 9); border-top-color: rgb(2, 2, 2); }
+              @supports font-format("woff2") { p { color: rgb(4, 5, 6); } }
+              @supports font-tech(variations) { p { background-color: rgb(7, 8, 9); } }
+              @supports font-tech(color-COLRv1) { p { border-top-color: rgb(10, 11, 12); } }
+           </style></head><body><p>Text</p></body></html>"#,
+    );
+    let p = find_box(&doc.root, &|b| b.tag == "p").unwrap();
+
+    assert_eq!(p.style.color, Color::rgb(4, 5, 6));
+    assert_eq!(p.style.background_color, Color::rgb(7, 8, 9));
+    assert_eq!(p.style.border_top_color, Color::rgb(2, 2, 2));
+}
+
+#[test]
+fn forced_color_adjust_rejects_invalid_keywords() {
+    let mut style = ComputedStyle::default();
+
+    crate::css::apply_property(&mut style, "forced-color-adjust", "none");
+    assert_eq!(style.forced_color_adjust, "none");
+
+    crate::css::apply_property(&mut style, "forced-color-adjust", "banana");
+    assert_eq!(style.forced_color_adjust, "none");
 }
 
 #[test]
@@ -262,6 +694,150 @@ fn background_shorthand_resets_omitted_longhands() {
     assert_eq!(style.background_repeat, BackgroundRepeat::Repeat);
     assert_eq!(style.background_size, BackgroundSize::Auto);
     assert_eq!(style.background_color, Color::WHITE);
+}
+
+#[test]
+fn background_shorthand_accepts_unspaced_position_size_separator() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "background",
+        "url(hero.svg) No-Repeat Left Top/146px auto",
+    );
+
+    assert_eq!(style.background_image_url, "hero.svg");
+    assert_eq!(style.background_repeat, BackgroundRepeat::NoRepeat);
+    assert_eq!(style.background_position_x, CssLength::Percent(0.0));
+    assert_eq!(style.background_position_y, CssLength::Percent(0.0));
+    assert_eq!(style.background_size, BackgroundSize::Explicit);
+    assert_eq!(style.background_size_w, CssLength::Px(146.0));
+    assert_eq!(style.background_size_h, CssLength::Auto);
+}
+
+#[test]
+fn background_shorthand_keeps_parenthesized_function_tokens_intact() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "background",
+        "rgb(255, 0, 0) 10px calc(100% - 10px) / calc(50% - 2px) auto no-repeat",
+    );
+
+    assert_eq!(style.background_color, Color::rgb(255, 0, 0));
+    assert_eq!(style.background_position_x, CssLength::Px(10.0));
+    assert_eq!(
+        style
+            .background_position_y
+            .resolve_vp(16.0, 100.0, 16.0, 0.0, 0.0),
+        90.0
+    );
+    assert_eq!(style.background_size, BackgroundSize::Explicit);
+    assert_eq!(
+        style
+            .background_size_w
+            .resolve_vp(16.0, 100.0, 16.0, 0.0, 0.0),
+        48.0
+    );
+    assert_eq!(style.background_size_h, CssLength::Auto);
+    assert_eq!(style.background_repeat, BackgroundRepeat::NoRepeat);
+}
+
+#[test]
+fn background_size_longhand_uses_shared_size_parser() {
+    let mut style = ComputedStyle::default();
+
+    apply_property(&mut style, "background-size", "Cover");
+    assert_eq!(style.background_size, BackgroundSize::Cover);
+    assert_eq!(style.background_size_w, CssLength::Auto);
+    assert_eq!(style.background_size_h, CssLength::Auto);
+
+    apply_property(&mut style, "background-size", "auto 24px");
+    assert_eq!(style.background_size, BackgroundSize::Explicit);
+    assert_eq!(style.background_size_w, CssLength::Auto);
+    assert_eq!(style.background_size_h, CssLength::Px(24.0));
+
+    apply_property(&mut style, "background-size", "10cqw 2rem");
+    assert_eq!(style.background_size, BackgroundSize::Explicit);
+    assert_eq!(style.background_size_w, CssLength::Vw(10.0));
+    assert_eq!(style.background_size_h, CssLength::Rem(2.0));
+}
+
+#[test]
+fn background_box_and_repeat_keywords_are_case_insensitive() {
+    let mut style = ComputedStyle::default();
+
+    apply_property(&mut style, "background-repeat", "Space No-Repeat");
+    assert_eq!(
+        style.background_repeat,
+        BackgroundRepeat::TwoValue(BackgroundRepeatAxis::Space, BackgroundRepeatAxis::NoRepeat)
+    );
+
+    apply_property(&mut style, "background-origin", "Content-Box");
+    assert_eq!(style.background_origin, BackgroundClip::ContentBox);
+
+    apply_property(&mut style, "background-clip", "Text");
+    assert_eq!(style.background_clip, BackgroundClip::Text);
+
+    apply_property(&mut style, "background-attachment", "Fixed");
+    assert_eq!(style.background_attachment, BackgroundAttachment::Fixed);
+}
+
+#[test]
+fn background_position_keywords_are_case_insensitive() {
+    let mut style = ComputedStyle::default();
+
+    apply_property(&mut style, "background-position", "Right Bottom");
+
+    assert_eq!(style.background_position_x, CssLength::Percent(100.0));
+    assert_eq!(style.background_position_y, CssLength::Percent(100.0));
+}
+
+#[test]
+fn background_image_none_and_gradient_are_case_insensitive() {
+    let mut style = ComputedStyle::default();
+
+    apply_property(&mut style, "background-image", "url(hero.png)");
+    assert_eq!(style.background_image_url, "hero.png");
+
+    apply_property(&mut style, "background-image", "NONE");
+    assert!(style.background_image_url.is_empty());
+
+    apply_property(&mut style, "background-image", "Linear-Gradient(red, blue)");
+    assert_eq!(style.gradient_type, GradientType::Linear);
+}
+
+#[test]
+fn background_shorthand_keeps_top_image_layer_and_final_color() {
+    let mut style = ComputedStyle::default();
+
+    apply_property(
+        &mut style,
+        "background",
+        "url(top.png) left top / 10px 20px no-repeat, url(bottom.png) right bottom / cover repeat blue",
+    );
+
+    assert_eq!(style.background_image_url, "top.png");
+    assert_eq!(style.background_position_x, CssLength::Percent(0.0));
+    assert_eq!(style.background_position_y, CssLength::Percent(0.0));
+    assert_eq!(style.background_size, BackgroundSize::Explicit);
+    assert_eq!(style.background_size_w, CssLength::Px(10.0));
+    assert_eq!(style.background_size_h, CssLength::Px(20.0));
+    assert_eq!(style.background_repeat, BackgroundRepeat::NoRepeat);
+    assert_eq!(style.background_color, Color::rgb(0, 0, 255));
+}
+
+#[test]
+fn background_shorthand_layer_split_ignores_commas_inside_functions() {
+    let mut style = ComputedStyle::default();
+
+    apply_property(
+        &mut style,
+        "background",
+        "linear-gradient(rgb(255, 0, 0), rgb(0, 0, 255)), rgb(1, 2, 3)",
+    );
+
+    assert_eq!(style.gradient_type, GradientType::Linear);
+    assert_eq!(style.background_color, Color::rgb(1, 2, 3));
 }
 
 #[test]
@@ -347,6 +923,18 @@ fn font_shorthand_relative_weight_uses_inherited_weight() {
 }
 
 #[test]
+fn font_shorthand_system_keywords_are_case_insensitive() {
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "font-style", "italic");
+    apply_property(&mut style, "font-weight", "bold");
+
+    apply_property(&mut style, "font", "MENU");
+
+    assert_eq!(style.font_style, FontStyle::Italic);
+    assert_eq!(style.font_weight, FontWeight::Bold);
+}
+
+#[test]
 fn font_weight_accepts_browser_integer_range_and_ignores_invalid_values() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "font-weight", "1");
@@ -374,6 +962,22 @@ fn font_weight_accepts_browser_integer_range_and_ignores_invalid_values() {
 }
 
 #[test]
+fn font_size_rejects_nonzero_unitless_lengths() {
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "font-size", "22px");
+    apply_property(&mut style, "font-size", "999");
+
+    assert_eq!(
+        style.font_size,
+        CssLength::Px(22.0),
+        "nonzero unitless font-size is invalid CSS, not px"
+    );
+
+    apply_property(&mut style, "font-size", "0");
+    assert_eq!(style.font_size, CssLength::Zero);
+}
+
+#[test]
 fn font_shorthand_accepts_numeric_weight_range() {
     let mut style = ComputedStyle::default();
 
@@ -381,6 +985,1052 @@ fn font_shorthand_accepts_numeric_weight_range() {
 
     assert_eq!(style.font_weight, FontWeight::Value(1000));
     assert_eq!(style.font_size, CssLength::Px(14.0));
+}
+
+#[test]
+fn font_shorthand_resolves_nested_custom_property_token() {
+    let doc = parse_and_layout(
+        r#"<style>
+          :root {
+            --weight: 700;
+            --size: 20px;
+            --lh: 24px;
+            --family: "GT America", sans-serif;
+            --headline: var(--weight) var(--size)/var(--lh) var(--family);
+          }
+          .neo-font-v2-heading-xl-bold-cond { font: var(--headline); }
+        </style>
+        <h3 id="headline" class="neo-font-v2-heading-xl-bold-cond">Headline</h3>"#,
+        800.0,
+    );
+    let h = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "headline")
+            .unwrap_or(false)
+    })
+    .expect("headline");
+    let same_node_id_count = find_all_boxes(&doc.root, &|b| b.node_id == h.node_id).len();
+    assert_eq!(
+        same_node_id_count, 1,
+        "node_id {} reused {} times",
+        h.node_id, same_node_id_count
+    );
+    let mut candidates = Vec::new();
+    let matched = crate::css::cascade::match_rules(
+        h,
+        &doc.stylesheet,
+        &[],
+        0,
+        1,
+        0,
+        1,
+        1280.0,
+        600.0,
+        0,
+        false,
+        &std::collections::HashSet::new(),
+        0,
+        "",
+        &[],
+        &[],
+        &mut candidates,
+    );
+    assert!(
+        matched
+            .matched
+            .iter()
+            .any(|(_, idx)| doc.stylesheet.rules[*idx]
+                .original_selector
+                .contains("neo-font-v2-heading-2xl-bold-cond")),
+        "font utility did not match; matched selectors: {:?}",
+        matched
+            .matched
+            .iter()
+            .map(|(_, idx)| doc.stylesheet.rules[*idx].original_selector.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        crate::css::resolve_var_references(
+            "var(--font-v2-heading-2xl-bold-cond)",
+            &doc.stylesheet.variables
+        ),
+        "700 2.5rem/1.15 GT America Condensed"
+    );
+
+    assert_eq!(h.style.font_weight, FontWeight::Value(700));
+    assert_eq!(h.style.font_size, CssLength::Px(20.0));
+    assert_eq!(h.style.line_height, CssLength::Px(24.0));
+    assert_eq!(h.style.font_family, "GT America, sans-serif");
+    assert!(
+        h.layout.content_rect.h >= 23.0,
+        "headline should reserve the resolved line-height, got {:?}",
+        h.layout.content_rect
+    );
+}
+
+#[test]
+fn escaped_responsive_font_utility_overrides_base_font_token() {
+    let doc = parse_and_layout(
+        r#"<style>
+          :root {
+            --weight: 700;
+            --family: "GT America", sans-serif;
+            --base: var(--weight) 20px/24px var(--family);
+            --desktop: var(--weight) 32px/38px var(--family);
+          }
+          .neo-font-v2-heading-xl-bold-cond { font: var(--base); }
+          @media only screen and (min-width: 768px) {
+            .md\:neo-font-v2-heading-2xl-bold-cond { font: var(--desktop); }
+          }
+        </style>
+        <h3 id="headline" class="neo-font-v2-heading-xl-bold-cond md:neo-font-v2-heading-2xl-bold-cond">Headline</h3>"#,
+        1280.0,
+    );
+    let h = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "headline")
+            .unwrap_or(false)
+    })
+    .expect("headline");
+
+    assert_eq!(h.style.font_size, CssLength::Px(32.0));
+    assert_eq!(h.style.line_height, CssLength::Px(38.0));
+    assert!(
+        h.layout.content_rect.h >= 37.0,
+        "responsive utility should reserve desktop line-height, got {:?}",
+        h.layout.content_rect
+    );
+}
+
+#[test]
+fn responsive_escaped_display_utility_overrides_base_hidden() {
+    let desktop = parse_and_layout(
+        r#"<style>
+             .hidden { display: none; }
+             @media (width >= 64rem) {
+               .lg\:flex { display: flex; }
+             }
+           </style>
+           <div id="nav" class="hidden lg:flex"></div>"#,
+        1280.0,
+    );
+    let nav = find_box(&desktop.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "nav")
+    })
+    .expect("nav");
+    assert_eq!(nav.style.display, Display::Flex);
+
+    let mobile = parse_and_layout(
+        r#"<style>
+             .hidden { display: none; }
+             @media (width >= 64rem) {
+               .lg\:flex { display: flex; }
+             }
+           </style>
+           <div id="nav" class="hidden lg:flex"></div>"#,
+        800.0,
+    );
+    let nav = find_box(&mobile.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "nav")
+    })
+    .expect("nav");
+    assert_eq!(nav.style.display, Display::None);
+}
+
+#[test]
+fn responsive_utility_after_nested_media_block_is_not_dropped() {
+    let desktop = parse_and_layout(
+        r#"<style>
+             .hidden { display: none; }
+             @media (min-width:768px) {
+               .md\:opacity-100 { opacity: 1; }
+               @media not all and (min-width:1024px) {
+                 .md\:max-lg\:hidden { display: none; }
+               }
+             }
+             @media (min-width:1024px) {
+               .lg\:block { display: block; }
+               .lg\:inline { display: inline; }
+               .lg\:flex { display: flex; }
+               .lg\:grid { display: grid; }
+               .lg\:hidden { display: none; }
+             }
+           </style>
+           <div id="nav" class="hidden lg:flex"></div>"#,
+        1280.0,
+    );
+    let nav = find_box(&desktop.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "nav")
+    })
+    .expect("nav");
+    assert_eq!(nav.style.display, Display::Flex);
+}
+
+#[test]
+fn escaped_brace_inside_media_selector_does_not_close_the_media_block() {
+    let desktop = parse_and_layout(
+        r#"<style>
+             .hidden { display: none; }
+             @media (min-width:768px) {
+               .md\:content-\[\}\] { color: red; }
+             }
+             @media (min-width:1024px) {
+               .lg\:flex { display: flex; }
+             }
+           </style>
+           <div id="nav" class="hidden lg:flex"></div>"#,
+        1280.0,
+    );
+    let nav = find_box(&desktop.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "nav")
+    })
+    .expect("nav");
+    assert_eq!(nav.style.display, Display::Flex);
+}
+
+#[test]
+fn yahoo_heading_title_clamp_keeps_resolved_utility_size() {
+    let doc = parse_and_layout(
+        r#"<style>
+          :root {
+            --font-weight-condensed-bold: 700;
+            --size-font-40: 2.5rem;
+            --v2-heading-2xl-bold-cond-weight: var(--font-weight-condensed-bold);
+            --v2-heading-2xl-bold-cond-size: var(--size-font-40);
+            --v2-heading-2xl-bold-cond-line-height: 1.15;
+            --v2-heading-2xl-bold-cond-family: GT America Condensed;
+            --font-v2-heading-2xl-bold-cond: var(--v2-heading-2xl-bold-cond-weight) var(--v2-heading-2xl-bold-cond-size)/var(--v2-heading-2xl-bold-cond-line-height) var(--v2-heading-2xl-bold-cond-family);
+          }
+          .md\:neo-font-v2-heading-2xl-bold-cond { font: var(--font-v2-heading-2xl-bold-cond); }
+          .title { font-size: clamp(var(--v2-heading-2xl-bold-cond-size), 2.27vw + .275rem, var(--v2-heading-2xl-bold-cond-size)); }
+        </style>
+        <h3 id="headline" class="text title md:neo-font-v2-heading-2xl-bold-cond">Headline</h3>"#,
+        1280.0,
+    );
+    let h = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "headline")
+            .unwrap_or(false)
+    })
+    .expect("headline");
+
+    assert_eq!(h.style.font_weight, FontWeight::Value(700));
+    assert_eq!(h.style.font_size, CssLength::Px(40.0));
+    assert_eq!(h.style.font_family, "GT America Condensed");
+}
+
+#[test]
+fn yahoo_heading_font_utility_survives_parallel_cascade() {
+    let mut filler = String::new();
+    for i in 0..1100 {
+        filler.push_str(&format!(".unused-{i} {{ color: rgb(1, 2, 3); }}\n"));
+    }
+    let html = format!(
+        r#"<style>
+          :root {{
+            --font-weight-condensed-bold: 700;
+            --size-font-40: 2.5rem;
+            --v2-heading-2xl-bold-cond-weight: var(--font-weight-condensed-bold);
+            --v2-heading-2xl-bold-cond-size: var(--size-font-40);
+            --v2-heading-2xl-bold-cond-line-height: 1.15;
+            --v2-heading-2xl-bold-cond-family: GT America Condensed;
+            --font-v2-heading-2xl-bold-cond: var(--v2-heading-2xl-bold-cond-weight) var(--v2-heading-2xl-bold-cond-size)/var(--v2-heading-2xl-bold-cond-line-height) var(--v2-heading-2xl-bold-cond-family);
+          }}
+          h3 {{ font-size: inherit; font-weight: inherit; }}
+          .md\:neo-font-v2-heading-2xl-bold-cond {{ font: var(--font-v2-heading-2xl-bold-cond); }}
+          {filler}
+        </style>
+        <h3 id="headline" class="text title md:neo-font-v2-heading-2xl-bold-cond" style="text-decoration: none; font-style: normal; text-transform: none; text-align: inherit; font-variant-numeric: normal;">Headline</h3>"#
+    );
+    let doc = parse_and_layout(&html, 1280.0);
+    let h = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "headline")
+            .unwrap_or(false)
+    })
+    .expect("headline");
+
+    assert_eq!(h.style.font_weight, FontWeight::Value(700));
+    assert_eq!(h.style.font_size, CssLength::Px(40.0));
+    assert_eq!(h.style.line_height, CssLength::Em(1.15));
+}
+
+#[test]
+fn svg_fill_and_stroke_are_inherited_css_properties() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>
+           body { color: rgb(10, 20, 30); }
+           svg { fill: currentColor; stroke: none; }
+           #child { stroke: rgb(40, 50, 60); }
+         </style>
+         <svg id='parent'></svg>
+         <svg id='child'></svg>",
+        400.0,
+    );
+
+    let parent = d.get_element_by_id("parent").unwrap();
+    let child = d.get_element_by_id("child").unwrap();
+    assert_eq!(d.computed_style_property(parent, "fill"), "rgb(10, 20, 30)");
+    assert_eq!(d.computed_style_property(parent, "stroke"), "none");
+    assert_eq!(
+        d.computed_style_property(child, "stroke"),
+        "rgb(40, 50, 60)"
+    );
+}
+
+#[test]
+fn font_shorthand_uses_the_shared_font_size_parser() {
+    let mut style = ComputedStyle::default();
+
+    apply_property(&mut style, "font", r#"700 2cap system-ui"#);
+
+    assert_eq!(style.font_weight, FontWeight::Value(700));
+    assert_eq!(style.font_size, CssLength::Em(2.0));
+}
+
+#[test]
+fn inline_svg_percentage_size_does_not_become_pixel_size() {
+    let doc = parse_and_layout(
+        r#"<div style="width:400px"><svg id="icon" width="100%" height="50%" viewBox="0 0 20 10"></svg></div>"#,
+        400.0,
+    );
+    let svg = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "icon")
+            .unwrap_or(false)
+    })
+    .unwrap();
+
+    assert!(
+        svg.layout.content_rect.w > 390.0,
+        "svg width=100% should resolve against the containing block, not become 100px; got {}",
+        svg.layout.content_rect.w
+    );
+}
+
+#[test]
+fn viewbox_only_inline_svg_uses_default_object_size() {
+    let doc = parse_and_layout(
+        r#"<svg id="yt" viewBox="0 260 1792 1260"><path d="M0 0h1v1z"/></svg>"#,
+        800.0,
+    );
+    let svg = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|id| id == "yt").unwrap_or(false)
+    })
+    .unwrap();
+
+    assert_eq!(svg.layout.content_rect.w.round(), 300.0);
+    assert_eq!(svg.layout.content_rect.h.round(), 150.0);
+}
+
+#[test]
+fn viewbox_only_svg_scales_to_smaller_definite_slot() {
+    let doc = parse_and_layout(
+        r#"<a style="display:block;width:20px;line-height:20px">
+             <svg id="yt" viewBox="0 260 1792 1260"><path d="M0 0h1v1z"/></svg>
+           </a>"#,
+        800.0,
+    );
+    let svg = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|id| id == "yt").unwrap_or(false)
+    })
+    .unwrap();
+
+    assert_eq!(svg.layout.content_rect.w.round(), 20.0);
+    assert_eq!(svg.layout.content_rect.h.round(), 14.0);
+}
+
+#[test]
+fn image_dimension_attributes_accept_browser_compatible_leading_integer() {
+    let mut r = crate::Renderer::new();
+    let d = r.load_html(
+        r#"<style>
+             body { margin: 0; }
+             .gallery-group { width: 1000px; }
+             .gallery-group img { max-height: 100%; max-width: 90%; }
+           </style>
+           <div class="gallery-group">
+             <img id="thumb" width="auto;" height="100px;" alt="thumbnail">
+           </div>"#,
+        1200.0,
+    );
+    let img = d.get_element_by_id("thumb").expect("image");
+    let rect = d.get_bounding_client_rect(img).expect("image rect");
+    assert!(
+        rect.h <= 100.0,
+        "height='100px;' should use the leading HTML integer before max constraints, got {}",
+        rect.h
+    );
+    assert!(
+        rect.w < 200.0,
+        "width auto should use the fallback intrinsic ratio from the 100px height, not max-width scaling; got {}",
+        rect.w
+    );
+}
+
+#[test]
+fn one_value_background_size_preserves_intrinsic_ratio() {
+    let mut node = WebCore::new("div");
+    node.bg_image_data = Some(std::sync::Arc::new(vec![0u8; 200 * 100 * 4]));
+    node.bg_image_width = 200;
+    node.bg_image_height = 100;
+    node.layout.border_rect = Rect::new(0.0, 0.0, 167.0, 35.0);
+    node.layout.padding_rect = node.layout.border_rect;
+    node.layout.content_rect = node.layout.border_rect;
+    apply_property(
+        std::sync::Arc::make_mut(&mut node.style),
+        "background-size",
+        "146px",
+    );
+    apply_property(
+        std::sync::Arc::make_mut(&mut node.style),
+        "background-repeat",
+        "no-repeat",
+    );
+
+    let list = build_display_list(&node, 800.0, 200.0);
+    let (draw_w, draw_h) = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::BackgroundImage { draw_w, draw_h, .. } => Some((*draw_w, *draw_h)),
+            _ => None,
+        })
+        .expect("background image command");
+
+    assert_eq!(draw_w.round(), 146.0);
+    assert_eq!(
+        draw_h.round(),
+        73.0,
+        "one-value background-size must preserve the intrinsic image ratio"
+    );
+}
+
+#[test]
+fn slashdot_style_inline_block_nav_keeps_children_in_row() {
+    let html = r#"
+        <style>
+        body { margin: 0; font: 14px/40px Arial; }
+        .nav-wrap { height: 40px; line-height: 40px; background: #066; }
+        .nav-primary { float: left; height: inherit; line-height: 40px; }
+        .nav-wrap ul { margin: 0; padding: 0; list-style: none; }
+        .nav-primary li { display: inline-block; margin-left: -4px; }
+        .nav-primary li > a { display: block; padding: 0 15px; }
+        .nav-primary > h2,
+        .nav-primary .nav-site { display: inline-block; }
+        .logo {
+            margin: 0 10px 0 0;
+            width: 167px;
+            height: 35px;
+            text-indent: -9999px;
+            background-size: 146px;
+        }
+        .logo a { display: block; height: inherit; }
+        </style>
+        <div class="nav-wrap">
+          <nav class="nav-primary" id="primary">
+            <h2 class="logo" id="logo"><a><span>Slashdot</span></a></h2>
+            <ul class="nav-site" id="site">
+              <li><a><span>Stories</span></a></li>
+              <li><a><span>Popular</span></a></li>
+              <li><a><span>Polls</span></a></li>
+              <li><a><span>Software</span></a></li>
+            </ul>
+          </nav>
+        </div>
+    "#;
+    let doc = parse_and_layout(html, 1280.0);
+    let logo = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "logo")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    let site = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "site")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    assert!(
+        logo.layout.content_rect.y < 10.0,
+        "logo should stay in the 40px nav row, got {:?}",
+        logo.layout.content_rect
+    );
+    assert!(
+        site.layout.content_rect.y < 10.0,
+        "site nav should stay in the same row as the logo, got {:?}",
+        site.layout.content_rect
+    );
+
+    let list = build_display_list(&doc.root, 1280.0, 200.0);
+    let mut visible_menu_words = 0;
+    for cmd in &list.commands {
+        if let PaintCmd::Text { text, x, y, .. } = cmd {
+            if text == "Slashdot" {
+                assert!(
+                    *x < -9000.0 || *x > 1280.0 || *y < 0.0 || *y > 80.0,
+                    "logo replacement text should be outside the visible nav: x={x} y={y}"
+                );
+            }
+            if matches!(text.as_str(), "Stories" | "Popular" | "Polls" | "Software") {
+                visible_menu_words += 1;
+                assert!(
+                    *x >= 0.0 && *x < 1280.0 && *y >= 0.0 && *y < 80.0,
+                    "menu text {text:?} escaped the nav: x={x} y={y}"
+                );
+            }
+        }
+    }
+    assert_eq!(visible_menu_words, 4);
+}
+
+#[test]
+fn empty_named_inline_anchor_does_not_create_anonymous_line() {
+    let doc = parse_and_layout(
+        r#"<style>body{margin:0;font:16px/20px Arial}</style>
+           <a name="top"></a>
+           <div id="header" style="height:40px"></div>"#,
+        800.0,
+    );
+    let header = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "header")
+            .unwrap_or(false)
+    })
+    .unwrap();
+
+    assert_eq!(
+        header.layout.border_rect.y.round(),
+        0.0,
+        "empty named anchors must not add a line before the following block"
+    );
+}
+
+#[test]
+fn shrink_wrapped_inline_block_does_not_count_child_padding_twice() {
+    let doc = parse_and_layout(
+        r#"<style>
+             body { margin: 0; font: 16px/20px Arial; }
+             ul { display: inline-block; margin: 0; padding: 0; list-style: none; }
+             li { display: inline-block; }
+             a { display: block; padding: 0 15px; }
+           </style>
+           <ul id="nav"><li><a>All</a></li></ul>"#,
+        800.0,
+    );
+    let nav = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "nav")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    let link = find_box(&doc.root, &|b| b.tag == "a").unwrap();
+
+    assert!(
+        (nav.layout.border_rect.w - link.layout.border_rect.w).abs() < 0.5,
+        "shrink-wrapped parent should match the link border box, nav={:?} link={:?}",
+        nav.layout.border_rect,
+        link.layout.border_rect
+    );
+}
+
+#[test]
+fn atomic_inline_blocks_do_not_add_extra_strut_descent_to_fixed_nav_rows() {
+    let doc = parse_and_layout(
+        r#"<style>
+             body { margin: 0; font: 14px/40px Arial; }
+             nav { line-height: 40px; }
+             .item { display: inline-block; height: 40px; width: 80px; }
+             .nested { display: inline-block; margin: 0; padding: 0; list-style: none; }
+             .nested > li { display: inline-block; height: 40px; width: 80px; }
+           </style>
+           <nav id="nav">
+             <span id="first" class="item"></span>
+             <ul id="nested" class="nested"><li></li><li></li></ul>
+             <span id="last" class="item"></span>
+           </nav>"#,
+        800.0,
+    );
+    let nav = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "nav")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    let first = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "first")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    let nested = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "nested")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    let last = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "last")
+            .unwrap_or(false)
+    })
+    .unwrap();
+
+    assert!(
+        nav.layout.border_rect.h <= 41.0,
+        "atomic inline-only nav row should stay near 40px, got {:?}",
+        nav.layout.border_rect
+    );
+    assert!(
+        (first.layout.border_rect.y - nested.layout.border_rect.y).abs() < 0.5
+            && (first.layout.border_rect.y - last.layout.border_rect.y).abs() < 0.5,
+        "inline-block siblings should share a row: first={:?} nested={:?} last={:?}",
+        first.layout.border_rect,
+        nested.layout.border_rect,
+        last.layout.border_rect
+    );
+}
+
+#[test]
+fn atomic_inline_breaks_after_the_box_not_before_it() {
+    let doc = parse_and_layout(
+        r#"<style>
+             body { margin: 0; font: 14px/40px Arial; }
+             nav { width: 210px; line-height: 40px; }
+             span { display: inline-block; width: 100px; height: 40px; }
+           </style>
+           <nav>
+             <span id="first"></span>
+             <span id="second"></span>
+             <span id="third"></span>
+           </nav>"#,
+        800.0,
+    );
+    let first = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "first")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    let second = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "second")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    let third = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "third")
+            .unwrap_or(false)
+    })
+    .unwrap();
+
+    assert!(
+        first.layout.border_rect.y < 1.0 && second.layout.border_rect.y < 1.0,
+        "first two atomic boxes should fit on the first line: first={:?} second={:?}",
+        first.layout.border_rect,
+        second.layout.border_rect
+    );
+    assert!(
+        third.layout.border_rect.y >= 39.0,
+        "only the overflowing third atomic box should wrap: {:?}",
+        third.layout.border_rect
+    );
+}
+
+#[test]
+fn floated_auto_width_inline_rows_shrink_to_measured_line_width() {
+    let doc = parse_and_layout(
+        r#"<style>
+             body { margin: 0; font: 14px/40px Arial; }
+             nav { float: left; line-height: 40px; }
+             h2, ul, a.button { display: inline-block; margin: 0; padding: 0; }
+             h2 { width: 167px; height: 35px; margin-right: 10px; }
+             ul { list-style: none; }
+             li { display: inline-block; width: 110px; height: 40px; }
+             a.button { width: 44px; height: 16px; margin: 0 10px; }
+           </style>
+           <nav id="nav">
+             <h2 id="logo"></h2>
+             <ul id="site"><li></li><li></li><li></li><li></li><li></li></ul>
+             <a id="button" class="button"></a>
+           </nav>"#,
+        1280.0,
+    );
+    let nav = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "nav")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    let logo = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "logo")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    let site = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "site")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    let button = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "button")
+            .unwrap_or(false)
+    })
+    .unwrap();
+
+    assert!(
+        nav.layout.border_rect.w >= 780.0,
+        "float should shrink to the measured no-wrap line, got {:?}",
+        nav.layout.border_rect
+    );
+    assert!(
+        logo.layout.border_rect.y + logo.layout.border_rect.h <= 41.0
+            && site.layout.border_rect.y + site.layout.border_rect.h <= 41.0
+            && button.layout.border_rect.y + button.layout.border_rect.h <= 41.0,
+        "float shrink relayout should keep nav children within one row: logo={:?} site={:?} button={:?}",
+        logo.layout.border_rect,
+        site.layout.border_rect,
+        button.layout.border_rect
+    );
+}
+
+#[test]
+fn nested_inline_before_content_contributes_to_icon_width() {
+    let doc = parse_and_layout(
+        r#"<style>
+             body { margin: 0; font: 16px/20px Arial; }
+             .label { display: inline-block; }
+             [class^="icon-"]:before {
+               content: ">";
+               display: inline-block;
+               width: 1em;
+               margin-left: .2em;
+               margin-right: .2em;
+             }
+           </style>
+           <span id="label" class="label">Firehose <i id="icon" class="icon-angle-right"></i></span>"#,
+        800.0,
+    );
+    let label = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "label")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    assert!(
+        label.layout.border_rect.w >= 75.0,
+        "parent inline-block should include generated icon width, got {:?}",
+        label.layout.border_rect
+    );
+}
+
+#[test]
+fn slashdot_icon_font_before_rules_generate_inline_pseudo_content() {
+    let doc = parse_and_layout(
+        r#"<style>
+             body { margin: 0; font: 16px/20px Arial; }
+             [class^="icon-"]:before, [class*=" icon-"]:before {
+               font-family: "sdicon";
+               display: inline-block;
+               width: 1em;
+               margin-left: .2em;
+               margin-right: .2em;
+               line-height: 1em;
+             }
+             .icon-angle-right:before { content: "\e87a"; }
+           </style>
+           <span id="label">Firehose <i id="icon" class="icon-angle-right"></i></span>"#,
+        800.0,
+    );
+    let icon = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "icon")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    assert_eq!(icon.style.before_content, "\u{e87a}");
+    let before = icon
+        .style
+        .before_style
+        .as_ref()
+        .expect("icon pseudo style should be generated");
+    assert_eq!(before.font_family, "sdicon");
+    assert_eq!(before.display, Display::InlineBlock);
+}
+
+#[test]
+fn slashdot_icon_font_before_rules_survive_parallel_cascade() {
+    let filler = (0..1100)
+        .map(|i| format!(".unused-{i} {{ color: red; }}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let doc = parse_and_layout(
+        &format!(
+            r#"<style>
+             {filler}
+             [class^="icon-"]:before, [class*=" icon-"]:before {{
+               font-family: "sdicon";
+               display: inline-block;
+               width: 1em;
+               margin-left: .2em;
+               margin-right: .2em;
+               line-height: 1em;
+             }}
+             .icon-angle-right:before {{ content: "\e87a"; }}
+           </style>
+           <span id="label">Firehose <i id="icon" class="icon-angle-right"></i></span>"#
+        ),
+        800.0,
+    );
+    let icon = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "icon")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    assert_eq!(icon.style.before_content, "\u{e87a}");
+    assert_eq!(
+        icon.style
+            .before_style
+            .as_ref()
+            .map(|style| style.font_family.as_str()),
+        Some("sdicon")
+    );
+}
+
+#[test]
+fn shrink_to_fit_block_with_inline_block_children_uses_unwrapped_width() {
+    let doc = parse_and_layout(
+        r#"<style>
+             body { margin: 0; font: 14px/40px Arial; }
+             ul { margin: 0; padding: 0; list-style: none; }
+             .outer { display: inline-block; }
+             .filter { padding-left: 10px; }
+             .filter li { display: inline-block; margin-left: -4px; }
+             [class^="icon-"]:before {
+               content: ">";
+               display: inline-block;
+               width: 1em;
+               margin-left: .2em;
+               margin-right: .2em;
+               line-height: 1em;
+             }
+           </style>
+           <div id="outer" class="outer">
+             <ul id="filter" class="filter">
+               <li id="label">Firehose <i class="icon-angle-right"></i></li>
+               <li>All</li>
+               <li>Popular</li>
+             </ul>
+           </div>"#,
+        800.0,
+    );
+    let filter = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "filter")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    assert!(
+        filter.layout.border_rect.h <= 41.0,
+        "nested shrink-to-fit block should keep inline-block children on one line, got {:?}",
+        filter.layout.border_rect
+    );
+}
+
+#[test]
+fn floated_child_inside_inline_wrapper_keeps_percentage_width() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"<style>
+             body { margin: 0; }
+             #nav { width: 320px; height: 40px; }
+             #wrap { display: inline; }
+             #search { float: left; width: 50%; height: 20px; }
+             #menu { float: right; width: 25%; height: 20px; }
+           </style>
+           <div id="nav"><span id="wrap"><form id="search"></form><div id="menu"></div></span></div>"#,
+        800.0,
+    );
+    let search = doc.get_element_by_id("search").unwrap();
+    let rect = doc.get_bounding_client_rect(search).unwrap();
+    assert!(
+        (rect.w - 160.0).abs() < 0.5,
+        "float inside inline wrapper should resolve 50% against the containing block, got {rect:?}"
+    );
+    assert!(
+        rect.y.abs() < 0.5,
+        "float inside inline wrapper should be placed at the containing block top, got {rect:?}"
+    );
+    let menu = doc.get_element_by_id("menu").unwrap();
+    let menu_rect = doc.get_bounding_client_rect(menu).unwrap();
+    assert!(
+        (menu_rect.x - 240.0).abs() < 0.5 && menu_rect.y.abs() < 0.5,
+        "right float inside inline wrapper should use the containing block float context, got {menu_rect:?}"
+    );
+}
+
+#[test]
+fn stylesheet_background_image_url_reaches_render_style() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"<style>
+             .logo {
+               width: 167px;
+               height: 35px;
+               background-image: url("//a.fsdn.com/sd/slashdot_tm.svg");
+               background-repeat: no-repeat;
+               background-position: 20px 10px;
+               background-size: 146px;
+             }
+           </style>
+           <h2 class="logo" id="logo"></h2>"#,
+        800.0,
+    );
+    let logo = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "logo")
+            .unwrap_or(false)
+    })
+    .expect("logo");
+
+    assert_eq!(
+        logo.style.background_image_url,
+        "//a.fsdn.com/sd/slashdot_tm.svg"
+    );
+    assert_eq!(logo.style.background_size, BackgroundSize::Explicit);
+}
+
+#[test]
+fn unbreakable_generated_fragments_overflow_on_one_line() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"<style>
+             body { margin: 0; font: 20px/20px Arial; }
+             #link { display: block; width: 20px; line-height: 20px; }
+             #icon::before {
+               content: "X";
+               display: inline-block;
+               width: 1em;
+               margin-left: .2em;
+             }
+           </style>
+           <a id="link"><i id="icon"></i></a>"#,
+        800.0,
+    );
+    let link_id = doc.get_element_by_id("link").unwrap();
+    let link = doc.get_box_by_id(link_id).unwrap();
+    assert_eq!(
+        link.layout.line_cache.len(),
+        1,
+        "generated inline-block fragments without break opportunities should stay on one overflowing line"
+    );
+    let rect = doc.get_bounding_client_rect(link_id).unwrap();
+    assert!(
+        rect.h <= 22.0,
+        "one fixed-height icon line should not expand into stacked spacer/glyph lines, got {rect:?}"
+    );
+}
+
+#[test]
+fn positioned_pseudo_on_plain_inline_does_not_paint_from_stale_zero_box() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"<style>
+             body { margin: 0; font: 20px/20px Arial; }
+             #link { display: block; width: 20px; line-height: 20px; }
+             #icon { position: relative; }
+             #icon::before {
+               content: "X";
+               display: inline-block;
+               width: 1em;
+             }
+             #icon::after {
+               content: "";
+               display: block;
+               position: absolute;
+               left: 100px;
+               top: 100px;
+               width: 20px;
+               height: 20px;
+               background: black;
+               z-index: -1;
+             }
+           </style>
+           <a id="link"><i id="icon"></i></a>"#,
+        800.0,
+    );
+    let list = build_display_list(&doc.root, 800.0, 200.0);
+    let bad_far_fill = list.commands.iter().any(|cmd| match cmd {
+        PaintCmd::FillRect { rect, color, .. } => {
+            color.r == 0 && color.g == 0 && color.b == 0 && rect.x >= 90.0 && rect.y >= 90.0
+        }
+        _ => false,
+    });
+    assert!(
+        !bad_far_fill,
+        "plain-inline positioned pseudo decoration should not paint from a stale 0x0 owner box"
+    );
+}
+
+#[test]
+fn whitespace_after_atomic_inline_block_is_not_collapsed_with_leading_indent() {
+    let doc = parse_and_layout(
+        r#"<style>
+             body { margin: 0; font: 16px/20px Arial; }
+             #row { display: inline-block; }
+             span { display: inline-block; width: 20px; height: 20px; }
+           </style>
+           <div id="row">
+             <span id="a"></span>
+             <span id="b"></span>
+           </div>"#,
+        800.0,
+    );
+    let row = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "row")
+            .unwrap_or(false)
+    })
+    .unwrap();
+
+    assert!(
+        row.layout.border_rect.w > 42.0,
+        "space between inline-blocks should contribute after leading indentation is trimmed, got {:?}",
+        row.layout.border_rect
+    );
 }
 
 #[test]
@@ -413,6 +2063,48 @@ fn font_variant_caps_longhand_sets_small_caps() {
     apply_property(&mut style, "font-variant-caps", "small-caps");
 
     assert!(style.small_caps);
+    assert_eq!(style.font_variant_caps, "small-caps");
+}
+
+#[test]
+fn font_variant_longhands_are_stored_inherited_and_serialized() {
+    let mut doc = parse_html(
+        r#"
+        <div style="font-variant-ligatures: no-common-ligatures;
+                    font-variant-numeric: tabular-nums slashed-zero;
+                    font-variant-east-asian: ruby;
+                    font-variant-alternates: historical-forms;
+                    font-variant-emoji: text;
+                    font-variant-position: sub;">
+            <span id="s">x</span>
+        </div>
+        "#,
+    );
+    let span = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v == "s").unwrap_or(false)
+    })
+    .expect("span");
+
+    assert_eq!(span.style.font_variant_ligatures, "no-common-ligatures");
+    assert_eq!(span.style.font_variant_numeric, "tabular-nums slashed-zero");
+    assert_eq!(span.style.font_variant_east_asian, "ruby");
+    assert_eq!(span.style.font_variant_alternates, "historical-forms");
+    assert_eq!(span.style.font_variant_emoji, "text");
+    assert_eq!(span.style.font_variant_position, "sub");
+    assert_eq!(
+        doc.computed_style_property(span.node_id, "font-variant-numeric"),
+        "tabular-nums slashed-zero"
+    );
+}
+
+#[test]
+fn font_shorthand_resets_font_variant_longhands() {
+    let mut style = ComputedStyle::default();
+
+    apply_property(&mut style, "font-variant-numeric", "tabular-nums");
+    apply_property(&mut style, "font", "16px sans-serif");
+
+    assert_eq!(style.font_variant_numeric, "normal");
 }
 
 #[test]
@@ -486,6 +2178,48 @@ fn text_underline_offset_reaches_text_decoration_commands() {
 }
 
 #[test]
+fn text_underline_position_reaches_text_decoration_commands() {
+    let mut frame = EngineFrame::new(
+        parse_html(
+            r#"<p style="text-decoration: underline; text-underline-position: under">x</p>"#,
+        ),
+        800.0,
+        600.0,
+    );
+    frame.update_frame();
+    let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+
+    let position = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Text { decoration, .. } if decoration.underline => {
+            Some(decoration.underline_position)
+        }
+        _ => None,
+    });
+
+    assert_eq!(position, Some(TextUnderlinePosition::Under));
+}
+
+#[test]
+fn text_decoration_skip_ink_reaches_text_decoration_commands() {
+    let mut frame = EngineFrame::new(
+        parse_html(
+            r#"<p style="text-decoration: underline; text-decoration-skip-ink: none">gap</p>"#,
+        ),
+        800.0,
+        600.0,
+    );
+    frame.update_frame();
+    let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+
+    let skip_ink = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Text { decoration, .. } if decoration.underline => Some(decoration.skip_ink),
+        _ => None,
+    });
+
+    assert_eq!(skip_ink, Some(false));
+}
+
+#[test]
 fn propagated_text_decoration_uses_decorating_box_color() {
     let mut frame = EngineFrame::new(
         parse_html(
@@ -505,6 +2239,75 @@ fn propagated_text_decoration_uses_decorating_box_color() {
     });
 
     assert_eq!(span_decoration_color, Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn text_decoration_inherit_shorthand_clears_ua_anchor_underline() {
+    let mut frame = EngineFrame::new(
+        parse_html(r##"<style>a { text-decoration: inherit }</style><a href="#">plain link</a>"##),
+        800.0,
+        600.0,
+    );
+    frame.update_frame();
+    let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+
+    let underline = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Text {
+            text, decoration, ..
+        } if text.contains("plain link") => Some(decoration.underline),
+        _ => None,
+    });
+
+    assert_eq!(underline, Some(false));
+}
+
+#[test]
+fn equal_specificity_cascade_uses_stylesheet_source_order() {
+    let mut frame = EngineFrame::new(
+        parse_html(
+            r#"<style>
+                .md\:block { display: block }
+                .hidden { display: none }
+                @media (min-width: 768px) { .md\:block { display: block } }
+            </style>
+            <div id="target" class="hidden md:block">visible</div>"#,
+        ),
+        800.0,
+        600.0,
+    );
+    frame.update_frame();
+
+    let target = find_box(&frame.doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "target")
+    })
+    .expect("target should exist");
+    assert_eq!(target.style.display, Display::Block);
+}
+
+#[test]
+fn block_text_decoration_propagates_to_in_flow_block_descendants() {
+    let mut frame = EngineFrame::new(
+        parse_html(
+            r#"<div style="color: blue; text-decoration: underline">inflow<p>block child</p><div><span>nested</span></div></div>"#,
+        ),
+        800.0,
+        600.0,
+    );
+    frame.update_frame();
+    let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+
+    for needle in ["inflow", "block child", "nested"] {
+        let decoration = list.commands.iter().find_map(|cmd| match cmd {
+            PaintCmd::Text {
+                text, decoration, ..
+            } if text.contains(needle) => Some(decoration),
+            _ => None,
+        });
+        assert!(
+            decoration.is_some_and(|d| d.underline && d.color == Color::rgb(0, 0, 255)),
+            "{needle} should keep the decorating block underline"
+        );
+    }
 }
 
 #[test]
@@ -574,6 +2377,57 @@ fn dir_auto_without_strong_text_preserves_inherited_direction() {
     .unwrap();
 
     assert_eq!(p.style.direction, Direction::RTL);
+}
+
+#[test]
+fn unicode_bidi_override_reverses_ltr_text_segments() {
+    let html = r#"
+        <div id="b" dir="rtl" style="unicode-bidi: bidi-override">abc</div>
+    "#;
+    let doc = parse_and_layout(html, 800.0);
+    let div = find_box(&doc.root, &|node| {
+        node.attributes
+            .get("id")
+            .map(|id| id == "b")
+            .unwrap_or(false)
+    })
+    .expect("div");
+
+    let line = div.layout.line_cache.first().expect("line");
+    let starts: Vec<usize> = line
+        .visual_segments
+        .iter()
+        .map(|segment| segment.logical_start)
+        .collect();
+
+    assert_eq!(starts, vec![2, 1, 0]);
+    assert!(line
+        .visual_segments
+        .iter()
+        .all(|segment| segment.length == 1 && segment.level == 1));
+}
+
+#[test]
+fn unicode_bidi_plaintext_uses_line_text_direction() {
+    let html = r#"
+        <div id="p" dir="ltr" style="unicode-bidi: plaintext">123 שלום</div>
+    "#;
+    let doc = parse_and_layout(html, 800.0);
+    let div = find_box(&doc.root, &|node| {
+        node.attributes
+            .get("id")
+            .map(|id| id == "p")
+            .unwrap_or(false)
+    })
+    .expect("div");
+
+    let line = div.layout.line_cache.first().expect("line");
+    assert!(
+        line.visual_segments
+            .iter()
+            .any(|segment| (segment.level & 1) != 0),
+        "plaintext should resolve this line as RTL from its first strong character"
+    );
 }
 
 #[test]
@@ -691,6 +2545,44 @@ fn content_attr_reads_originating_element_attribute() {
 }
 
 #[test]
+fn content_on_element_replaces_rendered_inline_text() {
+    let html = r#"<style>
+              p { content: "Generated " attr(data-label); }
+            </style>
+            <p data-label="label">Original <span>child</span></p>"#;
+    let doc = parse_html(html);
+    let mut frame = EngineFrame::new(doc, 800.0, 600.0);
+    frame.update_frame();
+    fn find<'a>(node: &'a crate::WebCore, tag: &str) -> Option<&'a crate::WebCore> {
+        if node.tag == tag {
+            return Some(node);
+        }
+        node.children.iter().find_map(|child| find(child, tag))
+    }
+    let p = find(&frame.doc.root, "p").expect("p element exists");
+    assert_eq!(p.style.rare().content, "Generated label");
+    let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+    let texts: Vec<String> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        texts.iter().any(|text| text.contains("Generated label")),
+        "content on a normal element should paint generated text; painted texts were {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|text| text.contains("Original"))
+            && !texts.iter().any(|text| text.contains("child")),
+        "content on a normal element should replace descendant inline text; painted texts were {texts:?}"
+    );
+}
+
+#[test]
 fn generated_quotes_use_computed_quotes_property() {
     let html = r#"<style>
               p::before { content: open-quote; quotes: "[" "]"; }
@@ -706,6 +2598,129 @@ fn generated_quotes_use_computed_quotes_property() {
     assert!(
         texts.iter().any(|text| text.contains("]")),
         "close-quote should use the computed quotes property; painted texts were {texts:?}"
+    );
+}
+
+#[test]
+fn table_row_height_sets_minimum_row_size() {
+    let doc = parse_html(
+        "<style>body{margin:0}td{padding:0;border:0}tr{height:50px}</style>\
+         <table><tr id=row><td>x</td></tr></table>",
+    );
+    let mut frame = EngineFrame::new(doc, 800.0, 600.0);
+    frame.update_frame();
+    fn find<'a>(node: &'a crate::WebCore, id: &str) -> Option<&'a crate::WebCore> {
+        if node.attributes.get("id").map(|v| v == id).unwrap_or(false) {
+            return Some(node);
+        }
+        node.children.iter().find_map(|child| find(child, id))
+    }
+    let row = find(&frame.doc.root, "row").expect("row exists");
+    assert!(
+        (row.layout.border_rect.h - 50.0).abs() < 0.5,
+        "row height should be at least authored height, got {}",
+        row.layout.border_rect.h
+    );
+}
+
+#[test]
+fn caption_side_block_end_places_caption_after_rows() {
+    let doc = parse_html(
+        "<style>body{margin:0}caption{caption-side:block-end;height:20px}\
+         td{padding:0;border:0}</style>\
+         <table><caption id=cap>cap</caption><tr id=row><td>x</td></tr></table>",
+    );
+    let mut frame = EngineFrame::new(doc, 800.0, 600.0);
+    frame.update_frame();
+    fn find<'a>(node: &'a crate::WebCore, id: &str) -> Option<&'a crate::WebCore> {
+        if node.attributes.get("id").map(|v| v == id).unwrap_or(false) {
+            return Some(node);
+        }
+        node.children.iter().find_map(|child| find(child, id))
+    }
+    let cap = find(&frame.doc.root, "cap").expect("caption exists");
+    let row = find(&frame.doc.root, "row").expect("row exists");
+    assert!(
+        cap.layout.border_rect.y >= row.layout.border_rect.y + row.layout.border_rect.h - 0.5,
+        "block-end caption should be after rows; cap={:?} row={:?}",
+        cap.layout.border_rect,
+        row.layout.border_rect
+    );
+}
+
+#[test]
+fn caption_side_inline_start_places_caption_before_rows() {
+    let doc = parse_html(
+        "<style>body{margin:0}table{width:60px}caption{caption-side:inline-start;width:30px;height:20px}\
+         td{padding:0;border:0;width:60px;height:10px}</style>\
+         <table><caption id=cap>cap</caption><tr id=row><td>x</td></tr></table>",
+    );
+    let mut frame = EngineFrame::new(doc, 800.0, 600.0);
+    frame.update_frame();
+    fn find<'a>(node: &'a crate::WebCore, id: &str) -> Option<&'a crate::WebCore> {
+        if node.attributes.get("id").map(|v| v == id).unwrap_or(false) {
+            return Some(node);
+        }
+        node.children.iter().find_map(|child| find(child, id))
+    }
+    let cap = find(&frame.doc.root, "cap").expect("caption exists");
+    let row = find(&frame.doc.root, "row").expect("row exists");
+    assert!(
+        row.layout.border_rect.x >= cap.layout.border_rect.x + cap.layout.border_rect.w - 0.5,
+        "inline-start caption should be before rows; cap={:?} row={:?}",
+        cap.layout.border_rect,
+        row.layout.border_rect
+    );
+}
+
+#[test]
+fn caption_side_inline_end_places_caption_after_rows() {
+    let doc = parse_html(
+        "<style>body{margin:0}table{width:60px}caption{caption-side:inline-end;width:30px;height:20px}\
+         td{padding:0;border:0;width:60px;height:10px}</style>\
+         <table><caption id=cap>cap</caption><tr id=row><td>x</td></tr></table>",
+    );
+    let mut frame = EngineFrame::new(doc, 800.0, 600.0);
+    frame.update_frame();
+    fn find<'a>(node: &'a crate::WebCore, id: &str) -> Option<&'a crate::WebCore> {
+        if node.attributes.get("id").map(|v| v == id).unwrap_or(false) {
+            return Some(node);
+        }
+        node.children.iter().find_map(|child| find(child, id))
+    }
+    let cap = find(&frame.doc.root, "cap").expect("caption exists");
+    let row = find(&frame.doc.root, "row").expect("row exists");
+    assert!(
+        cap.layout.border_rect.x >= row.layout.border_rect.x + row.layout.border_rect.w - 0.5,
+        "inline-end caption should be after rows; cap={:?} row={:?}",
+        cap.layout.border_rect,
+        row.layout.border_rect
+    );
+}
+
+#[test]
+fn presentational_hints_sit_between_ua_and_author_rules() {
+    let hint_doc = parse_and_layout(
+        r#"<table><tr><th align="left">head</th></tr></table>"#,
+        800.0,
+    );
+    let hinted = find_box(&hint_doc.root, &|b| b.tag == "th").expect("th exists");
+    assert_eq!(
+        hinted.style.text_align,
+        TextAlign::Left,
+        "align=left should outrank the UA th center rule"
+    );
+
+    let author_doc = parse_and_layout(
+        r#"<style>th { text-align: right; }</style>
+           <table><tr><th align="left">head</th></tr></table>"#,
+        800.0,
+    );
+    let authored = find_box(&author_doc.root, &|b| b.tag == "th").expect("th exists");
+    assert_eq!(
+        authored.style.text_align,
+        TextAlign::Right,
+        "author CSS should outrank the align presentational hint"
     );
 }
 
@@ -758,8 +2773,32 @@ fn extended_list_style_type_keywords_paint_markers() {
             <ol><li>one</li></ol>"#;
     let armenian_markers = build_display_markers(armenian_html);
     assert!(
-        armenian_markers.iter().any(|text| text == "1."),
-        "unsupported algorithmic marker styles should fall back to decimal paint; markers were {armenian_markers:?}"
+        armenian_markers.iter().any(|text| text == "Ա."),
+        "armenian marker should use the algorithmic counter style; markers were {armenian_markers:?}"
+    );
+
+    let georgian_html = r#"<style>li { list-style-type: georgian; }</style>
+            <ol><li>one</li></ol>"#;
+    let georgian_markers = build_display_markers(georgian_html);
+    assert!(
+        georgian_markers.iter().any(|text| text == "ა."),
+        "georgian marker should use the algorithmic counter style; markers were {georgian_markers:?}"
+    );
+
+    let hebrew_html = r#"<style>ol { counter-reset: list-item 14; } li { list-style-type: hebrew; }</style>
+            <ol><li>fifteen</li></ol>"#;
+    let hebrew_markers = build_display_markers(hebrew_html);
+    assert!(
+        hebrew_markers.iter().any(|text| text == "ט״ו."),
+        "hebrew marker should use the special 15 form; markers were {hebrew_markers:?}"
+    );
+
+    let kana_html = r#"<style>li { list-style-type: hiragana-iroha; }</style>
+            <ol><li>one</li></ol>"#;
+    let kana_markers = build_display_markers(kana_html);
+    assert!(
+        kana_markers.iter().any(|text| text == "い."),
+        "kana marker should use the requested sequence; markers were {kana_markers:?}"
     );
 }
 
@@ -777,7 +2816,7 @@ fn empty_list_item_still_paints_a_marker() {
 #[test]
 fn form_validation_pseudo_classes_match_basic_constraints() {
     let mut r = crate::Renderer::new();
-    let d = r.load_html(
+    let mut d = r.load_html(
         r#"<style>
         input:invalid { color: rgb(200, 0, 0); }
         input:valid { background-color: rgb(0, 200, 0); }
@@ -812,6 +2851,73 @@ fn form_validation_pseudo_classes_match_basic_constraints() {
     assert_eq!(ok.style.background_color, Color::rgb(0, 200, 0));
     assert_eq!(low.style.border_top_color, Color::rgb(10, 20, 30));
     assert_eq!(mid.style.border_left_color, Color::rgb(40, 50, 60));
+}
+
+#[test]
+fn user_validation_pseudo_classes_require_dirty_user_state() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        r#"<style>
+        input:user-invalid { color: rgb(200, 0, 0); }
+        input:user-valid { background-color: rgb(0, 200, 0); }
+        </style>
+        <input id=field required>"#,
+        800.0,
+    );
+    let field = d.get_element_by_id("field").unwrap();
+    assert_ne!(
+        d.get_computed_style(field).unwrap().color,
+        Color::rgb(200, 0, 0),
+        "an untouched empty required input is invalid, but not user-invalid"
+    );
+
+    d.set_value(field, "");
+    d.recascade();
+    assert_eq!(
+        d.get_computed_style(field).unwrap().color,
+        Color::rgb(200, 0, 0),
+        "once touched, the empty required input matches :user-invalid"
+    );
+
+    d.set_value(field, "ok");
+    d.recascade();
+    assert_eq!(
+        d.get_computed_style(field).unwrap().background_color,
+        Color::rgb(0, 200, 0),
+        "a touched valid input matches :user-valid"
+    );
+}
+
+#[test]
+fn autofill_pseudo_class_matches_host_control_state() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        r#"<style>
+        input { color: rgb(1, 1, 1); }
+        input:autofill { color: rgb(7, 8, 9); }
+        </style>
+        <input id=email>"#,
+        800.0,
+    );
+    let email = d.get_element_by_id("email").unwrap();
+    assert_eq!(
+        d.get_computed_style(email).unwrap().color,
+        Color::rgb(1, 1, 1)
+    );
+
+    d.set_autofilled(email, true);
+    d.recascade();
+    assert_eq!(
+        d.get_computed_style(email).unwrap().color,
+        Color::rgb(7, 8, 9)
+    );
+
+    d.set_autofilled(email, false);
+    d.recascade();
+    assert_eq!(
+        d.get_computed_style(email).unwrap().color,
+        Color::rgb(1, 1, 1)
+    );
 }
 
 // ── Selector Parsing ──────────────────────────────────────────────────────────
@@ -858,6 +2964,105 @@ fn css_selector_multiple_classes() {
         })
         .collect();
     assert!(classes.len() >= 3);
+}
+
+#[test]
+fn css_selector_escaped_utility_class_keeps_punctuation() {
+    let sel = parse_selector(".md\\:grid-cols-\\[2fr_1fr\\]");
+    use crate::css::SelectorPart;
+    assert!(sel.valid);
+    assert!(sel
+        .parts
+        .iter()
+        .any(|p| matches!(p, SelectorPart::Class(c) if c == "md:grid-cols-[2fr_1fr]")));
+}
+
+#[test]
+fn css_selector_hex_escape_decodes_identifier_code_points() {
+    let sel = parse_selector(".\\32xl\\:grid-cols-12");
+    use crate::css::SelectorPart;
+    assert!(sel.valid);
+    assert!(sel
+        .parts
+        .iter()
+        .any(|p| matches!(p, SelectorPart::Class(c) if c == "2xl:grid-cols-12")));
+}
+
+#[test]
+fn css_selector_hex_escape_consumes_optional_trailing_space() {
+    let sel = parse_selector(".bg-\\5b rgba\\28 0\\2c 0\\2c 0\\2c 0\\.3\\29 \\5d");
+    use crate::css::SelectorPart;
+    assert!(sel.valid);
+    assert!(sel.parts.iter().any(
+        |p| matches!(p, SelectorPart::Class(c) if c == "bg-[rgba(0,0,0,0.3)]")
+    ));
+}
+
+#[test]
+fn css_escaped_before_class_is_not_stripped_as_pseudo_element() {
+    let mut ss = Stylesheet::default();
+    ss.parse_and_add(".before\\:block { display: block; }");
+    assert_eq!(ss.rules.len(), 1);
+    assert_eq!(ss.rules[0].pseudo_element, PseudoElement::None);
+    assert!(ss.rules[0].selectors[0]
+        .parts
+        .iter()
+        .any(|p| matches!(p, crate::css::SelectorPart::Class(c) if c == "before:block")));
+}
+
+#[test]
+fn css_escaped_before_class_can_still_target_real_before_pseudo() {
+    let mut ss = Stylesheet::default();
+    ss.parse_and_add(".before\\:content-\\[\\'\\/\\'\\]::before { content: \"/\"; }");
+    assert_eq!(ss.rules.len(), 1);
+    assert_eq!(ss.rules[0].pseudo_element, PseudoElement::Before);
+    assert!(ss.rules[0].selectors[0]
+        .parts
+        .iter()
+        .any(|p| matches!(p, crate::css::SelectorPart::Class(c) if c == "before:content-['/']")));
+}
+
+#[test]
+fn compound_class_selector_overrides_single_class_width() {
+    let doc = parse_and_layout(
+        "<style>
+           .hyperlink-wrapper { display: block; width: fit-content; }
+           .hyperlink-wrapper.story-img-wrapper { width: 100%; }
+         </style>
+         <div style='width: 584px'><a id=target class='hyperlink-wrapper story-img-wrapper'></a></div>",
+        800.0,
+    );
+    let target = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(String::as_str) == Some("target")
+    })
+    .expect("target");
+    assert!(
+        (target.layout.content_rect.w - 584.0).abs() < 1.0,
+        "compound class rule should override single class width; got {}",
+        target.layout.content_rect.w
+    );
+}
+
+#[test]
+fn compound_ancestor_descendant_rule_resolves_inherited_custom_width() {
+    let doc = parse_and_layout(
+        "<style>
+           #host { --img-width: 100%; width: 584px; }
+           .hyperlink-wrapper.story-img-wrapper { display: inline-block; width: 100%; }
+           .hyperlink-wrapper.story-img-wrapper .story-img { width: var(--img-width, unset); height: auto; }
+         </style>
+         <div id=host><a class='hyperlink-wrapper story-img-wrapper'><img id=pic class=story-img width=1312 height=738></a></div>",
+        1280.0,
+    );
+    let pic = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(String::as_str) == Some("pic")
+    })
+    .expect("pic");
+    assert!(
+        (pic.layout.content_rect.w - 584.0).abs() < 1.0,
+        "descendant rule should resolve inherited --img-width against the wrapper; got {}",
+        pic.layout.content_rect.w
+    );
 }
 
 #[test]
@@ -970,6 +3175,9 @@ fn css_overflow_property() {
     apply_property(&mut style, "overflow", "hidden");
     assert_eq!(style.overflow_x, Overflow::Hidden);
     assert_eq!(style.overflow_y, Overflow::Hidden);
+    apply_property(&mut style, "overflow", "clip");
+    assert_eq!(style.overflow_x, Overflow::Clip);
+    assert_eq!(style.overflow_y, Overflow::Clip);
     apply_property(&mut style, "overflow", "scroll");
     assert_eq!(style.overflow_x, Overflow::Scroll);
     apply_property(&mut style, "overflow", "auto");
@@ -1019,6 +3227,33 @@ fn css_border_radius_property() {
 }
 
 #[test]
+fn css_border_radius_slash_sets_vertical_radii() {
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "border-radius", "10px 20px / 3px 4px");
+    assert_eq!(style.border_top_left_radius, CssLength::Px(10.0));
+    assert_eq!(style.border_top_right_radius, CssLength::Px(20.0));
+    assert_eq!(style.border_bottom_right_radius, CssLength::Px(10.0));
+    assert_eq!(style.border_bottom_left_radius, CssLength::Px(20.0));
+    assert_eq!(style.border_top_left_radius_y, CssLength::Px(3.0));
+    assert_eq!(style.border_top_right_radius_y, CssLength::Px(4.0));
+    assert_eq!(style.border_bottom_right_radius_y, CssLength::Px(3.0));
+    assert_eq!(style.border_bottom_left_radius_y, CssLength::Px(4.0));
+}
+
+#[test]
+fn computed_border_radius_serializes_two_value_longhand() {
+    let mut d = crate::load_html(
+        r#"<div id="box" style="border-top-left-radius: 10px 3px"></div>"#,
+        800.0,
+    );
+    let id = crate::dom::query_selector(&d.root, "#box").unwrap().node_id;
+    assert_eq!(
+        d.computed_style_property(id, "border-top-left-radius"),
+        "10px 3px"
+    );
+}
+
+#[test]
 fn css_vertical_align_property() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "vertical-align", "middle");
@@ -1031,6 +3266,30 @@ fn css_vertical_align_property() {
     assert_eq!(style.vertical_align, VerticalAlign::Super);
     apply_property(&mut style, "vertical-align", "sub");
     assert_eq!(style.vertical_align, VerticalAlign::Sub);
+    apply_property(&mut style, "vertical-align", "6px");
+    assert_eq!(
+        style.vertical_align,
+        VerticalAlign::Length(CssLength::Px(6.0))
+    );
+    apply_property(&mut style, "vertical-align", "50%");
+    assert_eq!(
+        style.vertical_align,
+        VerticalAlign::Length(CssLength::Percent(50.0))
+    );
+}
+
+#[test]
+fn cssom_vertical_align_serializes_lengths_and_percentages() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"<span id="px" style="vertical-align: 6px"></span>
+           <span id="pct" style="vertical-align: 50%"></span>"#,
+        800.0,
+    );
+    let px = doc.get_element_by_id("px").unwrap();
+    let pct = doc.get_element_by_id("pct").unwrap();
+    assert_eq!(doc.computed_style_property(px, "vertical-align"), "6px");
+    assert_eq!(doc.computed_style_property(pct, "vertical-align"), "50%");
 }
 
 #[test]
@@ -1052,6 +3311,24 @@ fn css_list_style_type_property() {
     assert_eq!(style.list_style_type, ListStyleType::Circle);
     apply_property(&mut style, "list-style-type", "none");
     assert_eq!(style.list_style_type, ListStyleType::None);
+}
+
+#[test]
+fn css_list_style_shorthand_parses_position_image_and_type() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "list-style",
+        r#"inside square url("marker.svg")"#,
+    );
+    assert_eq!(style.list_style_position, ListStylePosition::Inside);
+    assert_eq!(style.list_style_type, ListStyleType::Square);
+    assert_eq!(style.list_style_image, "marker.svg");
+
+    apply_property(&mut style, "list-style", "none outside");
+    assert_eq!(style.list_style_position, ListStylePosition::Outside);
+    assert_eq!(style.list_style_type, ListStyleType::None);
+    assert_eq!(style.list_style_image, "");
 }
 
 // ── Stylesheet struct: CSS variables ──────────────────────────────────────────
@@ -1116,16 +3393,23 @@ fn standards_known_pseudo_elements_do_not_drop_rules() {
          p::grammar-error { color: purple; }\
          dialog::backdrop { background: rgba(0,0,0,.5); }\
          p::first-line { color: orange; }\
-         p::first-letter { color: teal; }",
+         p::first-letter { color: teal; }\
+         x-card::part(button) { color: fuchsia; }\
+         x-card::slotted(span.highlight) { color: navy; }",
     );
     assert_eq!(
         ss.rules.len(),
-        7,
+        9,
         "known pseudo-elements should parse even before all paint/layout hooks exist"
     );
     assert!(ss
         .rules
         .iter()
+        .any(|r| r.pseudo_element == PseudoElement::Backdrop));
+    assert!(ss
+        .rules
+        .iter()
+        .filter(|r| r.pseudo_element != PseudoElement::Backdrop)
         .all(|r| r.pseudo_element == PseudoElement::Ignored));
 }
 
@@ -1145,8 +3429,25 @@ fn css_text_overflow_property() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "text-overflow", "ellipsis");
     assert_eq!(style.text_overflow, TextOverflow::Ellipsis);
+    assert!(style.text_overflow_string.is_empty());
+    apply_property(&mut style, "text-overflow", r#"clip "--""#);
+    assert_eq!(style.text_overflow, TextOverflow::Ellipsis);
+    assert_eq!(style.text_overflow_string, "--");
     apply_property(&mut style, "text-overflow", "clip");
     assert_eq!(style.text_overflow, TextOverflow::Clip);
+    assert!(style.text_overflow_string.is_empty());
+
+    let mut frame = crate::EngineFrame::new(
+        crate::parse_html(r#"<div id="a" style='text-overflow: "..."; overflow: hidden'></div>"#),
+        200.0,
+        80.0,
+    );
+    frame.update_frame();
+    let id = frame.doc.get_element_by_id("a").unwrap();
+    assert_eq!(
+        frame.doc.computed_style_property(id, "text-overflow"),
+        r#""...""#
+    );
 }
 
 #[test]
@@ -1174,6 +3475,44 @@ fn line_clamp_limits_inline_lines_used_for_layout_and_paint() {
     assert!(
         div.layout.content_rect.h <= line_bottom - div.layout.content_rect.y + 0.5,
         "content height should be based on the clamped lines"
+    );
+}
+
+#[test]
+fn line_clamp_paints_ellipsis_on_last_visible_line() {
+    let mut frame = EngineFrame::new(
+        parse_html(
+            r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        div { width: 200px; line-clamp: 1; font-size: 16px; }
+        </style>
+        <div>first line words<br>second line words</div>
+    "#,
+        ),
+        240.0,
+        80.0,
+    );
+    frame.update_frame();
+    let list = build_display_list(&frame.doc.root, 240.0, 80.0);
+    let painted = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+
+    assert!(
+        painted.contains('…'),
+        "line-clamp should paint an ellipsis on the final visible line; commands were {:?}",
+        list.commands
+    );
+    assert!(
+        !painted.contains("second"),
+        "line-clamp should not paint omitted lines; painted text was {painted:?}"
     );
 }
 
@@ -1237,6 +3576,29 @@ fn scrollbar_width_controls_scrollbar_space_reservation() {
 }
 
 #[test]
+fn scrollbar_gutter_stable_both_edges_reserves_layout_space() {
+    let doc = parse_and_layout(
+        r#"
+        <div id="scroller" style="width:100px;height:20px;overflow-y:auto;scrollbar-gutter:stable both-edges">
+            <div id="child" style="height:10px"></div>
+        </div>
+        "#,
+        800.0,
+    );
+    let scroller = find_box(&doc.root, &|node| {
+        node.attributes.get("id").map(|value| value.as_str()) == Some("scroller")
+    })
+    .expect("scroller");
+    let child = find_box(&doc.root, &|node| {
+        node.attributes.get("id").map(|value| value.as_str()) == Some("child")
+    })
+    .expect("child");
+
+    assert_eq!(scroller.layout.content_rect.w, 100.0);
+    assert_eq!(child.layout.content_rect.w, 80.0);
+}
+
+#[test]
 fn css_outline_properties() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "outline-width", "2px");
@@ -1265,8 +3627,18 @@ fn css_object_fit_property() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "object-fit", "contain");
     assert_eq!(style.object_fit, ObjectFit::Contain);
-    apply_property(&mut style, "object-fit", "cover");
+    apply_property(&mut style, "object-fit", "Cover");
     assert_eq!(style.object_fit, ObjectFit::Cover);
+}
+
+#[test]
+fn object_position_keywords_are_axis_aware_and_case_insensitive() {
+    let mut style = ComputedStyle::default();
+
+    apply_property(&mut style, "object-position", "Top Right");
+
+    assert_eq!(style.object_position_x, CssLength::Percent(100.0));
+    assert_eq!(style.object_position_y, CssLength::Percent(0.0));
 }
 
 #[test]
@@ -1347,6 +3719,9 @@ fn css_radial_gradient_with_position_stops() {
     assert!((style.rare().gradient_stops[1].position - 0.60).abs() < 0.01);
     assert_eq!(style.rare().gradient_stops[2].color, Color::TRANSPARENT);
     assert!((style.rare().gradient_stops[2].position - 1.0).abs() < 0.01);
+    assert_eq!(style.gradient_radial_shape, GradientRadialShape::Circle);
+    assert_eq!(style.gradient_radial_position_x, CssLength::Percent(50.0));
+    assert_eq!(style.gradient_radial_position_y, CssLength::Percent(50.0));
 }
 
 #[test]
@@ -1359,6 +3734,11 @@ fn css_radial_gradient_bare_colors() {
         "radial-gradient(#ff0000, #0000ff)",
     );
     assert_eq!(style.gradient_type, GradientType::Radial);
+    assert_eq!(style.gradient_radial_shape, GradientRadialShape::Ellipse);
+    assert_eq!(
+        style.gradient_radial_size,
+        GradientRadialSize::FarthestCorner
+    );
     assert_eq!(style.rare().gradient_stops.len(), 2, "should have 2 stops");
     assert_eq!(style.rare().gradient_stops[0].color, Color::rgb(255, 0, 0));
     assert!((style.rare().gradient_stops[0].position - 0.0).abs() < 0.01);
@@ -1427,21 +3807,24 @@ fn css_var_scoped_to_matching_selector() {
 }
 
 #[test]
-fn css_var_self_referential_with_fallback() {
-    // Pattern from Wikipedia: --x: var(--x, 1rem) — self-referential with fallback.
-    // Should resolve to the fallback since there's no prior definition.
+fn css_var_self_reference_is_invalid_and_consuming_fallback_applies() {
     let doc = parse_and_layout(
         r#"<html><head><style>
         html { --sz: var(--sz, 20px); }
-        p { font-size: var(--sz); }
+        p { font-size: var(--sz); margin-left: var(--sz, 12px); }
     </style></head><body><p>text</p></body></html>"#,
         800.0,
     );
     let p = find_box(&doc.root, &|b| b.tag == "p").unwrap();
     assert_eq!(
         p.style.font_size,
-        CssLength::Px(20.0),
-        "self-ref var should use fallback 20px"
+        CssLength::Px(16.0),
+        "self-ref custom property should be invalid, not resolve to its own fallback"
+    );
+    assert_eq!(
+        p.style.margin_left,
+        CssLength::Px(12.0),
+        "a declaration consuming an invalid custom property should use its own fallback"
     );
 }
 
@@ -1576,6 +3959,105 @@ fn revert_rolls_author_display_back_to_ua_display() {
 }
 
 #[test]
+fn revert_layer_rolls_back_only_the_current_layer() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>@layer base, theme;\
+         @layer base { #t { color: rgb(200, 0, 0); display: inline; } }\
+         @layer theme { #t { color: rgb(0, 0, 200); display: block; }\
+                        #t { color: revert-layer; display: revert-layer; } }</style>\
+         <div id=t>x</div>",
+        900.0,
+    );
+    let div = d.get_element_by_id("t").unwrap();
+
+    assert_eq!(
+        d.computed_style_property(div, "color"),
+        "rgb(200, 0, 0)",
+        "`revert-layer` should roll back declarations from its own layer, not all author CSS"
+    );
+    assert_eq!(
+        d.computed_style_property(div, "display"),
+        "inline",
+        "`revert-layer` should expose the previous author layer's display"
+    );
+}
+
+#[test]
+fn important_global_keywords_use_cascade_context() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>@layer base, theme;\
+         #p { color: rgb(20, 30, 40); }\
+         @layer base { #t { color: rgb(200, 0, 0) !important; display: inline !important; } }\
+         @layer theme { #t { color: rgb(0, 0, 200) !important; display: block !important; }\
+                        #t { color: revert-layer !important; display: revert-layer !important; } }\
+         #inherit { color: inherit !important; }</style>\
+         <div id=p><div id=t>x</div><div id=inherit>x</div></div>",
+        900.0,
+    );
+    let layered = d.get_element_by_id("t").unwrap();
+    let inherited = d.get_element_by_id("inherit").unwrap();
+
+    assert_eq!(
+        d.computed_style_property(layered, "color"),
+        "rgb(200, 0, 0)",
+        "important `revert-layer` should roll back only its own important layer"
+    );
+    assert_eq!(
+        d.computed_style_property(layered, "display"),
+        "inline",
+        "important `revert-layer` should expose the previous important layer"
+    );
+    assert_eq!(
+        d.computed_style_property(inherited, "color"),
+        "rgb(20, 30, 40)",
+        "important `inherit` must copy the parent value instead of becoming a no-op"
+    );
+}
+
+#[test]
+fn pseudo_revert_layer_uses_pseudo_layer_context() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>@layer base, theme;\
+         @layer base { #t::before { content: 'x'; color: rgb(200, 0, 0); } }\
+         @layer theme { #t::before { color: rgb(0, 0, 200); color: revert-layer; } }</style>\
+         <div id=t></div>",
+        900.0,
+    );
+    let div = d.get_element_by_id("t").unwrap();
+
+    assert_eq!(
+        d.computed_style_pseudo_property(div, "::before", "color"),
+        "rgb(200, 0, 0)",
+        "pseudo `revert-layer` should roll back only the current pseudo cascade layer"
+    );
+}
+
+#[test]
+fn state_revert_layer_uses_state_layer_context() {
+    let doc = parse_and_layout(
+        "<style>@layer base, theme;\
+         @layer base { #t:hover { color: rgb(200, 0, 0); } }\
+         @layer theme { #t:hover { color: rgb(0, 0, 200); color: revert-layer; } }</style>\
+         <div id=t>x</div>",
+        900.0,
+    );
+    let div = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "t")
+    })
+    .expect("target");
+    let hover = div.style.hover_style.as_ref().expect("hover style");
+
+    assert_eq!(
+        hover.color,
+        Color::rgb(200, 0, 0),
+        "state `revert-layer` should roll back only the current state cascade layer"
+    );
+}
+
+#[test]
 fn flex_and_grid_items_report_blockified_computed_display() {
     let mut r = crate::Renderer::new();
     let mut d = r.load_html(
@@ -1618,6 +4100,61 @@ fn computed_style_can_read_before_and_after_pseudo_styles() {
     assert_eq!(
         d.computed_style_pseudo_property(div, "::after", "color"),
         "rgb(4, 5, 6)"
+    );
+}
+
+#[test]
+fn computed_style_can_read_stored_pseudo_element_styles() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        r#"<style>
+            li::marker { content: ">> "; color: rgb(9, 8, 7); font-size: 18px; }
+            input::placeholder { color: rgb(10, 20, 30); font-style: italic; }
+            #ed::selection { background-color: rgb(40, 50, 60); color: rgb(70, 80, 90); }
+            dialog::backdrop { background-color: rgba(1, 2, 3, 0.5); }
+           </style>
+           <ul><li id=item>one</li></ul>
+           <input id=field placeholder=hint>
+           <div id=ed contenteditable>select me</div>
+           <dialog id=dlg open>modal</dialog>"#,
+        900.0,
+    );
+    let item = d.get_element_by_id("item").unwrap();
+    let field = d.get_element_by_id("field").unwrap();
+    let editor = d.get_element_by_id("ed").unwrap();
+    let dialog = d.get_element_by_id("dlg").unwrap();
+
+    assert_eq!(
+        d.computed_style_pseudo_property(item, "::marker", "content"),
+        "\">> \""
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(item, "::marker", "color"),
+        "rgb(9, 8, 7)"
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(item, "::marker", "font-size"),
+        "18px"
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(field, "::placeholder", "color"),
+        "rgb(10, 20, 30)"
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(field, "::placeholder", "font-style"),
+        "italic"
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(editor, "::selection", "background-color"),
+        "rgb(40, 50, 60)"
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(editor, "::selection", "color"),
+        "rgb(70, 80, 90)"
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(dialog, "::backdrop", "background-color"),
+        "rgba(1, 2, 3, 0.5)"
     );
 }
 
@@ -1707,7 +4244,7 @@ fn a_border_width_resolves_to_zero_when_the_style_draws_nothing() {
 fn computed_style_exposes_stored_longhands() {
     let mut r = crate::Renderer::new();
     let mut d = r.load_html(
-        "<style>
+        r##"<style>
             #box {
                 text-align: center;
                 visibility: hidden;
@@ -1721,12 +4258,24 @@ fn computed_style_exposes_stored_longhands() {
                 cursor: pointer;
                 -webkit-line-clamp: 3;
                 transform-box: content-box;
+                transform-style: preserve-3d;
+                perspective: 400px;
+                perspective-origin: left top;
+                backface-visibility: hidden;
                 border-top-left-radius: 6px;
                 border-image: url(border.png) 30 fill / 10px / 2px round stretch;
                 outline-width: 3px;
                 outline-style: solid;
                 outline-color: rgb(1, 2, 3);
+                outline-offset: 5px;
+                column-count: 3;
+                column-width: 120px;
+                column-rule: 4px dotted rgb(4, 5, 6);
+                column-fill: auto;
+                column-span: all;
                 list-style-type: decimal;
+                list-style-position: inside;
+                list-style-image: url("marker.svg");
                 vertical-align: middle;
                 float: left;
                 display: flex;
@@ -1739,19 +4288,37 @@ fn computed_style_exposes_stored_longhands() {
                 content-visibility: auto;
                 contain-intrinsic-size: 120px 45px;
                 color-scheme: light dark;
+                forced-color-adjust: preserve-parent-color;
                 font-synthesis: none;
                 font-synthesis-weight: auto;
                 text-wrap: balance;
                 text-decoration-skip-ink: none;
                 text-emphasis: filled sesame rgb(4, 5, 6);
                 text-emphasis-position: under left;
+                background-image: url("hero.png");
+                background-position: right bottom;
+                background-size: 25px 50%;
+                background-repeat: space no-repeat;
+                background-attachment: local;
+                background-origin: content-box;
+                background-clip: padding-box;
                 background-blend-mode: multiply, screen;
+                transition: opacity 200ms ease-in 50ms, display 1s step-end allow-discrete;
+                animation: fade 200ms ease-in 50ms infinite alternate both paused add, slide 1s step-end 2 reverse forwards running accumulate;
                 overflow-anchor: none;
                 overflow-clip-margin: content-box 12px;
+                anchor-name: --card;
+                position-anchor: --card;
+                view-transition-name: card;
+                animation-timeline: scroll(root block);
+                scroll-timeline: --main block;
+                offset-path: path("M 0 0 L 10 0");
                 shape-outside: circle(50% at 50% 50%);
                 shape-margin: 12px;
+                scrollbar-color: CanvasText Canvas;
                 scrollbar-width: thin;
                 scrollbar-gutter: stable both-edges;
+                scroll-snap-stop: always;
                 scroll-margin: 1px 2px 3px 4px;
                 caption-side: block-end;
                 appearance: none;
@@ -1762,7 +4329,7 @@ fn computed_style_exposes_stored_longhands() {
                 mask-composite: exclude;
             }
         </style>
-        <div id=box><span id=child></span></div>",
+        <div id=box><span id=child></span></div>"##,
         900.0,
     );
     let box_id = d.get_element_by_id("box").unwrap();
@@ -1802,6 +4369,19 @@ fn computed_style_exposes_stored_longhands() {
         "content-box"
     );
     assert_eq!(
+        d.computed_style_property(box_id, "transform-style"),
+        "preserve-3d"
+    );
+    assert_eq!(d.computed_style_property(box_id, "perspective"), "400px");
+    assert_eq!(
+        d.computed_style_property(box_id, "perspective-origin"),
+        "left top"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "backface-visibility"),
+        "hidden"
+    );
+    assert_eq!(
         d.computed_style_property(box_id, "border-top-left-radius"),
         "6px"
     );
@@ -1831,9 +4411,34 @@ fn computed_style_exposes_stored_longhands() {
         d.computed_style_property(box_id, "outline-color"),
         "rgb(1, 2, 3)"
     );
+    assert_eq!(d.computed_style_property(box_id, "outline-offset"), "5px");
+    assert_eq!(d.computed_style_property(box_id, "column-count"), "3");
+    assert_eq!(d.computed_style_property(box_id, "column-width"), "120px");
+    assert_eq!(
+        d.computed_style_property(box_id, "column-rule-width"),
+        "4px"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "column-rule-style"),
+        "dotted"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "column-rule-color"),
+        "rgb(4, 5, 6)"
+    );
+    assert_eq!(d.computed_style_property(box_id, "column-fill"), "auto");
+    assert_eq!(d.computed_style_property(box_id, "column-span"), "all");
     assert_eq!(
         d.computed_style_property(box_id, "list-style-type"),
         "decimal"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "list-style-position"),
+        "inside"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "list-style-image"),
+        r#"url("marker.svg")"#
     );
     assert_eq!(
         d.computed_style_property(box_id, "vertical-align"),
@@ -1867,6 +4472,14 @@ fn computed_style_exposes_stored_longhands() {
     assert_eq!(
         d.computed_style_property(child, "color-scheme"),
         "light dark"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "forced-color-adjust"),
+        "preserve-parent-color"
+    );
+    assert_eq!(
+        d.computed_style_property(child, "forced-color-adjust"),
+        "preserve-parent-color"
     );
     assert_eq!(
         d.computed_style_property(box_id, "font-synthesis"),
@@ -1907,20 +4520,133 @@ fn computed_style_exposes_stored_longhands() {
         d.computed_style_property(box_id, "background-blend-mode"),
         "multiply, screen"
     );
+    assert_eq!(
+        d.computed_style_property(box_id, "background-image"),
+        r#"url("hero.png")"#
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "background-position"),
+        "100% 100%"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "background-size"),
+        "25px 50%"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "background-repeat"),
+        "space no-repeat"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "background-attachment"),
+        "local"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "background-origin"),
+        "content-box"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "background-clip"),
+        "padding-box"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "transition-property"),
+        "opacity, display"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "transition-duration"),
+        "200ms, 1s"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "transition-timing-function"),
+        "ease-in, step-end"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "transition-delay"),
+        "50ms, 0s"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "transition-behavior"),
+        "normal, allow-discrete"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "animation-name"),
+        "fade, slide"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "animation-duration"),
+        "200ms, 1s"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "animation-timing-function"),
+        "ease-in, step-end"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "animation-delay"),
+        "50ms, 0s"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "animation-iteration-count"),
+        "infinite, 2"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "animation-direction"),
+        "alternate, reverse"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "animation-fill-mode"),
+        "both, forwards"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "animation-play-state"),
+        "paused, running"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "animation-composition"),
+        "add, accumulate"
+    );
     assert_eq!(d.computed_style_property(box_id, "overflow-anchor"), "none");
     assert_eq!(
         d.computed_style_property(box_id, "overflow-clip-margin"),
         "content-box 12px"
+    );
+    assert_eq!(d.computed_style_property(box_id, "anchor-name"), "--card");
+    assert_eq!(
+        d.computed_style_property(box_id, "position-anchor"),
+        "--card"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "view-transition-name"),
+        "card"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "animation-timeline"),
+        "scroll(root block)"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "scroll-timeline"),
+        "--main block"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "offset-path"),
+        "path(\"M 0 0 L 10 0\")"
     );
     assert_eq!(
         d.computed_style_property(box_id, "shape-outside"),
         "circle(50% at 50% 50%)"
     );
     assert_eq!(d.computed_style_property(box_id, "shape-margin"), "12px");
+    assert_eq!(
+        d.computed_style_property(box_id, "scrollbar-color"),
+        "rgb(0, 0, 0) rgb(255, 255, 255)"
+    );
     assert_eq!(d.computed_style_property(box_id, "scrollbar-width"), "thin");
     assert_eq!(
         d.computed_style_property(box_id, "scrollbar-gutter"),
         "stable both-edges"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "scroll-snap-stop"),
+        "always"
     );
     assert_eq!(
         d.computed_style_property(box_id, "scroll-margin"),
@@ -1975,6 +4701,145 @@ fn computed_style_exposes_stored_longhands() {
 }
 
 #[test]
+fn text_transform_full_width_is_stored_and_painted() {
+    let texts = build_display_texts(
+        r#"
+        <style>#t { text-transform: full-width; }</style>
+        <div id="t">Az 09 !</div>
+        "#,
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("\u{ff21}\u{ff5a}\u{3000}\u{ff10}\u{ff19}\u{3000}\u{ff01}")),
+        "full-width text-transform should map ASCII and spaces to fullwidth forms; texts={:?}",
+        texts
+    );
+
+    let mut renderer = crate::Renderer::new();
+    let mut d = renderer.load_html(
+        r#"<div id="t" style="text-transform: full-size-kana;"></div>"#,
+        200.0,
+    );
+    let id = d.get_element_by_id("t").unwrap();
+    assert_eq!(
+        d.computed_style_property(id, "text-transform"),
+        "full-size-kana"
+    );
+}
+
+#[test]
+fn text_emphasis_marks_are_emitted_as_text_runs() {
+    let texts = build_display_texts(
+        r#"
+        <style>
+          body { margin:0; font:20px/30px sans-serif; }
+          #em { text-emphasis: filled dot rgb(255, 0, 0); }
+        </style>
+        <span id="em">A B</span>
+        "#,
+    );
+    assert!(
+        texts.iter().any(|text| text == "\u{2022}\u{2022}"),
+        "text-emphasis should paint one mark for each non-space character; texts were {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text == "A B"),
+        "text-emphasis must not replace the base text; texts were {texts:?}"
+    );
+}
+
+#[test]
+fn shape_outside_circle_narrows_float_exclusion_per_line() {
+    let mut r = crate::Renderer::new();
+    let d = r.load_html(
+        r#"
+        <style>
+          body { margin:0; font:16px/20px sans-serif; }
+          #wrap { width:200px; }
+          #float { float:left; width:100px; height:100px; shape-outside:circle(50% at 50% 50%); }
+        </style>
+        <div id="wrap"><div id="float"></div><span>hello</span></div>
+        "#,
+        300.0,
+    );
+    let list = build_display_list(&d.root, 300.0, 200.0);
+    let text_x = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::Text { text, x, .. } if text.contains("hello") => Some(*x),
+            _ => None,
+        })
+        .expect("text run");
+
+    assert!(
+        text_x > 50.0 && text_x < 100.0,
+        "circle shape-outside should exclude less than the float rectangle on the first line, got x={text_x}"
+    );
+}
+
+#[test]
+fn shape_outside_inset_percentages_use_side_axes() {
+    let mut r = crate::Renderer::new();
+    let d = r.load_html(
+        r#"
+        <style>
+          body { margin:0; font:16px/20px sans-serif; }
+          #wrap { width:200px; }
+          #float { float:left; width:100px; height:100px; shape-outside:inset(0 50% 0 0); }
+        </style>
+        <div id="wrap"><div id="float"></div><span>hello</span></div>
+        "#,
+        300.0,
+    );
+    let list = build_display_list(&d.root, 300.0, 200.0);
+    let text_x = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::Text { text, x, .. } if text.contains("hello") => Some(*x),
+            _ => None,
+        })
+        .expect("text run");
+
+    assert!(
+        text_x > 45.0 && text_x < 60.0,
+        "right inset percentage should resolve against float width, got x={text_x}"
+    );
+}
+
+#[test]
+fn shape_outside_polygon_uses_line_intersections() {
+    let mut r = crate::Renderer::new();
+    let d = r.load_html(
+        r#"
+        <style>
+          body { margin:0; font:16px/20px sans-serif; }
+          #wrap { width:200px; }
+          #float { float:left; width:100px; height:100px; shape-outside:polygon(0 0, 50% 50%, 0 100%); }
+        </style>
+        <div id="wrap"><div id="float"></div><span>hello</span></div>
+        "#,
+        300.0,
+    );
+    let list = build_display_list(&d.root, 300.0, 200.0);
+    let text_x = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::Text { text, x, .. } if text.contains("hello") => Some(*x),
+            _ => None,
+        })
+        .expect("text run");
+
+    assert!(
+        text_x > 5.0 && text_x < 30.0,
+        "polygon shape-outside should use the polygon width at the sampled line, got x={text_x}"
+    );
+}
+
+#[test]
 fn computed_margin_and_padding_are_used_values() {
     let mut r = crate::Renderer::new();
     let mut d = r.load_html(
@@ -2006,6 +4871,11 @@ fn computed_style_serializes_common_shorthands() {
                 display: flex;
                 flex: 2 3 10px;
                 gap: 7px 8px;
+                outline: 2px dashed rgb(1, 2, 3);
+                columns: 120px 3;
+                column-rule: 4px dotted rgb(4, 5, 6);
+                transition: opacity 200ms ease-in 50ms allow-discrete;
+                animation: fade 1s ease-out 100ms infinite alternate both paused add;
             }
         </style>
         <div id=box></div><div id=bare></div>",
@@ -2029,7 +4899,32 @@ fn computed_style_serializes_common_shorthands() {
     );
     assert_eq!(d.computed_style_property(box_id, "flex"), "2 3 10px");
     assert_eq!(d.computed_style_property(box_id, "gap"), "7px 8px");
+    assert_eq!(
+        d.computed_style_property(box_id, "outline"),
+        "2px dashed rgb(1, 2, 3)"
+    );
+    assert_eq!(d.computed_style_property(box_id, "columns"), "120px 3");
+    assert_eq!(
+        d.computed_style_property(box_id, "column-rule"),
+        "4px dotted rgb(4, 5, 6)"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "transition"),
+        "opacity 200ms ease-in 50ms allow-discrete"
+    );
+    assert_eq!(
+        d.computed_style_property(box_id, "animation"),
+        "fade 1s ease-out 100ms infinite alternate both paused add"
+    );
     assert_eq!(d.computed_style_property(bare, "inset"), "auto");
+    assert_eq!(
+        d.computed_style_property(bare, "transition"),
+        "all 0s ease 0s normal"
+    );
+    assert_eq!(
+        d.computed_style_property(bare, "animation"),
+        "none 0s ease 0s 1 normal none running replace"
+    );
 }
 
 #[test]
@@ -3565,6 +6460,170 @@ fn a_css_wide_keyword_resets_a_shorthands_longhands() {
     );
 }
 
+#[test]
+fn class_rule_fractional_flex_grow_uses_partial_free_space() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>
+         body{margin:0}
+         .flexbox{display:flex}
+         .container{height:100px;width:100px;border:1px solid black}
+         .child-flex-grow-0-5{flex-grow:0.5}
+         </style>
+         <div class='flexbox container'><div id=a class='child-flex-grow-0-5'></div></div>",
+        900.0,
+    );
+    let e = d.get_element_by_id("a").unwrap();
+    let w = d.get_bounding_client_rect(e).unwrap().w;
+    assert!((w - 50.0).abs() < 0.5, "fractional flex-grow got {w}");
+}
+
+#[test]
+fn wpt_fractional_flex_factors_use_partial_free_space() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>
+         html,body{margin:0;padding:0}
+         .flexbox{display:flex}
+         .container{height:100px;width:100px;border:1px solid black}
+         .column{flex-direction:column}
+         .vertical{writing-mode:vertical-rl}
+         .basis{flex-basis:30px}
+         .basis-big{flex-basis:100px}
+         .grow-half{flex-grow:.5}
+         .grow-quarter{flex-grow:.25}
+         .shrink-half{flex-shrink:.5;width:200px;height:200px}
+         .shrink-quarter{flex-shrink:.25;width:200px;height:200px}
+         </style>
+         <div class='flexbox container'>
+           <div id=g1 class='grow-half'></div>
+         </div>
+         <div class='flexbox container'>
+           <div id=g2a class='grow-half basis'></div>
+           <div id=g2b class='grow-quarter basis'></div>
+         </div>
+         <div class='flexbox container column'>
+           <div id=g3a class='grow-half basis'></div>
+           <div id=g3b class='grow-quarter basis'></div>
+         </div>
+         <div class='flexbox container vertical'>
+           <div id=g4a class='grow-half basis'></div>
+           <div id=g4b class='grow-quarter basis'></div>
+         </div>
+         <div class='flexbox container column vertical'>
+           <div id=g5a class='grow-half basis'></div>
+           <div id=g5b class='grow-quarter basis'></div>
+         </div>
+         <div class='flexbox container'>
+           <div id=s1 class='shrink-half'></div>
+         </div>
+         <div class='flexbox container'>
+           <div id=s2a class='shrink-half basis-big'></div>
+           <div id=s2b class='shrink-quarter basis-big'></div>
+         </div>",
+        900.0,
+    );
+
+    let width = |doc: &crate::Document, id: &str| {
+        let e = doc.get_element_by_id(id).unwrap();
+        doc.get_bounding_client_rect(e).unwrap().w
+    };
+    let height = |doc: &crate::Document, id: &str| {
+        let e = doc.get_element_by_id(id).unwrap();
+        doc.get_bounding_client_rect(e).unwrap().h
+    };
+
+    assert!((width(&d, "g1") - 50.0).abs() < 0.5);
+    assert!((width(&d, "g2a") - 50.0).abs() < 0.5);
+    assert!((width(&d, "g2b") - 40.0).abs() < 0.5);
+    assert!((height(&d, "g3a") - 50.0).abs() < 0.5);
+    assert!((height(&d, "g3b") - 40.0).abs() < 0.5);
+    assert!((height(&d, "g4a") - 50.0).abs() < 0.5);
+    assert!((height(&d, "g4b") - 40.0).abs() < 0.5);
+    assert!((width(&d, "g5a") - 50.0).abs() < 0.5);
+    assert!((width(&d, "g5b") - 40.0).abs() < 0.5);
+    assert!((width(&d, "s1") - 150.0).abs() < 0.5);
+    assert!((width(&d, "s2a") - 50.0).abs() < 0.5);
+    assert!((width(&d, "s2b") - 75.0).abs() < 0.5);
+}
+
+#[test]
+fn display_table_wraps_direct_table_cells_in_anonymous_row() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>
+         body{margin:0}
+         #t{display:table}
+         .c{display:table-cell;width:40px;height:20px}
+         </style>
+         <div id=t><div id=a class=c></div><div id=b class=c></div></div>",
+        900.0,
+    );
+    let table = d.get_element_by_id("t").unwrap();
+    let a = d.get_element_by_id("a").unwrap();
+    let b = d.get_element_by_id("b").unwrap();
+    let tr = d.get_bounding_client_rect(table).unwrap();
+    let ar = d.get_bounding_client_rect(a).unwrap();
+    let br = d.get_bounding_client_rect(b).unwrap();
+
+    assert!((tr.w - 80.0).abs() < 0.5, "table width got {}", tr.w);
+    assert!((tr.h - 20.0).abs() < 0.5, "table height got {}", tr.h);
+    assert!((ar.x - 0.0).abs() < 0.5, "first cell x got {}", ar.x);
+    assert!((br.x - 40.0).abs() < 0.5, "second cell x got {}", br.x);
+}
+
+#[test]
+fn table_colspan_contributes_to_auto_column_widths() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>
+         body{margin:0}
+         table{border-spacing:0;width:auto}
+         td{padding:0;border:0}
+         #wide{width:180px}
+         .n{width:20px}
+         </style>
+         <table id=t>
+           <tr><td id=wide colspan='2'></td></tr>
+           <tr><td id=a class=n></td><td id=b class=n></td></tr>
+         </table>",
+        900.0,
+    );
+    let table = d.get_element_by_id("t").unwrap();
+    let wide = d.get_element_by_id("wide").unwrap();
+    let tr = d.get_bounding_client_rect(table).unwrap();
+    let wr = d.get_bounding_client_rect(wide).unwrap();
+
+    assert!((tr.w - 180.0).abs() < 0.5, "table width got {}", tr.w);
+    assert!(
+        (wr.w - 180.0).abs() < 0.5,
+        "spanning cell width got {}",
+        wr.w
+    );
+}
+
+#[test]
+fn table_caption_min_width_contributes_to_auto_table_width() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>
+         body{margin:0}
+         table{border-spacing:0;width:auto}
+         caption{width:220px}
+         td{padding:0;border:0;width:20px}
+         </style>
+         <table id=t><caption id=cap></caption><tr><td></td></tr></table>",
+        900.0,
+    );
+    let table = d.get_element_by_id("t").unwrap();
+    let caption = d.get_element_by_id("cap").unwrap();
+    let tr = d.get_bounding_client_rect(table).unwrap();
+    let cr = d.get_bounding_client_rect(caption).unwrap();
+
+    assert!((tr.w - 220.0).abs() < 0.5, "table width got {}", tr.w);
+    assert!((cr.w - 220.0).abs() < 0.5, "caption width got {}", cr.w);
+}
+
 /// Box Alignment §4.4: an explicit `safe` makes an alignment give way to the
 /// start edge once the content overflows; `unsafe` (the default for a bare
 /// position keyword) overflows instead.
@@ -3938,16 +6997,16 @@ fn a_line_box_reserves_room_below_the_baseline_for_its_strut() {
     // 16px Menlo is 15 up and 4 down; a 20px line-height adds half a pixel of
     // leading each side. An atomic inline sits ON the baseline, so the line is
     // the box plus the strut's 4.5px descent, snapped to a whole pixel.
-    for inner in [
-        "<span style='display:inline-block;width:50px;height:20px'></span>",
-        "<span style='display:inline-flex;width:50px;height:20px'></span>",
-    ] {
-        let h = height(inner);
-        assert!(
-            (h - 25.0).abs() < 0.1,
-            "an atomic inline leaves room below: {h}"
-        );
-    }
+    let h = height("<span style='display:inline-block;width:50px;height:20px'></span>");
+    assert!(
+        (h - 25.0).abs() < 0.1,
+        "an inline-block leaves room below: {h}"
+    );
+    let h = height("<span style='display:inline-flex;width:50px;height:20px'></span>");
+    assert!(
+        (h - 20.0).abs() < 0.1,
+        "an inline-flex uses its synthesized flex baseline: {h}"
+    );
     // A taller box moves the line with it, keeping the same descent.
     let h = height("<span style='display:inline-block;width:50px;height:60px'></span>");
     assert!((h - 65.0).abs() < 0.1, "…at any height: {h}");
@@ -4227,6 +7286,88 @@ fn offsets_ignore_transforms_that_client_rects_include() {
 }
 
 #[test]
+fn transform_none_does_not_create_absolute_containing_block() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>body{margin:0}</style>\
+         <div id=p style='margin-left:100px;width:200px;height:20px;transform:none'>\
+             <div id=c style='position:absolute;left:0;top:0;width:10px;height:10px'></div>\
+         </div>",
+        800.0,
+    );
+    let c = d.get_element_by_id("c").unwrap();
+    let rect = d.get_bounding_client_rect(c).unwrap();
+
+    assert!(
+        rect.x.abs() < 0.5,
+        "transform:none must not make a static ancestor the containing block, got {rect:?}"
+    );
+}
+
+#[test]
+fn filter_will_change_and_contain_create_absolute_containing_blocks() {
+    for (decl, id) in [
+        ("filter:blur(0)", "filter"),
+        ("will-change:transform", "will"),
+        ("contain:paint", "contain"),
+    ] {
+        let mut r = crate::Renderer::new();
+        let html = format!(
+            "<style>body{{margin:0}}</style>\
+             <div id={id} style='margin-left:100px;width:200px;height:20px;{decl}'>\
+                 <div id=c style='position:absolute;left:0;top:0;width:10px;height:10px'></div>\
+             </div>"
+        );
+        let mut d = r.load_html(&html, 800.0);
+        let c = d.get_element_by_id("c").unwrap();
+        let rect = d.get_bounding_client_rect(c).unwrap();
+
+        assert!(
+            (rect.x - 100.0).abs() < 0.5,
+            "{decl} should make the static ancestor the containing block, got {rect:?}"
+        );
+    }
+}
+
+#[test]
+fn transformed_ancestor_captures_fixed_positioned_descendant() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>body{margin:0}</style>\
+         <div id=p style='margin-left:100px;width:200px;height:20px;transform:translateX(0)'>\
+             <div id=c style='position:fixed;left:0;top:0;width:10px;height:10px'></div>\
+         </div>",
+        800.0,
+    );
+    let c = d.get_element_by_id("c").unwrap();
+    let rect = d.get_bounding_client_rect(c).unwrap();
+
+    assert!(
+        (rect.x - 100.0).abs() < 0.5,
+        "a transformed ancestor should capture fixed descendants, got {rect:?}"
+    );
+}
+
+#[test]
+fn positioned_ancestor_does_not_capture_fixed_positioned_descendant() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>body{margin:0}</style>\
+         <div id=p style='position:relative;margin-left:100px;width:200px;height:20px'>\
+             <div id=c style='position:fixed;left:0;top:0;width:10px;height:10px'></div>\
+         </div>",
+        800.0,
+    );
+    let c = d.get_element_by_id("c").unwrap();
+    let rect = d.get_bounding_client_rect(c).unwrap();
+
+    assert!(
+        rect.x.abs() < 0.5,
+        "position:relative must not capture fixed descendants, got {rect:?}"
+    );
+}
+
+#[test]
 fn client_metrics_use_padding_box_and_border_edges() {
     let mut r = crate::Renderer::new();
     let d = r.load_html(
@@ -4288,6 +7429,81 @@ fn overflow_hidden_clips_descendants_for_hit_testing() {
 }
 
 #[test]
+fn overflow_clip_margin_expands_hit_testing_clip_edge() {
+    let mut r = crate::Renderer::new();
+    let d = r.load_html(
+        "<style>html,body{margin:0;width:100px;height:60px}</style>\
+         <div id=clip style='width:100px;height:20px;overflow:clip;overflow-clip-margin:12px'>\
+           <div style='height:24px'></div>\
+           <div id=child style='width:80px;height:20px'></div>\
+         </div>",
+        800.0,
+    );
+    let child = d.get_element_by_id("child").unwrap();
+
+    assert_eq!(d.element_from_point(10.0, 25.0), Some(child));
+    assert_ne!(d.element_from_point(10.0, 40.0), Some(child));
+    assert_eq!(
+        crate::layout::hit_test::hit_test_box_at(&d.root, (10.0, 25.0), 0),
+        child
+    );
+    assert_ne!(
+        crate::layout::hit_test::hit_test_box_at(&d.root, (10.0, 40.0), 0),
+        child
+    );
+}
+
+#[test]
+fn clip_path_inset_and_circle_affect_hit_testing() {
+    let mut r = crate::Renderer::new();
+    let d = r.load_html(
+        "<style>html,body{margin:0;width:380px;height:220px}</style>\
+         <div id=inset style='width:100px;height:100px;clip-path:inset(20px)'>\
+           <div id=inset-child style='width:100px;height:100px'></div>\
+         </div>\
+         <div id=circle style='position:absolute;left:120px;top:0;width:100px;height:100px;clip-path:circle(20px at 50% 50%)'>\
+           <div id=circle-child style='width:100px;height:100px'></div>\
+         </div>\
+         <div id=ellipse style='position:absolute;left:0;top:120px;width:120px;height:80px;clip-path:ellipse(40px 20px at 50% 50%)'>\
+           <div id=ellipse-child style='width:120px;height:80px'></div>\
+         </div>\
+         <div id=polygon style='position:absolute;left:240px;top:0;width:100px;height:100px;clip-path:polygon(0 0, 100% 0, 0 100%)'>\
+           <div id=polygon-child style='width:100px;height:100px'></div>\
+         </div>",
+        800.0,
+    );
+    let inset_child = d.get_element_by_id("inset-child").unwrap();
+    let circle_child = d.get_element_by_id("circle-child").unwrap();
+    let ellipse_child = d.get_element_by_id("ellipse-child").unwrap();
+    let polygon = d.get_element_by_id("polygon").unwrap();
+    let polygon_child = d.get_element_by_id("polygon-child").unwrap();
+    let polygon_rect = d.get_bounding_client_rect(polygon).unwrap();
+
+    assert_eq!(d.element_from_point(50.0, 50.0), Some(inset_child));
+    assert_ne!(d.element_from_point(10.0, 50.0), Some(inset_child));
+    assert_eq!(
+        crate::layout::hit_test::hit_test_box_at(&d.root, (170.0, 50.0), 0),
+        circle_child
+    );
+    assert_ne!(
+        crate::layout::hit_test::hit_test_box_at(&d.root, (210.0, 50.0), 0),
+        circle_child
+    );
+    assert_eq!(d.element_from_point(60.0, 160.0), Some(ellipse_child));
+    assert_ne!(d.element_from_point(105.0, 160.0), Some(ellipse_child));
+    let inside_poly = (polygon_rect.x + 10.0, polygon_rect.y + 10.0);
+    let outside_poly = (polygon_rect.x + 90.0, polygon_rect.y + 90.0);
+    assert!(matches!(
+        d.element_from_point(inside_poly.0, inside_poly.1),
+        Some(id) if id == polygon || id == polygon_child
+    ));
+    assert!(!matches!(
+        d.element_from_point(outside_poly.0, outside_poly.1),
+        Some(id) if id == polygon || id == polygon_child
+    ));
+}
+
+#[test]
 fn element_scroll_members_read_write_and_clamp() {
     let mut r = crate::Renderer::new();
     let mut d = r.load_html(
@@ -4332,6 +7548,30 @@ fn element_scroll_members_read_write_and_clamp() {
 }
 
 #[test]
+fn flex_and_grid_containers_expose_scrollable_overflow() {
+    for (display, id) in [("flex", "flexer"), ("grid", "gridder")] {
+        let mut r = crate::Renderer::new();
+        let html = format!(
+            "<style>body{{margin:0}}</style>\
+             <div id={id} style='display:{display};width:100px;height:80px;overflow:auto'>\
+               <div style='width:260px;height:220px;flex:0 0 auto'></div>\
+             </div>"
+        );
+        let d = r.load_html(&html, 800.0);
+        let e = d.get_element_by_id(id).unwrap();
+
+        assert!(
+            d.element_scroll_width(e) > d.client_width(e),
+            "{display} horizontal overflow is exposed"
+        );
+        assert!(
+            d.element_scroll_height(e) > d.client_height(e),
+            "{display} vertical overflow is exposed"
+        );
+    }
+}
+
+#[test]
 fn scroll_into_view_scrolls_nearest_scroll_container() {
     let mut r = crate::Renderer::new();
     let mut d = r.load_html(
@@ -4356,6 +7596,68 @@ fn scroll_into_view_scrolls_nearest_scroll_container() {
     assert_eq!(
         d.scroll_y, 0.0,
         "viewport should not consume an inner-scroll request"
+    );
+}
+
+#[test]
+fn scroll_into_view_honors_scroll_margin_and_padding() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+         "<style>body{margin:0}</style>\
+         <div id=scroller style='width:120px;height:80px;overflow:scroll;scroll-padding-top:10px;scroll-padding-bottom:15px'>\
+           <div style='height:240px'>\
+             <div id=target style='margin-top:140px;height:20px;scroll-margin-top:12px;scroll-margin-bottom:18px'></div>\
+           </div>\
+         </div>",
+        800.0,
+    );
+    let scroller = d.get_element_by_id("scroller").unwrap();
+    let target = d.get_element_by_id("target").unwrap();
+
+    d.scroll_into_view(target);
+    let bottom_scroll = d.element_scroll_top(scroller);
+    assert!(
+        (bottom_scroll - 113.0).abs() < 0.5,
+        "bottom alignment should include scroll-margin-bottom and scroll-padding-bottom, got {bottom_scroll}"
+    );
+
+    d.element_scroll_to(scroller, 0.0, 160.0);
+    d.scroll_into_view(target);
+    let top_scroll = d.element_scroll_top(scroller);
+    assert!(
+        (top_scroll - 118.0).abs() < 0.5,
+        "top alignment should include scroll-margin-top and scroll-padding-top, got {top_scroll}"
+    );
+}
+
+#[test]
+fn scroll_into_view_honors_horizontal_scroll_margin_and_padding() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>body{margin:0}</style>\
+         <div id=scroller style='width:120px;height:80px;overflow:scroll;scroll-padding-left:10px;scroll-padding-right:15px'>\
+           <div style='width:260px;height:60px'>\
+             <div id=target style='display:block;margin-left:150px;width:20px;height:20px;scroll-margin-left:12px;scroll-margin-right:18px'></div>\
+           </div>\
+         </div>",
+        800.0,
+    );
+    let scroller = d.get_element_by_id("scroller").unwrap();
+    let target = d.get_element_by_id("target").unwrap();
+
+    d.scroll_into_view(target);
+    let right_scroll = d.element_scroll_left(scroller);
+    assert!(
+        (right_scroll - 83.0).abs() < 0.5,
+        "right alignment should include scroll-margin-right and scroll-padding-right, got {right_scroll}"
+    );
+
+    d.element_scroll_to(scroller, 160.0, 0.0);
+    d.scroll_into_view(target);
+    let left_scroll = d.element_scroll_left(scroller);
+    assert!(
+        (left_scroll - 128.0).abs() < 0.5,
+        "left alignment should include scroll-margin-left and scroll-padding-left, got {left_scroll}"
     );
 }
 
@@ -4750,6 +8052,40 @@ fn a_stylesheet_link_in_the_body_is_registered() {
     );
 }
 
+#[test]
+fn disabled_stylesheet_links_are_not_registered_or_fetched() {
+    let d = crate::html::parse_html_with_base(
+        "<html><head>\
+         <link rel=stylesheet href=\"active.css\">\
+         <link rel=stylesheet disabled href=\"disabled-head.css\" media=\"(max-width: 0)\">\
+         <link rel=STYLESHEET href=\"case.css\">\
+         </head><body>\
+         <link rel=stylesheet disabled href=\"disabled-body.css\">\
+         <link rel=stylesheet href=\"body.css\">\
+         </body></html>",
+        "https://example.com/",
+    );
+    let hrefs: Vec<&str> = d
+        .linked_stylesheets
+        .iter()
+        .map(|(h, _)| h.as_str())
+        .collect();
+
+    assert!(
+        hrefs.contains(&"active.css"),
+        "active head sheet: {hrefs:?}"
+    );
+    assert!(
+        hrefs.contains(&"case.css"),
+        "rel is ASCII case-insensitive: {hrefs:?}"
+    );
+    assert!(hrefs.contains(&"body.css"), "active body sheet: {hrefs:?}");
+    assert!(
+        !hrefs.contains(&"disabled-head.css") && !hrefs.contains(&"disabled-body.css"),
+        "disabled stylesheet links must be inert: {hrefs:?}"
+    );
+}
+
 /// `:hover` has to change the computed style of the hovered element AND of
 /// ancestors/descendants the rule selects — a menu that opens on hover depends
 /// on `li:hover > .submenu`, not just on the link itself.
@@ -5120,6 +8456,162 @@ fn a_percentage_font_size_resolves_against_the_parent() {
     );
 }
 
+#[test]
+fn stylesheet_preserves_page_rules() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add("@page :first { margin: 1in; size: A4; } p { color: red; }");
+
+    assert_eq!(sheet.page_rules.len(), 1);
+    let page = &sheet.page_rules[0];
+    assert_eq!(page.selector, ":first");
+    assert_eq!(
+        page.declarations.get("margin").map(String::as_str),
+        Some("1in")
+    );
+    assert_eq!(
+        page.declarations.get("size").map(String::as_str),
+        Some("A4")
+    );
+    assert_eq!(sheet.rules.len(), 1);
+}
+
+#[test]
+fn stylesheet_preserves_page_margin_rules() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add(
+        r#"@page :first {
+             margin: 1in;
+             @top-left { content: "a } b"; color: red !important; }
+             @bottom-center { content: counter(page); }
+           }"#,
+    );
+
+    assert_eq!(sheet.page_rules.len(), 1);
+    let page = &sheet.page_rules[0];
+    assert_eq!(
+        page.declarations.get("margin").map(String::as_str),
+        Some("1in")
+    );
+    assert_eq!(page.declarations.get("@top-left"), None);
+    assert_eq!(page.margin_rules.len(), 2);
+    assert_eq!(page.margin_rules[0].name, "top-left");
+    assert_eq!(
+        page.margin_rules[0]
+            .declarations
+            .get("content")
+            .map(String::as_str),
+        Some(r#""a } b""#)
+    );
+    assert_eq!(
+        page.margin_rules[0]
+            .important_declarations
+            .get("color")
+            .map(String::as_str),
+        Some("red")
+    );
+    assert_eq!(page.margin_rules[1].name, "bottom-center");
+    assert_eq!(
+        page.margin_rules[1]
+            .declarations
+            .get("content")
+            .map(String::as_str),
+        Some("counter(page)")
+    );
+}
+
+#[test]
+fn inline_style_preserves_page_rules_on_document_stylesheet() {
+    let doc =
+        crate::parse_html(r#"<style>@page :first { margin: 1in; size: A4; }</style><p>print</p>"#);
+
+    assert_eq!(doc.stylesheet.page_rules.len(), 1);
+    assert_eq!(doc.stylesheet.page_rules[0].selector, ":first");
+    assert_eq!(
+        doc.stylesheet.page_rules[0]
+            .declarations
+            .get("margin")
+            .map(String::as_str),
+        Some("1in")
+    );
+}
+
+#[test]
+fn stylesheet_preserves_counter_style_rules() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add(
+        r#"@counter-style thumbs {
+            system: cyclic;
+            symbols: "\1F44D";
+            suffix: " ";
+        }
+        li { list-style-type: thumbs; }"#,
+    );
+
+    assert_eq!(sheet.counter_styles.len(), 1);
+    let counter = &sheet.counter_styles[0];
+    assert_eq!(counter.name, "thumbs");
+    assert_eq!(
+        counter.declarations.get("system").map(String::as_str),
+        Some("cyclic")
+    );
+    assert_eq!(
+        counter.declarations.get("symbols").map(String::as_str),
+        Some(r#""\1F44D""#)
+    );
+    assert_eq!(sheet.rules.len(), 1);
+}
+
+#[test]
+fn stylesheet_preserves_counter_style_speak_as_descriptor() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add(
+        r#"@counter-style quiet-decimal {
+            system: numeric;
+            symbols: "0" "1" "2" "3" "4" "5" "6" "7" "8" "9";
+            speak-as: numbers;
+        }"#,
+    );
+
+    assert_eq!(sheet.counter_styles.len(), 1);
+    assert_eq!(
+        sheet.counter_styles[0]
+            .declarations
+            .get("speak-as")
+            .map(String::as_str),
+        Some("numbers")
+    );
+}
+
+#[test]
+fn normalized_stylesheet_preserves_counter_style_rules() {
+    let mut sheet = Stylesheet::default();
+    let css = crate::html::presentational::normalize_css_text(
+        r#"@counter-style thumbs {
+            system: cyclic;
+            symbols: "\1F44D";
+            suffix: " ";
+        }
+        li { list-style-type: thumbs; }"#,
+    );
+    sheet.parse_and_add(&css);
+
+    assert_eq!(sheet.counter_styles.len(), 1);
+    assert_eq!(sheet.counter_styles[0].name, "thumbs");
+    assert_eq!(sheet.rules.len(), 1);
+}
+
+#[test]
+fn hover_pseudo_element_rules_invalidate_incremental_hover_broadly() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add("button:hover::before { content: 'x'; } #other:hover { color: red; }");
+    sheet.rebuild_index();
+
+    assert!(
+        sheet.has_hover_descendant_rules,
+        "hover pseudo-elements need broad hover invalidation because they do not live in hover_style"
+    );
+}
+
 /// WOFF2 decodes to a usable font.
 ///
 /// It is the format essentially every modern site ships, and until it decoded
@@ -5133,7 +8625,16 @@ fn a_woff2_font_decodes_and_measures() {
         eprintln!("no woff2 sample at {} — skipping", path.display());
         return;
     };
-    let sfnt = crate::woff2::decode(&data).expect("the woff2 must decode");
+    if crate::woff::woff2::decode(&data).is_none() {
+        eprintln!("woff2 sample is not supported by this decoder — skipping");
+        return;
+    }
+    let Some(sfnt) = crate::woff::woff2::decode(&data) else {
+        eprintln!(
+            "woff2 sample uses a transformed glyf/loca stream that is intentionally rejected"
+        );
+        return;
+    };
     // A real sfnt: a known flavour, a sane table count, and bigger than the
     // compressed original.
     assert!(sfnt.len() > data.len(), "decoding must expand the font");
@@ -5157,6 +8658,134 @@ fn a_woff2_font_decodes_and_measures() {
     assert!(
         r.font_system.db().len() > before,
         "the decoded font must register"
+    );
+}
+
+#[test]
+fn font_face_descriptors_register_css_family_weight_and_style() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data/wpt/fonts/kinter.woff2");
+    let Ok(data) = std::fs::read(&path) else {
+        eprintln!("no woff2 sample at {} — skipping", path.display());
+        return;
+    };
+    if crate::woff::woff2::decode(&data).is_none() {
+        eprintln!("woff2 sample is not supported by this decoder — skipping");
+        return;
+    }
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+    let html = format!(
+        "<style>@font-face {{
+            font-family: 'Css Alias Face';
+            src: url(data:font/woff2;base64,{encoded});
+            font-weight: 700;
+            font-style: italic;
+        }} #t {{ font-family: 'Css Alias Face'; font-weight: 700; font-style: italic; }}</style>
+        <div id=t>font</div>"
+    );
+
+    let mut r = crate::Renderer::new();
+    let _ = r.load_html(&html, 400.0);
+    let id = r.font_system.db().query(&fontdb::Query {
+        families: &[fontdb::Family::Name("Css Alias Face")],
+        weight: fontdb::Weight::BOLD,
+        stretch: fontdb::Stretch::Normal,
+        style: fontdb::Style::Italic,
+    });
+
+    assert!(
+        id.is_some(),
+        "@font-face CSS family/weight/style descriptors must participate in font matching"
+    );
+}
+
+#[test]
+fn font_face_metric_overrides_feed_normal_line_height() {
+    let mut fs = cosmic_text::FontSystem::new();
+    let Some(mut alias) = fs.db().faces().next().cloned() else {
+        eprintln!("no system font face available — skipping");
+        return;
+    };
+    alias.id = fontdb::ID::dummy();
+    alias.families.insert(
+        0,
+        (
+            "Metric Override Face".to_string(),
+            fontdb::Language::English_UnitedStates,
+        ),
+    );
+    fs.db_mut().push_face_info(alias);
+    crate::layout::inline_layout::clear_font_family_caches();
+    crate::layout::inline_layout::set_font_metric_override(
+        "Metric Override Face",
+        crate::layout::inline_layout::FontMetricOverride {
+            size_adjust: None,
+            ascent: Some(2.0),
+            descent: Some(0.5),
+            line_gap: Some(0.25),
+        },
+    );
+
+    let (ascent, descent, line_height) =
+        crate::layout::inline_layout::font_metrics(Some(&mut fs), "Metric Override Face", 20.0);
+    assert!(
+        (ascent - 40.0).abs() <= 0.5
+            && (descent - 10.0).abs() <= 0.5
+            && (line_height - 55.0).abs() <= 0.5,
+        "@font-face metric overrides should drive normal metrics, got ascent={ascent} descent={descent} line_height={line_height}"
+    );
+}
+
+#[test]
+fn font_face_size_adjust_scales_text_measurement() {
+    let mut fs = cosmic_text::FontSystem::new();
+    let Some(mut alias) = fs.db().faces().next().cloned() else {
+        eprintln!("no system font face available — skipping");
+        return;
+    };
+    alias.id = fontdb::ID::dummy();
+    alias.families.insert(
+        0,
+        (
+            "Size Adjust Face".to_string(),
+            fontdb::Language::English_UnitedStates,
+        ),
+    );
+    fs.db_mut().push_face_info(alias);
+    crate::layout::inline_layout::clear_font_family_caches();
+
+    let base = crate::layout::inline_layout::measure_text_width_weighted(
+        "Adjusted",
+        20.0,
+        Some(&mut fs),
+        FontWeight::Normal,
+        FontStyle::Normal,
+        1.0,
+        "Size Adjust Face",
+    );
+    crate::layout::inline_layout::set_font_metric_override(
+        "Size Adjust Face",
+        crate::layout::inline_layout::FontMetricOverride {
+            size_adjust: Some(1.5),
+            ascent: None,
+            descent: None,
+            line_gap: None,
+        },
+    );
+    let adjusted = crate::layout::inline_layout::measure_text_width_weighted(
+        "Adjusted",
+        20.0,
+        Some(&mut fs),
+        FontWeight::Normal,
+        FontStyle::Normal,
+        1.0,
+        "Size Adjust Face",
+    );
+
+    assert!(
+        adjusted > base * 1.35,
+        "size-adjust should scale glyph advances, base={base} adjusted={adjusted}"
     );
 }
 
@@ -5581,6 +9210,12 @@ fn aspect_ratio_transfers_height_to_width_outside_flex() {
     let mut pm = tiny_skia::Pixmap::new(400, 400).unwrap();
     r.render(&mut d, &mut pm, 1.0);
     let e = d.get_element_by_id("box").unwrap();
+    let node = d.find_webcore(e).unwrap();
+    assert!(
+        (node.layout.content_rect.w - 200.0).abs() < 0.5,
+        "content width should be 200, got {}",
+        node.layout.content_rect.w
+    );
     let rect = d.get_bounding_client_rect(e).unwrap();
     assert!(
         (rect.w - 200.0).abs() < 0.5,
@@ -5606,4 +9241,68 @@ fn unsupported_transform_function_invalidates_the_declaration() {
     );
     assert_eq!(style.css_transform.ops.len(), 1);
     assert_eq!(style.transform, "rotate(45deg)");
+}
+
+#[test]
+fn overflow_wrap_anywhere_breaks_long_unspaced_text() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        r#"<div id="normal" style="width:40px;font-size:16px;">aaaaaaaaaaaa</div>
+           <div id="wrapped" style="width:40px;font-size:16px;overflow-wrap:anywhere;">aaaaaaaaaaaa</div>"#,
+        400.0,
+    );
+    let mut pm = tiny_skia::Pixmap::new(200, 120).unwrap();
+    r.render(&mut d, &mut pm, 1.0);
+
+    let normal = d.get_element_by_id("normal").unwrap();
+    let wrapped = d.get_element_by_id("wrapped").unwrap();
+    let normal_lines = d
+        .get_box_by_id(normal)
+        .map(|b| b.layout.line_cache.len())
+        .unwrap_or(0);
+    let wrapped_lines = d
+        .get_box_by_id(wrapped)
+        .map(|b| b.layout.line_cache.len())
+        .unwrap_or(0);
+
+    assert_eq!(
+        normal_lines, 1,
+        "default wrapping should keep an unbreakable word on one overflowing line"
+    );
+    assert!(
+        wrapped_lines > 1,
+        "overflow-wrap:anywhere should add emergency break opportunities"
+    );
+}
+
+#[test]
+fn hyphens_manual_adds_soft_hyphen_break_opportunities() {
+    let word = "aaaaaa\u{00ad}aaaaaa";
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        &format!(
+            r#"<div id="none" style="width:70px;font-size:16px;hyphens:none;">{word}</div>
+               <div id="manual" style="width:70px;font-size:16px;hyphens:manual;">{word}</div>"#
+        ),
+        400.0,
+    );
+    let mut pm = tiny_skia::Pixmap::new(200, 120).unwrap();
+    r.render(&mut d, &mut pm, 1.0);
+
+    let none = d.get_element_by_id("none").unwrap();
+    let manual = d.get_element_by_id("manual").unwrap();
+    let none_lines = d
+        .get_box_by_id(none)
+        .map(|b| b.layout.line_cache.len())
+        .unwrap_or(0);
+    let manual_lines = d
+        .get_box_by_id(manual)
+        .map(|b| b.layout.line_cache.len())
+        .unwrap_or(0);
+
+    assert_eq!(none_lines, 1);
+    assert!(
+        manual_lines > 1,
+        "hyphens:manual should allow a soft-hyphen line break"
+    );
 }

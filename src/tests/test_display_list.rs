@@ -1,10 +1,10 @@
 //! Tests for the display list builder and replay.
 
 use crate::frame::EngineFrame;
-use crate::html::parse_html;
+use crate::html::{parse_html, parse_html_with_base};
 use crate::renderer::display_list::{DisplayList, ImageRef, PaintCmd};
 use crate::renderer::display_list_builder::{build_display_list, build_display_list_full};
-use crate::renderer::display_list_replay::replay;
+use crate::renderer::display_list_replay::{reduce_corner_radii, replay, replay_with_scroll};
 use crate::types::{Color, Rect};
 
 fn build(html: &str) -> (EngineFrame, DisplayList) {
@@ -28,8 +28,37 @@ fn build_full(html: &str) -> (EngineFrame, DisplayList) {
         0,
         0,
         &std::collections::HashSet::new(),
+        "",
     );
     (f, list)
+}
+
+fn count_opaque_pixels(pixmap: &tiny_skia::Pixmap, x0: u32, y0: u32, x1: u32, y1: u32) -> usize {
+    let width = pixmap.width();
+    let height = pixmap.height();
+    let x1 = x1.min(width);
+    let y1 = y1.min(height);
+    let data = pixmap.data();
+    let mut count = 0;
+    for y in y0.min(height)..y1 {
+        for x in x0.min(width)..x1 {
+            let idx = ((y * width + x) * 4 + 3) as usize;
+            if data.get(idx).copied().unwrap_or(0) > 0 {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+#[test]
+fn border_radius_overlap_uses_one_proportional_scale_factor() {
+    let reduced = reduce_corner_radii(100.0, 40.0, [80.0, 40.0, 10.0, 30.0]);
+
+    let expected = [29.09091, 14.545455, 3.6363637, 10.909091];
+    for (actual, expected) in reduced.into_iter().zip(expected) {
+        assert!((actual - expected).abs() < 0.0001);
+    }
 }
 
 // ── Basic commands ──────────────────────────────────────────────────────────
@@ -41,6 +70,66 @@ fn non_empty_doc_produces_commands() {
 }
 
 #[test]
+fn text_children_are_not_painted_from_stale_child_geometry() {
+    fn first_text_mut(n: &mut crate::WebCore) -> Option<&mut crate::WebCore> {
+        if n.tag == "#text" {
+            return Some(n);
+        }
+        for child in &mut n.children {
+            if let Some(found) = first_text_mut(child) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    let doc = parse_html(
+        "<style>*{margin:0;padding:0} h3{font:40px/46px sans-serif;width:300px}</style>\
+         <h3>Headline text wraps here</h3>",
+    );
+    let mut f = EngineFrame::new(doc, 800.0, 600.0);
+    f.update_frame();
+
+    let parent_lines = f
+        .doc
+        .root
+        .children
+        .iter()
+        .flat_map(|n| n.children.iter())
+        .find(|n| n.tag == "h3")
+        .expect("h3")
+        .layout
+        .line_cache
+        .clone();
+    let text = first_text_mut(&mut f.doc.root).expect("text child");
+    text.layout.line_cache = parent_lines;
+    for line in &mut text.layout.line_cache {
+        line.y += 100_000.0;
+    }
+    text.layout.content_rect.y += 100_000.0;
+    text.layout.border_rect.y += 100_000.0;
+
+    let list = build_display_list(&f.doc.root, 800.0, 600.0);
+    let text_ys: Vec<f32> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Text { text, y, .. } if text.contains("Headline") => Some(*y),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        !text_ys.is_empty(),
+        "parent line cache should still paint text"
+    );
+    assert!(
+        text_ys.iter().all(|y| *y < 1000.0),
+        "stale child #text geometry must not emit offscreen text commands: {text_ys:?}"
+    );
+}
+
+#[test]
 fn colored_div_has_fill_rect() {
     let (_, list) =
         build(r#"<div style="background-color: red; width: 100px; height: 50px">x</div>"#);
@@ -48,6 +137,35 @@ fn colored_div_has_fill_rect() {
         |cmd| matches!(cmd, PaintCmd::FillRect { color, .. } if color.r == 255 && color.g == 0),
     );
     assert!(has_red, "red div should produce FillRect with red");
+}
+
+#[test]
+fn inline_svg_uses_cascaded_fill_color_when_rasterized() {
+    let (_, list) = build(
+        r#"<style>svg { color: rgb(255, 0, 0); fill: currentColor; }</style>
+           <svg style="width:20px;height:20px" viewBox="0 0 20 20">
+             <rect x="0" y="0" width="20" height="20"/>
+           </svg>"#,
+    );
+
+    let image = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Image {
+            data: ImageRef::Owned(data, w, h),
+            ..
+        } => Some((data, *w, *h)),
+        _ => None,
+    });
+    let (data, w, h) = image.expect("inline SVG should rasterize to an image command");
+    assert_eq!((w, h), (20, 20));
+    let idx = ((10 * w + 10) * 4) as usize;
+    assert!(
+        data[idx] > 200 && data[idx + 1] < 50 && data[idx + 2] < 50 && data[idx + 3] > 200,
+        "center pixel should be red from cascaded fill, got rgba({}, {}, {}, {})",
+        data[idx],
+        data[idx + 1],
+        data[idx + 2],
+        data[idx + 3]
+    );
 }
 
 #[test]
@@ -122,6 +240,256 @@ fn stacking_context_for_z_index() {
     assert!(has_ctx, "z-index should create stacking context");
 }
 
+#[test]
+fn explicit_zero_z_index_creates_stacking_context() {
+    let (_, list) =
+        build(r#"<div style="position: relative; z-index: 0; width: 100px; height: 50px">z</div>"#);
+    let has_ctx = list
+        .commands
+        .iter()
+        .any(|cmd| matches!(cmd, PaintCmd::BeginStackingContext { z_index, .. } if *z_index == 0));
+    assert!(
+        has_ctx,
+        "explicit z-index:0 should create a stacking context"
+    );
+}
+
+#[test]
+fn z_indexed_descendant_inside_plain_wrapper_competes_with_siblings() {
+    let (_, list) = build(
+        r#"<style>
+             body { margin: 0 }
+             .box { position: relative; width: 40px; height: 40px; }
+             #front { z-index: 10; background-color: red; }
+             #middle { z-index: 5; margin-top: -40px; background-color: blue; }
+           </style>
+           <div id="wrap"><div id="front" class="box"></div></div>
+           <div id="middle" class="box"></div>"#,
+    );
+    let painted: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::FillRect { color, .. } if color.a > 0 => Some((color.r, color.g, color.b)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        painted.last().copied(),
+        Some((255, 0, 0)),
+        "nested z-index:10 must paint above sibling z-index:5"
+    );
+}
+
+#[test]
+fn clip_path_inset_and_circle_emit_display_list_clips() {
+    let (_, inset) = build(
+        r#"<style>body{margin:0}</style>
+           <div style="width:100px;height:80px;clip-path:inset(10px 20px 30px 5px)">x</div>"#,
+    );
+    let inset_clip = inset
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::PushClip { rect, radius, .. } if *radius == [0.0; 4] => Some(*rect),
+            _ => None,
+        })
+        .expect("inset clip should be emitted");
+    assert!((inset_clip.x - 5.0).abs() < 0.5);
+    assert!((inset_clip.y - 10.0).abs() < 0.5);
+    assert!((inset_clip.w - 75.0).abs() < 0.5);
+    assert!((inset_clip.h - 40.0).abs() < 0.5);
+
+    let (_, circle) = build(
+        r#"<style>body{margin:0}</style>
+           <div style="width:100px;height:80px;clip-path:circle(25% at 50% 50%)">x</div>"#,
+    );
+    let has_circle_clip = circle.commands.iter().any(|cmd| {
+        matches!(cmd, PaintCmd::PushClip { radius, .. } if radius.iter().all(|r| (*r - 20.0).abs() < 0.5))
+    });
+    assert!(has_circle_clip, "circle clip should map to a rounded clip");
+
+    let (_, ellipse) = build(
+        r#"<style>body{margin:0}</style>
+           <div style="width:120px;height:80px;clip-path:ellipse(40px 20px at 50% 50%)">x</div>"#,
+    );
+    let has_ellipse_clip = ellipse.commands.iter().any(|cmd| {
+        matches!(cmd, PaintCmd::PushClip { rect, radius, .. }
+            if (rect.x - 20.0).abs() < 0.5
+                && (rect.y - 20.0).abs() < 0.5
+                && (rect.w - 80.0).abs() < 0.5
+                && (rect.h - 40.0).abs() < 0.5
+                && radius.iter().all(|r| (*r - 20.0).abs() < 0.5))
+    });
+    assert!(
+        has_ellipse_clip,
+        "ellipse clip should emit a display-list clip"
+    );
+
+    let (_, polygon) = build(
+        r#"<style>body{margin:0}</style>
+           <div style="width:100px;height:100px;clip-path:polygon(0 0, 100% 0, 0 100%);background:red"></div>"#,
+    );
+    assert!(
+        polygon
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::PushClipPath { points } if points.len() == 3)),
+        "polygon clip should emit a polygon display-list clip"
+    );
+
+    let mut pixmap = tiny_skia::Pixmap::new(120, 120).unwrap();
+    replay(&polygon, &mut pixmap, 1.0);
+    let alpha_at = |x: usize, y: usize| pixmap.data()[(y * 120 + x) * 4 + 3];
+    assert!(
+        alpha_at(10, 10) > 0,
+        "paint inside the polygon should remain visible"
+    );
+    assert_eq!(
+        alpha_at(90, 90),
+        0,
+        "paint outside the polygon should be clipped"
+    );
+}
+
+#[test]
+fn contain_paint_emits_a_descendant_clip() {
+    let (_, list) = build(
+        r#"<style>body{margin:0}</style>
+           <div style="width:20px;height:20px;contain:paint">
+             <div style="width:60px;height:20px;background:red"></div>
+           </div>"#,
+    );
+    let has_clip = list.commands.iter().any(|cmd| {
+        matches!(cmd, PaintCmd::PushClip { rect, .. } if (rect.w - 20.0).abs() < 0.5 && (rect.h - 20.0).abs() < 0.5)
+    });
+    assert!(has_clip, "contain:paint should clip descendant paint");
+}
+
+#[test]
+fn filter_drop_shadow_paints_offset_shadow_from_display_list() {
+    let (_, list) = build(
+        r#"<style>body{margin:0}</style>
+           <div style="width:10px;height:10px;background:black;filter:drop-shadow(10px 0 0 red)"></div>"#,
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(40, 20).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+
+    let source = pixmap.pixel(5, 5).expect("source pixel in bounds");
+    assert!(
+        source.alpha() > 0,
+        "filtered source content should remain painted"
+    );
+    let shadow = pixmap.pixel(15, 5).expect("shadow pixel in bounds");
+    assert!(
+        shadow.red() > 0 && shadow.alpha() > 0,
+        "drop-shadow should paint at the requested offset; got rgba({}, {}, {}, {})",
+        shadow.red(),
+        shadow.green(),
+        shadow.blue(),
+        shadow.alpha()
+    );
+}
+
+#[test]
+fn backdrop_filter_emits_a_backdrop_filter_command() {
+    let (_, list) = build(
+        r#"<style>body{margin:0}</style>
+           <div style="width:20px;height:20px;background:red"></div>
+           <div style="position:absolute;left:0;top:0;width:20px;height:20px;backdrop-filter:grayscale(1)"></div>"#,
+    );
+
+    let command = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::BackdropFilter { rect, filters } => Some((rect, filters)),
+        _ => None,
+    });
+
+    let (rect, filters) = command.expect("backdrop-filter command");
+    assert_eq!((rect.x, rect.y, rect.w, rect.h), (0.0, 0.0, 20.0, 20.0));
+    assert!(
+        filters
+            .iter()
+            .any(|(kind, value, _, _, _)| *kind == 3 && (*value - 1.0).abs() < 0.001),
+        "grayscale backdrop filter should use the shared filter encoding"
+    );
+}
+
+#[test]
+fn modal_dialog_backdrop_paints_viewport_fill() {
+    let mut r = crate::Renderer::new();
+    let mut doc = r.load_html(
+        r#"<style>
+           dialog::backdrop { background-color: rgba(0, 0, 0, 0.5); }
+           </style>
+           <dialog id="modal">Hi</dialog>"#,
+        800.0,
+    );
+    let modal = doc.get_element_by_id("modal").unwrap();
+    doc.show_dialog(modal, true);
+    doc.recascade();
+    let modal_node = doc
+        .find_webcore(modal)
+        .expect("modal node should remain in the render tree");
+    assert!(
+        modal_node.style.backdrop_style.is_some(),
+        "dialog::backdrop should cascade onto the modal dialog"
+    );
+
+    let list = build_display_list_full(
+        &doc.root,
+        800.0,
+        600.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+    let commands: Vec<_> = list
+        .commands
+        .iter()
+        .chain(list.fixed_commands.iter())
+        .collect();
+    assert!(
+        commands.iter().any(|cmd| matches!(
+            cmd,
+            PaintCmd::FillRect {
+                rect,
+                color,
+                radius,
+                radius_y,
+            } if *rect == Rect::new(0.0, 0.0, 800.0, 600.0)
+                && color.r == 0
+                && color.g == 0
+                && color.b == 0
+                && (120..=135).contains(&color.a)
+                && *radius == [0.0; 4]
+                && *radius_y == [0.0; 4]
+        )),
+        "modal dialog should emit a viewport-sized ::backdrop fill"
+    );
+}
+
+#[test]
+fn filter_will_change_isolation_and_blend_create_stacking_contexts() {
+    for style in [
+        "filter: blur(0px)",
+        "will-change: transform",
+        "isolation: isolate",
+        "mix-blend-mode: multiply",
+    ] {
+        let (_, list) = build(&format!(
+            r#"<div style="{style}; width: 100px; height: 50px">stack</div>"#
+        ));
+        let has_ctx = list
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::BeginStackingContext { .. }));
+        assert!(has_ctx, "{style} should create a stacking context");
+    }
+}
+
 // ── Inline content with line_cache ──────────────────────────────────────────
 
 #[test]
@@ -189,6 +557,7 @@ fn hover_style_applied_in_display_list() {
         0,
         0,
         &std::collections::HashSet::new(),
+        "",
     );
 
     // With hover on button
@@ -201,6 +570,7 @@ fn hover_style_applied_in_display_list() {
         btn_id,
         0,
         &std::collections::HashSet::new(),
+        "",
     );
 
     // Count red FillRects in each
@@ -257,6 +627,7 @@ fn the_display_list_is_scroll_independent() {
         0,
         0,
         &std::collections::HashSet::new(),
+        "",
     );
     let scrolled = build_display_list_full(
         &f.doc.root,
@@ -267,6 +638,7 @@ fn the_display_list_is_scroll_independent() {
         0,
         0,
         &std::collections::HashSet::new(),
+        "",
     );
 
     fn find_blue_y(list: &DisplayList) -> Option<f32> {
@@ -290,6 +662,207 @@ fn the_display_list_is_scroll_independent() {
     assert!(
         (y1 - 200.0).abs() < 2.0,
         "and that position is the DOCUMENT one"
+    );
+}
+
+#[test]
+fn replay_scrolls_background_image_clips_with_the_image() {
+    let mut list = DisplayList::new();
+    list.push(PaintCmd::BackgroundImage {
+        container: Rect::new(10.0, 100.0, 20.0, 20.0),
+        clip: Rect::new(10.0, 100.0, 20.0, 20.0),
+        data: ImageRef::Owned(vec![255, 0, 0, 255], 1, 1),
+        size_mode: 3,
+        draw_w: 20.0,
+        draw_h: 20.0,
+        pos_x: 10.0,
+        pos_y: 100.0,
+        repeat_x_mode: 0,
+        repeat_y_mode: 0,
+        radii: [0.0; 4],
+        radii_y: [0.0; 4],
+        blend_mode: 0,
+    });
+
+    let mut pixmap = tiny_skia::Pixmap::new(80, 80).unwrap();
+    pixmap.fill(tiny_skia::Color::WHITE);
+    let mut font_system = cosmic_text::FontSystem::new();
+    let mut swash_cache = cosmic_text::SwashCache::new();
+    replay_with_scroll(
+        &list,
+        &mut pixmap,
+        1.0,
+        &mut font_system,
+        &mut swash_cache,
+        0.0,
+        50.0,
+    );
+
+    let red = pixmap.pixel(15, 55).expect("sample inside scrolled image");
+    assert_eq!(
+        (red.red(), red.green(), red.blue(), red.alpha()),
+        (255, 0, 0, 255),
+        "background-image and its clip mask must scroll together"
+    );
+
+    let white = pixmap.pixel(15, 35).expect("sample above scrolled image");
+    assert_eq!(
+        (white.red(), white.green(), white.blue(), white.alpha()),
+        (255, 255, 255, 255),
+        "background-image must remain clipped after scroll"
+    );
+}
+
+#[test]
+fn replay_scrolls_form_element_content() {
+    let mut list = DisplayList::new();
+    list.push(PaintCmd::FormElement {
+        tag: "input".to_string(),
+        input_type: "checkbox".to_string(),
+        rect: Rect::new(10.0, 100.0, 20.0, 20.0),
+        node_id: 1,
+        attributes: Vec::new(),
+        font_size: 16.0,
+        font_weight: 400,
+        font_family: "Arial".to_string(),
+        color: Color::BLACK,
+        placeholder_color: Color::rgba(0, 0, 0, 128),
+        checked: true,
+        value: String::new(),
+        placeholder: String::new(),
+        input_cursor: 0,
+        appearance_none: false,
+        vertical: false,
+        options: Vec::new(),
+        selected: -1,
+        selected_all: Vec::new(),
+    });
+
+    let mut pixmap = tiny_skia::Pixmap::new(80, 80).unwrap();
+    let mut font_system = cosmic_text::FontSystem::new();
+    let mut swash_cache = cosmic_text::SwashCache::new();
+    replay_with_scroll(
+        &list,
+        &mut pixmap,
+        1.0,
+        &mut font_system,
+        &mut swash_cache,
+        0.0,
+        50.0,
+    );
+
+    let painted_in_scrolled_position = count_opaque_pixels(&pixmap, 8, 48, 34, 74);
+    let painted_at_unscrolled_position = count_opaque_pixels(&pixmap, 8, 0, 34, 38);
+    assert!(
+        painted_in_scrolled_position > 0,
+        "form element content should paint at its scrolled viewport position"
+    );
+    assert_eq!(
+        painted_at_unscrolled_position, 0,
+        "form element content must not stay fixed while the page scrolls"
+    );
+}
+
+#[test]
+fn replay_scrolls_text_shadow_with_text() {
+    let mut list = DisplayList::new();
+    list.push(PaintCmd::TextShadow {
+        x: 10.0,
+        y: 100.0,
+        text: "Welcome".to_string(),
+        font_family: "Arial".to_string(),
+        font_size: 24.0,
+        font_weight: 700,
+        font_style: 0,
+        font_stretch: 100.0,
+        line_height: 30.0,
+        color: Color::rgba(0, 0, 0, 255),
+        blur: 0.0,
+    });
+
+    let mut pixmap = tiny_skia::Pixmap::new(180, 100).unwrap();
+    let mut font_system = cosmic_text::FontSystem::new();
+    let mut swash_cache = cosmic_text::SwashCache::new();
+    replay_with_scroll(
+        &list,
+        &mut pixmap,
+        1.0,
+        &mut font_system,
+        &mut swash_cache,
+        0.0,
+        50.0,
+    );
+
+    let scrolled_band = count_opaque_pixels(&pixmap, 0, 45, 170, 90);
+    let fixed_band = count_opaque_pixels(&pixmap, 0, 0, 170, 40);
+    assert!(
+        scrolled_band > 0,
+        "text shadow should move with page scroll"
+    );
+    assert_eq!(
+        fixed_band, 0,
+        "text shadow must not remain at the unscrolled document position"
+    );
+}
+
+#[test]
+fn sticky_right_bottom_insets_clamp_to_viewport_edges() {
+    let html = r#"
+        <div style="height: 200px"></div>
+        <div style="position: sticky; right: 15px; bottom: 10px; margin-left: 200px; width: 20px; height: 20px; background-color: red"></div>
+    "#;
+    let doc = parse_html(html);
+    let mut f = EngineFrame::new(doc, 100.0, 100.0);
+    f.update_frame();
+    let list = build_display_list_full(
+        &f.doc.root,
+        100.0,
+        100.0,
+        0.0,
+        130.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+
+    let red = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::FillRect { rect, color, .. } if color.r == 255 && color.g == 0 => Some(*rect),
+            _ => None,
+        })
+        .expect("sticky box should paint a red background");
+
+    assert!(
+        (red.x - 65.0).abs() < 0.01,
+        "right:15 should clamp the 20px box to x=65 in a 100px viewport, got {}",
+        red.x
+    );
+    assert!(
+        (red.y - 200.0).abs() < 0.01,
+        "bottom:10 should keep the box above the viewport bottom when scrolled, got {}",
+        red.y
+    );
+}
+
+#[test]
+fn sticky_position_creates_a_stacking_context() {
+    let html = r#"
+        <style>
+          body { margin: 0; }
+          #sticky { position: sticky; top: 0; width: 20px; height: 20px; background: red; }
+        </style>
+        <div id="sticky"></div>
+    "#;
+    let (_f, list) = build_full(html);
+
+    assert!(
+        list.commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::BeginStackingContext { .. })),
+        "position: sticky should establish a stacking context"
     );
 }
 
@@ -519,7 +1092,7 @@ fn build_with_image(html: &str, iw: u32, ih: u32) -> DisplayList {
         if n.tag == "img" {
             n.image_width = iw;
             n.image_height = ih;
-            n.image_data = Some(vec![255u8; (iw * ih * 4) as usize]);
+            n.image_data = Some(std::sync::Arc::new(vec![255u8; (iw * ih * 4) as usize]));
         }
         for c in &mut n.children {
             seed(c, iw, ih);
@@ -536,6 +1109,33 @@ fn image_rect(list: &DisplayList) -> Option<crate::types::Rect> {
         PaintCmd::Image { rect, .. } => Some(*rect),
         _ => None,
     })
+}
+
+#[test]
+fn replaced_image_border_radius_clips_painted_bitmap() {
+    let list = build_with_image(
+        "<style>*{margin:0;padding:0} img{display:block;width:40px;height:40px;border-radius:20px}</style><img src=x>",
+        2,
+        2,
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(50, 50).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let data = pixmap.data();
+    let pixel = |x: usize, y: usize| {
+        let i = (y * 50 + x) * 4;
+        Color::rgba(data[i], data[i + 1], data[i + 2], data[i + 3])
+    };
+
+    assert!(
+        pixel(0, 0).a < 32,
+        "the rounded image corner must be clipped, got {:?}",
+        pixel(0, 0)
+    );
+    assert!(
+        pixel(20, 20).a > 220,
+        "the center of the image must remain painted, got {:?}",
+        pixel(20, 20)
+    );
 }
 
 /// **`object-fit` decides the drawn size of a replaced element** (css-images-3
@@ -608,6 +1208,21 @@ fn object_position_places_the_object() {
     );
 }
 
+#[test]
+fn object_position_edge_offsets_place_the_painted_object() {
+    let list = build_with_image(
+        "<style>*{margin:0;padding:0} img{width:200px;height:100px;object-fit:contain;object-position:right 10px bottom 20px}</style><img src=x>",
+        100,
+        100,
+    );
+    let r = image_rect(&list).expect("an image was painted");
+    assert_eq!(
+        (r.x, r.y, r.w, r.h),
+        (90.0, -20.0, 100.0, 100.0),
+        "right/bottom edge offsets place the object inside the free space"
+    );
+}
+
 // ── Gradient parsing: colour-stop fixup and layers (css-images-3 §4.3.1) ─────
 
 fn gradient_stops(list: &DisplayList) -> Option<Vec<(crate::types::Color, f32)>> {
@@ -624,6 +1239,24 @@ fn gradient_rect(list: &DisplayList) -> Option<crate::types::Rect> {
     })
 }
 
+fn radial_gradient_geometry(list: &DisplayList) -> Option<(f32, f32, f32, f32)> {
+    list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Gradient {
+            radial_center_x,
+            radial_center_y,
+            radial_radius_x,
+            radial_radius_y,
+            ..
+        } => Some((
+            *radial_center_x,
+            *radial_center_y,
+            *radial_radius_x,
+            *radial_radius_y,
+        )),
+        _ => None,
+    })
+}
+
 fn fill_rect_of(list: &DisplayList, r: u8, g: u8, b: u8) -> Option<crate::types::Rect> {
     list.commands.iter().find_map(|cmd| match cmd {
         PaintCmd::FillRect { rect, color, .. } if color.r == r && color.g == g && color.b == b => {
@@ -631,6 +1264,33 @@ fn fill_rect_of(list: &DisplayList, r: u8, g: u8, b: u8) -> Option<crate::types:
         }
         _ => None,
     })
+}
+
+#[test]
+fn gradient_background_repeat_preserves_space_and_round_modes() {
+    let (_, list) = build(
+        r#"
+        <style>
+        .box {
+            width: 80px;
+            height: 40px;
+            background-image: linear-gradient(red, red);
+            background-repeat: space round;
+        }
+        </style>
+        <div class=box></div>
+    "#,
+    );
+    let modes = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Gradient {
+            repeat_x_mode,
+            repeat_y_mode,
+            ..
+        } => Some((*repeat_x_mode, *repeat_y_mode)),
+        _ => None,
+    });
+
+    assert_eq!(modes, Some((2, 3)));
 }
 
 #[test]
@@ -711,6 +1371,46 @@ fn a_radial_gradient_descriptor_does_not_eat_a_stop() {
         "second stop is blue, got {:?}",
         stops[1].0
     );
+}
+
+#[test]
+fn radial_gradient_descriptor_sets_center_and_ellipse_radii() {
+    let (_, list) = build(
+        r#"<div style="width:100px;height:50px;background:radial-gradient(ellipse closest-side at right bottom, red, blue)">x</div>"#,
+    );
+    let (cx, cy, rx, ry) = radial_gradient_geometry(&list).expect("a radial gradient was painted");
+    assert!((cx - 100.0).abs() < 0.001, "right center x, got {cx}");
+    assert!((cy - 50.0).abs() < 0.001, "bottom center y, got {cy}");
+    assert!(
+        rx <= 1.0,
+        "closest-side x radius clamps to the nearest side, got {rx}"
+    );
+    assert!(
+        ry <= 1.0,
+        "closest-side y radius clamps to the nearest side, got {ry}"
+    );
+}
+
+#[test]
+fn radial_gradient_explicit_ellipse_radii_reach_paint_geometry() {
+    let (_, list) = build(
+        r#"<div style="width:100px;height:50px;background:radial-gradient(ellipse 20px 10px at 25px 30px, red, blue)">x</div>"#,
+    );
+    let (cx, cy, rx, ry) = radial_gradient_geometry(&list).expect("a radial gradient was painted");
+    assert!((cx - 25.0).abs() < 0.001, "explicit center x, got {cx}");
+    assert!((cy - 30.0).abs() < 0.001, "explicit center y, got {cy}");
+    assert!((rx - 20.0).abs() < 0.001, "explicit x radius, got {rx}");
+    assert!((ry - 10.0).abs() < 0.001, "explicit y radius, got {ry}");
+}
+
+#[test]
+fn radial_gradient_explicit_circle_radius_stays_circular() {
+    let (_, list) = build(
+        r#"<div style="width:100px;height:50px;background:radial-gradient(circle 25px at center, red, blue)">x</div>"#,
+    );
+    let (_, _, rx, ry) = radial_gradient_geometry(&list).expect("a radial gradient was painted");
+    assert!((rx - 25.0).abs() < 0.001, "circle x radius, got {rx}");
+    assert!((ry - 25.0).abs() < 0.001, "circle y radius, got {ry}");
 }
 
 #[test]
@@ -916,6 +1616,8 @@ fn background_repeat_space_distributes_tiles_with_gaps() {
         repeat_x_mode: 2,
         repeat_y_mode: 0,
         radii: [0.0; 4],
+        radii_y: [0.0; 4],
+        blend_mode: 0,
     });
 
     let mut pixmap = tiny_skia::Pixmap::new(25, 10).unwrap();
@@ -933,6 +1635,42 @@ fn background_repeat_space_distributes_tiles_with_gaps() {
         "space repeat should leave distributed space between whole tiles"
     );
     assert_eq!(pixel(17, 5), Color::rgb(255, 0, 0));
+}
+
+#[test]
+fn background_image_blend_mode_multiplies_with_existing_backdrop() {
+    let mut list = DisplayList::new();
+    list.push(PaintCmd::FillRect {
+        rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+        color: Color::rgba(255, 0, 0, 255),
+        radius: [0.0; 4],
+        radius_y: [0.0; 4],
+    });
+    list.push(PaintCmd::BackgroundImage {
+        container: Rect::new(0.0, 0.0, 10.0, 10.0),
+        clip: Rect::new(0.0, 0.0, 10.0, 10.0),
+        data: ImageRef::Owned(vec![0, 0, 255, 255], 1, 1),
+        size_mode: 3,
+        draw_w: 10.0,
+        draw_h: 10.0,
+        pos_x: 0.0,
+        pos_y: 0.0,
+        repeat_x_mode: 0,
+        repeat_y_mode: 0,
+        radii: [0.0; 4],
+        radii_y: [0.0; 4],
+        blend_mode: 1,
+    });
+
+    let mut pixmap = tiny_skia::Pixmap::new(10, 10).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let data = pixmap.data();
+    let i = (5 * 10 + 5) * 4;
+    let (r, g, b) = (data[i], data[i + 1], data[i + 2]);
+    assert!(
+        r < 40 && g < 40 && b < 40,
+        "multiply-blended blue image over red should paint black, got ({r},{g},{b})"
+    );
 }
 
 #[test]
@@ -1000,6 +1738,13 @@ fn first_radii(list: &DisplayList) -> Option<[f32; 4]> {
     })
 }
 
+fn first_radii_y(list: &DisplayList) -> Option<[f32; 4]> {
+    list.commands.iter().find_map(|c| match c {
+        PaintCmd::FillRect { radius_y, .. } => Some(*radius_y),
+        _ => None,
+    })
+}
+
 /// **Each corner keeps its own radius.** `border_radius` is only a mirror of
 /// the top-left longhand, not a "the shorthand was used" flag, but the painter
 /// treated any non-zero top-left as "apply this to all four corners". The
@@ -1026,6 +1771,19 @@ fn border_radius_shorthand_still_rounds_all_corners() {
     );
     let r = first_radii(&list).expect("a background rect was painted");
     assert_eq!(r, [12.0, 12.0, 12.0, 12.0], "got {r:?}");
+}
+
+#[test]
+fn border_radius_slash_keeps_elliptical_corner_radii() {
+    let (_f, list) = build(
+        "<style>* { margin:0; padding:0 }\
+         div { width:200px; height:100px; background:red;\
+               border-radius: 100px / 40px }</style><div></div>",
+    );
+    let rx = first_radii(&list).expect("a background rect was painted");
+    let ry = first_radii_y(&list).expect("a background rect was painted");
+    assert_eq!(rx, [100.0, 100.0, 100.0, 100.0], "got {rx:?}");
+    assert_eq!(ry, [40.0, 40.0, 40.0, 40.0], "got {ry:?}");
 }
 
 /// identity `[1, 0, 0, 1, 0, 0]` — the percentage translation is exactly zero.
@@ -1218,6 +1976,42 @@ fn text_overflow_ellipsis_truncates_display_text() {
 }
 
 #[test]
+fn text_overflow_two_value_custom_marker_truncates_display_text() {
+    let mut frame = crate::EngineFrame::new(
+        crate::parse_html(
+            r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        div {
+            width: 48px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: clip "--";
+            font-size: 20px;
+        }
+        </style>
+        <div>abcdef ghi</div>
+    "#,
+        ),
+        240.0,
+        80.0,
+    );
+    frame.update_frame();
+    let list = build_display_list(&frame.doc.root, 240.0, 80.0);
+
+    let text = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Text { text, .. } if text.contains("--") => Some(text.as_str()),
+        _ => None,
+    });
+
+    assert!(
+        text.is_some(),
+        "text-overflow two-value syntax should emit truncated text with the end marker; commands were {:?}",
+        list.commands
+    );
+}
+
+#[test]
 fn marker_content_overrides_list_style_marker_text() {
     let mut frame = crate::EngineFrame::new(
         crate::parse_html(
@@ -1245,6 +2039,130 @@ fn marker_content_overrides_list_style_marker_text() {
         Some(crate::types::Color::rgb(255, 0, 0)),
         "::marker content should replace generated list-style marker text"
     );
+}
+
+#[test]
+fn custom_counter_style_paints_list_marker() {
+    let (frame, list) = build(
+        r#"
+        <style>
+        @counter-style thumbs {
+            system: cyclic;
+            symbols: "\1F44D";
+            suffix: " ";
+        }
+        li { list-style-type: thumbs; }
+        </style>
+        <ol><li>item</li></ol>
+    "#,
+    );
+    assert_eq!(frame.doc.stylesheet.counter_styles.len(), 1);
+    let li =
+        crate::tests::harness::find_box(&frame.doc.root, &|node| node.tag == "li").expect("li box");
+    assert_eq!(li.style.custom_list_style_type, "thumbs");
+    assert_eq!(li.style.marker_content, "👍 ");
+
+    let marker = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::ListMarker { text, .. } if text == "👍 " => Some(text.as_str()),
+        _ => None,
+    });
+
+    assert_eq!(
+        marker,
+        Some("👍 "),
+        "@counter-style should resolve custom list-style markers before paint"
+    );
+}
+
+#[test]
+fn custom_counter_style_applies_range_fixed_start_pad_and_fallback() {
+    let (frame, _) = build(
+        r#"
+        <style>
+        @counter-style limited {
+            system: fixed 0;
+            symbols: "Z" "O";
+            range: 0 1;
+            fallback: lower-alpha;
+            pad: 2 "0";
+            suffix: ") ";
+        }
+        ol { counter-reset: list-item -1; }
+        li { list-style-type: limited; }
+        </style>
+        <ol><li id=zero>zero</li><li id=one>one</li><li id=two>two</li></ol>
+    "#,
+    );
+    let marker = |id: &str| {
+        crate::tests::harness::find_box(&frame.doc.root, &|node| {
+            node.tag == "li" && node.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .map(|node| node.style.marker_content.clone())
+    };
+
+    assert_eq!(marker("zero").as_deref(), Some("0Z) "));
+    assert_eq!(marker("one").as_deref(), Some("0O) "));
+    assert_eq!(
+        marker("two").as_deref(),
+        Some("0b) "),
+        "out-of-range values should use the declared fallback style and then apply pad"
+    );
+}
+
+#[test]
+fn custom_counter_style_extends_inherits_base_descriptors() {
+    let (frame, _) = build(
+        r#"
+        <style>
+        @counter-style base-dots {
+            system: cyclic;
+            symbols: "A" "B";
+            suffix: ". ";
+        }
+        @counter-style loud-dots {
+            system: extends base-dots;
+            suffix: "! ";
+        }
+        li { list-style-type: loud-dots; }
+        </style>
+        <ol><li id=first>first</li><li id=second>second</li></ol>
+    "#,
+    );
+    let marker = |id: &str| {
+        crate::tests::harness::find_box(&frame.doc.root, &|node| {
+            node.tag == "li" && node.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .map(|node| node.style.marker_content.clone())
+    };
+
+    assert_eq!(marker("first").as_deref(), Some("A! "));
+    assert_eq!(marker("second").as_deref(), Some("B! "));
+}
+
+#[test]
+fn custom_counter_style_additive_symbols_paint_marker() {
+    let (frame, _) = build(
+        r#"
+        <style>
+        @counter-style tally {
+            system: additive;
+            additive-symbols: 5 "V", 1 "I";
+            suffix: " ";
+        }
+        li { list-style-type: tally; }
+        </style>
+        <ol><li id=one>one</li><li id=two>two</li><li id=three>three</li><li id=four>four</li><li id=five>five</li><li id=six>six</li></ol>
+    "#,
+    );
+    let marker = |id: &str| {
+        crate::tests::harness::find_box(&frame.doc.root, &|node| {
+            node.tag == "li" && node.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .map(|node| node.style.marker_content.clone())
+    };
+
+    assert_eq!(marker("four").as_deref(), Some("IIII "));
+    assert_eq!(marker("six").as_deref(), Some("VI "));
 }
 
 #[test]
@@ -1400,6 +2318,186 @@ fn list_style_shorthand_url_emits_image_marker_command() {
             } if text == "icon.png"
         )),
         "list-style shorthand URL should feed list-style-image"
+    );
+}
+
+#[test]
+fn list_style_image_marker_decodes_and_paints_resolved_image() {
+    let base = format!("{}/examples/", env!("CARGO_MANIFEST_DIR"));
+    let doc = parse_html_with_base(
+        r#"<style>*{margin:0;padding:0} li{list-style-position:inside;list-style-image:url(silicon.png);font-size:16px;line-height:20px}</style><ul><li>item</li></ul>"#,
+        &base,
+    );
+    let mut frame = EngineFrame::new(doc, 80.0, 40.0);
+    frame.update_frame();
+    let list = build_display_list_full(
+        &frame.doc.root,
+        80.0,
+        40.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        &base,
+    );
+    assert!(
+        list.commands.iter().any(|cmd| matches!(
+            cmd,
+            PaintCmd::ListMarker {
+                marker_type: 4,
+                image: Some(ImageRef::Owned(_, _, _) | ImageRef::Shared(_, _, _)),
+                ..
+            }
+        )),
+        "list-style-image should decode into marker image pixels"
+    );
+
+    let paint_list = DisplayList {
+        commands: vec![PaintCmd::ListMarker {
+            marker_type: 4,
+            x: 4.0,
+            y: 4.0,
+            size: 12.0,
+            color: Color::rgba(0, 0, 0, 255),
+            text: String::new(),
+            image: Some(ImageRef::Owned(vec![255, 0, 0, 255], 1, 1)),
+            font_family: String::new(),
+            font_size: 16.0,
+            font_weight: 400,
+            font_style: 0,
+            line_height: 20.0,
+        }],
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(24, 24).unwrap();
+    replay(&paint_list, &mut pixmap, 1.0);
+    let painted_red = pixmap.data().chunks_exact(4).any(|px| {
+        px[0] > 200 && px[1] < 80 && px[2] < 80 && px[3] > 200
+    });
+    assert!(painted_red, "image marker replay should paint its bitmap");
+}
+
+#[test]
+fn circle_list_marker_paints_a_hollow_circle() {
+    let list = DisplayList {
+        commands: vec![PaintCmd::ListMarker {
+            marker_type: 1,
+            x: 12.0,
+            y: 12.0,
+            size: 6.0,
+            color: Color::rgba(0, 0, 0, 255),
+            text: String::new(),
+            image: None,
+            font_family: String::new(),
+            font_size: 16.0,
+            font_weight: 400,
+            font_style: 0,
+            line_height: 20.0,
+        }],
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(30, 30).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let data = pixmap.data();
+    let alpha_at = |x: usize, y: usize| data[(y * 30 + x) * 4 + 3];
+
+    assert!(
+        alpha_at(12, 6) > 0 || alpha_at(12, 18) > 0,
+        "circle marker should paint the stroked rim"
+    );
+    assert_eq!(
+        alpha_at(12, 12),
+        0,
+        "list-style-type: circle should not fill the marker center"
+    );
+}
+
+#[test]
+fn mask_layer_applies_to_nested_paint_commands() {
+    let list = DisplayList {
+        commands: vec![
+            PaintCmd::PushMask {
+                rect: Rect::new(0.0, 0.0, 20.0, 10.0),
+                data: ImageRef::Owned(
+                    vec![
+                        255, 255, 255, 255, // left half visible
+                        0, 0, 0, 255,       // right half transparent by luminance
+                    ],
+                    2,
+                    1,
+                ),
+            },
+            PaintCmd::FillRect {
+                rect: Rect::new(0.0, 0.0, 20.0, 10.0),
+                color: Color::rgba(255, 0, 0, 255),
+                radius: [0.0; 4],
+                radius_y: [0.0; 4],
+            },
+            PaintCmd::FillRect {
+                rect: Rect::new(12.0, 0.0, 8.0, 10.0),
+                color: Color::rgba(0, 0, 255, 255),
+                radius: [0.0; 4],
+                radius_y: [0.0; 4],
+            },
+            PaintCmd::PopMask,
+        ],
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(24, 12).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let data = pixmap.data();
+    let alpha_at = |x: usize, y: usize| data[(y * 24 + x) * 4 + 3];
+
+    assert!(alpha_at(5, 5) > 200, "opaque mask half should show content");
+    assert_eq!(
+        alpha_at(15, 5),
+        0,
+        "transparent mask half should hide later nested paint commands"
+    );
+}
+
+#[test]
+fn border_image_paints_only_the_border_ring() {
+    let list = DisplayList {
+        commands: vec![PaintCmd::BorderImage {
+            rect: Rect::new(2.0, 2.0, 20.0, 20.0),
+            widths: [4.0, 4.0, 4.0, 4.0],
+            slices: [1.0, 1.0, 1.0, 1.0],
+            fill_center: false,
+            data: ImageRef::Owned([0, 220, 0, 255].repeat(9), 3, 3),
+        }],
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(24, 24).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let data = pixmap.data();
+    let alpha_at = |x: usize, y: usize| data[(y * 24 + x) * 4 + 3];
+    let green_at = |x: usize, y: usize| data[(y * 24 + x) * 4 + 1];
+
+    assert!(alpha_at(4, 4) > 200 && green_at(4, 4) > 180);
+    assert_eq!(
+        alpha_at(12, 12),
+        0,
+        "border-image paint must not fill the content box"
+    );
+}
+
+#[test]
+fn resize_overflow_box_emits_resize_grip() {
+    let (_, list) = build(
+        r#"<div id="a" style="width:80px;height:60px;overflow:auto;resize:both"></div>
+           <div id="b" style="width:80px;height:60px;overflow:visible;resize:both"></div>"#,
+    );
+
+    let grips = list
+        .commands
+        .iter()
+        .filter(|cmd| matches!(cmd, PaintCmd::ResizeGrip { .. }))
+        .count();
+    assert_eq!(
+        grips, 1,
+        "only a resizable non-visible-overflow box should emit a resize affordance"
     );
 }
 

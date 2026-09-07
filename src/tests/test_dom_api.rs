@@ -47,6 +47,27 @@ fn query_selector_by_id() {
 }
 
 #[test]
+fn get_client_rects_returns_one_rect_per_owned_line_fragment() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        "<style>body{margin:0} #p{width:45px;font-size:16px;font-family:sans-serif}</style>\
+         <p id=p>alpha beta gamma</p>",
+        800.0,
+    );
+    let p = doc.get_element_by_id("p").expect("p");
+    let rects = doc.get_client_rects(p);
+
+    assert!(
+        rects.len() >= 2,
+        "wrapped paragraph should expose one client rect per line, got {rects:?}"
+    );
+    assert!(
+        rects.iter().all(|r| r.w > 0.0 && r.h > 0.0),
+        "client rect fragments should be non-empty: {rects:?}"
+    );
+}
+
+#[test]
 fn query_selector_descendant() {
     let doc = parse_html(r#"<div><ul><li>item</li></ul></div>"#);
     let li = doc.query_selector("div li");
@@ -463,6 +484,38 @@ fn inline_style_enumerates_items_and_remove_returns_old_value() {
 }
 
 #[test]
+fn document_stylesheet_rules_can_be_inserted_deleted_and_recascaded() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html("<style>p { color: red; }</style><p id=p>x</p>", 400.0);
+    let p = doc.get_element_by_id("p").unwrap();
+
+    assert_eq!(doc.style_sheet_len(), 1);
+    let rule_count = doc.style_sheet_css_rules(0).unwrap().len();
+    assert!(
+        doc.style_sheet_css_rules(0)
+            .unwrap()
+            .contains(&"p { color: red; }".to_string()),
+        "the aggregate document stylesheet should expose author rules"
+    );
+    assert_eq!(
+        doc.insert_style_sheet_rule(0, "p { color: blue; }", rule_count),
+        Ok(rule_count)
+    );
+
+    crate::layout::LayoutEngine::new().layout(&mut doc, 400.0);
+    assert_eq!(doc.computed_style_property(p, "color"), "rgb(0, 0, 255)");
+
+    assert_eq!(doc.delete_style_sheet_rule(0, rule_count), Ok(()));
+    crate::layout::LayoutEngine::new().layout(&mut doc, 400.0);
+    assert_eq!(doc.computed_style_property(p, "color"), "rgb(255, 0, 0)");
+
+    assert_eq!(
+        doc.insert_style_sheet_rule(1, "p { color: green; }", 0),
+        Err("IndexSizeError".to_string())
+    );
+}
+
+#[test]
 fn inline_style_parser_keeps_semicolons_inside_url_and_strings() {
     let mut doc = parse_html(
         r#"<div style='background-image: url("data:image/svg+xml;base64,AAAA"); content: "a;b"; color: red'></div>"#,
@@ -561,12 +614,418 @@ fn set_style_property_expands_box_and_pair_shorthands() {
         Some("solid".to_string())
     );
 
+    doc.set_style_property(div, "outline", "3px dotted green");
+    assert_eq!(doc.get_style_property(div, "outline"), None);
+    assert_eq!(
+        doc.get_style_property(div, "outline-width"),
+        Some("3px".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "outline-style"),
+        Some("dotted".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "outline-color"),
+        Some("rgb(0, 128, 0)".to_string())
+    );
+
+    doc.set_style_property(div, "columns", "120px 3 !important");
+    assert_eq!(doc.get_style_property(div, "columns"), None);
+    assert_eq!(
+        doc.get_style_property(div, "column-width"),
+        Some("120px".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "column-count"),
+        Some("3".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property_priority(div, "column-count"),
+        Some("important".to_string())
+    );
+
+    doc.set_style_property(div, "column-rule", "4px dashed blue");
+    assert_eq!(doc.get_style_property(div, "column-rule"), None);
+    assert_eq!(
+        doc.get_style_property(div, "column-rule-width"),
+        Some("4px".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "column-rule-style"),
+        Some("dashed".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "column-rule-color"),
+        Some("rgb(0, 0, 255)".to_string())
+    );
+
     doc.set_style_property(div, "margin", "");
     assert_eq!(doc.get_style_property(div, "margin-top"), None);
     assert_eq!(doc.get_style_property(div, "margin-left"), None);
     assert_eq!(
         doc.get_style_property(div, "row-gap"),
         Some("4px".to_string())
+    );
+}
+
+#[test]
+fn set_style_property_expands_font_shorthand() {
+    let mut doc = parse_html("<div style='font-variant-numeric: tabular-nums;'></div>");
+    let div = doc.query_selector("div").unwrap();
+
+    doc.set_style_property(
+        div,
+        "font",
+        r#"italic small-caps 700 condensed 16px/20px "A B" !important"#,
+    );
+
+    assert_eq!(doc.get_style_property(div, "font"), None);
+    assert_eq!(
+        doc.get_style_property(div, "font-style"),
+        Some("italic".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "font-variant"),
+        Some("small-caps".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "font-weight"),
+        Some("700".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "font-stretch"),
+        Some("condensed".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "font-size"),
+        Some("16px".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "line-height"),
+        Some("20px".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "font-family"),
+        Some(r#""A B""#.to_string())
+    );
+    assert_eq!(
+        doc.get_style_property_priority(div, "font-family"),
+        Some("important".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "font-variant-numeric"),
+        Some("normal".to_string())
+    );
+
+    doc.set_style_property(div, "font", "");
+    assert_eq!(doc.get_style_property(div, "font-size"), None);
+    assert_eq!(doc.get_style_property(div, "font-variant-numeric"), None);
+}
+
+#[test]
+fn set_style_property_expands_background_shorthand() {
+    let mut doc = parse_html(
+        "<div style='background-position: 10px 20px; background-blend-mode: multiply;'></div>",
+    );
+    let div = doc.query_selector("div").unwrap();
+
+    doc.set_style_property(
+        div,
+        "background",
+        r#"red url("hero.png") left top / cover no-repeat fixed content-box padding-box !important"#,
+    );
+
+    assert_eq!(doc.get_style_property(div, "background"), None);
+    assert_eq!(
+        doc.get_style_property(div, "background-color"),
+        Some("rgb(255, 0, 0)".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "background-image"),
+        Some(r#"url("hero.png")"#.to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "background-position"),
+        Some("0% 0%".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "background-size"),
+        Some("cover".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "background-repeat"),
+        Some("no-repeat".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "background-attachment"),
+        Some("fixed".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "background-origin"),
+        Some("content-box".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "background-clip"),
+        Some("padding-box".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "background-blend-mode"),
+        Some("normal".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property_priority(div, "background-image"),
+        Some("important".to_string())
+    );
+
+    doc.set_style_property(div, "background", "");
+    assert_eq!(doc.get_style_property(div, "background-color"), None);
+    assert_eq!(doc.get_style_property(div, "background-image"), None);
+}
+
+#[test]
+fn set_style_property_expands_mask_shorthand() {
+    let mut doc = parse_html("<div style='mask-position: left top; mask-repeat: repeat-x;'></div>");
+    let div = doc.query_selector("div").unwrap();
+
+    doc.set_style_property(
+        div,
+        "mask",
+        r#"url("mask.svg") no-repeat center / contain content-box border-box alpha exclude !important"#,
+    );
+
+    assert_eq!(doc.get_style_property(div, "mask"), None);
+    assert_eq!(
+        doc.get_style_property(div, "mask-image"),
+        Some(r#"url("mask.svg")"#.to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "mask-repeat"),
+        Some("no-repeat".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "mask-position"),
+        Some("center".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "mask-size"),
+        Some("contain".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "mask-origin"),
+        Some("content-box".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "mask-clip"),
+        Some("border-box".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "mask-mode"),
+        Some("alpha".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "mask-composite"),
+        Some("exclude".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property_priority(div, "mask-image"),
+        Some("important".to_string())
+    );
+
+    doc.set_style_property(div, "mask", "");
+    assert_eq!(doc.get_style_property(div, "mask-image"), None);
+    assert_eq!(doc.get_style_property(div, "mask-repeat"), None);
+}
+
+#[test]
+fn set_style_property_expands_border_image_shorthand() {
+    let mut doc = parse_html(
+        "<div style='border-image-source: url(old.png); border-image-repeat: repeat;'></div>",
+    );
+    let div = doc.query_selector("div").unwrap();
+
+    doc.set_style_property(
+        div,
+        "border-image",
+        "url(border.png) 30 fill / 10px / 2px round stretch !important",
+    );
+
+    assert_eq!(doc.get_style_property(div, "border-image"), None);
+    assert_eq!(
+        doc.get_style_property(div, "border-image-source"),
+        Some("url(border.png)".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "border-image-slice"),
+        Some("30 fill".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "border-image-width"),
+        Some("10px".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "border-image-outset"),
+        Some("2px".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "border-image-repeat"),
+        Some("round stretch".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property_priority(div, "border-image-source"),
+        Some("important".to_string())
+    );
+
+    doc.set_style_property(div, "border-image", "");
+    assert_eq!(doc.get_style_property(div, "border-image-source"), None);
+    assert_eq!(doc.get_style_property(div, "border-image-repeat"), None);
+}
+
+#[test]
+fn set_style_property_expands_list_style_shorthand() {
+    let mut doc = parse_html(
+        "<ul><li style='list-style-position: outside; list-style-image: url(old.svg);'></li></ul>",
+    );
+    let li = doc.query_selector("li").unwrap();
+
+    doc.set_style_property(
+        li,
+        "list-style",
+        r#"inside square url("marker.svg") !important"#,
+    );
+
+    assert_eq!(doc.get_style_property(li, "list-style"), None);
+    assert_eq!(
+        doc.get_style_property(li, "list-style-type"),
+        Some("square".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(li, "list-style-position"),
+        Some("inside".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(li, "list-style-image"),
+        Some(r#"url("marker.svg")"#.to_string())
+    );
+    assert_eq!(
+        doc.get_style_property_priority(li, "list-style-image"),
+        Some("important".to_string())
+    );
+
+    doc.set_style_property(li, "list-style", "");
+    assert_eq!(doc.get_style_property(li, "list-style-type"), None);
+    assert_eq!(doc.get_style_property(li, "list-style-image"), None);
+}
+
+#[test]
+fn set_style_property_expands_transition_shorthand() {
+    let mut doc =
+        parse_html("<div style='transition-duration: 4s; transition-property: width;'></div>");
+    let div = doc.query_selector("div").unwrap();
+
+    doc.set_style_property(
+        div,
+        "transition",
+        "opacity 200ms ease-in 50ms, display 1s step-end allow-discrete !important",
+    );
+
+    assert_eq!(doc.get_style_property(div, "transition"), None);
+    assert_eq!(
+        doc.get_style_property(div, "transition-property"),
+        Some("opacity, display".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "transition-duration"),
+        Some("200ms, 1s".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "transition-timing-function"),
+        Some("ease-in, step-end".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "transition-delay"),
+        Some("50ms, 0s".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "transition-behavior"),
+        Some("normal, allow-discrete".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property_priority(div, "transition-property"),
+        Some("important".to_string())
+    );
+
+    doc.set_style_property(div, "transition", "none");
+    assert_eq!(
+        doc.get_style_property(div, "transition-property"),
+        Some("all".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "transition-duration"),
+        Some("0s".to_string())
+    );
+}
+
+#[test]
+fn set_style_property_expands_animation_shorthand() {
+    let mut doc = parse_html("<div style='animation-duration: 4s; animation-name: old;'></div>");
+    let div = doc.query_selector("div").unwrap();
+
+    doc.set_style_property(
+        div,
+        "animation",
+        "fade 200ms ease-in 50ms infinite alternate both paused add, slide 1s step-end 2 reverse forwards running accumulate !important",
+    );
+
+    assert_eq!(doc.get_style_property(div, "animation"), None);
+    assert_eq!(
+        doc.get_style_property(div, "animation-name"),
+        Some("fade, slide".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "animation-duration"),
+        Some("200ms, 1s".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "animation-timing-function"),
+        Some("ease-in, step-end".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "animation-delay"),
+        Some("50ms, 0s".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "animation-iteration-count"),
+        Some("infinite, 2".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "animation-direction"),
+        Some("alternate, reverse".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "animation-fill-mode"),
+        Some("both, forwards".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "animation-play-state"),
+        Some("paused, running".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "animation-composition"),
+        Some("add, accumulate".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property_priority(div, "animation-name"),
+        Some("important".to_string())
+    );
+
+    doc.set_style_property(div, "animation", "none");
+    assert_eq!(
+        doc.get_style_property(div, "animation-name"),
+        Some("none".to_string())
+    );
+    assert_eq!(
+        doc.get_style_property(div, "animation-duration"),
+        Some("0s".to_string())
     );
 }
 
@@ -1630,5 +2089,76 @@ fn window_device_pixel_ratio_defaults_and_can_be_set_by_host() {
         crate::window::device_pixel_ratio(w),
         2.0,
         "invalid host ratios are ignored"
+    );
+}
+
+#[test]
+fn window_visual_viewport_reports_layout_viewport_and_scroll() {
+    let w = crate::window::open("vv-test", "width=320,height=200");
+    let doc_id = crate::window::document(w).unwrap();
+    crate::dom::registry::with_document(doc_id, |doc| {
+        doc.scroll_x = 12.0;
+        doc.scroll_y = 34.0;
+    });
+
+    let vv = crate::window::visual_viewport(w).expect("open window has a visual viewport");
+    assert_eq!(vv.width, 320.0);
+    assert_eq!(vv.height, 200.0);
+    assert_eq!(vv.scale, 1.0);
+    assert_eq!(vv.offset_left, 0.0);
+    assert_eq!(vv.offset_top, 0.0);
+    assert_eq!(vv.page_left, 12.0);
+    assert_eq!(vv.page_top, 34.0);
+
+    crate::window::resize_to(w, 480.0, 240.0);
+    let vv = crate::window::visual_viewport(w).unwrap();
+    assert_eq!(vv.width, 480.0);
+    assert_eq!(vv.height, 240.0);
+
+    crate::window::close(w);
+    assert_eq!(crate::window::visual_viewport(w), None);
+}
+
+#[test]
+fn scoped_query_selector_matches_scope_root() {
+    let doc = parse_html("<section id='scope'><p id='a'></p><div><p id='b'></p></div></section>");
+    let scope_id = doc.get_element_by_id("scope").unwrap();
+    let scope = doc.get_box_by_id(scope_id).unwrap();
+
+    let scoped = crate::dom::query::matching_ids_from(scope, ":scope > p", false);
+    assert_eq!(
+        scoped,
+        vec![doc.get_element_by_id("a").unwrap()],
+        ":scope should name the subtree root, not every descendant"
+    );
+
+    let root_only = crate::dom::query::matching_ids_from(scope, ":scope", false);
+    assert_eq!(root_only, vec![scope_id]);
+}
+
+#[test]
+fn document_query_selector_has_url_state_pseudo_classes() {
+    let doc = crate::html::parse_html_with_base(
+        "<section id=outer><p id=hit>target</p></section>\
+         <a id=local href=\"#hit\">local</a>\
+         <a id=remote href=\"https://example.test/other.html#hit\">remote</a>",
+        "https://example.test/page.html#hit",
+    );
+
+    assert_eq!(
+        doc.query_selector(":target").unwrap(),
+        doc.get_element_by_id("hit").unwrap()
+    );
+    assert_eq!(
+        doc.query_selector("section:target-within").unwrap(),
+        doc.get_element_by_id("outer").unwrap()
+    );
+    assert_eq!(
+        doc.query_selector("a:local-link").unwrap(),
+        doc.get_element_by_id("local").unwrap()
+    );
+    assert_eq!(
+        doc.query_selector_all("a:local-link"),
+        vec![doc.get_element_by_id("local").unwrap()]
     );
 }

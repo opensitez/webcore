@@ -1,6 +1,6 @@
 //! Tests for CSS value AST: min(), max(), clamp(), calc() with proper resolution.
 
-use crate::css::parse_length;
+use crate::css::{parse_color, parse_length};
 use crate::types::{BorderStyle, Color, CssLength};
 
 fn resolve(val: &CssLength, containing: f32, vw: f32) -> f32 {
@@ -60,6 +60,20 @@ fn env_length_uses_fallback_and_known_safe_area_zero() {
         CssLength::Px(20.0)
     );
     assert_eq!(parse_length("env(--unknown-inset)"), CssLength::Auto);
+}
+
+#[test]
+fn env_color_uses_fallback_for_unknown_variables() {
+    assert_eq!(
+        parse_color("env(--brand-color, rebeccapurple)"),
+        Some(Color::rgb(102, 51, 153))
+    );
+    assert_eq!(
+        parse_color("env(--brand-color, color-mix(in srgb, red 25%, blue))"),
+        Some(Color::rgb(64, 0, 191))
+    );
+    assert_eq!(parse_color("env(--brand-color)"), None);
+    assert_eq!(parse_color("env(safe-area-inset-top, red)"), None);
 }
 
 // ── min() ──────────────────────────────────────────────────────────────────
@@ -283,20 +297,61 @@ fn background_image_url_forms_all_parse() {
 }
 
 #[test]
-fn background_image_image_set_uses_first_url_candidate() {
+fn background_image_data_url_keeps_semicolon_and_comma_payload() {
     for input in [
-        "image-set(url(hero.png) 1x, url(hero@2x.png) 2x)",
-        "image-set(\"hero.avif\" type(\"image/avif\") 1x, url(hero.png) 1x)",
-        "-webkit-image-set(url(hero.png) 1x, url(hero@2x.png) 2x)",
+        "url(data:image/png;base64,iVBORw0KGgo=)",
+        "url('data:image/svg+xml;utf8,<svg viewBox=\"0 0 1 1\"></svg>')",
+        "url(\"data:image/svg+xml;base64,PHN2Zy8+\")",
     ] {
         let mut s = crate::types::ComputedStyle::default();
         crate::css::apply_property(&mut s, "background-image", input);
         assert!(
-            s.background_image_url == "hero.png" || s.background_image_url == "hero.avif",
-            "background-image image-set did not preserve a candidate URL for {input}: {}",
+            s.background_image_url.starts_with("data:image/"),
+            "background-image did not keep data URL: {input:?} -> {:?}",
+            s.background_image_url
+        );
+        assert!(
+            s.background_image_url.contains(';') && s.background_image_url.contains(','),
+            "data URL metadata/payload separator was lost: {input:?} -> {:?}",
             s.background_image_url
         );
     }
+}
+
+#[test]
+fn background_image_image_set_selects_supported_one_x_candidate() {
+    for (input, expected) in [
+        (
+            "image-set(url(hero@2x.png) 2x, url(hero.png) 1x)",
+            "hero.png",
+        ),
+        (
+            "image-set(\"hero.avif\" type(\"image/avif\") 1x, url(hero.png) type(\"image/png\") 1x)",
+            "hero.png",
+        ),
+        (
+            "-webkit-image-set(url(hero@2x.png) 2x, url(hero.png) 1x)",
+            "hero.png",
+        ),
+    ] {
+        let mut s = crate::types::ComputedStyle::default();
+        crate::css::apply_property(&mut s, "background-image", input);
+        assert_eq!(
+            s.background_image_url, expected,
+            "background-image image-set chose the wrong candidate for {input}"
+        );
+    }
+}
+
+#[test]
+fn background_image_image_set_keeps_quoted_data_url_candidate_together() {
+    let mut s = crate::types::ComputedStyle::default();
+    crate::css::apply_property(
+        &mut s,
+        "background-image",
+        r#"image-set("data:image/png;base64,AAAA" 1x, url(hero@2x.png) 2x)"#,
+    );
+    assert_eq!(s.background_image_url, "data:image/png;base64,AAAA");
 }
 
 /// And it must resolve against the document origin, keeping the scheme.
@@ -307,6 +362,24 @@ fn protocol_relative_url_takes_the_base_scheme() {
         "https://fr.wikipedia.org/wiki/Foo",
     );
     assert_eq!(got, "https://upload.wikimedia.org/a.svg");
+}
+
+#[test]
+fn file_url_base_directory_resolves_relative_stylesheets() {
+    let got = crate::html::images::resolve_url(
+        "support/flexbox.css",
+        "file:///tmp/webcore/wpt/css-flexbox",
+    );
+    assert_eq!(got, "/tmp/webcore/wpt/css-flexbox/support/flexbox.css");
+}
+
+#[test]
+fn explicit_file_url_resolves_to_local_path() {
+    let got = crate::html::images::resolve_url(
+        "file:///tmp/webcore/wpt/fonts/ahem.css",
+        "file:///tmp/webcore/wpt/css-flexbox",
+    );
+    assert_eq!(got, "/tmp/webcore/wpt/fonts/ahem.css");
 }
 
 // ── Colour keywords and accent-color ────────────────────────────────────────
@@ -327,6 +400,45 @@ fn colour_keywords_are_case_insensitive() {
         let c = s.background_color;
         assert_eq!((c.r, c.g, c.b), expect, "background-color: {input}");
     }
+}
+
+#[test]
+fn system_color_keywords_parse_case_insensitively() {
+    let mut s = crate::types::ComputedStyle::default();
+    crate::css::apply_property(&mut s, "background-color", "Canvas");
+    crate::css::apply_property(&mut s, "color", "CanvasText");
+
+    assert_eq!(s.background_color, crate::types::Color::WHITE);
+    assert_eq!(s.color, crate::types::Color::BLACK);
+}
+
+#[test]
+fn scrollbar_color_parses_pairs_and_auto_reset() {
+    let mut s = crate::types::ComputedStyle::default();
+
+    crate::css::apply_property(&mut s, "scrollbar-color", "red blue");
+    assert_eq!(
+        s.scrollbar_thumb_color,
+        Some(crate::types::Color::rgb(255, 0, 0))
+    );
+    assert_eq!(
+        s.scrollbar_track_color,
+        Some(crate::types::Color::rgb(0, 0, 255))
+    );
+
+    crate::css::apply_property(&mut s, "scrollbar-color", "red banana");
+    assert_eq!(
+        s.scrollbar_thumb_color,
+        Some(crate::types::Color::rgb(255, 0, 0))
+    );
+    assert_eq!(
+        s.scrollbar_track_color,
+        Some(crate::types::Color::rgb(0, 0, 255))
+    );
+
+    crate::css::apply_property(&mut s, "scrollbar-color", "auto");
+    assert_eq!(s.scrollbar_thumb_color, None);
+    assert_eq!(s.scrollbar_track_color, None);
 }
 
 /// **`accent-color` must not touch `background-color`.** With no accent field
@@ -372,14 +484,14 @@ fn font_size_xxx_large_is_not_zero() {
 fn overflow_clip_is_not_visible() {
     let mut s = crate::types::ComputedStyle::default();
     crate::css::apply_property(&mut s, "overflow", "clip");
-    assert_ne!(
+    assert_eq!(
         s.overflow_x,
-        crate::types::Overflow::Visible,
+        crate::types::Overflow::Clip,
         "overflow: clip must clip"
     );
-    assert_ne!(
+    assert_eq!(
         s.overflow_y,
-        crate::types::Overflow::Visible,
+        crate::types::Overflow::Clip,
         "overflow: clip must clip"
     );
 }
