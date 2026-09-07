@@ -1,6 +1,5 @@
 use super::Constraints;
 use crate::layout::block::collapse_two;
-use crate::layout::has_block_children;
 use crate::layout::text::resolve_bidi_line;
 use crate::layout::{layout_positioned, FloatContext, FloatSide, LayoutEngine, ResolvedBox};
 use crate::types::*;
@@ -21,13 +20,14 @@ pub fn layout_inline_block(
     let y = c.y;
     let font_px = c.parent_font_px;
     let root_font_px = c.root_font_px;
-    // Create a local float context if the parent didn't provide one.
-    // This ensures floated children inside inline containers are placed correctly.
+    // Create a local float context when this box establishes a BFC; otherwise
+    // clone the parent context so inline content can avoid ancestor floats.
     let mut fc_owned = FloatContext::default();
-    let has_parent_fc = parent_float_ctx.is_some();
-    let mut float_ctx: Option<&mut FloatContext> = if let Some(fc) = parent_float_ctx {
-        // Use parent's float context -- but we can't store it directly because of
-        // borrow rules, so we clone its state into fc_owned and use that.
+    let establishes_own_float_context = crate::layout::block::establishes_bfc(&node.style);
+    let has_parent_fc = parent_float_ctx.is_some() && !establishes_own_float_context;
+    let mut float_ctx: Option<&mut FloatContext> = if establishes_own_float_context {
+        Some(&mut fc_owned)
+    } else if let Some(fc) = parent_float_ctx {
         fc_owned = fc.clone();
         Some(&mut fc_owned)
     } else {
@@ -130,7 +130,7 @@ pub fn layout_inline_block(
 
     // Set float context origin now that content_y is known
     if let Some(ref mut fc) = float_ctx {
-        if fc.origin_y == 0.0 && fc.floats.is_empty() {
+        if establishes_own_float_context || (fc.origin_y == 0.0 && fc.floats.is_empty()) {
             fc.origin_y = content_y;
         }
     }
@@ -145,7 +145,8 @@ pub fn layout_inline_block(
         if matches!(
             node.children[ci].style.display,
             Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
-        ) {
+        ) || is_atomic_inline_replaced(&node.children[ci])
+        {
             engine.layout_box(
                 &mut node.children[ci],
                 &Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
@@ -162,17 +163,16 @@ pub fn layout_inline_block(
                     .iter()
                     .map(|l| l.width)
                     .fold(0.0_f32, f32::max);
-                // For block-container inline-blocks (e.g. ul/div with block children),
-                // line_cache is empty — fall back to max_content_width which
-                // recurses into block children to find max content width.
-                let intrinsic_w = if max_line_w > 0.0 {
-                    max_line_w
-                } else {
-                    engine.max_content_width(&node.children[ci], font_px, root_font_px)
-                };
+                // The first pass may already have wrapped under a temporary
+                // constraint. Floor it with max-content so shrink-to-fit never
+                // bakes in that wrapped width.
+                let max_content_w =
+                    engine.max_content_width(&node.children[ci], font_px, root_font_px);
+                let intrinsic_w = max_line_w.max(max_content_w);
                 {
                     let irb = &node.children[ci];
-                    let shrink_w = intrinsic_w
+                    let shrink_w = intrinsic_w.ceil()
+                        + shrink_to_fit_slop(irb)
                         + irb.layout.resolved_pad_left
                         + irb.layout.resolved_pad_right
                         + irb.layout.resolved_border_left
@@ -188,7 +188,7 @@ pub fn layout_inline_block(
                 }
             }
         } else if node.children[ci].style.is_inline_level()
-            && has_block_children(&node.children[ci])
+            && has_in_flow_block_children(&node.children[ci])
         {
             // Inline element containing block-level children (e.g. <a><strong style="display:block">).
             // Per CSS, this creates an anonymous block formatting context. We approximate by
@@ -205,11 +205,19 @@ pub fn layout_inline_block(
             );
             // Shrink-to-fit for auto-width floats
             if node.children[ci].style.width.is_auto() {
-                let intrinsic_w =
+                let max_line_w = node.children[ci]
+                    .layout
+                    .line_cache
+                    .iter()
+                    .map(|line| line.width)
+                    .fold(0.0_f32, f32::max);
+                let max_content_w =
                     engine.max_content_width(&node.children[ci], font_px, root_font_px);
+                let intrinsic_w = max_line_w.max(max_content_w);
                 if intrinsic_w > 0.0 && intrinsic_w < content_w {
                     let irb = &node.children[ci];
-                    let shrink_w = intrinsic_w
+                    let shrink_w = intrinsic_w.ceil()
+                        + shrink_to_fit_slop(irb)
                         + irb.layout.resolved_pad_left
                         + irb.layout.resolved_pad_right
                         + irb.layout.resolved_border_left
@@ -267,26 +275,47 @@ pub fn layout_inline_block(
     } else {
         None
     };
-    for (i, child) in node.children.iter().enumerate() {
-        if matches!(child.style.display, Display::None) {
-            continue;
-        }
-        collect_items_inner(
+    let generated_content = node.style.rare().content.as_str();
+    if !generated_content.is_empty() {
+        let mut tmp_node = WebCore::new("#text");
+        tmp_node.text = generated_content.to_string();
+        tmp_node.style = node.style.clone();
+        collect_items(
             engine,
-            child,
+            &tmp_node,
             font_px,
             root_font_px,
             &mut items,
             &mut runs,
             &mut text_offset,
-            i,
-            true,
+            0,
+            false,
             &[],
-            container_deco,
         );
+    } else {
+        let mut previous_collapsible_space = false;
+        for (i, child) in node.children.iter().enumerate() {
+            if matches!(child.style.display, Display::None) {
+                continue;
+            }
+            collect_items_inner(
+                engine,
+                child,
+                font_px,
+                root_font_px,
+                &mut items,
+                &mut runs,
+                &mut text_offset,
+                i,
+                true,
+                &[],
+                container_deco,
+                &mut previous_collapsible_space,
+            );
+        }
     }
     // Also collect from own text (text directly inside element)
-    if !node.text.is_empty() {
+    if generated_content.is_empty() && !node.text.is_empty() {
         if node.is_text_node() {
             // Text node laid out directly (e.g. as a flex child): collect self,
             // but skip whitespace-only nodes (handled by parent inline layout).
@@ -419,6 +448,7 @@ pub fn layout_inline_block(
                 text_x_offset: 0.0,
                 visual_segments: Vec::new(),
                 char_x: Vec::new(),
+                has_clamped_continuation: false,
                 char_x_key: 0,
             }];
         }
@@ -479,7 +509,8 @@ pub fn layout_inline_block(
         // Still need to lay out absolutely/fixed positioned children.
         // Use collect_grid_children to flatten through display:contents,
         // matching block layout behaviour (CSS §2.7).
-        let containing_rect = if !matches!(node.style.position, Position::Static) {
+        let containing_rect = if crate::layout::establishes_positioned_containing_block(&node.style)
+        {
             node.layout.padding_rect
         } else {
             engine.pos_cb.get()
@@ -556,6 +587,9 @@ pub fn layout_inline_block(
             margin_left,
             margin_right,
         );
+        if let Some(last_line) = node.layout.line_cache.last() {
+            node.layout.baseline = last_line.y + last_line.ascent;
+        }
         node.layout.layout_dirty = false;
         node.layout.last_containing_width = c.available_width;
         return node.layout.margin_rect.h;
@@ -565,6 +599,22 @@ pub fn layout_inline_block(
     let floats_before = float_ctx.as_ref().map_or(0, |fc| fc.floats.len());
     let text_indent = engine.res_len(&node.style.text_indent, font_px, content_w, root_font_px);
     let is_rtl = node.style.direction == Direction::RTL;
+
+    let balance_inline_width = if matches!(node.style.text_wrap.as_str(), "balance" | "pretty")
+        && !matches!(node.style.white_space, WhiteSpace::Pre | WhiteSpace::Nowrap)
+        && text_indent.abs() < 0.01
+        && before_w <= 0.01
+        && after_w <= 0.01
+        && floats_before == float_ctx.as_ref().map_or(0, |fc| fc.floats.len())
+    {
+        Some(if node.style.text_wrap == "pretty" {
+            pretty_wrap_width(&items, content_w)
+        } else {
+            balanced_wrap_width(&items, content_w)
+        })
+    } else {
+        None
+    };
 
     let mut cursor_y = content_y;
     let mut item_idx = 0usize;
@@ -583,9 +633,12 @@ pub fn layout_inline_block(
 
         // ── Place leading floats before current line ──────────────────────────
         while item_idx < items.len() {
-            if let InlineItemKind::Float { child_idx } = items[item_idx].kind {
+            if let InlineItemKind::Float { path } = &items[item_idx].kind {
                 if let Some(ref mut fc) = float_ctx {
-                    let child = &mut node.children[child_idx];
+                    let Some(child) = resolve_path_mut(node, path) else {
+                        item_idx += 1;
+                        continue;
+                    };
                     let float_w = (child.layout.border_rect.w
                         + child.layout.resolved_margin_left
                         + child.layout.resolved_margin_right)
@@ -596,8 +649,19 @@ pub fn layout_inline_block(
                     } else {
                         FloatSide::Left
                     };
-                    let placed =
-                        fc.place_float(cursor_y - fc.origin_y, float_w, float_h, content_w, side);
+                    let placed = fc.place_float(
+                        cursor_y - fc.origin_y,
+                        float_w,
+                        float_h,
+                        content_w,
+                        side,
+                        &child.style.shape_outside,
+                        child.style.shape_margin.resolve(
+                            child.style.font_size_px(font_px, root_font_px),
+                            content_w,
+                            root_font_px,
+                        ),
+                    );
                     let dx = content_x + placed.x - child.layout.margin_rect.x;
                     let dy = fc.origin_y + placed.y - child.layout.margin_rect.y;
                     crate::layout::shift_rects(child, dx, dy);
@@ -637,6 +701,9 @@ pub fn layout_inline_block(
         } else {
             finite_w
         };
+        if let Some(balance_w) = balance_inline_width {
+            avail_w = avail_w.min(balance_w).max(1.0);
+        }
         let align_w = finite_w;
 
         // Break items for this line
@@ -648,9 +715,12 @@ pub fn layout_inline_block(
         // we must re-break the line.
         let mut i = item_idx;
         while i < line_end {
-            if let InlineItemKind::Float { child_idx } = items[i].kind {
+            if let InlineItemKind::Float { path } = &items[i].kind {
                 if let Some(ref mut fc) = float_ctx {
-                    let child = &mut node.children[child_idx];
+                    let Some(child) = resolve_path_mut(node, path) else {
+                        i += 1;
+                        continue;
+                    };
                     let float_w = (child.layout.border_rect.w
                         + child.layout.resolved_margin_left
                         + child.layout.resolved_margin_right)
@@ -661,8 +731,19 @@ pub fn layout_inline_block(
                     } else {
                         FloatSide::Left
                     };
-                    let placed =
-                        fc.place_float(cursor_y - fc.origin_y, float_w, float_h, content_w, side);
+                    let placed = fc.place_float(
+                        cursor_y - fc.origin_y,
+                        float_w,
+                        float_h,
+                        content_w,
+                        side,
+                        &child.style.shape_outside,
+                        child.style.shape_margin.resolve(
+                            child.style.font_size_px(font_px, root_font_px),
+                            content_w,
+                            root_font_px,
+                        ),
+                    );
                     let dx = content_x + placed.x - child.layout.margin_rect.x;
                     let dy = fc.origin_y + placed.y - child.layout.margin_rect.y;
                     crate::layout::shift_rects(child, dx, dy);
@@ -781,7 +862,7 @@ pub fn layout_inline_block(
                 TextAlign::Center => ((align_w - content_line_w) / 2.0).max(0.0),
                 _ => 0.0,
             };
-        if line_x < content_x {
+        if text_indent >= 0.0 && line_x < content_x {
             line_x = content_x;
         }
 
@@ -789,7 +870,7 @@ pub fn layout_inline_block(
         let is_last_line = next_start >= items.len();
         if is_first_line && before_w > 0.0 {
             line_x -= before_w;
-            if line_x < content_x {
+            if text_indent >= 0.0 && line_x < content_x {
                 line_x = content_x;
             }
         }
@@ -918,21 +999,24 @@ pub fn layout_inline_block(
         {
             let mut cur_x = line_x;
             for item in line_items {
-                if let InlineItemKind::Atomic { path } = &item.kind {
+                if let InlineItemKind::Atomic { path, .. } = &item.kind {
                     let child_node = resolve_path(node, path);
                     let box_h = child_node
                         .map(|n| n.layout.margin_rect.h)
                         .unwrap_or(item.height);
                     let valign = child_node
-                        .map(|n| n.style.vertical_align)
+                        .map(|n| n.style.vertical_align.clone())
                         .unwrap_or(crate::types::VerticalAlign::Baseline);
                     let ay = match valign {
                         crate::types::VerticalAlign::Top => cursor_y,
                         crate::types::VerticalAlign::Bottom => cursor_y + line_h - box_h,
                         crate::types::VerticalAlign::Middle => cursor_y + (line_h - box_h) / 2.0,
                         _ => {
-                            // Baseline: bottom margin edge on the line baseline
-                            let ay = cursor_y + line_asc - box_h;
+                            // Baseline alignment uses the item's synthesized
+                            // ascent. For inline-block that is the bottom edge;
+                            // for inline-flex/grid it can be the container's
+                            // own baseline contribution.
+                            let ay = cursor_y + line_asc - item.ascent;
                             ay.max(cursor_y)
                         }
                     };
@@ -965,13 +1049,14 @@ pub fn layout_inline_block(
             text_x_offset: text_x_off,
             visual_segments: Vec::new(),
             char_x: Vec::new(),
+            has_clamped_continuation: false,
             char_x_key: 0,
         };
 
         // Resolve BiDi visual segments for this line
         let para_dir = node.style.direction;
         let flat_text = collect_flat_text(node);
-        resolve_bidi_line(&flat_text, &mut ll, para_dir);
+        resolve_bidi_line(&flat_text, &mut ll, para_dir, node.style.unicode_bidi);
 
         // Fill per-character x positions using real glyph metrics, shaped at
         // physical pixel size so positions match the renderer exactly.
@@ -1031,6 +1116,7 @@ pub fn layout_inline_block(
             text_x_offset: 0.0,
             visual_segments: Vec::new(),
             char_x: Vec::new(),
+            has_clamped_continuation: false,
             char_x_key: 0,
         });
         cursor_y += font_px * 1.2;
@@ -1051,6 +1137,7 @@ pub fn layout_inline_block(
             text_x_offset: 0.0,
             visual_segments: Vec::new(),
             char_x: Vec::new(),
+            has_clamped_continuation: false,
             char_x_key: 0,
         });
         cursor_y += font_px * 1.2;
@@ -1060,6 +1147,9 @@ pub fn layout_inline_block(
         let limit = limit as usize;
         if limit > 0 && line_cache.len() > limit {
             line_cache.truncate(limit);
+            if let Some(last) = line_cache.last_mut() {
+                last.has_clamped_continuation = true;
+            }
             cursor_y = line_cache
                 .last()
                 .map(|line| line.y + line.height)
@@ -1132,6 +1222,9 @@ pub fn layout_inline_block(
         margin_left,
         margin_right,
     );
+    if let Some(last_line) = line_cache.last() {
+        node.layout.baseline = last_line.y + last_line.ascent;
+    }
     node.layout.line_cache = line_cache;
     node.layout.inline_runs = runs;
 
@@ -1180,7 +1273,7 @@ pub fn layout_inline_block(
     //    Inline containers can still be containing blocks for absolutely-positioned
     //    children (e.g. a `position:relative` div whose only visible in-flow content
     //    is text while its absolutely-placed children are out-of-flow).
-    let containing_rect = if !matches!(node.style.position, Position::Static) {
+    let containing_rect = if crate::layout::establishes_positioned_containing_block(&node.style) {
         node.layout.padding_rect
     } else {
         engine.pos_cb.get()
@@ -1196,10 +1289,14 @@ pub fn layout_inline_block(
     for path in &abs_paths2 {
         let child = crate::layout::grid::grid_child_mut(node, path);
         // Record static position: where this element would sit in normal flow
-        // (content_y of the inline container).
+        // (content origin of the inline container).
+        if child.layout.abs_static_x.is_none() {
+            child.layout.abs_static_x = Some(content_x);
+        }
         if child.layout.abs_static_y.is_none() {
             child.layout.abs_static_y = Some(content_y);
         }
+        let had_static_x = child.layout.abs_static_x.is_some();
         let had_static_y = child.layout.abs_static_y.is_some();
         layout_positioned(engine, child, containing_rect, font_px, root_font_px);
         let child = crate::layout::grid::grid_child_mut(node, path);
@@ -1207,7 +1304,11 @@ pub fn layout_inline_block(
             && child.style.right.is_auto()
             && child.style.top.is_auto()
             && child.style.bottom.is_auto();
-        if all_auto && matches!(child.style.position, Position::Absolute) && !had_static_y {
+        if all_auto
+            && matches!(child.style.position, Position::Absolute)
+            && !had_static_x
+            && !had_static_y
+        {
             let dx = containing_rect.x - child.layout.border_rect.x;
             let dy = containing_rect.y - child.layout.border_rect.y;
             if dx.abs() > 0.01 || dy.abs() > 0.01 {
@@ -1321,9 +1422,22 @@ fn set_box_rects(
 fn measure_metrics(items: &[InlineItem], strut_asc: f32, strut_desc: f32) -> (f32, f32, f32) {
     let mut max_asc = strut_asc;
     let mut max_desc = strut_desc;
+    let mut max_atomic_h = 0.0f32;
+    let mut max_atomic_asc = 0.0f32;
+    let mut max_atomic_desc = 0.0f32;
+    let mut has_atomic = false;
+    let mut has_text = false;
     for it in items {
         if matches!(it.kind, InlineItemKind::Break) {
             continue;
+        }
+        if matches!(it.kind, InlineItemKind::Atomic { .. }) {
+            has_atomic = true;
+            max_atomic_h = max_atomic_h.max(it.height);
+            max_atomic_asc = max_atomic_asc.max(it.ascent);
+            max_atomic_desc = max_atomic_desc.max(it.descent);
+        } else if !it.is_space {
+            has_text = true;
         }
         if it.ascent > max_asc {
             max_asc = it.ascent;
@@ -1332,7 +1446,58 @@ fn measure_metrics(items: &[InlineItem], strut_asc: f32, strut_desc: f32) -> (f3
             max_desc = it.descent;
         }
     }
+    if has_atomic && !has_text && max_atomic_desc < 0.5 {
+        let line_h = baseline_bottom_atomic_line_height(max_atomic_h, strut_asc, strut_desc);
+        let line_asc = max_atomic_asc.max(strut_asc).min(line_h);
+        return (line_h, line_asc, (line_h - line_asc).max(0.0));
+    }
     (max_asc + max_desc, max_asc, max_desc)
+}
+
+fn shifted_inline_metrics(
+    vertical_align: &VerticalAlign,
+    font_px: f32,
+    ascent: f32,
+    descent: f32,
+) -> (f32, f32) {
+    let shift = vertical_align_shift(vertical_align, font_px, ascent + descent);
+    match vertical_align {
+        VerticalAlign::Super => (ascent + shift, (descent - shift).max(0.0)),
+        VerticalAlign::Sub => ((ascent - shift).max(0.0), descent + shift),
+        VerticalAlign::TextTop => (ascent + shift, (descent - shift).max(0.0)),
+        VerticalAlign::TextBottom => ((ascent + shift).max(0.0), descent - shift),
+        VerticalAlign::Length(_) if shift >= 0.0 => (ascent + shift, (descent - shift).max(0.0)),
+        VerticalAlign::Length(_) => ((ascent + shift).max(0.0), descent - shift),
+        _ => (ascent, descent),
+    }
+}
+
+pub(crate) fn vertical_align_shift(
+    vertical_align: &VerticalAlign,
+    font_px: f32,
+    line_height_px: f32,
+) -> f32 {
+    match vertical_align {
+        VerticalAlign::Super | VerticalAlign::Sub => font_px * 0.35,
+        VerticalAlign::TextTop => font_px * 0.25,
+        VerticalAlign::TextBottom => -(font_px * 0.25),
+        VerticalAlign::Length(length) => length.resolve(font_px, line_height_px, font_px),
+        _ => 0.0,
+    }
+}
+
+fn effective_inline_vertical_align(
+    own: VerticalAlign,
+    parent: Option<&crate::types::ComputedStyle>,
+) -> VerticalAlign {
+    if own != VerticalAlign::Baseline {
+        own
+    } else {
+        parent
+            .map(|style| style.vertical_align.clone())
+            .filter(|vertical_align| *vertical_align != VerticalAlign::Baseline)
+            .unwrap_or(own)
+    }
 }
 
 /// Split an inline box's leading evenly above and below its font
@@ -1356,8 +1521,29 @@ pub fn strut_line_height(
     box_h: f32,
 ) -> f32 {
     let (strut_asc, strut_desc) = strut_metrics(engine, node, font_px, root_font_px);
-    // The box hangs from the baseline, so it competes with the strut's ascent.
-    (box_h.max(strut_asc) + strut_desc).round()
+    baseline_bottom_atomic_line_height(box_h, strut_asc, strut_desc)
+}
+
+fn baseline_bottom_atomic_line_height(box_h: f32, strut_asc: f32, strut_desc: f32) -> f32 {
+    let strut_h = strut_asc + strut_desc;
+    if strut_desc > box_h * 0.25 {
+        box_h.max(strut_h).round()
+    } else {
+        (box_h + strut_desc).max(strut_h).round()
+    }
+}
+
+fn resolve_line_height(
+    engine: &LayoutEngine,
+    line_height: &CssLength,
+    font_px: f32,
+    root_font_px: f32,
+) -> Option<f32> {
+    if line_height.is_auto() {
+        None
+    } else {
+        Some(engine.res_len(line_height, font_px, font_px, root_font_px))
+    }
 }
 
 /// The strut for a block: its own font and `line-height`.
@@ -1369,11 +1555,8 @@ fn strut_metrics(
 ) -> (f32, f32) {
     let fs = unsafe { engine.font_system.map(|fs| &mut *fs) };
     let (fa, fd, natural_lh) = font_metrics(fs, &node.style.font_family, font_px);
-    let line_h = if node.style.line_height.is_auto() {
-        natural_lh
-    } else {
-        engine.res_len(&node.style.line_height, font_px, 0.0, root_font_px)
-    };
+    let line_h = resolve_line_height(engine, &node.style.line_height, font_px, root_font_px)
+        .unwrap_or(natural_lh);
     half_leading(fa, fd, line_h)
 }
 
@@ -1388,14 +1571,14 @@ pub enum InlineItemKind {
         text_len: usize,
         box_idx: usize,
     },
-    /// An inline-block child.  `path` is a chain of child indices from the
-    /// block container down to the actual InlineBlock node (e.g. [2, 0, 0]
-    /// means node.children[2].children[0].children[0]).
-    Atomic { path: Vec<usize> },
+    /// An atomic inline-level child. `path` is a chain of child indices from
+    /// the block container down to the actual node (e.g. [2, 0, 0] means
+    /// node.children[2].children[0].children[0]).
+    Atomic { path: Vec<usize>, display: Display },
     /// Forced line break (<br>).
     Break,
-    /// A floated child.
-    Float { child_idx: usize },
+    /// A floated child. `path` is rooted at the inline formatting context.
+    Float { path: Vec<usize> },
 }
 
 #[derive(Debug, Clone)]
@@ -1414,8 +1597,7 @@ pub struct InlineItem {
 /// Walk a node and emit InlineItems into `items`, also building style runs.
 /// `text_offset` tracks the current byte position in the global flat-text string.
 /// `is_direct_child` must be `true` only when `node` is an immediate child of the
-/// inline container being laid out; Float items use `box_idx` to index back into
-/// that container's `children` vec, so the index is only valid at depth 0.
+/// inline container being laid out.
 pub fn collect_items(
     engine: &LayoutEngine,
     node: &WebCore,
@@ -1443,6 +1625,7 @@ pub fn collect_items(
         is_direct_child,
         ancestor_path,
         None,
+        &mut false,
     );
 }
 
@@ -1458,29 +1641,29 @@ fn collect_items_inner(
     is_direct_child: bool,
     ancestor_path: &[usize],
     parent_decoration: Option<&crate::types::ComputedStyle>,
+    previous_collapsible_space: &mut bool,
 ) {
     if matches!(node.style.display, Display::None) {
         return;
     }
+    let generated_content = node.style.rare().content.as_str();
 
     // Absolutely/fixed positioned elements are out of flow — skip them here;
     // they are laid out separately by layout_positioned.
     // Record the static position so deeply nested abs elements can use it.
     if matches!(node.style.position, Position::Absolute | Position::Fixed) {
         // Note: we don't have cursor_y here, but the parent's content_y is available
-        // through the node's parent position. We'll set abs_static_y in layout_inline_block
+        // through the node's parent position. We'll set abs_static_x/y in layout_inline_block
         // after items are collected.
         return;
     }
 
     // ── Float ─────────────────────────────────────────────────────────────
-    // Only emit a Float item when this node is a *direct* child of the
-    // inline container being laid out.  Nested floats (float inside a <span>
-    // inside a block) would produce an out-of-bounds child_idx; we fall through
-    // and render them inline instead.
-    if !matches!(node.style.float, crate::types::Float::None) && is_direct_child {
+    if !matches!(node.style.float, crate::types::Float::None) {
+        let mut full_path = ancestor_path.to_vec();
+        full_path.push(box_idx);
         items.push(InlineItem {
-            kind: InlineItemKind::Float { child_idx: box_idx },
+            kind: InlineItemKind::Float { path: full_path },
             advance: 0.0,
             ascent: 0.0,
             descent: 0.0,
@@ -1496,11 +1679,8 @@ fn collect_items_inner(
     let (font_asc, font_desc, natural_lh) =
         font_metrics(font_system, &node.style.font_family, font_px);
     // `line-height: normal` is the font's own natural line height.
-    let line_h = if node.style.line_height.is_auto() {
-        natural_lh
-    } else {
-        engine.res_len(&node.style.line_height, font_px, 0.0, root_font_px)
-    };
+    let line_h = resolve_line_height(engine, &node.style.line_height, font_px, root_font_px)
+        .unwrap_or(natural_lh);
     // CSS 2.1 §10.8.1: an inline box's leading is split evenly above and below
     // its font, and it is THOSE half-leading-adjusted edges that size the line
     // box — not the bare font metrics. Using the raw metrics put the baseline
@@ -1510,17 +1690,28 @@ fn collect_items_inner(
 
     // ── Text node ─────────────────────────────────────────────────────────
     if node.is_text_node() {
-        if !node.text.is_empty() {
+        let rendered_text = if generated_content.is_empty() {
+            node.text.as_str()
+        } else {
+            generated_content
+        };
+        if !rendered_text.is_empty() {
             let start = *text_offset;
             let (letter_s, word_s) = resolved_spacings(engine, &node.style, font_px, root_font_px);
+            let vertical_align = effective_inline_vertical_align(
+                node.style.vertical_align.clone(),
+                parent_decoration,
+            );
+            let (item_ascent, item_descent) =
+                shifted_inline_metrics(&vertical_align, font_px, ascent, descent);
             tokenize_text(
                 engine,
-                &node.text,
+                rendered_text,
                 node.style.white_space,
                 start,
                 font_px,
-                ascent,
-                descent,
+                item_ascent,
+                item_descent,
                 line_h,
                 box_idx,
                 items,
@@ -1529,6 +1720,10 @@ fn collect_items_inner(
                 &node.style.font_family,
                 letter_s,
                 word_s,
+                node.style.word_break,
+                node.style.overflow_wrap,
+                node.style.hyphens,
+                previous_collapsible_space,
             );
             // ⛔ `node.style.clone()` now clones the ARC. This wants the
             // VALUE — it is mutated below and stored in an `InlineRun`.
@@ -1567,19 +1762,25 @@ fn collect_items_inner(
                 if run_style.href.is_empty() && !ps.href.is_empty() {
                     run_style.href = ps.href.clone();
                 }
+                if run_style.vertical_align == VerticalAlign::Baseline
+                    && ps.vertical_align != VerticalAlign::Baseline
+                {
+                    run_style.vertical_align = ps.vertical_align.clone();
+                }
             }
             runs.push(InlineRun {
                 text_offset: start,
-                length: node.text.len(),
+                length: rendered_text.len(),
                 style: run_style,
             });
-            *text_offset += node.text.len();
+            *text_offset += rendered_text.len();
         }
         return;
     }
 
     // ── Forced line break ─────────────────────────────────────────────────
     if node.tag == "br" {
+        *previous_collapsible_space = false;
         items.push(InlineItem {
             kind: InlineItemKind::Break,
             advance: 0.0,
@@ -1592,20 +1793,49 @@ fn collect_items_inner(
         return;
     }
 
+    if !node.style.before_content.is_empty() {
+        let pseudo_style = node
+            .style
+            .before_style
+            .as_deref()
+            .unwrap_or_else(|| node.style.as_ref());
+        emit_generated_inline_content(
+            engine,
+            &node.style.before_content,
+            pseudo_style,
+            font_px,
+            root_font_px,
+            items,
+            runs,
+            text_offset,
+            box_idx,
+            previous_collapsible_space,
+        );
+    }
+
     // ── Atomic inline-block ───────────────────────────────────────────────
     // Also treat inline elements that contain block-level children as atomic.
     // This handles the "block inside inline" case (e.g. <a><strong display:block>).
     let is_inline_with_block_children = is_direct_child
         && node.style.is_inline_level()
         && !node.is_text_node()
-        && has_block_children(node);
+        && has_in_flow_block_children(node);
     if matches!(
         node.style.display,
         Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
     ) || is_inline_with_block_children
+        || is_atomic_inline_replaced(node)
     {
-        // Use the pre-laid-out margin-rect width (set by the pre-layout pass)
-        let box_w = if node.layout.margin_rect.w > 0.0 {
+        // Use the pre-laid-out border box plus the resolved margins. The
+        // stored margin rect deliberately clamps negative margins for float
+        // placement, but inline layout must let negative margins reduce the
+        // advance width; Slashdot's nav uses `li { margin-left:-4px }`.
+        let used_margin_w = node.layout.border_rect.w
+            + node.layout.resolved_margin_left
+            + node.layout.resolved_margin_right;
+        let box_w = if used_margin_w > 0.0 {
+            used_margin_w
+        } else if node.layout.margin_rect.w > 0.0 {
             node.layout.margin_rect.w
         } else {
             50.0
@@ -1617,30 +1847,54 @@ fn collect_items_inner(
         };
         let mut full_path = ancestor_path.to_vec();
         full_path.push(box_idx);
+        let (item_ascent, item_descent) = if matches!(
+            node.style.display,
+            Display::InlineFlex | Display::InlineGrid
+        ) {
+            let a = box_h.min(ascent);
+            (a, (box_h - a).max(0.0))
+        } else if matches!(node.style.display, Display::InlineBlock) {
+            let baseline = node.layout.baseline - node.layout.margin_rect.y;
+            let a = baseline.clamp(0.0, box_h);
+            (a, (box_h - a).max(0.0))
+        } else {
+            (box_h, 0.0)
+        };
         items.push(InlineItem {
-            kind: InlineItemKind::Atomic { path: full_path },
+            kind: InlineItemKind::Atomic {
+                path: full_path,
+                display: node.style.display,
+            },
             advance: box_w,
-            ascent: box_h,
-            descent: 0.0,
+            ascent: item_ascent,
+            descent: item_descent,
             height: box_h,
             is_space: false,
             breakable: true,
         });
+        *previous_collapsible_space = false;
         return;
     }
 
     // ── Own text ──────────────────────────────────────────────────────────
-    if !node.text.is_empty() {
+    let rendered_text = if generated_content.is_empty() {
+        node.text.as_str()
+    } else {
+        generated_content
+    };
+    if !rendered_text.is_empty() {
         let start = *text_offset;
         let (letter_s, word_s) = resolved_spacings(engine, &node.style, font_px, root_font_px);
+        let (item_ascent, item_descent) =
+            shifted_inline_metrics(&node.style.vertical_align, font_px, ascent, descent);
         tokenize_text(
             engine,
-            &node.text,
+            rendered_text,
             node.style.white_space,
             start,
             font_px,
-            ascent,
-            descent,
+            item_ascent,
+            item_descent,
             line_h,
             box_idx,
             items,
@@ -1649,13 +1903,17 @@ fn collect_items_inner(
             &node.style.font_family,
             letter_s,
             word_s,
+            node.style.word_break,
+            node.style.overflow_wrap,
+            node.style.hyphens,
+            previous_collapsible_space,
         );
         runs.push(InlineRun {
             text_offset: start,
-            length: node.text.len(),
+            length: rendered_text.len(),
             style: (*node.style).clone(),
         });
-        *text_offset += node.text.len();
+        *text_offset += rendered_text.len();
     }
 
     // ── Inline box decoration: account for padding/border/margin ────────
@@ -1698,30 +1956,54 @@ fn collect_items_inner(
     let runs_before = runs.len();
     let mut child_path = ancestor_path.to_vec();
     child_path.push(box_idx);
-    // Pass this element's style to children if it has text-decoration or href
-    // (text-decoration paints across descendants; href needed for link hit-testing)
+    // Pass this element's style to children for inline visual effects that
+    // apply through the inline box rather than normal CSS inheritance.
     let deco_source = if node.style.text_decoration.underline
         || node.style.text_decoration.overline
         || node.style.text_decoration.strikethrough
         || !node.style.href.is_empty()
+        || node.style.vertical_align != VerticalAlign::Baseline
     {
         Some(node.style.as_ref())
     } else {
         parent_decoration
     };
-    for (i, child) in node.children.iter().enumerate() {
-        collect_items_inner(
+    if generated_content.is_empty() {
+        for (i, child) in node.children.iter().enumerate() {
+            collect_items_inner(
+                engine,
+                child,
+                font_px,
+                root_font_px,
+                items,
+                runs,
+                text_offset,
+                i,
+                false,
+                &child_path,
+                deco_source,
+                previous_collapsible_space,
+            );
+        }
+    }
+
+    if !node.style.after_content.is_empty() {
+        let pseudo_style = node
+            .style
+            .after_style
+            .as_deref()
+            .unwrap_or_else(|| node.style.as_ref());
+        emit_generated_inline_content(
             engine,
-            child,
+            &node.style.after_content,
+            pseudo_style,
             font_px,
             root_font_px,
             items,
             runs,
             text_offset,
-            i,
-            false,
-            &child_path,
-            deco_source,
+            box_idx,
+            previous_collapsible_space,
         );
     }
 
@@ -1750,6 +2032,122 @@ fn collect_items_inner(
                 run.style.background_color = node.style.background_color;
             }
         }
+    }
+}
+
+fn emit_generated_inline_content(
+    engine: &LayoutEngine,
+    content: &str,
+    style: &ComputedStyle,
+    parent_font_px: f32,
+    root_font_px: f32,
+    items: &mut Vec<InlineItem>,
+    runs: &mut Vec<InlineRun>,
+    text_offset: &mut usize,
+    box_idx: usize,
+    previous_collapsible_space: &mut bool,
+) {
+    if content.is_empty() {
+        return;
+    }
+    let font_px = style.font_size_px(parent_font_px, root_font_px);
+    let font_system = unsafe { engine.font_system.map(|fs| &mut *fs) };
+    let (font_asc, font_desc, natural_lh) = font_metrics(font_system, &style.font_family, font_px);
+    let line_h = resolve_line_height(engine, &style.line_height, font_px, root_font_px)
+        .unwrap_or(natural_lh);
+    let (ascent, descent) = half_leading(font_asc, font_desc, line_h);
+    let rb = engine.res_box(style, font_px, 0.0, root_font_px);
+    let left = rb.margin_left + rb.border_left + rb.padding_left;
+    let right = rb.padding_right + rb.border_right + rb.margin_right;
+    if left > 0.0 {
+        items.push(InlineItem {
+            kind: InlineItemKind::Text {
+                text_start: *text_offset,
+                text_len: 0,
+                box_idx,
+            },
+            advance: left,
+            ascent: 0.0,
+            descent: 0.0,
+            height: 0.0,
+            is_space: false,
+            breakable: false,
+        });
+    }
+    let start = *text_offset;
+    let items_before_text = items.len();
+    let (letter_s, word_s) = resolved_spacings(engine, style, font_px, root_font_px);
+    let (item_ascent, item_descent) =
+        shifted_inline_metrics(&style.vertical_align, font_px, ascent, descent);
+    tokenize_text(
+        engine,
+        content,
+        style.white_space,
+        start,
+        font_px,
+        item_ascent,
+        item_descent,
+        line_h,
+        box_idx,
+        items,
+        style.font_weight,
+        style.font_style,
+        &style.font_family,
+        letter_s,
+        word_s,
+        style.word_break,
+        style.overflow_wrap,
+        style.hyphens,
+        previous_collapsible_space,
+    );
+    let emitted_text_w = items[items_before_text..]
+        .iter()
+        .map(|item| item.advance)
+        .sum::<f32>();
+    if matches!(
+        style.display,
+        Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+    ) && !style.width.is_auto()
+        && !matches!(style.width, CssLength::Percent(_))
+    {
+        let target_w = engine.res_len(&style.width, font_px, 0.0, root_font_px);
+        let extra = (target_w - emitted_text_w).max(0.0);
+        if extra > 0.0 {
+            items.push(InlineItem {
+                kind: InlineItemKind::Text {
+                    text_start: *text_offset,
+                    text_len: 0,
+                    box_idx,
+                },
+                advance: extra,
+                ascent: 0.0,
+                descent: 0.0,
+                height: 0.0,
+                is_space: false,
+                breakable: false,
+            });
+        }
+    }
+    runs.push(InlineRun {
+        text_offset: start,
+        length: content.len(),
+        style: style.clone(),
+    });
+    *text_offset += content.len();
+    if right > 0.0 {
+        items.push(InlineItem {
+            kind: InlineItemKind::Text {
+                text_start: *text_offset,
+                text_len: 0,
+                box_idx,
+            },
+            advance: right,
+            ascent: 0.0,
+            descent: 0.0,
+            height: 0.0,
+            is_space: false,
+            breakable: false,
+        });
     }
 }
 
@@ -1801,6 +2199,10 @@ fn tokenize_text(
     font_family: &str,
     letter_spacing: f32,
     word_spacing: f32,
+    word_break: WordBreak,
+    overflow_wrap: OverflowWrap,
+    hyphens: Hyphens,
+    previous_collapsible_space: &mut bool,
 ) {
     if text.is_empty() {
         return;
@@ -1811,47 +2213,149 @@ fn tokenize_text(
         WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine
     );
 
-    let bytes = text.as_bytes();
     let mut word_start = 0usize;
     let mut i = 0usize;
 
-    while i <= bytes.len() {
-        let at_end = i == bytes.len();
-        let is_nl = !at_end && bytes[i] == b'\n' && preserve_newlines;
-        let is_space = !at_end && !is_nl && bytes[i].is_ascii_whitespace();
+    while i <= text.len() {
+        let at_end = i == text.len();
+        let ch = if at_end {
+            None
+        } else {
+            text[i..].chars().next()
+        };
+        let ch_len = ch.map_or(0, |c| c.len_utf8());
+        let is_nl = matches!(ch, Some('\n')) && preserve_newlines;
+        let is_space = ch.is_some_and(|c| !is_nl && c.is_ascii_whitespace());
 
         if (at_end || is_space || is_nl) && i > word_start {
+            *previous_collapsible_space = false;
             // Emit word — use cached measurement to avoid redundant font shaping
             let word = &text[word_start..i];
-            let w = engine.measure_text_cached(word, font_px, font_weight, font_style, font_family);
-            // css-text-3 §8.2: tracking is inserted after EVERY typographic
-            // character unit, the last one included — a browser's box for
-            // `letter-spacing: 4px` on five letters is twenty pixels wider,
-            // not sixteen.
-            let tracking = letter_spacing * word.chars().count() as f32;
-            items.push(InlineItem {
-                kind: InlineItemKind::Text {
-                    text_start: base_offset + word_start,
-                    text_len: i - word_start,
-                    box_idx,
-                },
-                advance: w + tracking,
-                ascent,
-                descent,
-                height: line_h,
-                is_space: false,
-                breakable: word_start > 0,
-            });
+            let break_inside_word =
+                matches!(word_break, WordBreak::BreakAll | WordBreak::BreakWord)
+                    || matches!(
+                        overflow_wrap,
+                        OverflowWrap::Anywhere | OverflowWrap::BreakWord
+                    );
+            if break_inside_word {
+                for (rel, ch) in word.char_indices() {
+                    let next = rel + ch.len_utf8();
+                    let part = &word[rel..next];
+                    let w = engine.measure_text_cached(
+                        part,
+                        font_px,
+                        font_weight,
+                        font_style,
+                        font_family,
+                    );
+                    items.push(InlineItem {
+                        kind: InlineItemKind::Text {
+                            text_start: base_offset + word_start + rel,
+                            text_len: next - rel,
+                            box_idx,
+                        },
+                        advance: w + letter_spacing,
+                        ascent,
+                        descent,
+                        height: line_h,
+                        is_space: false,
+                        breakable: word_start > 0 || rel > 0,
+                    });
+                }
+            } else if hyphens != Hyphens::None && word.contains('\u{00ad}') {
+                let mut segment_start = 0usize;
+                let mut starts_after_soft_hyphen = false;
+                for (rel, ch) in word.char_indices() {
+                    if ch != '\u{00ad}' {
+                        continue;
+                    }
+                    if rel > segment_start {
+                        let segment = &word[segment_start..rel];
+                        let w = engine.measure_text_cached(
+                            segment,
+                            font_px,
+                            font_weight,
+                            font_style,
+                            font_family,
+                        );
+                        let tracking = letter_spacing * segment.chars().count() as f32;
+                        items.push(InlineItem {
+                            kind: InlineItemKind::Text {
+                                text_start: base_offset + word_start + segment_start,
+                                text_len: rel - segment_start,
+                                box_idx,
+                            },
+                            advance: w + tracking,
+                            ascent,
+                            descent,
+                            height: line_h,
+                            is_space: false,
+                            breakable: word_start > 0 || starts_after_soft_hyphen,
+                        });
+                    }
+                    segment_start = rel + ch.len_utf8();
+                    starts_after_soft_hyphen = true;
+                }
+                if segment_start < word.len() {
+                    let segment = &word[segment_start..];
+                    let w = engine.measure_text_cached(
+                        segment,
+                        font_px,
+                        font_weight,
+                        font_style,
+                        font_family,
+                    );
+                    let tracking = letter_spacing * segment.chars().count() as f32;
+                    items.push(InlineItem {
+                        kind: InlineItemKind::Text {
+                            text_start: base_offset + word_start + segment_start,
+                            text_len: word.len() - segment_start,
+                            box_idx,
+                        },
+                        advance: w + tracking,
+                        ascent,
+                        descent,
+                        height: line_h,
+                        is_space: false,
+                        breakable: word_start > 0 || starts_after_soft_hyphen,
+                    });
+                }
+            } else {
+                let w =
+                    engine.measure_text_cached(word, font_px, font_weight, font_style, font_family);
+                // css-text-3 §8.2: tracking is inserted after EVERY typographic
+                // character unit, the last one included — a browser's box for
+                // `letter-spacing: 4px` on five letters is twenty pixels wider,
+                // not sixteen.
+                let tracking = letter_spacing * word.chars().count() as f32;
+                items.push(InlineItem {
+                    kind: InlineItemKind::Text {
+                        text_start: base_offset + word_start,
+                        text_len: i - word_start,
+                        box_idx,
+                    },
+                    advance: w + tracking,
+                    ascent,
+                    descent,
+                    height: line_h,
+                    is_space: false,
+                    breakable: word_start > 0,
+                });
+            }
+        }
+        if at_end {
+            break;
         }
 
         if is_nl {
+            *previous_collapsible_space = false;
             // Newline in a pre-like context: forced line break.
             // The newline byte itself is represented as a 1-byte Text item with
             // zero advance so caret offsets stay in sync.
             items.push(InlineItem {
                 kind: InlineItemKind::Text {
                     text_start: base_offset + i,
-                    text_len: 1,
+                    text_len: ch_len,
                     box_idx,
                 },
                 advance: 0.0,
@@ -1870,7 +2374,7 @@ fn tokenize_text(
                 is_space: false,
                 breakable: false,
             });
-            i += 1;
+            i += ch_len;
             word_start = i;
             continue;
         }
@@ -1888,25 +2392,32 @@ fn tokenize_text(
             // Mark them as non-space so break_one_line doesn't strip leading whitespace,
             // and non-breakable in pre mode (only \n breaks lines).
             let preserve_spaces = matches!(white_space, WhiteSpace::Pre | WhiteSpace::PreWrap);
+            let collapsible_space = !preserve_spaces;
+            let advance = if collapsible_space && *previous_collapsible_space {
+                0.0
+            } else {
+                space_w
+            };
             items.push(InlineItem {
                 kind: InlineItemKind::Text {
                     text_start: base_offset + i,
-                    text_len: 1,
+                    text_len: ch_len,
                     box_idx,
                 },
-                advance: space_w,
+                advance,
                 ascent,
                 descent,
                 height: line_h,
                 is_space: !preserve_spaces,
                 breakable: !matches!(white_space, WhiteSpace::Pre),
             });
-            i += 1; // consume exactly one space byte
+            *previous_collapsible_space = collapsible_space;
+            i += ch_len; // consume exactly one space character
             word_start = i;
             continue;
         }
 
-        i += 1;
+        i += ch_len;
     }
 }
 
@@ -1919,6 +2430,7 @@ fn tokenize_text(
 /// - `items[next_start..]` remain for subsequent lines.
 /// - `was_forced_break` is true if a `<br>` item terminated the line.
 fn break_one_line(items: &[InlineItem], start_idx: usize, avail_w: f32) -> (usize, usize, bool) {
+    const LINE_BREAK_EPSILON: f32 = 0.5;
     // Skip leading spaces
     let mut i = start_idx;
     while i < items.len() && items[i].is_space {
@@ -1937,13 +2449,16 @@ fn break_one_line(items: &[InlineItem], start_idx: usize, avail_w: f32) -> (usiz
             return (i, i + 1, true);
         }
 
-        // Track last break opportunity BEFORE overflow check (matches original logic)
-        if item.breakable {
+        // Text items mark a break opportunity before the item. Atomic
+        // inline-level boxes mark one after the box, but only after this item
+        // has actually fit; otherwise the overflowing item would be included
+        // on the previous line.
+        if item.breakable && !matches!(item.kind, InlineItemKind::Atomic { .. }) {
             last_bp = Some(i);
         }
 
         let new_w = cur_w + item.advance;
-        if new_w > avail_w && i > line_start {
+        if new_w > avail_w + LINE_BREAK_EPSILON && i > line_start {
             if let Some(bp) = last_bp {
                 // Trim trailing spaces from line
                 let mut line_end = bp;
@@ -1957,17 +2472,141 @@ fn break_one_line(items: &[InlineItem], start_idx: usize, avail_w: f32) -> (usiz
                 }
                 return (line_end, next, false);
             } else {
-                // No break point: force break before current item
-                return (i, i, false);
+                // No valid break point: this is one unbreakable run. Let it
+                // overflow the line instead of splitting generated box-model
+                // fragments away from their glyph/content.
+                cur_w = new_w;
+                i += 1;
+                continue;
             }
         }
 
         cur_w += item.advance;
+        if item.breakable && matches!(item.kind, InlineItemKind::Atomic { .. }) {
+            last_bp = Some(i + 1);
+        }
         i += 1;
     }
 
     // Consumed all items
     (i, i, false)
+}
+
+fn balanced_wrap_width(items: &[InlineItem], max_w: f32) -> f32 {
+    if !max_w.is_finite() || max_w <= 0.0 || items.is_empty() {
+        return max_w;
+    }
+    let greedy = line_stats_for_width(items, max_w);
+    if greedy.count <= 1 {
+        return max_w;
+    }
+
+    let min_w = items
+        .iter()
+        .filter(|item| !item.is_space && !matches!(item.kind, InlineItemKind::Break))
+        .map(|item| item.advance)
+        .fold(1.0_f32, f32::max)
+        .min(max_w);
+    let mut lo = min_w;
+    let mut hi = max_w;
+    for _ in 0..16 {
+        let mid = (lo + hi) * 0.5;
+        let stats = line_stats_for_width(items, mid);
+        if stats.count > greedy.count {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    hi.clamp(min_w, max_w)
+}
+
+fn pretty_wrap_width(items: &[InlineItem], max_w: f32) -> f32 {
+    if !max_w.is_finite() || max_w <= 0.0 || items.is_empty() {
+        return max_w;
+    }
+    let greedy = line_stats_for_width(items, max_w);
+    if greedy.count <= 1 || !greedy.last_line_is_single_word {
+        return max_w;
+    }
+    let balanced = balanced_wrap_width(items, max_w);
+    let balanced_stats = line_stats_for_width(items, balanced);
+    if balanced_stats.count == greedy.count && !balanced_stats.last_line_is_single_word {
+        balanced
+    } else {
+        max_w
+    }
+}
+
+#[derive(Default)]
+struct LineStats {
+    count: usize,
+    max_width: f32,
+    last_line_is_single_word: bool,
+}
+
+fn line_stats_for_width(items: &[InlineItem], width: f32) -> LineStats {
+    let mut stats = LineStats::default();
+    let mut idx = 0usize;
+    let mut guard = 0usize;
+    while idx < items.len() {
+        guard += 1;
+        if guard > items.len() + 4 {
+            break;
+        }
+        let (line_end, next, was_break) = break_one_line(items, idx, width);
+        if line_end > idx {
+            let line_items = &items[idx..line_end];
+            let line_w = trimmed_line_width(line_items);
+            stats.max_width = stats.max_width.max(line_w);
+            stats.last_line_is_single_word = trimmed_line_word_count(line_items) == 1;
+            stats.count += 1;
+            idx = next;
+        } else if was_break {
+            stats.last_line_is_single_word = false;
+            stats.count += 1;
+            idx = next;
+        } else {
+            idx += 1;
+        }
+    }
+    stats
+}
+
+fn trimmed_line_word_count(items: &[InlineItem]) -> usize {
+    let first = items
+        .iter()
+        .position(|it| !it.is_space && !matches!(it.kind, InlineItemKind::Break));
+    let last = items
+        .iter()
+        .rposition(|it| !it.is_space && !matches!(it.kind, InlineItemKind::Break));
+    let Some((f, l)) = first.zip(last) else {
+        return 0;
+    };
+    let mut words = 0usize;
+    let mut in_word = false;
+    for item in &items[f..=l] {
+        if item.is_space || matches!(item.kind, InlineItemKind::Break) {
+            in_word = false;
+        } else if !in_word {
+            words += 1;
+            in_word = true;
+        }
+    }
+    words
+}
+
+fn trimmed_line_width(items: &[InlineItem]) -> f32 {
+    let first = items
+        .iter()
+        .position(|it| !it.is_space && !matches!(it.kind, InlineItemKind::Break));
+    let last = items
+        .iter()
+        .rposition(|it| !it.is_space && !matches!(it.kind, InlineItemKind::Break));
+    match (first, last) {
+        (Some(f), Some(l)) => items[f..=l].iter().map(|it| it.advance).sum(),
+        _ => 0.0,
+    }
 }
 
 // ─── Legacy full-document line breaker (kept for compatibility) ───────────────
@@ -2160,6 +2799,17 @@ thread_local! {
     /// (address, length, family) — a tiny direct scan, cleared when it fills.
     static FRONT: std::cell::RefCell<Vec<(*const u8, usize, ResolvedFamily)>> =
         std::cell::RefCell::new(Vec::new());
+}
+
+pub(crate) fn clear_font_family_caches() {
+    FAMILY_CACHE.with(|c| c.borrow_mut().clear());
+    FRONT.with(|f| f.borrow_mut().clear());
+    FONT_RATIOS.with(|c| c.borrow_mut().clear());
+    AVAILABLE.with(|a| {
+        let mut a = a.borrow_mut();
+        a.0 = 0;
+        a.1.clear();
+    });
 }
 
 fn resolve_css_family_slow(fs: &cosmic_text::FontSystem, raw: &str) -> ResolvedFamily {
@@ -2365,7 +3015,8 @@ pub fn measure_text_width_fs_attrs(
     if text.is_empty() {
         return 0.0;
     }
-    let phys_px = font_px * scale.max(1.0);
+    let size_adjust = font_size_adjust_scale(fs, font_family);
+    let phys_px = font_px * size_adjust * scale.max(1.0);
     let inv = if scale > 1.0 { 1.0 / scale } else { 1.0 };
     let metrics = Metrics::new(phys_px, phys_px * 1.2);
     let mut buffer = Buffer::new(fs, metrics);
@@ -2458,6 +3109,59 @@ pub fn font_metrics(
 thread_local! {
     static FONT_RATIOS: std::cell::RefCell<std::collections::HashMap<String, Option<(f32, f32, f32)>>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+    static FONT_METRIC_OVERRIDES: std::cell::RefCell<std::collections::HashMap<String, FontMetricOverride>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FontMetricOverride {
+    pub size_adjust: Option<f32>,
+    pub ascent: Option<f32>,
+    pub descent: Option<f32>,
+    pub line_gap: Option<f32>,
+}
+
+impl FontMetricOverride {
+    fn apply(self, asc: f32, desc: f32, leading: f32) -> (f32, f32, f32) {
+        let size_adjust = self.size_adjust.unwrap_or(1.0).max(0.0);
+        let mut asc = asc * size_adjust;
+        let mut desc = desc * size_adjust;
+        let mut leading = leading * size_adjust;
+        if let Some(v) = self.ascent {
+            asc = v.max(0.0);
+        }
+        if let Some(v) = self.descent {
+            desc = v.max(0.0);
+        }
+        if let Some(v) = self.line_gap {
+            leading = v.max(0.0);
+        }
+        (asc, desc, leading)
+    }
+}
+
+pub(crate) fn set_font_metric_override(family: &str, metrics: FontMetricOverride) {
+    let key = extract_first_css_family(family).trim().to_ascii_lowercase();
+    if key.is_empty() {
+        return;
+    }
+    FONT_METRIC_OVERRIDES.with(|m| {
+        m.borrow_mut().insert(key.clone(), metrics);
+    });
+    FONT_RATIOS.with(|c| {
+        c.borrow_mut().remove(&key);
+    });
+}
+
+pub(crate) fn font_size_adjust_scale(fs: &cosmic_text::FontSystem, family: &str) -> f32 {
+    let key = extract_first_css_family(family).trim().to_ascii_lowercase();
+    if key.is_empty() || !font_family_available(fs, &key) {
+        return 1.0;
+    }
+    FONT_METRIC_OVERRIDES
+        .with(|m| m.borrow().get(&key).and_then(|metrics| metrics.size_adjust))
+        .unwrap_or(1.0)
+        .max(0.0)
 }
 
 /// Ascent, descent and leading as fractions of the em.
@@ -2466,11 +3170,29 @@ fn font_metric_ratios(fs: &mut cosmic_text::FontSystem, family: &str) -> Option<
     if let Some(hit) = FONT_RATIOS.with(|c| c.borrow().get(&key).copied()) {
         return hit;
     }
-    let computed = measure_font_ratios(fs, family);
+    let computed = measure_font_ratios(fs, family).map(|(asc, desc, leading)| {
+        let override_key = extract_first_css_family(family).trim().to_ascii_lowercase();
+        FONT_METRIC_OVERRIDES
+            .with(|m| m.borrow().get(&override_key).copied())
+            .filter(|_| font_family_available(fs, &override_key))
+            .map(|metrics| metrics.apply(asc, desc, leading))
+            .unwrap_or((asc, desc, leading))
+    });
     FONT_RATIOS.with(|c| {
         c.borrow_mut().insert(key, computed);
     });
     computed
+}
+
+fn font_family_available(fs: &cosmic_text::FontSystem, lower_family: &str) -> bool {
+    if lower_family.is_empty() {
+        return false;
+    }
+    fs.db().faces().any(|face| {
+        face.families
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(lower_family))
+    })
 }
 
 fn measure_font_ratios(fs: &mut cosmic_text::FontSystem, family: &str) -> Option<(f32, f32, f32)> {
@@ -2524,6 +3246,9 @@ fn char_x_fingerprint(
     if end <= start {
         return 0;
     }
+    if !flat.is_char_boundary(start) || !flat.is_char_boundary(end) {
+        return 0;
+    }
     let mut h = std::collections::hash_map::DefaultHasher::new();
     flat[start..end].hash(&mut h);
     line.extra_space_per_word.to_bits().hash(&mut h);
@@ -2532,6 +3257,7 @@ fn char_x_fingerprint(
     for vs in &line.visual_segments {
         vs.logical_start.hash(&mut h);
         vs.length.hash(&mut h);
+        vs.level.hash(&mut h);
     }
     for r in runs {
         // Only the runs that touch this line can affect its glyphs.
@@ -2613,15 +3339,12 @@ pub fn fill_char_x_for_line(
             FontStyle::Normal => CTextStyle::Normal,
         };
         let ct_stretch = stretch_from_percent(run.style.font_stretch);
-        let phys_px = font_px * scale;
+        let size_adjust = font_size_adjust_scale(fs, &run.style.font_family);
+        let phys_px = font_px * size_adjust * scale;
         let metrics = Metrics::new(phys_px, phys_px * 1.2);
         let mut buf = Buffer::new(fs, metrics);
-        // ⛔ The cheap first-name resolver, NOT `resolve_css_family`. Routing
-        // this through the available-family cache measured WORSE: it runs per
-        // segment per line, and even a pointer-keyed hit is ~1.7 us, which
-        // exceeds what the fallback it avoids costs here. The resolver earns
-        // its keep in `measure_text_width_fs_attrs`, which is called far less.
-        let family = css_family_to_cosmic(&run.style.font_family);
+        let resolved = resolve_css_family(fs, &run.style.font_family);
+        let family = resolved.as_family();
         let attrs = Attrs::new()
             .weight(ct_w)
             .style(ct_s)
@@ -2806,23 +3529,17 @@ pub fn collect_flat_text(node: &WebCore) -> String {
 }
 
 fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {
+    let generated_content = node.style.rare().content.as_str();
+    if !node.style.before_content.is_empty() {
+        push_flat_rendered_text(out, &node.style.before_content, &node.style);
+    }
     if node.is_text_node() {
-        // Normalize newlines/tabs to spaces in normal white-space mode
-        // so that flat text matches what tokenize_text rendered.
-        if matches!(
-            node.style.white_space,
-            WhiteSpace::Normal | WhiteSpace::Nowrap
-        ) {
-            for c in node.text.chars() {
-                out.push(if matches!(c, '\n' | '\r' | '\t') {
-                    ' '
-                } else {
-                    c
-                });
-            }
+        let rendered_text = if generated_content.is_empty() {
+            node.text.as_str()
         } else {
-            out.push_str(&node.text);
-        }
+            generated_content
+        };
+        push_flat_rendered_text(out, rendered_text, &node.style);
         return;
     }
     if matches!(node.style.display, Display::None) {
@@ -2848,8 +3565,16 @@ fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {
     {
         return;
     }
-    if !node.text.is_empty() {
-        out.push_str(&node.text);
+    let rendered_text = if generated_content.is_empty() {
+        node.text.as_str()
+    } else {
+        generated_content
+    };
+    if !rendered_text.is_empty() {
+        out.push_str(rendered_text);
+    }
+    if !generated_content.is_empty() {
+        return;
     }
     let children = node.effective_children();
     for child in children {
@@ -2860,9 +3585,52 @@ fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {
         }
         collect_flat_text_inner(child, out, false);
     }
+    if !node.style.after_content.is_empty() {
+        push_flat_rendered_text(out, &node.style.after_content, &node.style);
+    }
+}
+
+fn push_flat_rendered_text(out: &mut String, text: &str, style: &ComputedStyle) {
+    // Normalize newlines/tabs to spaces in normal white-space mode so that flat
+    // text matches what tokenize_text rendered.
+    if matches!(style.white_space, WhiteSpace::Normal | WhiteSpace::Nowrap) {
+        for c in text.chars() {
+            out.push(if matches!(c, '\n' | '\r' | '\t') {
+                ' '
+            } else {
+                c
+            });
+        }
+    } else {
+        out.push_str(text);
+    }
 }
 
 // ─── Recursive inline-block pre-layout ───────────────────────────────────────
+
+fn shrink_to_fit_slop(node: &WebCore) -> f32 {
+    if node.style.aspect_ratio.is_some()
+        && node.style.width.is_auto()
+        && !node.style.height.is_auto()
+        && !matches!(node.style.height, CssLength::Percent(_))
+    {
+        0.0
+    } else if !node.layout.line_cache.is_empty()
+        && node
+            .layout
+            .line_cache
+            .iter()
+            .all(|line| line.text_length == 0)
+    {
+        0.0
+    } else {
+        1.0
+    }
+}
+
+fn is_atomic_inline_replaced(node: &WebCore) -> bool {
+    node.is_image_element() || matches!(node.tag.as_str(), "svg" | "canvas" | "video" | "iframe")
+}
 
 /// Recursively walk inline children and pre-layout any nested inline-block
 /// elements (e.g. `<input>` inside `<label>`).  This ensures that when
@@ -2885,10 +3653,44 @@ fn prelayout_nested_inline_blocks(
         ) {
             continue;
         }
+        if !matches!(node.children[ci].style.float, crate::types::Float::None) {
+            engine.layout_box(
+                &mut node.children[ci],
+                &Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
+            );
+            if node.children[ci].style.width.is_auto() {
+                let max_line_w = node.children[ci]
+                    .layout
+                    .line_cache
+                    .iter()
+                    .map(|l| l.width)
+                    .fold(0.0_f32, f32::max);
+                let max_content_w =
+                    engine.max_content_width(&node.children[ci], font_px, root_font_px);
+                let intrinsic_w = max_line_w.max(max_content_w);
+                let fc = &node.children[ci];
+                let shrink_w = intrinsic_w.ceil()
+                    + shrink_to_fit_slop(fc)
+                    + fc.layout.resolved_pad_left
+                    + fc.layout.resolved_pad_right
+                    + fc.layout.resolved_border_left
+                    + fc.layout.resolved_border_right
+                    + fc.layout.resolved_margin_left
+                    + fc.layout.resolved_margin_right;
+                if shrink_w > 0.0 && shrink_w < content_w {
+                    engine.layout_box(
+                        &mut node.children[ci],
+                        &Constraints::new(shrink_w, 0.0, 0.0, font_px, root_font_px),
+                    );
+                }
+            }
+            continue;
+        }
         if matches!(
             node.children[ci].style.display,
             Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
-        ) {
+        ) || is_atomic_inline_replaced(&node.children[ci])
+        {
             // When called from the top-level (block container), direct inline-block
             // children are already handled by the step 0 loop in layout_inline_block().
             // Only lay out here in the recursive case (node is an inline wrapper,
@@ -2905,13 +3707,12 @@ fn prelayout_nested_inline_blocks(
                         .iter()
                         .map(|l| l.width)
                         .fold(0.0_f32, f32::max);
-                    let intrinsic_w = if max_line_w > 0.0 {
-                        max_line_w
-                    } else {
-                        engine.max_content_width(&node.children[ci], font_px, root_font_px)
-                    };
+                    let max_content_w =
+                        engine.max_content_width(&node.children[ci], font_px, root_font_px);
+                    let intrinsic_w = max_line_w.max(max_content_w);
                     let gc = &node.children[ci];
-                    let shrink_w = intrinsic_w
+                    let shrink_w = intrinsic_w.ceil()
+                        + shrink_to_fit_slop(gc)
                         + gc.layout.resolved_pad_left
                         + gc.layout.resolved_pad_right
                         + gc.layout.resolved_border_left
@@ -2934,10 +3735,48 @@ fn prelayout_nested_inline_blocks(
             // Pre-layout any inline-block grandchildren inside this inline child.
             for gci in 0..node.children[ci].children.len() {
                 let grandchild_display = node.children[ci].children[gci].style.display;
-                if matches!(
+                if !matches!(
+                    node.children[ci].children[gci].style.float,
+                    crate::types::Float::None
+                ) {
+                    engine.layout_box(
+                        &mut node.children[ci].children[gci],
+                        &Constraints::new(content_w, 0.0, 0.0, child_font_px, root_font_px),
+                    );
+                    if node.children[ci].children[gci].style.width.is_auto() {
+                        let max_line_w = node.children[ci].children[gci]
+                            .layout
+                            .line_cache
+                            .iter()
+                            .map(|l| l.width)
+                            .fold(0.0_f32, f32::max);
+                        let max_content_w = engine.max_content_width(
+                            &node.children[ci].children[gci],
+                            font_px,
+                            root_font_px,
+                        );
+                        let intrinsic_w = max_line_w.max(max_content_w);
+                        let gc = &node.children[ci].children[gci];
+                        let shrink_w = intrinsic_w.ceil()
+                            + shrink_to_fit_slop(gc)
+                            + gc.layout.resolved_pad_left
+                            + gc.layout.resolved_pad_right
+                            + gc.layout.resolved_border_left
+                            + gc.layout.resolved_border_right
+                            + gc.layout.resolved_margin_left
+                            + gc.layout.resolved_margin_right;
+                        if shrink_w > 0.0 && shrink_w < content_w {
+                            engine.layout_box(
+                                &mut node.children[ci].children[gci],
+                                &Constraints::new(shrink_w, 0.0, 0.0, child_font_px, root_font_px),
+                            );
+                        }
+                    }
+                } else if matches!(
                     grandchild_display,
                     Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
-                ) {
+                ) || is_atomic_inline_replaced(&node.children[ci].children[gci])
+                {
                     engine.layout_box(
                         &mut node.children[ci].children[gci],
                         &Constraints::new(content_w, 0.0, 0.0, child_font_px, root_font_px),
@@ -2950,17 +3789,15 @@ fn prelayout_nested_inline_blocks(
                             .iter()
                             .map(|l| l.width)
                             .fold(0.0_f32, f32::max);
-                        let intrinsic_w = if max_line_w > 0.0 {
-                            max_line_w
-                        } else {
-                            engine.max_content_width(
-                                &node.children[ci].children[gci],
-                                font_px,
-                                root_font_px,
-                            )
-                        };
+                        let max_content_w = engine.max_content_width(
+                            &node.children[ci].children[gci],
+                            font_px,
+                            root_font_px,
+                        );
+                        let intrinsic_w = max_line_w.max(max_content_w);
                         let gc = &node.children[ci].children[gci];
-                        let shrink_w = intrinsic_w
+                        let shrink_w = intrinsic_w.ceil()
+                            + shrink_to_fit_slop(gc)
                             + gc.layout.resolved_pad_left
                             + gc.layout.resolved_pad_right
                             + gc.layout.resolved_border_left
@@ -2987,4 +3824,20 @@ fn prelayout_nested_inline_blocks(
             }
         }
     }
+}
+
+fn has_in_flow_block_children(node: &WebCore) -> bool {
+    node.effective_children().iter().any(|c| {
+        if matches!(c.style.display, Display::None) {
+            return false;
+        }
+        if matches!(c.style.display, Display::Contents) {
+            return has_in_flow_block_children(c);
+        }
+        matches!(
+            c.style.position,
+            Position::Static | Position::Relative | Position::Sticky
+        ) && matches!(c.style.float, crate::types::Float::None)
+            && c.style.is_block_level()
+    })
 }

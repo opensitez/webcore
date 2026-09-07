@@ -187,6 +187,71 @@ fn collect_rows(
     all
 }
 
+fn wrap_direct_table_cells_in_anonymous_rows(table: &mut WebCore) {
+    if !table.children.iter().any(|c| {
+        matches!(
+            c.style.display,
+            Display::TableCell | Display::TableHeaderCell
+        )
+    }) {
+        return;
+    }
+
+    let children = std::mem::take(&mut table.children);
+    let mut out: Vec<WebCore> = Vec::with_capacity(children.len());
+    let mut row: Option<WebCore> = None;
+    for child in children {
+        if matches!(
+            child.style.display,
+            Display::TableCell | Display::TableHeaderCell
+        ) {
+            let r = row.get_or_insert_with(|| {
+                let mut n = WebCore::new("anonymous-table-row");
+                std::sync::Arc::make_mut(&mut n.style).display = Display::TableRow;
+                n
+            });
+            r.children.push(child);
+        } else {
+            if let Some(r) = row.take() {
+                out.push(r);
+            }
+            out.push(child);
+        }
+    }
+    if let Some(r) = row {
+        out.push(r);
+    }
+    table.children = out;
+}
+
+fn distribute_spanned_width(
+    widths: &mut [f32],
+    start_col: usize,
+    colspan: usize,
+    required_width: f32,
+    spacing_h: f32,
+) {
+    if start_col >= widths.len() || colspan == 0 {
+        return;
+    }
+    let end = (start_col + colspan).min(widths.len());
+    let span = end - start_col;
+    if span == 0 {
+        return;
+    }
+
+    let current: f32 =
+        widths[start_col..end].iter().sum::<f32>() + spacing_h * span.saturating_sub(1) as f32;
+    if required_width <= current {
+        return;
+    }
+
+    let add = (required_width - current) / span as f32;
+    for w in &mut widths[start_col..end] {
+        *w += add;
+    }
+}
+
 /// Get a reference to a row box given a RowRef.
 fn row_ref<'a>(table: &'a WebCore, rr: &RowRef) -> &'a WebCore {
     match rr.grandchild_idx {
@@ -288,12 +353,24 @@ pub fn layout_table(
         }
     }
 
+    // CSS table fixup: a table-cell cannot be a direct child of a table box.
+    // Real HTML `<table><td>` is normalized by the tree builder; CSS display
+    // tables need the same anonymous row box here in layout.
+    wrap_direct_table_cells_in_anonymous_rows(node);
+
     // ── Collect rows ─────────────────────────────────────────────────────────
     let mut abs_children: Vec<usize> = Vec::new();
     let mut caption_idx: Option<usize> = None;
     let mut col_indices: Vec<usize> = Vec::new();
     let row_refs = collect_rows(node, &mut abs_children, &mut caption_idx, &mut col_indices);
     let num_rows = row_refs.len();
+    let caption_side = caption_idx.map(|ci| node.children[ci].style.caption_side);
+    let caption_at_bottom = matches!(
+        caption_side,
+        Some(CaptionSide::Bottom | CaptionSide::BlockEnd)
+    );
+    let caption_inline_start = matches!(caption_side, Some(CaptionSide::InlineStart));
+    let caption_inline_end = matches!(caption_side, Some(CaptionSide::InlineEnd));
 
     if num_rows == 0 {
         return finish_table(node, rbox, content_x, content_y, table_width, 0.0);
@@ -378,7 +455,7 @@ pub fn layout_table(
         for r in 0..num_rows {
             for c in 0..num_cols {
                 let slot = &grid[r][c];
-                if slot.owner_row != r || slot.colspan != 1 {
+                if slot.owner_row != r {
                     continue;
                 }
                 if let Some((row_idx, ci)) = slot.box_path {
@@ -393,13 +470,31 @@ pub fn layout_table(
                             .intrinsic_sizes(cell, font_px, root_font_px)
                             .max_content
                     };
-                    if cw > col_max_content[c] {
-                        col_max_content[c] = cw;
+                    if slot.colspan == 1 {
+                        if cw > col_max_content[c] {
+                            col_max_content[c] = cw;
+                        }
+                    } else {
+                        distribute_spanned_width(
+                            &mut col_max_content,
+                            c,
+                            slot.colspan,
+                            cw,
+                            spacing_h,
+                        );
                     }
                 }
             }
         }
-        let intrinsic_w: f32 = col_max_content.iter().sum::<f32>() + total_spacing;
+        let mut intrinsic_w: f32 = col_max_content.iter().sum::<f32>() + total_spacing;
+        if let Some(ci) = caption_idx {
+            let cap_w = engine
+                .intrinsic_sizes(&node.children[ci], font_px, root_font_px)
+                .max_content;
+            if !caption_inline_start && !caption_inline_end && cap_w > intrinsic_w {
+                intrinsic_w = cap_w;
+            }
+        }
         // Shrink-to-fit: use intrinsic width but don't exceed container
         // and don't go below min-width
         let mut shrunk = intrinsic_w.min(content_w).max(0.0);
@@ -452,14 +547,32 @@ pub fn layout_table(
         // Fixed layout: first row / col element widths only
         for c in 0..num_cols {
             let slot = &grid[0][c];
-            if slot.owner_row == 0 && slot.colspan == 1 {
+            if slot.owner_row == 0 {
                 if let Some((_, ci)) = slot.box_path {
                     let cell = &row_ref(node, &row_refs[0]).children[ci];
                     if !cell.style.width.is_auto() {
-                        col_widths[c] =
-                            engine.res_len(&cell.style.width, font_px, cell_area, root_font_px);
-                        col_has_explicit[c] = true;
-                        explicit_count += 1;
+                        let w = engine.res_len(&cell.style.width, font_px, cell_area, root_font_px);
+                        if slot.colspan == 1 {
+                            col_widths[c] = w;
+                            if !col_has_explicit[c] {
+                                col_has_explicit[c] = true;
+                                explicit_count += 1;
+                            }
+                        } else {
+                            distribute_spanned_width(
+                                &mut col_widths,
+                                c,
+                                slot.colspan,
+                                w,
+                                spacing_h,
+                            );
+                            for cc in c..(c + slot.colspan).min(num_cols) {
+                                if !col_has_explicit[cc] {
+                                    col_has_explicit[cc] = true;
+                                    explicit_count += 1;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -494,27 +607,53 @@ pub fn layout_table(
         for r in 0..num_rows {
             for c in 0..num_cols {
                 let slot = &grid[r][c];
-                if slot.owner_row != r || slot.colspan != 1 {
+                if slot.owner_row != r {
                     continue;
                 }
                 if let Some((row_idx, ci)) = slot.box_path {
                     let cell = &row_ref(node, &row_refs[row_idx]).children[ci];
                     if !cell.style.width.is_auto() {
                         let w = engine.res_len(&cell.style.width, font_px, cell_area, root_font_px);
-                        if w > col_widths[c] {
-                            if !col_has_explicit[c] {
-                                col_has_explicit[c] = true;
-                                explicit_count += 1;
+                        if slot.colspan == 1 {
+                            if w > col_widths[c] {
+                                if !col_has_explicit[c] {
+                                    col_has_explicit[c] = true;
+                                    explicit_count += 1;
+                                }
+                                col_widths[c] = w;
                             }
-                            col_widths[c] = w;
+                        } else {
+                            distribute_spanned_width(
+                                &mut col_widths,
+                                c,
+                                slot.colspan,
+                                w,
+                                spacing_h,
+                            );
+                            for cc in c..(c + slot.colspan).min(num_cols) {
+                                if !col_has_explicit[cc] {
+                                    col_has_explicit[cc] = true;
+                                    explicit_count += 1;
+                                }
+                            }
                         }
                     } else {
                         // Measure content width for auto columns
                         let cw = engine
                             .intrinsic_sizes(cell, font_px, root_font_px)
                             .max_content;
-                        if cw > col_content_widths[c] {
-                            col_content_widths[c] = cw;
+                        if slot.colspan == 1 {
+                            if cw > col_content_widths[c] {
+                                col_content_widths[c] = cw;
+                            }
+                        } else {
+                            distribute_spanned_width(
+                                &mut col_content_widths,
+                                c,
+                                slot.colspan,
+                                cw,
+                                spacing_h,
+                            );
                         }
                     }
                 }
@@ -580,15 +719,14 @@ pub fn layout_table(
 
     // ── Layout caption ────────────────────────────────────────────────────────
     let mut caption_h = 0.0f32;
-    let caption_at_bottom = caption_idx.map_or(false, |ci| {
-        node.children[ci].style.caption_side == CaptionSide::Bottom
-    });
+    let mut caption_w = 0.0f32;
     if let Some(ci) = caption_idx {
         engine.layout_box(
             &mut node.children[ci],
             &Constraints::new(table_width, content_x, content_y, font_px, root_font_px),
         );
         caption_h = node.children[ci].layout.margin_rect.h;
+        caption_w = node.children[ci].layout.margin_rect.w;
         // Position at top for now; bottom case handled later
         let (dx, dy) = (
             content_x - node.children[ci].layout.margin_rect.x,
@@ -672,6 +810,16 @@ pub fn layout_table(
         }
     }
 
+    for r in 0..num_rows {
+        let row = row_ref(node, &row_refs[r]);
+        if !row.style.height.is_auto() {
+            let row_h = engine.res_len(&row.style.height, font_px, 0.0, root_font_px);
+            if row_h > row_heights[r] {
+                row_heights[r] = row_h;
+            }
+        }
+    }
+
     // Handle rowspan: distribute spanned cell heights
     for r in 0..num_rows {
         for c in 0..num_cols {
@@ -714,7 +862,14 @@ pub fn layout_table(
     }
 
     // ── Position cells ────────────────────────────────────────────────────────
-    let caption_top_h = if !caption_at_bottom { caption_h } else { 0.0 };
+    let caption_top_h = if !caption_at_bottom && !caption_inline_start && !caption_inline_end {
+        caption_h
+    } else {
+        0.0
+    };
+    let side_caption_left_w = if caption_inline_start { caption_w } else { 0.0 };
+    let side_caption_right_w = if caption_inline_end { caption_w } else { 0.0 };
+    let grid_content_x = content_x + side_caption_left_w;
     let mut y_cursor = content_y + caption_top_h + spacing_v;
 
     for r in 0..num_rows {
@@ -787,7 +942,7 @@ pub fn layout_table(
 
                 (
                     nat,
-                    cell.style.vertical_align,
+                    cell.style.vertical_align.clone(),
                     cell.style.empty_cells_hide && is_empty,
                     cell.style.position,
                     cell.layout.border_rect.x,
@@ -807,7 +962,7 @@ pub fn layout_table(
                 _ => 0.0,
             };
 
-            let cell_x = content_x + col_x[c];
+            let cell_x = grid_content_x + col_x[c];
 
             // Position cell: shift entire subtree from layout position to final grid position
             {
@@ -875,7 +1030,7 @@ pub fn layout_table(
         // Position row box
         {
             let row = row_ref_mut(node, &row_refs[r]);
-            row.layout.content_rect = Rect::new(content_x, y_cursor, table_width, row_h);
+            row.layout.content_rect = Rect::new(grid_content_x, y_cursor, table_width, row_h);
             row.layout.padding_rect = row.layout.content_rect;
             row.layout.border_rect = row.layout.content_rect;
             row.layout.margin_rect = row.layout.content_rect;
@@ -915,7 +1070,7 @@ pub fn layout_table(
                 min_y = 0.0;
             }
             child.layout.content_rect =
-                Rect::new(content_x, min_y, table_width, max_bottom - min_y);
+                Rect::new(grid_content_x, min_y, table_width, max_bottom - min_y);
             child.layout.padding_rect = child.layout.content_rect;
             child.layout.border_rect = child.layout.content_rect;
             child.layout.margin_rect = child.layout.content_rect;
@@ -946,18 +1101,40 @@ pub fn layout_table(
             shift_rects(&mut node.children[ci], dx, dy);
             y_cursor += caption_h;
         }
+    } else if caption_inline_start || caption_inline_end {
+        if let Some(ci) = caption_idx {
+            let target_x = if caption_inline_end {
+                grid_content_x + table_width
+            } else {
+                content_x
+            };
+            let (dx, dy) = (
+                target_x - node.children[ci].layout.margin_rect.x,
+                content_y - node.children[ci].layout.margin_rect.y,
+            );
+            shift_rects(&mut node.children[ci], dx, dy);
+            y_cursor = y_cursor.max(content_y + caption_h);
+        }
     }
 
     let table_height = y_cursor - content_y;
+    let table_total_width = table_width + side_caption_left_w + side_caption_right_w;
 
     // ── Clear dirty flags on all descendants ─────────────────────────────────
     clear_dirty(node);
 
     // ── Finalize table box ────────────────────────────────────────────────────
-    let result = finish_table(node, rbox, content_x, content_y, table_width, table_height);
+    let result = finish_table(
+        node,
+        rbox,
+        content_x,
+        content_y,
+        table_total_width,
+        table_height,
+    );
 
     // Absolute children
-    let containing_rect = if !matches!(node.style.position, Position::Static) {
+    let containing_rect = if crate::layout::establishes_positioned_containing_block(&node.style) {
         node.layout.padding_rect
     } else {
         engine.pos_cb.get()
@@ -1000,6 +1177,12 @@ fn resolve_collapsed_borders(
             if top_path == bot_path {
                 continue;
             } // same cell (rowspan)
+            if c > 0
+                && grid[r][c - 1].box_path == top_path
+                && grid[r + 1][c - 1].box_path == bot_path
+            {
+                continue;
+            }
 
             let (top_w, top_s) = {
                 let (ri, ci) = top_path.unwrap();
@@ -1044,6 +1227,12 @@ fn resolve_collapsed_borders(
                 continue;
             }
             if left_path == right_path {
+                continue;
+            }
+            if r > 0
+                && grid[r - 1][c].box_path == left_path
+                && grid[r - 1][c + 1].box_path == right_path
+            {
                 continue;
             }
 

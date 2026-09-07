@@ -305,13 +305,15 @@ fn parse_html_full(
     }
     stylesheet.raw_sources.extend(parser.stylesheet.raw_sources);
     stylesheet.keyframes.extend(parser.stylesheet.keyframes);
-    // ⛔ `@font-face` and `@layer` travel with the rest. This merge carried
-    // rules, variables, sources and keyframes and dropped these two, so a web
-    // font declared in an inline `<style>` was parsed, stored on the parser's
-    // sheet, and then thrown away — the document loaded no font and every
-    // string was measured in the fallback face. Layer order went the same way,
-    // which decides which layered rule wins.
+    // ⛔ At-rules travel with the rest. This merge carried rules, variables,
+    // sources and keyframes and used to drop stylesheet-side metadata, so a web
+    // font or counter style declared in an inline `<style>` was parsed, stored
+    // on the parser's sheet, and then thrown away.
     stylesheet.font_faces.extend(parser.stylesheet.font_faces);
+    stylesheet.page_rules.extend(parser.stylesheet.page_rules);
+    stylesheet
+        .counter_styles
+        .extend(parser.stylesheet.counter_styles);
     for name in parser.stylesheet.layer_order {
         if !stylesheet.layer_order.iter().any(|n| *n == name) {
             stylesheet.layer_order.push(name);
@@ -389,6 +391,7 @@ fn parse_html_full(
         prev_styles: std::collections::HashMap::new(),
         animation_overrides: std::collections::HashMap::new(),
         needs_animation_frame: false,
+        smooth_scrolls: Vec::new(),
         hover_changed: false,
         hover_sensitive_nodes: std::collections::HashSet::new(),
         style_dirty: false,
@@ -431,7 +434,20 @@ fn parse_html_full(
     // Apply cascade (basic pass — lib.rs re-runs with viewport dimensions)
     let root_font_px = 16.0;
     doc.stylesheet.rebuild_index();
-    apply_cascade(&mut doc.root, &doc.stylesheet, None, root_font_px);
+    let target_id = doc.fragment_target_id();
+    apply_cascade_vp_hover_target_url(
+        &mut doc.root,
+        &doc.stylesheet,
+        None,
+        root_font_px,
+        0.0,
+        0.0,
+        0,
+        false,
+        &std::collections::HashSet::new(),
+        target_id,
+        &doc.base_url,
+    );
 
     // Post-cascade fixes
     apply_details_summary_post_cascade(&mut doc.root);

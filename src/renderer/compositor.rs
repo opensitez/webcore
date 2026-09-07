@@ -160,10 +160,10 @@ impl Compositor {
                 l.opacity = node.style.opacity;
                 l.clips = matches!(
                     node.style.overflow_x,
-                    Overflow::Hidden | Overflow::Scroll | Overflow::Auto
+                    Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
                 ) || matches!(
                     node.style.overflow_y,
-                    Overflow::Hidden | Overflow::Scroll | Overflow::Auto
+                    Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
                 );
 
                 if l.clips {

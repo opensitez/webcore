@@ -16,173 +16,284 @@ pub use constraints::{Constraints, FormattingContext, IntrinsicSizes};
 use crate::types::*;
 use std::cell::Cell;
 
-// ─── Font loading helpers ──────────────────────────────────────────────────────
+pub(crate) fn establishes_positioned_containing_block(style: &ComputedStyle) -> bool {
+    let transform = style.transform.trim();
+    let has_active_transform = !transform.is_empty() && !transform.eq_ignore_ascii_case("none");
+    let filter = style.rare().filter.trim();
+    let has_active_filter = !filter.is_empty() && !filter.eq_ignore_ascii_case("none");
+    let backdrop_filter = style.rare().backdrop_filter.trim();
+    let has_active_backdrop_filter =
+        !backdrop_filter.is_empty() && !backdrop_filter.eq_ignore_ascii_case("none");
 
-/// WOFF2 magic bytes: `wOF2` (0x774F4632).
-const WOFF2_MAGIC: [u8; 4] = [0x77, 0x4F, 0x46, 0x32];
-
-/// Split a CSS `src:` value into individual source entries, respecting
-/// parentheses so that `data:` URIs (which contain commas) are not split.
-fn split_font_sources(src: &str) -> Vec<&str> {
-    let mut result = Vec::new();
-    let mut depth = 0;
-    let mut start = 0;
-    for (i, c) in src.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
-            }
-            ',' if depth == 0 => {
-                result.push(&src[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    if start < src.len() {
-        result.push(&src[start..]);
-    }
-    result
+    !matches!(style.position, Position::Static)
+        || has_active_transform
+        || has_active_filter
+        || has_active_backdrop_filter
+        || style.will_change_transform
+        || style.contain_layout
+        || style.contain_paint
 }
 
-/// Load raw font bytes into the font system, with format detection.
-/// WOFF2 is detected and skipped (it requires Brotli decompression which is not
-/// currently bundled; convert to TTF/OTF/WOFF1 for use with @font-face).
-/// WOFF1 magic bytes: `wOFF` (0x774F4646).
-const WOFF1_MAGIC: [u8; 4] = [0x77, 0x4F, 0x46, 0x46];
+pub(crate) fn establishes_fixed_positioned_containing_block(style: &ComputedStyle) -> bool {
+    let transform = style.transform.trim();
+    let has_active_transform = !transform.is_empty() && !transform.eq_ignore_ascii_case("none");
+    let filter = style.rare().filter.trim();
+    let has_active_filter = !filter.is_empty() && !filter.eq_ignore_ascii_case("none");
+    let backdrop_filter = style.rare().backdrop_filter.trim();
+    let has_active_backdrop_filter =
+        !backdrop_filter.is_empty() && !backdrop_filter.eq_ignore_ascii_case("none");
 
-fn load_font_bytes(fs: &mut cosmic_text::FontSystem, data: Vec<u8>) {
-    if data.starts_with(&WOFF2_MAGIC) {
-        // WOFF2 is Brotli plus a `glyf`/`loca` transform; decoding it in-house
-        // keeps the font on the same streaming path as every other resource.
-        match crate::woff2::decode(&data) {
-            Some(sfnt) => {
-                fs.db_mut().load_font_data(sfnt);
-            }
-            None => {}
-        }
-        return;
+    has_active_transform
+        || has_active_filter
+        || has_active_backdrop_filter
+        || style.will_change_transform
+        || style.contain_layout
+        || style.contain_paint
+}
+
+pub(crate) fn update_scroll_extents_from_children(
+    node: &mut WebCore,
+    content_x: f32,
+    content_y: f32,
+    content_w: f32,
+    content_h: f32,
+) {
+    if matches!(node.style.overflow_x, Overflow::Scroll | Overflow::Auto)
+        || matches!(node.style.overflow_y, Overflow::Scroll | Overflow::Auto)
+    {
+        let natural_scroll_w = node
+            .children
+            .iter()
+            .filter(|child| !matches!(child.style.display, Display::None))
+            .map(|child| child.layout.margin_rect.x + child.layout.margin_rect.w - content_x)
+            .fold(content_w, f32::max);
+        let natural_scroll_h = node
+            .children
+            .iter()
+            .filter(|child| !matches!(child.style.display, Display::None))
+            .map(|child| child.layout.margin_rect.y + child.layout.margin_rect.h - content_y)
+            .fold(content_h, f32::max);
+        node.layout.scroll_width = natural_scroll_w;
+        node.layout.scroll_height = natural_scroll_h;
+        let max_scroll_x = (node.layout.scroll_width - content_w).max(0.0);
+        let max_scroll_y = (node.layout.scroll_height - content_h).max(0.0);
+        node.layout.scroll_left = node.layout.scroll_left.min(max_scroll_x).max(0.0);
+        node.layout.scroll_top = node.layout.scroll_top.min(max_scroll_y).max(0.0);
+    } else {
+        node.layout.scroll_width = content_w;
+        node.layout.scroll_height = content_h;
+        node.layout.scroll_left = 0.0;
+        node.layout.scroll_top = 0.0;
     }
-    let font_data = if data.starts_with(&WOFF1_MAGIC) {
-        match decode_woff1(&data) {
-            Some(ttf) => ttf,
-            None => return,
+}
+
+// ─── Font loading helpers ──────────────────────────────────────────────────────
+
+/// Load raw font bytes into the font system, with format detection.
+fn load_font_bytes(fs: &mut cosmic_text::FontSystem, data: Vec<u8>) -> Vec<fontdb::ID> {
+    let font_data = if data.starts_with(&crate::woff::WOFF2_MAGIC)
+        || data.starts_with(&crate::woff::WOFF1_MAGIC)
+    {
+        match crate::woff::decode(&data) {
+            Some(sfnt) => sfnt,
+            None => return Vec::new(),
         }
     } else {
         data
     };
-    fs.db_mut().load_font_data(font_data);
+    fs.db_mut()
+        .load_font_source(fontdb::Source::Binary(std::sync::Arc::new(font_data)))
+        .into_iter()
+        .collect()
 }
 
-/// Decode WOFF1 container to raw OpenType/TrueType.
-/// WOFF1 wraps each OT table with optional zlib compression.
-fn decode_woff1(data: &[u8]) -> Option<Vec<u8>> {
-    use flate2::read::ZlibDecoder;
+fn css_font_family_name(raw: &str) -> Option<String> {
+    let name = raw.trim().trim_matches('"').trim_matches('\'').trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
 
-    if data.len() < 44 {
+fn parse_font_face_weight(raw: Option<&str>) -> Option<fontdb::Weight> {
+    let first = raw?.split_whitespace().next()?.trim().to_ascii_lowercase();
+    match first.as_str() {
+        "normal" => Some(fontdb::Weight::NORMAL),
+        "bold" => Some(fontdb::Weight::BOLD),
+        _ => first
+            .parse::<u16>()
+            .ok()
+            .filter(|n| (1..=1000).contains(n))
+            .map(fontdb::Weight),
+    }
+}
+
+fn parse_font_face_style(raw: Option<&str>) -> Option<fontdb::Style> {
+    let first = raw?.split_whitespace().next()?.trim().to_ascii_lowercase();
+    match first.as_str() {
+        "normal" => Some(fontdb::Style::Normal),
+        "italic" => Some(fontdb::Style::Italic),
+        "oblique" => Some(fontdb::Style::Oblique),
+        _ => None,
+    }
+}
+
+fn parse_font_face_stretch(raw: Option<&str>) -> Option<fontdb::Stretch> {
+    let first = raw?.split_whitespace().next()?.trim().to_ascii_lowercase();
+    if let Some(percent) = first.strip_suffix('%') {
+        return percent
+            .parse::<f32>()
+            .ok()
+            .map(crate::layout::inline_layout::stretch_from_percent);
+    }
+    match first.as_str() {
+        "ultra-condensed" => Some(fontdb::Stretch::UltraCondensed),
+        "extra-condensed" => Some(fontdb::Stretch::ExtraCondensed),
+        "condensed" => Some(fontdb::Stretch::Condensed),
+        "semi-condensed" => Some(fontdb::Stretch::SemiCondensed),
+        "normal" => Some(fontdb::Stretch::Normal),
+        "semi-expanded" => Some(fontdb::Stretch::SemiExpanded),
+        "expanded" => Some(fontdb::Stretch::Expanded),
+        "extra-expanded" => Some(fontdb::Stretch::ExtraExpanded),
+        "ultra-expanded" => Some(fontdb::Stretch::UltraExpanded),
+        _ => None,
+    }
+}
+
+fn parse_font_face_metric_percent(raw: Option<&str>) -> Option<f32> {
+    let value = raw?.trim();
+    if value.eq_ignore_ascii_case("normal") {
         return None;
     }
+    let number = value.strip_suffix('%')?.trim().parse::<f32>().ok()?;
+    if number.is_finite() && number >= 0.0 {
+        Some(number / 100.0)
+    } else {
+        None
+    }
+}
 
-    let r32 = |off: usize| -> u32 {
-        u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+fn font_face_metric_override(
+    face: &crate::css::FontFaceDecl,
+) -> crate::layout::inline_layout::FontMetricOverride {
+    crate::layout::inline_layout::FontMetricOverride {
+        size_adjust: parse_font_face_metric_percent(face.size_adjust.as_deref()),
+        ascent: parse_font_face_metric_percent(face.ascent_override.as_deref()),
+        descent: parse_font_face_metric_percent(face.descent_override.as_deref()),
+        line_gap: parse_font_face_metric_percent(face.line_gap_override.as_deref()),
+    }
+}
+
+fn register_css_font_face_alias(
+    fs: &mut cosmic_text::FontSystem,
+    face: &crate::css::FontFaceDecl,
+    ids: &[fontdb::ID],
+) {
+    let Some(css_family) = css_font_family_name(&face.family) else {
+        return;
     };
-    let r16 = |off: usize| -> u16 { u16::from_be_bytes([data[off], data[off + 1]]) };
+    let css_weight = parse_font_face_weight(face.weight.as_deref());
+    let css_style = parse_font_face_style(face.style.as_deref());
+    let css_stretch = parse_font_face_stretch(face.stretch.as_deref());
 
-    let _signature = r32(0); // 'wOFF'
-    let flavor = r32(4); // original sfVersion (e.g. 0x00010000 for TrueType)
-    let _length = r32(8); // total WOFF file size
-    let num_tables = r16(12);
-    let _reserved = r16(14);
-    let total_sfnt = r32(16) as usize; // total size of uncompressed font
-                                       // bytes 20..44: version, metadata, private data offsets (not needed)
-
-    // Each table directory entry is 20 bytes, starting at offset 44
-    struct TableEntry {
-        tag: [u8; 4],
-        offset: usize,
-        comp_length: usize,
-        orig_length: usize,
-        orig_checksum: u32,
-    }
-    let mut entries = Vec::with_capacity(num_tables as usize);
-    for i in 0..num_tables as usize {
-        let base = 44 + i * 20;
-        if base + 20 > data.len() {
-            return None;
-        }
-        let mut tag = [0u8; 4];
-        tag.copy_from_slice(&data[base..base + 4]);
-        entries.push(TableEntry {
-            tag,
-            offset: r32(base + 4) as usize,
-            comp_length: r32(base + 8) as usize,
-            orig_length: r32(base + 12) as usize,
-            orig_checksum: r32(base + 16),
-        });
-    }
-
-    // Build the output OTF/TTF
-    let mut out = Vec::with_capacity(total_sfnt);
-
-    // OT header: sfVersion(4) + numTables(2) + searchRange(2) + entrySelector(2) + rangeShift(2) = 12
-    out.extend_from_slice(&flavor.to_be_bytes());
-    out.extend_from_slice(&num_tables.to_be_bytes());
-    let n = num_tables as u32;
-    let entry_sel = (n as f64).log2().floor() as u16;
-    let search_range = (1u16 << entry_sel) * 16;
-    let range_shift = num_tables * 16 - search_range;
-    out.extend_from_slice(&search_range.to_be_bytes());
-    out.extend_from_slice(&entry_sel.to_be_bytes());
-    out.extend_from_slice(&range_shift.to_be_bytes());
-
-    // We need to write the table directory first (each entry = 16 bytes),
-    // then the actual table data. Compute offsets.
-    let dir_size = 12 + (num_tables as usize) * 16;
-    let mut table_data: Vec<Vec<u8>> = Vec::new();
-    let mut current_offset = dir_size;
-
-    for entry in &entries {
-        // Decompress or copy table data
-        let raw = if entry.comp_length < entry.orig_length {
-            // zlib compressed
-            let compressed = &data[entry.offset..entry.offset + entry.comp_length];
-            let mut decoder = ZlibDecoder::new(compressed);
-            let mut decompressed = Vec::with_capacity(entry.orig_length);
-            if std::io::Read::read_to_end(&mut decoder, &mut decompressed).is_err() {
-                return None;
+    let aliases: Vec<_> = ids
+        .iter()
+        .filter_map(|id| fs.db().face(*id).cloned())
+        .map(|mut info| {
+            info.id = fontdb::ID::dummy();
+            info.families
+                .retain(|(name, _)| !name.eq_ignore_ascii_case(&css_family));
+            info.families.insert(
+                0,
+                (css_family.clone(), fontdb::Language::English_UnitedStates),
+            );
+            if let Some(weight) = css_weight {
+                info.weight = weight;
             }
-            decompressed
-        } else {
-            // uncompressed
-            if entry.offset + entry.orig_length > data.len() {
-                return None;
+            if let Some(style) = css_style {
+                info.style = style;
             }
-            data[entry.offset..entry.offset + entry.orig_length].to_vec()
-        };
+            if let Some(stretch) = css_stretch {
+                info.stretch = stretch;
+            }
+            info
+        })
+        .collect();
 
-        // Write table directory entry: tag(4) + checksum(4) + offset(4) + length(4)
-        out.extend_from_slice(&entry.tag);
-        out.extend_from_slice(&entry.orig_checksum.to_be_bytes());
-        out.extend_from_slice(&(current_offset as u32).to_be_bytes());
-        out.extend_from_slice(&(raw.len() as u32).to_be_bytes());
-
-        // Pad to 4-byte boundary
-        let padded = (raw.len() + 3) & !3;
-        let mut padded_raw = raw;
-        padded_raw.resize(padded, 0);
-        current_offset += padded;
-        table_data.push(padded_raw);
+    if aliases.is_empty() {
+        return;
     }
 
-    // Append all table data
-    for td in table_data {
-        out.extend_from_slice(&td);
+    for alias in aliases {
+        fs.db_mut().push_face_info(alias);
     }
+    crate::layout::inline_layout::set_font_metric_override(
+        &css_family,
+        font_face_metric_override(face),
+    );
+    crate::layout::inline_layout::clear_font_family_caches();
+}
 
-    Some(out)
+fn load_font_face_bytes(
+    fs: &mut cosmic_text::FontSystem,
+    face: &crate::css::FontFaceDecl,
+    bytes: Vec<u8>,
+) -> bool {
+    let ids = load_font_bytes(fs, bytes);
+    if ids.is_empty() {
+        return false;
+    }
+    register_css_font_face_alias(fs, face, &ids);
+    true
+}
+
+fn font_source_formats_supported(source: &crate::css::FontFaceSource) -> bool {
+    source.formats.is_empty()
+        || source.formats.iter().any(|format| {
+            matches!(
+                format.as_str(),
+                "woff2"
+                    | "woff"
+                    | "opentype"
+                    | "truetype"
+                    | "embedded-opentype"
+                    | "collection"
+                    | "font/woff2"
+                    | "font/woff"
+                    | "font/otf"
+                    | "font/ttf"
+            )
+        })
+}
+
+pub(crate) fn font_source_techs_supported(source: &crate::css::FontFaceSource) -> bool {
+    source.techs.is_empty()
+        || source.techs.iter().all(|tech| {
+            matches!(
+                tech.as_str(),
+                "features-opentype" | "features-aat" | "variations" | "variations-opentype"
+            )
+        })
+}
+
+fn load_local_font_face(
+    fs: &mut cosmic_text::FontSystem,
+    face: &crate::css::FontFaceDecl,
+    name: &str,
+) -> bool {
+    let query = fontdb::Query {
+        families: &[fontdb::Family::Name(name)],
+        weight: parse_font_face_weight(face.weight.as_deref()).unwrap_or(fontdb::Weight::NORMAL),
+        stretch: parse_font_face_stretch(face.stretch.as_deref())
+            .unwrap_or(fontdb::Stretch::Normal),
+        style: parse_font_face_style(face.style.as_deref()).unwrap_or(fontdb::Style::Normal),
+    };
+    let Some(id) = fs.db().query(&query) else {
+        return false;
+    };
+    register_css_font_face_alias(fs, face, &[id]);
+    true
 }
 
 /// Minimal Base64 decoder (no external dependency).
@@ -238,6 +349,8 @@ pub struct FloatItem {
     pub rect: Rect,
     pub side: FloatSide,
     pub clear: f32, // bottom of this float
+    pub shape: Option<FloatShape>,
+    pub shape_margin: f32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -250,6 +363,28 @@ impl Default for FloatSide {
     fn default() -> Self {
         Self::Left
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FloatShape {
+    Circle {
+        cx: f32,
+        cy: f32,
+        r: f32,
+    },
+    Ellipse {
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+    },
+    Inset {
+        top: f32,
+        right: f32,
+        bottom: f32,
+        left: f32,
+    },
+    Polygon(Vec<(f32, f32)>),
 }
 
 #[derive(Debug, Default, Clone)]
@@ -272,12 +407,12 @@ impl FloatContext {
         for f in &self.floats {
             if f.rect.y < y + line_h && f.clear > y {
                 if f.side == FloatSide::Left {
-                    let r = f.rect.x + f.rect.w;
+                    let r = f.right_exclusion_at(y, line_h);
                     if r > *out_left {
                         *out_left = r;
                     }
                 } else {
-                    let l = f.rect.x;
+                    let l = f.left_exclusion_at(y, line_h);
                     if l < *out_right {
                         *out_right = l;
                     }
@@ -318,6 +453,8 @@ impl FloatContext {
         float_h: f32,
         containing_w: f32,
         side: FloatSide,
+        shape_outside: &str,
+        shape_margin: f32,
     ) -> Rect {
         // Find the lowest Y position where the float fits horizontally.
         let mut y = current_y;
@@ -356,8 +493,274 @@ impl FloatContext {
             rect,
             side,
             clear: y + float_h,
+            shape: parse_float_shape(shape_outside, float_w, float_h),
+            shape_margin: shape_margin.max(0.0),
         });
         rect
+    }
+}
+
+impl FloatItem {
+    fn right_exclusion_at(&self, y: f32, line_h: f32) -> f32 {
+        match self.shape.as_ref() {
+            Some(shape) => {
+                let (_, right) = shape_exclusion_x(shape, self.rect, self.shape_margin, y, line_h);
+                right
+            }
+            None => self.rect.x + self.rect.w,
+        }
+    }
+
+    fn left_exclusion_at(&self, y: f32, line_h: f32) -> f32 {
+        match self.shape.as_ref() {
+            Some(shape) => {
+                let (left, _) = shape_exclusion_x(shape, self.rect, self.shape_margin, y, line_h);
+                left
+            }
+            None => self.rect.x,
+        }
+    }
+}
+
+fn shape_exclusion_x(
+    shape: &FloatShape,
+    rect: Rect,
+    margin: f32,
+    y: f32,
+    line_h: f32,
+) -> (f32, f32) {
+    let sample_y = (y + line_h * 0.5 - rect.y).clamp(0.0, rect.h.max(0.0));
+    match *shape {
+        FloatShape::Circle { cx, cy, r } => {
+            ellipse_exclusion_x(rect, cx, cy, r, r, margin, sample_y)
+        }
+        FloatShape::Ellipse { cx, cy, rx, ry } => {
+            ellipse_exclusion_x(rect, cx, cy, rx, ry, margin, sample_y)
+        }
+        FloatShape::Inset {
+            top,
+            right,
+            bottom,
+            left,
+        } => {
+            let top = (top - margin).max(0.0);
+            let bottom_limit = (rect.h - bottom + margin).min(rect.h);
+            if sample_y < top || sample_y > bottom_limit {
+                (rect.x, rect.x)
+            } else {
+                (
+                    rect.x + (left - margin).max(0.0),
+                    rect.x + rect.w - (right - margin).max(0.0),
+                )
+            }
+        }
+        FloatShape::Polygon(ref points) => polygon_exclusion_x(rect, margin, points, sample_y),
+    }
+}
+
+fn ellipse_exclusion_x(
+    rect: Rect,
+    cx: f32,
+    cy: f32,
+    rx: f32,
+    ry: f32,
+    margin: f32,
+    sample_y: f32,
+) -> (f32, f32) {
+    let rx = (rx + margin).max(0.0);
+    let ry = (ry + margin).max(0.0);
+    if rx <= 0.0 || ry <= 0.0 {
+        return (rect.x, rect.x);
+    }
+    let dy = (sample_y - cy).abs();
+    if dy >= ry {
+        return (rect.x + cx, rect.x + cx);
+    }
+    let half = rx * (1.0 - (dy / ry).powi(2)).sqrt();
+    (rect.x + cx - half, rect.x + cx + half)
+}
+
+fn parse_float_shape(value: &str, width: f32, height: f32) -> Option<FloatShape> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") || value.is_empty() {
+        return None;
+    }
+    let lower = value.to_ascii_lowercase();
+    if lower.starts_with("circle(") && value.ends_with(')') {
+        parse_circle_shape(&value["circle(".len()..value.len() - 1], width, height)
+    } else if lower.starts_with("ellipse(") && value.ends_with(')') {
+        parse_ellipse_shape(&value["ellipse(".len()..value.len() - 1], width, height)
+    } else if lower.starts_with("inset(") && value.ends_with(')') {
+        parse_inset_shape(&value["inset(".len()..value.len() - 1], width, height)
+    } else if lower.starts_with("polygon(") && value.ends_with(')') {
+        parse_polygon_shape(&value["polygon(".len()..value.len() - 1], width, height)
+    } else {
+        None
+    }
+}
+
+fn parse_circle_shape(inner: &str, width: f32, height: f32) -> Option<FloatShape> {
+    let (radius_part, position_part) = split_shape_at(inner);
+    let default_r = width.min(height) * 0.5;
+    let r = radius_part
+        .and_then(|r| resolve_shape_len(r, width.min(height)))
+        .unwrap_or(default_r);
+    let (cx, cy) = parse_shape_position(position_part, width, height);
+    Some(FloatShape::Circle { cx, cy, r })
+}
+
+fn parse_ellipse_shape(inner: &str, width: f32, height: f32) -> Option<FloatShape> {
+    let (radii_part, position_part) = split_shape_at(inner);
+    let mut radii = radii_part.unwrap_or("").split_whitespace();
+    let rx = radii
+        .next()
+        .and_then(|v| resolve_shape_len(v, width))
+        .unwrap_or(width * 0.5);
+    let ry = radii
+        .next()
+        .and_then(|v| resolve_shape_len(v, height))
+        .unwrap_or(height * 0.5);
+    let (cx, cy) = parse_shape_position(position_part, width, height);
+    Some(FloatShape::Ellipse { cx, cy, rx, ry })
+}
+
+fn parse_inset_shape(inner: &str, width: f32, height: f32) -> Option<FloatShape> {
+    let before_round = inner.split("round").next().unwrap_or(inner);
+    let tokens: Vec<&str> = before_round.split_whitespace().collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    let top_token = tokens[0];
+    let right_token = *tokens.get(1).unwrap_or(&top_token);
+    let bottom_token = *tokens.get(2).unwrap_or(&top_token);
+    let left_token = *tokens.get(3).unwrap_or(&right_token);
+    let top = resolve_shape_len(top_token, height).unwrap_or(0.0);
+    let right = resolve_shape_len(right_token, width).unwrap_or(0.0);
+    let bottom = resolve_shape_len(bottom_token, height).unwrap_or(0.0);
+    let left = resolve_shape_len(left_token, width).unwrap_or(0.0);
+    Some(FloatShape::Inset {
+        top,
+        right,
+        bottom,
+        left,
+    })
+}
+
+fn parse_polygon_shape(inner: &str, width: f32, height: f32) -> Option<FloatShape> {
+    let mut points = Vec::new();
+    for raw in inner.split(',') {
+        let part = raw.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let coords: Vec<&str> = part.split_whitespace().collect();
+        let start = if coords
+            .first()
+            .is_some_and(|v| v.eq_ignore_ascii_case("evenodd") || v.eq_ignore_ascii_case("nonzero"))
+        {
+            1
+        } else {
+            0
+        };
+        let Some(x_token) = coords.get(start) else {
+            continue;
+        };
+        let Some(y_token) = coords.get(start + 1) else {
+            continue;
+        };
+        if let (Some(x), Some(y)) = (
+            resolve_shape_len(x_token, width),
+            resolve_shape_len(y_token, height),
+        ) {
+            points.push((x, y));
+        }
+    }
+    if points.len() >= 3 {
+        Some(FloatShape::Polygon(points))
+    } else {
+        None
+    }
+}
+
+fn polygon_exclusion_x(
+    rect: Rect,
+    margin: f32,
+    points: &[(f32, f32)],
+    sample_y: f32,
+) -> (f32, f32) {
+    let mut xs = Vec::new();
+    for i in 0..points.len() {
+        let (x1, y1) = points[i];
+        let (x2, y2) = points[(i + 1) % points.len()];
+        if (y1 <= sample_y && sample_y < y2) || (y2 <= sample_y && sample_y < y1) {
+            let t = (sample_y - y1) / (y2 - y1);
+            xs.push(x1 + (x2 - x1) * t);
+        } else if (sample_y - y1).abs() < f32::EPSILON && (y1 - y2).abs() < f32::EPSILON {
+            xs.push(x1);
+            xs.push(x2);
+        }
+    }
+    if xs.len() < 2 {
+        return (rect.x, rect.x);
+    }
+    xs.sort_by(|a, b| a.total_cmp(b));
+    let left = xs.first().copied().unwrap_or(0.0) - margin;
+    let right = xs.last().copied().unwrap_or(0.0) + margin;
+    (
+        rect.x + left.clamp(0.0, rect.w),
+        rect.x + right.clamp(0.0, rect.w),
+    )
+}
+
+fn split_shape_at(inner: &str) -> (Option<&str>, Option<&str>) {
+    if let Some(idx) = inner.to_ascii_lowercase().find(" at ") {
+        let before = inner[..idx].trim();
+        let after = inner[idx + 4..].trim();
+        (
+            if before.is_empty() {
+                None
+            } else {
+                Some(before)
+            },
+            if after.is_empty() { None } else { Some(after) },
+        )
+    } else {
+        let trimmed = inner.trim();
+        (
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            },
+            None,
+        )
+    }
+}
+
+fn parse_shape_position(position: Option<&str>, width: f32, height: f32) -> (f32, f32) {
+    let Some(position) = position else {
+        return (width * 0.5, height * 0.5);
+    };
+    let mut parts = position.split_whitespace();
+    let x = parts
+        .next()
+        .and_then(|v| resolve_shape_len(v, width))
+        .unwrap_or(width * 0.5);
+    let y = parts
+        .next()
+        .and_then(|v| resolve_shape_len(v, height))
+        .unwrap_or(height * 0.5);
+    (x, y)
+}
+
+fn resolve_shape_len(token: &str, basis: f32) -> Option<f32> {
+    let token = token.trim();
+    if let Some(percent) = token.strip_suffix('%') {
+        percent.parse::<f32>().ok().map(|v| basis * v / 100.0)
+    } else if let Some(px) = token.strip_suffix("px") {
+        px.parse::<f32>().ok()
+    } else {
+        token.parse::<f32>().ok()
     }
 }
 
@@ -374,24 +777,24 @@ fn collect_hover_sensitive(node: &WebCore, out: &mut std::collections::HashSet<u
 /// Walk the tree bottom-up: if any child is `layout_dirty`, mark the parent
 /// dirty too.  Returns `true` if the node (or any descendant) is dirty.
 fn propagate_dirty(node: &mut WebCore) -> bool {
-    // Fast path: if neither this node nor any descendant is dirty, skip entirely.
-    // Check both cascade-dirty descendants (hover → style → layout) and
-    // layout-dirty descendants (DOM mutation → layout_dirty set directly).
-    if !node.layout.layout_dirty && !node.has_dirty_descendant && !node.has_dirty_layout_descendant
-    {
-        return false;
-    }
-    // Invalidate intrinsic width cache — a dirty descendant means our
-    // intrinsic size may have changed (needed by flex/grid/table parents).
-    node.layout.cached_intrinsic_w.set(f32::NAN);
-    node.layout.intrinsic_dirty = true;
-
     let mut child_dirty = false;
     for child in &mut node.children {
         if propagate_dirty(child) {
             child_dirty = true;
         }
     }
+
+    if node.layout.layout_dirty
+        || child_dirty
+        || node.has_dirty_descendant
+        || node.has_dirty_layout_descendant
+    {
+        // Invalidate intrinsic width cache — a dirty descendant means our
+        // intrinsic size may have changed (needed by flex/grid/table parents).
+        node.layout.cached_intrinsic_w.set(f32::NAN);
+        node.layout.intrinsic_dirty = true;
+    }
+
     if child_dirty {
         node.layout.layout_dirty = true;
         node.has_dirty_layout_descendant = true;
@@ -611,12 +1014,15 @@ pub struct LayoutEngine {
     /// Whether @font-face font fetches have been kicked off (not necessarily finished).
     fonts_loaded: bool,
     /// Receiver for async font data arriving from background threads.
-    pending_fonts: Option<std::sync::mpsc::Receiver<(String, Vec<u8>)>>,
+    pending_fonts: Option<std::sync::mpsc::Receiver<(crate::css::FontFaceDecl, Vec<u8>)>>,
     /// Number of font fetches still in flight.
     fonts_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Containing block rect for the nearest positioned (non-static) ancestor.
     /// Used by abs-pos children to resolve their containing block correctly.
     pub pos_cb: Cell<Rect>,
+    /// Containing block rect for fixed-position descendants. Unlike abs-pos,
+    /// ordinary positioned ancestors do not capture fixed descendants.
+    pub fixed_cb: Cell<Rect>,
     /// Current recursion depth — prevents stack overflow on deeply nested DOMs.
     layout_depth: Cell<usize>,
     /// Total layout_box calls — detect infinite loops.
@@ -651,6 +1057,7 @@ impl LayoutEngine {
             pending_fonts: None,
             fonts_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             pos_cb: Cell::new(Rect::new(0.0, 0.0, 0.0, 0.0)),
+            fixed_cb: Cell::new(Rect::new(0.0, 0.0, 0.0, 0.0)),
             layout_depth: Cell::new(0),
             layout_calls: Cell::new(0),
             layout_start: Cell::new(None),
@@ -677,6 +1084,14 @@ impl LayoutEngine {
         (style as u8).hash(&mut hasher);
         font_family.hash(&mut hasher);
         self.scale.to_bits().hash(&mut hasher);
+        let font_state = self.font_system.map(|fs_ptr| {
+            let fs = unsafe { &*fs_ptr };
+            (
+                fs.db().len(),
+                crate::layout::inline_layout::font_size_adjust_scale(fs, font_family).to_bits(),
+            )
+        });
+        font_state.hash(&mut hasher);
         let key = hasher.finish();
 
         // Check cache
@@ -704,6 +1119,76 @@ impl LayoutEngine {
 
         self.text_width_cache.borrow_mut().insert(key, w);
         w
+    }
+
+    fn field_sizing_content_width(&self, node: &WebCore, font_px: f32) -> Option<f32> {
+        if !node.style.field_sizing.eq_ignore_ascii_case("content") || !node.style.width.is_auto() {
+            return None;
+        }
+        if !crate::types::is_text_input(node) && node.tag != "textarea" {
+            return None;
+        }
+        let value = crate::types::input_value(node);
+        let text = if value.is_empty() {
+            node.attributes
+                .get("placeholder")
+                .map(String::as_str)
+                .unwrap_or("")
+        } else {
+            value.as_str()
+        };
+        let measure = if node.tag == "textarea" {
+            text.lines()
+                .max_by_key(|line| line.chars().count())
+                .filter(|line| !line.is_empty())
+                .unwrap_or(" ")
+        } else if text.is_empty() {
+            " "
+        } else {
+            text
+        };
+        Some(
+            self.measure_text_cached(
+                measure,
+                font_px,
+                node.style.font_weight,
+                node.style.font_style,
+                &node.style.font_family,
+            )
+            .ceil()
+            .max(font_px),
+        )
+    }
+
+    fn field_sizing_content_height(
+        &self,
+        node: &WebCore,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> Option<f32> {
+        if !node.style.field_sizing.eq_ignore_ascii_case("content") || !node.style.height.is_auto()
+        {
+            return None;
+        }
+        if node.tag != "textarea" {
+            return None;
+        }
+        let value = crate::types::input_value(node);
+        let text = if value.is_empty() {
+            node.attributes
+                .get("placeholder")
+                .map(String::as_str)
+                .unwrap_or("")
+        } else {
+            value.as_str()
+        };
+        let line_count = text.lines().count().max(1) as f32;
+        let line_height = node
+            .style
+            .line_height
+            .resolve(font_px, font_px, root_font_px)
+            .max(font_px);
+        Some((line_count * line_height).ceil())
     }
 
     /// Resolve a box's styles using the engine's viewport dimensions.
@@ -778,7 +1263,8 @@ impl LayoutEngine {
             let attr = |k: &str| {
                 node.attributes
                     .get(k)
-                    .and_then(|s| s.parse::<f32>().ok())
+                    .and_then(|s| crate::html::forms::parse_non_negative_integer(s))
+                    .map(|value| value as f32)
                     .unwrap_or(0.0)
             };
             let (attr_w, attr_h) = (attr("width"), attr("height"));
@@ -898,6 +1384,55 @@ impl LayoutEngine {
         })
     }
 
+    fn clamp_resolved_content_width(
+        &self,
+        rbox: &mut ResolvedBox,
+        node: &WebCore,
+        containing_w: f32,
+        font_px: f32,
+        root_font_px: f32,
+    ) {
+        let Some(raw_w) = rbox.content_width else {
+            return;
+        };
+        let bb_extra = if node.style.box_sizing == crate::types::BoxSizing::BorderBox {
+            rbox.padding_left + rbox.padding_right + rbox.border_left + rbox.border_right
+        } else {
+            0.0
+        };
+        let avail_w = (containing_w - rbox.h_space()).max(0.0);
+        let min_w = match self.res_len_sizing(
+            &node.style.min_width,
+            node,
+            avail_w,
+            font_px,
+            containing_w,
+            root_font_px,
+        ) {
+            Some(v) => v,
+            None => {
+                let v = self.res_len(&node.style.min_width, font_px, containing_w, root_font_px);
+                (v - bb_extra).max(0.0)
+            }
+        };
+        let max_w = match self.res_len_sizing(
+            &node.style.max_width,
+            node,
+            avail_w,
+            font_px,
+            containing_w,
+            root_font_px,
+        ) {
+            Some(v) => v,
+            None if node.style.max_width.is_none() || node.style.max_width.is_auto() => f32::MAX,
+            None => {
+                let v = self.res_len(&node.style.max_width, font_px, containing_w, root_font_px);
+                (v - bb_extra).max(0.0)
+            }
+        };
+        rbox.content_width = Some(raw_w.max(min_w).min(max_w));
+    }
+
     /// Turn an intrinsic sizing keyword into a width — css-sizing-3 §5, §6.1.
     ///
     /// One definition, shared by block, inline and flex container sizing. Each
@@ -976,8 +1511,10 @@ impl LayoutEngine {
         // directions. Only the width→height direction was implemented, so
         // `display:inline-block; aspect-ratio:2/1; height:100px` measured as
         // zero wide and collapsed, instead of 200.
-        if let Some(w) = self.aspect_ratio_transferred_width(node, font_px, root_font_px) {
-            return w;
+        if honor_width {
+            if let Some(w) = self.aspect_ratio_transferred_width(node, font_px, root_font_px) {
+                return w;
+            }
         }
 
         // Replaced elements: the size they are shown at, ratio included.
@@ -1003,9 +1540,9 @@ impl LayoutEngine {
             };
         }
 
-        let rbox = self.res_box(&node.style, font_px, 0.0, root_font_px);
-        let pad_border =
-            rbox.padding_left + rbox.padding_right + rbox.border_left + rbox.border_right;
+        let _rbox = self.res_box(&node.style, font_px, 0.0, root_font_px);
+        let generated_inline_w = self.generated_inline_content_width(node, font_px, root_font_px);
+        let own_text_w = self.min_content_width_of_direct_text(node, font_px, root_font_px);
 
         // Text node or pseudo-element (::before/::after) with direct text content.
         // Pseudo-elements store content in node.text, not as #text children.
@@ -1076,11 +1613,11 @@ impl LayoutEngine {
                 total += self.min_content_width(ch, font_px, root_font_px) + child_outer;
                 count += 1;
             }
-            return total + pad_border;
+            return total;
         }
 
         // For containers: max of children's min-content widths
-        let mut max_w = 0.0f32;
+        let mut max_w = generated_inline_w.max(own_text_w);
         for ch in &node.children {
             if matches!(ch.style.display, Display::None) {
                 continue;
@@ -1101,7 +1638,7 @@ impl LayoutEngine {
                 max_w = cw;
             }
         }
-        max_w + pad_border
+        max_w
     }
 
     pub fn max_content_width(&self, node: &WebCore, parent_font_px: f32, root_font_px: f32) -> f32 {
@@ -1219,9 +1756,9 @@ impl LayoutEngine {
             };
         }
 
-        let rbox = self.res_box(&node.style, font_px, 0.0, root_font_px);
-        let pad_border =
-            rbox.padding_left + rbox.padding_right + rbox.border_left + rbox.border_right;
+        let _rbox = self.res_box(&node.style, font_px, 0.0, root_font_px);
+        let generated_inline_w = self.generated_inline_content_width(node, font_px, root_font_px);
+        let own_text_w = self.max_content_width_of_direct_text(node, font_px, root_font_px);
 
         // Text node or pseudo-element (::before/::after) with direct text content.
         let is_pseudo = matches!(node.tag.as_str(), "::before" | "::after");
@@ -1244,13 +1781,22 @@ impl LayoutEngine {
             if text.is_empty() {
                 return 0.0;
             }
-            let w = self.measure_text_cached(
-                &text,
-                font_px,
-                node.style.font_weight,
-                node.style.font_style,
-                &node.style.font_family,
-            );
+            let letter_spacing = node
+                .style
+                .letter_spacing
+                .resolve(font_px, 0.0, root_font_px);
+            let word_spacing = node.style.word_spacing.resolve(font_px, 0.0, root_font_px);
+            let w = if letter_spacing != 0.0 || word_spacing != 0.0 {
+                text::measure_text_with_spacing(&text, font_px, letter_spacing, word_spacing, None)
+            } else {
+                self.measure_text_cached(
+                    &text,
+                    font_px,
+                    node.style.font_weight,
+                    node.style.font_style,
+                    &node.style.font_family,
+                )
+            };
             return w;
         }
 
@@ -1327,7 +1873,7 @@ impl LayoutEngine {
                 }
                 count += 1;
             }
-            return total + pad_border;
+            return total;
         }
 
         // Column flex or block: max of children's max-content widths.
@@ -1337,14 +1883,21 @@ impl LayoutEngine {
         // everything that shares a line contributes its width to that line. A
         // plain max over all children measured `Hello <b>World</b>` as the wider
         // single word, and any shrink-to-fit box sized from it then wrapped.
-        let mut max_w = 0.0f32;
+        let mut max_w = generated_inline_w;
         let mut float_sum = 0.0f32;
-        let mut run = 0.0f32; // the inline run being accumulated
+        let mut run = generated_inline_w + own_text_w; // the inline run being accumulated
+        let mut pending_collapsed_space = false;
         for ch in &node.children {
             if matches!(ch.style.display, Display::None) {
                 continue;
             }
             if matches!(ch.style.position, Position::Absolute | Position::Fixed) {
+                continue;
+            }
+            if ch.tag == "#text" && ch.text.chars().all(|c| c.is_ascii_whitespace()) {
+                if run > 0.0 {
+                    pending_collapsed_space = true;
+                }
                 continue;
             }
             let child_font = ch.style.font_size_px(font_px, root_font_px);
@@ -1355,7 +1908,14 @@ impl LayoutEngine {
                 + child_rbox.border_right
                 + child_rbox.margin_left
                 + child_rbox.margin_right;
-            let cw = self.max_content_width(ch, font_px, root_font_px) + child_outer;
+            let mut cw = self.max_content_width(ch, font_px, root_font_px) + child_outer;
+            if ch.style.is_inline_level() && ch.layout.border_rect.w > 0.0 {
+                let measured_outer =
+                    ch.layout.border_rect.w + child_rbox.margin_left + child_rbox.margin_right;
+                if measured_outer > cw {
+                    cw = measured_outer;
+                }
+            }
             if !matches!(ch.style.float, Float::None) {
                 float_sum += cw;
                 continue;
@@ -1365,9 +1925,20 @@ impl LayoutEngine {
                     max_w = run;
                 }
                 run = 0.0;
+                pending_collapsed_space = false;
                 continue;
             }
             if ch.style.is_inline_level() {
+                if pending_collapsed_space && cw > 0.0 {
+                    run += self.measure_text_cached(
+                        " ",
+                        font_px,
+                        node.style.font_weight,
+                        node.style.font_style,
+                        &node.style.font_family,
+                    );
+                }
+                pending_collapsed_space = false;
                 run += cw;
             } else {
                 // A block-level child ends the current line and owns its own.
@@ -1375,6 +1946,7 @@ impl LayoutEngine {
                     max_w = run;
                 }
                 run = 0.0;
+                pending_collapsed_space = false;
                 if cw > max_w {
                     max_w = cw;
                 }
@@ -1384,7 +1956,145 @@ impl LayoutEngine {
             max_w = run;
         }
         // Container must be wide enough for both floats and normal flow
-        max_w.max(float_sum) + pad_border
+        max_w.max(float_sum)
+    }
+
+    fn generated_inline_content_width(
+        &self,
+        node: &WebCore,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> f32 {
+        self.generated_content_width(
+            &node.style.before_content,
+            node.style.before_style.as_deref(),
+            font_px,
+            root_font_px,
+        ) + self.generated_content_width(
+            &node.style.after_content,
+            node.style.after_style.as_deref(),
+            font_px,
+            root_font_px,
+        )
+    }
+
+    fn min_content_width_of_direct_text(
+        &self,
+        node: &WebCore,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> f32 {
+        if node.is_text_node() || node.text.is_empty() {
+            return 0.0;
+        }
+        let (letter_spacing, word_spacing) = (
+            node.style
+                .letter_spacing
+                .resolve(font_px, 0.0, root_font_px),
+            node.style.word_spacing.resolve(font_px, 0.0, root_font_px),
+        );
+        node.text
+            .split(|c: char| c.is_ascii_whitespace())
+            .filter(|word| !word.is_empty())
+            .map(|word| {
+                if letter_spacing != 0.0 || word_spacing != 0.0 {
+                    text::measure_text_with_spacing(
+                        word,
+                        font_px,
+                        letter_spacing,
+                        word_spacing,
+                        None,
+                    )
+                } else {
+                    self.measure_text_cached(
+                        word,
+                        font_px,
+                        node.style.font_weight,
+                        node.style.font_style,
+                        &node.style.font_family,
+                    )
+                }
+            })
+            .fold(0.0_f32, f32::max)
+    }
+
+    fn max_content_width_of_direct_text(
+        &self,
+        node: &WebCore,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> f32 {
+        if node.is_text_node() || node.text.is_empty() {
+            return 0.0;
+        }
+        let text = if matches!(
+            node.style.white_space,
+            WhiteSpace::Normal | WhiteSpace::Nowrap
+        ) {
+            node.text.split_whitespace().collect::<Vec<_>>().join(" ")
+        } else {
+            node.text.clone()
+        };
+        if text.is_empty() {
+            return 0.0;
+        }
+        let letter_spacing = node
+            .style
+            .letter_spacing
+            .resolve(font_px, 0.0, root_font_px);
+        let word_spacing = node.style.word_spacing.resolve(font_px, 0.0, root_font_px);
+        if letter_spacing != 0.0 || word_spacing != 0.0 {
+            text::measure_text_with_spacing(&text, font_px, letter_spacing, word_spacing, None)
+        } else {
+            self.measure_text_cached(
+                &text,
+                font_px,
+                node.style.font_weight,
+                node.style.font_style,
+                &node.style.font_family,
+            )
+        }
+    }
+
+    fn generated_content_width(
+        &self,
+        content: &str,
+        style: Option<&ComputedStyle>,
+        parent_font_px: f32,
+        root_font_px: f32,
+    ) -> f32 {
+        if content.is_empty() {
+            return 0.0;
+        }
+        let Some(style) = style else {
+            return self.measure_text_cached(
+                content,
+                parent_font_px,
+                FontWeight::Normal,
+                FontStyle::Normal,
+                "",
+            );
+        };
+        let font_px = style.font_size_px(parent_font_px, root_font_px);
+        let rb = self.res_box(style, font_px, 0.0, root_font_px);
+        let content_w = if !style.width.is_auto() && !matches!(style.width, CssLength::Percent(_)) {
+            self.res_len(&style.width, font_px, 0.0, root_font_px)
+        } else {
+            self.measure_text_cached(
+                content,
+                font_px,
+                style.font_weight,
+                style.font_style,
+                &style.font_family,
+            )
+        };
+        content_w.max(0.0)
+            + rb.margin_left
+            + rb.border_left
+            + rb.padding_left
+            + rb.padding_right
+            + rb.border_right
+            + rb.margin_right
     }
 
     /// Kick off non-blocking font loading. Base64 and local fonts are loaded
@@ -1395,21 +2105,33 @@ impl LayoutEngine {
             let fs = unsafe { &mut *fs_ptr };
 
             // ── Phase 1: Resolve each @font-face to its best fetchable URL ──────
-            let mut remote: Vec<(String, String)> = Vec::new();
+            let mut remote: Vec<(crate::css::FontFaceDecl, String)> = Vec::new();
 
             for face in faces {
                 let mut found = false;
-                for source in split_font_sources(&face.src) {
+                let parsed_sources;
+                let sources = if face.sources.is_empty() {
+                    parsed_sources = crate::css::font_face::parse_font_face_sources(&face.src);
+                    parsed_sources.as_slice()
+                } else {
+                    face.sources.as_slice()
+                };
+                for source in sources {
                     if found {
                         break;
                     }
-                    let source = source.trim();
-                    let url_inner = if let Some(start) = source.find("url(") {
-                        let rest = &source[start + 4..];
-                        let end = rest.find(')').unwrap_or(rest.len());
-                        rest[..end].trim().trim_matches('"').trim_matches('\'')
-                    } else {
+                    if !font_source_formats_supported(source) {
                         continue;
+                    };
+                    if !font_source_techs_supported(source) {
+                        continue;
+                    }
+                    let url_inner = match &source.kind {
+                        crate::css::FontFaceSourceKind::Local(name) => {
+                            found = load_local_font_face(fs, face, name);
+                            continue;
+                        }
+                        crate::css::FontFaceSourceKind::Url(url) => url.as_str(),
                     };
 
                     // Strip fragment (#iefix etc.)
@@ -1430,7 +2152,7 @@ impl LayoutEngine {
                         .and_then(|s| s.find(";base64,").map(|i| &s[i + 8..]))
                     {
                         if let Ok(bytes) = decode_base64(b64.trim()) {
-                            load_font_bytes(fs, bytes);
+                            load_font_face_bytes(fs, face, bytes);
                             found = true;
                         }
                         continue;
@@ -1439,7 +2161,7 @@ impl LayoutEngine {
                     let resolved = crate::html::resolve_url(url_clean, base_url);
 
                     if resolved.starts_with("http://") || resolved.starts_with("https://") {
-                        remote.push((face.family.clone(), resolved));
+                        remote.push((face.clone(), resolved));
                         found = true;
                     } else if !resolved.is_empty() {
                         // Local file — load immediately.
@@ -1451,7 +2173,7 @@ impl LayoutEngine {
                         // fallback font instead.
                         let path = resolved.strip_prefix("file://").unwrap_or(&resolved);
                         if let Ok(data) = std::fs::read(path) {
-                            load_font_bytes(fs, data);
+                            load_font_face_bytes(fs, face, data);
                             found = true;
                         }
                     }
@@ -1460,11 +2182,11 @@ impl LayoutEngine {
 
             // ── Phase 2: Fire-and-forget remote font fetches ────────────────────
             if !remote.is_empty() {
-                let (tx, rx) = std::sync::mpsc::channel::<(String, Vec<u8>)>();
+                let (tx, rx) = std::sync::mpsc::channel::<(crate::css::FontFaceDecl, Vec<u8>)>();
                 let in_flight = self.fonts_in_flight.clone();
                 in_flight.store(remote.len(), std::sync::atomic::Ordering::SeqCst);
 
-                for (family, url) in remote {
+                for (face, url) in remote {
                     let sender = tx.clone();
                     let counter = in_flight.clone();
                     std::thread::spawn(move || {
@@ -1478,13 +2200,13 @@ impl LayoutEngine {
                         if let Some(bytes) = result {
                             eprintln!(
                                 "  Font loaded: {} ({} bytes) from {}",
-                                family,
+                                face.family,
                                 bytes.len(),
                                 &url[..url.len().min(80)]
                             );
-                            let _ = sender.send((family, bytes));
+                            let _ = sender.send((face, bytes));
                         } else {
-                            eprintln!("  Font fetch failed: {}", family);
+                            eprintln!("  Font fetch failed: {}", face.family);
                         }
                         counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     });
@@ -1508,9 +2230,8 @@ impl LayoutEngine {
 
         let mut loaded_any = false;
         // Drain all available font data without blocking.
-        while let Ok((_, bytes)) = rx.try_recv() {
-            load_font_bytes(fs, bytes);
-            loaded_any = true;
+        while let Ok((face, bytes)) = rx.try_recv() {
+            loaded_any |= load_font_face_bytes(fs, &face, bytes);
         }
 
         // If all fetches are done, drop the receiver.
@@ -1603,7 +2324,8 @@ impl LayoutEngine {
         let did_cascade = if needs_cascade || dom_style_dirty {
             // Full cascade needed (initial, viewport change, etc.)
             let hover_chain = crate::css::build_hover_chain(&doc.root, doc.hovered_box);
-            crate::css::apply_cascade_vp_hover(
+            let target_id = doc.fragment_target_id();
+            crate::css::apply_cascade_vp_hover_target_url(
                 &mut doc.root,
                 &doc.stylesheet,
                 None,
@@ -1613,6 +2335,8 @@ impl LayoutEngine {
                 doc.focused_box,
                 doc.keyboard_focus,
                 &hover_chain,
+                target_id,
+                &doc.base_url,
             );
             // Clear any leftover dirty flags after full cascade
             crate::css::clear_cascade_dirty(&mut doc.root);
@@ -1676,6 +2400,7 @@ impl LayoutEngine {
             doc.sync_transitions(now, did_cascade);
         }
         doc.tick_animations(now);
+        doc.tick_smooth_scrolls(now);
         if !doc.animation_overrides.is_empty() {
             let overrides = doc.animation_overrides.clone();
             crate::css::apply_animation_overrides(&mut doc.root, &overrides);
@@ -1692,24 +2417,27 @@ impl LayoutEngine {
 
         // Container query post-pass: now that box sizes are known, apply @container rules
         // whose conditions match the computed dimensions of container ancestors, then
-        // re-layout so the updated styles take effect.
+        // re-layout until dependent container sizes settle.
         if self.cached_has_container_q {
-            let changed = crate::css::apply_container_cascade_tree(
-                &mut doc.root,
-                &doc.stylesheet,
-                &[],
-                &[],
-                0,
-                1,
-                0,
-                1,
-                root_font_px,
-                self.viewport_w,
-                self.viewport_h,
-                doc.focused_box,
-                doc.keyboard_focus,
-            );
-            if changed {
+            for _ in 0..4 {
+                let changed = crate::css::apply_container_cascade_tree(
+                    &mut doc.root,
+                    &doc.stylesheet,
+                    &[],
+                    &[],
+                    0,
+                    1,
+                    0,
+                    1,
+                    root_font_px,
+                    self.viewport_w,
+                    self.viewport_h,
+                    doc.focused_box,
+                    doc.keyboard_focus,
+                );
+                if !changed {
+                    break;
+                }
                 // Re-apply animation overrides after container-query cascade.
                 if !doc.animation_overrides.is_empty() {
                     let overrides = doc.animation_overrides.clone();
@@ -1810,6 +2538,8 @@ impl LayoutEngine {
         }
 
         self.pos_cb
+            .set(Rect::new(0.0, 0.0, content_w, self.viewport_h));
+        self.fixed_cb
             .set(Rect::new(0.0, 0.0, content_w, self.viewport_h));
         // **The root's containing block is the VIEWPORT, height included.**
         // CSS 2.1 §10.1: the initial containing block has the viewport's
@@ -1987,8 +2717,17 @@ impl LayoutEngine {
                 let h = (w * ih / iw).round();
                 (None, Some(h))
             } else if node.style.width.is_auto() && node.style.height.is_auto() {
-                let mut w = iw;
-                let mut h = ih;
+                let (mut w, mut h) = if node.tag == "svg" {
+                    let default_w = 300.0;
+                    let default_h = 150.0;
+                    if containing_w > 0.0 && containing_w < default_w {
+                        (containing_w, (containing_w * ih / iw).round())
+                    } else {
+                        (default_w, default_h)
+                    }
+                } else {
+                    (iw, ih)
+                };
                 let max_w = node.style.max_width.resolve_vp(
                     font_px,
                     containing_w,
@@ -2028,6 +2767,38 @@ impl LayoutEngine {
             self.viewport_h,
             c.available_height,
         );
+        if node.style.display == Display::Inline
+            && has_block_children(node)
+            && !node.style.width.is_auto()
+        {
+            let mut w = node
+                .style
+                .width
+                .resolve_vp(
+                    font_px,
+                    containing_w,
+                    root_font_px,
+                    self.viewport_w,
+                    self.viewport_h,
+                )
+                .max(0.0);
+            if node.style.box_sizing == BoxSizing::BorderBox {
+                w = (w
+                    - rbox.padding_left
+                    - rbox.padding_right
+                    - rbox.border_left
+                    - rbox.border_right)
+                    .max(0.0);
+            }
+            rbox.content_width = Some(w);
+        }
+
+        if let Some(w) = self.field_sizing_content_width(node, font_px) {
+            rbox.content_width = Some(w);
+        }
+        if let Some(h) = self.field_sizing_content_height(node, font_px, root_font_px) {
+            rbox.content_height = Some(h);
+        }
 
         // Apply intrinsic aspect ratio overrides to rbox (not to style)
         if let Some(w) = intrinsic_w_override {
@@ -2036,6 +2807,8 @@ impl LayoutEngine {
         if let Some(h) = intrinsic_h_override {
             rbox.content_height = Some(h);
         }
+
+        self.clamp_resolved_content_width(&mut rbox, node, containing_w, font_px, root_font_px);
 
         // Apply forced dimensions from Constraints (used by flex layout).
         // These override style.width/height without mutating the DOM.
@@ -2176,9 +2949,10 @@ impl LayoutEngine {
 
         // Track the nearest positioned ancestor's padding rect for abs children.
         let old_pos_cb = self.pos_cb.get();
+        let old_fixed_cb = self.fixed_cb.get();
         // CSS spec: positioned elements AND elements with transform/filter/will-change
         // create a containing block for absolute/fixed descendants.
-        if !matches!(node.style.position, Position::Static) || !node.style.transform.is_empty() {
+        if establishes_positioned_containing_block(&node.style) {
             let est_padding_x = x + rbox.margin_left + rbox.border_left;
             let est_padding_y = y + rbox.margin_top + rbox.border_top;
             let est_content_w = rbox
@@ -2191,6 +2965,14 @@ impl LayoutEngine {
                 est_padding_w,
                 self.viewport_h,
             ));
+            if establishes_fixed_positioned_containing_block(&node.style) {
+                self.fixed_cb.set(Rect::new(
+                    est_padding_x,
+                    est_padding_y,
+                    est_padding_w,
+                    self.viewport_h,
+                ));
+            }
         }
 
         // Shadow DOM: layout reads `effective_children()`, which answers the
@@ -2294,6 +3076,7 @@ impl LayoutEngine {
         };
 
         self.pos_cb.set(old_pos_cb);
+        self.fixed_cb.set(old_fixed_cb);
         self.layout_depth.set(depth);
         node.layout.layout_dirty = false;
         node.layout.intrinsic_dirty = false;
@@ -2385,10 +3168,13 @@ pub fn layout_positioned(
         parent_font_px,
         root_font_px,
         None,
+        None,
     );
 }
 
 /// Layout an absolutely/fixed positioned element, with optional static position.
+/// `static_x` is the x offset (relative to containing block) where the element would
+/// appear in normal flow — used when `left` and `right` are both `auto`.
 /// `static_y` is the y offset (relative to containing block) where the element would
 /// appear in normal flow — used when `top` and `bottom` are both `auto`.
 pub fn layout_positioned_static(
@@ -2397,20 +3183,23 @@ pub fn layout_positioned_static(
     containing_rect: Rect,
     parent_font_px: f32,
     root_font_px: f32,
+    static_x: Option<f32>,
     static_y: Option<f32>,
 ) {
     let font_px = node.style.font_size_px(parent_font_px, root_font_px);
     // By default the containing block is the passed containing_rect. For `fixed`
-    // positioned elements the containing block is the viewport (0,0, viewport_w, viewport_h).
+    // positioned elements, use the fixed-position containing block stack: the
+    // viewport unless a transform/filter/contain/will-change ancestor captured it.
     let mut containing_w = containing_rect.w;
     let mut containing_h = containing_rect.h;
     let mut containing_x = containing_rect.x;
     let mut containing_y = containing_rect.y;
     if node.style.position == Position::Fixed {
-        containing_w = engine.viewport_w;
-        containing_h = engine.viewport_h;
-        containing_x = 0.0;
-        containing_y = 0.0;
+        let fixed_cb = engine.fixed_cb.get();
+        containing_w = fixed_cb.w;
+        containing_h = fixed_cb.h;
+        containing_x = fixed_cb.x;
+        containing_y = fixed_cb.y;
     }
 
     let left_auto = node.style.left.is_auto();
@@ -2570,9 +3359,17 @@ pub fn layout_positioned_static(
             containing_x + res_l + rbox.margin_left
         }
     } else if !left_auto {
-        containing_x + res_l + rbox.margin_left
+        if !right_auto && !node.style.width.is_auto() && node.style.direction == Direction::RTL {
+            (containing_x + containing_w) - res_r - node.layout.border_rect.w - rbox.margin_right
+        } else {
+            containing_x + res_l + rbox.margin_left
+        }
     } else if !right_auto {
         (containing_x + containing_w) - res_r - node.layout.border_rect.w - rbox.margin_right
+    } else if let Some(abs_sx) = static_x {
+        abs_sx + rbox.margin_left
+    } else if let Some(abs_sx) = node.layout.abs_static_x {
+        abs_sx + rbox.margin_left
     } else {
         containing_x + rbox.margin_left
     };

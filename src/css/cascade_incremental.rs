@@ -194,6 +194,8 @@ fn apply_cascade_incremental_walk(
             vh,
             focused_box,
             keyboard_focus,
+            0,
+            "",
             inherited_vars,
             candidates_buf,
             counters,
@@ -362,6 +364,9 @@ fn swap_hover_inner(
             let cur_placeholder_style = std::sync::Arc::make_mut(&mut node.style)
                 .placeholder_style
                 .take();
+            let cur_backdrop_style = std::sync::Arc::make_mut(&mut node.style)
+                .backdrop_style
+                .take();
 
             let cur_style = std::mem::replace(&mut node.style, std::sync::Arc::new(*other));
             // Store the old style as the new hover_style (for swapping back)
@@ -383,6 +388,7 @@ fn swap_hover_inner(
             stored.marker_style = cur_marker_style;
             stored.marker_content = cur_marker_content;
             stored.placeholder_style = cur_placeholder_style;
+            stored.backdrop_style = cur_backdrop_style;
 
             std::sync::Arc::make_mut(&mut node.style).hover_style = Some(stored);
             std::sync::Arc::make_mut(&mut node.style).active_style = as_backup;
@@ -405,8 +411,9 @@ fn swap_hover_inner(
 
 #[allow(clippy::too_many_arguments)]
 /// Maximum DOM depth before we stop recursing to avoid stack overflow.
-/// 400 levels is more than any well-formed page needs (most pages are < 50 deep).
-pub(crate) const MAX_CASCADE_DEPTH: usize = 400;
+/// Keep this below libtest's smaller worker-thread stack limit; real pages are
+/// normally far shallower, and extreme nesting degrades by inheriting.
+pub(crate) const MAX_CASCADE_DEPTH: usize = 256;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Shared pseudo-element helpers — used by both sequential and parallel cascade

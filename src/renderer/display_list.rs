@@ -12,7 +12,7 @@
 //! - Debug/inspector visualization
 //! - Future: GPU acceleration, layer compositing
 
-use crate::types::{Color, Rect};
+use crate::types::{Color, GradientDirection, Rect, TextUnderlinePosition};
 
 /// A single paint command in the display list.
 #[derive(Clone, Debug)]
@@ -22,6 +22,7 @@ pub enum PaintCmd {
         rect: Rect,
         color: Color,
         radius: [f32; 4],
+        radius_y: [f32; 4],
     },
 
     /// Draw a border on a rectangle.
@@ -31,6 +32,16 @@ pub enum PaintCmd {
         colors: [Color; 4],
         styles: [u8; 4], // 0=none, 1=solid, 2=dashed, 3=dotted, 4=double, etc.
         radii: [f32; 4], // top-left, top-right, bottom-right, bottom-left
+        radii_y: [f32; 4],
+    },
+
+    /// Draw a decoded CSS border-image source clipped to the border ring.
+    BorderImage {
+        rect: Rect,
+        widths: [f32; 4],
+        slices: [f32; 4],
+        fill_center: bool,
+        data: ImageRef,
     },
 
     /// Draw a text run at a position.
@@ -55,7 +66,14 @@ pub enum PaintCmd {
     Image { rect: Rect, data: ImageRef },
 
     /// Push a clip rectangle — all subsequent commands are clipped to this rect.
-    PushClip { rect: Rect, radius: [f32; 4] },
+    PushClip {
+        rect: Rect,
+        radius: [f32; 4],
+        radius_y: [f32; 4],
+    },
+
+    /// Push an arbitrary polygon clip in document coordinates.
+    PushClipPath { points: Vec<(f32, f32)> },
 
     /// Pop the current clip.
     PopClip,
@@ -81,6 +99,19 @@ pub enum PaintCmd {
     /// Pop filter layer.
     PopFilter,
 
+    /// Filter the already-painted backdrop within the element's border box.
+    BackdropFilter {
+        rect: Rect,
+        filters: Vec<(u8, f32, f32, f32, crate::types::Color)>,
+    },
+
+    /// Push a CSS mask layer. Subsequent element content is rendered offscreen,
+    /// then composited through the mask image on pop.
+    PushMask { rect: Rect, data: ImageRef },
+
+    /// Pop the current CSS mask layer.
+    PopMask,
+
     /// Push a blend mode layer — subsequent content is composited with this mode.
     PushBlendMode { mode: u8 }, // 0=normal, 1=multiply, 2=screen, 3=overlay, etc.
 
@@ -97,6 +128,7 @@ pub enum PaintCmd {
         spread: f32,
         inset: bool,
         radii: [f32; 4],
+        radii_y: [f32; 4],
     },
 
     /// Draw a linear or radial gradient.
@@ -111,12 +143,18 @@ pub enum PaintCmd {
         clip: Rect,
         /// `background-repeat`, resolved per axis. A repeating gradient tiles
         /// its positioning area across the painting area.
-        repeat_x: bool,
-        repeat_y: bool,
+        repeat_x_mode: u8, // 0=no-repeat, 1=repeat, 2=space, 3=round
+        repeat_y_mode: u8, // 0=no-repeat, 1=repeat, 2=space, 3=round
         gradient_type: u8, // 1=linear, 2=radial
         angle: f32,
+        direction: GradientDirection,
+        radial_center_x: f32,
+        radial_center_y: f32,
+        radial_radius_x: f32,
+        radial_radius_y: f32,
         stops: Vec<(Color, f32)>, // (color, position 0..1)
         radii: [f32; 4],
+        radii_y: [f32; 4],
         opacity: f32,
         blend_mode: u8,
     },
@@ -130,6 +168,13 @@ pub enum PaintCmd {
         offset: f32,
     },
 
+    /// Draw the native resize affordance for CSS `resize`.
+    ResizeGrip {
+        rect: Rect,
+        color: Color,
+        mode: u8, // 1=both, 2=horizontal, 3=vertical
+    },
+
     /// Draw a horizontal line (for <hr>).
     HorizontalRule { x1: f32, y1: f32, x2: f32 },
 
@@ -141,6 +186,7 @@ pub enum PaintCmd {
         size: f32,
         color: Color,
         text: String, // for numbered markers
+        image: Option<ImageRef>,
         font_family: String,
         font_size: f32,
         font_weight: u16,
@@ -226,6 +272,8 @@ pub enum PaintCmd {
         repeat_x_mode: u8, // 0=no-repeat, 1=repeat, 2=space, 3=round
         repeat_y_mode: u8, // 0=no-repeat, 1=repeat, 2=space, 3=round
         radii: [f32; 4],
+        radii_y: [f32; 4],
+        blend_mode: u8,
     },
 
     /// Marker: start of a stacking context.
@@ -245,6 +293,8 @@ pub struct TextDecoration {
     pub style: u8, // 0=solid, 1=double, 2=dotted, 3=dashed, 4=wavy
     pub thickness: f32,
     pub underline_offset: f32,
+    pub underline_position: TextUnderlinePosition,
+    pub skip_ink: bool,
 }
 
 /// Reference to image data — avoids cloning large pixel buffers.

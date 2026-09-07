@@ -161,6 +161,7 @@ pub fn apply_css_value(
         }
         CssValue::ListStyleType(l) => {
             style.list_style_type = *l;
+            style.custom_list_style_type.clear();
             return;
         }
         CssValue::ListStylePosition(l) => {
@@ -196,7 +197,7 @@ pub fn apply_css_value(
             return;
         }
         CssValue::VerticalAlign(v) => {
-            style.vertical_align = *v;
+            style.vertical_align = v.clone();
             return;
         }
         CssValue::Raw(s) => {
@@ -249,6 +250,8 @@ pub(crate) fn note_current_color(
         P::BackgroundColor | P::Background => CURRENT_COLOR_BACKGROUND,
         P::TextDecorationColor | P::TextDecoration => CURRENT_COLOR_TEXT_DECOR,
         P::CaretColor => CURRENT_COLOR_CARET,
+        P::Fill => CURRENT_COLOR_SVG_FILL,
+        P::Stroke => CURRENT_COLOR_SVG_STROKE,
         _ => return,
     };
     // A shorthand carries the colour as one component among several, so every
@@ -481,6 +484,12 @@ pub fn finalize_current_color(style: &mut ComputedStyle) {
     if mask & CURRENT_COLOR_CARET != 0 {
         style.caret_color = Some(c);
     }
+    if mask & CURRENT_COLOR_SVG_FILL != 0 {
+        style.svg_fill = Some(c);
+    }
+    if mask & CURRENT_COLOR_SVG_STROKE != 0 {
+        style.svg_stroke = Some(c);
+    }
     // The mask has done its job. Clearing it keeps it from riding along into a
     // style that inherits from this one.
     style.rare_mut().current_color_props = 0;
@@ -602,6 +611,8 @@ fn apply_color_value(
         BorderLeftColor => style.border_left_color = *c,
         OutlineColor => style.outline_color = *c,
         CaretColor => style.caret_color = Some(*c),
+        Fill => style.svg_fill = Some(*c),
+        Stroke => style.svg_stroke = Some(*c),
         _ => return false,
     }
     true
@@ -1138,6 +1149,13 @@ pub(crate) fn format_counter_value(value: i32, style: &str) -> String {
         "upper-roman" => roman_counter(value, true),
         "lower-greek" => greek_counter(value),
         "cjk-decimal" => cjk_decimal_counter(value),
+        "armenian" => armenian_counter(value),
+        "georgian" => georgian_counter(value),
+        "hebrew" => hebrew_counter(value),
+        "hiragana" => kana_counter(value, HIRAGANA_GOJUON),
+        "katakana" => kana_counter(value, KATAKANA_GOJUON),
+        "hiragana-iroha" => kana_counter(value, HIRAGANA_IROHA),
+        "katakana-iroha" => kana_counter(value, KATAKANA_IROHA),
         _ => value.to_string(),
     }
 }
@@ -1189,6 +1207,187 @@ fn roman_counter(value: i32, uppercase: bool) -> String {
         out.to_ascii_lowercase()
     }
 }
+
+fn additive_counter(value: i32, table: &[(i32, &str)]) -> String {
+    if value <= 0 {
+        return value.to_string();
+    }
+    let mut n = value;
+    let mut out = String::new();
+    for (amount, symbol) in table {
+        while n >= *amount {
+            out.push_str(symbol);
+            n -= *amount;
+        }
+    }
+    if n == 0 {
+        out
+    } else {
+        value.to_string()
+    }
+}
+
+fn armenian_counter(value: i32) -> String {
+    additive_counter(
+        value,
+        &[
+            (9000, "Ք"),
+            (8000, "Փ"),
+            (7000, "Ւ"),
+            (6000, "Ց"),
+            (5000, "Ր"),
+            (4000, "Տ"),
+            (3000, "Վ"),
+            (2000, "Ս"),
+            (1000, "Ռ"),
+            (900, "Ջ"),
+            (800, "Պ"),
+            (700, "Չ"),
+            (600, "Ո"),
+            (500, "Շ"),
+            (400, "Ն"),
+            (300, "Յ"),
+            (200, "Մ"),
+            (100, "Ճ"),
+            (90, "Ղ"),
+            (80, "Ձ"),
+            (70, "Հ"),
+            (60, "Կ"),
+            (50, "Ծ"),
+            (40, "Խ"),
+            (30, "Լ"),
+            (20, "Ի"),
+            (10, "Ժ"),
+            (9, "Թ"),
+            (8, "Ը"),
+            (7, "Է"),
+            (6, "Զ"),
+            (5, "Ե"),
+            (4, "Դ"),
+            (3, "Գ"),
+            (2, "Բ"),
+            (1, "Ա"),
+        ],
+    )
+}
+
+fn georgian_counter(value: i32) -> String {
+    additive_counter(
+        value,
+        &[
+            (10000, "ჵ"),
+            (9000, "ჰ"),
+            (8000, "ჯ"),
+            (7000, "ჴ"),
+            (6000, "ხ"),
+            (5000, "ჭ"),
+            (4000, "წ"),
+            (3000, "ძ"),
+            (2000, "ც"),
+            (1000, "ჩ"),
+            (900, "შ"),
+            (800, "ყ"),
+            (700, "ღ"),
+            (600, "ქ"),
+            (500, "ფ"),
+            (400, "უ"),
+            (300, "ტ"),
+            (200, "ს"),
+            (100, "რ"),
+            (90, "ჟ"),
+            (80, "პ"),
+            (70, "ო"),
+            (60, "ჲ"),
+            (50, "ნ"),
+            (40, "მ"),
+            (30, "ლ"),
+            (20, "კ"),
+            (10, "ი"),
+            (9, "თ"),
+            (8, "ჱ"),
+            (7, "ზ"),
+            (6, "ვ"),
+            (5, "ე"),
+            (4, "დ"),
+            (3, "გ"),
+            (2, "ბ"),
+            (1, "ა"),
+        ],
+    )
+}
+
+fn hebrew_counter(value: i32) -> String {
+    match value {
+        15 => "ט״ו".to_string(),
+        16 => "ט״ז".to_string(),
+        _ => additive_counter(
+            value,
+            &[
+                (400, "ת"),
+                (300, "ש"),
+                (200, "ר"),
+                (100, "ק"),
+                (90, "צ"),
+                (80, "פ"),
+                (70, "ע"),
+                (60, "ס"),
+                (50, "נ"),
+                (40, "מ"),
+                (30, "ל"),
+                (20, "כ"),
+                (10, "י"),
+                (9, "ט"),
+                (8, "ח"),
+                (7, "ז"),
+                (6, "ו"),
+                (5, "ה"),
+                (4, "ד"),
+                (3, "ג"),
+                (2, "ב"),
+                (1, "א"),
+            ],
+        ),
+    }
+}
+
+fn kana_counter(value: i32, symbols: &[&str]) -> String {
+    if value <= 0 {
+        return value.to_string();
+    }
+    let base = symbols.len() as i32;
+    let mut n = value;
+    let mut out = Vec::new();
+    while n > 0 {
+        n -= 1;
+        out.push(symbols[(n % base) as usize]);
+        n /= base;
+    }
+    out.into_iter().rev().collect()
+}
+
+const HIRAGANA_GOJUON: &[&str] = &[
+    "あ", "い", "う", "え", "お", "か", "き", "く", "け", "こ", "さ", "し", "す", "せ", "そ", "た",
+    "ち", "つ", "て", "と", "な", "に", "ぬ", "ね", "の", "は", "ひ", "ふ", "へ", "ほ", "ま", "み",
+    "む", "め", "も", "や", "ゆ", "よ", "ら", "り", "る", "れ", "ろ", "わ", "ゐ", "ゑ", "を", "ん",
+];
+
+const KATAKANA_GOJUON: &[&str] = &[
+    "ア", "イ", "ウ", "エ", "オ", "カ", "キ", "ク", "ケ", "コ", "サ", "シ", "ス", "セ", "ソ", "タ",
+    "チ", "ツ", "テ", "ト", "ナ", "ニ", "ヌ", "ネ", "ノ", "ハ", "ヒ", "フ", "ヘ", "ホ", "マ", "ミ",
+    "ム", "メ", "モ", "ヤ", "ユ", "ヨ", "ラ", "リ", "ル", "レ", "ロ", "ワ", "ヰ", "ヱ", "ヲ", "ン",
+];
+
+const HIRAGANA_IROHA: &[&str] = &[
+    "い", "ろ", "は", "に", "ほ", "へ", "と", "ち", "り", "ぬ", "る", "を", "わ", "か", "よ", "た",
+    "れ", "そ", "つ", "ね", "な", "ら", "む", "う", "ゐ", "の", "お", "く", "や", "ま", "け", "ふ",
+    "こ", "え", "て", "あ", "さ", "き", "ゆ", "め", "み", "し", "ゑ", "ひ", "も", "せ", "す",
+];
+
+const KATAKANA_IROHA: &[&str] = &[
+    "イ", "ロ", "ハ", "ニ", "ホ", "ヘ", "ト", "チ", "リ", "ヌ", "ル", "ヲ", "ワ", "カ", "ヨ", "タ",
+    "レ", "ソ", "ツ", "ネ", "ナ", "ラ", "ム", "ウ", "ヰ", "ノ", "オ", "ク", "ヤ", "マ", "ケ", "フ",
+    "コ", "エ", "テ", "ア", "サ", "キ", "ユ", "メ", "ミ", "シ", "ヱ", "ヒ", "モ", "セ", "ス",
+];
 
 /// Parse CSS counter list: "name1 3 name2 name3 -1".
 ///
@@ -1580,10 +1779,10 @@ fn find_top_level_space(s: &str) -> Option<usize> {
     None
 }
 
-/// The `<angle>` or `to <side>` that may open a `linear-gradient()`, in degrees
-/// clockwise from "up". `None` when the component is not a direction at all —
-/// the gradient then runs to the bottom and this component is a colour stop.
-fn parse_gradient_direction(dir: &str) -> Option<f32> {
+/// The `<angle>` or `to <side>` that may open a `linear-gradient()`.
+/// `None` when the component is not a direction at all — the gradient then
+/// runs to the bottom and this component is a colour stop.
+fn parse_gradient_direction(dir: &str) -> Option<GradientDirection> {
     let dir = dir.trim().to_ascii_lowercase();
     for (unit, per_turn) in [
         ("deg", 360.0f32),
@@ -1593,7 +1792,7 @@ fn parse_gradient_direction(dir: &str) -> Option<f32> {
     ] {
         if let Some(num) = dir.strip_suffix(unit) {
             if let Ok(n) = num.trim().parse::<f32>() {
-                return Some(n * 360.0 / per_turn);
+                return Some(GradientDirection::Angle(n * 360.0 / per_turn));
             }
         }
     }
@@ -1613,17 +1812,14 @@ fn parse_gradient_direction(dir: &str) -> Option<f32> {
         }
     }
     match (top, bottom, left, right) {
-        (true, false, false, false) => Some(0.0),
-        (false, false, false, true) => Some(90.0),
-        (false, true, false, false) => Some(180.0),
-        (false, false, true, false) => Some(270.0),
-        // Corner keywords aim at a corner, which for a non-square box is not a
-        // fixed angle; the box diagonal is the closest fixed answer available
-        // until the used size reaches here.
-        (true, false, false, true) => Some(45.0),
-        (false, true, false, true) => Some(135.0),
-        (false, true, true, false) => Some(225.0),
-        (true, false, true, false) => Some(315.0),
+        (true, false, false, false) => Some(GradientDirection::Angle(0.0)),
+        (false, false, false, true) => Some(GradientDirection::Angle(90.0)),
+        (false, true, false, false) => Some(GradientDirection::Angle(180.0)),
+        (false, false, true, false) => Some(GradientDirection::Angle(270.0)),
+        (true, false, false, true) => Some(GradientDirection::Corner { x: 1, y: -1 }),
+        (false, true, false, true) => Some(GradientDirection::Corner { x: 1, y: 1 }),
+        (false, true, true, false) => Some(GradientDirection::Corner { x: -1, y: 1 }),
+        (true, false, true, false) => Some(GradientDirection::Corner { x: -1, y: -1 }),
         _ => None,
     }
 }
@@ -1796,7 +1992,16 @@ pub fn apply_gradient(style: &mut ComputedStyle, v: &str) {
             if angle.is_some() {
                 args.remove(0);
             }
-            style.gradient_angle = angle.unwrap_or(180.0);
+            style.gradient_direction = angle.unwrap_or_default();
+            style.gradient_angle = match style.gradient_direction {
+                GradientDirection::Angle(angle) => angle,
+                GradientDirection::Corner { x, y } => match (x, y) {
+                    (1, -1) => 45.0,
+                    (1, 1) => 135.0,
+                    (-1, 1) => 225.0,
+                    _ => 315.0,
+                },
+            };
         }
         GradientType::Radial => {
             // The first component is the optional
@@ -1807,7 +2012,10 @@ pub fn apply_gradient(style: &mut ComputedStyle, v: &str) {
             let first = args[0].trim();
             let split = find_top_level_space(first).unwrap_or(first.len());
             if parse_color(&first[..split]).is_none() {
+                apply_radial_gradient_descriptor(style, first);
                 args.remove(0);
+            } else {
+                reset_radial_gradient_descriptor(style);
             }
         }
         GradientType::None => {}
@@ -1826,33 +2034,112 @@ pub fn apply_gradient(style: &mut ComputedStyle, v: &str) {
     }));
 }
 
+fn reset_radial_gradient_descriptor(style: &mut ComputedStyle) {
+    style.gradient_radial_shape = GradientRadialShape::Ellipse;
+    style.gradient_radial_size = GradientRadialSize::FarthestCorner;
+    style.gradient_radial_radius_x = CssLength::Auto;
+    style.gradient_radial_radius_y = CssLength::Auto;
+    style.gradient_radial_position_x = CssLength::Percent(50.0);
+    style.gradient_radial_position_y = CssLength::Percent(50.0);
+}
+
+fn apply_radial_gradient_descriptor(style: &mut ComputedStyle, descriptor: &str) {
+    reset_radial_gradient_descriptor(style);
+    let lower = descriptor.to_ascii_lowercase();
+    let (before_at, after_at) = match lower.find(" at ") {
+        Some(at) => (&descriptor[..at], Some(&descriptor[at + 4..])),
+        None => (descriptor, None),
+    };
+
+    let mut radii = Vec::new();
+    for token in before_at.split_whitespace() {
+        match token.to_ascii_lowercase().as_str() {
+            "circle" => style.gradient_radial_shape = GradientRadialShape::Circle,
+            "ellipse" => style.gradient_radial_shape = GradientRadialShape::Ellipse,
+            "closest-side" => style.gradient_radial_size = GradientRadialSize::ClosestSide,
+            "farthest-side" => style.gradient_radial_size = GradientRadialSize::FarthestSide,
+            "closest-corner" => style.gradient_radial_size = GradientRadialSize::ClosestCorner,
+            "farthest-corner" => style.gradient_radial_size = GradientRadialSize::FarthestCorner,
+            _ => {
+                let len = parse_length(token);
+                if !len.is_auto() {
+                    radii.push(len);
+                }
+            }
+        }
+    }
+    if let Some(rx) = radii.first() {
+        style.gradient_radial_radius_x = rx.clone();
+        style.gradient_radial_radius_y = radii.get(1).cloned().unwrap_or_else(|| rx.clone());
+    }
+
+    if let Some(position) = after_at {
+        let (x, y) = parse_radial_position(position);
+        style.gradient_radial_position_x = x;
+        style.gradient_radial_position_y = y;
+    }
+}
+
+fn parse_radial_position(position: &str) -> (CssLength, CssLength) {
+    let mut x = CssLength::Percent(50.0);
+    let mut y = CssLength::Percent(50.0);
+    let mut x_set = false;
+    let mut y_set = false;
+
+    for token in position.split_whitespace() {
+        match token.to_ascii_lowercase().as_str() {
+            "left" => {
+                x = CssLength::Percent(0.0);
+                x_set = true;
+            }
+            "right" => {
+                x = CssLength::Percent(100.0);
+                x_set = true;
+            }
+            "top" => {
+                y = CssLength::Percent(0.0);
+                y_set = true;
+            }
+            "bottom" => {
+                y = CssLength::Percent(100.0);
+                y_set = true;
+            }
+            "center" => {
+                if !x_set {
+                    x = CssLength::Percent(50.0);
+                    x_set = true;
+                } else if !y_set {
+                    y = CssLength::Percent(50.0);
+                    y_set = true;
+                }
+            }
+            _ => {
+                if let Some(length) = parse_length_checked(token) {
+                    if !x_set {
+                        x = length;
+                        x_set = true;
+                    } else if !y_set {
+                        y = length;
+                        y_set = true;
+                    }
+                }
+            }
+        }
+    }
+    (x, y)
+}
+
 /// Return true if a token looks like a font-size value (keyword or length unit).
 fn is_font_size_token(tok: &str) -> bool {
-    matches!(
-        tok,
-        "xx-small"
-            | "x-small"
-            | "small"
-            | "medium"
-            | "large"
-            | "x-large"
-            | "xx-large"
-            | "smaller"
-            | "larger"
-    ) || tok.ends_with("px")
-        || tok.ends_with("em")
-        || tok.ends_with("rem")
-        || tok.ends_with('%')
-        || tok.ends_with("pt")
-        || tok.ends_with("vw")
-        || tok.ends_with("vh")
+    parse_font_size_checked(tok).is_some()
 }
 
 pub fn apply_font_shorthand(style: &mut ComputedStyle, v: &str) {
     // CSS font shorthand: [style] [variant] [weight] [stretch] size[/line-height] family-list
     // System font keywords (single-token):
+    let keyword = v.trim().to_ascii_lowercase();
     if matches!(
-        v,
+        keyword.as_str(),
         "caption" | "icon" | "menu" | "message-box" | "small-caption" | "status-bar"
     ) {
         return; // Use UA defaults; no overrides.
@@ -1862,6 +2149,13 @@ pub fn apply_font_shorthand(style: &mut ComputedStyle, v: &str) {
     let defaults = ComputedStyle::default();
     style.font_style = defaults.font_style;
     style.small_caps = defaults.small_caps;
+    style.font_variant_alternates = defaults.font_variant_alternates;
+    style.font_variant_caps = defaults.font_variant_caps;
+    style.font_variant_east_asian = defaults.font_variant_east_asian;
+    style.font_variant_emoji = defaults.font_variant_emoji;
+    style.font_variant_ligatures = defaults.font_variant_ligatures;
+    style.font_variant_numeric = defaults.font_variant_numeric;
+    style.font_variant_position = defaults.font_variant_position;
     style.font_weight = defaults.font_weight;
     style.font_stretch = defaults.font_stretch;
     style.line_height = defaults.line_height;
@@ -1887,12 +2181,16 @@ pub fn apply_font_shorthand(style: &mut ComputedStyle, v: &str) {
             // Parse size (and optional /line-height).
             if tok.contains('/') {
                 let mut parts = tok.splitn(2, '/');
-                style.font_size = parse_font_size(parts.next().unwrap_or(""));
+                if let Some(size) = parse_font_size_checked(parts.next().unwrap_or("")) {
+                    style.font_size = size;
+                }
                 if let Some(lh) = parts.next() {
                     style.line_height = parse_line_height(lh);
                 }
             } else {
-                style.font_size = parse_font_size(tok);
+                if let Some(size) = parse_font_size_checked(tok) {
+                    style.font_size = size;
+                }
             }
             size_found_at = Some(byte_pos + tok.len());
             break;
@@ -1910,6 +2208,7 @@ pub fn apply_font_shorthand(style: &mut ComputedStyle, v: &str) {
             }
             "small-caps" => {
                 style.small_caps = true;
+                style.font_variant_caps = String::from("small-caps");
             }
             "bold" => {
                 style.font_weight = FontWeight::Bold;

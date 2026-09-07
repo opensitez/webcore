@@ -158,17 +158,50 @@ pub(crate) fn copy_property_from_style(
             style.overflow_x = parent.overflow_x;
             style.overflow_y = parent.overflow_y;
         }
+        "flex" => {
+            style.flex_grow = parent.flex_grow;
+            style.flex_shrink = parent.flex_shrink;
+            style.flex_basis = parent.flex_basis.clone();
+        }
+        "flex-flow" => {
+            style.flex_direction = parent.flex_direction;
+            style.flex_wrap = parent.flex_wrap;
+        }
         "overflow-x" => style.overflow_x = parent.overflow_x,
         "overflow-y" => style.overflow_y = parent.overflow_y,
         "position" => style.position = parent.position,
         "float" => style.float = parent.float,
         "text-indent" => style.text_indent = parent.text_indent.clone(),
-        "list-style-type" => style.list_style_type = parent.list_style_type,
-        "vertical-align" => style.vertical_align = parent.vertical_align,
-        "text-overflow" => style.text_overflow = parent.text_overflow,
+        "list-style-type" => {
+            style.list_style_type = parent.list_style_type;
+            style.custom_list_style_type = parent.custom_list_style_type.clone();
+        }
+        "vertical-align" => style.vertical_align = parent.vertical_align.clone(),
+        "text-overflow" => {
+            style.text_overflow = parent.text_overflow;
+            style.text_overflow_string = parent.text_overflow_string.clone();
+        }
         "word-break" => style.word_break = parent.word_break,
         "overflow-wrap" => style.overflow_wrap = parent.overflow_wrap,
         "font-stretch" => style.font_stretch = parent.font_stretch,
+        "font-variant-alternates" => {
+            style.font_variant_alternates = parent.font_variant_alternates.clone()
+        }
+        "font-variant-caps" => {
+            style.small_caps = parent.small_caps;
+            style.font_variant_caps = parent.font_variant_caps.clone();
+        }
+        "font-variant-east-asian" => {
+            style.font_variant_east_asian = parent.font_variant_east_asian.clone()
+        }
+        "font-variant-emoji" => style.font_variant_emoji = parent.font_variant_emoji.clone(),
+        "font-variant-ligatures" => {
+            style.font_variant_ligatures = parent.font_variant_ligatures.clone()
+        }
+        "font-variant-numeric" => style.font_variant_numeric = parent.font_variant_numeric.clone(),
+        "font-variant-position" => {
+            style.font_variant_position = parent.font_variant_position.clone()
+        }
         "font-synthesis-weight" => style.font_synthesis_weight = parent.font_synthesis_weight,
         "font-synthesis-style" => style.font_synthesis_style = parent.font_synthesis_style,
         "font-synthesis-small-caps" => {
@@ -177,6 +210,7 @@ pub(crate) fn copy_property_from_style(
         "font-synthesis-position" => style.font_synthesis_position = parent.font_synthesis_position,
         "text-shadow" => style.text_shadow = parent.text_shadow.clone(),
         "color-scheme" => style.color_scheme = parent.color_scheme.clone(),
+        "forced-color-adjust" => style.forced_color_adjust = parent.forced_color_adjust.clone(),
         "text-orientation" => style.text_orientation = parent.text_orientation,
         _ => {} // Unhandled properties — no-op
     }

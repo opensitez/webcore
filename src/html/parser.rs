@@ -470,34 +470,7 @@ impl HtmlParser {
                         } else {
                             String::new()
                         };
-                        // Rebuild full SVG markup with attributes
-                        let mut svg_tag_str = String::from("<svg");
-                        for (k, v) in &attrs {
-                            svg_tag_str.push_str(&format!(" {}=\"{}\"", k, v));
-                        }
-                        if !svg_tag_str.contains("xmlns=") {
-                            svg_tag_str.push_str(" xmlns=\"http://www.w3.org/2000/svg\"");
-                        }
-                        if svg_body.contains("xlink:") && !svg_tag_str.contains("xmlns:xlink") {
-                            svg_tag_str.push_str(" xmlns:xlink=\"http://www.w3.org/1999/xlink\"");
-                        }
-                        svg_tag_str.push('>');
-                        let svg_markup = format!("{}{}</svg>", svg_tag_str, svg_body);
-
-                        // Parse viewBox (case-insensitive lookup)
-                        let vb_str = attrs.get("viewBox").or_else(|| attrs.get("viewbox"));
-                        let vb = parse_viewbox_value(vb_str.map(|s| s.as_str()));
-                        let (vb_w, vb_h) = vb.unwrap_or((0, 0));
-
-                        // Check for explicit dimensions from HTML attributes or inline style
-                        let explicit_w = attrs
-                            .get("style")
-                            .and_then(|s| style_px(s, "width"))
-                            .or_else(|| attrs.get("width").and_then(|s| parse_px(s)));
-                        let explicit_h = attrs
-                            .get("style")
-                            .and_then(|s| style_px(s, "height"))
-                            .or_else(|| attrs.get("height").and_then(|s| parse_px(s)));
+                        let fallback = crate::svg::build_inline_svg_fallback(&attrs, &svg_body);
 
                         let mut node = self.new_box("svg");
                         node.attributes = attrs;
@@ -506,21 +479,21 @@ impl HtmlParser {
                             "display",
                             "inline-block",
                         );
-                        node.svg_markup = Some(svg_markup);
-                        node.svg_viewbox_w = vb_w as f32;
-                        node.svg_viewbox_h = vb_h as f32;
+                        node.svg_markup = Some(fallback.markup);
+                        node.svg_viewbox_w = fallback.viewbox_w;
+                        node.svg_viewbox_h = fallback.viewbox_h;
 
                         // Only bake explicit HTML-attribute dimensions into the style.
                         // CSS cascade will override these. If no explicit dimensions,
                         // the layout engine uses svg_viewbox_w/h.
-                        if let Some(w) = explicit_w {
+                        if let Some(w) = fallback.explicit_w {
                             apply_property(
                                 std::sync::Arc::make_mut(&mut node.style),
                                 "width",
                                 &format!("{}px", w),
                             );
                         }
-                        if let Some(h) = explicit_h {
+                        if let Some(h) = fallback.explicit_h {
                             apply_property(
                                 std::sync::Arc::make_mut(&mut node.style),
                                 "height",
@@ -545,7 +518,10 @@ impl HtmlParser {
                     if tag == "link" {
                         let rel = attrs.get("rel").map(|s| s.as_str()).unwrap_or("");
                         let href = attrs.get("href").cloned().unwrap_or_default();
-                        if rel.eq_ignore_ascii_case("stylesheet") && !href.is_empty() {
+                        if rel.eq_ignore_ascii_case("stylesheet")
+                            && !attrs.contains_key("disabled")
+                            && !href.is_empty()
+                        {
                             let media = attrs.get("media").cloned().unwrap_or_default();
                             if !self.linked_stylesheets.iter().any(|(h, _)| *h == href) {
                                 self.linked_stylesheets.push((href, media));
@@ -646,7 +622,7 @@ impl HtmlParser {
                     if !node.style.background_image_url.is_empty() {
                         let url = node.style.background_image_url.clone();
                         if let Some((data, w, h)) = load_image_from_src(&url, &self.base_url) {
-                            node.bg_image_data = Some(data);
+                            node.bg_image_data = Some(std::sync::Arc::new(data));
                             node.bg_image_width = w;
                             node.bg_image_height = h;
                         }
@@ -853,7 +829,10 @@ impl HtmlParser {
             let rel = attrs.get("rel").map(|s| s.as_str()).unwrap_or("");
             let media = attrs.get("media").map(|s| s.as_str()).unwrap_or("");
             let href = attrs.get("href").cloned().unwrap_or_default();
-            if rel.eq_ignore_ascii_case("stylesheet") && !href.is_empty() {
+            if rel.eq_ignore_ascii_case("stylesheet")
+                && !attrs.contains_key("disabled")
+                && !href.is_empty()
+            {
                 // Print-only sheets are not fetched for screen rendering, the
                 // same rule the head path applies.
                 if !media.eq_ignore_ascii_case("print") {
@@ -902,29 +881,7 @@ impl HtmlParser {
             } else {
                 String::new()
             };
-            let mut svg_tag_str = String::from("<svg");
-            for (k, v) in &attrs {
-                svg_tag_str.push_str(&format!(" {}=\"{}\"", k, v));
-            }
-            if !svg_tag_str.contains("xmlns=") {
-                svg_tag_str.push_str(" xmlns=\"http://www.w3.org/2000/svg\"");
-            }
-            if svg_body.contains("xlink:") && !svg_tag_str.contains("xmlns:xlink") {
-                svg_tag_str.push_str(" xmlns:xlink=\"http://www.w3.org/1999/xlink\"");
-            }
-            svg_tag_str.push('>');
-            let svg_markup = format!("{}{}</svg>", svg_tag_str, svg_body);
-            let vb_str = attrs.get("viewBox").or_else(|| attrs.get("viewbox"));
-            let vb = parse_viewbox_value(vb_str.map(|s| s.as_str()));
-            let (vb_w, vb_h) = vb.unwrap_or((0, 0));
-            let explicit_w = attrs
-                .get("style")
-                .and_then(|s| style_px(s, "width"))
-                .or_else(|| attrs.get("width").and_then(|s| parse_px(s)));
-            let explicit_h = attrs
-                .get("style")
-                .and_then(|s| style_px(s, "height"))
-                .or_else(|| attrs.get("height").and_then(|s| parse_px(s)));
+            let fallback = crate::svg::build_inline_svg_fallback(&attrs, &svg_body);
             let mut node = self.new_box("svg");
             node.attributes = attrs;
             apply_property(
@@ -932,17 +889,17 @@ impl HtmlParser {
                 "display",
                 "inline-block",
             );
-            node.svg_markup = Some(svg_markup);
-            node.svg_viewbox_w = vb_w as f32;
-            node.svg_viewbox_h = vb_h as f32;
-            if let Some(w) = explicit_w {
+            node.svg_markup = Some(fallback.markup);
+            node.svg_viewbox_w = fallback.viewbox_w;
+            node.svg_viewbox_h = fallback.viewbox_h;
+            if let Some(w) = fallback.explicit_w {
                 apply_property(
                     std::sync::Arc::make_mut(&mut node.style),
                     "width",
                     &format!("{}px", w),
                 );
             }
-            if let Some(h) = explicit_h {
+            if let Some(h) = fallback.explicit_h {
                 apply_property(
                     std::sync::Arc::make_mut(&mut node.style),
                     "height",
@@ -1007,13 +964,13 @@ impl HtmlParser {
                 node.image_width = w;
                 node.image_height = h;
                 // Transparent pixel buffer — ready for drawing
-                node.image_data = Some(vec![0u8; (w * h * 4) as usize]);
+                node.image_data = Some(std::sync::Arc::new(vec![0u8; (w * h * 4) as usize]));
             }
         }
         if !node.style.background_image_url.is_empty() {
             let url = node.style.background_image_url.clone();
             if let Some((data, w, h)) = load_image_from_src(&url, &self.base_url) {
-                node.bg_image_data = Some(data);
+                node.bg_image_data = Some(std::sync::Arc::new(data));
                 node.bg_image_width = w;
                 node.bg_image_height = h;
             }

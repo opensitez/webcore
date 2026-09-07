@@ -148,12 +148,18 @@ pub fn layout_flex(
     let content_x = x + rbox.margin_left + rbox.border_left + rbox.padding_left;
     let content_y = y + rbox.margin_top + rbox.border_top + rbox.padding_top;
 
-    let is_row = matches!(
+    let flex_direction_is_row = matches!(
         node.style.flex_direction,
         FlexDirection::Row | FlexDirection::RowReverse
     );
+    let is_row = if flex_direction_is_row {
+        inline_axis_is_horizontal(node.style.writing_mode)
+    } else {
+        !inline_axis_is_horizontal(node.style.writing_mode)
+    };
     // In RTL context, flex-direction:row is visually reversed (items flow right-to-left)
-    let rtl_row = is_row && node.style.direction == crate::types::Direction::RTL;
+    let rtl_row =
+        flex_direction_is_row && is_row && node.style.direction == crate::types::Direction::RTL;
     let is_reversed = matches!(
         node.style.flex_direction,
         FlexDirection::RowReverse | FlexDirection::ColumnReverse
@@ -1775,12 +1781,15 @@ fn finish_flex(
     node.layout.resolved_pad_bottom = rbox.padding_bottom;
     node.layout.resolved_pad_left = rbox.padding_left;
     node.layout.resolved_content_width = content_w;
+    crate::layout::update_scroll_extents_from_children(
+        node, content_x, content_y, content_w, content_h,
+    );
 }
 
 fn layout_abs_children(engine: &LayoutEngine, node: &mut WebCore, font_px: f32, root_font_px: f32) {
     // CSS spec: containing block for absolutely positioned children is the padding box
     // of the nearest positioned ancestor.
-    let containing_rect = if !matches!(node.style.position, Position::Static) {
+    let containing_rect = if crate::layout::establishes_positioned_containing_block(&node.style) {
         node.layout.padding_rect
     } else {
         engine.pos_cb.get()

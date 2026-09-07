@@ -33,6 +33,19 @@ pub struct PropertyDef {
 fn apply_noop(_: &mut ComputedStyle, _: &str) {}
 fn copy_noop(_: &mut ComputedStyle, _: &ComputedStyle) {}
 
+fn apply_content(s: &mut ComputedStyle, v: &str) {
+    let v = v.trim();
+    if v.eq_ignore_ascii_case("normal") || v.eq_ignore_ascii_case("none") {
+        s.rare_mut().content.clear();
+    } else {
+        s.rare_mut().content = v.to_string();
+    }
+}
+
+fn copy_content(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.rare_mut().content = s.rare().content.clone();
+}
+
 // ── Unknown default ─────────────────────────────────────────────────────────
 
 static UNKNOWN_DEF: PropertyDef = PropertyDef {
@@ -203,6 +216,22 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             copy: copy_background_color,
             longhands: &[],
         },
+        Fill => &PropertyDef {
+            id: Fill,
+            name: "fill",
+            inherited: true,
+            apply: apply_svg_fill,
+            copy: copy_svg_fill,
+            longhands: &[],
+        },
+        Stroke => &PropertyDef {
+            id: Stroke,
+            name: "stroke",
+            inherited: true,
+            apply: apply_svg_stroke,
+            copy: copy_svg_stroke,
+            longhands: &[],
+        },
         Opacity => &PropertyDef {
             id: Opacity,
             name: "opacity",
@@ -289,8 +318,8 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             id: FontVariantAlternates,
             name: "font-variant-alternates",
             inherited: true,
-            apply: apply_font_variant_noop,
-            copy: copy_noop,
+            apply: apply_font_variant_alternates,
+            copy: copy_font_variant_alternates,
             longhands: &[],
         },
         FontVariantCaps => &PropertyDef {
@@ -298,47 +327,47 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             name: "font-variant-caps",
             inherited: true,
             apply: apply_font_variant_caps,
-            copy: copy_font_variant,
+            copy: copy_font_variant_caps,
             longhands: &[],
         },
         FontVariantEastAsian => &PropertyDef {
             id: FontVariantEastAsian,
             name: "font-variant-east-asian",
             inherited: true,
-            apply: apply_font_variant_noop,
-            copy: copy_noop,
+            apply: apply_font_variant_east_asian,
+            copy: copy_font_variant_east_asian,
             longhands: &[],
         },
         FontVariantEmoji => &PropertyDef {
             id: FontVariantEmoji,
             name: "font-variant-emoji",
             inherited: true,
-            apply: apply_font_variant_noop,
-            copy: copy_noop,
+            apply: apply_font_variant_emoji,
+            copy: copy_font_variant_emoji,
             longhands: &[],
         },
         FontVariantLigatures => &PropertyDef {
             id: FontVariantLigatures,
             name: "font-variant-ligatures",
             inherited: true,
-            apply: apply_font_variant_noop,
-            copy: copy_noop,
+            apply: apply_font_variant_ligatures,
+            copy: copy_font_variant_ligatures,
             longhands: &[],
         },
         FontVariantNumeric => &PropertyDef {
             id: FontVariantNumeric,
             name: "font-variant-numeric",
             inherited: true,
-            apply: apply_font_variant_noop,
-            copy: copy_noop,
+            apply: apply_font_variant_numeric,
+            copy: copy_font_variant_numeric,
             longhands: &[],
         },
         FontVariantPosition => &PropertyDef {
             id: FontVariantPosition,
             name: "font-variant-position",
             inherited: true,
-            apply: apply_font_variant_noop,
-            copy: copy_noop,
+            apply: apply_font_variant_position,
+            copy: copy_font_variant_position,
             longhands: &[],
         },
         FontStretch => &PropertyDef {
@@ -935,7 +964,7 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             name: "text-decoration",
             inherited: false,
             apply: apply_text_decoration,
-            copy: copy_noop,
+            copy: copy_text_decoration,
             longhands: &[TextDecorationLine, TextDecorationStyle, TextDecorationColor],
         },
         TextDecorationLine => &PropertyDef {
@@ -1681,32 +1710,32 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             id: TransformStyle,
             name: "transform-style",
             inherited: false,
-            apply: apply_noop,
-            copy: copy_noop,
+            apply: apply_transform_style_3d,
+            copy: copy_transform_style_3d,
             longhands: &[],
         },
         Perspective => &PropertyDef {
             id: Perspective,
             name: "perspective",
             inherited: false,
-            apply: apply_noop,
-            copy: copy_noop,
+            apply: apply_perspective,
+            copy: copy_perspective,
             longhands: &[],
         },
         PerspectiveOrigin => &PropertyDef {
             id: PerspectiveOrigin,
             name: "perspective-origin",
             inherited: false,
-            apply: apply_noop,
-            copy: copy_noop,
+            apply: apply_perspective_origin,
+            copy: copy_perspective_origin,
             longhands: &[],
         },
         BackfaceVisibility => &PropertyDef {
             id: BackfaceVisibility,
             name: "backface-visibility",
             inherited: false,
-            apply: apply_noop,
-            copy: copy_noop,
+            apply: apply_backface_visibility,
+            copy: copy_backface_visibility,
             longhands: &[],
         },
 
@@ -1839,6 +1868,14 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             copy: copy_animation,
             longhands: &[],
         },
+        AnimationTimeline => &PropertyDef {
+            id: AnimationTimeline,
+            name: "animation-timeline",
+            inherited: false,
+            apply: apply_animation_timeline,
+            copy: copy_animation_timeline,
+            longhands: &[],
+        },
         WillChange => &PropertyDef {
             id: WillChange,
             name: "will-change",
@@ -1941,6 +1978,14 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             copy: copy_scrollbar_gutter,
             longhands: &[],
         },
+        ScrollTimeline => &PropertyDef {
+            id: ScrollTimeline,
+            name: "scroll-timeline",
+            inherited: false,
+            apply: apply_scroll_timeline,
+            copy: copy_scroll_timeline,
+            longhands: &[],
+        },
         CaretColor => &PropertyDef {
             id: CaretColor,
             name: "caret-color",
@@ -1985,6 +2030,30 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             copy: copy_noop,
             longhands: &[ContainerType, ContainerName],
         },
+        AnchorName => &PropertyDef {
+            id: AnchorName,
+            name: "anchor-name",
+            inherited: false,
+            apply: apply_anchor_name,
+            copy: copy_anchor_name,
+            longhands: &[],
+        },
+        PositionAnchor => &PropertyDef {
+            id: PositionAnchor,
+            name: "position-anchor",
+            inherited: false,
+            apply: apply_position_anchor,
+            copy: copy_position_anchor,
+            longhands: &[],
+        },
+        ViewTransitionName => &PropertyDef {
+            id: ViewTransitionName,
+            name: "view-transition-name",
+            inherited: false,
+            apply: apply_view_transition_name,
+            copy: copy_view_transition_name,
+            longhands: &[],
+        },
 
         // ── Clip ──
         Clip => &PropertyDef {
@@ -2017,6 +2086,14 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             inherited: false,
             apply: apply_shape_margin,
             copy: copy_shape_margin,
+            longhands: &[],
+        },
+        OffsetPath => &PropertyDef {
+            id: OffsetPath,
+            name: "offset-path",
+            inherited: false,
+            apply: apply_offset_path,
+            copy: copy_offset_path,
             longhands: &[],
         },
 
@@ -2393,8 +2470,14 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             copy: copy_scroll_margin_left,
             longhands: &[],
         },
-        // Accepted but not implemented
-        ScrollSnapStop => &UNKNOWN_DEF,
+        ScrollSnapStop => &PropertyDef {
+            id: ScrollSnapStop,
+            name: "scroll-snap-stop",
+            inherited: false,
+            apply: apply_scroll_snap_stop,
+            copy: copy_scroll_snap_stop,
+            longhands: &[],
+        },
 
         // ── Logical properties ──
         MarginBlock => &PropertyDef {
@@ -2763,8 +2846,8 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             id: ForcedColorAdjust,
             name: "forced-color-adjust",
             inherited: true,
-            apply: apply_noop,
-            copy: copy_noop,
+            apply: apply_forced_color_adjust,
+            copy: copy_forced_color_adjust,
             longhands: &[],
         },
         ColorInterpolation => &PropertyDef {
@@ -2867,8 +2950,8 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             id: Content,
             name: "content",
             inherited: false,
-            apply: apply_noop,
-            copy: copy_noop,
+            apply: apply_content,
+            copy: copy_content,
             longhands: &[],
         },
 
@@ -2942,7 +3025,13 @@ pub const INHERITED_IDS: &[PropertyId] = &[
     PropertyId::FontVariationSettings,
     PropertyId::FontFeatureSettings,
     PropertyId::FontVariant,
+    PropertyId::FontVariantAlternates,
     PropertyId::FontVariantCaps,
+    PropertyId::FontVariantEastAsian,
+    PropertyId::FontVariantEmoji,
+    PropertyId::FontVariantLigatures,
+    PropertyId::FontVariantNumeric,
+    PropertyId::FontVariantPosition,
     PropertyId::FontStretch,
     PropertyId::FontSynthesisWeight,
     PropertyId::FontSynthesisStyle,
@@ -2957,6 +3046,7 @@ pub const INHERITED_IDS: &[PropertyId] = &[
     PropertyId::TextWrap,
     PropertyId::InterpolateSize,
     PropertyId::ColorScheme,
+    PropertyId::ForcedColorAdjust,
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2965,7 +3055,8 @@ pub const INHERITED_IDS: &[PropertyId] = &[
 // ═══════════════════════════════════════════════════════════════════════════════
 
 use super::{
-    parse_color, parse_font_size, parse_length, parse_length_checked, parse_length_or_none,
+    parse_color, parse_font_size, parse_font_size_checked, parse_length, parse_length_checked,
+    parse_length_or_none,
 };
 use crate::types::*;
 
@@ -3141,6 +3232,20 @@ fn apply_background_color(s: &mut ComputedStyle, v: &str) {
         s.background_color = c;
     }
 }
+fn apply_svg_fill(s: &mut ComputedStyle, v: &str) {
+    if v.trim().eq_ignore_ascii_case("none") {
+        s.svg_fill = None;
+    } else if let Some(c) = parse_color(v) {
+        s.svg_fill = Some(c);
+    }
+}
+fn apply_svg_stroke(s: &mut ComputedStyle, v: &str) {
+    if v.trim().eq_ignore_ascii_case("none") {
+        s.svg_stroke = None;
+    } else if let Some(c) = parse_color(v) {
+        s.svg_stroke = Some(c);
+    }
+}
 fn apply_opacity(s: &mut ComputedStyle, v: &str) {
     // css-color-4 §14: an `<alpha-value>` is a `<number>` OR a `<percentage>`
     // — the two are equivalent, `50%` is `0.5` — and either may arrive inside
@@ -3167,6 +3272,12 @@ fn copy_color(d: &mut ComputedStyle, s: &ComputedStyle) {
 fn copy_background_color(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.background_color = s.background_color;
 }
+fn copy_svg_fill(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.svg_fill = s.svg_fill;
+}
+fn copy_svg_stroke(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.svg_stroke = s.svg_stroke;
+}
 fn copy_opacity(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.opacity = s.opacity;
 }
@@ -3174,7 +3285,9 @@ fn copy_opacity(d: &mut ComputedStyle, s: &ComputedStyle) {
 // ── Font ────────────────────────────────────────────────────────────────────
 
 fn apply_font_size(s: &mut ComputedStyle, v: &str) {
-    s.font_size = parse_font_size(v);
+    if let Some(size) = parse_font_size_checked(v) {
+        s.font_size = size;
+    }
 }
 fn apply_font_family(s: &mut ComputedStyle, v: &str) {
     s.font_family = super::split_font_families(v).join(", ");
@@ -3247,14 +3360,46 @@ fn apply_font_variant(s: &mut ComputedStyle, v: &str) {
     s.small_caps = v
         .split_whitespace()
         .any(|tok| tok == "small-caps" || tok == "all-small-caps");
+    s.font_variant_caps = if s.small_caps {
+        String::from("small-caps")
+    } else {
+        String::from("normal")
+    };
 }
 fn apply_font_variant_caps(s: &mut ComputedStyle, v: &str) {
+    let value = normalize_font_variant_longhand(v);
     s.small_caps = matches!(
         v.split_whitespace().next(),
         Some("small-caps" | "all-small-caps")
     );
+    s.font_variant_caps = value;
 }
-fn apply_font_variant_noop(_: &mut ComputedStyle, _: &str) {}
+fn apply_font_variant_alternates(s: &mut ComputedStyle, v: &str) {
+    s.font_variant_alternates = normalize_font_variant_longhand(v);
+}
+fn apply_font_variant_east_asian(s: &mut ComputedStyle, v: &str) {
+    s.font_variant_east_asian = normalize_font_variant_longhand(v);
+}
+fn apply_font_variant_emoji(s: &mut ComputedStyle, v: &str) {
+    s.font_variant_emoji = normalize_font_variant_longhand(v);
+}
+fn apply_font_variant_ligatures(s: &mut ComputedStyle, v: &str) {
+    s.font_variant_ligatures = normalize_font_variant_longhand(v);
+}
+fn apply_font_variant_numeric(s: &mut ComputedStyle, v: &str) {
+    s.font_variant_numeric = normalize_font_variant_longhand(v);
+}
+fn apply_font_variant_position(s: &mut ComputedStyle, v: &str) {
+    s.font_variant_position = normalize_font_variant_longhand(v);
+}
+fn normalize_font_variant_longhand(v: &str) -> String {
+    let value = v.split_whitespace().collect::<Vec<_>>().join(" ");
+    if value.is_empty() {
+        String::from("normal")
+    } else {
+        value
+    }
+}
 fn apply_font_stretch(s: &mut ComputedStyle, v: &str) {
     s.font_stretch = match v {
         "ultra-condensed" => 50.0,
@@ -3375,6 +3520,29 @@ fn copy_font_feature_settings(d: &mut ComputedStyle, s: &ComputedStyle) {
 }
 fn copy_font_variant(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.small_caps = s.small_caps;
+    d.font_variant_caps = s.font_variant_caps.clone();
+}
+fn copy_font_variant_caps(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.small_caps = s.small_caps;
+    d.font_variant_caps = s.font_variant_caps.clone();
+}
+fn copy_font_variant_alternates(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.font_variant_alternates = s.font_variant_alternates.clone();
+}
+fn copy_font_variant_east_asian(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.font_variant_east_asian = s.font_variant_east_asian.clone();
+}
+fn copy_font_variant_emoji(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.font_variant_emoji = s.font_variant_emoji.clone();
+}
+fn copy_font_variant_ligatures(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.font_variant_ligatures = s.font_variant_ligatures.clone();
+}
+fn copy_font_variant_numeric(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.font_variant_numeric = s.font_variant_numeric.clone();
+}
+fn copy_font_variant_position(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.font_variant_position = s.font_variant_position.clone();
 }
 fn copy_font_stretch(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.font_stretch = s.font_stretch;
@@ -3409,6 +3577,9 @@ fn apply_text_transform(s: &mut ComputedStyle, v: &str) {
         "uppercase" => TextTransform::Uppercase,
         "lowercase" => TextTransform::Lowercase,
         "capitalize" => TextTransform::Capitalize,
+        "full-width" => TextTransform::FullWidth,
+        "full-size-kana" => TextTransform::FullSizeKana,
+        "math-auto" => TextTransform::MathAuto,
         _ => TextTransform::None,
     };
 }
@@ -3895,65 +4066,80 @@ fn copy_border_left_color(d: &mut ComputedStyle, s: &ComputedStyle) {
 // ── Border radius ───────────────────────────────────────────────────────────
 
 fn apply_border_radius(s: &mut ComputedStyle, v: &str) {
-    let radii = if let Some(slash) = v.find('/') {
-        v[..slash].trim()
-    } else {
-        v
-    };
-    let parts: Vec<&str> = radii.split_whitespace().collect();
-    let tl = parse_length(parts.first().copied().unwrap_or("0"));
-    let tr = parse_length(
-        parts
-            .get(1)
-            .copied()
-            .unwrap_or(parts.first().copied().unwrap_or("0")),
-    );
-    let br = parse_length(
-        parts
-            .get(2)
-            .copied()
-            .unwrap_or(parts.first().copied().unwrap_or("0")),
-    );
-    let bl = parse_length(
-        parts.get(3).copied().unwrap_or(
-            parts
-                .get(1)
-                .copied()
-                .unwrap_or(parts.first().copied().unwrap_or("0")),
-        ),
-    );
+    let (horizontal, vertical) = v.split_once('/').unwrap_or((v, v));
+    let [tl, tr, br, bl] = parse_radius_set(horizontal);
+    let [tl_y, tr_y, br_y, bl_y] = parse_radius_set(vertical);
     s.border_radius = tl.clone();
     s.border_top_left_radius = tl;
     s.border_top_right_radius = tr;
     s.border_bottom_right_radius = br;
     s.border_bottom_left_radius = bl;
+    s.border_top_left_radius_y = tl_y;
+    s.border_top_right_radius_y = tr_y;
+    s.border_bottom_right_radius_y = br_y;
+    s.border_bottom_left_radius_y = bl_y;
 }
 fn apply_border_top_left_radius(s: &mut ComputedStyle, v: &str) {
-    s.border_top_left_radius = parse_length(v);
+    let (x, y) = parse_radius_pair(v);
+    s.border_top_left_radius = x;
+    s.border_top_left_radius_y = y;
     s.border_radius = s.border_top_left_radius.clone();
 }
 fn apply_border_top_right_radius(s: &mut ComputedStyle, v: &str) {
-    s.border_top_right_radius = parse_length(v);
+    let (x, y) = parse_radius_pair(v);
+    s.border_top_right_radius = x;
+    s.border_top_right_radius_y = y;
 }
 fn apply_border_bottom_left_radius(s: &mut ComputedStyle, v: &str) {
-    s.border_bottom_left_radius = parse_length(v);
+    let (x, y) = parse_radius_pair(v);
+    s.border_bottom_left_radius = x;
+    s.border_bottom_left_radius_y = y;
 }
 fn apply_border_bottom_right_radius(s: &mut ComputedStyle, v: &str) {
-    s.border_bottom_right_radius = parse_length(v);
+    let (x, y) = parse_radius_pair(v);
+    s.border_bottom_right_radius = x;
+    s.border_bottom_right_radius_y = y;
 }
 
 fn copy_border_top_left_radius(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.border_top_left_radius = s.border_top_left_radius.clone();
+    d.border_top_left_radius_y = s.border_top_left_radius_y.clone();
     d.border_radius = s.border_radius.clone();
 }
 fn copy_border_top_right_radius(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.border_top_right_radius = s.border_top_right_radius.clone();
+    d.border_top_right_radius_y = s.border_top_right_radius_y.clone();
 }
 fn copy_border_bottom_left_radius(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.border_bottom_left_radius = s.border_bottom_left_radius.clone();
+    d.border_bottom_left_radius_y = s.border_bottom_left_radius_y.clone();
 }
 fn copy_border_bottom_right_radius(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.border_bottom_right_radius = s.border_bottom_right_radius.clone();
+    d.border_bottom_right_radius_y = s.border_bottom_right_radius_y.clone();
+}
+
+fn parse_radius_set(input: &str) -> [CssLength; 4] {
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    let first = parts.first().copied().unwrap_or("0");
+    [
+        parse_length(first),
+        parse_length(parts.get(1).copied().unwrap_or(first)),
+        parse_length(parts.get(2).copied().unwrap_or(first)),
+        parse_length(
+            parts
+                .get(3)
+                .copied()
+                .unwrap_or(parts.get(1).copied().unwrap_or(first)),
+        ),
+    ]
+}
+
+fn parse_radius_pair(input: &str) -> (CssLength, CssLength) {
+    let mut parts = input.split_whitespace();
+    let x = parse_length(parts.next().unwrap_or("0"));
+    let y = parts.next().map(parse_length).unwrap_or_else(|| x.clone());
+    (x, y)
 }
 
 // ── Border image ────────────────────────────────────────────────────────────
@@ -4143,11 +4329,13 @@ fn apply_vertical_align(s: &mut ComputedStyle, v: &str) {
         "text-bottom" => VerticalAlign::TextBottom,
         "sub" => VerticalAlign::Sub,
         "super" => VerticalAlign::Super,
-        _ => VerticalAlign::Baseline,
+        _ => parse_length_checked(v)
+            .map(VerticalAlign::Length)
+            .unwrap_or(VerticalAlign::Baseline),
     };
 }
 fn copy_vertical_align(d: &mut ComputedStyle, s: &ComputedStyle) {
-    d.vertical_align = s.vertical_align;
+    d.vertical_align = s.vertical_align.clone();
 }
 
 // ── Text decoration ─────────────────────────────────────────────────────────
@@ -4196,6 +4384,11 @@ fn apply_text_decoration_thickness(s: &mut ComputedStyle, v: &str) {
 }
 fn apply_text_decoration_skip_ink(s: &mut ComputedStyle, v: &str) {
     apply_keyword_list(&mut s.text_decoration_skip_ink, v, &["auto", "none", "all"]);
+}
+fn copy_text_decoration(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.text_decoration = s.text_decoration;
+    d.text_decoration_color = s.text_decoration_color;
+    d.text_decoration_style = s.text_decoration_style;
 }
 fn apply_text_emphasis(s: &mut ComputedStyle, v: &str) {
     s.text_emphasis_style = String::from("none");
@@ -4269,11 +4462,75 @@ fn apply_text_underline_position(s: &mut ComputedStyle, v: &str) {
     };
 }
 fn apply_text_overflow(s: &mut ComputedStyle, v: &str) {
-    s.text_overflow = if v == "ellipsis" {
-        TextOverflow::Ellipsis
-    } else {
-        TextOverflow::Clip
-    };
+    let tokens = split_text_overflow_tokens(v);
+    if tokens.is_empty() || tokens.len() > 2 {
+        s.text_overflow = TextOverflow::Clip;
+        s.text_overflow_string.clear();
+        return;
+    }
+
+    let end_marker = tokens.last().map(String::as_str).unwrap_or("clip");
+    match end_marker {
+        "ellipsis" => {
+            s.text_overflow = TextOverflow::Ellipsis;
+            s.text_overflow_string.clear();
+        }
+        "clip" => {
+            s.text_overflow = TextOverflow::Clip;
+            s.text_overflow_string.clear();
+        }
+        marker if is_quoted_css_string(marker) => {
+            s.text_overflow = TextOverflow::Ellipsis;
+            s.text_overflow_string = crate::css::resolve_content_value(marker);
+        }
+        _ => {
+            s.text_overflow = TextOverflow::Clip;
+            s.text_overflow_string.clear();
+        }
+    }
+}
+
+fn split_text_overflow_tokens(v: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut chars = v.trim().chars().peekable();
+    while let Some(ch) = chars.peek().copied() {
+        if ch.is_whitespace() {
+            chars.next();
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            let quote = ch;
+            let mut token = String::new();
+            token.push(chars.next().unwrap());
+            let mut escaped = false;
+            for c in chars.by_ref() {
+                token.push(c);
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == quote {
+                    break;
+                }
+            }
+            tokens.push(token);
+        } else {
+            let mut token = String::new();
+            while let Some(c) = chars.peek().copied() {
+                if c.is_whitespace() {
+                    break;
+                }
+                token.push(c);
+                chars.next();
+            }
+            tokens.push(token);
+        }
+    }
+    tokens
+}
+
+fn is_quoted_css_string(v: &str) -> bool {
+    (v.starts_with('"') && v.ends_with('"')) || (v.starts_with('\'') && v.ends_with('\''))
 }
 fn apply_text_wrap(s: &mut ComputedStyle, v: &str) {
     apply_keyword_list(
@@ -4331,6 +4588,7 @@ fn copy_text_wrap(d: &mut ComputedStyle, s: &ComputedStyle) {
 }
 fn copy_text_overflow(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.text_overflow = s.text_overflow;
+    d.text_overflow_string = s.text_overflow_string.clone();
 }
 fn copy_text_shadow(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.text_shadow = s.text_shadow.clone();
@@ -4364,6 +4622,7 @@ fn copy_overflow_wrap(d: &mut ComputedStyle, s: &ComputedStyle) {
 // ── List style ──────────────────────────────────────────────────────────────
 
 fn apply_list_style_type(s: &mut ComputedStyle, v: &str) {
+    s.custom_list_style_type.clear();
     s.list_style_type = match v {
         "none" => ListStyleType::None,
         "disc" => ListStyleType::Disc,
@@ -4386,7 +4645,14 @@ fn apply_list_style_type(s: &mut ComputedStyle, v: &str) {
         "hiragana-iroha" => ListStyleType::HiraganaIroha,
         "katakana-iroha" => ListStyleType::KatakanaIroha,
         "cjk-decimal" => ListStyleType::CjkDecimal,
-        _ => ListStyleType::None,
+        _ => {
+            if is_custom_ident(v) {
+                s.custom_list_style_type = v.to_string();
+                ListStyleType::None
+            } else {
+                ListStyleType::None
+            }
+        }
     };
 }
 fn apply_list_style_position(s: &mut ComputedStyle, v: &str) {
@@ -4404,24 +4670,49 @@ fn apply_list_style_image(s: &mut ComputedStyle, v: &str) {
     }
 }
 fn apply_list_style(s: &mut ComputedStyle, v: &str) {
-    if v.contains("none") {
-        s.list_style_type = ListStyleType::None;
-        s.list_style_image.clear();
-    } else if let Some(url) = super::extract_url(v) {
+    s.custom_list_style_type.clear();
+    s.list_style_type = ListStyleType::Disc;
+    s.list_style_position = ListStylePosition::Outside;
+    s.list_style_image.clear();
+    if let Some(url) = super::extract_url(v) {
         s.list_style_image = url;
-    } else if v.contains("disc") {
-        s.list_style_type = ListStyleType::Disc;
-    } else if v.contains("circle") {
-        s.list_style_type = ListStyleType::Circle;
-    } else if v.contains("square") {
-        s.list_style_type = ListStyleType::Square;
-    } else if v.contains("decimal") {
-        s.list_style_type = ListStyleType::Decimal;
+    }
+    let v_no_url = if let Some(start) = v.find("url(") {
+        let mut depth = 0;
+        let mut end = v.len();
+        for (i, ch) in v[start..].char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = start + i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        format!("{} {}", &v[..start], &v[end..])
+    } else {
+        v.to_string()
+    };
+    for token in v_no_url.split_whitespace() {
+        match token {
+            "inside" | "outside" => apply_list_style_position(s, token),
+            "none" => {
+                s.list_style_type = ListStyleType::None;
+                s.custom_list_style_type.clear();
+                s.list_style_image.clear();
+            }
+            other => apply_list_style_type(s, other),
+        }
     }
 }
 
 fn copy_list_style_type(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.list_style_type = s.list_style_type;
+    d.custom_list_style_type = s.custom_list_style_type.clone();
 }
 fn copy_list_style_position(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.list_style_position = s.list_style_position;
@@ -4901,10 +5192,43 @@ fn copy_grid_row_end(d: &mut ComputedStyle, s: &ComputedStyle) {
 // ── Background ──────────────────────────────────────────────────────────────
 
 fn apply_background(s: &mut ComputedStyle, v: &str) {
+    let layers = crate::css::value_parse::split_top_level_commas(v);
+    if layers.len() > 1 {
+        reset_background_fields(s);
+
+        let mut selected = None;
+        let mut final_color = Color::TRANSPARENT;
+        for layer in &layers {
+            let mut parsed = ComputedStyle::default();
+            apply_background_single_layer(&mut parsed, layer.trim());
+            if layer_has_background_image(&parsed) && selected.is_none() {
+                selected = Some(parsed.clone());
+            }
+            final_color = background_layer_color(layer.trim()).unwrap_or(parsed.background_color);
+        }
+
+        if let Some(parsed) = selected {
+            copy_background_layer_fields(s, &parsed);
+        }
+        s.background_color = final_color;
+        return;
+    }
+
+    apply_background_single_layer(s, v);
+}
+
+fn reset_background_fields(s: &mut ComputedStyle) {
     s.background_color = Color::TRANSPARENT;
     s.background_image_url.clear();
     s.gradient_type = GradientType::None;
     s.gradient_angle = 180.0;
+    s.gradient_direction = GradientDirection::Angle(180.0);
+    s.gradient_radial_shape = GradientRadialShape::Ellipse;
+    s.gradient_radial_size = GradientRadialSize::FarthestCorner;
+    s.gradient_radial_radius_x = CssLength::Auto;
+    s.gradient_radial_radius_y = CssLength::Auto;
+    s.gradient_radial_position_x = CssLength::Percent(50.0);
+    s.gradient_radial_position_y = CssLength::Percent(50.0);
     s.rare_mut().gradient_stops.clear();
     s.background_position_x = CssLength::Zero;
     s.background_position_y = CssLength::Zero;
@@ -4915,8 +5239,66 @@ fn apply_background(s: &mut ComputedStyle, v: &str) {
     s.background_attachment = BackgroundAttachment::Scroll;
     s.background_origin = BackgroundClip::PaddingBox;
     s.background_clip = BackgroundClip::BorderBox;
+}
+
+fn layer_has_background_image(s: &ComputedStyle) -> bool {
+    !s.background_image_url.is_empty() || s.gradient_type != GradientType::None
+}
+
+fn copy_background_layer_fields(dst: &mut ComputedStyle, src: &ComputedStyle) {
+    dst.background_image_url = src.background_image_url.clone();
+    dst.gradient_type = src.gradient_type;
+    dst.gradient_angle = src.gradient_angle;
+    dst.gradient_direction = src.gradient_direction;
+    dst.gradient_radial_shape = src.gradient_radial_shape;
+    dst.gradient_radial_size = src.gradient_radial_size;
+    dst.gradient_radial_radius_x = src.gradient_radial_radius_x.clone();
+    dst.gradient_radial_radius_y = src.gradient_radial_radius_y.clone();
+    dst.gradient_radial_position_x = src.gradient_radial_position_x.clone();
+    dst.gradient_radial_position_y = src.gradient_radial_position_y.clone();
+    dst.rare_mut().gradient_stops = src.rare().gradient_stops.clone();
+    dst.background_position_x = src.background_position_x.clone();
+    dst.background_position_y = src.background_position_y.clone();
+    dst.background_size = src.background_size;
+    dst.background_size_w = src.background_size_w.clone();
+    dst.background_size_h = src.background_size_h.clone();
+    dst.background_repeat = src.background_repeat;
+    dst.background_attachment = src.background_attachment;
+    dst.background_origin = src.background_origin;
+    dst.background_clip = src.background_clip;
+}
+
+fn background_layer_color(layer: &str) -> Option<Color> {
+    let without_url = if let Some(start) = layer.find("url(") {
+        let mut depth = 0;
+        let mut end = layer.len();
+        for (i, ch) in layer[start..].char_indices() {
+            if ch == '(' {
+                depth += 1;
+            }
+            if ch == ')' {
+                depth -= 1;
+                if depth == 0 {
+                    end = start + i + 1;
+                    break;
+                }
+            }
+        }
+        format!("{} {}", &layer[..start], &layer[end..])
+    } else {
+        layer.to_string()
+    };
+
+    split_top_level_whitespace(&without_url)
+        .into_iter()
+        .filter_map(parse_color)
+        .next()
+}
+
+fn apply_background_single_layer(s: &mut ComputedStyle, v: &str) {
+    reset_background_fields(s);
     // Handle gradient functions first
-    if v.contains("gradient") {
+    if v.to_ascii_lowercase().contains("gradient") {
         super::apply_gradient(s, v);
         return;
     }
@@ -4946,57 +5328,80 @@ fn apply_background(s: &mut ComputedStyle, v: &str) {
         v.to_string()
     };
     let v_rest = v_no_url.trim();
-    let (pos_part, size_part) = if let Some(slash) = v_rest.find(" / ") {
-        (&v_rest[..slash], Some(&v_rest[slash + 3..]))
+    let (pos_part, size_part) = if let Some(slash) = find_top_level_char(v_rest, '/') {
+        (&v_rest[..slash], Some(&v_rest[slash + 1..]))
     } else {
         (v_rest, None)
     };
     if let Some(size_str) = size_part {
-        let size_tok: &str = size_str.split_whitespace().next().unwrap_or("auto");
-        match size_tok {
-            "cover" => s.background_size = BackgroundSize::Cover,
-            "contain" => s.background_size = BackgroundSize::Contain,
-            _ => {
-                s.background_size = BackgroundSize::Explicit;
-                s.background_size_w = parse_length(size_tok);
+        let size_tokens = background_size_tokens(size_str);
+        match size_tokens.first().copied().unwrap_or("auto") {
+            "cover" => {
+                s.background_size = BackgroundSize::Cover;
+                s.background_size_w = CssLength::Auto;
                 s.background_size_h = CssLength::Auto;
             }
+            "contain" => {
+                s.background_size = BackgroundSize::Contain;
+                s.background_size_w = CssLength::Auto;
+                s.background_size_h = CssLength::Auto;
+            }
+            _ => {
+                s.background_size = BackgroundSize::Explicit;
+                s.background_size_w = parse_length(size_tokens.first().copied().unwrap_or("auto"));
+                s.background_size_h = size_tokens
+                    .get(1)
+                    .map(|tok| parse_length(tok))
+                    .unwrap_or(CssLength::Auto);
+            }
         }
-        let repeat_tokens: Vec<&str> = size_str
-            .split_whitespace()
+        let repeat_tokens: Vec<&str> = split_top_level_whitespace(size_str)
+            .into_iter()
             .skip(1)
             .filter(|tok| is_background_repeat_token(tok))
             .collect();
         apply_background_repeat_tokens(s, &repeat_tokens);
+        let misc_tokens: Vec<&str> = split_top_level_whitespace(size_str)
+            .into_iter()
+            .skip(1)
+            .collect();
+        apply_background_misc_tokens(s, &misc_tokens);
     }
-    let mut pos_tokens: Vec<&str> = Vec::new();
+    let mut pos_tokens: Vec<String> = Vec::new();
     let mut repeat_tokens: Vec<&str> = Vec::new();
-    for token in pos_part.split_whitespace() {
-        match token {
+    let mut misc_tokens: Vec<&str> = Vec::new();
+    for token in split_top_level_whitespace(pos_part) {
+        let token_lower = token.to_ascii_lowercase();
+        match token_lower.as_str() {
             "none" => {
                 s.background_image_url.clear();
             }
             "no-repeat" | "repeat-x" | "repeat-y" | "repeat" | "space" | "round" => {
                 repeat_tokens.push(token);
             }
+            "scroll" | "fixed" | "local" | "border-box" | "padding-box" | "content-box"
+            | "text" => {
+                misc_tokens.push(token);
+            }
             "left" | "center" | "right" | "top" | "bottom" => {
-                pos_tokens.push(token);
+                pos_tokens.push(token_lower);
             }
             _ => {
                 if let Some(c) = parse_color(token) {
                     s.background_color = c;
-                } else if token.ends_with('%') || token.ends_with("px") || token.ends_with("em") {
-                    pos_tokens.push(token);
+                } else if is_background_position_length_token(token) {
+                    pos_tokens.push(token.to_string());
                 }
             }
         }
     }
     apply_background_repeat_tokens(s, &repeat_tokens);
+    apply_background_misc_tokens(s, &misc_tokens);
     if !pos_tokens.is_empty() {
         let mut x_set = false;
         let mut y_set = false;
         for tok in &pos_tokens {
-            match *tok {
+            match tok.as_str() {
                 "left" => {
                     s.background_position_x = CssLength::Percent(0.0);
                     x_set = true;
@@ -5029,6 +5434,7 @@ fn apply_background(s: &mut ComputedStyle, v: &str) {
                         x_set = true;
                     } else if !y_set {
                         s.background_position_y = l;
+                        y_set = true;
                     }
                 }
             }
@@ -5038,16 +5444,115 @@ fn apply_background(s: &mut ComputedStyle, v: &str) {
         }
     }
 }
+
+fn find_top_level_char(s: &str, needle: char) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            c if c == needle && depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_top_level_whitespace(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = None;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => {
+                if start.is_none() {
+                    start = Some(i);
+                }
+                depth += 1;
+            }
+            ')' => {
+                if start.is_none() {
+                    start = Some(i);
+                }
+                depth = depth.saturating_sub(1);
+            }
+            c if c.is_whitespace() && depth == 0 => {
+                if let Some(st) = start.take() {
+                    out.push(&s[st..i]);
+                }
+            }
+            _ => {
+                if start.is_none() {
+                    start = Some(i);
+                }
+            }
+        }
+    }
+    if let Some(st) = start {
+        out.push(&s[st..]);
+    }
+    out
+}
+
+fn is_background_position_length_token(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    parse_length_checked(token).is_some()
+        || lower.starts_with("calc(")
+        || lower.starts_with("min(")
+        || lower.starts_with("max(")
+        || lower.starts_with("clamp(")
+}
+
+fn background_size_tokens(value: &str) -> Vec<&str> {
+    split_top_level_whitespace(value)
+        .into_iter()
+        .take_while(|tok| {
+            let lower = tok.to_ascii_lowercase();
+            lower == "auto"
+                || lower == "cover"
+                || lower == "contain"
+                || parse_length_checked(tok).is_some()
+        })
+        .take(2)
+        .collect()
+}
+
+fn apply_background_misc_tokens(s: &mut ComputedStyle, tokens: &[&str]) {
+    let mut boxes = Vec::new();
+    for token in tokens {
+        match *token {
+            "scroll" | "fixed" | "local" => apply_background_attachment(s, token),
+            "border-box" | "padding-box" | "content-box" | "text" => boxes.push(*token),
+            _ => {}
+        }
+    }
+    if let Some(first) = boxes.first().copied() {
+        apply_background_origin(s, first);
+        apply_background_clip(s, boxes.get(1).copied().unwrap_or(first));
+    }
+}
+
 fn apply_background_image(s: &mut ComputedStyle, v: &str) {
-    if v.contains("gradient") {
+    let lower = v.to_ascii_lowercase();
+    if lower.contains("gradient") {
         super::apply_gradient(s, v);
-    } else if v == "none" {
+    } else if lower.trim() == "none" {
         s.background_image_url.clear();
     } else if let Some(url) = extract_image_set_url(v) {
         s.background_image_url = url;
     } else if let Some(url) = super::extract_url(v) {
         s.background_image_url = url;
     }
+}
+
+#[derive(Clone)]
+struct ImageSetCandidate {
+    url: String,
+    resolution: f32,
 }
 
 fn extract_image_set_url(v: &str) -> Option<String> {
@@ -5061,57 +5566,134 @@ fn extract_image_set_url(v: &str) -> Option<String> {
         return None;
     };
 
+    let mut candidates = Vec::new();
     for candidate in super::split_top_level_commas(inner) {
-        let candidate = candidate.trim();
-        if let Some(url) = super::extract_url(candidate) {
-            return Some(url);
+        if let Some(parsed) = parse_image_set_candidate(candidate.trim()) {
+            candidates.push(parsed);
         }
-        if let Some(rest) = candidate.strip_prefix('"') {
-            if let Some(end) = rest.find('"') {
-                return Some(rest[..end].to_string());
-            }
-        } else if let Some(rest) = candidate.strip_prefix('\'') {
-            if let Some(end) = rest.find('\'') {
-                return Some(rest[..end].to_string());
-            }
-        }
+    }
+
+    const DEVICE_PIXEL_RATIO: f32 = 1.0;
+    candidates
+        .iter()
+        .filter(|candidate| candidate.resolution >= DEVICE_PIXEL_RATIO)
+        .min_by(|a, b| a.resolution.total_cmp(&b.resolution))
+        .or_else(|| {
+            candidates
+                .iter()
+                .max_by(|a, b| a.resolution.total_cmp(&b.resolution))
+        })
+        .map(|candidate| candidate.url.clone())
+}
+
+fn parse_image_set_candidate(candidate: &str) -> Option<ImageSetCandidate> {
+    let mut url = super::extract_url(candidate).or_else(|| extract_css_string_prefix(candidate))?;
+    url = url.trim().to_string();
+    if url.is_empty() || !image_set_candidate_type_is_supported(candidate) {
+        return None;
+    }
+    let resolution = candidate
+        .split_whitespace()
+        .filter_map(parse_image_set_resolution_descriptor)
+        .next()
+        .unwrap_or(1.0);
+    Some(ImageSetCandidate { url, resolution })
+}
+
+fn extract_css_string_prefix(value: &str) -> Option<String> {
+    let quote = value.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let rest = &value[quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
+fn parse_image_set_resolution_descriptor(token: &str) -> Option<f32> {
+    let token = token.trim().trim_end_matches(',');
+    let lower = token.to_ascii_lowercase();
+    if let Some(value) = lower.strip_suffix('x') {
+        return value.parse::<f32>().ok().filter(|v| *v > 0.0);
+    }
+    if let Some(value) = lower.strip_suffix("dppx") {
+        return value.parse::<f32>().ok().filter(|v| *v > 0.0);
+    }
+    if let Some(value) = lower.strip_suffix("dpi") {
+        return value
+            .parse::<f32>()
+            .ok()
+            .map(|v| v / 96.0)
+            .filter(|v| *v > 0.0);
+    }
+    if let Some(value) = lower.strip_suffix("dpcm") {
+        return value
+            .parse::<f32>()
+            .ok()
+            .map(|v| v / 37.795_276)
+            .filter(|v| *v > 0.0);
     }
     None
 }
+
+fn image_set_candidate_type_is_supported(candidate: &str) -> bool {
+    let lower = candidate.to_ascii_lowercase();
+    let Some(type_start) = lower.find("type(") else {
+        return true;
+    };
+    let after_type = &candidate[type_start + "type(".len()..];
+    let Some(type_end) = after_type.find(')') else {
+        return false;
+    };
+    let mime = after_type[..type_end]
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_ascii_lowercase();
+    matches!(
+        mime.as_str(),
+        "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/bmp" | "image/svg+xml"
+    )
+}
 fn apply_background_size(s: &mut ComputedStyle, v: &str) {
-    match v {
-        "cover" => {
+    let tokens = background_size_tokens(v);
+    match tokens.first().map(|tok| tok.to_ascii_lowercase()) {
+        Some(keyword) if keyword == "cover" => {
             s.background_size = BackgroundSize::Cover;
+            s.background_size_w = CssLength::Auto;
+            s.background_size_h = CssLength::Auto;
         }
-        "contain" => {
+        Some(keyword) if keyword == "contain" => {
             s.background_size = BackgroundSize::Contain;
+            s.background_size_w = CssLength::Auto;
+            s.background_size_h = CssLength::Auto;
         }
-        "auto" => {
+        Some(keyword) if keyword == "auto" && tokens.len() == 1 => {
             s.background_size = BackgroundSize::Auto;
+            s.background_size_w = CssLength::Auto;
+            s.background_size_h = CssLength::Auto;
         }
         _ => {
             s.background_size = BackgroundSize::Explicit;
-            let parts: Vec<&str> = v.split_whitespace().collect();
-            s.background_size_w = parse_length(parts.first().copied().unwrap_or("auto"));
-            s.background_size_h = if parts.len() >= 2 {
-                parse_length(parts[1])
-            } else {
-                CssLength::Auto
-            };
+            s.background_size_w = parse_length(tokens.first().copied().unwrap_or("auto"));
+            s.background_size_h = tokens
+                .get(1)
+                .map(|tok| parse_length(tok))
+                .unwrap_or(CssLength::Auto);
         }
     }
 }
 fn apply_background_position(s: &mut ComputedStyle, v: &str) {
     let parts: Vec<&str> = v.split_whitespace().collect();
     let x_str = parts.first().copied().unwrap_or("0%");
-    s.background_position_x = match x_str {
+    s.background_position_x = match x_str.to_ascii_lowercase().as_str() {
         "left" => CssLength::Percent(0.0),
         "center" => CssLength::Percent(50.0),
         "right" => CssLength::Percent(100.0),
         _ => parse_length(x_str),
     };
     let y_str = parts.get(1).copied().unwrap_or("center");
-    s.background_position_y = match y_str {
+    s.background_position_y = match y_str.to_ascii_lowercase().as_str() {
         "top" => CssLength::Percent(0.0),
         "center" => CssLength::Percent(50.0),
         "bottom" => CssLength::Percent(100.0),
@@ -5119,19 +5701,20 @@ fn apply_background_position(s: &mut ComputedStyle, v: &str) {
     };
 }
 fn apply_background_repeat(s: &mut ComputedStyle, v: &str) {
-    let tokens: Vec<&str> = v.split_whitespace().collect();
+    let normalized = v.to_ascii_lowercase();
+    let tokens: Vec<&str> = normalized.split_whitespace().collect();
     apply_background_repeat_tokens(s, &tokens);
 }
 
 fn is_background_repeat_token(token: &str) -> bool {
     matches!(
-        token,
+        token.to_ascii_lowercase().as_str(),
         "repeat" | "space" | "round" | "no-repeat" | "repeat-x" | "repeat-y"
     )
 }
 
 fn background_repeat_axis(token: &str) -> Option<BackgroundRepeatAxis> {
-    match token {
+    match token.to_ascii_lowercase().as_str() {
         "repeat" => Some(BackgroundRepeatAxis::Repeat),
         "space" => Some(BackgroundRepeatAxis::Space),
         "round" => Some(BackgroundRepeatAxis::Round),
@@ -5144,11 +5727,13 @@ fn apply_background_repeat_tokens(s: &mut ComputedStyle, tokens: &[&str]) {
     let Some(first) = tokens.first().copied() else {
         return;
     };
-    s.background_repeat = match (first, tokens.get(1).copied()) {
+    let first_lower = first.to_ascii_lowercase();
+    let second_lower = tokens.get(1).map(|tok| tok.to_ascii_lowercase());
+    s.background_repeat = match (first_lower.as_str(), second_lower.as_deref()) {
         ("repeat-x", _) => BackgroundRepeat::RepeatX,
         ("repeat-y", _) => BackgroundRepeat::RepeatY,
         (_, Some(second)) => match (
-            background_repeat_axis(first),
+            background_repeat_axis(first_lower.as_str()),
             background_repeat_axis(second),
         ) {
             (Some(x), Some(y)) => BackgroundRepeat::TwoValue(x, y),
@@ -5162,7 +5747,7 @@ fn apply_background_repeat_tokens(s: &mut ComputedStyle, tokens: &[&str]) {
     };
 }
 fn apply_background_clip(s: &mut ComputedStyle, v: &str) {
-    s.background_clip = match v {
+    s.background_clip = match v.to_ascii_lowercase().as_str() {
         "padding-box" => BackgroundClip::PaddingBox,
         "content-box" => BackgroundClip::ContentBox,
         "text" => BackgroundClip::Text,
@@ -5170,14 +5755,14 @@ fn apply_background_clip(s: &mut ComputedStyle, v: &str) {
     };
 }
 fn apply_background_origin(s: &mut ComputedStyle, v: &str) {
-    s.background_origin = match v {
+    s.background_origin = match v.to_ascii_lowercase().as_str() {
         "border-box" => BackgroundClip::BorderBox,
         "content-box" => BackgroundClip::ContentBox,
         _ => BackgroundClip::PaddingBox,
     };
 }
 fn apply_background_attachment(s: &mut ComputedStyle, v: &str) {
-    s.background_attachment = match v {
+    s.background_attachment = match v.to_ascii_lowercase().as_str() {
         "fixed" => BackgroundAttachment::Fixed,
         "local" => BackgroundAttachment::Local,
         _ => BackgroundAttachment::Scroll,
@@ -5212,6 +5797,13 @@ fn copy_background_image(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.background_image_url = s.background_image_url.clone();
     d.gradient_type = s.gradient_type;
     d.gradient_angle = s.gradient_angle;
+    d.gradient_direction = s.gradient_direction;
+    d.gradient_radial_shape = s.gradient_radial_shape;
+    d.gradient_radial_size = s.gradient_radial_size;
+    d.gradient_radial_radius_x = s.gradient_radial_radius_x.clone();
+    d.gradient_radial_radius_y = s.gradient_radial_radius_y.clone();
+    d.gradient_radial_position_x = s.gradient_radial_position_x.clone();
+    d.gradient_radial_position_y = s.gradient_radial_position_y.clone();
     d.rare_mut().gradient_stops = s.rare().gradient_stops.clone();
 }
 fn copy_background_size(d: &mut ComputedStyle, s: &ComputedStyle) {
@@ -5390,7 +5982,7 @@ fn apply_outline(s: &mut ComputedStyle, v: &str) {
         s.outline_style = BorderStyle::None;
         s.outline_width = 0.0;
     } else {
-        for tok in v.split_whitespace() {
+        for tok in super::split_shorthand_values(v) {
             match tok {
                 "solid" => {
                     s.outline_style = BorderStyle::Solid;
@@ -5556,7 +6148,7 @@ fn copy_resize(d: &mut ComputedStyle, s: &ComputedStyle) {
 // ── Object fit/position ─────────────────────────────────────────────────────
 
 fn apply_object_fit(s: &mut ComputedStyle, v: &str) {
-    s.object_fit = match v {
+    s.object_fit = match v.to_ascii_lowercase().as_str() {
         "contain" => ObjectFit::Contain,
         "cover" => ObjectFit::Cover,
         "none" => ObjectFit::None,
@@ -5566,18 +6158,108 @@ fn apply_object_fit(s: &mut ComputedStyle, v: &str) {
 }
 fn apply_object_position(s: &mut ComputedStyle, v: &str) {
     let parts: Vec<&str> = v.split_whitespace().collect();
-    s.object_position_x = match parts.first().copied().unwrap_or("50%") {
-        "left" => CssLength::Percent(0.0),
-        "center" => CssLength::Percent(50.0),
-        "right" => CssLength::Percent(100.0),
-        sv => parse_length(sv),
+    let (x, y) = parse_object_position_tokens(&parts);
+    s.object_position_x = x;
+    s.object_position_y = y;
+}
+
+fn parse_object_position_tokens(parts: &[&str]) -> (CssLength, CssLength) {
+    match parts {
+        [] => (CssLength::Percent(50.0), CssLength::Percent(50.0)),
+        [one] => match position_axis(*one) {
+            Some(PositionAxis::Horizontal(x)) => (x, CssLength::Percent(50.0)),
+            Some(PositionAxis::Vertical(y)) => (CssLength::Percent(50.0), y),
+            Some(PositionAxis::Center) => (CssLength::Percent(50.0), CssLength::Percent(50.0)),
+            None => (parse_length(one), CssLength::Percent(50.0)),
+        },
+        [first, second] => {
+            let a = position_axis(first);
+            let b = position_axis(second);
+            match (a, b) {
+                (Some(PositionAxis::Horizontal(x)), Some(PositionAxis::Vertical(y)))
+                | (Some(PositionAxis::Vertical(y)), Some(PositionAxis::Horizontal(x))) => (x, y),
+                (Some(PositionAxis::Horizontal(x)), Some(PositionAxis::Center)) => {
+                    (x, CssLength::Percent(50.0))
+                }
+                (Some(PositionAxis::Center), Some(PositionAxis::Horizontal(x))) => {
+                    (x, CssLength::Percent(50.0))
+                }
+                (Some(PositionAxis::Vertical(y)), Some(PositionAxis::Center)) => {
+                    (CssLength::Percent(50.0), y)
+                }
+                (Some(PositionAxis::Center), Some(PositionAxis::Vertical(y))) => {
+                    (CssLength::Percent(50.0), y)
+                }
+                (Some(PositionAxis::Horizontal(x)), None) => (x, parse_length(second)),
+                (Some(PositionAxis::Vertical(y)), None) => (parse_length(second), y),
+                (None, Some(PositionAxis::Horizontal(x))) => (x, parse_length(first)),
+                (None, Some(PositionAxis::Vertical(y))) => (parse_length(first), y),
+                _ => (parse_length(first), parse_length(second)),
+            }
+        }
+        [a, b, c] | [a, b, c, ..] => {
+            if let Some((x, consumed)) = edge_position_component(parts, true) {
+                if let Some((y, _)) = edge_position_component(&parts[consumed..], false) {
+                    return (x, y);
+                }
+            }
+            if let Some((y, consumed)) = edge_position_component(parts, false) {
+                if let Some((x, _)) = edge_position_component(&parts[consumed..], true) {
+                    return (x, y);
+                }
+            }
+            parse_object_position_tokens(&[*a, *b, *c][..2])
+        }
+    }
+}
+
+#[derive(Clone)]
+enum PositionAxis {
+    Horizontal(CssLength),
+    Vertical(CssLength),
+    Center,
+}
+
+fn position_axis(token: &str) -> Option<PositionAxis> {
+    match token.to_ascii_lowercase().as_str() {
+        "left" => Some(PositionAxis::Horizontal(CssLength::Percent(0.0))),
+        "right" => Some(PositionAxis::Horizontal(CssLength::Percent(100.0))),
+        "top" => Some(PositionAxis::Vertical(CssLength::Percent(0.0))),
+        "bottom" => Some(PositionAxis::Vertical(CssLength::Percent(100.0))),
+        "center" => Some(PositionAxis::Center),
+        _ => None,
+    }
+}
+
+fn edge_position_component(parts: &[&str], horizontal: bool) -> Option<(CssLength, usize)> {
+    let edge = parts.first()?.to_ascii_lowercase();
+    let is_start = if horizontal {
+        edge == "left"
+    } else {
+        edge == "top"
     };
-    s.object_position_y = match parts.get(1).copied().unwrap_or("50%") {
-        "top" => CssLength::Percent(0.0),
-        "center" => CssLength::Percent(50.0),
-        "bottom" => CssLength::Percent(100.0),
-        sv => parse_length(sv),
+    let is_end = if horizontal {
+        edge == "right"
+    } else {
+        edge == "bottom"
     };
+    if !is_start && !is_end {
+        return None;
+    }
+
+    let offset = parts.get(1).copied();
+    let value = match (is_start, offset) {
+        (_, None) => {
+            if is_start {
+                CssLength::Percent(0.0)
+            } else {
+                CssLength::Percent(100.0)
+            }
+        }
+        (true, Some(offset)) => parse_length(offset),
+        (false, Some(offset)) => parse_length(&format!("calc(100% - {offset})")),
+    };
+    Some((value, if offset.is_some() { 2 } else { 1 }))
 }
 fn apply_aspect_ratio(s: &mut ComputedStyle, v: &str) {
     // css-sizing-4 §4: the grammar is `auto || <ratio>`, so the `auto` keyword
@@ -5623,7 +6305,11 @@ fn copy_aspect_ratio(d: &mut ComputedStyle, s: &ComputedStyle) {
 
 fn apply_transform(s: &mut ComputedStyle, v: &str) {
     if let Some(transform) = super::parse_css_transform_checked(v) {
-        s.transform = v.to_string();
+        s.transform = if v.trim().eq_ignore_ascii_case("none") {
+            String::new()
+        } else {
+            v.to_string()
+        };
         s.css_transform = transform;
     }
 }
@@ -5658,6 +6344,33 @@ fn apply_transform_box(s: &mut ComputedStyle, v: &str) {
 fn apply_transform_origin(s: &mut ComputedStyle, v: &str) {
     s.rare_mut().transform_origin = Some(super::parse_transform_origin(v));
 }
+fn apply_transform_style_3d(s: &mut ComputedStyle, v: &str) {
+    apply_keyword_list(&mut s.transform_style_3d, v, &["flat", "preserve-3d"]);
+}
+fn apply_perspective(s: &mut ComputedStyle, v: &str) {
+    let value = v.trim();
+    if value == "none" || parse_length_checked(value).is_some() {
+        s.perspective = value.to_string();
+    }
+}
+fn is_perspective_origin_component(v: &str) -> bool {
+    matches!(v, "left" | "center" | "right" | "top" | "bottom") || parse_length_checked(v).is_some()
+}
+fn apply_perspective_origin(s: &mut ComputedStyle, v: &str) {
+    let value = v.trim();
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if !parts.is_empty()
+        && parts.len() <= 2
+        && parts
+            .iter()
+            .all(|part| is_perspective_origin_component(part))
+    {
+        s.perspective_origin = value.to_string();
+    }
+}
+fn apply_backface_visibility(s: &mut ComputedStyle, v: &str) {
+    apply_keyword_list(&mut s.backface_visibility, v, &["visible", "hidden"]);
+}
 fn apply_filter(s: &mut ComputedStyle, v: &str) {
     s.rare_mut().filter = v.to_string();
     s.css_filter = super::parse_css_filter_with_current_color(v, s.color);
@@ -5685,6 +6398,18 @@ fn copy_transform_box(d: &mut ComputedStyle, s: &ComputedStyle) {
 fn copy_transform_origin(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.rare_mut().transform_origin = s.rare().transform_origin.clone();
 }
+fn copy_transform_style_3d(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.transform_style_3d = s.transform_style_3d.clone();
+}
+fn copy_perspective(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.perspective = s.perspective.clone();
+}
+fn copy_perspective_origin(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.perspective_origin = s.perspective_origin.clone();
+}
+fn copy_backface_visibility(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.backface_visibility = s.backface_visibility.clone();
+}
 fn copy_filter(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.rare_mut().filter = s.rare().filter.clone();
     d.css_filter = s.css_filter.clone();
@@ -5709,34 +6434,98 @@ fn ensure_transition(s: &mut ComputedStyle) {
         });
     }
 }
+
+fn default_transition() -> ParsedTransition {
+    ParsedTransition {
+        property: "all".to_string(),
+        duration_ms: 0.0,
+        delay_ms: 0.0,
+        timing_fn: EasingFn::Ease,
+        allow_discrete: false,
+    }
+}
+
+fn transition_list_values(v: &str) -> Vec<&str> {
+    super::split_top_level_commas(v)
+        .into_iter()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn resize_transitions(s: &mut ComputedStyle, len: usize) {
+    let len = len.max(1);
+    let transitions = &mut s.rare_mut().transitions;
+    if transitions.is_empty() {
+        transitions.push(default_transition());
+    }
+    while transitions.len() < len {
+        let next = transitions
+            .last()
+            .cloned()
+            .unwrap_or_else(default_transition);
+        transitions.push(next);
+    }
+    transitions.truncate(len);
+}
+
 fn apply_transition_property(s: &mut ComputedStyle, v: &str) {
-    ensure_transition(s);
-    for tr in &mut s.rare_mut().transitions {
-        tr.property = v.to_string();
+    let values = transition_list_values(v);
+    if values
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case("none"))
+    {
+        s.rare_mut().transitions.clear();
+        return;
+    }
+    resize_transitions(s, values.len());
+    for (idx, tr) in s.rare_mut().transitions.iter_mut().enumerate() {
+        tr.property = values.get(idx).copied().unwrap_or("all").to_string();
     }
 }
 fn apply_transition_duration(s: &mut ComputedStyle, v: &str) {
-    ensure_transition(s);
-    for tr in &mut s.rare_mut().transitions {
-        tr.duration_ms = super::parse_time_ms(v).unwrap_or(0.0);
+    let values = transition_list_values(v);
+    if values.is_empty() {
+        ensure_transition(s);
+        return;
+    }
+    resize_transitions(s, s.rare().transitions.len().max(values.len()));
+    for (idx, tr) in s.rare_mut().transitions.iter_mut().enumerate() {
+        let value = values[idx % values.len()];
+        tr.duration_ms = super::parse_time_ms(value).unwrap_or(0.0);
     }
 }
 fn apply_transition_timing_function(s: &mut ComputedStyle, v: &str) {
-    ensure_transition(s);
-    for tr in &mut s.rare_mut().transitions {
-        tr.timing_fn = super::parse_easing(v);
+    let values = transition_list_values(v);
+    if values.is_empty() {
+        ensure_transition(s);
+        return;
+    }
+    resize_transitions(s, s.rare().transitions.len().max(values.len()));
+    for (idx, tr) in s.rare_mut().transitions.iter_mut().enumerate() {
+        tr.timing_fn = super::parse_easing(values[idx % values.len()]);
     }
 }
 fn apply_transition_delay(s: &mut ComputedStyle, v: &str) {
-    ensure_transition(s);
-    for tr in &mut s.rare_mut().transitions {
-        tr.delay_ms = super::parse_time_ms(v).unwrap_or(0.0);
+    let values = transition_list_values(v);
+    if values.is_empty() {
+        ensure_transition(s);
+        return;
+    }
+    resize_transitions(s, s.rare().transitions.len().max(values.len()));
+    for (idx, tr) in s.rare_mut().transitions.iter_mut().enumerate() {
+        tr.delay_ms = super::parse_time_ms(values[idx % values.len()]).unwrap_or(0.0);
     }
 }
 fn apply_transition_behavior(s: &mut ComputedStyle, v: &str) {
-    ensure_transition(s);
-    for tr in &mut s.rare_mut().transitions {
-        tr.allow_discrete = v.trim() == "allow-discrete";
+    let values = transition_list_values(v);
+    if values.is_empty() {
+        ensure_transition(s);
+        return;
+    }
+    resize_transitions(s, s.rare().transitions.len().max(values.len()));
+    for (idx, tr) in s.rare_mut().transitions.iter_mut().enumerate() {
+        tr.allow_discrete = values[idx % values.len()] == "allow-discrete";
     }
 }
 
@@ -5745,89 +6534,164 @@ fn apply_animation(s: &mut ComputedStyle, v: &str) {
 }
 fn ensure_animation(s: &mut ComputedStyle) {
     if s.rare().animations.is_empty() {
-        s.rare_mut().animations.push(ParsedAnimation {
-            name: String::new(),
-            duration_ms: 0.0,
-            delay_ms: 0.0,
-            timing_fn: EasingFn::Ease,
-            iteration_count: 1.0,
-            direction: AnimDirection::Normal,
-            fill_mode: FillMode::None,
-            play_state_paused: false,
-            composition: AnimationComposition::Replace,
-        });
+        s.rare_mut().animations.push(default_animation());
     }
 }
+
+fn default_animation() -> ParsedAnimation {
+    ParsedAnimation {
+        name: String::new(),
+        duration_ms: 0.0,
+        delay_ms: 0.0,
+        timing_fn: EasingFn::Ease,
+        iteration_count: 1.0,
+        direction: AnimDirection::Normal,
+        fill_mode: FillMode::None,
+        play_state_paused: false,
+        composition: AnimationComposition::Replace,
+    }
+}
+
+fn resize_animations(s: &mut ComputedStyle, len: usize) {
+    let len = len.max(1);
+    let animations = &mut s.rare_mut().animations;
+    if animations.is_empty() {
+        animations.push(default_animation());
+    }
+    while animations.len() < len {
+        let next = animations.last().cloned().unwrap_or_else(default_animation);
+        animations.push(next);
+    }
+    animations.truncate(len);
+}
+
+fn parse_animation_iteration_count(value: &str) -> f32 {
+    if value.trim() == "infinite" {
+        f32::INFINITY
+    } else {
+        value.trim().parse().unwrap_or(1.0)
+    }
+}
+
+fn parse_animation_direction(value: &str) -> AnimDirection {
+    match value.trim() {
+        "reverse" => AnimDirection::Reverse,
+        "alternate" => AnimDirection::Alternate,
+        "alternate-reverse" => AnimDirection::AlternateReverse,
+        _ => AnimDirection::Normal,
+    }
+}
+
+fn parse_animation_fill_mode(value: &str) -> FillMode {
+    match value.trim() {
+        "forwards" => FillMode::Forwards,
+        "backwards" => FillMode::Backwards,
+        "both" => FillMode::Both,
+        _ => FillMode::None,
+    }
+}
+
+fn parse_animation_composition(value: &str) -> AnimationComposition {
+    match value.trim() {
+        "add" => AnimationComposition::Add,
+        "accumulate" => AnimationComposition::Accumulate,
+        _ => AnimationComposition::Replace,
+    }
+}
+
 fn apply_animation_name(s: &mut ComputedStyle, v: &str) {
-    ensure_animation(s);
-    for anim in &mut s.rare_mut().animations {
-        anim.name = v.to_string();
+    let values = transition_list_values(v);
+    resize_animations(s, values.len());
+    for (idx, anim) in s.rare_mut().animations.iter_mut().enumerate() {
+        anim.name = values.get(idx).copied().unwrap_or("").to_string();
     }
 }
 fn apply_animation_duration(s: &mut ComputedStyle, v: &str) {
-    ensure_animation(s);
-    for anim in &mut s.rare_mut().animations {
-        anim.duration_ms = super::parse_time_ms(v).unwrap_or(0.0);
+    let values = transition_list_values(v);
+    if values.is_empty() {
+        ensure_animation(s);
+        return;
+    }
+    resize_animations(s, s.rare().animations.len().max(values.len()));
+    for (idx, anim) in s.rare_mut().animations.iter_mut().enumerate() {
+        anim.duration_ms = super::parse_time_ms(values[idx % values.len()]).unwrap_or(0.0);
     }
 }
 fn apply_animation_timing_function(s: &mut ComputedStyle, v: &str) {
-    ensure_animation(s);
-    for anim in &mut s.rare_mut().animations {
-        anim.timing_fn = super::parse_easing(v);
+    let values = transition_list_values(v);
+    if values.is_empty() {
+        ensure_animation(s);
+        return;
+    }
+    resize_animations(s, s.rare().animations.len().max(values.len()));
+    for (idx, anim) in s.rare_mut().animations.iter_mut().enumerate() {
+        anim.timing_fn = super::parse_easing(values[idx % values.len()]);
     }
 }
 fn apply_animation_delay(s: &mut ComputedStyle, v: &str) {
-    ensure_animation(s);
-    for anim in &mut s.rare_mut().animations {
-        anim.delay_ms = super::parse_time_ms(v).unwrap_or(0.0);
+    let values = transition_list_values(v);
+    if values.is_empty() {
+        ensure_animation(s);
+        return;
+    }
+    resize_animations(s, s.rare().animations.len().max(values.len()));
+    for (idx, anim) in s.rare_mut().animations.iter_mut().enumerate() {
+        anim.delay_ms = super::parse_time_ms(values[idx % values.len()]).unwrap_or(0.0);
     }
 }
 fn apply_animation_iteration_count(s: &mut ComputedStyle, v: &str) {
-    ensure_animation(s);
-    for anim in &mut s.rare_mut().animations {
-        anim.iteration_count = if v == "infinite" {
-            f32::INFINITY
-        } else {
-            v.parse().unwrap_or(1.0)
-        };
+    let values = transition_list_values(v);
+    if values.is_empty() {
+        ensure_animation(s);
+        return;
+    }
+    resize_animations(s, s.rare().animations.len().max(values.len()));
+    for (idx, anim) in s.rare_mut().animations.iter_mut().enumerate() {
+        anim.iteration_count = parse_animation_iteration_count(values[idx % values.len()]);
     }
 }
 fn apply_animation_direction(s: &mut ComputedStyle, v: &str) {
-    ensure_animation(s);
-    for anim in &mut s.rare_mut().animations {
-        anim.direction = match v {
-            "reverse" => AnimDirection::Reverse,
-            "alternate" => AnimDirection::Alternate,
-            "alternate-reverse" => AnimDirection::AlternateReverse,
-            _ => AnimDirection::Normal,
-        };
+    let values = transition_list_values(v);
+    if values.is_empty() {
+        ensure_animation(s);
+        return;
+    }
+    resize_animations(s, s.rare().animations.len().max(values.len()));
+    for (idx, anim) in s.rare_mut().animations.iter_mut().enumerate() {
+        anim.direction = parse_animation_direction(values[idx % values.len()]);
     }
 }
 fn apply_animation_fill_mode(s: &mut ComputedStyle, v: &str) {
-    ensure_animation(s);
-    for anim in &mut s.rare_mut().animations {
-        anim.fill_mode = match v {
-            "forwards" => FillMode::Forwards,
-            "backwards" => FillMode::Backwards,
-            "both" => FillMode::Both,
-            _ => FillMode::None,
-        };
+    let values = transition_list_values(v);
+    if values.is_empty() {
+        ensure_animation(s);
+        return;
+    }
+    resize_animations(s, s.rare().animations.len().max(values.len()));
+    for (idx, anim) in s.rare_mut().animations.iter_mut().enumerate() {
+        anim.fill_mode = parse_animation_fill_mode(values[idx % values.len()]);
     }
 }
 fn apply_animation_play_state(s: &mut ComputedStyle, v: &str) {
-    ensure_animation(s);
-    for anim in &mut s.rare_mut().animations {
-        anim.play_state_paused = v == "paused";
+    let values = transition_list_values(v);
+    if values.is_empty() {
+        ensure_animation(s);
+        return;
+    }
+    resize_animations(s, s.rare().animations.len().max(values.len()));
+    for (idx, anim) in s.rare_mut().animations.iter_mut().enumerate() {
+        anim.play_state_paused = values[idx % values.len()] == "paused";
     }
 }
 fn apply_animation_composition(s: &mut ComputedStyle, v: &str) {
-    ensure_animation(s);
-    for anim in &mut s.rare_mut().animations {
-        anim.composition = match v.trim() {
-            "add" => AnimationComposition::Add,
-            "accumulate" => AnimationComposition::Accumulate,
-            _ => AnimationComposition::Replace,
-        };
+    let values = transition_list_values(v);
+    if values.is_empty() {
+        ensure_animation(s);
+        return;
+    }
+    resize_animations(s, s.rare().animations.len().max(values.len()));
+    for (idx, anim) in s.rare_mut().animations.iter_mut().enumerate() {
+        anim.composition = parse_animation_composition(values[idx % values.len()]);
     }
 }
 fn apply_will_change(s: &mut ComputedStyle, v: &str) {
@@ -5942,13 +6806,17 @@ fn copy_orphans(d: &mut ComputedStyle, s: &ComputedStyle) {
 // ── Scrollbar & caret ───────────────────────────────────────────────────────
 
 fn apply_scrollbar_color(s: &mut ComputedStyle, v: &str) {
-    if v != "auto" {
-        let sp = super::find_split_space(v);
-        if let Some(idx) = sp {
-            let thumb = v[..idx].trim();
-            let track = v[idx + 1..].trim();
-            s.scrollbar_thumb_color = parse_color(thumb);
-            s.scrollbar_track_color = parse_color(track);
+    if v == "auto" {
+        s.scrollbar_thumb_color = None;
+        s.scrollbar_track_color = None;
+        return;
+    }
+    if let Some(idx) = super::find_split_space(v) {
+        let thumb = v[..idx].trim();
+        let track = v[idx + 1..].trim();
+        if let (Some(thumb), Some(track)) = (parse_color(thumb), parse_color(track)) {
+            s.scrollbar_thumb_color = Some(thumb);
+            s.scrollbar_track_color = Some(track);
         }
     }
 }
@@ -6417,6 +7285,58 @@ fn apply_margin_trim(s: &mut ComputedStyle, v: &str) {
         ],
     );
 }
+fn apply_custom_ident_or_none(field: &mut String, v: &str) {
+    let value = v.trim();
+    if value == "none"
+        || (!value.is_empty()
+            && value
+                .split(',')
+                .all(|part| part.trim().starts_with("--") || is_custom_ident(part.trim())))
+    {
+        *field = value.to_string();
+    }
+}
+fn apply_raw_or_keyword(field: &mut String, v: &str, allowed_keywords: &[&str]) {
+    let value = v.trim();
+    if value.is_empty() {
+        return;
+    }
+    if allowed_keywords.iter().any(|kw| *kw == value)
+        || value.contains('(')
+        || value.starts_with("--")
+        || is_custom_ident(value)
+    {
+        *field = value.to_string();
+    }
+}
+fn is_custom_ident(value: &str) -> bool {
+    let Some(first) = value.chars().next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic() || first == '-')
+        && !matches!(
+            value,
+            "initial" | "inherit" | "unset" | "revert" | "revert-layer"
+        )
+}
+fn apply_anchor_name(s: &mut ComputedStyle, v: &str) {
+    apply_custom_ident_or_none(&mut s.anchor_name, v);
+}
+fn apply_position_anchor(s: &mut ComputedStyle, v: &str) {
+    apply_raw_or_keyword(&mut s.position_anchor, v, &["auto"]);
+}
+fn apply_view_transition_name(s: &mut ComputedStyle, v: &str) {
+    apply_custom_ident_or_none(&mut s.view_transition_name, v);
+}
+fn apply_animation_timeline(s: &mut ComputedStyle, v: &str) {
+    apply_raw_or_keyword(&mut s.animation_timeline, v, &["auto", "none"]);
+}
+fn apply_scroll_timeline(s: &mut ComputedStyle, v: &str) {
+    apply_raw_or_keyword(&mut s.scroll_timeline, v, &["none"]);
+}
+fn apply_offset_path(s: &mut ComputedStyle, v: &str) {
+    apply_raw_or_keyword(&mut s.offset_path, v, &["none"]);
+}
 fn apply_field_sizing(s: &mut ComputedStyle, v: &str) {
     apply_keyword_list(&mut s.field_sizing, v, &["fixed", "content"]);
 }
@@ -6467,11 +7387,32 @@ fn copy_interpolate_size(d: &mut ComputedStyle, s: &ComputedStyle) {
 fn copy_margin_trim(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.margin_trim = s.margin_trim.clone();
 }
+fn copy_anchor_name(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.anchor_name = s.anchor_name.clone();
+}
+fn copy_position_anchor(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.position_anchor = s.position_anchor.clone();
+}
+fn copy_view_transition_name(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.view_transition_name = s.view_transition_name.clone();
+}
+fn copy_animation_timeline(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.animation_timeline = s.animation_timeline.clone();
+}
+fn copy_scroll_timeline(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.scroll_timeline = s.scroll_timeline.clone();
+}
+fn copy_offset_path(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.offset_path = s.offset_path.clone();
+}
 fn copy_field_sizing(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.field_sizing = s.field_sizing.clone();
 }
 fn copy_appearance(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.appearance = s.appearance.clone();
+}
+fn copy_forced_color_adjust(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.forced_color_adjust = s.forced_color_adjust.clone();
 }
 
 fn apply_color_scheme(s: &mut ComputedStyle, v: &str) {
@@ -6490,6 +7431,13 @@ fn apply_color_scheme(s: &mut ComputedStyle, v: &str) {
 
 fn copy_color_scheme(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.color_scheme = s.color_scheme.clone();
+}
+
+fn apply_forced_color_adjust(s: &mut ComputedStyle, v: &str) {
+    let value = v.trim();
+    if matches!(value, "auto" | "none" | "preserve-parent-color") {
+        s.forced_color_adjust = value.to_string();
+    }
 }
 
 // ── Containment ─────────────────────────────────────────────────────────────
@@ -6583,6 +7531,9 @@ fn apply_scroll_snap_align(s: &mut ComputedStyle, v: &str) {
         _ => ScrollSnapAlign::None,
     };
 }
+fn apply_scroll_snap_stop(s: &mut ComputedStyle, v: &str) {
+    apply_keyword_list(&mut s.scroll_snap_stop, v, &["normal", "always"]);
+}
 fn apply_scroll_padding(s: &mut ComputedStyle, v: &str) {
     super::apply_shorthand_4(
         v,
@@ -6633,6 +7584,9 @@ fn copy_scroll_snap_type(d: &mut ComputedStyle, s: &ComputedStyle) {
 }
 fn copy_scroll_snap_align(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.scroll_snap_align = s.scroll_snap_align;
+}
+fn copy_scroll_snap_stop(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.scroll_snap_stop = s.scroll_snap_stop.clone();
 }
 fn copy_scroll_padding_top(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.scroll_padding_top = s.scroll_padding_top.clone();

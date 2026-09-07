@@ -45,7 +45,12 @@ pub fn detect_direction_in_range(text: &str, start: usize, length: usize) -> Dir
 /// If the line is pure LTR, `visual_segments` is cleared (renderer uses logical order).
 /// Mirrors LayoutEngine::ResolveBidiLine in C++.
 /// Uses bidi.levels directly (NOT reorder_line which returns Cow<str>).
-pub fn resolve_bidi_line(text: &str, line: &mut LayoutLine, para_dir: Direction) {
+pub fn resolve_bidi_line(
+    text: &str,
+    line: &mut LayoutLine,
+    para_dir: Direction,
+    unicode_bidi: UnicodeBidi,
+) {
     let byte_start = line.text_start;
     let byte_end = byte_start + line.text_length;
     if byte_end > text.len() || line.text_length == 0 {
@@ -69,6 +74,18 @@ pub fn resolve_bidi_line(text: &str, line: &mut LayoutLine, para_dir: Direction)
         &line_text_owned
     } else {
         line_text_raw
+    };
+    if matches!(
+        unicode_bidi,
+        UnicodeBidi::Override | UnicodeBidi::IsolateOverride
+    ) {
+        resolve_bidi_override_line(line_text, line, byte_start, para_dir);
+        return;
+    }
+    let para_dir = if unicode_bidi == UnicodeBidi::Plaintext {
+        detect_paragraph_direction(line_text)
+    } else {
+        para_dir
     };
     let para_level = Some(match para_dir {
         Direction::LTR => Level::ltr(),
@@ -170,6 +187,37 @@ pub fn resolve_bidi_line(text: &str, line: &mut LayoutLine, para_dir: Direction)
     }
 }
 
+fn resolve_bidi_override_line(
+    line_text: &str,
+    line: &mut LayoutLine,
+    byte_start: usize,
+    para_dir: Direction,
+) {
+    line.visual_segments.clear();
+
+    if para_dir == Direction::LTR {
+        return;
+    }
+
+    let mut chars: Vec<(usize, usize)> = line_text
+        .char_indices()
+        .map(|(idx, ch)| (idx, idx + ch.len_utf8()))
+        .collect();
+    chars.reverse();
+    for (start, end) in chars {
+        if end <= start {
+            continue;
+        }
+        line.visual_segments.push(VisualSegment {
+            logical_start: byte_start + start,
+            length: end - start,
+            level: 1,
+            x: 0.0,
+            width: 0.0,
+        });
+    }
+}
+
 // ─── Break opportunities ──────────────────────────────────────────────────────
 
 /// Return true if it is valid to break a line after `ch`.
@@ -220,6 +268,24 @@ pub fn measure_text(
     let snippet = &text[start..end];
     let char_count = snippet.chars().count();
     measure_text_width(snippet, font_px, font_system) + letter_spacing_px * char_count as f32
+}
+
+/// Measure a rendered text run with CSS Text spacing applied.
+pub fn measure_text_with_spacing(
+    text: &str,
+    font_px: f32,
+    letter_spacing_px: f32,
+    word_spacing_px: f32,
+    font_system: Option<&mut cosmic_text::FontSystem>,
+) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    let char_count = text.chars().count() as f32;
+    let word_separators = text.chars().filter(|c| c.is_whitespace()).count() as f32;
+    measure_text_width(text, font_px, font_system)
+        + letter_spacing_px * char_count
+        + word_spacing_px * word_separators
 }
 
 /// Advance width of a single character including letter-spacing.

@@ -192,6 +192,8 @@ pub fn apply_cascade_parallel(
     focused_box: u32,
     keyboard_focus: bool,
     hover_chain: &std::collections::HashSet<u32>,
+    target_id: u32,
+    document_url: &str,
 ) {
     // The work items borrow `root`, so passes 1 and 2 are scoped: the immutable
     // borrow has to end before pass 3 takes the tree mutably.
@@ -228,6 +230,8 @@ pub fn apply_cascade_parallel(
                     focused_box,
                     keyboard_focus,
                     hover_chain,
+                    target_id,
+                    document_url,
                     &item.siblings[..item.sibling_pos],
                     &item.siblings[item.sibling_pos.saturating_add(1).min(item.siblings.len())..],
                     &mut candidates_buf,
@@ -255,6 +259,8 @@ pub fn apply_cascade_parallel(
         vh,
         focused_box,
         keyboard_focus,
+        target_id,
+        document_url,
         &stylesheet.variables,
         &mut candidates_buf,
         &mut counters,

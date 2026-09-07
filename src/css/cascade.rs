@@ -13,19 +13,172 @@ use std::collections::{HashMap, HashSet};
 
 // ─── CSS Cascade ─────────────────────────────────────────────────────────────
 
-fn normal_cascade_sort_key(rules: &[CssRule], specificity: u32, rule_idx: usize) -> (u8, u32, u32) {
+fn normal_cascade_sort_key(
+    rules: &[CssRule],
+    specificity: u32,
+    rule_idx: usize,
+) -> (u8, u32, u32, usize) {
     let origin_rank = if is_author_origin(specificity) { 1 } else { 0 };
-    (origin_rank, rules[rule_idx].layer_rank, specificity)
+    (origin_rank, rules[rule_idx].layer_rank, specificity, rule_idx)
 }
 
-fn important_cascade_sort_key(rules: &[CssRule], specificity: u32, rule_idx: usize) -> (u32, u32) {
+fn important_cascade_sort_key(
+    rules: &[CssRule],
+    specificity: u32,
+    rule_idx: usize,
+) -> (u32, u32, usize) {
     let layer_rank = rules[rule_idx].layer_rank;
     let reversed_layer_rank = if layer_rank == u32::MAX {
         0
     } else {
         u32::MAX - layer_rank
     };
-    (reversed_layer_rank, specificity)
+    (reversed_layer_rank, specificity, rule_idx)
+}
+
+fn clear_inherit_tracking_for_property(inherit_props: &mut HashSet<String>, prop: &str) {
+    inherit_props.remove(prop);
+    let id = properties::resolve(&prop.to_ascii_lowercase());
+    clear_inherit_tracking_for_id(inherit_props, id);
+}
+
+fn clear_inherit_tracking_for_id(inherit_props: &mut HashSet<String>, id: properties::PropertyId) {
+    let def = property_defs::get(id);
+    inherit_props.remove(def.name);
+    for &longhand in def.longhands {
+        inherit_props.remove(property_defs::get(longhand).name);
+    }
+}
+
+fn apply_css_value_with_cascade_context(
+    style: &mut ComputedStyle,
+    id: properties::PropertyId,
+    val: &crate::types::CssValue,
+    local_vars: &HashMap<String, String>,
+    parent_style: Option<&ComputedStyle>,
+    revert_base: Option<&ComputedStyle>,
+    revert_layer_base: &ComputedStyle,
+) {
+    use crate::types::CssValue;
+    let name = property_defs::get(id).name;
+    match val {
+        CssValue::Inherit => {
+            if let Some(parent) = parent_style {
+                copy_property_from_style(style, parent, name);
+            }
+        }
+        CssValue::RevertLayer => copy_property_from_style(style, revert_layer_base, name),
+        CssValue::Revert => {
+            if let Some(base) = revert_base {
+                copy_property_from_style(style, base, name);
+            } else {
+                apply_css_value(style, id, &CssValue::Initial);
+            }
+        }
+        CssValue::Raw(s) => {
+            let resolved = resolve_var_references(s, local_vars);
+            if resolved.trim().is_empty() && s.contains("var(") {
+                return;
+            }
+            apply_resolved_property_with_cascade_context(
+                style,
+                name,
+                id,
+                &resolved,
+                parent_style,
+                revert_base,
+                revert_layer_base,
+            );
+        }
+        _ => apply_css_value(style, id, val),
+    }
+}
+
+fn apply_resolved_property_with_cascade_context(
+    style: &mut ComputedStyle,
+    prop: &str,
+    id: properties::PropertyId,
+    value: &str,
+    parent_style: Option<&ComputedStyle>,
+    revert_base: Option<&ComputedStyle>,
+    revert_layer_base: &ComputedStyle,
+) {
+    let trimmed = value.trim();
+    if trimmed == "inherit" {
+        if let Some(parent) = parent_style {
+            copy_property_from_style(style, parent, prop);
+        }
+    } else if trimmed == "revert-layer" {
+        copy_property_from_style(style, revert_layer_base, prop);
+    } else if trimmed == "revert" {
+        if let Some(base) = revert_base {
+            copy_property_from_style(style, base, prop);
+        } else {
+            apply_css_value(style, id, &crate::types::CssValue::Initial);
+        }
+    } else {
+        apply_property_by_id_str(style, id, value);
+    }
+}
+
+fn apply_state_matched_rules(
+    state: &mut ComputedStyle,
+    matched: &mut Vec<(u32, usize)>,
+    stylesheet: &Stylesheet,
+    local_vars: &HashMap<String, String>,
+    parent_style: Option<&ComputedStyle>,
+    revert_base: Option<&ComputedStyle>,
+) {
+    matched.sort_by_key(|(sp, idx)| normal_cascade_sort_key(&stylesheet.rules, *sp, *idx));
+    let mut current_layer: Option<(bool, u32)> = None;
+    let mut layer_start_style = state.clone();
+    for &(sp, ri) in matched.iter() {
+        let rule = &stylesheet.rules[ri];
+        let layer_key = (is_author_origin(sp), rule.layer_rank);
+        if current_layer != Some(layer_key) {
+            current_layer = Some(layer_key);
+            layer_start_style = state.clone();
+        }
+        for &(id, ref val) in &rule.compiled_decls {
+            apply_css_value_with_cascade_context(
+                state,
+                id,
+                val,
+                local_vars,
+                parent_style,
+                revert_base,
+                &layer_start_style,
+            );
+        }
+    }
+
+    matched.sort_by_key(|(sp, idx)| important_cascade_sort_key(&stylesheet.rules, *sp, *idx));
+    for author_pass in [true, false] {
+        let mut current_layer: Option<(bool, u32)> = None;
+        let mut layer_start_style = state.clone();
+        for &(sp, ri) in matched.iter() {
+            if is_author_origin(sp) != author_pass {
+                continue;
+            }
+            let rule = &stylesheet.rules[ri];
+            let layer_key = (is_author_origin(sp), rule.layer_rank);
+            if current_layer != Some(layer_key) {
+                current_layer = Some(layer_key);
+                layer_start_style = state.clone();
+            }
+            for &(id, ref val) in &rule.compiled_important {
+                apply_css_value_with_cascade_context(
+                    state,
+                    id,
+                    val,
+                    local_vars,
+                    parent_style,
+                    revert_base,
+                    &layer_start_style,
+                );
+            }
+        }
+    }
 }
 
 /// Apply a stylesheet to all boxes in the tree (cascade + inheritance).
@@ -92,6 +245,60 @@ pub fn apply_cascade_vp_hover(
     keyboard_focus: bool,
     hover_chain: &std::collections::HashSet<u32>,
 ) {
+    apply_cascade_vp_hover_target(
+        root,
+        stylesheet,
+        parent_style,
+        root_font_px,
+        vw,
+        vh,
+        focused_box,
+        keyboard_focus,
+        hover_chain,
+        0,
+    );
+}
+
+pub fn apply_cascade_vp_hover_target(
+    root: &mut crate::types::WebCore,
+    stylesheet: &Stylesheet,
+    parent_style: Option<&ComputedStyle>,
+    root_font_px: f32,
+    vw: f32,
+    vh: f32,
+    focused_box: u32,
+    keyboard_focus: bool,
+    hover_chain: &std::collections::HashSet<u32>,
+    target_id: u32,
+) {
+    apply_cascade_vp_hover_target_url(
+        root,
+        stylesheet,
+        parent_style,
+        root_font_px,
+        vw,
+        vh,
+        focused_box,
+        keyboard_focus,
+        hover_chain,
+        target_id,
+        "",
+    );
+}
+
+pub fn apply_cascade_vp_hover_target_url(
+    root: &mut crate::types::WebCore,
+    stylesheet: &Stylesheet,
+    parent_style: Option<&ComputedStyle>,
+    root_font_px: f32,
+    vw: f32,
+    vh: f32,
+    focused_box: u32,
+    keyboard_focus: bool,
+    hover_chain: &std::collections::HashSet<u32>,
+    target_id: u32,
+    document_url: &str,
+) {
     // Use parallel cascade when the stylesheet is large enough to justify the overhead.
     if stylesheet.rules.len() > 1000 {
         apply_cascade_parallel(
@@ -104,6 +311,8 @@ pub fn apply_cascade_vp_hover(
             focused_box,
             keyboard_focus,
             hover_chain,
+            target_id,
+            document_url,
         );
         return;
     }
@@ -128,6 +337,8 @@ pub fn apply_cascade_vp_hover(
         vh,
         focused_box,
         keyboard_focus,
+        target_id,
+        document_url,
         &stylesheet.variables,
         &mut candidates_buf,
         &mut counters,
@@ -150,6 +361,317 @@ fn pseudo_content_value(value: &str) -> Option<String> {
         return None;
     }
     Some(value.to_string())
+}
+
+fn resolve_custom_counter_style_marker(
+    stylesheet: &Stylesheet,
+    name: &str,
+    index: i32,
+) -> Option<String> {
+    resolve_custom_counter_style_marker_inner(stylesheet, name, index, &mut Vec::new())
+}
+
+fn resolve_custom_counter_style_marker_inner(
+    stylesheet: &Stylesheet,
+    name: &str,
+    index: i32,
+    resolving: &mut Vec<String>,
+) -> Option<String> {
+    if name.is_empty() {
+        return None;
+    }
+    let rule = stylesheet
+        .counter_styles
+        .iter()
+        .find(|rule| rule.name.eq_ignore_ascii_case(name))?;
+    if resolving
+        .iter()
+        .any(|seen| seen.eq_ignore_ascii_case(&rule.name))
+    {
+        return None;
+    }
+    resolving.push(rule.name.clone());
+    let system = counter_style_system(stylesheet, rule, resolving);
+    let symbols = if system.starts_with("additive") {
+        Vec::new()
+    } else {
+        let symbols =
+            counter_style_symbols(counter_style_decl(stylesheet, rule, "symbols", resolving)?)?;
+        if symbols.is_empty() {
+            resolving.pop();
+            return None;
+        }
+        symbols
+    };
+    let prefix = counter_style_decl(stylesheet, rule, "prefix", resolving)
+        .map(|value| resolve_content_value_with_context(value, None, None))
+        .unwrap_or_default();
+    let suffix = counter_style_decl(stylesheet, rule, "suffix", resolving)
+        .map(|value| resolve_content_value_with_context(value, None, None))
+        .unwrap_or_else(|| ". ".to_string());
+    let mut body = (if !counter_style_range_contains(
+        counter_style_decl(stylesheet, rule, "range", resolving),
+        index,
+    ) {
+        counter_style_fallback_body(stylesheet, rule, index, resolving)
+    } else if system.starts_with("cyclic") {
+        let idx = (index - 1).rem_euclid(symbols.len() as i32) as usize;
+        Some(symbols[idx].clone())
+    } else if system.starts_with("fixed") {
+        let first = fixed_counter_first_value(&system);
+        let offset = index - first;
+        if offset < 0 || offset as usize >= symbols.len() {
+            counter_style_fallback_body(stylesheet, rule, index, resolving)
+        } else {
+            Some(symbols[offset as usize].clone())
+        }
+    } else if system.starts_with("numeric") && symbols.len() >= 2 {
+        Some(numeric_counter_symbols(index, &symbols))
+    } else if system.starts_with("alphabetic") && symbols.len() >= 2 {
+        Some(alphabetic_counter_symbols(index, &symbols))
+    } else if system.starts_with("additive") {
+        counter_style_additive_body(
+            counter_style_decl(stylesheet, rule, "additive-symbols", resolving),
+            index,
+        )
+    } else {
+        let repeats = index.max(1) as usize;
+        Some(symbols[0].repeat(repeats))
+    })
+    .unwrap_or_else(|| crate::css::format_counter_value(index, "decimal"));
+    if let Some(padded) = counter_style_padded_body(
+        counter_style_decl(stylesheet, rule, "pad", resolving),
+        &body,
+    ) {
+        body = padded;
+    }
+    resolving.pop();
+    Some(format!("{prefix}{body}{suffix}"))
+}
+
+fn counter_style_decl<'a>(
+    stylesheet: &'a Stylesheet,
+    rule: &'a crate::css::CounterStyleRule,
+    key: &str,
+    resolving: &[String],
+) -> Option<&'a String> {
+    if let Some(value) = rule.declarations.get(key) {
+        return Some(value);
+    }
+    let system = rule.declarations.get("system")?.trim();
+    let base = counter_style_extends_name(system)?;
+    if resolving.iter().any(|seen| seen.eq_ignore_ascii_case(base)) {
+        return None;
+    }
+    let base_rule = stylesheet
+        .counter_styles
+        .iter()
+        .find(|candidate| candidate.name.eq_ignore_ascii_case(base))?;
+    counter_style_decl(stylesheet, base_rule, key, resolving)
+}
+
+fn counter_style_system(
+    stylesheet: &Stylesheet,
+    rule: &crate::css::CounterStyleRule,
+    resolving: &[String],
+) -> String {
+    let own = rule
+        .declarations
+        .get("system")
+        .map(|value| value.trim())
+        .unwrap_or("symbolic");
+    let Some(base) = counter_style_extends_name(own) else {
+        return own.to_ascii_lowercase();
+    };
+    if resolving.iter().any(|seen| seen.eq_ignore_ascii_case(base)) {
+        return "symbolic".to_string();
+    }
+    stylesheet
+        .counter_styles
+        .iter()
+        .find(|candidate| candidate.name.eq_ignore_ascii_case(base))
+        .map(|base_rule| counter_style_system(stylesheet, base_rule, resolving))
+        .unwrap_or_else(|| base.to_ascii_lowercase())
+}
+
+fn counter_style_extends_name(system: &str) -> Option<&str> {
+    let mut parts = system.split_whitespace();
+    if !parts.next()?.eq_ignore_ascii_case("extends") {
+        return None;
+    }
+    parts.next().filter(|name| !name.is_empty())
+}
+
+fn counter_style_additive_body(additive: Option<&String>, index: i32) -> Option<String> {
+    if index <= 0 {
+        return None;
+    }
+    let mut remaining = index;
+    let mut out = String::new();
+    for part in additive?.split(',') {
+        let part = part.trim();
+        let split = part
+            .char_indices()
+            .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx))?;
+        let weight = part[..split].trim().parse::<i32>().ok()?;
+        if weight <= 0 {
+            return None;
+        }
+        let symbol = resolve_content_value_with_context(part[split..].trim(), None, None);
+        if symbol.is_empty() {
+            return None;
+        }
+        while remaining >= weight {
+            out.push_str(&symbol);
+            remaining -= weight;
+        }
+    }
+    (remaining == 0 && !out.is_empty()).then_some(out)
+}
+
+fn fixed_counter_first_value(system: &str) -> i32 {
+    system
+        .split_whitespace()
+        .nth(1)
+        .and_then(|part| part.parse::<i32>().ok())
+        .unwrap_or(1)
+}
+
+fn counter_style_fallback_body(
+    stylesheet: &Stylesheet,
+    rule: &crate::css::CounterStyleRule,
+    index: i32,
+    resolving: &mut Vec<String>,
+) -> Option<String> {
+    let fallback = counter_style_decl(stylesheet, rule, "fallback", resolving)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("decimal");
+    if fallback.eq_ignore_ascii_case("decimal") {
+        Some(crate::css::format_counter_value(index, "decimal"))
+    } else if stylesheet
+        .counter_styles
+        .iter()
+        .any(|candidate| candidate.name.eq_ignore_ascii_case(fallback))
+    {
+        resolve_custom_counter_style_marker_inner(stylesheet, fallback, index, resolving)
+    } else {
+        Some(crate::css::format_counter_value(index, fallback))
+    }
+}
+
+fn counter_style_range_contains(range: Option<&String>, index: i32) -> bool {
+    let Some(range) = range else {
+        return true;
+    };
+    let range = range.trim();
+    if range.eq_ignore_ascii_case("auto") || range.is_empty() {
+        return true;
+    }
+    range.split(',').any(|pair| {
+        let mut parts = pair.split_whitespace();
+        let Some(start) = parts.next().and_then(counter_range_bound) else {
+            return false;
+        };
+        let Some(end) = parts.next().and_then(counter_range_bound) else {
+            return false;
+        };
+        index >= start && index <= end
+    })
+}
+
+fn counter_range_bound(value: &str) -> Option<i32> {
+    if value.eq_ignore_ascii_case("infinite") {
+        Some(i32::MAX)
+    } else if value.eq_ignore_ascii_case("-infinite") {
+        Some(i32::MIN)
+    } else {
+        value.parse::<i32>().ok()
+    }
+}
+
+fn counter_style_padded_body(pad: Option<&String>, body: &str) -> Option<String> {
+    let pad = pad?.trim();
+    let mut parts = pad.splitn(2, char::is_whitespace);
+    let width = parts.next()?.parse::<usize>().ok()?;
+    let symbol_src = parts.next()?.trim();
+    let symbol = counter_style_symbols(symbol_src)
+        .and_then(|mut symbols| symbols.pop())
+        .filter(|symbol| !symbol.is_empty())
+        .unwrap_or_else(|| resolve_content_value_with_context(symbol_src, None, None));
+    let body_len = body.chars().count();
+    if symbol.is_empty() || body_len >= width {
+        return None;
+    }
+    Some(format!("{}{}", symbol.repeat(width - body_len), body))
+}
+
+fn counter_style_symbols(value: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    let mut rest = value.trim();
+    while !rest.is_empty() {
+        rest = rest.trim_start();
+        let Some(quote) = rest.chars().next().filter(|ch| *ch == '"' || *ch == '\'') else {
+            break;
+        };
+        let mut escaped = false;
+        let mut end_byte = None;
+        for (idx, ch) in rest.char_indices().skip(1) {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == quote {
+                end_byte = Some(idx);
+                break;
+            }
+        }
+        let end = end_byte?;
+        out.push(resolve_content_value_with_context(
+            &rest[..=end],
+            None,
+            None,
+        ));
+        rest = &rest[end + quote.len_utf8()..];
+    }
+    Some(out)
+}
+
+fn numeric_counter_symbols(value: i32, symbols: &[String]) -> String {
+    if value == 0 {
+        return symbols[0].clone();
+    }
+    let negative = value < 0;
+    let mut n = value.abs();
+    let base = symbols.len() as i32;
+    let mut parts = Vec::new();
+    while n > 0 {
+        parts.push(symbols[(n % base) as usize].clone());
+        n /= base;
+    }
+    let mut out = parts.into_iter().rev().collect::<String>();
+    if negative {
+        out.insert(0, '-');
+    }
+    out
+}
+
+fn alphabetic_counter_symbols(mut value: i32, symbols: &[String]) -> String {
+    if value <= 0 {
+        return crate::css::format_counter_value(value, "decimal");
+    }
+    let base = symbols.len() as i32;
+    let mut parts = Vec::new();
+    while value > 0 {
+        value -= 1;
+        parts.push(symbols[(value % base) as usize].clone());
+        value /= base;
+    }
+    parts.into_iter().rev().collect()
 }
 
 /// The last word on `display`, run once every declaration has been applied.
@@ -273,6 +795,7 @@ pub(crate) fn build_pseudo_style_shared(
     ps.before_style = None; // pseudo-elements don't nest
     ps.after_style = None;
     ps.placeholder_style = None;
+    ps.backdrop_style = None;
     ps.before_content = String::new();
     ps.after_content = String::new();
     ps.marker_content = String::new();
@@ -281,13 +804,31 @@ pub(crate) fn build_pseudo_style_shared(
     // and what an absent declaration leaves — generates nothing. `""` is a
     // real, empty pseudo-element, so the two cannot collapse to one string.
     let mut content_value: Option<String> = None;
-    for &(_, ri) in matched.iter() {
-        for (prop, val) in &rules[ri].declarations {
+    let pseudo_revert_base = ps.clone();
+    let mut current_normal_layer: Option<(bool, u32)> = None;
+    let mut normal_layer_start_style = ps.clone();
+    for &(sp, ri) in matched.iter() {
+        let rule = &rules[ri];
+        let layer_key = (is_author_origin(sp), rule.layer_rank);
+        if current_normal_layer != Some(layer_key) {
+            current_normal_layer = Some(layer_key);
+            normal_layer_start_style = ps.clone();
+        }
+        for (prop, val) in &rule.declarations {
             let resolved = resolve_var_references(val, vars);
             if prop == "content" {
                 content_value = pseudo_content_value(&resolved);
             } else {
-                apply_property(&mut ps, prop, &resolved);
+                let id = properties::resolve(prop);
+                apply_resolved_property_with_cascade_context(
+                    &mut ps,
+                    prop,
+                    id,
+                    &resolved,
+                    Some(base),
+                    Some(&pseudo_revert_base),
+                    &normal_layer_start_style,
+                );
             }
         }
     }
@@ -296,16 +837,33 @@ pub(crate) fn build_pseudo_style_shared(
     for author_pass in [true, false] {
         let mut important_matched = matched.clone();
         important_matched.sort_by_key(|(sp, idx)| important_cascade_sort_key(rules, *sp, *idx));
+        let mut current_important_layer: Option<(bool, u32)> = None;
+        let mut important_layer_start_style = ps.clone();
         for &(sp, ri) in important_matched.iter() {
             if is_author_origin(sp) != author_pass {
                 continue;
             }
-            for (prop, val) in &rules[ri].important_declarations {
+            let rule = &rules[ri];
+            let layer_key = (is_author_origin(sp), rule.layer_rank);
+            if current_important_layer != Some(layer_key) {
+                current_important_layer = Some(layer_key);
+                important_layer_start_style = ps.clone();
+            }
+            for (prop, val) in &rule.important_declarations {
                 let resolved = resolve_var_references(val, vars);
                 if prop == "content" {
                     content_value = pseudo_content_value(&resolved);
                 } else {
-                    apply_property(&mut ps, prop, &resolved);
+                    let id = properties::resolve(prop);
+                    apply_resolved_property_with_cascade_context(
+                        &mut ps,
+                        prop,
+                        id,
+                        &resolved,
+                        Some(base),
+                        Some(&pseudo_revert_base),
+                        &important_layer_start_style,
+                    );
                 }
             }
         }
@@ -328,14 +886,15 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         root.style.display,
         Display::Grid | Display::InlineGrid | Display::Flex | Display::InlineFlex
     );
+    let has_pseudo_containing_box = !matches!(root.style.display, Display::Inline);
     let before_is_positioned = root.style.before_style.as_ref().map_or(false, |ps| {
-        matches!(ps.position, Position::Absolute | Position::Fixed)
+        has_pseudo_containing_box && matches!(ps.position, Position::Absolute | Position::Fixed)
     });
     let before_is_block = root
         .style
         .before_style
         .as_ref()
-        .map_or(false, |ps| ps.is_block_level());
+        .map_or(false, |ps| has_pseudo_containing_box && ps.is_block_level());
     // `before_style` is Some only when `content` generated the pseudo-element,
     // so it — not the generated TEXT, which is empty for `content: ""` — is
     // what says the box may exist.
@@ -366,13 +925,13 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         }
     }
     let after_is_positioned = root.style.after_style.as_ref().map_or(false, |ps| {
-        matches!(ps.position, Position::Absolute | Position::Fixed)
+        has_pseudo_containing_box && matches!(ps.position, Position::Absolute | Position::Fixed)
     });
     let after_is_block = root
         .style
         .after_style
         .as_ref()
-        .map_or(false, |ps| ps.is_block_level());
+        .map_or(false, |ps| has_pseudo_containing_box && ps.is_block_level());
     let after_generated = root.style.after_style.is_some();
     if after_generated && (is_grid_or_flex || after_is_positioned || after_is_block) {
         let existing = root.children.iter().position(|c| c.tag == "::after");
@@ -435,6 +994,7 @@ pub(crate) struct MatchSets {
     pub selection_matched: Vec<(u32, usize)>,
     pub placeholder_matched: Vec<(u32, usize)>,
     pub marker_matched: Vec<(u32, usize)>,
+    pub backdrop_matched: Vec<(u32, usize)>,
 }
 
 /// Precomputed match results, keyed by `node_id`.
@@ -462,6 +1022,8 @@ pub(crate) fn match_rules(
     focused_box: u32,
     keyboard_focus: bool,
     hover_chain: &std::collections::HashSet<u32>,
+    target_id: u32,
+    document_url: &str,
     prev_siblings: &[(String, String, String)],
     next_siblings: &[(String, String, String)],
     candidates_buf: &mut Vec<usize>,
@@ -478,6 +1040,9 @@ pub(crate) fn match_rules(
         html_box: Some(node),
         hover_chain,
         element_id: node.node_id,
+        scope_root_id: 0,
+        target_id,
+        document_url,
         prev_siblings,
         next_siblings,
     };
@@ -578,6 +1143,9 @@ pub(crate) fn match_rules(
                         sets.placeholder_matched.push((rule.specificity, rule_idx))
                     }
                     PseudoElement::Marker => sets.marker_matched.push((rule.specificity, rule_idx)),
+                    PseudoElement::Backdrop => {
+                        sets.backdrop_matched.push((rule.specificity, rule_idx))
+                    }
                     PseudoElement::None => sets.matched.push((rule.specificity, rule_idx)),
                     PseudoElement::Ignored => {}
                 }
@@ -599,40 +1167,84 @@ fn rule_matches_scope(
     let Some(scope_selector) = &rule.scope_selector else {
         return true;
     };
-    if scope_selector.matches_with_ancestors_ctx(
+    let scope_root_index = if scope_selector.matches_with_ancestors_ctx(
         node,
         child_index,
         sibling_count,
         ancestors,
         match_ctx,
     ) {
-        return true;
+        None
+    } else {
+        ancestors.iter().enumerate().find_map(|(i, ancestor)| {
+            selector_matches_ancestor(scope_selector, ancestor, &ancestors[..i], match_ctx)
+                .then_some(i)
+        })
+    };
+
+    let in_scope = scope_root_index.is_some()
+        || scope_selector.matches_with_ancestors_ctx(
+            node,
+            child_index,
+            sibling_count,
+            ancestors,
+            match_ctx,
+        );
+    if !in_scope {
+        return false;
     }
-    for (i, ancestor) in ancestors.iter().enumerate() {
-        let ancestor_ctx = MatchContext {
-            focused_box: match_ctx.focused_box,
-            keyboard_focus: match_ctx.keyboard_focus,
-            type_child_index: ancestor.type_child_index,
-            type_sibling_count: ancestor.type_sibling_count,
-            html_box: None,
-            hover_chain: match_ctx.hover_chain,
-            element_id: ancestor.node_id,
-            prev_siblings: &[],
-            next_siblings: &[],
-        };
-        if matches_selector_with_ancestors(
-            &scope_selector.parts,
-            &ancestor.tag,
-            &ancestor.attributes,
-            ancestor.child_index,
-            ancestor.sibling_count,
-            &ancestors[i + 1..],
-            &ancestor_ctx,
-        ) {
-            return true;
+
+    let Some(scope_limit_selector) = &rule.scope_limit_selector else {
+        return true;
+    };
+    if scope_limit_selector.matches_with_ancestors_ctx(
+        node,
+        child_index,
+        sibling_count,
+        ancestors,
+        match_ctx,
+    ) {
+        return false;
+    }
+    let limit_start = scope_root_index.map_or(ancestors.len(), |root_index| root_index + 1);
+    for i in limit_start..ancestors.len() {
+        let ancestor = &ancestors[i];
+        if selector_matches_ancestor(scope_limit_selector, ancestor, &ancestors[..i], match_ctx) {
+            return false;
         }
     }
-    false
+    true
+}
+
+fn selector_matches_ancestor(
+    selector: &CssSelector,
+    ancestor: &AncestorInfo,
+    ancestors_above: &[AncestorInfo],
+    match_ctx: &MatchContext<'_>,
+) -> bool {
+    let ancestor_ctx = MatchContext {
+        focused_box: match_ctx.focused_box,
+        keyboard_focus: match_ctx.keyboard_focus,
+        type_child_index: ancestor.type_child_index,
+        type_sibling_count: ancestor.type_sibling_count,
+        html_box: None,
+        hover_chain: match_ctx.hover_chain,
+        element_id: ancestor.node_id,
+        scope_root_id: match_ctx.scope_root_id,
+        target_id: match_ctx.target_id,
+        document_url: match_ctx.document_url,
+        prev_siblings: &[],
+        next_siblings: &[],
+    };
+    matches_selector_with_ancestors(
+        &selector.parts,
+        &ancestor.tag,
+        &ancestor.attributes,
+        ancestor.child_index,
+        ancestor.sibling_count,
+        ancestors_above,
+        &ancestor_ctx,
+    )
 }
 
 pub(crate) fn apply_cascade_inner(
@@ -651,6 +1263,8 @@ pub(crate) fn apply_cascade_inner(
     vh: f32,
     focused_box: u32,
     keyboard_focus: bool,
+    target_id: u32,
+    document_url: &str,
     inherited_vars: &HashMap<String, String>,
     candidates_buf: &mut Vec<usize>,
     counters: &mut HashMap<String, Vec<i32>>,
@@ -707,160 +1321,6 @@ pub(crate) fn apply_cascade_inner(
         style.relative_font_weight_base = Some(p.font_weight);
     }
 
-    // Apply presentational HTML attributes (specificity 0 — before author rules)
-    let attrs = root.attributes.clone();
-    for (attr, val) in &attrs {
-        match attr.as_str() {
-            "align" => match val.as_str() {
-                "center" => apply_property(&mut style, "text-align", "center"),
-                "right" => apply_property(&mut style, "text-align", "right"),
-                "left" => apply_property(&mut style, "text-align", "left"),
-                _ => {}
-            },
-            "valign" => apply_property(&mut style, "vertical-align", val),
-            // `<select multiple>` with no `size` shows FOUR rows, which is the
-            // long-standing UA default every browser uses. With a `size` the
-            // arm below wins, because it is applied from that attribute.
-            "multiple" if root.tag == "select" && !root.attributes.contains_key("size") => {
-                apply_property(&mut style, "height", &format!("{}em", 4.0 * 1.2 + 0.5));
-            }
-            "bgcolor" => apply_property(&mut style, "background-color", val),
-            "color" | "text" => apply_property(&mut style, "color", val),
-            "face" => apply_property(&mut style, "font-family", val),
-            // ⛔ `size` means THREE different things depending on the element,
-            // and this arm applied the `<font>` one to all of them: a
-            // `<select size="4">` — four visible ROWS — was being given
-            // `font-size: 18px`, because `"4"` is also a legal `<font size>`.
-            "size" => match root.tag.as_str() {
-                // HTML <font size="1..7"> maps to absolute px sizes.
-                "font" => {
-                    let px: f32 = match val.trim() {
-                        "1" => 10.0,
-                        "2" => 13.0,
-                        "3" => 16.0,
-                        "4" => 18.0,
-                        "5" => 24.0,
-                        "6" => 32.0,
-                        "7" => 48.0,
-                        v => v.parse::<f32>().unwrap_or(16.0),
-                    };
-                    apply_property(&mut style, "font-size", &format!("{}px", px));
-                }
-                // **`<select size=N>` with N > 1 is a LIST BOX** (HTML
-                // §4.10.7): it shows N options at once instead of one closed
-                // row. The UA sheet's `height: 2.2em` is the closed height, so
-                // the list needs its own — one line box per row plus the
-                // border-box padding, which is what a browser computes.
-                //
-                // Presentational, so an author's own `height` still wins: this
-                // is the UA's default for the attribute, not an override.
-                "select" => {
-                    // Every `<select size=N>` takes its height from here, N=1
-                    // included: the UA rule deliberately does not match an
-                    // element that HAS the attribute, so if this arm skipped
-                    // `size="1"` that select would be left with no height at
-                    // all. One row is the closed height.
-                    let rows = val.trim().parse::<f32>().unwrap_or(1.0).max(1.0);
-                    let height = if rows > 1.0 { rows * 1.2 + 0.5 } else { 2.2 };
-                    apply_property(&mut style, "height", &format!("{height}em"));
-                }
-                // `<input size=N>` is a width in CHARACTERS — `ch` is exactly
-                // that unit, and the UA sheet's fixed `width: 200px` is what it
-                // replaces.
-                "input" => {
-                    if let Ok(chars) = val.trim().parse::<f32>() {
-                        if chars > 0.0 {
-                            apply_property(&mut style, "width", &format!("{}ch", chars));
-                        }
-                    }
-                }
-                _ => {}
-            },
-            "rows" if root.tag == "textarea" => {
-                if let Ok(rows) = val.trim().parse::<f32>() {
-                    if rows > 0.0 {
-                        apply_property(&mut style, "height", &format!("{}em", rows * 1.4));
-                    }
-                }
-            }
-            "cols" if root.tag == "textarea" => {
-                if let Ok(cols) = val.trim().parse::<f32>() {
-                    if cols > 0.0 {
-                        apply_property(&mut style, "width", &format!("{}em", cols * 0.6));
-                    }
-                }
-            }
-            "width" => {
-                if val.ends_with('%') {
-                    apply_property(&mut style, "width", val);
-                } else if val.parse::<f32>().is_ok() {
-                    apply_property(&mut style, "width", &format!("{}px", val));
-                }
-            }
-            "height" => {
-                if val.ends_with('%') {
-                    apply_property(&mut style, "height", val);
-                } else if val.parse::<f32>().is_ok() {
-                    apply_property(&mut style, "height", &format!("{}px", val));
-                }
-            }
-            "border" if root.tag == "table" => {
-                // HTML border attr on <table>: sets a solid frame and collapses borders
-                // so the table frame and cell borders merge into a single grid (like browsers).
-                if let Ok(w) = val.parse::<f32>() {
-                    if w > 0.0 {
-                        apply_property(&mut style, "border", &format!("{}px solid", w));
-                        apply_property(&mut style, "border-collapse", "collapse");
-                    } else {
-                        apply_property(&mut style, "border", "0px solid transparent");
-                    }
-                }
-            }
-            "cellspacing" => {
-                // Maps to CSS border-spacing.
-                if let Ok(n) = val.parse::<f32>() {
-                    apply_property(&mut style, "border-spacing", &format!("{}px", n));
-                } else if val.ends_with("px") {
-                    apply_property(&mut style, "border-spacing", val);
-                }
-            }
-            "cellpadding" => {
-                apply_property(&mut style, "cellpadding", val);
-            }
-            "dir" => match val.to_ascii_lowercase().as_str() {
-                "rtl" => apply_property(&mut style, "direction", "rtl"),
-                "ltr" => apply_property(&mut style, "direction", "ltr"),
-                "auto" => {
-                    let text = collect_text_for_dir_auto(root);
-                    if let Some(dir) = crate::layout::text::first_strong_direction(&text) {
-                        match dir {
-                            Direction::RTL => apply_property(&mut style, "direction", "rtl"),
-                            Direction::LTR => apply_property(&mut style, "direction", "ltr"),
-                        }
-                    }
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-
-    // HTML: td/th inside a table with border="N" (N>0) get a 1px inset border,
-    // matching browser UA behaviour. Applied at presentational-attribute specificity
-    // so author CSS can override.
-    if matches!(root.tag.as_str(), "td" | "th") {
-        let has_table_border = ancestors.iter().rev().any(|a| {
-            a.tag == "table"
-                && a.attributes
-                    .get("border")
-                    .and_then(|v| v.parse::<f32>().ok())
-                    .map_or(false, |n| n > 0.0)
-        });
-        if has_table_border {
-            apply_property(&mut style, "border", "1px solid");
-        }
-    }
-
     // Selector matching — the SAME function the parallel pass runs, so a
     // precomputed result and an inline one can never disagree.
     let precomputed_here = precomputed
@@ -885,6 +1345,8 @@ pub(crate) fn apply_cascade_inner(
             focused_box,
             keyboard_focus,
             hover_chain,
+            target_id,
+            document_url,
             prev_siblings,
             next_siblings,
             candidates_buf,
@@ -900,6 +1362,7 @@ pub(crate) fn apply_cascade_inner(
         mut selection_matched,
         mut placeholder_matched,
         mut marker_matched,
+        mut backdrop_matched,
     } = sets;
     matched.sort_by_key(|(sp, idx)| normal_cascade_sort_key(&stylesheet.rules, *sp, *idx));
     // Build variable scope: inherited from parent + any --custom-properties from matched rules.
@@ -960,18 +1423,29 @@ pub(crate) fn apply_cascade_inner(
     let mut inherit_props: HashSet<String> = HashSet::new();
     let has_vars = !local_vars.is_empty();
     let mut pre_author_normal_style: Option<ComputedStyle> = None;
+    let mut current_normal_layer: Option<(bool, u32)> = None;
+    let mut normal_layer_start_style = style.clone();
+    let mut hints_applied = false;
     for &(sp, ri) in &matched {
         if is_author_origin(sp) && pre_author_normal_style.is_none() {
+            apply_presentational_hints(&mut style, root, ancestors);
+            hints_applied = true;
             pre_author_normal_style = Some(style.clone());
+        }
+        let rule = &stylesheet.rules[ri];
+        let layer_key = (is_author_origin(sp), rule.layer_rank);
+        if current_normal_layer != Some(layer_key) {
+            current_normal_layer = Some(layer_key);
+            normal_layer_start_style = style.clone();
         }
         let revert_base = if is_author_origin(sp) {
             pre_author_normal_style.as_ref()
         } else {
             None
         };
+        let revert_layer_base = &normal_layer_start_style;
         // Fast path: use pre-compiled declarations (PropertyId dispatch, no string matching).
         // Only fall back to raw declarations when var() resolution is needed.
-        let rule = &stylesheet.rules[ri];
         if has_vars && rule.has_var_refs {
             // Slow path: var() references need string-based resolution
             for (prop, val) in &rule.declarations {
@@ -985,14 +1459,16 @@ pub(crate) fn apply_cascade_inner(
                 let trimmed = resolved.trim();
                 if trimmed == "inherit" {
                     inherit_props.insert(prop.to_string());
-                } else if matches!(trimmed, "revert" | "revert-layer") {
+                } else if trimmed == "revert-layer" {
+                    copy_property_from_style(&mut style, revert_layer_base, prop);
+                } else if trimmed == "revert" {
                     if let Some(base) = revert_base {
                         copy_property_from_style(&mut style, base, prop);
                     } else {
                         apply_property(&mut style, prop, "initial");
                     }
                 } else {
-                    inherit_props.remove(prop.as_str());
+                    clear_inherit_tracking_for_property(&mut inherit_props, prop);
                     apply_property(&mut style, prop, &resolved);
                 }
             }
@@ -1002,10 +1478,10 @@ pub(crate) fn apply_cascade_inner(
                 if matches!(val, crate::types::CssValue::Inherit) {
                     let name = property_defs::get(id).name;
                     inherit_props.insert(name.to_string());
-                } else if matches!(
-                    val,
-                    crate::types::CssValue::Revert | crate::types::CssValue::RevertLayer
-                ) {
+                } else if matches!(val, crate::types::CssValue::RevertLayer) {
+                    let name = property_defs::get(id).name;
+                    copy_property_from_style(&mut style, revert_layer_base, name);
+                } else if matches!(val, crate::types::CssValue::Revert) {
                     let name = property_defs::get(id).name;
                     if let Some(base) = revert_base {
                         copy_property_from_style(&mut style, base, name);
@@ -1020,13 +1496,14 @@ pub(crate) fn apply_cascade_inner(
                         let resolved = resolve_var_references(s, &local_vars);
                         if !resolved.trim().is_empty() {
                             let trimmed = resolved.trim();
-                            if matches!(trimmed, "revert" | "revert-layer") {
+                            let name = property_defs::get(id).name;
+                            if trimmed == "inherit" {
+                                inherit_props.insert(name.to_string());
+                            } else if trimmed == "revert-layer" {
+                                copy_property_from_style(&mut style, revert_layer_base, name);
+                            } else if trimmed == "revert" {
                                 if let Some(base) = revert_base {
-                                    copy_property_from_style(
-                                        &mut style,
-                                        base,
-                                        property_defs::get(id).name,
-                                    );
+                                    copy_property_from_style(&mut style, base, name);
                                 } else {
                                     apply_css_value(
                                         &mut style,
@@ -1035,17 +1512,38 @@ pub(crate) fn apply_cascade_inner(
                                     );
                                 }
                             } else {
+                                clear_inherit_tracking_for_id(&mut inherit_props, id);
                                 apply_property_by_id_str(&mut style, id, &resolved);
                             }
                         }
                     } else {
-                        apply_css_value(&mut style, id, val);
+                        let trimmed = s.trim();
+                        if trimmed == "inherit" {
+                            inherit_props.insert(property_defs::get(id).name.to_string());
+                        } else if trimmed == "revert-layer" {
+                            let name = property_defs::get(id).name;
+                            copy_property_from_style(&mut style, revert_layer_base, name);
+                        } else if trimmed == "revert" {
+                            let name = property_defs::get(id).name;
+                            if let Some(base) = revert_base {
+                                copy_property_from_style(&mut style, base, name);
+                            } else {
+                                apply_css_value(&mut style, id, &crate::types::CssValue::Initial);
+                            }
+                        } else {
+                            clear_inherit_tracking_for_id(&mut inherit_props, id);
+                            apply_css_value(&mut style, id, val);
+                        }
                     }
                 } else {
+                    clear_inherit_tracking_for_id(&mut inherit_props, id);
                     apply_css_value(&mut style, id, val);
                 }
             }
         }
+    }
+    if !hints_applied {
+        apply_presentational_hints(&mut style, root, ancestors);
     }
 
     apply_form_sizing_hints_after_ua(&mut style, root, &stylesheet.rules, &matched);
@@ -1063,11 +1561,23 @@ pub(crate) fn apply_cascade_inner(
     important_matched
         .sort_by_key(|(sp, idx)| important_cascade_sort_key(&stylesheet.rules, *sp, *idx));
     for author_pass in [true, false] {
+        let mut current_important_layer: Option<(bool, u32)> = None;
+        let mut important_layer_start_style = style.clone();
         for &(sp, ri) in &important_matched {
             if is_author_origin(sp) != author_pass {
                 continue;
             }
             let rule = &stylesheet.rules[ri];
+            let layer_key = (is_author_origin(sp), rule.layer_rank);
+            if current_important_layer != Some(layer_key) {
+                current_important_layer = Some(layer_key);
+                important_layer_start_style = style.clone();
+            }
+            let revert_base = if is_author_origin(sp) {
+                pre_author_normal_style.as_ref()
+            } else {
+                None
+            };
             if has_vars && rule.has_var_refs {
                 for (prop, val) in &rule.important_declarations {
                     if prop.starts_with("--") {
@@ -1077,11 +1587,28 @@ pub(crate) fn apply_cascade_inner(
                     if resolved.trim().is_empty() && val.contains("var(") {
                         continue;
                     }
-                    apply_property(&mut style, prop, &resolved);
+                    let id = properties::resolve(prop);
+                    apply_resolved_property_with_cascade_context(
+                        &mut style,
+                        prop,
+                        id,
+                        &resolved,
+                        parent_style,
+                        revert_base,
+                        &important_layer_start_style,
+                    );
                 }
             } else {
                 for &(id, ref val) in &rule.compiled_important {
-                    apply_css_value(&mut style, id, val);
+                    apply_css_value_with_cascade_context(
+                        &mut style,
+                        id,
+                        val,
+                        &local_vars,
+                        parent_style,
+                        revert_base,
+                        &important_layer_start_style,
+                    );
                 }
             }
         }
@@ -1096,19 +1623,15 @@ pub(crate) fn apply_cascade_inner(
     }
     // Hover style — clone the base style and overlay all matched hover declarations.
     if !hover_matched.is_empty() {
-        hover_matched
-            .sort_by_key(|(sp, idx)| normal_cascade_sort_key(&stylesheet.rules, *sp, *idx));
         let mut hs = style.clone();
-        for &(_, ri) in &hover_matched {
-            for &(id, ref val) in &stylesheet.rules[ri].compiled_decls {
-                apply_css_value_with_vars(&mut hs, id, val, &local_vars);
-            }
-        }
-        for &(_, ri) in &hover_matched {
-            for &(id, ref val) in &stylesheet.rules[ri].compiled_important {
-                apply_css_value_with_vars(&mut hs, id, val, &local_vars);
-            }
-        }
+        apply_state_matched_rules(
+            &mut hs,
+            &mut hover_matched,
+            stylesheet,
+            &local_vars,
+            parent_style,
+            pre_author_normal_style.as_ref(),
+        );
         // Prevent infinite nesting: state styles don't carry their own state overrides.
         hs.hover_style = None;
         hs.active_style = None;
@@ -1117,19 +1640,15 @@ pub(crate) fn apply_cascade_inner(
     }
     // Active style — clone the base style and overlay all matched active declarations.
     if !active_matched.is_empty() {
-        active_matched
-            .sort_by_key(|(sp, idx)| normal_cascade_sort_key(&stylesheet.rules, *sp, *idx));
         let mut as_ = style.clone();
-        for &(_, ri) in &active_matched {
-            for &(id, ref val) in &stylesheet.rules[ri].compiled_decls {
-                apply_css_value_with_vars(&mut as_, id, val, &local_vars);
-            }
-        }
-        for &(_, ri) in &active_matched {
-            for &(id, ref val) in &stylesheet.rules[ri].compiled_important {
-                apply_css_value_with_vars(&mut as_, id, val, &local_vars);
-            }
-        }
+        apply_state_matched_rules(
+            &mut as_,
+            &mut active_matched,
+            stylesheet,
+            &local_vars,
+            parent_style,
+            pre_author_normal_style.as_ref(),
+        );
         as_.hover_style = None;
         as_.active_style = None;
         as_.visited_style = None;
@@ -1137,19 +1656,15 @@ pub(crate) fn apply_cascade_inner(
     }
     // Visited style — clone the base style and overlay all matched visited declarations.
     if !visited_matched.is_empty() {
-        visited_matched
-            .sort_by_key(|(sp, idx)| normal_cascade_sort_key(&stylesheet.rules, *sp, *idx));
         let mut vs = style.clone();
-        for &(_, ri) in &visited_matched {
-            for &(id, ref val) in &stylesheet.rules[ri].compiled_decls {
-                apply_css_value_with_vars(&mut vs, id, val, &local_vars);
-            }
-        }
-        for &(_, ri) in &visited_matched {
-            for &(id, ref val) in &stylesheet.rules[ri].compiled_important {
-                apply_css_value_with_vars(&mut vs, id, val, &local_vars);
-            }
-        }
+        apply_state_matched_rules(
+            &mut vs,
+            &mut visited_matched,
+            stylesheet,
+            &local_vars,
+            parent_style,
+            pre_author_normal_style.as_ref(),
+        );
         vs.hover_style = None;
         vs.active_style = None;
         vs.visited_style = None;
@@ -1211,66 +1726,65 @@ pub(crate) fn apply_cascade_inner(
     // The style attribute is author origin, so it outranks author RULES but
     // still loses to the UA sheet's `!important`; the UA pass therefore comes
     // last, not first.
+    let mut current_author_important_layer: Option<u32> = None;
+    let mut author_important_layer_start_style = style.clone();
     for &(sp, ri) in &important_matched {
         if !is_author_origin(sp) {
             continue;
         }
+        let rule = &stylesheet.rules[ri];
+        if current_author_important_layer != Some(rule.layer_rank) {
+            current_author_important_layer = Some(rule.layer_rank);
+            author_important_layer_start_style = style.clone();
+        }
+        let revert_base = pre_author_normal_style.as_ref();
         for &(id, ref val) in &stylesheet.rules[ri].compiled_important {
-            apply_css_value_with_vars(&mut style, id, val, &local_vars);
+            apply_css_value_with_cascade_context(
+                &mut style,
+                id,
+                val,
+                &local_vars,
+                parent_style,
+                revert_base,
+                &author_important_layer_start_style,
+            );
         }
     }
+    let inline_important_start_style = style.clone();
     for (prop, val) in &inline_important {
         let resolved = resolve_var_references(val, &local_vars);
-        if resolved.trim() == "inherit" {
-            if let Some(p) = parent_style {
-                copy_property_from_parent(&mut style, p, prop);
-            }
-        } else {
-            apply_property(&mut style, prop, &resolved);
-        }
+        let id = properties::resolve(prop);
+        apply_resolved_property_with_cascade_context(
+            &mut style,
+            prop,
+            id,
+            &resolved,
+            parent_style,
+            pre_author_normal_style.as_ref(),
+            &inline_important_start_style,
+        );
     }
+    let mut current_ua_important_layer: Option<u32> = None;
+    let mut ua_important_layer_start_style = style.clone();
     for &(sp, ri) in &important_matched {
         if is_author_origin(sp) {
             continue;
         }
+        let rule = &stylesheet.rules[ri];
+        if current_ua_important_layer != Some(rule.layer_rank) {
+            current_ua_important_layer = Some(rule.layer_rank);
+            ua_important_layer_start_style = style.clone();
+        }
         for &(id, ref val) in &stylesheet.rules[ri].compiled_important {
-            apply_css_value_with_vars(&mut style, id, val, &local_vars);
-        }
-    }
-
-    // Re-apply table layout HTML attributes after CSS rules so UA/author stylesheets
-    // cannot silently override them (e.g. UA "border-spacing: 2px" must not win over
-    // cellspacing="0").  These are still below inline style priority.
-    //
-    // `valign` joins them for the same reason: the UA sheet gives `td`/`th` the
-    // default `vertical-align: middle` a cell must have, and a presentational
-    // hint has to outrank the UA sheet (HTML §15.2 places hints at the start of
-    // the AUTHOR origin). The general ordering — hints applied before every
-    // matched rule instead of between the UA and author passes — is still wrong
-    // for `align`, `bgcolor`, `width` and `height`; see cssgaps.md.
-    if matches!(
-        root.tag.as_str(),
-        "td" | "th" | "tr" | "thead" | "tbody" | "tfoot"
-    ) {
-        if let Some(v) = root.attributes.get("valign").cloned() {
-            apply_property(&mut style, "vertical-align", &v);
-        }
-    }
-    if root.tag == "table" {
-        if let Some(v) = root.attributes.get("cellspacing").cloned() {
-            if let Ok(n) = v.parse::<f32>() {
-                apply_property(&mut style, "border-spacing", &format!("{}px", n));
-            }
-        }
-        if let Some(v) = root.attributes.get("cellpadding").cloned() {
-            apply_property(&mut style, "cellpadding", &v);
-        }
-        if let Some(v) = root.attributes.get("border").cloned() {
-            if let Ok(n) = v.parse::<f32>() {
-                if n > 0.0 {
-                    apply_property(&mut style, "border-collapse", "collapse");
-                }
-            }
+            apply_css_value_with_cascade_context(
+                &mut style,
+                id,
+                val,
+                &local_vars,
+                parent_style,
+                None,
+                &ua_important_layer_start_style,
+            );
         }
     }
 
@@ -1341,6 +1855,8 @@ pub(crate) fn apply_cascade_inner(
                 } else {
                     rule.media_condition.clone()
                 },
+                layer: rule.layer.clone(),
+                layer_rank: rule.layer_rank,
             });
         }
     }
@@ -1426,6 +1942,13 @@ pub(crate) fn apply_cascade_inner(
         {
             std::sync::Arc::make_mut(&mut root.style).list_index = value;
         }
+        if let Some(marker) = resolve_custom_counter_style_marker(
+            stylesheet,
+            &root.style.custom_list_style_type,
+            root.style.list_index,
+        ) {
+            std::sync::Arc::make_mut(&mut root.style).marker_content = marker;
+        }
     }
 
     if let Some((Some(txt), ps)) = build_pseudo_style_shared(
@@ -1508,6 +2031,28 @@ pub(crate) fn apply_cascade_inner(
         }
         std::sync::Arc::make_mut(&mut root.style).marker_style = Some(ps);
     }
+    if let Some((_, ps)) = build_pseudo_style_shared(
+        &mut backdrop_matched,
+        &root.style,
+        &local_vars,
+        &root.attributes,
+        &stylesheet.rules,
+    ) {
+        std::sync::Arc::make_mut(&mut root.style).backdrop_style = Some(ps);
+    }
+
+    {
+        let authored_content = root.style.rare().content.clone();
+        if !authored_content.is_empty() {
+            let resolved = resolve_content_value_with_context(
+                &authored_content,
+                Some(&root.attributes),
+                Some(&root.style.rare().quotes),
+            );
+            std::sync::Arc::make_mut(&mut root.style).rare_mut().content =
+                resolve_counters_in_content(&resolved, counters);
+        }
+    }
 
     build_pseudo_element_boxes(root);
 
@@ -1534,6 +2079,8 @@ pub(crate) fn apply_cascade_inner(
         vh: f32,
         focused_box: u32,
         keyboard_focus: bool,
+        target_id: u32,
+        document_url: &str,
         inherited_vars: &HashMap<String, String>,
         candidates_buf: &mut Vec<usize>,
         counters: &mut HashMap<String, Vec<i32>>,
@@ -1674,6 +2221,8 @@ pub(crate) fn apply_cascade_inner(
                 vh,
                 focused_box,
                 keyboard_focus,
+                target_id,
+                document_url,
                 inherited_vars,
                 candidates_buf,
                 counters,
@@ -1727,6 +2276,8 @@ pub(crate) fn apply_cascade_inner(
             vh,
             focused_box,
             keyboard_focus,
+            target_id,
+            document_url,
             &local_vars,
             candidates_buf,
             counters,
@@ -1746,6 +2297,8 @@ pub(crate) fn apply_cascade_inner(
             vh,
             focused_box,
             keyboard_focus,
+            target_id,
+            document_url,
             &local_vars,
             candidates_buf,
             counters,
@@ -1764,6 +2317,8 @@ pub(crate) fn apply_cascade_inner(
             vh,
             focused_box,
             keyboard_focus,
+            target_id,
+            document_url,
             &local_vars,
             candidates_buf,
             counters,
@@ -1831,6 +2386,132 @@ fn apply_form_sizing_hints_after_ua(
             }
         }
         _ => {}
+    }
+}
+
+fn apply_presentational_hints(
+    style: &mut ComputedStyle,
+    root: &crate::types::WebCore,
+    ancestors: &[AncestorInfo],
+) {
+    for (attr, val) in root.attributes.iter() {
+        match attr.as_str() {
+            "align" => match val.as_str() {
+                "center" => apply_property(style, "text-align", "center"),
+                "right" => apply_property(style, "text-align", "right"),
+                "left" => apply_property(style, "text-align", "left"),
+                _ => {}
+            },
+            "valign" => apply_property(style, "vertical-align", val),
+            "multiple" if root.tag == "select" && !root.attributes.contains_key("size") => {
+                apply_property(style, "height", &format!("{}em", 4.0 * 1.2 + 0.5));
+            }
+            "bgcolor" => apply_property(style, "background-color", val),
+            "color" | "text" => apply_property(style, "color", val),
+            "face" => apply_property(style, "font-family", val),
+            "size" => match root.tag.as_str() {
+                "font" => {
+                    let px: f32 = match val.trim() {
+                        "1" => 10.0,
+                        "2" => 13.0,
+                        "3" => 16.0,
+                        "4" => 18.0,
+                        "5" => 24.0,
+                        "6" => 32.0,
+                        "7" => 48.0,
+                        v => v.parse::<f32>().unwrap_or(16.0),
+                    };
+                    apply_property(style, "font-size", &format!("{}px", px));
+                }
+                "select" => {
+                    let rows = val.trim().parse::<f32>().unwrap_or(1.0).max(1.0);
+                    let height = if rows > 1.0 { rows * 1.2 + 0.5 } else { 2.2 };
+                    apply_property(style, "height", &format!("{height}em"));
+                }
+                "input" => {
+                    if let Ok(chars) = val.trim().parse::<f32>() {
+                        if chars > 0.0 {
+                            apply_property(style, "width", &format!("{}ch", chars));
+                        }
+                    }
+                }
+                _ => {}
+            },
+            "rows" if root.tag == "textarea" => {
+                if let Ok(rows) = val.trim().parse::<f32>() {
+                    if rows > 0.0 {
+                        apply_property(style, "height", &format!("{}em", rows * 1.4));
+                    }
+                }
+            }
+            "cols" if root.tag == "textarea" => {
+                if let Ok(cols) = val.trim().parse::<f32>() {
+                    if cols > 0.0 {
+                        apply_property(style, "width", &format!("{}em", cols * 0.6));
+                    }
+                }
+            }
+            "width" => {
+                if val.ends_with('%') {
+                    apply_property(style, "width", val);
+                } else if val.parse::<f32>().is_ok() {
+                    apply_property(style, "width", &format!("{}px", val));
+                }
+            }
+            "height" => {
+                if val.ends_with('%') {
+                    apply_property(style, "height", val);
+                } else if val.parse::<f32>().is_ok() {
+                    apply_property(style, "height", &format!("{}px", val));
+                }
+            }
+            "border" if root.tag == "table" => {
+                if let Ok(w) = val.parse::<f32>() {
+                    if w > 0.0 {
+                        apply_property(style, "border", &format!("{}px solid", w));
+                        apply_property(style, "border-collapse", "collapse");
+                    } else {
+                        apply_property(style, "border", "0px solid transparent");
+                    }
+                }
+            }
+            "cellspacing" => {
+                if let Ok(n) = val.parse::<f32>() {
+                    apply_property(style, "border-spacing", &format!("{}px", n));
+                } else if val.ends_with("px") {
+                    apply_property(style, "border-spacing", val);
+                }
+            }
+            "cellpadding" => apply_property(style, "cellpadding", val),
+            "dir" => match val.to_ascii_lowercase().as_str() {
+                "rtl" => apply_property(style, "direction", "rtl"),
+                "ltr" => apply_property(style, "direction", "ltr"),
+                "auto" => {
+                    let text = collect_text_for_dir_auto(root);
+                    if let Some(dir) = crate::layout::text::first_strong_direction(&text) {
+                        match dir {
+                            Direction::RTL => apply_property(style, "direction", "rtl"),
+                            Direction::LTR => apply_property(style, "direction", "ltr"),
+                        }
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    if matches!(root.tag.as_str(), "td" | "th") {
+        let has_table_border = ancestors.iter().rev().any(|a| {
+            a.tag == "table"
+                && a.attributes
+                    .get("border")
+                    .and_then(|v| v.parse::<f32>().ok())
+                    .map_or(false, |n| n > 0.0)
+        });
+        if has_table_border {
+            apply_property(style, "border", "1px solid");
+        }
     }
 }
 

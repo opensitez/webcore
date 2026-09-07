@@ -488,7 +488,7 @@ pub(crate) fn extract_root_variables_vp(
 }
 
 /// Expand `var()` references within the variable map itself so all values are concrete.
-/// Handles chains (--a: var(--b), --b: 1rem) and circular refs (uses fallback or "").
+/// Handles chains (--a: var(--b), --b: 1rem) and circular refs (invalid/empty).
 pub(crate) fn pre_resolve_variables(vars: &mut HashMap<String, String>) {
     // Handle csstools light-dark() polyfill: in light mode (our default),
     // the toggle variables should be empty so fallback (light) values are used.
@@ -524,13 +524,16 @@ pub(crate) fn pre_resolve_variables(vars: &mut HashMap<String, String>) {
             break;
         }
     }
-    // Final pass: replace any still-unresolved var() with their fallback or "".
+    // Final pass: any still-unresolved custom property is cyclic/invalid.
+    // The fallback inside the custom property's own `var()` is not taken; a
+    // consuming declaration can still use its own fallback when it sees the
+    // variable is invalid.
     let keys: Vec<String> = vars.keys().cloned().collect();
     for key in &keys {
         if let Some(val) = vars.get(key) {
             let mut resolved = val.clone();
             if resolved.contains("var(") {
-                resolved = resolve_var_pass(&resolved, &HashMap::new());
+                resolved.clear();
             }
             // Resolve light-dark() → use light value
             if resolved.contains("light-dark(") {
@@ -617,6 +620,7 @@ pub(crate) fn extract_font_faces_cleaned(css: &str, faces: &mut Vec<FontFaceDecl
                         face.family = value.trim_matches('"').trim_matches('\'').to_string();
                     }
                     "src" => {
+                        face.sources = crate::css::font_face::parse_font_face_sources(&value);
                         face.src = value;
                     }
                     "font-weight" => {

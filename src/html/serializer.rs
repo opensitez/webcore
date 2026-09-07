@@ -328,6 +328,9 @@ pub fn serialize_style_to_css(style: &ComputedStyle, _tag: &str) -> String {
         TextTransform::Uppercase => "uppercase",
         TextTransform::Lowercase => "lowercase",
         TextTransform::Capitalize => "capitalize",
+        TextTransform::FullWidth => "full-width",
+        TextTransform::FullSizeKana => "full-size-kana",
+        TextTransform::MathAuto => "math-auto",
     };
     if !tt_str.is_empty() {
         parts.push(("text-transform".into(), tt_str.into()));

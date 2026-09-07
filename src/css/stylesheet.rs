@@ -13,6 +13,11 @@ pub struct Stylesheet {
     pub rules: Vec<CssRule>,
     pub variables: HashMap<String, String>, // CSS custom properties from :root
     pub font_faces: Vec<FontFaceDecl>,
+    /// Parsed `@page` rules. Screen layout ignores them; print/pagination can
+    /// consume the preserved descriptors without reparsing raw CSS.
+    pub page_rules: Vec<PageRule>,
+    /// Parsed `@counter-style` rules, preserved for custom list marker support.
+    pub counter_styles: Vec<CounterStyleRule>,
     /// Parsed `@keyframes` blocks, keyed by animation name.
     pub keyframes: HashMap<String, Vec<KeyframeStop>>,
     /// Selector index: rule indices bucketed by the key selector's id/class/tag.
@@ -48,6 +53,65 @@ impl Stylesheet {
     pub fn add_rule(&mut self, rule: CssRule) {
         self.rules.push(rule);
         self.idx_dirty = true;
+    }
+
+    /// CSSOM-like `CSSStyleSheet.insertRule()`: parse exactly one rule and
+    /// insert it at the requested rule-list index.
+    pub fn insert_rule(&mut self, css_text: &str, index: usize) -> Result<usize, String> {
+        self.insert_rule_with_origin(css_text, index, false)
+    }
+
+    /// CSSOM-like `CSSStyleSheet.insertRule()` for author-origin document sheets.
+    pub fn insert_author_rule(&mut self, css_text: &str, index: usize) -> Result<usize, String> {
+        self.insert_rule_with_origin(css_text, index, true)
+    }
+
+    fn insert_rule_with_origin(
+        &mut self,
+        css_text: &str,
+        index: usize,
+        author_origin: bool,
+    ) -> Result<usize, String> {
+        if index > self.rules.len() {
+            return Err("IndexSizeError".to_string());
+        }
+
+        let cleaned = strip_css_comments(css_text);
+        let Some(mut parsed) = parse_stylesheet_cleaned(&cleaned) else {
+            return Err("SyntaxError".to_string());
+        };
+        if parsed.len() != 1 {
+            return Err("SyntaxError".to_string());
+        }
+
+        let mut rule = parsed.remove(0);
+        if author_origin {
+            rule.specificity = rule.specificity.saturating_add(AUTHOR_ORIGIN_BOOST);
+        }
+        self.rules.insert(index, rule);
+        self.raw_sources.push(cleaned);
+        self.idx_dirty = true;
+        Ok(index)
+    }
+
+    /// CSSOM-like `CSSStyleSheet.deleteRule()`.
+    pub fn delete_rule(&mut self, index: usize) -> Result<(), String> {
+        if index >= self.rules.len() {
+            return Err("IndexSizeError".to_string());
+        }
+
+        self.rules.remove(index);
+        self.idx_dirty = true;
+        Ok(())
+    }
+
+    /// CSSOM-like `cssRules`, serialized as `CSSRule.cssText`.
+    pub fn css_rules(&self) -> Vec<String> {
+        self.rules
+            .iter()
+            .map(crate::html::serialize_rule)
+            .filter(|text| !text.is_empty())
+            .collect()
     }
 
     /// Parse a CSS string and append its rules. Also extracts CSS variables from `:root`.
@@ -146,6 +210,13 @@ impl Stylesheet {
         self.raw_sources.push(cleaned.to_string());
         // Extract @font-face declarations
         extract_font_faces_cleaned(cleaned, &mut self.font_faces);
+        // Preserve @page rules for print/pagination consumers.
+        self.page_rules
+            .extend(crate::css::parser::extract_page_rules_cleaned(cleaned));
+        self.counter_styles
+            .extend(crate::css::parser::extract_counter_style_rules_cleaned(
+                cleaned,
+            ));
         // Extract @keyframes blocks
         let kf = extract_keyframes_cleaned(cleaned);
         self.keyframes.extend(kf);
@@ -248,6 +319,10 @@ impl Stylesheet {
         'rules: for rule in &self.rules {
             if !rule.is_hover {
                 continue;
+            }
+            if !matches!(rule.pseudo_element, PseudoElement::None) {
+                self.has_hover_descendant_rules = true;
+                break 'rules;
             }
             for sel in &rule.selectors {
                 // Find the last combinator — everything before it is ancestor context

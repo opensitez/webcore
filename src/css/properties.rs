@@ -80,6 +80,8 @@ pub enum PropertyId {
     Color,
     Background,
     BackgroundColor,
+    Fill,
+    Stroke,
     BackgroundImage,
     BackgroundSize,
     BackgroundRepeat,
@@ -240,6 +242,7 @@ pub enum PropertyId {
     AnimationFillMode,
     AnimationPlayState,
     AnimationComposition,
+    AnimationTimeline,
 
     // Filters & compositing
     Filter,
@@ -264,6 +267,7 @@ pub enum PropertyId {
     Clip,
     ShapeOutside,
     ShapeMargin,
+    OffsetPath,
 
     // Generated content
     Content,
@@ -326,6 +330,7 @@ pub enum PropertyId {
     ScrollbarColor,
     ScrollbarWidth,
     ScrollbarGutter,
+    ScrollTimeline,
 
     // UI
     AccentColor,
@@ -339,6 +344,11 @@ pub enum PropertyId {
     ContainerType,
     ContainerName,
     Container,
+
+    // Anchor positioning / view transitions
+    AnchorName,
+    PositionAnchor,
+    ViewTransitionName,
 
     // Logical sizing
     InlineSize,
@@ -506,6 +516,8 @@ pub fn resolve(name: &str) -> PropertyId {
         "color" => PropertyId::Color,
         "background" => PropertyId::Background,
         "background-color" => PropertyId::BackgroundColor,
+        "fill" => PropertyId::Fill,
+        "stroke" => PropertyId::Stroke,
         "background-image" => PropertyId::BackgroundImage,
         "mask" => PropertyId::Mask,
         "mask-image" => PropertyId::MaskImage,
@@ -666,6 +678,7 @@ pub fn resolve(name: &str) -> PropertyId {
         "animation-fill-mode" => PropertyId::AnimationFillMode,
         "animation-play-state" => PropertyId::AnimationPlayState,
         "animation-composition" => PropertyId::AnimationComposition,
+        "animation-timeline" => PropertyId::AnimationTimeline,
 
         // Filters & compositing
         "filter" => PropertyId::Filter,
@@ -690,6 +703,7 @@ pub fn resolve(name: &str) -> PropertyId {
         "clip" => PropertyId::Clip,
         "shape-outside" => PropertyId::ShapeOutside,
         "shape-margin" => PropertyId::ShapeMargin,
+        "offset-path" => PropertyId::OffsetPath,
 
         // Generated content
         "content" => PropertyId::Content,
@@ -753,6 +767,7 @@ pub fn resolve(name: &str) -> PropertyId {
         "scrollbar-color" => PropertyId::ScrollbarColor,
         "scrollbar-width" => PropertyId::ScrollbarWidth,
         "scrollbar-gutter" => PropertyId::ScrollbarGutter,
+        "scroll-timeline" => PropertyId::ScrollTimeline,
 
         // UI
         "accent-color" => PropertyId::AccentColor,
@@ -766,6 +781,11 @@ pub fn resolve(name: &str) -> PropertyId {
         "container-type" => PropertyId::ContainerType,
         "container-name" => PropertyId::ContainerName,
         "container" => PropertyId::Container,
+
+        // Anchor positioning / view transitions
+        "anchor-name" => PropertyId::AnchorName,
+        "position-anchor" => PropertyId::PositionAnchor,
+        "view-transition-name" => PropertyId::ViewTransitionName,
 
         // Logical sizing
         "inline-size" => PropertyId::InlineSize,

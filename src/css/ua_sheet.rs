@@ -294,6 +294,13 @@ pub(crate) fn apply_host_rules(
 /// `Some(arg)` for `:host(arg)` / `:host-context(arg)`. `None` overall when the
 /// selector is not a host selector at all.
 fn host_selector_argument(sel: &CssSelector) -> Option<HostArg<'_>> {
+    if sel
+        .parts
+        .iter()
+        .any(|part| matches!(part, SelectorPart::Combinator(_)))
+    {
+        return None;
+    }
     for part in &sel.parts {
         if let SelectorPart::PseudoClass(name) = part {
             if name == "host" {
@@ -340,6 +347,9 @@ fn matches_bare(
         html_box: node,
         hover_chain: &empty,
         element_id: node.map(|n| n.node_id).unwrap_or(0),
+        scope_root_id: 0,
+        target_id: 0,
+        document_url: "",
         prev_siblings: &[],
         next_siblings: &[],
     };

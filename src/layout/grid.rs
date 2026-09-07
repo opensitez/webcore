@@ -936,6 +936,9 @@ pub fn layout_grid(
     // 150/150 where Chrome gives 180/120.
     for &(cs, ce, mn, mx) in &col_spans {
         if ce.saturating_sub(cs) == 1 && cs < n_measured_cols {
+            if span_only_flexible_tracks(&col_tracks, cs, ce) {
+                continue;
+            }
             if mx > col_content_widths[cs] {
                 col_content_widths[cs] = mx;
             }
@@ -953,6 +956,9 @@ pub fn layout_grid(
     col_spanning.sort_by_key(|(cs, ce, _, _)| ce - cs);
     for (cs, ce, mn, mx) in col_spanning {
         if ce <= cs {
+            continue;
+        }
+        if span_only_flexible_tracks(&col_tracks, cs, ce) {
             continue;
         }
         let n = ce - cs;
@@ -1970,6 +1976,16 @@ pub fn track_to_px(track: &GridTrackSize, container: f32, font_px: f32, root_fon
     }
 }
 
+fn span_only_flexible_tracks(tracks: &[GridTrackSize], start: usize, end: usize) -> bool {
+    if start >= end || end > tracks.len() {
+        return false;
+    }
+    tracks[start..end].iter().all(|track| {
+        track.kind == GridTrackKind::Fractional
+            || (track.kind == GridTrackKind::MinMax && track.max_kind == GridTrackKind::Fractional)
+    })
+}
+
 /// Resolve a track list to pixel sizes, running the CSS Grid track sizing
 /// algorithm in the order the spec gives it: initialize base sizes and growth
 /// limits (§12.4/§12.5), Maximize Tracks (§12.6), Expand Flexible Tracks
@@ -2298,12 +2314,13 @@ fn finish_grid(
     node.layout.resolved_pad_bottom = rbox.padding_bottom;
     node.layout.resolved_pad_left = rbox.padding_left;
     node.layout.resolved_content_width = content_w;
+    crate::layout::update_scroll_extents_from_children(node, content_x, content_y, content_w, ch);
 
     node.layout.margin_rect.h
 }
 
 fn layout_abs_children(engine: &LayoutEngine, node: &mut WebCore, font_px: f32, root_font_px: f32) {
-    let containing_rect = if !matches!(node.style.position, Position::Static) {
+    let containing_rect = if crate::layout::establishes_positioned_containing_block(&node.style) {
         node.layout.padding_rect
     } else {
         engine.pos_cb.get()

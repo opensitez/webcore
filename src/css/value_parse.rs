@@ -209,6 +209,15 @@ fn parse_env_length(inner: &str) -> CssLength {
     CssLength::Auto
 }
 
+fn parse_env_color(inner: &str) -> Option<Color> {
+    let args = split_top_level_commas(inner);
+    let name = args.first().map(|s| s.trim()).unwrap_or("");
+    if is_zero_env_length(name) {
+        return None;
+    }
+    parse_color(args.get(1)?.trim())
+}
+
 fn is_zero_env_length(name: &str) -> bool {
     matches!(
         name,
@@ -239,8 +248,21 @@ pub(crate) fn split_top_level_commas(s: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut depth = 0usize;
     let mut start = 0;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
     for (i, c) in s.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
         match c {
+            '"' | '\'' => quote = Some(c),
             '(' => depth += 1,
             ')' => {
                 if depth > 0 {
@@ -323,8 +345,10 @@ pub fn parse_length_or_none(v: &str) -> CssLength {
     }
 }
 
-pub fn parse_font_size(v: &str) -> CssLength {
-    match v {
+pub fn parse_font_size_checked(v: &str) -> Option<CssLength> {
+    let t = v.trim();
+    let lower = t.to_ascii_lowercase();
+    match lower.as_str() {
         "xx-small" => CssLength::Px(9.0),
         "x-small" => CssLength::Px(10.0),
         "small" => CssLength::Px(13.0),
@@ -335,8 +359,15 @@ pub fn parse_font_size(v: &str) -> CssLength {
         "xxx-large" => CssLength::Px(48.0),
         "smaller" => CssLength::Em(0.83),
         "larger" => CssLength::Em(1.17),
-        _ => parse_length(v),
+        _ if t == "0" || t == "+0" || t == "-0" => CssLength::Zero,
+        _ if t.parse::<f32>().is_ok() => return None,
+        _ => parse_length_checked(t)?,
     }
+    .into()
+}
+
+pub fn parse_font_size(v: &str) -> CssLength {
+    parse_font_size_checked(v).unwrap_or(CssLength::Auto)
 }
 
 pub fn parse_line_height(v: &str) -> CssLength {
@@ -353,11 +384,7 @@ pub fn parse_line_height(v: &str) -> CssLength {
 pub fn parse_overflow(v: &str) -> Overflow {
     match v {
         "hidden" => Overflow::Hidden,
-        // ⛔ `clip` CLIPS. Falling through to `Visible` did not merely ignore
-        // the declaration, it disabled the clipping the page asked for. `clip`
-        // differs from `hidden` only in that it establishes no scroll container;
-        // clipping is the visible behaviour and the one that matters here.
-        "clip" => Overflow::Hidden,
+        "clip" => Overflow::Clip,
         "scroll" => Overflow::Scroll,
         "auto" => Overflow::Auto,
         _ => Overflow::Visible,
@@ -400,6 +427,10 @@ pub fn parse_color(v: &str) -> Option<Color> {
     let lowered = v.trim().to_ascii_lowercase();
     let v = lowered.as_str();
     let v = v.trim();
+
+    if let Some(inner) = v.strip_prefix("env(").and_then(|s| s.strip_suffix(')')) {
+        return parse_env_color(inner);
+    }
 
     // light-dark(light, dark) — use light value (we render in light mode)
     if v.starts_with("light-dark(") {
@@ -547,6 +578,25 @@ pub fn parse_color(v: &str) -> Option<Color> {
         "seashell" => Some(Color::rgb(255, 245, 238)),
         "linen" => Some(Color::rgb(250, 240, 230)),
         "transparent" => Some(Color::TRANSPARENT),
+        // CSS system colors. These are light/default-theme approximations
+        // until forced-colors rendering can resolve them from platform state.
+        "canvas" => Some(Color::rgb(255, 255, 255)),
+        "canvastext" => Some(Color::rgb(0, 0, 0)),
+        "linktext" => Some(Color::rgb(0, 0, 238)),
+        "visitedtext" => Some(Color::rgb(85, 26, 139)),
+        "activetext" => Some(Color::rgb(238, 0, 0)),
+        "buttonface" => Some(Color::rgb(240, 240, 240)),
+        "buttontext" => Some(Color::rgb(0, 0, 0)),
+        "buttonborder" => Some(Color::rgb(118, 118, 118)),
+        "field" => Some(Color::rgb(255, 255, 255)),
+        "fieldtext" => Some(Color::rgb(0, 0, 0)),
+        "highlight" | "selecteditem" => Some(Color::rgb(0, 120, 215)),
+        "highlighttext" | "selecteditemtext" => Some(Color::rgb(255, 255, 255)),
+        "graytext" => Some(Color::rgb(128, 128, 128)),
+        "mark" => Some(Color::rgb(255, 255, 0)),
+        "marktext" => Some(Color::rgb(0, 0, 0)),
+        "accentcolor" => Some(Color::rgb(0, 120, 215)),
+        "accentcolortext" => Some(Color::rgb(255, 255, 255)),
         "currentcolor" => None, // can't resolve without context
         _ => None,
     };

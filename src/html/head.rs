@@ -85,15 +85,17 @@ pub(crate) fn handle_head_tag(
         "link" => {
             let rel = attrs.get("rel").map(|s| s.as_str()).unwrap_or("");
             let media = attrs.get("media").map(|s| s.as_str()).unwrap_or("");
+            let disabled = attrs.contains_key("disabled");
             let is_print_only = media.eq_ignore_ascii_case("print");
             // Don't fire hook for print-only stylesheets — they
             // shouldn't be fetched/applied in screen rendering.
-            if !(rel == "stylesheet" && is_print_only) {
+            if !(rel.eq_ignore_ascii_case("stylesheet") && (is_print_only || disabled)) {
                 parser.fire_hook(tag, &attrs);
             }
             let href = attrs.get("href").cloned().unwrap_or_default();
             let media_owned = media.to_string();
-            let want_sheet = rel == "stylesheet" && !href.is_empty();
+            let want_sheet =
+                rel.eq_ignore_ascii_case("stylesheet") && !disabled && !href.is_empty();
             parser.push_head_node("link", attrs, String::new());
             if want_sheet {
                 parser.linked_stylesheets.push((href, media_owned));

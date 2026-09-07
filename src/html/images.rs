@@ -15,6 +15,9 @@ pub fn resolve_url(src: &str, base_url: &str) -> String {
     if src.starts_with("data:") {
         return src.to_string();
     }
+    if let Some(path) = src.strip_prefix("file://") {
+        return path.to_string();
+    }
     if src.contains("://") {
         return src.to_string();
     }
@@ -53,10 +56,20 @@ pub fn resolve_url(src: &str, base_url: &str) -> String {
     if src.starts_with('/') || base_url.is_empty() {
         return src.to_string();
     }
-    let base_dir = std::path::Path::new(base_url)
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
+    let base_path = base_url.strip_prefix("file://").unwrap_or(base_url);
+    let base_path = std::path::Path::new(base_path);
+    let base_dir =
+        if base_path.is_dir() || base_url.ends_with('/') || base_path.extension().is_none() {
+            base_path
+                .to_string_lossy()
+                .trim_end_matches('/')
+                .to_string()
+        } else {
+            base_path
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default()
+        };
     if base_dir.is_empty() {
         src.to_string()
     } else {
@@ -68,7 +81,7 @@ pub fn resolve_url(src: &str, base_url: &str) -> String {
 /// Dimensions are NOT baked into the style here — the layout engine handles
 /// aspect-ratio sizing after the CSS cascade has set any explicit width/height.
 pub fn set_image_on_node(node: &mut WebCore, data: Vec<u8>, w: u32, h: u32) {
-    node.image_data = Some(data);
+    node.image_data = Some(std::sync::Arc::new(data));
     node.image_width = w;
     node.image_height = h;
 }
@@ -157,9 +170,7 @@ fn parse_svg_dimensions(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
             let val_start = pos + pattern.len();
             if let Some(val_end) = svg_tag[val_start..].find('"') {
                 let val_str = &svg_tag[val_start..val_start + val_end];
-                // Strip units like "px"
-                let num_str = val_str.trim_end_matches("px").trim();
-                if let Ok(n) = num_str.parse::<f32>() {
+                if let Some(n) = parse_svg_length_px(val_str) {
                     if attr == "width" {
                         w = Some(n);
                     } else {
@@ -177,7 +188,8 @@ fn parse_svg_dimensions(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
             if let Some(val_end) = svg_tag[val_start..].find('"') {
                 let vb = &svg_tag[val_start..val_start + val_end];
                 let parts: Vec<f32> = vb
-                    .split_whitespace()
+                    .split(|c: char| c == ',' || c.is_whitespace())
+                    .filter(|s| !s.is_empty())
                     .filter_map(|s| s.parse().ok())
                     .collect();
                 if parts.len() == 4 {
@@ -202,8 +214,9 @@ fn parse_svg_dimensions(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 }
 
 /// Result of decoding image bytes: either rasterized RGBA or SVG markup to rasterize later.
+#[derive(Clone)]
 pub enum DecodedImage {
-    Raster(Vec<u8>, u32, u32),
+    Raster(std::sync::Arc<Vec<u8>>, u32, u32),
     Svg(String, f32, f32), // markup, intrinsic_w, intrinsic_h
 }
 
@@ -227,7 +240,7 @@ pub fn decode_image_bytes_ex(bytes: &[u8]) -> Option<DecodedImage> {
                     pixel[2] = ((pixel[2] as u16 * a) / 255) as u8;
                 }
             }
-            return Some(DecodedImage::Raster(raw, w, h));
+            return Some(DecodedImage::Raster(std::sync::Arc::new(raw), w, h));
         }
     }
     // SVG: return the markup for deferred rasterization at paint time
@@ -243,20 +256,12 @@ pub fn decode_image_bytes_ex(bytes: &[u8]) -> Option<DecodedImage> {
 
 /// Extract intrinsic dimensions from SVG markup without rasterizing.
 fn svg_intrinsic_size(svg: &str) -> (f32, f32) {
-    use resvg::usvg;
-    let opt = usvg::Options::default();
-    match usvg::Tree::from_str(svg, &opt) {
-        Ok(tree) => {
-            let size = tree.size();
-            (size.width(), size.height())
-        }
-        _ => (0.0, 0.0),
-    }
+    crate::svg::intrinsic_size_from_markup(svg)
 }
 
 pub fn decode_image_bytes(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     match decode_image_bytes_ex(bytes)? {
-        DecodedImage::Raster(data, w, h) => Some((data, w, h)),
+        DecodedImage::Raster(data, w, h) => Some((data.as_ref().clone(), w, h)),
         DecodedImage::Svg(svg, _, _) => rasterize_svg_intrinsic(&svg),
     }
 }

@@ -15,6 +15,7 @@ pub struct ContainerEntry {
     pub height: f32,
     pub container_type: crate::types::ContainerType,
     pub name: String,
+    pub style: std::sync::Arc<crate::types::ComputedStyle>,
 }
 
 /// Walk `node` and all its descendants applying any `@container` rules whose
@@ -91,6 +92,9 @@ fn apply_container_cascade_inner(
             html_box: Some(node),
             hover_chain: &empty_hover,
             element_id: node.node_id,
+            scope_root_id: 0,
+            target_id: 0,
+            document_url: "",
             prev_siblings: &[],
             next_siblings: &[],
         };
@@ -115,11 +119,12 @@ fn apply_container_cascade_inner(
                 Some(c) => c,
                 None => continue,
             };
-            if !evaluate_container_for_type(
+            if !evaluate_container_for_type_and_style(
                 &rule.container_condition,
                 ctx.width,
                 ctx.height,
                 ctx.container_type,
+                Some(&ctx.style),
             ) {
                 continue;
             }
@@ -180,6 +185,7 @@ fn apply_container_cascade_inner(
             height: node.layout.content_rect.h,
             container_type: node.style.container_type,
             name: node.style.container_name.clone(),
+            style: node.style.clone(),
         });
     }
 

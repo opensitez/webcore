@@ -124,7 +124,7 @@ pub(crate) fn apply_presentational_attrs(node: &mut WebCore) {
             "width" => {
                 if val.ends_with('%') {
                     apply_property(std::sync::Arc::make_mut(&mut node.style), "width", val);
-                } else if let Ok(n) = val.parse::<f32>() {
+                } else if let Some(n) = crate::html::forms::parse_non_negative_integer(val) {
                     apply_property(
                         std::sync::Arc::make_mut(&mut node.style),
                         "width",
@@ -135,7 +135,7 @@ pub(crate) fn apply_presentational_attrs(node: &mut WebCore) {
             "height" => {
                 if val.ends_with('%') {
                     apply_property(std::sync::Arc::make_mut(&mut node.style), "height", val);
-                } else if let Ok(n) = val.parse::<f32>() {
+                } else if let Some(n) = crate::html::forms::parse_non_negative_integer(val) {
                     apply_property(
                         std::sync::Arc::make_mut(&mut node.style),
                         "height",

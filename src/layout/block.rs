@@ -41,6 +41,56 @@ pub fn establishes_bfc(style: &ComputedStyle) -> bool {
         || matches!(style.position, Position::Absolute | Position::Fixed)
 }
 
+fn text_decoration_source(style: &ComputedStyle) -> Option<ComputedStyle> {
+    if style.text_decoration.underline
+        || style.text_decoration.overline
+        || style.text_decoration.strikethrough
+    {
+        Some(style.clone())
+    } else {
+        None
+    }
+}
+
+fn apply_parent_text_decoration(run_style: &mut ComputedStyle, parent: &ComputedStyle) {
+    if parent.text_decoration.underline {
+        run_style.text_decoration.underline = true;
+    }
+    if parent.text_decoration.overline {
+        run_style.text_decoration.overline = true;
+    }
+    if parent.text_decoration.strikethrough {
+        run_style.text_decoration.strikethrough = true;
+    }
+    run_style.text_decoration_color = Some(parent.text_decoration_color.unwrap_or(parent.color));
+    if matches!(run_style.text_decoration_style, TextDecorationStyle::Solid) {
+        run_style.text_decoration_style = parent.text_decoration_style;
+    }
+    if run_style.text_decoration_thickness.is_auto() {
+        run_style.text_decoration_thickness = parent.text_decoration_thickness.clone();
+    }
+}
+
+fn scrollbar_gutter_stable(value: &str) -> bool {
+    value.split_whitespace().any(|token| token == "stable")
+}
+
+fn scrollbar_gutter_both_edges(value: &str) -> bool {
+    value.split_whitespace().any(|token| token == "both-edges")
+}
+
+fn propagate_text_decoration_to_inline_runs(node: &mut WebCore, parent: &ComputedStyle) {
+    for run in &mut node.layout.inline_runs {
+        apply_parent_text_decoration(&mut run.style, parent);
+    }
+    for child in &mut node.children {
+        if matches!(child.style.position, Position::Absolute | Position::Fixed) {
+            continue;
+        }
+        propagate_text_decoration_to_inline_runs(child, parent);
+    }
+}
+
 /// Can top margin of this box collapse with its first child's top margin?
 /// Mirrors C++ CanCollapseTopWithFirstChild.
 fn can_collapse_top_with_first_child(node: &WebCore, rbox: &ResolvedBox) -> bool {
@@ -85,6 +135,30 @@ fn can_collapse_bottom_with_last_child(node: &WebCore, rbox: &ResolvedBox) -> bo
         return false;
     }
     true
+}
+
+fn margin_trim_has(value: &str, keyword: &str) -> bool {
+    value
+        .split_whitespace()
+        .any(|part| part.eq_ignore_ascii_case(keyword))
+}
+
+fn trim_child_margin_left(node: &mut WebCore, amount: f32) {
+    if amount <= 0.0 {
+        return;
+    }
+    shift_rects(node, -amount, 0.0);
+    node.layout.margin_rect.x += amount;
+    node.layout.margin_rect.w = (node.layout.margin_rect.w - amount).max(0.0);
+    node.layout.resolved_margin_left = (node.layout.resolved_margin_left - amount).max(0.0);
+}
+
+fn trim_child_margin_right(node: &mut WebCore, amount: f32) {
+    if amount <= 0.0 {
+        return;
+    }
+    node.layout.margin_rect.w = (node.layout.margin_rect.w - amount).max(0.0);
+    node.layout.resolved_margin_right = (node.layout.resolved_margin_right - amount).max(0.0);
 }
 
 /// Is this an "empty" block (no borders, padding, inline content, explicit height, in-flow children)?
@@ -148,6 +222,26 @@ pub fn compute_intrinsic_width(node: &WebCore) -> f32 {
     let result = compute_intrinsic_width_inner(node);
     node.layout.cached_intrinsic_w.set(result);
     result
+}
+
+fn shrink_to_fit_slop(node: &WebCore) -> f32 {
+    if node.style.aspect_ratio.is_some()
+        && node.style.width.is_auto()
+        && !node.style.height.is_auto()
+        && !matches!(node.style.height, CssLength::Percent(_))
+    {
+        0.0
+    } else if !node.layout.line_cache.is_empty()
+        && node
+            .layout
+            .line_cache
+            .iter()
+            .all(|line| line.text_length == 0)
+    {
+        0.0
+    } else {
+        1.0
+    }
 }
 
 fn compute_intrinsic_width_inner(node: &WebCore) -> f32 {
@@ -485,6 +579,7 @@ pub fn layout_block_with_fc(
     let y = c.y;
     let font_px = c.parent_font_px;
     let root_font_px = c.root_font_px;
+    let decorating_style = text_decoration_source(&node.style);
     // **This block IS its children's containing block, height included.**
     //
     // CSS 2.1 §10.5: a percentage height resolves against the containing
@@ -586,8 +681,20 @@ pub fn layout_block_with_fc(
         || (matches!(node.style.overflow_y, Overflow::Auto)
             && !node.style.max_height.is_none()
             && !node.style.max_height.is_auto());
-    let child_content_w = if reserve_v_scrollbar && sbw > 0.0 {
-        (content_w - sbw).max(0.0)
+    let stable_gutter = scrollbar_gutter_stable(&node.style.scrollbar_gutter)
+        && !matches!(node.style.overflow_y, Overflow::Visible);
+    let reserve_scrollbar_gutter = reserve_v_scrollbar || stable_gutter;
+    let gutter_edges = if reserve_scrollbar_gutter && sbw > 0.0 {
+        if scrollbar_gutter_both_edges(&node.style.scrollbar_gutter) {
+            2.0
+        } else {
+            1.0
+        }
+    } else {
+        0.0
+    };
+    let child_content_w = if gutter_edges > 0.0 {
+        (content_w - sbw * gutter_edges).max(0.0)
     } else {
         content_w
     };
@@ -617,7 +724,11 @@ pub fn layout_block_with_fc(
 
     let is_bfc = establishes_bfc(&node.style);
 
-    let content_x = x + margin_left + rbox.border_left + rbox.padding_left;
+    let content_x = x
+        + margin_left
+        + rbox.border_left
+        + rbox.padding_left
+        + if gutter_edges > 1.0 { sbw } else { 0.0 };
     let content_y = y + rbox.margin_top + rbox.border_top + rbox.padding_top;
 
     // ─── CSS margin collapsing setup ──────────────────────────────────────────
@@ -692,7 +803,8 @@ pub fn layout_block_with_fc(
             margin_right,
         );
         // Absolute/fixed children
-        let containing_rect = if !matches!(node.style.position, Position::Static) {
+        let containing_rect = if crate::layout::establishes_positioned_containing_block(&node.style)
+        {
             node.layout.padding_rect
         } else {
             engine.pos_cb.get()
@@ -713,6 +825,7 @@ pub fn layout_block_with_fc(
     let mut first_child_collapsed = false;
     let mut first_in_flow_path: Option<Vec<usize>> = None;
     let mut last_in_flow_path: Option<Vec<usize>> = None;
+    let mut block_in_flow_paths: Vec<Vec<usize>> = Vec::new();
     // If the parent passed a float context with floats, children need to
     // receive it so their inline content wraps around those floats.
     let mut seen_float = !is_bfc && !fc.floats.is_empty();
@@ -725,7 +838,8 @@ pub fn layout_block_with_fc(
     let mut inline_line_start_x = 0.0f32;
     let mut inline_line_paths: Vec<Vec<usize>> = Vec::new();
 
-    // Track static y positions for absolute children (indexed by eff_children position)
+    // Track static positions for absolute children (indexed by eff_children position)
+    let mut abs_static_x: HashMap<usize, f32> = HashMap::new();
     let mut abs_static_y: HashMap<usize, f32> = HashMap::new();
 
     for (eff_idx, path) in eff_children.iter().enumerate() {
@@ -739,13 +853,18 @@ pub fn layout_block_with_fc(
             continue;
         }
         if matches!(child_position, Position::Absolute | Position::Fixed) {
-            // Record absolute document-space y as the static position for this abs child.
-            // content_y is already in document space; child_y is relative to content_y.
+            // Record absolute document-space static position for this abs child.
+            // content_x/content_y are already in document space; inline_x/child_y
+            // are relative to that content origin.
+            let sx = content_x + inline_x.max(inline_line_start_x);
             let sy = content_y + child_y;
+            abs_static_x.insert(eff_idx, sx);
             abs_static_y.insert(eff_idx, sy);
             // Also store on the node itself for deeply nested abs elements whose
             // containing block is an ancestor further up the tree.
-            grid_child_mut(node, path).layout.abs_static_y = Some(sy);
+            let child = grid_child_mut(node, path);
+            child.layout.abs_static_x = Some(sx);
+            child.layout.abs_static_y = Some(sy);
             continue;
         }
 
@@ -786,12 +905,24 @@ pub fn layout_block_with_fc(
             );
             // Shrink-to-fit for auto-width floats
             if grid_child_ref(node, path).style.width.is_auto() {
-                let intrinsic_w = engine
-                    .intrinsic_sizes(grid_child_ref(node, path), font_px, root_font_px)
-                    .max_content;
+                let ch = grid_child_ref(node, path);
+                let max_line_w = ch
+                    .layout
+                    .line_cache
+                    .iter()
+                    .map(|line| line.width)
+                    .fold(0.0_f32, f32::max);
+                let intrinsic_w = if max_line_w > 0.0 {
+                    max_line_w
+                } else {
+                    engine
+                        .intrinsic_sizes(ch, font_px, root_font_px)
+                        .max_content
+                };
                 if intrinsic_w > 0.0 && intrinsic_w < child_content_w {
                     let irb = grid_child_ref(node, path);
-                    let shrink_w = intrinsic_w
+                    let shrink_w = intrinsic_w.ceil()
+                        + shrink_to_fit_slop(irb)
                         + irb.layout.resolved_pad_left
                         + irb.layout.resolved_pad_right
                         + irb.layout.resolved_border_left
@@ -821,6 +952,12 @@ pub fn layout_block_with_fc(
                 float_h,
                 child_content_w,
                 side,
+                &ch.style.shape_outside,
+                ch.style.shape_margin.resolve(
+                    ch.style.font_size_px(font_px, root_font_px),
+                    child_content_w,
+                    root_font_px,
+                ),
             );
             let ch = grid_child_ref(node, path);
             // ⛔ Back into document space through the CONTEXT's origin, which is
@@ -920,6 +1057,10 @@ pub fn layout_block_with_fc(
                 }
             }
 
+            if let Some(parent) = decorating_style.as_ref() {
+                propagate_text_decoration_to_inline_runs(grid_child_mut(node, path), parent);
+            }
+
             let ch = grid_child_ref(node, path);
             let child_top_margin = ch.layout.collapsed_margin_top;
             let child_bottom_margin = ch.layout.collapsed_margin_bottom;
@@ -988,6 +1129,7 @@ pub fn layout_block_with_fc(
             child_y = ch.layout.margin_rect.y - content_y + ch.layout.margin_rect.h;
             prev_bottom_margin = child_bottom_margin;
             last_in_flow_path = Some(path.clone());
+            block_in_flow_paths.push(path.clone());
             is_first_in_flow = false;
 
             if matches!(
@@ -1005,6 +1147,9 @@ pub fn layout_block_with_fc(
                 );
             }
         } else if grid_child_ref(node, path).style.is_inline_level() {
+            if is_empty_line_neutral_inline(grid_child_ref(node, path)) {
+                continue;
+            }
             let is_whitespace_only_text = grid_child_ref(node, path).is_text_node()
                 && grid_child_ref(node, path)
                     .text
@@ -1030,7 +1175,8 @@ pub fn layout_block_with_fc(
                         engine.max_content_width(ch, font_px, root_font_px)
                     };
                     if intrinsic_w > 0.0 {
-                        let shrink_w = intrinsic_w
+                        let shrink_w = intrinsic_w.ceil()
+                            + shrink_to_fit_slop(ch)
                             + ch.layout.resolved_pad_left
                             + ch.layout.resolved_pad_right
                             + ch.layout.resolved_border_left
@@ -1044,6 +1190,10 @@ pub fn layout_block_with_fc(
                             );
                         }
                     }
+                }
+
+                if let Some(parent) = decorating_style.as_ref() {
+                    propagate_text_decoration_to_inline_runs(grid_child_mut(node, path), parent);
                 }
 
                 let ch = grid_child_ref(node, path);
@@ -1109,6 +1259,23 @@ pub fn layout_block_with_fc(
         child_y += inline_line_h;
     }
 
+    let trims_block_start = margin_trim_has(&node.style.margin_trim, "block")
+        || margin_trim_has(&node.style.margin_trim, "block-start");
+    if trims_block_start {
+        if let Some(first_path) = block_in_flow_paths.first() {
+            let mt = grid_child_ref(node, first_path)
+                .layout
+                .resolved_margin_top
+                .max(0.0);
+            if mt > 0.0 {
+                for path in &block_in_flow_paths {
+                    shift_rects(grid_child_mut(node, path), 0.0, -mt);
+                }
+                child_y = (child_y - mt).max(0.0);
+            }
+        }
+    }
+
     // ─── Parent-last-child bottom margin collapsing ───────────────────────────
     let _last_child_collapsed_bottom = if let Some(ref p) = last_in_flow_path {
         if can_collapse_bottom {
@@ -1121,6 +1288,50 @@ pub fn layout_block_with_fc(
     } else {
         0.0
     };
+
+    let trims_block_end = margin_trim_has(&node.style.margin_trim, "block")
+        || margin_trim_has(&node.style.margin_trim, "block-end");
+    if trims_block_end {
+        if let Some(last_path) = block_in_flow_paths.last() {
+            let mb = grid_child_ref(node, last_path)
+                .layout
+                .resolved_margin_bottom
+                .max(0.0);
+            if mb > 0.0 {
+                child_y = (child_y - mb).max(0.0);
+            }
+        }
+    }
+
+    let trims_inline_start = margin_trim_has(&node.style.margin_trim, "inline")
+        || margin_trim_has(&node.style.margin_trim, "inline-start");
+    if trims_inline_start {
+        if let Some(first_path) = block_in_flow_paths.first().cloned() {
+            let first = grid_child_ref(node, &first_path);
+            if node.style.direction == Direction::RTL {
+                let mr = first.layout.resolved_margin_right.max(0.0);
+                trim_child_margin_right(grid_child_mut(node, &first_path), mr);
+            } else {
+                let ml = first.layout.resolved_margin_left.max(0.0);
+                trim_child_margin_left(grid_child_mut(node, &first_path), ml);
+            }
+        }
+    }
+
+    let trims_inline_end = margin_trim_has(&node.style.margin_trim, "inline")
+        || margin_trim_has(&node.style.margin_trim, "inline-end");
+    if trims_inline_end {
+        if let Some(last_path) = block_in_flow_paths.last().cloned() {
+            let last = grid_child_ref(node, &last_path);
+            if node.style.direction == Direction::RTL {
+                let ml = last.layout.resolved_margin_left.max(0.0);
+                trim_child_margin_left(grid_child_mut(node, &last_path), ml);
+            } else {
+                let mr = last.layout.resolved_margin_right.max(0.0);
+                trim_child_margin_right(grid_child_mut(node, &last_path), mr);
+            }
+        }
+    }
 
     // ─── Content height ───────────────────────────────────────────────────────
     // Include float bottom when:
@@ -1255,12 +1466,13 @@ pub fn layout_block_with_fc(
     // Use the padding box as the containing block for positioned children
     // (CSS: containing block for absolutely positioned elements is the padding box
     //  of the nearest positioned ancestor).
-    let containing_rect = if !matches!(node.style.position, Position::Static) {
+    let containing_rect = if crate::layout::establishes_positioned_containing_block(&node.style) {
         node.layout.padding_rect
     } else {
         engine.pos_cb.get()
     };
     for (path, dom_idx) in &abs_children {
+        let sx = abs_static_x.get(dom_idx).copied();
         let sy = abs_static_y.get(dom_idx).copied();
         crate::layout::layout_positioned_static(
             engine,
@@ -1268,11 +1480,12 @@ pub fn layout_block_with_fc(
             containing_rect,
             font_px,
             root_font_px,
+            sx,
             sy,
         );
         // Only force-shift to containing block origin when we have NO static position info.
-        // When static_y is available, layout_positioned_static already placed it correctly.
-        if sy.is_none() {
+        // When static position is available, layout_positioned_static already placed it correctly.
+        if sx.is_none() && sy.is_none() {
             let child = grid_child_mut(node, path);
             let all_auto = child.style.left.is_auto()
                 && child.style.right.is_auto()
@@ -1295,6 +1508,39 @@ pub fn layout_block_with_fc(
     node.layout.last_containing_width = containing_w;
 
     node.layout.margin_rect.h
+}
+
+fn is_empty_line_neutral_inline(node: &WebCore) -> bool {
+    if node.style.display != Display::Inline
+        || node.is_text_node()
+        || !node.children.is_empty()
+        || node.tag == "br"
+    {
+        return false;
+    }
+    if !node.text.is_empty()
+        || !node.style.before_content.is_empty()
+        || !node.style.after_content.is_empty()
+        || !node.style.rare().content.is_empty()
+    {
+        return false;
+    }
+    let has_box_decoration = node.layout.resolved_pad_left.abs() > 0.01
+        || node.layout.resolved_pad_right.abs() > 0.01
+        || node.layout.resolved_pad_top.abs() > 0.01
+        || node.layout.resolved_pad_bottom.abs() > 0.01
+        || node.layout.resolved_border_left.abs() > 0.01
+        || node.layout.resolved_border_right.abs() > 0.01
+        || node.layout.resolved_border_top.abs() > 0.01
+        || node.layout.resolved_border_bottom.abs() > 0.01
+        || node.layout.resolved_margin_left.abs() > 0.01
+        || node.layout.resolved_margin_right.abs() > 0.01
+        || node.layout.resolved_margin_top.abs() > 0.01
+        || node.layout.resolved_margin_bottom.abs() > 0.01
+        || node.style.background_color.a > 0
+        || !node.style.background_image_url.is_empty()
+        || node.bg_image_data.is_some();
+    !has_box_decoration
 }
 
 // ─── Multi-column layout ──────────────────────────────────────────────────────
@@ -1344,6 +1590,9 @@ fn distribution_path(node: &WebCore) -> Vec<usize> {
             return path;
         }
         if !child.style.width.is_auto() || !child.style.height.is_auto() {
+            return path;
+        }
+        if matches!(child.style.break_inside, BreakInside::Avoid) {
             return path;
         }
         if child.style.column_span_all {

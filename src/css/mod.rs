@@ -25,6 +25,16 @@ pub(crate) fn evaluate_container_for_type(
     h: f32,
     container_type: crate::types::ContainerType,
 ) -> bool {
+    evaluate_container_for_type_and_style(condition, w, h, container_type, None)
+}
+
+pub(crate) fn evaluate_container_for_type_and_style(
+    condition: &str,
+    w: f32,
+    h: f32,
+    container_type: crate::types::ContainerType,
+    style: Option<&crate::types::ComputedStyle>,
+) -> bool {
     let cond = condition.trim();
     if cond.is_empty() {
         return true;
@@ -52,15 +62,27 @@ pub(crate) fn evaluate_container_for_type(
     }
 
     if let Some(rest) = cond.strip_prefix("not ") {
-        return !evaluate_container_for_type(rest.trim(), w, h, container_type);
+        return !evaluate_container_for_type_and_style(rest.trim(), w, h, container_type, style);
     }
     if let Some(idx) = find_keyword_outside_parens(cond, " and ") {
-        return evaluate_container_for_type(&cond[..idx], w, h, container_type)
-            && evaluate_container_for_type(&cond[idx + 5..], w, h, container_type);
+        return evaluate_container_for_type_and_style(&cond[..idx], w, h, container_type, style)
+            && evaluate_container_for_type_and_style(
+                &cond[idx + 5..],
+                w,
+                h,
+                container_type,
+                style,
+            );
     }
     if let Some(idx) = find_keyword_outside_parens(cond, " or ") {
-        return evaluate_container_for_type(&cond[..idx], w, h, container_type)
-            || evaluate_container_for_type(&cond[idx + 4..], w, h, container_type);
+        return evaluate_container_for_type_and_style(&cond[..idx], w, h, container_type, style)
+            || evaluate_container_for_type_and_style(
+                &cond[idx + 4..],
+                w,
+                h,
+                container_type,
+                style,
+            );
     }
 
     // Strip outer parens
@@ -143,11 +165,42 @@ pub(crate) fn evaluate_container_for_type(
     }
 
     if lower.starts_with("style(") {
-        return false;
+        return style.is_some_and(|s| container_style_query_matches(lower, s));
     }
 
     // Unknown — fail-open
     true
+}
+
+fn container_style_query_matches(lower: &str, style: &crate::types::ComputedStyle) -> bool {
+    let Some(body) = lower
+        .strip_prefix("style(")
+        .and_then(|s| s.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let body = body.trim();
+    let Some((property, value)) = body.split_once(':') else {
+        return false;
+    };
+    let property = property.trim();
+    let value = value.trim();
+    match property {
+        "color" => crate::css::parse_color(value).is_some_and(|c| c == style.color),
+        "background-color" => {
+            crate::css::parse_color(value).is_some_and(|c| c == style.background_color)
+        }
+        "display" => {
+            let wanted = value.replace('-', "");
+            let actual = format!("{:?}", style.display).to_ascii_lowercase();
+            actual == wanted
+        }
+        "font-weight" => value
+            .parse::<u16>()
+            .map(|wanted| style.font_weight.value() == wanted)
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 pub mod animation;

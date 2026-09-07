@@ -15,8 +15,9 @@ pub enum PseudoElement {
     After,     // ::after
     Selection, // ::selection
     Placeholder,
-    Marker,  // ::marker
-    Ignored, // ::first-line, ::first-letter, unknown vendor pseudo-elements
+    Marker,   // ::marker
+    Backdrop, // ::backdrop
+    Ignored,  // ::first-line, ::first-letter, unknown vendor pseudo-elements
 }
 
 impl Default for PseudoElement {
@@ -123,6 +124,28 @@ impl FromIterator<(String, String)> for Declarations {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PageRule {
+    pub selector: String,
+    pub declarations: Declarations,
+    pub important_declarations: Declarations,
+    pub margin_rules: Vec<PageMarginRule>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PageMarginRule {
+    pub name: String,
+    pub declarations: Declarations,
+    pub important_declarations: Declarations,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CounterStyleRule {
+    pub name: String,
+    pub declarations: Declarations,
+    pub important_declarations: Declarations,
+}
+
 #[derive(Clone, Debug)]
 pub struct CssRule {
     pub selectors: Vec<CssSelector>,
@@ -151,6 +174,7 @@ pub struct CssRule {
     pub container_condition: String,         // non-empty if inside @container
     pub container_name: String,              // optional container name (empty = unnamed)
     pub scope_selector: Option<CssSelector>, // @scope root selector, when present
+    pub scope_limit_selector: Option<CssSelector>, // @scope limit selector from `to (...)`
     pub original_selector: String,           // verbatim selector text for roundtrip
     pub is_hover: bool,
     /// True if any declaration value contains `var(` — needs slow-path resolution.
@@ -173,6 +197,7 @@ impl Default for CssRule {
             container_condition: String::new(),
             container_name: String::new(),
             scope_selector: None,
+            scope_limit_selector: None,
             original_selector: String::new(),
             is_hover: false,
             has_var_refs: false,
@@ -383,6 +408,11 @@ pub(crate) fn pre_parse_value(id: properties::PropertyId, val: &str) -> crate::t
             "capitalize" => {
                 return CssValue::TextTransform(crate::types::TextTransform::Capitalize)
             }
+            "full-width" => return CssValue::TextTransform(crate::types::TextTransform::FullWidth),
+            "full-size-kana" => {
+                return CssValue::TextTransform(crate::types::TextTransform::FullSizeKana)
+            }
+            "math-auto" => return CssValue::TextTransform(crate::types::TextTransform::MathAuto),
             _ => {}
         },
         WhiteSpace => {
@@ -532,6 +562,7 @@ fn parse_overflow_keyword(v: &str) -> Option<crate::types::Overflow> {
     Some(match v {
         "visible" => Visible,
         "hidden" => Hidden,
+        "clip" => Clip,
         "scroll" => Scroll,
         "auto" => Auto,
         _ => return Option::None,
@@ -711,28 +742,4 @@ fn try_parse_color(v: &str) -> Option<crate::types::Color> {
         _ => {}
     }
     None
-}
-
-/// Apply a CssValue to a style, resolving var() references for Raw values.
-/// Used in hover/active/visited cascade paths where var() resolution is needed.
-pub(crate) fn apply_css_value_with_vars(
-    style: &mut ComputedStyle,
-    id: properties::PropertyId,
-    val: &crate::types::CssValue,
-    local_vars: &std::collections::HashMap<String, String>,
-) {
-    use crate::types::CssValue;
-    match val {
-        CssValue::Raw(s) => {
-            let resolved = resolve_var_references(s, local_vars);
-            if resolved.trim().is_empty() && s.contains("var(") {
-                return;
-            }
-            apply_property_by_id_str(style, id, &resolved);
-        }
-        _ => {
-            // Typed value — apply directly, no var resolution needed
-            apply_css_value(style, id, val);
-        }
-    }
 }

@@ -5,7 +5,7 @@ pub mod display_list_replay;
 pub mod tiles;
 
 use crate::layout::inline_layout::collect_flat_text;
-use crate::layout::inline_layout::{css_family_to_cosmic, stretch_from_percent, weight_from_style};
+use crate::layout::inline_layout::{resolve_css_family, stretch_from_percent, weight_from_style};
 use crate::types::*;
 use cosmic_text::{
     Attrs, Buffer, Color as CTextColor, FontSystem, Metrics, Shaping, Style as CTextStyle,
@@ -79,6 +79,18 @@ impl Renderer {
 
     pub fn invalidate_display_list(&mut self) {
         self.display_list_dirty = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn display_list_cache_state(&self) -> Option<(u64, usize, usize, bool)> {
+        self.cached_display_list.as_ref().map(|list| {
+            (
+                self.cached_layout_generation,
+                list.commands.len(),
+                list.fixed_commands.len(),
+                self.display_list_dirty,
+            )
+        })
     }
 
     pub fn handle_window_event(
@@ -505,6 +517,7 @@ impl Renderer {
                 doc.hovered_box,
                 doc.active_box,
                 &doc.visited_urls,
+                &doc.base_url,
             );
             self.cached_display_list = Some(list);
             self.cached_hovered_id = doc.hovered_box;
@@ -572,6 +585,22 @@ impl Renderer {
         if doc.open_picker != 0 {
             self.scale = scale * zoom;
             self.draw_color_picker(doc, pixmap, doc.scroll_x, doc.scroll_y);
+        }
+        if doc.editor.has_selection() {
+            if let Some((caret_id, _)) = doc.editor.caret_info() {
+                if crate::dom::is_in_contenteditable_by_id(&doc.root, caret_id) {
+                    self.scale = scale * zoom;
+                    self.draw_selection_highlight(
+                        &doc.root,
+                        pixmap,
+                        doc.scroll_x,
+                        doc.scroll_y,
+                        caret_id,
+                        doc.editor.sel_start,
+                        doc.editor.sel_end,
+                    );
+                }
+            }
         }
         if doc.editor.caret_visible {
             if let Some((caret_id, caret_local)) = doc.editor.caret_info() {
@@ -684,7 +713,8 @@ impl Renderer {
         let phys_px = font_px * sc;
         let phys_lh = line_h * sc;
         let metrics = Metrics::new(phys_px, phys_lh);
-        let family = css_family_to_cosmic(font_family);
+        let resolved = resolve_css_family(&self.font_system, font_family);
+        let family = resolved.as_family();
         let ct_w = weight_from_style(weight, variation);
         let ct_s = match font_style {
             FontStyle::Italic => CTextStyle::Italic,
@@ -852,6 +882,122 @@ impl Renderer {
         caret_local: usize,
     ) {
         self.draw_caret_walk(root, pixmap, sx, sy, caret_node_id, caret_local);
+    }
+
+    fn draw_selection_highlight(
+        &mut self,
+        root: &WebCore,
+        pixmap: &mut Pixmap,
+        sx: f32,
+        sy: f32,
+        caret_node_id: u32,
+        sel_start: usize,
+        sel_end: usize,
+    ) {
+        self.draw_selection_highlight_walk(root, pixmap, sx, sy, caret_node_id, sel_start, sel_end);
+    }
+
+    fn draw_selection_highlight_walk(
+        &mut self,
+        node: &WebCore,
+        pixmap: &mut Pixmap,
+        sx: f32,
+        sy: f32,
+        caret_node_id: u32,
+        sel_start: usize,
+        sel_end: usize,
+    ) -> bool {
+        if node.node_id == caret_node_id {
+            let flat = collect_flat_text(node);
+            if flat.is_empty() {
+                return true;
+            }
+            let mut color = Color::rgba(0, 120, 215, 160);
+            let mut foreground = Color::rgb(255, 255, 255);
+            if let Some(selection_style) = node.style.selection_style.as_deref() {
+                if selection_style.background_color.a > 0 {
+                    color = selection_style.background_color;
+                }
+                foreground = selection_style.color;
+            }
+
+            let mut paint = Paint::default();
+            paint.set_color(color.to_tiny_skia());
+            let transform = Transform::from_scale(self.scale, self.scale);
+            let mut selected_runs: Vec<(String, f32, f32)> = Vec::new();
+            for line in &node.layout.line_cache {
+                let line_start = line.text_start.min(flat.len());
+                let line_end = (line.text_start + line.text_length).min(flat.len());
+                let start = sel_start.max(line_start).min(line_end);
+                let end = sel_end.max(line_start).min(line_end);
+                if start >= end {
+                    continue;
+                }
+                let x1 = crate::layout::hit_test::get_caret_x(
+                    &flat,
+                    &node.layout.inline_runs,
+                    line,
+                    start,
+                ) - sx;
+                let x2 = crate::layout::hit_test::get_caret_x(
+                    &flat,
+                    &node.layout.inline_runs,
+                    line,
+                    end,
+                ) - sx;
+                let left = x1.min(x2);
+                let width = (x2 - x1).abs().max(1.0);
+                if let Some(rect) =
+                    SkRect::from_xywh(left, line.y - sy, width, line.height.max(1.0))
+                {
+                    pixmap.fill_rect(rect, &paint, transform, None);
+                }
+                let text_start = crate::layout::text::floor_char_boundary(&flat, start);
+                let text_end = crate::layout::text::floor_char_boundary(&flat, end);
+                if text_start < text_end {
+                    selected_runs.push((flat[text_start..text_end].to_string(), left, line.y - sy));
+                }
+            }
+
+            let font_px = node.style.font_size_px(16.0, 16.0);
+            let line_h = node
+                .style
+                .line_height
+                .resolve(font_px, 0.0, 16.0)
+                .max(font_px * 1.2);
+            let text_color =
+                CTextColor::rgba(foreground.r, foreground.g, foreground.b, foreground.a);
+            for (text, x, y) in selected_runs {
+                self.draw_text_run(
+                    &text,
+                    x,
+                    y,
+                    font_px,
+                    line_h,
+                    node.style.font_weight,
+                    node.style.font_style,
+                    &node.style.font_family,
+                    text_color,
+                    pixmap,
+                    None,
+                );
+            }
+            return true;
+        }
+        for child in &node.children {
+            if self.draw_selection_highlight_walk(
+                child,
+                pixmap,
+                sx,
+                sy,
+                caret_node_id,
+                sel_start,
+                sel_end,
+            ) {
+                return true;
+            }
+        }
+        false
     }
 
     fn draw_caret_walk(

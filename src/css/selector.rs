@@ -246,6 +246,9 @@ impl CssSelector {
             html_box: Some(b),
             hover_chain: &empty_hover,
             element_id: b.node_id,
+            scope_root_id: 0,
+            target_id: 0,
+            document_url: "",
             prev_siblings: &[],
             next_siblings: &[],
         };
@@ -269,6 +272,9 @@ impl CssSelector {
             html_box: Some(b),
             hover_chain: &empty_hover,
             element_id: b.node_id,
+            scope_root_id: 0,
+            target_id: 0,
+            document_url: "",
             prev_siblings: &[],
             next_siblings: &[],
         };

@@ -369,6 +369,9 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
     if node.attributes.contains_key("inert") {
         return None;
     }
+    if !point_inside_clip_path(node, doc_pt.0, doc_pt.1) {
+        return None;
+    }
 
     // Adjust for this node's own scroll offset (rare — only scrollable boxes)
     let px = doc_pt.0 + node.layout.scroll_left;
@@ -402,7 +405,10 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
                         continue;
                     }
                     if child.layout.border_rect.h <= 0.0
-                        && matches!(child.style.overflow_y, crate::types::Overflow::Hidden)
+                        && matches!(
+                            child.style.overflow_y,
+                            crate::types::Overflow::Hidden | crate::types::Overflow::Clip
+                        )
                     {
                         continue;
                     }
@@ -412,10 +418,12 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
                         if let Some(r) = hit_test_impl(child, (cx, cy), _button) {
                             return Some(r);
                         }
-                        return Some(HitResult {
-                            node_id: child.node_id,
-                            local_offset: 0,
-                        });
+                        if point_inside_clip_path(child, cx, cy) {
+                            return Some(HitResult {
+                                node_id: child.node_id,
+                                local_offset: 0,
+                            });
+                        }
                     }
                 }
             }
@@ -438,7 +446,10 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
             }
             // Skip elements with 0 height and overflow:hidden — they're collapsed (e.g. hidden dropdowns)
             if child.layout.border_rect.h <= 0.0
-                && matches!(child.style.overflow_y, crate::types::Overflow::Hidden)
+                && matches!(
+                    child.style.overflow_y,
+                    crate::types::Overflow::Hidden | crate::types::Overflow::Clip
+                )
             {
                 continue;
             }
@@ -448,14 +459,17 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
             }
             let (cx, cy) = to_local(child, (px, py));
             let b = &child.layout.border_rect;
-            if cx >= b.x && cx < b.x + b.w && cy >= b.y && cy < b.y + b.h {
+            let in_border = cx >= b.x && cx < b.x + b.w && cy >= b.y && cy < b.y + b.h;
+            if in_border || point_in_children_clip_area(child, cx, cy) {
                 if let Some(r) = hit_test_impl(child, (cx, cy), _button) {
                     return Some(r);
                 }
-                return Some(HitResult {
-                    node_id: child.node_id,
-                    local_offset: 0,
-                });
+                if in_border && point_inside_clip_path(child, cx, cy) {
+                    return Some(HitResult {
+                        node_id: child.node_id,
+                        local_offset: 0,
+                    });
+                }
             }
         }
 
@@ -528,19 +542,169 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
 }
 
 fn children_clipped_at(node: &WebCore, px: f32, py: f32) -> bool {
+    let Some((left, right, top, bottom)) = children_clip_bounds(node) else {
+        return false;
+    };
+    px < left || px >= right || py < top || py >= bottom
+}
+
+fn point_in_children_clip_area(node: &WebCore, px: f32, py: f32) -> bool {
+    children_clip_bounds(node)
+        .map(|(left, right, top, bottom)| px >= left && px < right && py >= top && py < bottom)
+        .unwrap_or(false)
+}
+
+fn children_clip_bounds(node: &WebCore) -> Option<(f32, f32, f32, f32)> {
     let clip_x = matches!(
         node.style.overflow_x,
-        Overflow::Hidden | Overflow::Scroll | Overflow::Auto
+        Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
     );
     let clip_y = matches!(
         node.style.overflow_y,
-        Overflow::Hidden | Overflow::Scroll | Overflow::Auto
+        Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
     );
     if !clip_x && !clip_y {
+        return None;
+    }
+    let clip_margin = overflow_clip_margin_px(node);
+    let margin_x = if matches!(node.style.overflow_x, Overflow::Clip) {
+        clip_margin
+    } else {
+        0.0
+    };
+    let margin_y = if matches!(node.style.overflow_y, Overflow::Clip) {
+        clip_margin
+    } else {
+        0.0
+    };
+    let p = &node.layout.padding_rect;
+    let left = if clip_x {
+        p.x - margin_x
+    } else {
+        f32::NEG_INFINITY
+    };
+    let right = if clip_x {
+        p.x + p.w + margin_x
+    } else {
+        f32::INFINITY
+    };
+    let top = if clip_y {
+        p.y - margin_y
+    } else {
+        f32::NEG_INFINITY
+    };
+    let bottom = if clip_y {
+        p.y + p.h + margin_y
+    } else {
+        f32::INFINITY
+    };
+    Some((left, right, top, bottom))
+}
+
+fn overflow_clip_margin_px(node: &WebCore) -> f32 {
+    if !matches!(node.style.overflow_x, Overflow::Clip)
+        && !matches!(node.style.overflow_y, Overflow::Clip)
+    {
+        return 0.0;
+    }
+    let font_px = node.style.font_size_px(16.0, 16.0);
+    node.style
+        .overflow_clip_margin
+        .split_whitespace()
+        .find_map(crate::css::parse_length_checked)
+        .map(|length| {
+            length
+                .resolve(font_px, node.layout.padding_rect.w, 16.0)
+                .max(0.0)
+        })
+        .unwrap_or(0.0)
+}
+
+fn point_inside_clip_path(node: &WebCore, x: f32, y: f32) -> bool {
+    let b = &node.layout.border_rect;
+    let font_px = node.style.font_size_px(16.0, 16.0);
+    match node.style.clip_path.kind {
+        ClipPathKind::None => true,
+        ClipPathKind::Inset => {
+            let top = node.style.clip_path.inset_top.resolve(font_px, b.h, 16.0);
+            let right = node.style.clip_path.inset_right.resolve(font_px, b.w, 16.0);
+            let bottom = node
+                .style
+                .clip_path
+                .inset_bottom
+                .resolve(font_px, b.h, 16.0);
+            let left = node.style.clip_path.inset_left.resolve(font_px, b.w, 16.0);
+            x >= b.x + left && x < b.x + b.w - right && y >= b.y + top && y < b.y + b.h - bottom
+        }
+        ClipPathKind::Circle => {
+            let reference = b.w.min(b.h);
+            let r = node
+                .style
+                .clip_path
+                .circle_radius
+                .resolve(font_px, reference, 16.0)
+                .max(0.0);
+            let cx = b.x + node.style.clip_path.center_x.resolve(font_px, b.w, 16.0);
+            let cy = b.y + node.style.clip_path.center_y.resolve(font_px, b.h, 16.0);
+            let dx = x - cx;
+            let dy = y - cy;
+            dx * dx + dy * dy <= r * r
+        }
+        ClipPathKind::Ellipse => {
+            let rx = node
+                .style
+                .clip_path
+                .ellipse_rx
+                .resolve(font_px, b.w, 16.0)
+                .max(0.0);
+            let ry = node
+                .style
+                .clip_path
+                .ellipse_ry
+                .resolve(font_px, b.h, 16.0)
+                .max(0.0);
+            if rx <= 0.0 || ry <= 0.0 {
+                return false;
+            }
+            let cx = b.x + node.style.clip_path.center_x.resolve(font_px, b.w, 16.0);
+            let cy = b.y + node.style.clip_path.center_y.resolve(font_px, b.h, 16.0);
+            let nx = (x - cx) / rx;
+            let ny = (y - cy) / ry;
+            nx * nx + ny * ny <= 1.0
+        }
+        ClipPathKind::Polygon => point_inside_clip_polygon(node, x, y, font_px),
+    }
+}
+
+fn point_inside_clip_polygon(node: &WebCore, x: f32, y: f32, font_px: f32) -> bool {
+    let b = node.layout.border_rect;
+    let points = &node.style.clip_path.points;
+    if points.len() < 3 {
         return false;
     }
-    let p = &node.layout.padding_rect;
-    (clip_x && (px < p.x || px >= p.x + p.w)) || (clip_y && (py < p.y || py >= p.y + p.h))
+
+    let px = x - b.x;
+    let py = y - b.y;
+    let mut inside = false;
+    let mut prev = points.len() - 1;
+    for i in 0..points.len() {
+        let (xi, yi) = (
+            points[i].0.resolve(font_px, b.w, 16.0),
+            points[i].1.resolve(font_px, b.h, 16.0),
+        );
+        let (xj, yj) = (
+            points[prev].0.resolve(font_px, b.w, 16.0),
+            points[prev].1.resolve(font_px, b.h, 16.0),
+        );
+        if (yi > py) != (yj > py) && (yj - yi).abs() > f32::EPSILON {
+            let edge_x = (xj - xi) * (py - yi) / (yj - yi) + xi;
+            if px < edge_x {
+                inside = !inside;
+            }
+        }
+        prev = i;
+    }
+    inside
 }
 
 fn snap_to_line(lines: &[LayoutLine], y: f32) -> &LayoutLine {
@@ -710,6 +874,9 @@ fn deepest_box_at(node: &WebCore, pt: (f32, f32), _button: u8) -> Option<u32> {
     if matches!(node.style.display, Display::None) {
         return None;
     }
+    if !point_inside_clip_path(node, pt.0, pt.1) {
+        return None;
+    }
     // ⛔ The SECOND tree walker — `hit_test_impl` above is not the only road
     // in, and a guard on one of them is invisible to every test that drives
     // the other. The check is per-CHILD in the loop below rather than here:
@@ -732,11 +899,14 @@ fn deepest_box_at(node: &WebCore, pt: (f32, f32), _button: u8) -> Option<u32> {
         // The second walker needs the same mapping — see `to_local`.
         let (cx, cy) = to_local(child, (px, py));
         let m = &child.layout.margin_rect;
-        if cx >= m.x && cx < m.x + m.w && cy >= m.y && cy < m.y + m.h {
+        let in_margin = cx >= m.x && cx < m.x + m.w && cy >= m.y && cy < m.y + m.h;
+        if in_margin || point_in_children_clip_area(child, cx, cy) {
             if let Some(r) = deepest_box_at(child, (cx, cy), _button) {
                 return Some(r);
             }
-            return Some(child.node_id);
+            if in_margin {
+                return Some(child.node_id);
+            }
         }
     }
     None

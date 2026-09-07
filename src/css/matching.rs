@@ -111,6 +111,12 @@ pub struct MatchContext<'a> {
     pub hover_chain: &'a std::collections::HashSet<u32>,
     /// Node ID of the element currently being matched (for :hover on ancestors).
     pub element_id: u32,
+    /// Node ID of the selector scope root for `:scope` (0 = no scoped query).
+    pub scope_root_id: u32,
+    /// Node ID named by the document URL fragment for `:target` selectors.
+    pub target_id: u32,
+    /// Document URL used by URL-state selectors such as `:local-link`.
+    pub document_url: &'a str,
     /// Previous non-text sibling info for `+` and `~` combinators.
     /// Each entry: (tag, id, classes) of preceding element siblings.
     pub prev_siblings: &'a [(String, String, String)],
@@ -174,6 +180,9 @@ pub fn matches_selector_with_ancestors(
                             html_box: None,
                             hover_chain: ctx.hover_chain,
                             element_id: anc.node_id,
+                            scope_root_id: ctx.scope_root_id,
+                            target_id: ctx.target_id,
+                            document_url: ctx.document_url,
                             prev_siblings: &[],
                             next_siblings: &[],
                         };
@@ -203,6 +212,9 @@ pub fn matches_selector_with_ancestors(
                             html_box: None,
                             hover_chain: ctx.hover_chain,
                             element_id: parent.node_id,
+                            scope_root_id: ctx.scope_root_id,
+                            target_id: ctx.target_id,
+                            document_url: ctx.document_url,
                             prev_siblings: &[],
                             next_siblings: &[],
                         };
@@ -290,6 +302,9 @@ fn matches_sibling(
         html_box: None,
         hover_chain: ctx.hover_chain,
         element_id: 0,
+        scope_root_id: ctx.scope_root_id,
+        target_id: ctx.target_id,
+        document_url: ctx.document_url,
         prev_siblings: sib_prev,
         next_siblings: &[],
     };
@@ -422,6 +437,7 @@ pub(crate) fn matches_part_with_context(
                 "last-of-type" => ctx.type_child_index + 1 == ctx.type_sibling_count,
                 "only-of-type" => ctx.type_sibling_count == 1,
                 "root" => tag.eq_ignore_ascii_case("html"),
+                "scope" => ctx.scope_root_id != 0 && ctx.element_id == ctx.scope_root_id,
                 // Selectors §14.3 — no element children and no TEXT children.
                 // Comments and processing instructions do not count, which is
                 // why this asks `is_element`/`is_text_node` rather than
@@ -611,9 +627,17 @@ pub(crate) fn matches_part_with_context(
                     .is_some_and(|v| v.range_applicable && v.valid),
                 "out-of-range" => selector_validity(tag, attrs, ctx.html_box, ancestors)
                     .is_some_and(|v| v.range_underflow || v.range_overflow),
-                // These require user-interaction and autofill state that is
-                // not carried in the selector context yet.
-                "user-valid" | "user-invalid" | "autofill" => false,
+                "user-valid" => {
+                    ctx.html_box.is_some_and(selector_has_user_input)
+                        && selector_validity(tag, attrs, ctx.html_box, ancestors)
+                            .is_some_and(|v| v.valid)
+                }
+                "user-invalid" => {
+                    ctx.html_box.is_some_and(selector_has_user_input)
+                        && selector_validity(tag, attrs, ctx.html_box, ancestors)
+                            .is_some_and(|v| !v.valid)
+                }
+                "autofill" => ctx.html_box.is_some_and(|node| node.autofilled),
                 "blank" => ctx
                     .html_box
                     .map(selector_box_value)
@@ -728,12 +752,88 @@ pub(crate) fn matches_part_with_context(
                             .unwrap_or_else(|| "ltr".to_string());
                         return dir == want;
                     }
-                    if pc.starts_with("host(") || pc.starts_with("host-context(") || pc == "host" {
-                        return false;
+                    if pc == "host" {
+                        return ctx.html_box.is_none() && !ancestors.is_empty();
                     }
+                    if let Some(arg) = pc.strip_prefix("host(").and_then(|s| s.strip_suffix(')')) {
+                        if ctx.html_box.is_some() || ancestors.is_empty() {
+                            return false;
+                        }
+                        let parsed = parse_selector(arg.trim());
+                        if parsed.parts.is_empty() {
+                            return false;
+                        }
+                        return parsed.matches_with_ancestors_ctx_raw(
+                            tag,
+                            attrs,
+                            child_index,
+                            sibling_count,
+                            ancestors,
+                            ctx,
+                        );
+                    }
+                    if let Some(arg) = pc
+                        .strip_prefix("host-context(")
+                        .and_then(|s| s.strip_suffix(')'))
+                    {
+                        if ctx.html_box.is_some() || ancestors.is_empty() {
+                            return false;
+                        }
+                        let parsed = parse_selector(arg.trim());
+                        if parsed.parts.is_empty() {
+                            return false;
+                        }
+                        if parsed.matches_with_ancestors_ctx_raw(
+                            tag,
+                            attrs,
+                            child_index,
+                            sibling_count,
+                            ancestors,
+                            ctx,
+                        ) {
+                            return true;
+                        }
+                        return ancestors.iter().enumerate().any(|(i, anc)| {
+                            let anc_ctx = MatchContext {
+                                focused_box: ctx.focused_box,
+                                keyboard_focus: ctx.keyboard_focus,
+                                type_child_index: anc.type_child_index,
+                                type_sibling_count: anc.type_sibling_count,
+                                html_box: None,
+                                hover_chain: ctx.hover_chain,
+                                element_id: anc.node_id,
+                                scope_root_id: ctx.scope_root_id,
+                                target_id: ctx.target_id,
+                                document_url: ctx.document_url,
+                                prev_siblings: &[],
+                                next_siblings: &[],
+                            };
+                            parsed.matches_with_ancestors_ctx_raw(
+                                &anc.tag,
+                                &anc.attributes,
+                                anc.child_index,
+                                anc.sibling_count,
+                                &ancestors[..i],
+                                &anc_ctx,
+                            )
+                        });
+                    }
+                    if pc == "target" {
+                        return ctx.target_id != 0 && ctx.element_id == ctx.target_id;
+                    }
+                    if pc == "target-within" {
+                        return ctx.target_id != 0
+                            && (ctx.element_id == ctx.target_id
+                                || ctx
+                                    .html_box
+                                    .is_some_and(|b| contains_node_id(b, ctx.target_id)));
+                    }
+                    if pc == "local-link" {
+                        return is_local_link(tag, attrs, ctx.document_url);
+                    }
+
                     // Everything left is a pseudo-class this engine recognises
-                    // but has no state for — `:target` with no URL fragment,
-                    // `:modal`, `:fullscreen`, `:lang()`, the media-resource
+                    // but has no state for — `:fullscreen` and the media-resource
                     // ones. They do not match.
                     //
                     // This used to `return true` "for forward compat", which
@@ -896,6 +996,10 @@ fn selector_validity(
     Some(out)
 }
 
+fn selector_has_user_input(node: &crate::types::WebCore) -> bool {
+    node.dirty_value || node.dirty_checked || node.dirty_selectedness
+}
+
 fn selector_box_value(b: &crate::types::WebCore) -> String {
     if let Some(value) = &b.value_state {
         return value.clone();
@@ -943,6 +1047,34 @@ fn is_or_contains_focused(b: &crate::types::WebCore, focused: u32) -> bool {
     false
 }
 
+fn contains_node_id(b: &crate::types::WebCore, target_id: u32) -> bool {
+    for child in &b.children {
+        if child.node_id != 0 && child.node_id == target_id {
+            return true;
+        }
+        if contains_node_id(child, target_id) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_local_link(tag: &str, attrs: &crate::dom::attrs::AttrMap, document_url: &str) -> bool {
+    if !matches!(tag, "a" | "area" | "link") {
+        return false;
+    }
+    let Some(href) = attrs.get("href") else {
+        return false;
+    };
+    let Some(base) = crate::dom::url::parse(document_url, None) else {
+        return false;
+    };
+    let Some(link) = crate::dom::url::parse(href, Some(&base)) else {
+        return false;
+    };
+    link.origin() == base.origin() && link.pathname() == base.pathname() && link.query == base.query
+}
+
 /// Check if any descendant of `node` matches `sel`.
 /// Does anything in `node`'s subtree satisfy the relative selector `sel`?
 ///
@@ -977,6 +1109,9 @@ fn has_descendant_matching(
                             html_box: Some(child),
                             hover_chain: &empty_hover,
                             element_id: child.node_id,
+                            scope_root_id: 0,
+                            target_id: 0,
+                            document_url: "",
                             prev_siblings: &[],
                             next_siblings: &[],
                         };
@@ -1014,6 +1149,9 @@ fn has_descendant_matching(
             html_box: Some(child),
             hover_chain: &empty_hover,
             element_id: child.node_id,
+            scope_root_id: 0,
+            target_id: 0,
+            document_url: "",
             prev_siblings: &[],
             next_siblings: &[],
         };
