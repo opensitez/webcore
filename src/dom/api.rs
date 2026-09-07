@@ -785,6 +785,22 @@ impl Document {
         self.style_dirty = true;
     }
 
+    /// Host/browser autofill state for `:autofill`.
+    ///
+    /// Autofill is not a content attribute, so this updates element state only
+    /// and dirties style for selector re-matching.
+    pub fn set_autofilled(&mut self, id: u32, autofilled: bool) {
+        if let Some(node) = self.find_webcore_mut(id) {
+            if node.autofilled == autofilled {
+                return;
+            }
+            node.autofilled = autofilled;
+            node.layout.layout_dirty = true;
+            node.layout.intrinsic_dirty = true;
+        }
+        self.style_dirty = true;
+    }
+
     /// `element.focus()`.
     ///
     /// Focus is a field on the document here — `process_key_event` reads
@@ -2330,6 +2346,51 @@ impl Document {
         removed
     }
 
+    // ── Stylesheet CSSOM ──
+
+    /// Number of document stylesheets exposed through the current aggregate sheet.
+    pub fn style_sheet_len(&self) -> usize {
+        1
+    }
+
+    /// Serialized `cssRules` for the aggregate document stylesheet.
+    pub fn style_sheet_css_rules(&self, sheet_index: usize) -> Option<Vec<String>> {
+        if sheet_index == 0 {
+            Some(self.stylesheet.css_rules())
+        } else {
+            None
+        }
+    }
+
+    /// Insert one CSS rule into the aggregate document stylesheet.
+    pub fn insert_style_sheet_rule(
+        &mut self,
+        sheet_index: usize,
+        css_text: &str,
+        rule_index: usize,
+    ) -> Result<usize, String> {
+        if sheet_index != 0 {
+            return Err("IndexSizeError".to_string());
+        }
+        let inserted = self.stylesheet.insert_author_rule(css_text, rule_index)?;
+        self.style_dirty = true;
+        Ok(inserted)
+    }
+
+    /// Delete one CSS rule from the aggregate document stylesheet.
+    pub fn delete_style_sheet_rule(
+        &mut self,
+        sheet_index: usize,
+        rule_index: usize,
+    ) -> Result<(), String> {
+        if sheet_index != 0 {
+            return Err("IndexSizeError".to_string());
+        }
+        self.stylesheet.delete_rule(rule_index)?;
+        self.style_dirty = true;
+        Ok(())
+    }
+
     // ── Layout queries ──
 
     fn raw_border_rect_document(&self, id: u32) -> Option<Rect> {
@@ -2473,17 +2534,39 @@ impl Document {
         let max_y = (self.element_scroll_height(id) - self.client_height(id)).max(0.0);
         let old_x = self.element_scroll_left(id);
         let old_y = self.element_scroll_top(id);
+        let target_x = if x.is_finite() {
+            x.clamp(0.0, max_x)
+        } else {
+            0.0
+        };
+        let target_y = if y.is_finite() {
+            y.clamp(0.0, max_y)
+        } else {
+            0.0
+        };
+        let smooth = self
+            .find_webcore(id)
+            .is_some_and(|node| node.style.scroll_behavior == crate::types::ScrollBehavior::Smooth);
+        if smooth {
+            if (target_x - old_x).abs() <= 0.01 && (target_y - old_y).abs() <= 0.01 {
+                return;
+            }
+            self.smooth_scrolls.retain(|s| s.element_id != id);
+            self.smooth_scrolls.push(crate::types::SmoothScrollState {
+                element_id: id,
+                start_x: old_x,
+                start_y: old_y,
+                target_x,
+                target_y,
+                start_time: std::time::Instant::now(),
+                duration: std::time::Duration::from_millis(250),
+            });
+            self.needs_animation_frame = true;
+            return;
+        }
         if let Some(node) = self.find_webcore_mut(id) {
-            node.layout.scroll_left = if x.is_finite() {
-                x.clamp(0.0, max_x)
-            } else {
-                0.0
-            };
-            node.layout.scroll_top = if y.is_finite() {
-                y.clamp(0.0, max_y)
-            } else {
-                0.0
-            };
+            node.layout.scroll_left = target_x;
+            node.layout.scroll_top = target_y;
         }
         if (self.element_scroll_left(id) - old_x).abs() > 0.01
             || (self.element_scroll_top(id) - old_y).abs() > 0.01
@@ -2498,6 +2581,91 @@ impl Document {
         let x = self.element_scroll_left(id) + dx;
         let y = self.element_scroll_top(id) + dy;
         self.element_scroll_to(id, x, y);
+    }
+
+    /// Programmatic viewport scroll. Honors root `scroll-behavior:smooth`.
+    pub fn viewport_scroll_to(&mut self, x: f32, y: f32, viewport_w: f32, viewport_h: f32) -> bool {
+        let doc_h =
+            crate::types::Document::scroll_height(&self.root).max(self.root.layout.margin_rect.h);
+        let doc_w = self.root.layout.margin_rect.w;
+        let old_x = self.scroll_x;
+        let old_y = self.scroll_y;
+        let target_x = x.max(0.0).min((doc_w - viewport_w).max(0.0));
+        let target_y = if self.viewport_y_scroll_locked() {
+            self.scroll_y
+        } else {
+            y.max(0.0).min((doc_h - viewport_h).max(0.0))
+        };
+        if (target_x - old_x).abs() <= 0.01 && (target_y - old_y).abs() <= 0.01 {
+            return false;
+        }
+        if self.root.style.scroll_behavior == crate::types::ScrollBehavior::Smooth {
+            self.smooth_scrolls.retain(|s| s.element_id != 0);
+            self.smooth_scrolls.push(crate::types::SmoothScrollState {
+                element_id: 0,
+                start_x: old_x,
+                start_y: old_y,
+                target_x,
+                target_y,
+                start_time: std::time::Instant::now(),
+                duration: std::time::Duration::from_millis(250),
+            });
+            self.needs_animation_frame = true;
+            return true;
+        }
+        self.scroll_x = target_x;
+        self.scroll_y = target_y;
+        self.fire_window_event("scroll");
+        true
+    }
+
+    pub fn tick_smooth_scrolls(&mut self, now: std::time::Instant) {
+        if self.smooth_scrolls.is_empty() {
+            return;
+        }
+        let mut remaining = Vec::with_capacity(self.smooth_scrolls.len());
+        let mut scrolled = Vec::new();
+        for state in std::mem::take(&mut self.smooth_scrolls) {
+            let denom = state.duration.as_secs_f32().max(0.001);
+            let t = (now.duration_since(state.start_time).as_secs_f32() / denom).clamp(0.0, 1.0);
+            let eased = t * t * (3.0 - 2.0 * t);
+            let x = state.start_x + (state.target_x - state.start_x) * eased;
+            let y = state.start_y + (state.target_y - state.start_y) * eased;
+            if state.element_id == 0 {
+                let old_x = self.scroll_x;
+                let old_y = self.scroll_y;
+                self.scroll_x = x;
+                self.scroll_y = y;
+                if (self.scroll_x - old_x).abs() > 0.01 || (self.scroll_y - old_y).abs() > 0.01 {
+                    scrolled.push(0);
+                }
+            } else if let Some(node) = self.find_webcore_mut(state.element_id) {
+                let old_x = node.layout.scroll_left;
+                let old_y = node.layout.scroll_top;
+                node.layout.scroll_left = x;
+                node.layout.scroll_top = y;
+                if (node.layout.scroll_left - old_x).abs() > 0.01
+                    || (node.layout.scroll_top - old_y).abs() > 0.01
+                {
+                    scrolled.push(state.element_id);
+                }
+            }
+            if t < 1.0 {
+                remaining.push(state);
+            }
+        }
+        self.smooth_scrolls = remaining;
+        for id in scrolled {
+            if id == 0 {
+                self.fire_window_event("scroll");
+            } else {
+                let mut event = crate::dom::events::DomEvent::new("scroll", id);
+                self.dispatch_dom_event(&mut event);
+            }
+        }
+        if !self.smooth_scrolls.is_empty() {
+            self.needs_animation_frame = true;
+        }
     }
 
     /// `document.elementFromPoint(x, y)` — viewport coordinates to topmost element.
@@ -2749,6 +2917,79 @@ fn inline_shorthand_longhands(prop: &str) -> Option<&'static [&'static str]> {
         "border-bottom-color",
         "border-left-color",
     ];
+    const FONT_LONGHANDS: &[&str] = &[
+        "font-family",
+        "font-size",
+        "font-weight",
+        "font-style",
+        "font-stretch",
+        "line-height",
+        "font-variant",
+        "font-variant-alternates",
+        "font-variant-caps",
+        "font-variant-east-asian",
+        "font-variant-emoji",
+        "font-variant-ligatures",
+        "font-variant-numeric",
+        "font-variant-position",
+        "font-feature-settings",
+        "font-variation-settings",
+    ];
+    const BACKGROUND_LONGHANDS: &[&str] = &[
+        "background-color",
+        "background-image",
+        "background-position",
+        "background-size",
+        "background-repeat",
+        "background-attachment",
+        "background-origin",
+        "background-clip",
+        "background-blend-mode",
+    ];
+    const LIST_STYLE_LONGHANDS: &[&str] =
+        &["list-style-type", "list-style-position", "list-style-image"];
+    const TRANSITION_LONGHANDS: &[&str] = &[
+        "transition-property",
+        "transition-duration",
+        "transition-timing-function",
+        "transition-delay",
+        "transition-behavior",
+    ];
+    const ANIMATION_LONGHANDS: &[&str] = &[
+        "animation-name",
+        "animation-duration",
+        "animation-timing-function",
+        "animation-delay",
+        "animation-iteration-count",
+        "animation-direction",
+        "animation-fill-mode",
+        "animation-play-state",
+        "animation-composition",
+    ];
+    const MASK_LONGHANDS: &[&str] = &[
+        "mask-image",
+        "mask-mode",
+        "mask-repeat",
+        "mask-position",
+        "mask-size",
+        "mask-clip",
+        "mask-origin",
+        "mask-composite",
+    ];
+    const BORDER_IMAGE_LONGHANDS: &[&str] = &[
+        "border-image-source",
+        "border-image-slice",
+        "border-image-width",
+        "border-image-outset",
+        "border-image-repeat",
+    ];
+    const OUTLINE_LONGHANDS: &[&str] = &["outline-width", "outline-style", "outline-color"];
+    const COLUMNS_LONGHANDS: &[&str] = &["column-width", "column-count"];
+    const COLUMN_RULE_LONGHANDS: &[&str] = &[
+        "column-rule-width",
+        "column-rule-style",
+        "column-rule-color",
+    ];
     Some(match prop {
         "margin" => &["margin-top", "margin-right", "margin-bottom", "margin-left"],
         "padding" => &[
@@ -2760,6 +3001,16 @@ fn inline_shorthand_longhands(prop: &str) -> Option<&'static [&'static str]> {
         "inset" => &["top", "right", "bottom", "left"],
         "gap" => &["row-gap", "column-gap"],
         "border" => BORDER_LONGHANDS,
+        "font" => FONT_LONGHANDS,
+        "background" => BACKGROUND_LONGHANDS,
+        "list-style" => LIST_STYLE_LONGHANDS,
+        "transition" => TRANSITION_LONGHANDS,
+        "animation" => ANIMATION_LONGHANDS,
+        "mask" => MASK_LONGHANDS,
+        "border-image" => BORDER_IMAGE_LONGHANDS,
+        "outline" => OUTLINE_LONGHANDS,
+        "columns" => COLUMNS_LONGHANDS,
+        "column-rule" => COLUMN_RULE_LONGHANDS,
         "border-top" => &["border-top-width", "border-top-style", "border-top-color"],
         "border-right" => &[
             "border-right-width",
@@ -2817,6 +3068,16 @@ fn expand_inline_shorthand(prop: &str, value: &str) -> Option<Vec<InlineStyleDec
                 make("column-gap", toks.get(1).copied().unwrap_or(toks[0])),
             ]
         }
+        "font" => expand_inline_font_shorthand(&value, important)?,
+        "background" => expand_inline_background_shorthand(&value, important)?,
+        "list-style" => expand_inline_list_style_shorthand(&value, important),
+        "transition" => expand_inline_transition_shorthand(&value, important),
+        "animation" => expand_inline_animation_shorthand(&value, important),
+        "mask" => expand_inline_mask_shorthand(&value, important),
+        "border-image" => expand_inline_border_image_shorthand(&value, important),
+        "outline" => expand_inline_outline_shorthand(&value, important),
+        "columns" => expand_inline_columns_shorthand(&value, important),
+        "column-rule" => expand_inline_column_rule_shorthand(&value, important),
         "border" => {
             let (width, style, color) = parse_inline_border_components(&toks);
             let sides = ["top", "right", "bottom", "left"];
@@ -2844,6 +3105,838 @@ fn expand_inline_shorthand(prop: &str, value: &str) -> Option<Vec<InlineStyleDec
         }
         _ => return None,
     })
+}
+
+fn expand_inline_background_shorthand(
+    value: &str,
+    important: bool,
+) -> Option<Vec<InlineStyleDecl>> {
+    use crate::types::{ComputedStyle, GradientType};
+
+    let mut style = ComputedStyle::default();
+    crate::css::apply_property(&mut style, "background", value);
+    if style.gradient_type != GradientType::None {
+        return None;
+    }
+
+    let make = |name: &str, value: String| InlineStyleDecl {
+        name: name.to_string(),
+        value,
+        important,
+    };
+    Some(vec![
+        make(
+            "background-color",
+            serialize_inline_color(style.background_color),
+        ),
+        make(
+            "background-image",
+            serialize_inline_background_image(&style.background_image_url),
+        ),
+        make(
+            "background-position",
+            format!(
+                "{} {}",
+                crate::html::serializer::serialize_length(&style.background_position_x),
+                crate::html::serializer::serialize_length(&style.background_position_y)
+            ),
+        ),
+        make("background-size", serialize_inline_background_size(&style)),
+        make(
+            "background-repeat",
+            serialize_inline_background_repeat(style.background_repeat),
+        ),
+        make(
+            "background-attachment",
+            serialize_inline_background_attachment(style.background_attachment),
+        ),
+        make(
+            "background-origin",
+            serialize_inline_background_clip(style.background_origin),
+        ),
+        make(
+            "background-clip",
+            serialize_inline_background_clip(style.background_clip),
+        ),
+        make("background-blend-mode", style.background_blend_mode.clone()),
+    ])
+}
+
+fn expand_inline_list_style_shorthand(value: &str, important: bool) -> Vec<InlineStyleDecl> {
+    let mut style = crate::types::ComputedStyle::default();
+    crate::css::apply_property(&mut style, "list-style", value);
+
+    let make = |name: &str, value: String| InlineStyleDecl {
+        name: name.to_string(),
+        value,
+        important,
+    };
+    vec![
+        make(
+            "list-style-type",
+            if style.custom_list_style_type.is_empty() {
+                serialize_inline_list_style_type(style.list_style_type)
+            } else {
+                style.custom_list_style_type.clone()
+            },
+        ),
+        make(
+            "list-style-position",
+            serialize_inline_list_style_position(style.list_style_position),
+        ),
+        make(
+            "list-style-image",
+            serialize_inline_list_style_image(&style.list_style_image),
+        ),
+    ]
+}
+
+fn expand_inline_transition_shorthand(value: &str, important: bool) -> Vec<InlineStyleDecl> {
+    let transitions = crate::css::parse_transition_shorthand(value);
+    let make = |name: &str, value: String| InlineStyleDecl {
+        name: name.to_string(),
+        value,
+        important,
+    };
+    if transitions.is_empty() {
+        return vec![
+            make("transition-property", "all".to_string()),
+            make("transition-duration", "0s".to_string()),
+            make("transition-timing-function", "ease".to_string()),
+            make("transition-delay", "0s".to_string()),
+            make("transition-behavior", "normal".to_string()),
+        ];
+    }
+    let join = |values: Vec<String>| values.join(", ");
+    vec![
+        make(
+            "transition-property",
+            join(transitions.iter().map(|tr| tr.property.clone()).collect()),
+        ),
+        make(
+            "transition-duration",
+            join(
+                transitions
+                    .iter()
+                    .map(|tr| serialize_inline_time_ms(tr.duration_ms))
+                    .collect(),
+            ),
+        ),
+        make(
+            "transition-timing-function",
+            join(
+                transitions
+                    .iter()
+                    .map(|tr| serialize_inline_easing(&tr.timing_fn))
+                    .collect(),
+            ),
+        ),
+        make(
+            "transition-delay",
+            join(
+                transitions
+                    .iter()
+                    .map(|tr| serialize_inline_time_ms(tr.delay_ms))
+                    .collect(),
+            ),
+        ),
+        make(
+            "transition-behavior",
+            join(
+                transitions
+                    .iter()
+                    .map(|tr| {
+                        if tr.allow_discrete {
+                            "allow-discrete".to_string()
+                        } else {
+                            "normal".to_string()
+                        }
+                    })
+                    .collect(),
+            ),
+        ),
+    ]
+}
+
+fn expand_inline_animation_shorthand(value: &str, important: bool) -> Vec<InlineStyleDecl> {
+    let animations = crate::css::parse_animation_shorthand(value);
+    let make = |name: &str, value: String| InlineStyleDecl {
+        name: name.to_string(),
+        value,
+        important,
+    };
+    if animations.is_empty() {
+        return vec![
+            make("animation-name", "none".to_string()),
+            make("animation-duration", "0s".to_string()),
+            make("animation-timing-function", "ease".to_string()),
+            make("animation-delay", "0s".to_string()),
+            make("animation-iteration-count", "1".to_string()),
+            make("animation-direction", "normal".to_string()),
+            make("animation-fill-mode", "none".to_string()),
+            make("animation-play-state", "running".to_string()),
+            make("animation-composition", "replace".to_string()),
+        ];
+    }
+
+    let join = |values: Vec<String>| values.join(", ");
+    vec![
+        make(
+            "animation-name",
+            join(animations.iter().map(|anim| anim.name.clone()).collect()),
+        ),
+        make(
+            "animation-duration",
+            join(
+                animations
+                    .iter()
+                    .map(|anim| serialize_inline_time_ms(anim.duration_ms))
+                    .collect(),
+            ),
+        ),
+        make(
+            "animation-timing-function",
+            join(
+                animations
+                    .iter()
+                    .map(|anim| serialize_inline_easing(&anim.timing_fn))
+                    .collect(),
+            ),
+        ),
+        make(
+            "animation-delay",
+            join(
+                animations
+                    .iter()
+                    .map(|anim| serialize_inline_time_ms(anim.delay_ms))
+                    .collect(),
+            ),
+        ),
+        make(
+            "animation-iteration-count",
+            join(
+                animations
+                    .iter()
+                    .map(|anim| serialize_inline_iteration_count(anim.iteration_count))
+                    .collect(),
+            ),
+        ),
+        make(
+            "animation-direction",
+            join(
+                animations
+                    .iter()
+                    .map(|anim| serialize_inline_animation_direction(&anim.direction).to_string())
+                    .collect(),
+            ),
+        ),
+        make(
+            "animation-fill-mode",
+            join(
+                animations
+                    .iter()
+                    .map(|anim| serialize_inline_animation_fill_mode(&anim.fill_mode).to_string())
+                    .collect(),
+            ),
+        ),
+        make(
+            "animation-play-state",
+            join(
+                animations
+                    .iter()
+                    .map(|anim| {
+                        if anim.play_state_paused {
+                            "paused".to_string()
+                        } else {
+                            "running".to_string()
+                        }
+                    })
+                    .collect(),
+            ),
+        ),
+        make(
+            "animation-composition",
+            join(
+                animations
+                    .iter()
+                    .map(|anim| {
+                        serialize_inline_animation_composition(&anim.composition).to_string()
+                    })
+                    .collect(),
+            ),
+        ),
+    ]
+}
+
+fn expand_inline_mask_shorthand(value: &str, important: bool) -> Vec<InlineStyleDecl> {
+    let mut style = crate::types::ComputedStyle::default();
+    crate::css::apply_property(&mut style, "mask", value);
+    let rare = style.rare();
+    let make = |name: &str, value: String| InlineStyleDecl {
+        name: name.to_string(),
+        value,
+        important,
+    };
+    vec![
+        make(
+            "mask-image",
+            if rare.mask_image_url.is_empty() {
+                "none".to_string()
+            } else {
+                format!(
+                    "url(\"{}\")",
+                    rare.mask_image_url
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                )
+            },
+        ),
+        make("mask-mode", inline_rare_or(&rare.mask_mode, "match-source")),
+        make("mask-repeat", inline_rare_or(&rare.mask_repeat, "repeat")),
+        make(
+            "mask-position",
+            inline_rare_or(&rare.mask_position, "0% 0%"),
+        ),
+        make("mask-size", inline_rare_or(&rare.mask_size, "auto")),
+        make("mask-clip", inline_rare_or(&rare.mask_clip, "border-box")),
+        make(
+            "mask-origin",
+            inline_rare_or(&rare.mask_origin, "border-box"),
+        ),
+        make(
+            "mask-composite",
+            inline_rare_or(&rare.mask_composite, "add"),
+        ),
+    ]
+}
+
+fn inline_rare_or(value: &str, initial: &str) -> String {
+    if value.is_empty() {
+        initial.to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn expand_inline_border_image_shorthand(value: &str, important: bool) -> Vec<InlineStyleDecl> {
+    let mut style = crate::types::ComputedStyle::default();
+    crate::css::apply_property(&mut style, "border-image", value);
+    let make = |name: &str, value: String| InlineStyleDecl {
+        name: name.to_string(),
+        value,
+        important,
+    };
+    vec![
+        make("border-image-source", style.border_image_source.clone()),
+        make("border-image-slice", style.border_image_slice.clone()),
+        make("border-image-width", style.border_image_width.clone()),
+        make("border-image-outset", style.border_image_outset.clone()),
+        make("border-image-repeat", style.border_image_repeat.clone()),
+    ]
+}
+
+fn expand_inline_outline_shorthand(value: &str, important: bool) -> Vec<InlineStyleDecl> {
+    let mut style = crate::types::ComputedStyle::default();
+    crate::css::apply_property(&mut style, "outline", value);
+    vec![
+        InlineStyleDecl {
+            name: "outline-width".to_string(),
+            value: format!("{}px", trim_inline_float(style.outline_width)),
+            important,
+        },
+        InlineStyleDecl {
+            name: "outline-style".to_string(),
+            value: serialize_inline_border_style(style.outline_style).to_string(),
+            important,
+        },
+        InlineStyleDecl {
+            name: "outline-color".to_string(),
+            value: serialize_inline_color(style.outline_color),
+            important,
+        },
+    ]
+}
+
+fn expand_inline_columns_shorthand(value: &str, important: bool) -> Vec<InlineStyleDecl> {
+    let mut style = crate::types::ComputedStyle::default();
+    crate::css::apply_property(&mut style, "columns", value);
+    vec![
+        InlineStyleDecl {
+            name: "column-width".to_string(),
+            value: crate::html::serializer::serialize_length(&style.column_width),
+            important,
+        },
+        InlineStyleDecl {
+            name: "column-count".to_string(),
+            value: style
+                .column_count
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "auto".to_string()),
+            important,
+        },
+    ]
+}
+
+fn expand_inline_column_rule_shorthand(value: &str, important: bool) -> Vec<InlineStyleDecl> {
+    let mut style = crate::types::ComputedStyle::default();
+    crate::css::apply_property(&mut style, "column-rule", value);
+    vec![
+        InlineStyleDecl {
+            name: "column-rule-width".to_string(),
+            value: crate::html::serializer::serialize_length(&style.column_rule_width),
+            important,
+        },
+        InlineStyleDecl {
+            name: "column-rule-style".to_string(),
+            value: serialize_inline_border_style(style.column_rule_style).to_string(),
+            important,
+        },
+        InlineStyleDecl {
+            name: "column-rule-color".to_string(),
+            value: serialize_inline_color(style.column_rule_color),
+            important,
+        },
+    ]
+}
+
+fn expand_inline_font_shorthand(value: &str, important: bool) -> Option<Vec<InlineStyleDecl>> {
+    use crate::types::{ComputedStyle, FontStyle};
+
+    if value.split_whitespace().count() == 1 {
+        let lower = value.trim().to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "caption" | "icon" | "menu" | "message-box" | "small-caption" | "status-bar"
+        ) {
+            return None;
+        }
+    }
+
+    if !inline_font_shorthand_has_size(value) {
+        return None;
+    }
+
+    let mut style = ComputedStyle::default();
+    crate::css::apply_property(&mut style, "font", value);
+
+    let make = |name: &str, value: String| InlineStyleDecl {
+        name: name.to_string(),
+        value,
+        important,
+    };
+    Some(vec![
+        make(
+            "font-family",
+            serialize_inline_font_family_list(&style.font_family),
+        ),
+        make(
+            "font-size",
+            crate::html::serializer::serialize_length(&style.font_size),
+        ),
+        make("font-weight", style.font_weight.value().to_string()),
+        make(
+            "font-style",
+            match style.font_style {
+                FontStyle::Normal => "normal",
+                FontStyle::Italic => "italic",
+                FontStyle::Oblique => "oblique",
+            }
+            .to_string(),
+        ),
+        make(
+            "font-stretch",
+            serialize_inline_font_stretch(style.font_stretch),
+        ),
+        make(
+            "line-height",
+            crate::html::serializer::serialize_length(&style.line_height),
+        ),
+        make(
+            "font-variant",
+            if style.small_caps {
+                "small-caps".to_string()
+            } else {
+                "normal".to_string()
+            },
+        ),
+        make(
+            "font-variant-alternates",
+            style.font_variant_alternates.clone(),
+        ),
+        make("font-variant-caps", style.font_variant_caps.clone()),
+        make(
+            "font-variant-east-asian",
+            style.font_variant_east_asian.clone(),
+        ),
+        make("font-variant-emoji", style.font_variant_emoji.clone()),
+        make(
+            "font-variant-ligatures",
+            style.font_variant_ligatures.clone(),
+        ),
+        make("font-variant-numeric", style.font_variant_numeric.clone()),
+        make("font-variant-position", style.font_variant_position.clone()),
+        make(
+            "font-feature-settings",
+            serialize_inline_font_feature_settings(&style.rare().font_feature_settings),
+        ),
+        make(
+            "font-variation-settings",
+            serialize_inline_font_variation_settings(&style.rare().font_variation_settings),
+        ),
+    ])
+}
+
+fn inline_font_shorthand_has_size(value: &str) -> bool {
+    value.split_whitespace().any(|tok| {
+        let size = tok.split_once('/').map(|(size, _)| size).unwrap_or(tok);
+        let lower = size.to_ascii_lowercase();
+        matches!(
+            lower.as_str(),
+            "xx-small"
+                | "x-small"
+                | "small"
+                | "medium"
+                | "large"
+                | "x-large"
+                | "xx-large"
+                | "xxx-large"
+                | "smaller"
+                | "larger"
+        ) || crate::css::parse_length_checked(size).is_some()
+    })
+}
+
+fn serialize_inline_font_family_list(value: &str) -> String {
+    crate::css::split_font_families(value)
+        .into_iter()
+        .map(|family| {
+            if is_inline_css_identifier(&family) {
+                family
+            } else {
+                format!("\"{}\"", family.replace('\\', "\\\\").replace('"', "\\\""))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn is_inline_css_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_' || first == '-')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn serialize_inline_font_stretch(stretch: f32) -> String {
+    match stretch {
+        n if (n - 50.0).abs() < f32::EPSILON => "ultra-condensed".to_string(),
+        n if (n - 62.5).abs() < f32::EPSILON => "extra-condensed".to_string(),
+        n if (n - 75.0).abs() < f32::EPSILON => "condensed".to_string(),
+        n if (n - 87.5).abs() < f32::EPSILON => "semi-condensed".to_string(),
+        n if (n - 100.0).abs() < f32::EPSILON => "normal".to_string(),
+        n if (n - 112.5).abs() < f32::EPSILON => "semi-expanded".to_string(),
+        n if (n - 125.0).abs() < f32::EPSILON => "expanded".to_string(),
+        n if (n - 150.0).abs() < f32::EPSILON => "extra-expanded".to_string(),
+        n if (n - 200.0).abs() < f32::EPSILON => "ultra-expanded".to_string(),
+        n => format!("{n}%"),
+    }
+}
+
+fn serialize_inline_font_feature_settings(settings: &[(String, u32)]) -> String {
+    if settings.is_empty() {
+        return "normal".to_string();
+    }
+    settings
+        .iter()
+        .map(|(tag, value)| {
+            if *value == 1 {
+                format!("\"{}\"", tag.replace('\\', "\\\\").replace('"', "\\\""))
+            } else {
+                format!(
+                    "\"{}\" {}",
+                    tag.replace('\\', "\\\\").replace('"', "\\\""),
+                    value
+                )
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn serialize_inline_font_variation_settings(settings: &[(String, f32)]) -> String {
+    if settings.is_empty() {
+        return "normal".to_string();
+    }
+    settings
+        .iter()
+        .map(|(tag, value)| {
+            format!(
+                "\"{}\" {}",
+                tag.replace('\\', "\\\\").replace('"', "\\\""),
+                trim_inline_float(*value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn trim_inline_float(value: f32) -> String {
+    let mut out = value.to_string();
+    if out.contains('.') {
+        while out.ends_with('0') {
+            out.pop();
+        }
+        if out.ends_with('.') {
+            out.pop();
+        }
+    }
+    out
+}
+
+fn serialize_inline_color(color: crate::types::Color) -> String {
+    if color.a == 255 {
+        format!("rgb({}, {}, {})", color.r, color.g, color.b)
+    } else {
+        let alpha = (color.a as f32 / 255.0 * 100.0).round() / 100.0;
+        format!("rgba({}, {}, {}, {})", color.r, color.g, color.b, alpha)
+    }
+}
+
+fn serialize_inline_border_style(style: crate::types::BorderStyle) -> &'static str {
+    match style {
+        crate::types::BorderStyle::None => "none",
+        crate::types::BorderStyle::Hidden => "hidden",
+        crate::types::BorderStyle::Solid => "solid",
+        crate::types::BorderStyle::Dashed => "dashed",
+        crate::types::BorderStyle::Dotted => "dotted",
+        crate::types::BorderStyle::Double => "double",
+        crate::types::BorderStyle::Inset => "inset",
+        crate::types::BorderStyle::Outset => "outset",
+        crate::types::BorderStyle::Groove => "groove",
+        crate::types::BorderStyle::Ridge => "ridge",
+    }
+}
+
+fn serialize_inline_background_image(url: &str) -> String {
+    if url.is_empty() {
+        "none".to_string()
+    } else {
+        format!(
+            "url(\"{}\")",
+            url.replace('\\', "\\\\").replace('"', "\\\"")
+        )
+    }
+}
+
+fn serialize_inline_background_size(style: &crate::types::ComputedStyle) -> String {
+    use crate::types::BackgroundSize;
+
+    match style.background_size {
+        BackgroundSize::Auto => "auto".to_string(),
+        BackgroundSize::Cover => "cover".to_string(),
+        BackgroundSize::Contain => "contain".to_string(),
+        BackgroundSize::Explicit => {
+            let width = crate::html::serializer::serialize_length(&style.background_size_w);
+            let height = crate::html::serializer::serialize_length(&style.background_size_h);
+            if height == "auto" {
+                width
+            } else {
+                format!("{width} {height}")
+            }
+        }
+    }
+}
+
+fn serialize_inline_background_repeat(repeat: crate::types::BackgroundRepeat) -> String {
+    use crate::types::{BackgroundRepeat, BackgroundRepeatAxis};
+
+    fn axis(axis: BackgroundRepeatAxis) -> &'static str {
+        match axis {
+            BackgroundRepeatAxis::Repeat => "repeat",
+            BackgroundRepeatAxis::NoRepeat => "no-repeat",
+            BackgroundRepeatAxis::Space => "space",
+            BackgroundRepeatAxis::Round => "round",
+        }
+    }
+
+    match repeat {
+        BackgroundRepeat::Repeat => "repeat".to_string(),
+        BackgroundRepeat::RepeatX => "repeat-x".to_string(),
+        BackgroundRepeat::RepeatY => "repeat-y".to_string(),
+        BackgroundRepeat::NoRepeat => "no-repeat".to_string(),
+        BackgroundRepeat::Space => "space".to_string(),
+        BackgroundRepeat::Round => "round".to_string(),
+        BackgroundRepeat::TwoValue(x, y) => format!("{} {}", axis(x), axis(y)),
+    }
+}
+
+fn serialize_inline_background_clip(clip: crate::types::BackgroundClip) -> String {
+    use crate::types::BackgroundClip;
+
+    match clip {
+        BackgroundClip::BorderBox => "border-box",
+        BackgroundClip::PaddingBox => "padding-box",
+        BackgroundClip::ContentBox => "content-box",
+        BackgroundClip::Text => "text",
+    }
+    .to_string()
+}
+
+fn serialize_inline_background_attachment(
+    attachment: crate::types::BackgroundAttachment,
+) -> String {
+    use crate::types::BackgroundAttachment;
+
+    match attachment {
+        BackgroundAttachment::Scroll => "scroll",
+        BackgroundAttachment::Fixed => "fixed",
+        BackgroundAttachment::Local => "local",
+    }
+    .to_string()
+}
+
+fn serialize_inline_list_style_type(value: crate::types::ListStyleType) -> String {
+    use crate::types::ListStyleType as L;
+
+    match value {
+        L::None => "none",
+        L::Disc => "disc",
+        L::Circle => "circle",
+        L::Square => "square",
+        L::Decimal => "decimal",
+        L::DecimalLeadingZero => "decimal-leading-zero",
+        L::LowerAlpha => "lower-alpha",
+        L::UpperAlpha => "upper-alpha",
+        L::LowerLatin => "lower-latin",
+        L::UpperLatin => "upper-latin",
+        L::LowerRoman => "lower-roman",
+        L::UpperRoman => "upper-roman",
+        L::LowerGreek => "lower-greek",
+        L::Armenian => "armenian",
+        L::Georgian => "georgian",
+        L::Hebrew => "hebrew",
+        L::Hiragana => "hiragana",
+        L::Katakana => "katakana",
+        L::HiraganaIroha => "hiragana-iroha",
+        L::KatakanaIroha => "katakana-iroha",
+        L::CjkDecimal => "cjk-decimal",
+        L::Disclosure => "disclosure-open",
+    }
+    .to_string()
+}
+
+fn serialize_inline_list_style_position(value: crate::types::ListStylePosition) -> String {
+    match value {
+        crate::types::ListStylePosition::Outside => "outside",
+        crate::types::ListStylePosition::Inside => "inside",
+    }
+    .to_string()
+}
+
+fn serialize_inline_list_style_image(url: &str) -> String {
+    if url.is_empty() {
+        "none".to_string()
+    } else {
+        format!(
+            "url(\"{}\")",
+            url.replace('\\', "\\\\").replace('"', "\\\"")
+        )
+    }
+}
+
+fn serialize_inline_time_ms(ms: f32) -> String {
+    if (ms / 1000.0).fract().abs() < f32::EPSILON {
+        format!("{}s", trim_inline_float(ms / 1000.0))
+    } else {
+        format!("{}ms", trim_inline_float(ms))
+    }
+}
+
+fn serialize_inline_iteration_count(count: f32) -> String {
+    if count.is_infinite() {
+        "infinite".to_string()
+    } else {
+        trim_inline_float(count)
+    }
+}
+
+fn serialize_inline_animation_direction(direction: &crate::types::AnimDirection) -> &'static str {
+    match direction {
+        crate::types::AnimDirection::Normal => "normal",
+        crate::types::AnimDirection::Reverse => "reverse",
+        crate::types::AnimDirection::Alternate => "alternate",
+        crate::types::AnimDirection::AlternateReverse => "alternate-reverse",
+    }
+}
+
+fn serialize_inline_animation_fill_mode(fill_mode: &crate::types::FillMode) -> &'static str {
+    match fill_mode {
+        crate::types::FillMode::None => "none",
+        crate::types::FillMode::Forwards => "forwards",
+        crate::types::FillMode::Backwards => "backwards",
+        crate::types::FillMode::Both => "both",
+    }
+}
+
+fn serialize_inline_animation_composition(
+    composition: &crate::types::AnimationComposition,
+) -> &'static str {
+    match composition {
+        crate::types::AnimationComposition::Replace => "replace",
+        crate::types::AnimationComposition::Add => "add",
+        crate::types::AnimationComposition::Accumulate => "accumulate",
+    }
+}
+
+fn serialize_inline_easing(easing: &crate::types::EasingFn) -> String {
+    match easing {
+        crate::types::EasingFn::Linear => "linear".to_string(),
+        crate::types::EasingFn::Ease => "ease".to_string(),
+        crate::types::EasingFn::EaseIn => "ease-in".to_string(),
+        crate::types::EasingFn::EaseOut => "ease-out".to_string(),
+        crate::types::EasingFn::EaseInOut => "ease-in-out".to_string(),
+        crate::types::EasingFn::CubicBezier(a, b, c, d) => format!(
+            "cubic-bezier({}, {}, {}, {})",
+            trim_inline_float(*a),
+            trim_inline_float(*b),
+            trim_inline_float(*c),
+            trim_inline_float(*d)
+        ),
+        crate::types::EasingFn::StepStart => "step-start".to_string(),
+        crate::types::EasingFn::StepEnd => "step-end".to_string(),
+        crate::types::EasingFn::Steps(count, position) => {
+            format!(
+                "steps({}, {})",
+                count,
+                serialize_inline_step_position(*position)
+            )
+        }
+        crate::types::EasingFn::LinearPoints(points) => {
+            let points = points
+                .iter()
+                .map(|(input, output)| {
+                    format!(
+                        "{} {}",
+                        trim_inline_float(*output),
+                        trim_inline_float(*input)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("linear({points})")
+        }
+    }
+}
+
+fn serialize_inline_step_position(position: crate::types::StepPosition) -> &'static str {
+    match position {
+        crate::types::StepPosition::JumpStart => "jump-start",
+        crate::types::StepPosition::JumpEnd => "jump-end",
+        crate::types::StepPosition::JumpNone => "jump-none",
+        crate::types::StepPosition::JumpBoth => "jump-both",
+    }
 }
 
 fn parse_inline_border_components<'a>(tokens: &[&'a str]) -> (&'a str, &'a str, &'a str) {
@@ -3384,6 +4477,24 @@ impl Document {
     /// the single border box, which is the correct answer for every element
     /// that generates one box and an under-count for the rest.
     pub fn get_client_rects(&self, id: u32) -> Vec<Rect> {
+        if let Some(node) = self.get_node(id) {
+            if !node.layout.line_cache.is_empty() {
+                return node
+                    .layout
+                    .line_cache
+                    .iter()
+                    .filter(|line| line.width > 0.0 && line.height > 0.0)
+                    .map(|line| {
+                        Rect::new(
+                            line.x - self.scroll_x,
+                            line.y - self.scroll_y,
+                            line.width,
+                            line.height,
+                        )
+                    })
+                    .collect();
+            }
+        }
         self.get_bounding_client_rect(id).into_iter().collect()
     }
 
@@ -3393,30 +4504,107 @@ impl Document {
         let Some(target) = self.raw_border_rect_document(id) else {
             return;
         };
+        let target_style = self.get_computed_style(id).cloned();
+        let margin_top = target_style
+            .as_ref()
+            .map(|style| {
+                self.resolve_scroll_length(&style.scroll_margin_top, style, self.viewport_h)
+            })
+            .unwrap_or(0.0);
+        let margin_bottom = target_style
+            .as_ref()
+            .map(|style| {
+                self.resolve_scroll_length(&style.scroll_margin_bottom, style, self.viewport_h)
+            })
+            .unwrap_or(0.0);
+        let margin_left = target_style
+            .as_ref()
+            .map(|style| {
+                self.resolve_scroll_length(&style.scroll_margin_left, style, self.viewport_w)
+            })
+            .unwrap_or(0.0);
+        let margin_right = target_style
+            .as_ref()
+            .map(|style| {
+                self.resolve_scroll_length(&style.scroll_margin_right, style, self.viewport_w)
+            })
+            .unwrap_or(0.0);
         let mut handled_by_ancestor = false;
         let mut current = self.parent_node(id);
         while current != 0 {
-            let scrollable = self
-                .get_computed_style(current)
+            let current_style = self.get_computed_style(current).cloned();
+            let scrollable_y = current_style
+                .as_ref()
                 .map(|style| matches!(style.overflow_y, Overflow::Scroll | Overflow::Auto))
                 .unwrap_or(false)
                 && self.element_scroll_height(current) > self.client_height(current);
-            if scrollable {
+            let scrollable_x = current_style
+                .as_ref()
+                .map(|style| matches!(style.overflow_x, Overflow::Scroll | Overflow::Auto))
+                .unwrap_or(false)
+                && self.element_scroll_width(current) > self.client_width(current);
+            if scrollable_x || scrollable_y {
                 if let Some(view) = self.raw_padding_rect_document(current) {
-                    let current_scroll = self.element_scroll_top(current);
-                    let visible_top = view.y + current_scroll;
-                    let visible_bottom = visible_top + view.h;
-                    let target_top = target.y;
-                    let target_bottom = target.y + target.h;
-                    let mut next_scroll = current_scroll;
-                    if target_top < visible_top {
-                        next_scroll = target_top - view.y;
-                    } else if target_bottom > visible_bottom {
-                        next_scroll = target_bottom - view.y - view.h;
+                    let current_scroll_x = self.element_scroll_left(current);
+                    let current_scroll_y = self.element_scroll_top(current);
+                    let (padding_top, padding_right, padding_bottom, padding_left) = current_style
+                        .as_ref()
+                        .map(|style| {
+                            (
+                                self.resolve_scroll_length(
+                                    &style.scroll_padding_top,
+                                    style,
+                                    view.h,
+                                ),
+                                self.resolve_scroll_length(
+                                    &style.scroll_padding_bottom,
+                                    style,
+                                    view.h,
+                                ),
+                                self.resolve_scroll_length(
+                                    &style.scroll_padding_left,
+                                    style,
+                                    view.w,
+                                ),
+                                self.resolve_scroll_length(
+                                    &style.scroll_padding_right,
+                                    style,
+                                    view.w,
+                                ),
+                            )
+                        })
+                        .map(|(top, bottom, left, right)| (top, right, bottom, left))
+                        .unwrap_or((0.0, 0.0, 0.0, 0.0));
+                    let visible_top = view.y + current_scroll_y + padding_top;
+                    let visible_bottom = view.y + current_scroll_y + view.h - padding_bottom;
+                    let target_top = target.y - margin_top;
+                    let target_bottom = target.y + target.h + margin_bottom;
+                    let mut next_scroll_y = current_scroll_y;
+                    if scrollable_y {
+                        if target_top < visible_top {
+                            next_scroll_y = target_top - view.y - padding_top;
+                        } else if target_bottom > visible_bottom {
+                            next_scroll_y = target_bottom - view.y - view.h + padding_bottom;
+                        }
                     }
-                    if (next_scroll - current_scroll).abs() > f32::EPSILON {
-                        let x = self.element_scroll_left(current);
-                        self.element_scroll_to(current, x, next_scroll);
+
+                    let visible_left = view.x + current_scroll_x + padding_left;
+                    let visible_right = view.x + current_scroll_x + view.w - padding_right;
+                    let target_left = target.x - margin_left;
+                    let target_right = target.x + target.w + margin_right;
+                    let mut next_scroll_x = current_scroll_x;
+                    if scrollable_x {
+                        if target_left < visible_left {
+                            next_scroll_x = target_left - view.x - padding_left;
+                        } else if target_right > visible_right {
+                            next_scroll_x = target_right - view.x - view.w + padding_right;
+                        }
+                    }
+
+                    if (next_scroll_x - current_scroll_x).abs() > f32::EPSILON
+                        || (next_scroll_y - current_scroll_y).abs() > f32::EPSILON
+                    {
+                        self.element_scroll_to(current, next_scroll_x, next_scroll_y);
                     }
                     handled_by_ancestor = true;
                 }
@@ -3424,8 +4612,25 @@ impl Document {
             current = self.parent_node(current);
         }
         if !handled_by_ancestor {
-            self.scroll_y = target.y.max(0.0);
+            self.scroll_x = (target.x - margin_left).max(0.0);
+            self.scroll_y = (target.y - margin_top).max(0.0);
         }
+    }
+
+    fn resolve_scroll_length(
+        &self,
+        length: &crate::types::CssLength,
+        style: &crate::types::ComputedStyle,
+        percent_basis: f32,
+    ) -> f32 {
+        let font_px = style.font_size.resolve(16.0, 16.0, self.root_font_px());
+        length.resolve_vp(
+            font_px,
+            percent_basis,
+            self.root_font_px(),
+            self.viewport_w,
+            self.viewport_h,
+        )
     }
 
     /// `element.offsetParent` — the nearest POSITIONED ancestor, else the body.

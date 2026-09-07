@@ -42,7 +42,13 @@ impl Document {
     /// empty ancestor chain, so `querySelector("html")` found nothing and
     /// `querySelector("html body")` had no `html` to match against.
     fn run_query(&self, selector: &str, first_only: bool) -> Vec<u32> {
-        matching_ids_from(&self.root, selector, first_only)
+        matching_ids_from_with_state(
+            &self.root,
+            selector,
+            first_only,
+            self.fragment_target_id(),
+            &self.base_url,
+        )
     }
 }
 
@@ -57,6 +63,16 @@ impl Document {
 /// headless browser's `find` reported an empty result for `table tbody`.
 /// One question, one answer.
 pub fn matching_ids_from(root: &WebCore, selector: &str, first_only: bool) -> Vec<u32> {
+    matching_ids_from_with_state(root, selector, first_only, 0, "")
+}
+
+pub fn matching_ids_from_with_state(
+    root: &WebCore,
+    selector: &str,
+    first_only: bool,
+    target_id: u32,
+    document_url: &str,
+) -> Vec<u32> {
     {
         let selectors = parse_comma_selectors(selector);
         let empty_hover = std::collections::HashSet::new();
@@ -70,6 +86,9 @@ pub fn matching_ids_from(root: &WebCore, selector: &str, first_only: bool) -> Ve
                 html_box: Some(root),
                 hover_chain: &empty_hover,
                 element_id: root.node_id,
+                scope_root_id: root.node_id,
+                target_id,
+                document_url,
                 prev_siblings: &[],
                 next_siblings: &[],
             };
@@ -97,6 +116,9 @@ pub fn matching_ids_from(root: &WebCore, selector: &str, first_only: bool) -> Ve
             &root_chain,
             &selectors,
             &empty_hover,
+            root.node_id,
+            target_id,
+            document_url,
             first_only,
             &mut results,
         );
@@ -195,6 +217,9 @@ fn query_walk(
     parent_ancestors: &[crate::css::AncestorInfo],
     selectors: &[crate::css::CssSelector],
     hover_chain: &std::collections::HashSet<u32>,
+    scope_root_id: u32,
+    target_id: u32,
+    document_url: &str,
     first_only: bool,
     results: &mut Vec<u32>,
 ) -> bool {
@@ -227,6 +252,9 @@ fn query_walk(
             html_box: Some(child),
             hover_chain,
             element_id: child.node_id,
+            scope_root_id,
+            target_id,
+            document_url,
             prev_siblings: &prev_siblings,
             next_siblings: &sibling_records[pos.elem_index[i].saturating_add(1)..],
         };
@@ -262,6 +290,9 @@ fn query_walk(
             &child_ancestors,
             selectors,
             hover_chain,
+            scope_root_id,
+            target_id,
+            document_url,
             first_only,
             results,
         ) {

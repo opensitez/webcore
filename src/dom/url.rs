@@ -379,6 +379,17 @@ impl Document {
         let url = parse(&self.base_url, None);
         url_component(url.as_ref(), component)
     }
+
+    /// The element named by the document URL fragment, for `:target`.
+    pub fn fragment_target_id(&self) -> u32 {
+        let Some(url) = parse(&self.base_url, None) else {
+            return 0;
+        };
+        if !url.has_fragment || url.fragment.is_empty() {
+            return 0;
+        }
+        self.get_element_by_id(&url.fragment).unwrap_or(0)
+    }
 }
 
 /// The IDL components of a URL, or the empty-URL answers when there is none.

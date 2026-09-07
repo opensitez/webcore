@@ -103,7 +103,16 @@ impl Document {
         }
         if matches!(
             property.as_str(),
-            "margin" | "padding" | "border" | "overflow" | "flex" | "inset" | "gap"
+            "margin"
+                | "padding"
+                | "border"
+                | "outline"
+                | "overflow"
+                | "flex"
+                | "inset"
+                | "gap"
+                | "columns"
+                | "column-rule"
         ) {
             return self.resolved_shorthand(id, &property);
         }
@@ -163,13 +172,21 @@ impl Document {
             return String::new();
         };
         let pseudo = pseudo.trim().trim_start_matches(':');
+        let empty_content = String::new();
         let (style, content) = match pseudo {
             "before" => (
                 node.style.before_style.as_deref(),
                 &node.style.before_content,
             ),
             "after" => (node.style.after_style.as_deref(), &node.style.after_content),
-            _ => (None, &String::new()),
+            "marker" => (
+                node.style.marker_style.as_deref(),
+                &node.style.marker_content,
+            ),
+            "placeholder" => (node.style.placeholder_style.as_deref(), &empty_content),
+            "selection" => (node.style.selection_style.as_deref(), &empty_content),
+            "backdrop" => (node.style.backdrop_style.as_deref(), &empty_content),
+            _ => (None, &empty_content),
         };
         let Some(style) = style else {
             return String::new();
@@ -282,6 +299,14 @@ impl Document {
             .to_string(),
             "color" => serialize_color(s.color),
             "background-color" => serialize_color(s.background_color),
+            "fill" => s
+                .svg_fill
+                .map(serialize_color)
+                .unwrap_or_else(|| "none".to_string()),
+            "stroke" => s
+                .svg_stroke
+                .map(serialize_color)
+                .unwrap_or_else(|| "none".to_string()),
             "font-size" => format!("{font_px}px"),
             // ⛔ A NUMBER, not the keyword: `font-weight: bold` serializes as
             // `"700"` (measured).
@@ -346,10 +371,24 @@ impl Document {
             "border-right-color" => serialize_color(s.border_right_color),
             "border-bottom-color" => serialize_color(s.border_bottom_color),
             "border-left-color" => serialize_color(s.border_left_color),
-            "border-top-left-radius" => len(&s.border_top_left_radius),
-            "border-top-right-radius" => len(&s.border_top_right_radius),
-            "border-bottom-right-radius" => len(&s.border_bottom_right_radius),
-            "border-bottom-left-radius" => len(&s.border_bottom_left_radius),
+            "border-top-left-radius" => {
+                radius_pair(&len, &s.border_top_left_radius, &s.border_top_left_radius_y)
+            }
+            "border-top-right-radius" => radius_pair(
+                &len,
+                &s.border_top_right_radius,
+                &s.border_top_right_radius_y,
+            ),
+            "border-bottom-right-radius" => radius_pair(
+                &len,
+                &s.border_bottom_right_radius,
+                &s.border_bottom_right_radius_y,
+            ),
+            "border-bottom-left-radius" => radius_pair(
+                &len,
+                &s.border_bottom_left_radius,
+                &s.border_bottom_left_radius_y,
+            ),
             "border-image-source" => s.border_image_source.clone(),
             "border-image-slice" => s.border_image_slice.clone(),
             "border-image-width" => s.border_image_width.clone(),
@@ -366,6 +405,7 @@ impl Document {
             "outline-width" => format!("{}px", s.outline_width),
             "outline-style" => serialize_border_style(s.outline_style),
             "outline-color" => serialize_color(s.outline_color),
+            "outline-offset" => format!("{}px", s.outline_offset),
             "overflow-x" => serialize_overflow(s.overflow_x),
             "overflow-y" => serialize_overflow(s.overflow_y),
             "box-sizing" => match s.box_sizing {
@@ -443,6 +483,10 @@ impl Document {
                 }
             }
             "transform-box" => s.transform_box.clone(),
+            "transform-style" => s.transform_style_3d.clone(),
+            "perspective" => s.perspective.clone(),
+            "perspective-origin" => s.perspective_origin.clone(),
+            "backface-visibility" => s.backface_visibility.clone(),
             "z-index" => {
                 if s.z_index_is_auto {
                     "auto".to_string()
@@ -450,13 +494,20 @@ impl Document {
                     s.z_index.to_string()
                 }
             }
-            "font-variant" | "font-variant-caps" => {
+            "font-variant" => {
                 if s.small_caps {
                     "small-caps".to_string()
                 } else {
                     "normal".to_string()
                 }
             }
+            "font-variant-alternates" => s.font_variant_alternates.clone(),
+            "font-variant-caps" => s.font_variant_caps.clone(),
+            "font-variant-east-asian" => s.font_variant_east_asian.clone(),
+            "font-variant-emoji" => s.font_variant_emoji.clone(),
+            "font-variant-ligatures" => s.font_variant_ligatures.clone(),
+            "font-variant-numeric" => s.font_variant_numeric.clone(),
+            "font-variant-position" => s.font_variant_position.clone(),
             "font-synthesis" => serialize_font_synthesis(s),
             "font-synthesis-weight" => serialize_font_synthesis_longhand(s.font_synthesis_weight),
             "font-synthesis-style" => serialize_font_synthesis_longhand(s.font_synthesis_style),
@@ -467,6 +518,15 @@ impl Document {
                 serialize_font_synthesis_longhand(s.font_synthesis_position)
             }
             "text-decoration-skip-ink" => s.text_decoration_skip_ink.clone(),
+            "text-overflow" => match s.text_overflow {
+                crate::types::TextOverflow::Clip => "clip".to_string(),
+                crate::types::TextOverflow::Ellipsis if s.text_overflow_string.is_empty() => {
+                    "ellipsis".to_string()
+                }
+                crate::types::TextOverflow::Ellipsis => {
+                    format!("\"{}\"", serialize_css_string(&s.text_overflow_string))
+                }
+            },
             "text-emphasis-style" => s.text_emphasis_style.clone(),
             "text-emphasis-color" => s
                 .text_emphasis_color
@@ -481,7 +541,15 @@ impl Document {
                 format!("{} {}", s.text_emphasis_style, color)
             }
             "text-wrap" => s.text_wrap.clone(),
-            "list-style-type" => serialize_list_style_type(s.list_style_type),
+            "list-style-type" => {
+                if s.custom_list_style_type.is_empty() {
+                    serialize_list_style_type(s.list_style_type)
+                } else {
+                    s.custom_list_style_type.clone()
+                }
+            }
+            "list-style-position" => serialize_list_style_position(s.list_style_position),
+            "list-style-image" => serialize_list_style_image(&s.list_style_image),
             "mask-image" => {
                 if s.rare().mask_image_url.is_empty() {
                     "none".to_string()
@@ -497,7 +565,7 @@ impl Document {
             "mask-origin" => rare_or(&s.rare().mask_origin, "border-box"),
             "mask-composite" => rare_or(&s.rare().mask_composite, "add"),
             "mask" => serialize_mask(s),
-            "vertical-align" => serialize_vertical_align(s.vertical_align),
+            "vertical-align" => serialize_vertical_align(&s.vertical_align),
             "float" => serialize_float(s.float),
             "flex-direction" => serialize_flex_direction(s.flex_direction),
             "justify-content" => serialize_justify_content(s.justify_content),
@@ -519,13 +587,49 @@ impl Document {
                 len(&s.contain_intrinsic_height),
             ),
             "color-scheme" => s.color_scheme.clone(),
+            "forced-color-adjust" => s.forced_color_adjust.clone(),
+            "background-image" => serialize_background_image(s),
+            "background-position" => format!(
+                "{} {}",
+                len(&s.background_position_x),
+                len(&s.background_position_y)
+            ),
+            "background-size" => serialize_background_size(s),
+            "background-repeat" => serialize_background_repeat(s.background_repeat),
+            "background-attachment" => serialize_background_attachment(s.background_attachment),
+            "background-origin" => serialize_background_clip(s.background_origin),
+            "background-clip" => serialize_background_clip(s.background_clip),
             "background-blend-mode" => s.background_blend_mode.clone(),
+            "transition" => serialize_transition_shorthand(s),
+            "transition-property" => serialize_transition_property(s),
+            "transition-duration" => serialize_transition_duration(s),
+            "transition-timing-function" => serialize_transition_timing_function(s),
+            "transition-delay" => serialize_transition_delay(s),
+            "transition-behavior" => serialize_transition_behavior(s),
+            "animation" => serialize_animation_shorthand(s),
+            "animation-name" => serialize_animation_name(s),
+            "animation-duration" => serialize_animation_duration(s),
+            "animation-timing-function" => serialize_animation_timing_function(s),
+            "animation-delay" => serialize_animation_delay(s),
+            "animation-iteration-count" => serialize_animation_iteration_count(s),
+            "animation-direction" => serialize_animation_direction(s),
+            "animation-fill-mode" => serialize_animation_fill_mode(s),
+            "animation-play-state" => serialize_animation_play_state(s),
+            "animation-composition" => serialize_animation_composition(s),
             "overflow-anchor" => s.overflow_anchor.clone(),
             "overflow-clip-margin" => s.overflow_clip_margin.clone(),
+            "anchor-name" => s.anchor_name.clone(),
+            "position-anchor" => s.position_anchor.clone(),
+            "view-transition-name" => s.view_transition_name.clone(),
+            "animation-timeline" => s.animation_timeline.clone(),
+            "scroll-timeline" => s.scroll_timeline.clone(),
+            "offset-path" => s.offset_path.clone(),
             "shape-outside" => s.shape_outside.clone(),
             "shape-margin" => len(&s.shape_margin),
             "scrollbar-width" => s.scrollbar_width.clone(),
             "scrollbar-gutter" => s.scrollbar_gutter.clone(),
+            "scrollbar-color" => serialize_scrollbar_color(s),
+            "scroll-snap-stop" => s.scroll_snap_stop.clone(),
             "scroll-margin-top" => len(&s.scroll_margin_top),
             "scroll-margin-right" => len(&s.scroll_margin_right),
             "scroll-margin-bottom" => len(&s.scroll_margin_bottom),
@@ -557,6 +661,30 @@ impl Document {
                 TextUnderlinePosition::Right => "right",
             }
             .to_string(),
+            "column-count" => s
+                .column_count
+                .map(|count| count.to_string())
+                .unwrap_or_else(|| "auto".to_string()),
+            "column-width" => len(&s.column_width),
+            "column-rule-width" => len(&s.column_rule_width),
+            "column-rule-style" => serialize_border_style(s.column_rule_style),
+            "column-rule-color" => serialize_color(s.column_rule_color),
+            "column-fill" => {
+                if s.column_fill {
+                    "balance"
+                } else {
+                    "auto"
+                }
+            }
+            .to_string(),
+            "column-span" => {
+                if s.column_span_all {
+                    "all"
+                } else {
+                    "none"
+                }
+            }
+            .to_string(),
             _ => return None,
         })
     }
@@ -569,6 +697,32 @@ fn px(v: f32) -> String {
     format!("{}px", if v == 0.0 { 0.0 } else { v })
 }
 
+fn serialize_computed_length(l: &crate::types::CssLength) -> String {
+    match l {
+        crate::types::CssLength::Percent(p) => format!("{p}%"),
+        crate::types::CssLength::Auto => "auto".to_string(),
+        crate::types::CssLength::None => "none".to_string(),
+        other => px(other.resolve(16.0, 0.0, 16.0)),
+    }
+}
+
+fn serialize_css_string(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn radius_pair<F>(len: &F, x: &crate::types::CssLength, y: &crate::types::CssLength) -> String
+where
+    F: Fn(&crate::types::CssLength) -> String,
+{
+    let x = len(x);
+    let y = len(y);
+    if x == y {
+        x
+    } else {
+        format!("{x} {y}")
+    }
+}
+
 /// `rgb(r, g, b)` when opaque, `rgba(r, g, b, a)` otherwise — CSSOM's own
 /// serialization, and what Chrome answers. A fully transparent colour is
 /// `"rgba(0, 0, 0, 0)"`, never the keyword `transparent` (measured).
@@ -579,6 +733,92 @@ fn serialize_color(c: crate::types::Color) -> String {
         let alpha = (c.a as f32 / 255.0 * 100.0).round() / 100.0;
         format!("rgba({}, {}, {}, {})", c.r, c.g, c.b, alpha)
     }
+}
+
+fn serialize_scrollbar_color(s: &crate::types::ComputedStyle) -> String {
+    match (s.scrollbar_thumb_color, s.scrollbar_track_color) {
+        (Some(thumb), Some(track)) => {
+            format!("{} {}", serialize_color(thumb), serialize_color(track))
+        }
+        _ => "auto".to_string(),
+    }
+}
+
+fn serialize_background_image(s: &crate::types::ComputedStyle) -> String {
+    if !s.background_image_url.is_empty() {
+        return format!(
+            "url(\"{}\")",
+            s.background_image_url
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+        );
+    }
+    if s.gradient_type != crate::types::GradientType::None {
+        return match s.gradient_type {
+            crate::types::GradientType::Linear => "linear-gradient(...)",
+            crate::types::GradientType::Radial => "radial-gradient(...)",
+            crate::types::GradientType::None => "none",
+        }
+        .to_string();
+    }
+    "none".to_string()
+}
+
+fn serialize_background_size(s: &crate::types::ComputedStyle) -> String {
+    match s.background_size {
+        crate::types::BackgroundSize::Auto => "auto".to_string(),
+        crate::types::BackgroundSize::Cover => "cover".to_string(),
+        crate::types::BackgroundSize::Contain => "contain".to_string(),
+        crate::types::BackgroundSize::Explicit => {
+            let width = serialize_computed_length(&s.background_size_w);
+            let height = serialize_computed_length(&s.background_size_h);
+            if height == "auto" {
+                width
+            } else {
+                format!("{width} {height}")
+            }
+        }
+    }
+}
+
+fn serialize_background_repeat(repeat: crate::types::BackgroundRepeat) -> String {
+    fn axis(axis: crate::types::BackgroundRepeatAxis) -> &'static str {
+        match axis {
+            crate::types::BackgroundRepeatAxis::Repeat => "repeat",
+            crate::types::BackgroundRepeatAxis::NoRepeat => "no-repeat",
+            crate::types::BackgroundRepeatAxis::Space => "space",
+            crate::types::BackgroundRepeatAxis::Round => "round",
+        }
+    }
+
+    match repeat {
+        crate::types::BackgroundRepeat::Repeat => "repeat".to_string(),
+        crate::types::BackgroundRepeat::RepeatX => "repeat-x".to_string(),
+        crate::types::BackgroundRepeat::RepeatY => "repeat-y".to_string(),
+        crate::types::BackgroundRepeat::NoRepeat => "no-repeat".to_string(),
+        crate::types::BackgroundRepeat::Space => "space".to_string(),
+        crate::types::BackgroundRepeat::Round => "round".to_string(),
+        crate::types::BackgroundRepeat::TwoValue(x, y) => format!("{} {}", axis(x), axis(y)),
+    }
+}
+
+fn serialize_background_clip(clip: crate::types::BackgroundClip) -> String {
+    match clip {
+        crate::types::BackgroundClip::BorderBox => "border-box",
+        crate::types::BackgroundClip::PaddingBox => "padding-box",
+        crate::types::BackgroundClip::ContentBox => "content-box",
+        crate::types::BackgroundClip::Text => "text",
+    }
+    .to_string()
+}
+
+fn serialize_background_attachment(attachment: crate::types::BackgroundAttachment) -> String {
+    match attachment {
+        crate::types::BackgroundAttachment::Scroll => "scroll",
+        crate::types::BackgroundAttachment::Fixed => "fixed",
+        crate::types::BackgroundAttachment::Local => "local",
+    }
+    .to_string()
 }
 
 fn serialize_display(display: crate::types::Display) -> String {
@@ -703,6 +943,270 @@ fn serialize_mask(s: &crate::types::ComputedStyle) -> String {
     )
 }
 
+fn serialize_transition_property(s: &crate::types::ComputedStyle) -> String {
+    join_transition_values(s, |tr| tr.property.clone(), "all")
+}
+
+fn serialize_transition_shorthand(s: &crate::types::ComputedStyle) -> String {
+    if s.rare().transitions.is_empty() {
+        return "all 0s ease 0s normal".to_string();
+    }
+    s.rare()
+        .transitions
+        .iter()
+        .map(|tr| {
+            format!(
+                "{} {} {} {} {}",
+                tr.property,
+                serialize_time_ms(tr.duration_ms),
+                serialize_easing(&tr.timing_fn),
+                serialize_time_ms(tr.delay_ms),
+                if tr.allow_discrete {
+                    "allow-discrete"
+                } else {
+                    "normal"
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn serialize_transition_duration(s: &crate::types::ComputedStyle) -> String {
+    join_transition_values(s, |tr| serialize_time_ms(tr.duration_ms), "0s")
+}
+
+fn serialize_transition_timing_function(s: &crate::types::ComputedStyle) -> String {
+    join_transition_values(s, |tr| serialize_easing(&tr.timing_fn), "ease")
+}
+
+fn serialize_transition_delay(s: &crate::types::ComputedStyle) -> String {
+    join_transition_values(s, |tr| serialize_time_ms(tr.delay_ms), "0s")
+}
+
+fn serialize_transition_behavior(s: &crate::types::ComputedStyle) -> String {
+    join_transition_values(
+        s,
+        |tr| {
+            if tr.allow_discrete {
+                "allow-discrete".to_string()
+            } else {
+                "normal".to_string()
+            }
+        },
+        "normal",
+    )
+}
+
+fn join_transition_values<F>(s: &crate::types::ComputedStyle, map: F, initial: &str) -> String
+where
+    F: Fn(&crate::types::ParsedTransition) -> String,
+{
+    let values: Vec<_> = s.rare().transitions.iter().map(map).collect();
+    if values.is_empty() {
+        initial.to_string()
+    } else {
+        values.join(", ")
+    }
+}
+
+fn serialize_animation_name(s: &crate::types::ComputedStyle) -> String {
+    join_animation_values(s, |anim| anim.name.clone(), "none")
+}
+
+fn serialize_animation_shorthand(s: &crate::types::ComputedStyle) -> String {
+    if s.rare().animations.is_empty() {
+        return "none 0s ease 0s 1 normal none running replace".to_string();
+    }
+    s.rare()
+        .animations
+        .iter()
+        .map(|anim| {
+            format!(
+                "{} {} {} {} {} {} {} {} {}",
+                anim.name,
+                serialize_time_ms(anim.duration_ms),
+                serialize_easing(&anim.timing_fn),
+                serialize_time_ms(anim.delay_ms),
+                if anim.iteration_count.is_infinite() {
+                    "infinite".to_string()
+                } else {
+                    trim_f32(anim.iteration_count)
+                },
+                match anim.direction {
+                    crate::types::AnimDirection::Normal => "normal",
+                    crate::types::AnimDirection::Reverse => "reverse",
+                    crate::types::AnimDirection::Alternate => "alternate",
+                    crate::types::AnimDirection::AlternateReverse => "alternate-reverse",
+                },
+                match anim.fill_mode {
+                    crate::types::FillMode::None => "none",
+                    crate::types::FillMode::Forwards => "forwards",
+                    crate::types::FillMode::Backwards => "backwards",
+                    crate::types::FillMode::Both => "both",
+                },
+                if anim.play_state_paused {
+                    "paused"
+                } else {
+                    "running"
+                },
+                match anim.composition {
+                    crate::types::AnimationComposition::Replace => "replace",
+                    crate::types::AnimationComposition::Add => "add",
+                    crate::types::AnimationComposition::Accumulate => "accumulate",
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn serialize_animation_duration(s: &crate::types::ComputedStyle) -> String {
+    join_animation_values(s, |anim| serialize_time_ms(anim.duration_ms), "0s")
+}
+
+fn serialize_animation_timing_function(s: &crate::types::ComputedStyle) -> String {
+    join_animation_values(s, |anim| serialize_easing(&anim.timing_fn), "ease")
+}
+
+fn serialize_animation_delay(s: &crate::types::ComputedStyle) -> String {
+    join_animation_values(s, |anim| serialize_time_ms(anim.delay_ms), "0s")
+}
+
+fn serialize_animation_iteration_count(s: &crate::types::ComputedStyle) -> String {
+    join_animation_values(
+        s,
+        |anim| {
+            if anim.iteration_count.is_infinite() {
+                "infinite".to_string()
+            } else {
+                trim_f32(anim.iteration_count)
+            }
+        },
+        "1",
+    )
+}
+
+fn serialize_animation_direction(s: &crate::types::ComputedStyle) -> String {
+    join_animation_values(
+        s,
+        |anim| {
+            match anim.direction {
+                crate::types::AnimDirection::Normal => "normal",
+                crate::types::AnimDirection::Reverse => "reverse",
+                crate::types::AnimDirection::Alternate => "alternate",
+                crate::types::AnimDirection::AlternateReverse => "alternate-reverse",
+            }
+            .to_string()
+        },
+        "normal",
+    )
+}
+
+fn serialize_animation_fill_mode(s: &crate::types::ComputedStyle) -> String {
+    join_animation_values(
+        s,
+        |anim| {
+            match anim.fill_mode {
+                crate::types::FillMode::None => "none",
+                crate::types::FillMode::Forwards => "forwards",
+                crate::types::FillMode::Backwards => "backwards",
+                crate::types::FillMode::Both => "both",
+            }
+            .to_string()
+        },
+        "none",
+    )
+}
+
+fn serialize_animation_play_state(s: &crate::types::ComputedStyle) -> String {
+    join_animation_values(
+        s,
+        |anim| {
+            if anim.play_state_paused {
+                "paused".to_string()
+            } else {
+                "running".to_string()
+            }
+        },
+        "running",
+    )
+}
+
+fn serialize_animation_composition(s: &crate::types::ComputedStyle) -> String {
+    join_animation_values(
+        s,
+        |anim| {
+            match anim.composition {
+                crate::types::AnimationComposition::Replace => "replace",
+                crate::types::AnimationComposition::Add => "add",
+                crate::types::AnimationComposition::Accumulate => "accumulate",
+            }
+            .to_string()
+        },
+        "replace",
+    )
+}
+
+fn join_animation_values<F>(s: &crate::types::ComputedStyle, map: F, initial: &str) -> String
+where
+    F: Fn(&crate::types::ParsedAnimation) -> String,
+{
+    let values: Vec<_> = s.rare().animations.iter().map(map).collect();
+    if values.is_empty() {
+        initial.to_string()
+    } else {
+        values.join(", ")
+    }
+}
+
+fn serialize_time_ms(ms: f32) -> String {
+    if (ms / 1000.0).fract().abs() < f32::EPSILON {
+        format!("{}s", trim_f32(ms / 1000.0))
+    } else {
+        format!("{}ms", trim_f32(ms))
+    }
+}
+
+fn serialize_easing(easing: &crate::types::EasingFn) -> String {
+    match easing {
+        crate::types::EasingFn::Linear => "linear".to_string(),
+        crate::types::EasingFn::Ease => "ease".to_string(),
+        crate::types::EasingFn::EaseIn => "ease-in".to_string(),
+        crate::types::EasingFn::EaseOut => "ease-out".to_string(),
+        crate::types::EasingFn::EaseInOut => "ease-in-out".to_string(),
+        crate::types::EasingFn::CubicBezier(a, b, c, d) => format!(
+            "cubic-bezier({}, {}, {}, {})",
+            trim_f32(*a),
+            trim_f32(*b),
+            trim_f32(*c),
+            trim_f32(*d)
+        ),
+        crate::types::EasingFn::StepStart => "step-start".to_string(),
+        crate::types::EasingFn::StepEnd => "step-end".to_string(),
+        crate::types::EasingFn::Steps(count, position) => {
+            format!("steps({}, {})", count, serialize_step_position(*position))
+        }
+        crate::types::EasingFn::LinearPoints(points) => {
+            let points = points
+                .iter()
+                .map(|(input, output)| format!("{} {}", trim_f32(*output), trim_f32(*input)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("linear({points})")
+        }
+    }
+}
+
+fn serialize_step_position(position: crate::types::StepPosition) -> &'static str {
+    match position {
+        crate::types::StepPosition::JumpStart => "jump-start",
+        crate::types::StepPosition::JumpEnd => "jump-end",
+        crate::types::StepPosition::JumpNone => "jump-none",
+        crate::types::StepPosition::JumpBoth => "jump-both",
+    }
+}
+
 fn is_css_family_identifier(name: &str) -> bool {
     const GENERICS: &[&str] = &[
         "serif",
@@ -749,6 +1253,9 @@ fn serialize_text_transform(v: crate::types::TextTransform) -> String {
         T::Uppercase => "uppercase",
         T::Lowercase => "lowercase",
         T::Capitalize => "capitalize",
+        T::FullWidth => "full-width",
+        T::FullSizeKana => "full-size-kana",
+        T::MathAuto => "math-auto",
     }
     .to_string()
 }
@@ -765,19 +1272,19 @@ fn serialize_white_space(v: crate::types::WhiteSpace) -> String {
     .to_string()
 }
 
-fn serialize_vertical_align(v: crate::types::VerticalAlign) -> String {
+fn serialize_vertical_align(v: &crate::types::VerticalAlign) -> String {
     use crate::types::VerticalAlign as V;
     match v {
-        V::Baseline => "baseline",
-        V::Top => "top",
-        V::Middle => "middle",
-        V::Bottom => "bottom",
-        V::TextTop => "text-top",
-        V::TextBottom => "text-bottom",
-        V::Sub => "sub",
-        V::Super => "super",
+        V::Baseline => "baseline".to_string(),
+        V::Top => "top".to_string(),
+        V::Middle => "middle".to_string(),
+        V::Bottom => "bottom".to_string(),
+        V::TextTop => "text-top".to_string(),
+        V::TextBottom => "text-bottom".to_string(),
+        V::Sub => "sub".to_string(),
+        V::Super => "super".to_string(),
+        V::Length(l) => serialize_computed_length(l),
     }
-    .to_string()
 }
 
 fn serialize_float(v: crate::types::Float) -> String {
@@ -819,6 +1326,25 @@ fn serialize_list_style_type(v: crate::types::ListStyleType) -> String {
         L::Disclosure => "disclosure-open",
     }
     .to_string()
+}
+
+fn serialize_list_style_position(v: crate::types::ListStylePosition) -> String {
+    match v {
+        crate::types::ListStylePosition::Outside => "outside",
+        crate::types::ListStylePosition::Inside => "inside",
+    }
+    .to_string()
+}
+
+fn serialize_list_style_image(url: &str) -> String {
+    if url.is_empty() {
+        "none".to_string()
+    } else {
+        format!(
+            "url(\"{}\")",
+            url.replace('\\', "\\\\").replace('"', "\\\"")
+        )
+    }
 }
 
 fn serialize_flex_direction(v: crate::types::FlexDirection) -> String {
@@ -915,6 +1441,7 @@ fn serialize_overflow(v: crate::types::Overflow) -> String {
     match v {
         O::Visible => "visible",
         O::Hidden => "hidden",
+        O::Clip => "clip",
         O::Scroll => "scroll",
         O::Auto => "auto",
     }
@@ -1000,6 +1527,22 @@ impl Document {
                     String::new()
                 }
             }
+            "outline" => format!(
+                "{} {} {}",
+                self.computed_style_property(id, "outline-width"),
+                self.computed_style_property(id, "outline-style"),
+                self.computed_style_property(id, "outline-color")
+            ),
+            "columns" => shorthand_pair_values(
+                self.computed_style_property(id, "column-width"),
+                self.computed_style_property(id, "column-count"),
+            ),
+            "column-rule" => format!(
+                "{} {} {}",
+                self.computed_style_property(id, "column-rule-width"),
+                self.computed_style_property(id, "column-rule-style"),
+                self.computed_style_property(id, "column-rule-color")
+            ),
             _ => String::new(),
         }
     }

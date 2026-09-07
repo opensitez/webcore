@@ -46,7 +46,9 @@ pub use registry::{
 
 use crate::css::apply_property;
 use crate::layout::hit_test::point_to_hit;
-use crate::types::{Color, CssLength, Display, Document, FontStyle, FontWeight, Position, WebCore};
+use crate::types::{
+    Color, CssLength, Display, Document, FontStyle, FontWeight, Position, UserSelect, WebCore,
+};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -260,6 +262,27 @@ fn collect_id_path(node: &WebCore, target_id: u32, path: &mut Vec<u32>) -> bool 
     }
     path.pop();
     false
+}
+
+fn user_select_allows_selection(root: &WebCore, target_id: u32) -> bool {
+    let mut path = Vec::new();
+    if !collect_id_path(root, target_id, &mut path) {
+        return true;
+    }
+    path.into_iter()
+        .filter_map(|id| find_node_ref(root, id))
+        .all(|node| node.style.user_select != UserSelect::None)
+}
+
+fn nearest_user_select_all_node(root: &WebCore, target_id: u32) -> Option<&WebCore> {
+    let mut path = Vec::new();
+    if !collect_id_path(root, target_id, &mut path) {
+        return None;
+    }
+    path.into_iter()
+        .rev()
+        .filter_map(|id| find_node_ref(root, id))
+        .find(|node| node.style.user_select == UserSelect::All)
 }
 
 /// Simple CSS selector matching: `tag`, `#id`, `.class`, `*`.
@@ -959,6 +982,18 @@ impl Editor {
         self.caret_at_line_start = false;
     }
 
+    fn select_entire_node(&mut self, node: &WebCore) {
+        let flat = crate::layout::inline_layout::collect_flat_text(node);
+        self.caret_box = Some(node.node_id);
+        self.caret_local = flat.len();
+        self.sel_anchor = 0;
+        self.sel_start = 0;
+        self.sel_end = flat.len();
+        self.caret_visible = true;
+        self.last_blink = Instant::now();
+        self.caret_at_line_start = false;
+    }
+
     pub fn blink_update(&mut self) -> bool {
         if self.last_blink.elapsed() >= Duration::from_millis(CARET_BLINK_MS) {
             self.caret_visible = !self.caret_visible;
@@ -986,6 +1021,14 @@ impl Editor {
                 self.mouse_down = true;
                 self.has_focus = true;
                 if let Some(hit) = point_to_hit(root, doc_pt, button) {
+                    if !user_select_allows_selection(root, hit.node_id) {
+                        self.mouse_down = false;
+                        return false;
+                    }
+                    if let Some(all_node) = nearest_user_select_all_node(root, hit.node_id) {
+                        self.select_entire_node(all_node);
+                        return true;
+                    }
                     self.set_caret_from_hit(hit.node_id, hit.local_offset, false);
                     return true;
                 }
@@ -993,6 +1036,13 @@ impl Editor {
             HtmlEventType::MouseMove => {
                 if self.mouse_down {
                     if let Some(hit) = point_to_hit(root, doc_pt, button) {
+                        if !user_select_allows_selection(root, hit.node_id) {
+                            return false;
+                        }
+                        if let Some(all_node) = nearest_user_select_all_node(root, hit.node_id) {
+                            self.select_entire_node(all_node);
+                            return true;
+                        }
                         if self.caret_box == Some(hit.node_id) {
                             self.caret_local = hit.local_offset;
                             self.sel_start = self.sel_anchor.min(hit.local_offset);
@@ -1602,13 +1652,13 @@ pub fn is_in_contenteditable_by_id(node: &WebCore, target_id: u32) -> bool {
         return node
             .attributes
             .get("contenteditable")
-            .map(|v| v == "true")
+            .map(|v| v.is_empty() || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
     }
     let editable_root = node
         .attributes
         .get("contenteditable")
-        .map(|v| v == "true")
+        .map(|v| v.is_empty() || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if editable_root && node_contains_id(node, target_id) {
         return true;

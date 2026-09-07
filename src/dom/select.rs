@@ -272,5 +272,6 @@ impl Document {
                 node.input_sel_direction = crate::types::SelectionDirection::None;
             }
         }
+        self.style_dirty = true;
     }
 }

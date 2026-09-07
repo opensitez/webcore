@@ -55,7 +55,7 @@ impl Document {
             Some(ref data) if data.len() == want => {}
             // Transparent black, which is what the spec initialises the
             // bitmap to — and what a zeroed RGBA buffer already is.
-            _ => node.image_data = Some(vec![0u8; want]),
+            _ => node.image_data = Some(std::sync::Arc::new(vec![0u8; want])),
         }
         true
     }
@@ -80,11 +80,15 @@ impl Document {
         // is never copied to be drawn on.
         let (mut pixels, w, h) = {
             let node = self.find_webcore_mut(id)?;
-            (node.image_data.take()?, node.image_width, node.image_height)
+            (
+                node.image_data.take()?.as_ref().clone(),
+                node.image_width,
+                node.image_height,
+            )
         };
         let out = self.canvas_surfaces.with_context(id, &mut pixels, w, h, f);
         if let Some(node) = self.find_webcore_mut(id) {
-            node.image_data = Some(pixels);
+            node.image_data = Some(std::sync::Arc::new(pixels));
         }
         out
     }
@@ -106,7 +110,12 @@ impl Document {
         }
         node.image_width = width;
         node.image_height = height;
-        node.image_data = Some(vec![0u8; (width as usize) * (height as usize) * 4]);
+        node.image_data = Some(std::sync::Arc::new(vec![
+            0u8;
+            (width as usize)
+                * (height as usize)
+                * 4
+        ]));
         node.attributes.insert("width", width.to_string());
         node.attributes.insert("height", height.to_string());
         self.canvas_surfaces.reset(id);
