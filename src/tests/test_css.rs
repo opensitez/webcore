@@ -94,10 +94,14 @@ fn absolute_dropdown_wrapper_does_not_raise_flex_nav_item() {
            </ul>"#,
         800.0,
     );
-    let sports = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "sports"))
-        .expect("sports link");
-    let more = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "more"))
-        .expect("more button");
+    let sports = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "sports")
+    })
+    .expect("sports link");
+    let more = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "more")
+    })
+    .expect("more button");
     assert!(
         (sports.layout.content_rect.y - more.layout.content_rect.y).abs() < 1.0,
         "absolute submenu wrapper should not change top nav alignment: sports y={}, more y={}",
@@ -2993,9 +2997,10 @@ fn css_selector_hex_escape_consumes_optional_trailing_space() {
     let sel = parse_selector(".bg-\\5b rgba\\28 0\\2c 0\\2c 0\\2c 0\\.3\\29 \\5d");
     use crate::css::SelectorPart;
     assert!(sel.valid);
-    assert!(sel.parts.iter().any(
-        |p| matches!(p, SelectorPart::Class(c) if c == "bg-[rgba(0,0,0,0.3)]")
-    ));
+    assert!(sel
+        .parts
+        .iter()
+        .any(|p| matches!(p, SelectorPart::Class(c) if c == "bg-[rgba(0,0,0,0.3)]")));
 }
 
 #[test]

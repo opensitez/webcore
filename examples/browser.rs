@@ -23,7 +23,7 @@ use tiny_skia::{Pixmap, PixmapPaint, Transform};
 use webcore::css::apply_cascade_vp;
 use webcore::dom::{self, HtmlEventType};
 use webcore::platform::Platform;
-use webcore::renderer::display_list::PaintCmd;
+use webcore::renderer::display_list::{ImageRef, PaintCmd};
 use webcore::renderer::display_list_builder::build_display_list_full;
 use webcore::{hit_test_link, parse_html_with_hooks, point_to_hit, Document, Renderer};
 
@@ -2874,6 +2874,13 @@ fn dbg_inspect_json(node: &webcore::WebCore) -> String {
         "transparent".to_string()
     };
     let color_str = format!("#{:02x}{:02x}{:02x}", s.color.r, s.color.g, s.color.b);
+    let mask_image = s.rare().mask_image_url.as_str();
+    let svg_child_count = node
+        .svg_document
+        .as_ref()
+        .map(|doc| doc.root.children.len())
+        .unwrap_or(0);
+    let svg_markup_len = node.svg_markup.as_ref().map(|s| s.len()).unwrap_or(0);
     format!(
         concat!(
             r#"{{"tag":{0},"id":{1},"class":{2},"#,
@@ -2885,7 +2892,8 @@ fn dbg_inspect_json(node: &webcore::WebCore) -> String {
             r#""margin_trbl":[{20:.1},{21:.1},{22:.1},{23:.1}],"#,
             r#""padding_trbl":[{24:.1},{25:.1},{26:.1},{27:.1}],"#,
             r#""border_trbl":[{28:.1},{29:.1},{30:.1},{31:.1}],"#,
-            r#""children":{32}}}"#
+            r#""children":{32},"svg_parsed":{33},"svg_children":{34},"svg_markup_len":{35},"#,
+            r#""mask_image":{36},"mask_loaded":{37},"mask_size":[{38},{39}]}}"#
         ),
         dbg_json_escape(&node.tag),
         dbg_json_escape(id),
@@ -2920,6 +2928,13 @@ fn dbg_inspect_json(node: &webcore::WebCore) -> String {
         node.layout.resolved_border_bottom,
         node.layout.resolved_border_left,
         node.children.iter().filter(|c| c.tag != "#text").count(),
+        node.svg_document.is_some(),
+        svg_child_count,
+        svg_markup_len,
+        dbg_json_escape(mask_image),
+        node.mask_image_data.is_some(),
+        node.mask_image_width,
+        node.mask_image_height,
     )
 }
 
@@ -3548,7 +3563,11 @@ impl BrowserApp {
                     .unwrap_or(true);
                 let pw = self.page_width();
                 self.inspect_mode = on;
-                self.inspect_panel_pct = if on { self.inspect_panel_pct.max(0.35) } else { 0.0 };
+                self.inspect_panel_pct = if on {
+                    self.inspect_panel_pct.max(0.35)
+                } else {
+                    0.0
+                };
                 if !on {
                     self.inspect_node = 0;
                 }
@@ -3586,6 +3605,27 @@ impl BrowserApp {
                             break;
                         }
                         match cmd {
+                            PaintCmd::FillRect {
+                                rect,
+                                color,
+                                radius,
+                                radius_y,
+                            } => {
+                                if rect.x <= qx2
+                                    && rect.right() >= x
+                                    && rect.y <= qy2
+                                    && rect.bottom() >= y
+                                    && color.a > 0
+                                {
+                                    out.push(format!(
+                                        r##"{{"kind":"fill","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"color":"#{:02x}{:02x}{:02x}{:02x}","radius":[{:.1},{:.1},{:.1},{:.1}],"radius_y":[{:.1},{:.1},{:.1},{:.1}]}}"##,
+                                        rect.x, rect.y, rect.w, rect.h,
+                                        color.r, color.g, color.b, color.a,
+                                        radius[0], radius[1], radius[2], radius[3],
+                                        radius_y[0], radius_y[1], radius_y[2], radius_y[3]
+                                    ));
+                                }
+                            }
                             PaintCmd::Text {
                                 x: tx,
                                 y: ty,
@@ -3668,8 +3708,30 @@ impl BrowserApp {
                                     ));
                                 }
                             }
+                            PaintCmd::PushMask { rect, data } => {
+                                if rect.x <= qx2
+                                    && rect.right() >= x
+                                    && rect.y <= qy2
+                                    && rect.bottom() >= y
+                                {
+                                    let (mw, mh) = match data {
+                                        ImageRef::Owned(_, w, h) | ImageRef::Shared(_, w, h) => {
+                                            (*w, *h)
+                                        }
+                                    };
+                                    out.push(format!(
+                                        r#"{{"kind":"push-mask","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"mask_w":{},"mask_h":{}}}"#,
+                                        rect.x, rect.y, rect.w, rect.h, mw, mh
+                                    ));
+                                }
+                            }
+                            PaintCmd::PopMask => {
+                                out.push(r#"{"kind":"pop-mask"}"#.to_string());
+                            }
                             PaintCmd::PopClip => {
-                                out.push(r#"{"kind":"pop-clip"}"#.to_string());
+                                // Standalone pop clips are technically in the global display list,
+                                // but in a filtered dump they hide the commands we are trying to
+                                // inspect. Keep range dumps focused on drawable/entering commands.
                             }
                             _ => {}
                         }
@@ -5653,6 +5715,27 @@ fn dispatch_headless_cmd(
                     break;
                 }
                 match cmd {
+                    PaintCmd::FillRect {
+                        rect,
+                        color,
+                        radius,
+                        radius_y,
+                    } => {
+                        if rect.x <= qx2
+                            && rect.right() >= x
+                            && rect.y <= qy2
+                            && rect.bottom() >= y
+                            && color.a > 0
+                        {
+                            out.push(format!(
+                                r##"{{"kind":"fill","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"color":"#{:02x}{:02x}{:02x}{:02x}","radius":[{:.1},{:.1},{:.1},{:.1}],"radius_y":[{:.1},{:.1},{:.1},{:.1}]}}"##,
+                                rect.x, rect.y, rect.w, rect.h,
+                                color.r, color.g, color.b, color.a,
+                                radius[0], radius[1], radius[2], radius[3],
+                                radius_y[0], radius_y[1], radius_y[2], radius_y[3]
+                            ));
+                        }
+                    }
                     PaintCmd::Text {
                         x: tx,
                         y: ty,
@@ -5721,6 +5804,19 @@ fn dispatch_headless_cmd(
                             ));
                         }
                     }
+                    PaintCmd::PushMask { rect, data } => {
+                        if rect.x <= qx2 && rect.right() >= x && rect.y <= qy2 && rect.bottom() >= y
+                        {
+                            let (mw, mh) = match data {
+                                ImageRef::Owned(_, w, h) | ImageRef::Shared(_, w, h) => (*w, *h),
+                            };
+                            out.push(format!(
+                                r#"{{"kind":"push-mask","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"mask_w":{},"mask_h":{}}}"#,
+                                rect.x, rect.y, rect.w, rect.h, mw, mh
+                            ));
+                        }
+                    }
+                    PaintCmd::PopMask => out.push(r#"{"kind":"pop-mask"}"#.to_string()),
                     PaintCmd::PopClip => out.push(r#"{"kind":"pop-clip"}"#.to_string()),
                     _ => {}
                 }

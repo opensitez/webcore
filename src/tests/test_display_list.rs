@@ -51,6 +51,15 @@ fn count_opaque_pixels(pixmap: &tiny_skia::Pixmap, x0: u32, y0: u32, x1: u32, y1
     count
 }
 
+fn find_node_by_tag<'a>(node: &'a crate::WebCore, tag: &str) -> Option<&'a crate::WebCore> {
+    if node.tag == tag {
+        return Some(node);
+    }
+    node.children
+        .iter()
+        .find_map(|child| find_node_by_tag(child, tag))
+}
+
 #[test]
 fn border_radius_overlap_uses_one_proportional_scale_factor() {
     let reduced = reduce_corner_radii(100.0, 40.0, [80.0, 40.0, 10.0, 30.0]);
@@ -141,11 +150,16 @@ fn colored_div_has_fill_rect() {
 
 #[test]
 fn inline_svg_uses_cascaded_fill_color_when_rasterized() {
-    let (_, list) = build(
+    let (frame, list) = build(
         r#"<style>svg { color: rgb(255, 0, 0); fill: currentColor; }</style>
            <svg style="width:20px;height:20px" viewBox="0 0 20 20">
              <rect x="0" y="0" width="20" height="20"/>
            </svg>"#,
+    );
+    let svg = find_node_by_tag(&frame.doc.root, "svg").expect("inline SVG node");
+    assert!(
+        svg.svg_document.is_some(),
+        "inline SVG should keep its parsed native SVG tree for browser paint"
     );
 
     let image = list.commands.iter().find_map(|cmd| match cmd {
@@ -161,6 +175,124 @@ fn inline_svg_uses_cascaded_fill_color_when_rasterized() {
     assert!(
         data[idx] > 200 && data[idx + 1] < 50 && data[idx + 2] < 50 && data[idx + 3] > 200,
         "center pixel should be red from cascaded fill, got rgba({}, {}, {}, {})",
+        data[idx],
+        data[idx + 1],
+        data[idx + 2],
+        data[idx + 3]
+    );
+}
+
+#[test]
+fn inline_svg_resolves_inherited_custom_property_paint() {
+    let (_, list) = build(
+        r#"<div style="--icon-color: rgb(25, 103, 210)">
+             <svg style="width:20px;height:14px;color:blue" viewBox="0 0 20 14" fill="none">
+               <path d="M0 0H20V14H0Z" fill="var(--icon-color)"/>
+             </svg>
+           </div>"#,
+    );
+
+    let image = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Image {
+            data: ImageRef::Owned(data, w, h),
+            ..
+        } => Some((data, *w, *h)),
+        _ => None,
+    });
+    let (data, w, _) = image.expect("inline SVG should rasterize to an image command");
+    let idx = ((7 * w + 10) * 4) as usize;
+    assert!(
+        data[idx] < 50 && data[idx + 1] > 80 && data[idx + 2] > 180 && data[idx + 3] > 200,
+        "SVG paint var() should resolve inherited custom properties, got rgba({}, {}, {}, {})",
+        data[idx],
+        data[idx + 1],
+        data[idx + 2],
+        data[idx + 3]
+    );
+}
+
+#[test]
+fn decoded_svg_image_uses_parsed_native_svg_tree_when_rasterized() {
+    fn find_img_mut(node: &mut crate::WebCore) -> Option<&mut crate::WebCore> {
+        if node.tag == "img" {
+            return Some(node);
+        }
+        node.children.iter_mut().find_map(find_img_mut)
+    }
+
+    let doc = parse_html(r#"<img style="width:20px;height:20px">"#);
+    let mut frame = EngineFrame::new(doc, 800.0, 600.0);
+    let img = find_img_mut(&mut frame.doc.root).expect("img node");
+    crate::html::set_decoded_image_on_node(
+        img,
+        crate::html::DecodedImage::Svg(
+            r#"<svg width="20" height="20"><style>.brand{fill:rgb(88, 0, 150)}</style><rect class="brand" width="20" height="20"/></svg>"#
+                .to_string(),
+            20.0,
+            20.0,
+        ),
+    );
+    assert!(
+        img.svg_document.is_some(),
+        "decoded SVG images should keep a parsed native SVG tree for browser paint"
+    );
+    frame.update_frame();
+    let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+    let image = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Image {
+            data: ImageRef::Owned(data, w, h),
+            ..
+        } => Some((data, *w, *h)),
+        _ => None,
+    });
+    let (data, w, h) = image.expect("decoded SVG image should rasterize to an image command");
+    assert_eq!((w, h), (20, 20));
+    let idx = ((10 * w + 10) * 4) as usize;
+    assert!(
+        data[idx] > 70 && data[idx + 1] < 40 && data[idx + 2] > 120 && data[idx + 3] > 200,
+        "center pixel should come from the SVG's internal CSS, got rgba({}, {}, {}, {})",
+        data[idx],
+        data[idx + 1],
+        data[idx + 2],
+        data[idx + 3]
+    );
+}
+
+#[test]
+fn decoded_svg_image_uses_isolated_svg_document_color() {
+    fn find_img_mut(node: &mut crate::WebCore) -> Option<&mut crate::WebCore> {
+        if node.tag == "img" {
+            return Some(node);
+        }
+        node.children.iter_mut().find_map(find_img_mut)
+    }
+
+    let doc = parse_html(r#"<img style="width:20px;height:20px;color:white">"#);
+    let mut frame = EngineFrame::new(doc, 800.0, 600.0);
+    let img = find_img_mut(&mut frame.doc.root).expect("img node");
+    crate::html::set_decoded_image_on_node(
+        img,
+        crate::html::DecodedImage::Svg(
+            r#"<svg width="20" height="20" color="rgb(80, 0, 160)"><rect width="20" height="20" fill="currentColor"/></svg>"#
+                .to_string(),
+            20.0,
+            20.0,
+        ),
+    );
+    frame.update_frame();
+    let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+    let image = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Image {
+            data: ImageRef::Owned(data, w, h),
+            ..
+        } => Some((data, *w, *h)),
+        _ => None,
+    });
+    let (data, w, _) = image.expect("decoded SVG image should rasterize to an image command");
+    let idx = ((10 * w + 10) * 4) as usize;
+    assert!(
+        data[idx] > 60 && data[idx] < 110 && data[idx + 1] < 40 && data[idx + 2] > 130,
+        "SVG image should use its own document color, not embedding img color; got rgba({}, {}, {}, {})",
         data[idx],
         data[idx + 1],
         data[idx + 2],
@@ -2372,9 +2504,10 @@ fn list_style_image_marker_decodes_and_paints_resolved_image() {
     };
     let mut pixmap = tiny_skia::Pixmap::new(24, 24).unwrap();
     replay(&paint_list, &mut pixmap, 1.0);
-    let painted_red = pixmap.data().chunks_exact(4).any(|px| {
-        px[0] > 200 && px[1] < 80 && px[2] < 80 && px[3] > 200
-    });
+    let painted_red = pixmap
+        .data()
+        .chunks_exact(4)
+        .any(|px| px[0] > 200 && px[1] < 80 && px[2] < 80 && px[3] > 200);
     assert!(painted_red, "image marker replay should paint its bitmap");
 }
 
@@ -2422,7 +2555,7 @@ fn mask_layer_applies_to_nested_paint_commands() {
                 data: ImageRef::Owned(
                     vec![
                         255, 255, 255, 255, // left half visible
-                        0, 0, 0, 255,       // right half transparent by luminance
+                        0, 0, 0, 255, // right half transparent by luminance
                     ],
                     2,
                     1,

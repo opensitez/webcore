@@ -22,14 +22,8 @@ pub struct SvgViewBox {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PreserveAspectRatio {
     None,
-    Meet {
-        align_x: AlignX,
-        align_y: AlignY,
-    },
-    Slice {
-        align_x: AlignX,
-        align_y: AlignY,
-    },
+    Meet { align_x: AlignX, align_y: AlignY },
+    Slice { align_x: AlignX, align_y: AlignY },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,7 +184,9 @@ mod tests {
     #[test]
     fn intrinsic_size_ignores_contextual_lengths_and_uses_viewbox() {
         assert_eq!(
-            intrinsic_size_from_markup(r#"<svg width="100%" height="2em" viewBox="0 0 30 20"></svg>"#),
+            intrinsic_size_from_markup(
+                r#"<svg width="100%" height="2em" viewBox="0 0 30 20"></svg>"#
+            ),
             (30.0, 20.0)
         );
     }

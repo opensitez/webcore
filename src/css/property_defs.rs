@@ -3054,9 +3054,7 @@ pub const INHERITED_IDS: &[PropertyId] = &[
 // Each takes `(style, value_str)` and sets the appropriate field.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-use super::{
-    parse_color, parse_font_size_checked, parse_length, parse_length_checked,
-};
+use super::{parse_color, parse_font_size_checked, parse_length, parse_length_checked};
 use crate::types::*;
 
 fn apply_keyword_list(field: &mut String, v: &str, allowed: &[&str]) {

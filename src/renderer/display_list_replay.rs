@@ -557,7 +557,13 @@ fn replay_inner(
                             .map(|l| &mut l.pixmap)
                             .unwrap_or(pixmap);
                         composite_masked_layer(
-                            target, &layer.pixmap, rect, &data, scale, scroll_x, scroll_y,
+                            target,
+                            &layer.pixmap,
+                            rect,
+                            &data,
+                            scale,
+                            scroll_x,
+                            scroll_y,
                         );
                     }
                 }
@@ -1960,16 +1966,36 @@ fn draw_border_image_stretch(
 
     let sx = [0.0, sl, (sw - sr).max(sl), sw];
     let sy = [0.0, st, (sh - sb).max(st), sh];
-    let dx = [rect.x, rect.x + dl, (rect.right() - dr).max(rect.x + dl), rect.right()];
-    let dy = [rect.y, rect.y + dt, (rect.bottom() - db).max(rect.y + dt), rect.bottom()];
+    let dx = [
+        rect.x,
+        rect.x + dl,
+        (rect.right() - dr).max(rect.x + dl),
+        rect.right(),
+    ];
+    let dy = [
+        rect.y,
+        rect.y + dt,
+        (rect.bottom() - db).max(rect.y + dt),
+        rect.bottom(),
+    ];
 
     for row in 0..3 {
         for col in 0..3 {
             if row == 1 && col == 1 && !fill_center {
                 continue;
             }
-            let src = Rect::new(sx[col], sy[row], sx[col + 1] - sx[col], sy[row + 1] - sy[row]);
-            let dst = Rect::new(dx[col], dy[row], dx[col + 1] - dx[col], dy[row + 1] - dy[row]);
+            let src = Rect::new(
+                sx[col],
+                sy[row],
+                sx[col + 1] - sx[col],
+                sy[row + 1] - sy[row],
+            );
+            let dst = Rect::new(
+                dx[col],
+                dy[row],
+                dx[col + 1] - dx[col],
+                dy[row + 1] - dy[row],
+            );
             draw_rgba_patch(target, rgba, iw, ih, src, dst, ts, clip_mask);
         }
     }
@@ -2337,7 +2363,8 @@ fn draw_text_cmd(
         return;
     }
     let sc = scale;
-    let size_adjust = crate::layout::inline_layout::font_size_adjust_scale(font_system, font_family);
+    let size_adjust =
+        crate::layout::inline_layout::font_size_adjust_scale(font_system, font_family);
     let phys_px = (font_size * size_adjust * sc).max(1.0);
     let phys_lh = (line_height * sc).max(1.0); // cosmic-text panics on 0
     let metrics = Metrics::new(phys_px, phys_lh);

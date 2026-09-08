@@ -322,6 +322,7 @@ impl WebCore {
             bg_image_height: 0,
 
             svg_markup: None,
+            svg_document: None,
             svg_viewbox_w: 0.0,
             svg_viewbox_h: 0.0,
 

@@ -19,7 +19,12 @@ fn normal_cascade_sort_key(
     rule_idx: usize,
 ) -> (u8, u32, u32, usize) {
     let origin_rank = if is_author_origin(specificity) { 1 } else { 0 };
-    (origin_rank, rules[rule_idx].layer_rank, specificity, rule_idx)
+    (
+        origin_rank,
+        rules[rule_idx].layer_rank,
+        specificity,
+        rule_idx,
+    )
 }
 
 fn important_cascade_sort_key(
@@ -1812,6 +1817,9 @@ pub(crate) fn apply_cascade_inner(
     // Preserve list_index: set by the HTML parser (ol counter), not by CSS.
     // The fresh ComputedStyle defaults list_index=0, so carry the old value forward.
     style.list_index = root.style.list_index;
+    // Preserve the resolved custom-property scope on computed style. Paint-time
+    // consumers such as inline SVG need these inherited variables after cascade.
+    style.custom_props = local_vars.clone();
     let has_explicit_display = matched.iter().any(|&(_, ri)| {
         stylesheet.rules[ri]
             .declarations

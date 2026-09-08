@@ -982,25 +982,61 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                     }
                 }
             } else if node.tag == "svg" || (node.is_image_element() && node.svg_markup.is_some()) {
-                // SVG: rasterize from svg_markup on demand (inline <svg> or <img src="*.svg">)
-                if let Some(ref markup) = node.svg_markup {
+                // SVG: rasterize on demand. Inline SVG prefers the parsed
+                // native tree; markup remains for external SVG images and
+                // round-trip compatibility during migration.
+                if node.svg_document.is_some() || node.svg_markup.is_some() {
                     let cr = node.layout.content_rect;
                     if cr.w > 0.0 && cr.h > 0.0 {
                         let raster_w = cr.w.round() as u32;
                         let raster_h = cr.h.round() as u32;
                         if raster_w > 0 && raster_h > 0 {
-                            // Inject inherited CSS color for currentColor support
                             let c = node.style.color;
-                            let color_hex = format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b);
-                            let colored = crate::svg::prepare_svg_for_rasterization(
-                                markup,
-                                &color_hex,
-                                node.style.svg_fill,
-                                node.style.svg_stroke,
-                            );
-                            if let Some(rgba) =
-                                crate::svg::rasterize_svg_to_rgba(&colored, raster_w, raster_h)
-                            {
+                            let rgba = if let Some(ref doc) = node.svg_document {
+                                let (current_color, fill, stroke) = if node.tag == "svg" {
+                                    (c, node.style.svg_fill, node.style.svg_stroke)
+                                } else {
+                                    (
+                                        crate::types::Color::BLACK,
+                                        Some(crate::types::Color::BLACK),
+                                        None,
+                                    )
+                                };
+                                if node.tag == "svg" {
+                                    crate::svg::rasterize_svg_document_to_rgba_with_vars(
+                                        doc,
+                                        raster_w,
+                                        raster_h,
+                                        (node.svg_viewbox_w, node.svg_viewbox_h),
+                                        current_color,
+                                        fill,
+                                        stroke,
+                                        &node.style.custom_props,
+                                    )
+                                } else {
+                                    crate::svg::rasterize_svg_document_to_rgba(
+                                        doc,
+                                        raster_w,
+                                        raster_h,
+                                        (node.svg_viewbox_w, node.svg_viewbox_h),
+                                        current_color,
+                                        fill,
+                                        stroke,
+                                    )
+                                }
+                            } else {
+                                node.svg_markup.as_ref().and_then(|markup| {
+                                    let color_hex = format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b);
+                                    let colored = crate::svg::prepare_svg_for_rasterization(
+                                        markup,
+                                        &color_hex,
+                                        node.style.svg_fill,
+                                        node.style.svg_stroke,
+                                    );
+                                    crate::svg::rasterize_svg_to_rgba(&colored, raster_w, raster_h)
+                                })
+                            };
+                            if let Some(rgba) = rgba {
                                 let clips_radius = radii_arr.iter().any(|r| *r > 0.5)
                                     || radii_y_arr.iter().any(|r| *r > 0.5);
                                 if clips_radius {
@@ -2339,10 +2375,7 @@ fn border_image_slices(value: &str, image_w: f32, image_h: f32) -> [f32; 4] {
         let p = part.trim();
         if let Some(raw) = p.strip_suffix('%') {
             if let Ok(percent) = raw.parse::<f32>() {
-                vals.push((
-                    image_h * percent / 100.0,
-                    image_w * percent / 100.0,
-                ));
+                vals.push((image_h * percent / 100.0, image_w * percent / 100.0));
             }
         } else if let Ok(px) = p.parse::<f32>() {
             vals.push((px, px));
@@ -2354,7 +2387,11 @@ fn border_image_slices(value: &str, image_w: f32, image_h: f32) -> [f32; 4] {
     let top = pick(0).unwrap_or((image_h, image_w)).0;
     let right = pick(1).or_else(|| pick(0)).unwrap_or((image_h, image_w)).1;
     let bottom = pick(2).or_else(|| pick(0)).unwrap_or((image_h, image_w)).0;
-    let left = pick(3).or_else(|| pick(1)).or_else(|| pick(0)).unwrap_or((image_h, image_w)).1;
+    let left = pick(3)
+        .or_else(|| pick(1))
+        .or_else(|| pick(0))
+        .unwrap_or((image_h, image_w))
+        .1;
     [
         top.clamp(0.0, image_h),
         right.clamp(0.0, image_w),

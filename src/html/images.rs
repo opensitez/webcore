@@ -98,6 +98,10 @@ pub fn set_decoded_image_on_node(node: &mut WebCore, decoded: DecodedImage) {
         DecodedImage::Svg(markup, iw, ih) => {
             // Store SVG for paint-time rasterization at the layout-determined size
             node.svg_markup = Some(markup);
+            node.svg_document = node
+                .svg_markup
+                .as_deref()
+                .and_then(|markup| crate::svg::parse_svg_document(markup).ok());
             node.svg_viewbox_w = iw;
             node.svg_viewbox_h = ih;
             // Set intrinsic dimensions so layout can compute aspect ratio
@@ -133,7 +137,42 @@ pub(crate) fn load_image_from_src(src: &str, base_url: &str) -> Option<(Vec<u8>,
     decode_image_bytes(&bytes)
 }
 
+pub(crate) fn load_decoded_image_from_src(src: &str, base_url: &str) -> Option<DecodedImage> {
+    if src.starts_with("data:") {
+        let bytes = image_data_url_bytes(src)?;
+        return decode_image_bytes_ex(&bytes);
+    }
+
+    let path = resolve_url(src, base_url);
+    if path.starts_with("http://") || path.starts_with("https://") {
+        let bytes = crate::http_client()
+            .get(&path)
+            .header("Sec-Fetch-Dest", "image")
+            .send()
+            .ok()
+            .and_then(|r| r.bytes().ok())
+            .map(|b| b.to_vec())?;
+        return decode_image_bytes_ex(&bytes);
+    }
+
+    let bytes = std::fs::read(&path).ok()?;
+    decode_image_bytes_ex(&bytes)
+}
+
 fn load_image_data_url(src: &str) -> Option<(Vec<u8>, u32, u32)> {
+    let bytes = image_data_url_bytes(src)?;
+    // SVG data URLs need actual native rasterization, not a transparent
+    // dimensions placeholder.
+    if std::str::from_utf8(&bytes)
+        .ok()
+        .is_some_and(|text| text.trim_start().starts_with('<') && text.contains("<svg"))
+    {
+        return decode_image_bytes(&bytes);
+    }
+    decode_image_bytes(&bytes)
+}
+
+fn image_data_url_bytes(src: &str) -> Option<Vec<u8>> {
     // data:image/png;base64,<data>
     let comma = src.find(',')?;
     let header = &src[5..comma]; // strip "data:"
@@ -142,75 +181,7 @@ fn load_image_data_url(src: &str) -> Option<(Vec<u8>, u32, u32)> {
     if !is_base64 {
         return None;
     }
-    // Decode base64
-    let bytes = base64_decode(encoded)?;
-    // SVG: the image crate can't decode SVGs, so extract dimensions from XML
-    if header.contains("svg") {
-        return parse_svg_dimensions(&bytes);
-    }
-    decode_image_bytes(&bytes)
-}
-
-/// Extract width/height from an SVG's root element attributes or viewBox.
-/// Returns a 1×1 transparent RGBA pixel with the SVG's declared dimensions.
-fn parse_svg_dimensions(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    // Find the <svg ...> opening tag
-    let svg_start = text.find("<svg")?;
-    let svg_end = text[svg_start..].find('>')? + svg_start;
-    let svg_tag = &text[svg_start..=svg_end];
-
-    // Try to extract width="N" and height="N" attributes
-    let mut w: Option<f32> = None;
-    let mut h: Option<f32> = None;
-
-    for attr in ["width", "height"] {
-        let pattern = format!("{}=\"", attr);
-        if let Some(pos) = svg_tag.find(&pattern) {
-            let val_start = pos + pattern.len();
-            if let Some(val_end) = svg_tag[val_start..].find('"') {
-                let val_str = &svg_tag[val_start..val_start + val_end];
-                if let Some(n) = parse_svg_length_px(val_str) {
-                    if attr == "width" {
-                        w = Some(n);
-                    } else {
-                        h = Some(n);
-                    }
-                }
-            }
-        }
-    }
-
-    // Fallback: try viewBox="minX minY width height"
-    if w.is_none() || h.is_none() {
-        if let Some(pos) = svg_tag.find("viewBox=\"") {
-            let val_start = pos + 9;
-            if let Some(val_end) = svg_tag[val_start..].find('"') {
-                let vb = &svg_tag[val_start..val_start + val_end];
-                let parts: Vec<f32> = vb
-                    .split(|c: char| c == ',' || c.is_whitespace())
-                    .filter(|s| !s.is_empty())
-                    .filter_map(|s| s.parse().ok())
-                    .collect();
-                if parts.len() == 4 {
-                    if w.is_none() {
-                        w = Some(parts[2]);
-                    }
-                    if h.is_none() {
-                        h = Some(parts[3]);
-                    }
-                }
-            }
-        }
-    }
-
-    let wi = w? as u32;
-    let hi = h? as u32;
-    if wi == 0 || hi == 0 {
-        return None;
-    }
-    // Return a 1×1 transparent pixel — we only need the dimensions
-    Some((vec![0u8; 4], wi, hi))
+    base64_decode(encoded)
 }
 
 /// Result of decoding image bytes: either rasterized RGBA or SVG markup to rasterize later.

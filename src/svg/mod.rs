@@ -11,10 +11,10 @@ pub mod paint;
 pub mod parser;
 pub mod tree;
 
-pub use geometry::{
-    intrinsic_size_from_markup, PreserveAspectRatio, SvgLength, SvgViewBox,
-};
 pub use fallback::{load_background_images, rasterize_svg_intrinsic, rasterize_svg_to_rgba};
+pub use geometry::{intrinsic_size_from_markup, PreserveAspectRatio, SvgLength, SvgViewBox};
+pub use paint::rasterize_svg_document_to_rgba;
+pub(crate) use paint::rasterize_svg_document_to_rgba_with_vars;
 pub use parser::{parse_svg_document, SvgParseError};
 pub use tree::{SvgAttribute, SvgDocument, SvgElementKind, SvgNode};
 

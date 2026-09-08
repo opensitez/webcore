@@ -69,6 +69,9 @@ pub struct WebCore {
 
     // SVG source markup (for round-trip and re-rasterization)
     pub svg_markup: Option<String>,
+    /// Parsed native SVG tree used by the browser paint path. `svg_markup`
+    /// remains temporarily for round-trip and image fallback compatibility.
+    pub svg_document: Option<crate::svg::SvgDocument>,
     /// SVG viewBox intrinsic dimensions (width, height). Used for aspect ratio
     /// sizing in layout and on-demand rasterization at the correct display size.
     pub svg_viewbox_w: f32,

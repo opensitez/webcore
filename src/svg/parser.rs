@@ -273,8 +273,10 @@ mod tests {
 
     #[test]
     fn skips_comments_and_preserves_cdata_text() {
-        let doc = parse_svg_document("<svg><!-- hidden --><style><![CDATA[path{fill:red}]]></style></svg>")
-            .unwrap();
+        let doc = parse_svg_document(
+            "<svg><!-- hidden --><style><![CDATA[path{fill:red}]]></style></svg>",
+        )
+        .unwrap();
         assert_eq!(doc.root.children.len(), 1);
         assert_eq!(doc.root.children[0].kind, SvgElementKind::Style);
         assert_eq!(doc.root.children[0].text, "path{fill:red}");

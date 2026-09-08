@@ -480,6 +480,10 @@ impl HtmlParser {
                             "inline-block",
                         );
                         node.svg_markup = Some(fallback.markup);
+                        node.svg_document = node
+                            .svg_markup
+                            .as_deref()
+                            .and_then(|markup| crate::svg::parse_svg_document(markup).ok());
                         node.svg_viewbox_w = fallback.viewbox_w;
                         node.svg_viewbox_h = fallback.viewbox_h;
 
@@ -609,10 +613,10 @@ impl HtmlParser {
                             let is_remote =
                                 resolved.starts_with("http://") || resolved.starts_with("https://");
                             if !is_remote {
-                                if let Some((data, w, h)) =
-                                    load_image_from_src(&src, &self.base_url)
+                                if let Some(decoded) =
+                                    load_decoded_image_from_src(&src, &self.base_url)
                                 {
-                                    set_image_on_node(&mut node, data, w, h);
+                                    set_decoded_image_on_node(&mut node, decoded);
                                 }
                             }
                             node.resolved_src = resolved;
@@ -890,6 +894,10 @@ impl HtmlParser {
                 "inline-block",
             );
             node.svg_markup = Some(fallback.markup);
+            node.svg_document = node
+                .svg_markup
+                .as_deref()
+                .and_then(|markup| crate::svg::parse_svg_document(markup).ok());
             node.svg_viewbox_w = fallback.viewbox_w;
             node.svg_viewbox_h = fallback.viewbox_h;
             if let Some(w) = fallback.explicit_w {
@@ -931,8 +939,8 @@ impl HtmlParser {
                 let resolved = resolve_url(&src, &self.base_url);
                 let is_remote = resolved.starts_with("http://") || resolved.starts_with("https://");
                 if !is_remote {
-                    if let Some((data, w, h)) = load_image_from_src(&src, &self.base_url) {
-                        set_image_on_node(&mut node, data, w, h);
+                    if let Some(decoded) = load_decoded_image_from_src(&src, &self.base_url) {
+                        set_decoded_image_on_node(&mut node, decoded);
                     }
                 }
                 node.resolved_src = resolved;
