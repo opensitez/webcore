@@ -76,6 +76,37 @@ fn canon(html: &str) -> String {
     s
 }
 
+fn find_tag<'a>(node: &'a WebCore, tag: &str) -> Option<&'a WebCore> {
+    if node.tag == tag {
+        return Some(node);
+    }
+    node.children.iter().find_map(|child| find_tag(child, tag))
+}
+
+#[test]
+fn inline_svg_projects_native_children_into_the_tree() {
+    let doc = parse_html(
+        r##"<svg width="16" height="16"><g id="icon"><path xlink:href="#p" d="M0 0h10v10z"/></g></svg>"##,
+    );
+    let svg = find_tag(&doc.root, "svg").expect("svg node");
+    let group = svg
+        .children
+        .iter()
+        .find(|child| child.tag == "g")
+        .expect("g child");
+    let path = group
+        .children
+        .iter()
+        .find(|child| child.tag == "path")
+        .expect("path child");
+    assert!(svg.svg_document.is_some());
+    assert_eq!(group.attributes.get("id").map(String::as_str), Some("icon"));
+    assert_eq!(
+        path.attributes.get("xlink:href").map(String::as_str),
+        Some("#p")
+    );
+}
+
 /// (markup, expected canonical tree) — cases webcore matches a browser on.
 const CASES: &[(&str, &str)] = &[
     ("<table><tr><td>a</td></tr></table>",

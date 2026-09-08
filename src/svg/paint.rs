@@ -58,6 +58,10 @@ struct PaintState {
     stroke_dasharray: Option<Vec<f32>>,
     stroke_dashoffset: f32,
     fill_rule: FillRule,
+    clip_rule: FillRule,
+    mask_type: MaskType,
+    stop_color: Color,
+    stop_opacity: f32,
     paint_order: [PaintOp; 2],
     opacity: f32,
 }
@@ -89,6 +93,10 @@ impl Default for PaintState {
             stroke_dasharray: None,
             stroke_dashoffset: 0.0,
             fill_rule: FillRule::Winding,
+            clip_rule: FillRule::Winding,
+            mask_type: MaskType::Luminance,
+            stop_color: Color::BLACK,
+            stop_opacity: 1.0,
             paint_order: [PaintOp::Fill, PaintOp::Stroke],
             opacity: 1.0,
         }
@@ -321,7 +329,7 @@ fn paint_node<'a>(
                         false,
                     );
                     stack.pop();
-                    apply_svg_filter(&mut layer, filter_node, &state);
+                    apply_svg_filter(&mut layer, filter_node, node, &state, transform);
                     let paint = PixmapPaint::default();
                     pixmap.draw_pixmap(
                         0,
@@ -536,20 +544,21 @@ fn paint_node<'a>(
                         active_clip,
                     );
                 }
-                let (points, closed) = path_marker_points(d);
-                paint_poly_markers(
-                    node,
-                    &points,
-                    closed,
-                    pixmap,
-                    state.clone(),
-                    transform,
-                    ids,
-                    styles,
-                    ancestors,
-                    stack,
-                    active_clip,
-                );
+                for subpath in path_marker_subpaths(d) {
+                    paint_poly_markers(
+                        node,
+                        &subpath.points,
+                        subpath.closed,
+                        pixmap,
+                        state.clone(),
+                        transform,
+                        ids,
+                        styles,
+                        ancestors,
+                        stack,
+                        active_clip,
+                    );
+                }
             }
         }
         SvgElementKind::Image => {
@@ -885,6 +894,19 @@ fn paint_text_path(
     canvas.set_text_align(TextAlign::Start);
     canvas.set_text_baseline(state.text_baseline);
     let natural_advance = canvas.measure_text(&text).width;
+    let target_length = attr_length(node, "textLength", LengthAxis::X, state);
+    let length_adjust = node
+        .attr_ascii_case_insensitive("lengthAdjust")
+        .unwrap_or("spacing")
+        .trim();
+    let extra_letter_spacing = if length_adjust.eq_ignore_ascii_case("spacing")
+        || length_adjust.eq_ignore_ascii_case("spacingAndGlyphs")
+    {
+        text_length_extra_spacing(&text, natural_advance, target_length)
+    } else {
+        0.0
+    };
+    let total_letter_spacing = state.letter_spacing + extra_letter_spacing;
     let mut distance = text_path_start_offset(node, state, total_len);
     distance += match state.text_align {
         TextAlign::Center => -natural_advance / 2.0,
@@ -914,7 +936,7 @@ fn paint_text_path(
                 }
             }
         }
-        distance += char_advance + state.letter_spacing;
+        distance += char_advance + total_letter_spacing;
         if ch.is_whitespace() {
             distance += state.word_spacing;
         }
@@ -1128,9 +1150,17 @@ fn paint_image(
     };
     let mut paint = PixmapPaint::default();
     paint.opacity = state.opacity.clamp(0.0, 1.0);
-    let image_transform = transform
-        .pre_translate(x, y)
-        .pre_scale(w / iw as f32, h / ih as f32);
+    let image_transform = transform.pre_translate(x, y).pre_concat(view_box_transform(
+        SvgViewBox {
+            min_x: 0.0,
+            min_y: 0.0,
+            width: iw as f32,
+            height: ih as f32,
+        },
+        w,
+        h,
+        parse_preserve_aspect_ratio(node.attr_ascii_case_insensitive("preserveAspectRatio")),
+    ));
     pixmap.draw_pixmap(0, 0, src, &paint, image_transform, clip);
 }
 
@@ -1304,7 +1334,7 @@ fn paint_poly_markers<'a>(
             "marker-mid",
             points[i].0,
             points[i].1,
-            (in_angle + out_angle) / 2.0,
+            average_marker_angle(in_angle, out_angle),
             pixmap,
             state.clone(),
             transform,
@@ -1342,6 +1372,18 @@ fn segment_angle(from: (f32, f32), to: (f32, f32)) -> f32 {
     (to.1 - from.1).atan2(to.0 - from.0).to_degrees()
 }
 
+fn average_marker_angle(a: f32, b: f32) -> f32 {
+    let ar = a.to_radians();
+    let br = b.to_radians();
+    let x = ar.cos() + br.cos();
+    let y = ar.sin() + br.sin();
+    if x.abs() < f32::EPSILON && y.abs() < f32::EPSILON {
+        b
+    } else {
+        y.atan2(x).to_degrees()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_marker_ref<'a>(
     owner: &SvgNode,
@@ -1377,17 +1419,16 @@ fn paint_marker_ref<'a>(
     let ref_x = attr_length(marker, "refX", LengthAxis::X, &state).unwrap_or(0.0);
     let ref_y = attr_length(marker, "refY", LengthAxis::Y, &state).unwrap_or(0.0);
     let marker_angle = match marker.attr("orient").unwrap_or("0").trim() {
-        "auto" | "auto-start-reverse" => angle,
+        "auto" => angle,
+        "auto-start-reverse" if attr == "marker-start" => angle + 180.0,
+        "auto-start-reverse" => angle,
         other => number(other).unwrap_or(angle),
     };
     let mut marker_transform = transform
         .pre_translate(x, y)
         .pre_rotate(marker_angle)
         .pre_translate(-ref_x, -ref_y);
-    if marker
-        .attr("markerUnits")
-        .is_some_and(|v| v == "strokeWidth")
-    {
+    if marker.attr("markerUnits").unwrap_or("strokeWidth") == "strokeWidth" {
         marker_transform = marker_transform.pre_scale(state.stroke_width, state.stroke_width);
     }
     if let Some(vb) = marker
@@ -1432,9 +1473,12 @@ fn compositing_mask_for_node<'a>(
     stack: &mut Vec<String>,
     parent: Option<&Mask>,
 ) -> Option<Mask> {
-    let clip = clip_mask_for_node(node, state, width, height, transform, ids, parent);
+    let clip = clip_mask_for_node(
+        node, state, width, height, transform, ids, styles, ancestors, parent,
+    );
     let mask = svg_mask_for_node(
         node,
+        state,
         width,
         height,
         transform,
@@ -1447,13 +1491,15 @@ fn compositing_mask_for_node<'a>(
     mask.or(clip)
 }
 
-fn clip_mask_for_node(
+fn clip_mask_for_node<'a>(
     node: &SvgNode,
     state: &PaintState,
     width: u32,
     height: u32,
     transform: Transform,
-    ids: &HashMap<String, &SvgNode>,
+    ids: &HashMap<String, &'a SvgNode>,
+    styles: &[CssRule],
+    ancestors: &mut Vec<&'a SvgNode>,
     parent: Option<&Mask>,
 ) -> Option<Mask> {
     let id = node.attr("clip-path").and_then(parse_url_id)?;
@@ -1462,11 +1508,26 @@ fn clip_mask_for_node(
         return None;
     }
     let mut mask = Mask::new(width, height)?;
+    let clip_transform = if clip_node
+        .attr("clipPathUnits")
+        .is_some_and(|value| value == "objectBoundingBox")
+    {
+        let target_path = node_path(node, state)?;
+        let bounds = target_path.bounds();
+        transform
+            .pre_translate(bounds.left(), bounds.top())
+            .pre_scale(bounds.width(), bounds.height())
+    } else {
+        transform
+    };
+    ancestors.push(clip_node);
     for child in &clip_node.children {
-        if let Some(path) = node_path(child, state) {
-            mask.fill_path(&path, FillRule::Winding, true, transform);
+        let child_state = state_for_node(child, state.clone(), styles, ancestors);
+        if let Some(path) = node_path(child, &child_state) {
+            mask.fill_path(&path, child_state.clip_rule, true, clip_transform);
         }
     }
+    ancestors.pop();
     if let Some(parent) = parent {
         for (value, parent_value) in mask.data_mut().iter_mut().zip(parent.data()) {
             *value = (*value).min(*parent_value);
@@ -1504,6 +1565,7 @@ fn nested_svg_viewport_mask(
 
 fn svg_mask_for_node<'a>(
     node: &SvgNode,
+    state: &PaintState,
     width: u32,
     height: u32,
     transform: Transform,
@@ -1522,13 +1584,29 @@ fn svg_mask_for_node<'a>(
         return None;
     }
     let mut mask_pixmap = Pixmap::new(width, height)?;
+    ancestors.push(mask_node);
+    let mut mask_state = state_for_node(mask_node, PaintState::default(), styles, ancestors);
+    let mask_transform = if mask_node
+        .attr("maskContentUnits")
+        .is_some_and(|value| value == "objectBoundingBox")
+    {
+        let target_path = node_path(node, state)?;
+        let bounds = target_path.bounds();
+        mask_state.viewport_width = 1.0;
+        mask_state.viewport_height = 1.0;
+        transform
+            .pre_translate(bounds.left(), bounds.top())
+            .pre_scale(bounds.width(), bounds.height())
+    } else {
+        transform
+    };
     stack.push(id.to_string());
     for child in &mask_node.children {
         paint_node(
             child,
             &mut mask_pixmap,
-            PaintState::default(),
-            transform,
+            mask_state.clone(),
+            mask_transform,
             ids,
             styles,
             ancestors,
@@ -1538,12 +1616,72 @@ fn svg_mask_for_node<'a>(
         );
     }
     stack.pop();
-    let mut mask = Mask::from_pixmap(mask_pixmap.as_ref(), MaskType::Luminance);
+    ancestors.pop();
+    let mut mask = Mask::from_pixmap(mask_pixmap.as_ref(), mask_state.mask_type);
+    if let Some(region) = mask_region_for_node(mask_node, node, state, width, height, transform) {
+        for (value, region_value) in mask.data_mut().iter_mut().zip(region.data()) {
+            *value = (*value).min(*region_value);
+        }
+    }
     if let Some(parent) = parent {
         for (value, parent_value) in mask.data_mut().iter_mut().zip(parent.data()) {
             *value = (*value).min(*parent_value);
         }
     }
+    Some(mask)
+}
+
+fn mask_region_for_node(
+    mask_node: &SvgNode,
+    target_node: &SvgNode,
+    target_state: &PaintState,
+    width: u32,
+    height: u32,
+    transform: Transform,
+) -> Option<Mask> {
+    let uses_object_bbox = !mask_node
+        .attr("maskUnits")
+        .is_some_and(|value| value == "userSpaceOnUse");
+    let (x, y, w, h, region_transform) = if uses_object_bbox {
+        let target_path = node_path(target_node, target_state)?;
+        let bounds = target_path.bounds();
+        if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+            return None;
+        }
+        let mut state = target_state.clone();
+        state.viewport_width = 1.0;
+        state.viewport_height = 1.0;
+        (
+            attr_length(mask_node, "x", LengthAxis::X, &state).unwrap_or(-0.1),
+            attr_length(mask_node, "y", LengthAxis::Y, &state).unwrap_or(-0.1),
+            attr_length(mask_node, "width", LengthAxis::X, &state).unwrap_or(1.2),
+            attr_length(mask_node, "height", LengthAxis::Y, &state).unwrap_or(1.2),
+            transform
+                .pre_translate(bounds.left(), bounds.top())
+                .pre_scale(bounds.width(), bounds.height()),
+        )
+    } else {
+        (
+            attr_length(mask_node, "x", LengthAxis::X, target_state)
+                .unwrap_or(-0.1 * target_state.viewport_width.max(1.0)),
+            attr_length(mask_node, "y", LengthAxis::Y, target_state)
+                .unwrap_or(-0.1 * target_state.viewport_height.max(1.0)),
+            attr_length(mask_node, "width", LengthAxis::X, target_state)
+                .unwrap_or(1.2 * target_state.viewport_width.max(1.0)),
+            attr_length(mask_node, "height", LengthAxis::Y, target_state)
+                .unwrap_or(1.2 * target_state.viewport_height.max(1.0)),
+            transform,
+        )
+    };
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let rect = tiny_skia::Rect::from_xywh(x, y, w, h)?;
+    let mut path = PathBuilder::new();
+    path.push_rect(rect);
+    let path = path.finish()?;
+    let mut mask = Mask::new(width, height)?;
+    mask.fill_path(&path, FillRule::Winding, true, region_transform);
     Some(mask)
 }
 
@@ -2034,6 +2172,30 @@ fn apply_paint_attr(state: &mut PaintState, name: &str, value: &str) {
                 FillRule::Winding
             };
         }
+        "clip-rule" => {
+            state.clip_rule = if value.trim().eq_ignore_ascii_case("evenodd") {
+                FillRule::EvenOdd
+            } else {
+                FillRule::Winding
+            };
+        }
+        "mask-type" => {
+            state.mask_type = if value.trim().eq_ignore_ascii_case("alpha") {
+                MaskType::Alpha
+            } else {
+                MaskType::Luminance
+            };
+        }
+        "stop-color" => {
+            if let Some(color) = parse_svg_color(value, &state.custom_props) {
+                state.stop_color = color;
+            }
+        }
+        "stop-opacity" => {
+            if let Some(v) = number(value) {
+                state.stop_opacity = v.clamp(0.0, 1.0);
+            }
+        }
         "paint-order" => {
             state.paint_order = parse_paint_order(value);
         }
@@ -2168,12 +2330,19 @@ fn is_svg_filter_node(node: &SvgNode) -> bool {
     svg_tag_name(node).eq_ignore_ascii_case("filter")
 }
 
-fn apply_svg_filter(pixmap: &mut Pixmap, filter: &SvgNode, state: &PaintState) {
+fn apply_svg_filter(
+    pixmap: &mut Pixmap,
+    filter: &SvgNode,
+    target_node: &SvgNode,
+    state: &PaintState,
+    transform: Transform,
+) {
     let source = pixmap.to_owned();
     let mut current = source.to_owned();
     let mut results: HashMap<String, Pixmap> = HashMap::new();
     results.insert("SourceGraphic".to_string(), source.to_owned());
     results.insert("SourceAlpha".to_string(), source_alpha_pixmap(&source));
+    let primitive_state = filter_primitive_state(filter, target_node, state);
 
     for child in &filter.children {
         let tag = svg_tag_name(child);
@@ -2182,12 +2351,12 @@ fn apply_svg_filter(pixmap: &mut Pixmap, filter: &SvgNode, state: &PaintState) {
             let std_dev = filter_std_deviation(child).unwrap_or(0.0);
             crate::canvas::effects::blur_pixmap(&mut next, std_dev);
         } else if tag.eq_ignore_ascii_case("feOffset") {
-            let dx = attr_length(child, "dx", LengthAxis::X, state).unwrap_or(0.0);
-            let dy = attr_length(child, "dy", LengthAxis::Y, state).unwrap_or(0.0);
+            let dx = attr_length(child, "dx", LengthAxis::X, &primitive_state).unwrap_or(0.0);
+            let dy = attr_length(child, "dy", LengthAxis::Y, &primitive_state).unwrap_or(0.0);
             offset_pixmap(&mut next, dx, dy);
         } else if tag.eq_ignore_ascii_case("feDropShadow") {
-            let dx = attr_length(child, "dx", LengthAxis::X, state).unwrap_or(2.0);
-            let dy = attr_length(child, "dy", LengthAxis::Y, state).unwrap_or(2.0);
+            let dx = attr_length(child, "dx", LengthAxis::X, &primitive_state).unwrap_or(2.0);
+            let dy = attr_length(child, "dy", LengthAxis::Y, &primitive_state).unwrap_or(2.0);
             let std_dev = filter_std_deviation(child).unwrap_or(2.0);
             crate::canvas::effects::drop_shadow(
                 &mut next,
@@ -2205,8 +2374,7 @@ fn apply_svg_filter(pixmap: &mut Pixmap, filter: &SvgNode, state: &PaintState) {
                 &current,
                 &results,
             );
-            next =
-                composite_filter_pixmaps(&next, &second, child.attr("operator").unwrap_or("over"));
+            next = composite_filter_pixmaps(&next, &second, child);
         } else if tag.eq_ignore_ascii_case("feBlend") {
             let second = filter_input_named(
                 child.attr("in2").unwrap_or("SourceGraphic"),
@@ -2224,7 +2392,7 @@ fn apply_svg_filter(pixmap: &mut Pixmap, filter: &SvgNode, state: &PaintState) {
         } else if tag.eq_ignore_ascii_case("feComponentTransfer") {
             next = component_transfer_filter_pixmap(&next, child);
         } else if tag.eq_ignore_ascii_case("feMorphology") {
-            next = morphology_filter_pixmap(&next, child);
+            next = morphology_filter_pixmap(&next, child, &primitive_state);
         } else if tag.eq_ignore_ascii_case("feMerge") {
             let Some(mut merged) = Pixmap::new(pixmap.width(), pixmap.height()) else {
                 continue;
@@ -2256,6 +2424,110 @@ fn apply_svg_filter(pixmap: &mut Pixmap, filter: &SvgNode, state: &PaintState) {
         current = next;
     }
     *pixmap = current;
+    if let Some(region) = filter_region_for_node(
+        filter,
+        target_node,
+        state,
+        pixmap.width(),
+        pixmap.height(),
+        transform,
+    ) {
+        apply_alpha_mask_to_pixmap(pixmap, region.data());
+    }
+}
+
+fn filter_primitive_state(
+    filter: &SvgNode,
+    target_node: &SvgNode,
+    target_state: &PaintState,
+) -> PaintState {
+    if !filter
+        .attr("primitiveUnits")
+        .is_some_and(|value| value == "objectBoundingBox")
+    {
+        return target_state.clone();
+    }
+    let Some(target_path) = node_path(target_node, target_state) else {
+        return target_state.clone();
+    };
+    let bounds = target_path.bounds();
+    if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+        return target_state.clone();
+    }
+    let mut state = target_state.clone();
+    state.viewport_width = bounds.width();
+    state.viewport_height = bounds.height();
+    state
+}
+
+fn filter_region_for_node(
+    filter: &SvgNode,
+    target_node: &SvgNode,
+    target_state: &PaintState,
+    width: u32,
+    height: u32,
+    transform: Transform,
+) -> Option<Mask> {
+    let uses_object_bbox = !filter
+        .attr("filterUnits")
+        .is_some_and(|value| value == "userSpaceOnUse");
+    let (x, y, w, h, region_transform) = if uses_object_bbox {
+        let target_path = node_path(target_node, target_state)?;
+        let bounds = target_path.bounds();
+        if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+            return None;
+        }
+        let mut unit_state = target_state.clone();
+        unit_state.viewport_width = 1.0;
+        unit_state.viewport_height = 1.0;
+        (
+            attr_length(filter, "x", LengthAxis::X, &unit_state).unwrap_or(-0.1),
+            attr_length(filter, "y", LengthAxis::Y, &unit_state).unwrap_or(-0.1),
+            attr_length(filter, "width", LengthAxis::X, &unit_state).unwrap_or(1.2),
+            attr_length(filter, "height", LengthAxis::Y, &unit_state).unwrap_or(1.2),
+            transform
+                .pre_translate(bounds.left(), bounds.top())
+                .pre_scale(bounds.width(), bounds.height()),
+        )
+    } else {
+        (
+            attr_length(filter, "x", LengthAxis::X, target_state)
+                .unwrap_or(-0.1 * target_state.viewport_width.max(1.0)),
+            attr_length(filter, "y", LengthAxis::Y, target_state)
+                .unwrap_or(-0.1 * target_state.viewport_height.max(1.0)),
+            attr_length(filter, "width", LengthAxis::X, target_state)
+                .unwrap_or(1.2 * target_state.viewport_width.max(1.0)),
+            attr_length(filter, "height", LengthAxis::Y, target_state)
+                .unwrap_or(1.2 * target_state.viewport_height.max(1.0)),
+            transform,
+        )
+    };
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let rect = tiny_skia::Rect::from_xywh(x, y, w, h)?;
+    let mut path = PathBuilder::new();
+    path.push_rect(rect);
+    let path = path.finish()?;
+    let mut mask = Mask::new(width, height)?;
+    mask.fill_path(&path, FillRule::Winding, true, region_transform);
+    Some(mask)
+}
+
+fn apply_alpha_mask_to_pixmap(pixmap: &mut Pixmap, mask: &[u8]) {
+    for (px, mask_alpha) in pixmap.pixels_mut().iter_mut().zip(mask) {
+        let alpha = px.alpha() as u32 * *mask_alpha as u32 / 255;
+        if alpha == 0 {
+            *px = PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap();
+            continue;
+        }
+        let scale = alpha as f32 / px.alpha().max(1) as f32;
+        let r = (px.red() as f32 * scale).round().clamp(0.0, 255.0) as u8;
+        let g = (px.green() as f32 * scale).round().clamp(0.0, 255.0) as u8;
+        let b = (px.blue() as f32 * scale).round().clamp(0.0, 255.0) as u8;
+        *px = PremultipliedColorU8::from_rgba(r, g, b, alpha as u8)
+            .unwrap_or_else(|| PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap());
+    }
 }
 
 fn filter_input(node: &SvgNode, current: &Pixmap, results: &HashMap<String, Pixmap>) -> Pixmap {
@@ -2322,8 +2594,21 @@ fn composite_source_over(dst: &mut Pixmap, src: &Pixmap) {
     }
 }
 
-fn composite_filter_pixmaps(input: &Pixmap, input2: &Pixmap, operator: &str) -> Pixmap {
+fn composite_filter_pixmaps(input: &Pixmap, input2: &Pixmap, node: &SvgNode) -> Pixmap {
     let mut out = Pixmap::new(input.width(), input.height()).expect("filter dimensions are valid");
+    let operator = node.attr("operator").unwrap_or("over").trim();
+    if operator == "arithmetic" {
+        return arithmetic_composite_filter_pixmaps(
+            input,
+            input2,
+            (
+                node.attr("k1").and_then(number).unwrap_or(0.0),
+                node.attr("k2").and_then(number).unwrap_or(0.0),
+                node.attr("k3").and_then(number).unwrap_or(0.0),
+                node.attr("k4").and_then(number).unwrap_or(0.0),
+            ),
+        );
+    }
     for ((dst, a), b) in out
         .pixels_mut()
         .iter_mut()
@@ -2334,7 +2619,7 @@ fn composite_filter_pixmaps(input: &Pixmap, input2: &Pixmap, operator: &str) -> 
         let ba = b.alpha() as u32;
         let inv_aa = 255 - aa;
         let inv_ba = 255 - ba;
-        let (r, g, bl, alpha) = match operator.trim() {
+        let (r, g, bl, alpha) = match operator {
             "in" => (
                 a.red() as u32 * ba / 255,
                 a.green() as u32 * ba / 255,
@@ -2371,6 +2656,36 @@ fn composite_filter_pixmaps(input: &Pixmap, input2: &Pixmap, operator: &str) -> 
             g.min(255) as u8,
             bl.min(255) as u8,
             alpha.min(255) as u8,
+        );
+    }
+    out
+}
+
+fn arithmetic_composite_filter_pixmaps(
+    input: &Pixmap,
+    input2: &Pixmap,
+    coeffs: (f32, f32, f32, f32),
+) -> Pixmap {
+    let mut out = Pixmap::new(input.width(), input.height()).expect("filter dimensions are valid");
+    let (k1, k2, k3, k4) = coeffs;
+    for ((dst, a), b) in out
+        .pixels_mut()
+        .iter_mut()
+        .zip(input.pixels())
+        .zip(input2.pixels())
+    {
+        let (ar, ag, ab, aa) = pixel_unpremul_rgba(*a);
+        let (br, bg, bb, ba) = pixel_unpremul_rgba(*b);
+        let arithmetic = |ca: u8, cb: u8| -> f32 {
+            let ca = ca as f32 / 255.0;
+            let cb = cb as f32 / 255.0;
+            k1 * ca * cb + k2 * ca + k3 * cb + k4
+        };
+        *dst = premul_from_unit_rgba(
+            arithmetic(ar, br),
+            arithmetic(ag, bg),
+            arithmetic(ab, bb),
+            arithmetic(aa, ba),
         );
     }
     out
@@ -2480,10 +2795,10 @@ fn table_transfer(value: f32, table: &[f32], discrete: bool) -> f32 {
     table[i] + (table[i + 1] - table[i]) * t
 }
 
-fn morphology_filter_pixmap(input: &Pixmap, node: &SvgNode) -> Pixmap {
+fn morphology_filter_pixmap(input: &Pixmap, node: &SvgNode, state: &PaintState) -> Pixmap {
     let radii = node
         .attr("radius")
-        .map(number_list)
+        .map(|value| svg_filter_radius_list(value, state))
         .filter(|values| !values.is_empty())
         .unwrap_or_else(|| vec![0.0]);
     let rx = radii[0].max(0.0).round() as i32;
@@ -2519,10 +2834,27 @@ fn morphology_filter_pixmap(input: &Pixmap, node: &SvgNode) -> Pixmap {
                     }
                 }
             }
-            *out.pixel_mut(x as u32, y as u32).unwrap() = premul_channels_to_pixel(r, g, b, a);
+            let index = (y as u32 * input.width() + x as u32) as usize;
+            out.pixels_mut()[index] = premul_channels_to_pixel(r, g, b, a);
         }
     }
     out
+}
+
+fn svg_filter_radius_list(value: &str, state: &PaintState) -> Vec<f32> {
+    value
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|part| !part.trim().is_empty())
+        .enumerate()
+        .filter_map(|(index, part)| {
+            let axis = if index == 0 {
+                LengthAxis::X
+            } else {
+                LengthAxis::Y
+            };
+            resolve_svg_length(part, axis, state).or_else(|| number(part))
+        })
+        .collect()
 }
 
 fn blend_filter_pixmaps(backdrop: &Pixmap, source: &Pixmap, mode: &str) -> Pixmap {
@@ -2576,6 +2908,7 @@ fn source_over_pixel(dst: PremultipliedColorU8, src: PremultipliedColorU8) -> Pr
 fn color_matrix_filter_pixmap(input: &Pixmap, ty: &str, values: &str) -> Pixmap {
     let mut out = Pixmap::new(input.width(), input.height()).expect("filter dimensions are valid");
     let nums = number_list(values);
+    let ty = ty.trim().to_ascii_lowercase();
     for (dst, src) in out.pixels_mut().iter_mut().zip(input.pixels()) {
         let (r, g, b, a) = pixel_unpremul_rgba(*src);
         let (rf, gf, bf, af) = (
@@ -2584,7 +2917,7 @@ fn color_matrix_filter_pixmap(input: &Pixmap, ty: &str, values: &str) -> Pixmap 
             b as f32 / 255.0,
             a as f32 / 255.0,
         );
-        let next = match ty.trim() {
+        let next = match ty.as_str() {
             "saturate" => {
                 let s = nums.first().copied().unwrap_or(1.0);
                 let ir = 0.213 + 0.787 * s;
@@ -2603,7 +2936,27 @@ fn color_matrix_filter_pixmap(input: &Pixmap, ty: &str, values: &str) -> Pixmap 
                     af,
                 )
             }
-            "luminanceToAlpha" => (0.0, 0.0, 0.0, 0.2126 * rf + 0.7152 * gf + 0.0722 * bf),
+            "huerotate" => {
+                let angle = nums.first().copied().unwrap_or(0.0).to_radians();
+                let cos = angle.cos();
+                let sin = angle.sin();
+                let ir = 0.213 + cos * 0.787 - sin * 0.213;
+                let ig = 0.715 - cos * 0.715 - sin * 0.715;
+                let ib = 0.072 - cos * 0.072 + sin * 0.928;
+                let jr = 0.213 - cos * 0.213 + sin * 0.143;
+                let jg = 0.715 + cos * 0.285 + sin * 0.140;
+                let jb = 0.072 - cos * 0.072 - sin * 0.283;
+                let kr = 0.213 - cos * 0.213 - sin * 0.787;
+                let kg = 0.715 - cos * 0.715 + sin * 0.715;
+                let kb = 0.072 + cos * 0.928 + sin * 0.072;
+                (
+                    ir * rf + ig * gf + ib * bf,
+                    jr * rf + jg * gf + jb * bf,
+                    kr * rf + kg * gf + kb * bf,
+                    af,
+                )
+            }
+            "luminancetoalpha" => (0.0, 0.0, 0.0, 0.2126 * rf + 0.7152 * gf + 0.0722 * bf),
             _ if nums.len() >= 20 => (
                 nums[0] * rf + nums[1] * gf + nums[2] * bf + nums[3] * af + nums[4],
                 nums[5] * rf + nums[6] * gf + nums[7] * bf + nums[8] * af + nums[9],
@@ -2864,7 +3217,7 @@ fn with_paint_source<'a>(
                 .filter(|node| matches!(node.kind, SvgElementKind::Pattern))
             {
                 if let Some(tile) =
-                    render_pattern_tile(pattern, state, ids, styles, ancestors, stack)
+                    render_pattern_tile(pattern, state, path, ids, styles, ancestors, stack)
                 {
                     let Some(src) = PixmapRef::from_bytes(tile.data(), tile.width(), tile.height())
                     else {
@@ -2880,7 +3233,7 @@ fn with_paint_source<'a>(
                         SpreadMode::Repeat,
                         tiny_skia::FilterQuality::Nearest,
                         state.opacity.clamp(0.0, 1.0),
-                        pattern_transform(pattern, state),
+                        pattern_transform(pattern, state, path),
                     );
                     draw(&paint);
                 } else {
@@ -2892,7 +3245,7 @@ fn with_paint_source<'a>(
                 }
             } else if let Some(shader) = ids
                 .get(id)
-                .and_then(|node| gradient_shader(node, state.opacity, path, ids))
+                .and_then(|node| gradient_shader(node, state.opacity, path, ids, styles, ancestors))
             {
                 paint.shader = shader;
                 draw(&paint);
@@ -2909,19 +3262,29 @@ fn with_paint_source<'a>(
 fn render_pattern_tile<'a>(
     pattern: &'a SvgNode,
     inherited: &PaintState,
+    path: &Path,
     ids: &HashMap<String, &'a SvgNode>,
     styles: &[CssRule],
     ancestors: &mut Vec<&'a SvgNode>,
     stack: &mut Vec<String>,
 ) -> Option<Pixmap> {
-    let width = attr_length(pattern, "width", LengthAxis::X, inherited)
-        .unwrap_or(0.0)
-        .ceil()
-        .max(1.0) as u32;
-    let height = attr_length(pattern, "height", LengthAxis::Y, inherited)
-        .unwrap_or(0.0)
-        .ceil()
-        .max(1.0) as u32;
+    let bounds = path.bounds();
+    let pattern_units_bbox = !pattern
+        .attr("patternUnits")
+        .is_some_and(|value| value == "userSpaceOnUse");
+    let mut unit_state = inherited.clone();
+    if pattern_units_bbox {
+        unit_state.viewport_width = 1.0;
+        unit_state.viewport_height = 1.0;
+    }
+    let mut width = attr_length(pattern, "width", LengthAxis::X, &unit_state).unwrap_or(0.0);
+    let mut height = attr_length(pattern, "height", LengthAxis::Y, &unit_state).unwrap_or(0.0);
+    if pattern_units_bbox {
+        width *= bounds.width();
+        height *= bounds.height();
+    }
+    let width = width.ceil().max(1.0) as u32;
+    let height = height.ceil().max(1.0) as u32;
     if width == 0 || height == 0 {
         return None;
     }
@@ -2934,6 +3297,28 @@ fn render_pattern_tile<'a>(
         transform = transform
             .pre_scale(width as f32 / vb.width, height as f32 / vb.height)
             .pre_translate(-vb.min_x, -vb.min_y);
+    } else if pattern
+        .attr("patternContentUnits")
+        .is_some_and(|value| value == "objectBoundingBox")
+    {
+        let mut content_state = inherited.clone();
+        content_state.viewport_width = bounds.width();
+        content_state.viewport_height = bounds.height();
+        for child in &pattern.children {
+            paint_node(
+                child,
+                &mut tile,
+                content_state.clone(),
+                transform,
+                ids,
+                styles,
+                ancestors,
+                stack,
+                None,
+                true,
+            );
+        }
+        return Some(tile);
     }
     for child in &pattern.children {
         paint_node(
@@ -2952,35 +3337,55 @@ fn render_pattern_tile<'a>(
     Some(tile)
 }
 
-fn pattern_transform(pattern: &SvgNode, state: &PaintState) -> Transform {
+fn pattern_transform(pattern: &SvgNode, state: &PaintState, path: &Path) -> Transform {
     let local = pattern
         .attr("patternTransform")
         .and_then(parse_transform_list)
         .unwrap_or_else(Transform::identity);
-    local.pre_translate(
-        -attr_length(pattern, "x", LengthAxis::X, state).unwrap_or(0.0),
-        -attr_length(pattern, "y", LengthAxis::Y, state).unwrap_or(0.0),
-    )
+    let bounds = path.bounds();
+    let pattern_units_bbox = !pattern
+        .attr("patternUnits")
+        .is_some_and(|value| value == "userSpaceOnUse");
+    let mut unit_state = state.clone();
+    if pattern_units_bbox {
+        unit_state.viewport_width = 1.0;
+        unit_state.viewport_height = 1.0;
+    }
+    let mut x = attr_length(pattern, "x", LengthAxis::X, &unit_state).unwrap_or(0.0);
+    let mut y = attr_length(pattern, "y", LengthAxis::Y, &unit_state).unwrap_or(0.0);
+    if pattern_units_bbox {
+        x = bounds.left() + x * bounds.width();
+        y = bounds.top() + y * bounds.height();
+    }
+    local.pre_translate(x, y)
 }
 
-fn gradient_shader(
-    node: &SvgNode,
+fn gradient_shader<'a>(
+    node: &'a SvgNode,
     opacity: f32,
     path: &Path,
-    ids: &HashMap<String, &SvgNode>,
+    ids: &HashMap<String, &'a SvgNode>,
+    styles: &[CssRule],
+    ancestors: &mut Vec<&'a SvgNode>,
 ) -> Option<tiny_skia::Shader<'static>> {
     match node.kind {
-        SvgElementKind::LinearGradient => linear_gradient_shader(node, opacity, path, ids),
-        SvgElementKind::RadialGradient => radial_gradient_shader(node, opacity, path, ids),
+        SvgElementKind::LinearGradient => {
+            linear_gradient_shader(node, opacity, path, ids, styles, ancestors)
+        }
+        SvgElementKind::RadialGradient => {
+            radial_gradient_shader(node, opacity, path, ids, styles, ancestors)
+        }
         _ => None,
     }
 }
 
-fn linear_gradient_shader(
-    node: &SvgNode,
+fn linear_gradient_shader<'a>(
+    node: &'a SvgNode,
     opacity: f32,
     path: &Path,
-    ids: &HashMap<String, &SvgNode>,
+    ids: &HashMap<String, &'a SvgNode>,
+    styles: &[CssRule],
+    ancestors: &mut Vec<&'a SvgNode>,
 ) -> Option<tiny_skia::Shader<'static>> {
     let bounds = path.bounds();
     let user_space =
@@ -3024,17 +3429,19 @@ fn linear_gradient_shader(
     LinearGradient::new(
         SkPoint::from_xy(x1, y1),
         SkPoint::from_xy(x2, y2),
-        gradient_stops(node, opacity, ids),
+        gradient_stops(node, opacity, ids, styles, ancestors),
         gradient_spread(node, ids),
         gradient_transform(node, ids),
     )
 }
 
-fn radial_gradient_shader(
-    node: &SvgNode,
+fn radial_gradient_shader<'a>(
+    node: &'a SvgNode,
     opacity: f32,
     path: &Path,
-    ids: &HashMap<String, &SvgNode>,
+    ids: &HashMap<String, &'a SvgNode>,
+    styles: &[CssRule],
+    ancestors: &mut Vec<&'a SvgNode>,
 ) -> Option<tiny_skia::Shader<'static>> {
     let bounds = path.bounds();
     let user_space =
@@ -3088,7 +3495,7 @@ fn radial_gradient_shader(
         0.0,
         SkPoint::from_xy(cx, cy),
         r.max(0.0),
-        gradient_stops(node, opacity, ids),
+        gradient_stops(node, opacity, ids, styles, ancestors),
         gradient_spread(node, ids),
         gradient_transform(node, ids),
     )
@@ -3157,50 +3564,42 @@ fn percent_or_number(value: &str) -> Option<f32> {
     }
 }
 
-fn gradient_stops(
-    node: &SvgNode,
+fn gradient_stops<'a>(
+    node: &'a SvgNode,
     opacity: f32,
-    ids: &HashMap<String, &SvgNode>,
+    ids: &HashMap<String, &'a SvgNode>,
+    styles: &[CssRule],
+    ancestors: &mut Vec<&'a SvgNode>,
 ) -> Vec<SkGradientStop> {
     let mut stops = Vec::new();
-    collect_gradient_stops(node, opacity, ids, &mut stops, &mut Vec::new());
+    collect_gradient_stops(
+        node,
+        opacity,
+        ids,
+        styles,
+        ancestors,
+        &mut stops,
+        &mut Vec::new(),
+    );
     stops
 }
 
-fn collect_gradient_stops(
-    node: &SvgNode,
+fn collect_gradient_stops<'a>(
+    node: &'a SvgNode,
     opacity: f32,
-    ids: &HashMap<String, &SvgNode>,
+    ids: &HashMap<String, &'a SvgNode>,
+    styles: &[CssRule],
+    ancestors: &mut Vec<&'a SvgNode>,
     stops: &mut Vec<SkGradientStop>,
     stack: &mut Vec<String>,
 ) {
+    ancestors.push(node);
+    let gradient_state = state_for_node(node, PaintState::default(), styles, ancestors);
     for child in &node.children {
         if svg_tag_name(child).eq_ignore_ascii_case("stop") {
             let offset = percent_or_number(child.attr("offset").unwrap_or("0")).unwrap_or(0.0);
-            let mut color = child
-                .attr("stop-color")
-                .and_then(parse_color)
-                .unwrap_or(Color::BLACK);
-            if let Some(style) = child.attr("style") {
-                for decl in style.split(';') {
-                    if let Some((name, value)) = decl.split_once(':') {
-                        let name = name.trim();
-                        let value = value.trim();
-                        if name == "stop-color" {
-                            if let Some(parsed) = parse_color(value) {
-                                color = parsed;
-                            }
-                        } else if name == "stop-opacity" {
-                            if let Some(alpha) = number(value) {
-                                color = with_alpha(color, alpha);
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some(alpha) = child.attr("stop-opacity").and_then(number) {
-                color = with_alpha(color, alpha);
-            }
+            let stop_state = state_for_node(child, gradient_state.clone(), styles, ancestors);
+            let color = with_alpha(stop_state.stop_color, stop_state.stop_opacity);
             stops.push(SkGradientStop::new(
                 offset,
                 apply_opacity(color, opacity).to_tiny_skia(),
@@ -3208,20 +3607,25 @@ fn collect_gradient_stops(
         }
     }
     if !stops.is_empty() {
+        ancestors.pop();
         return;
     }
     let Some(id) = href_id(node) else {
+        ancestors.pop();
         return;
     };
     if stack.iter().any(|seen| seen == id) {
+        ancestors.pop();
         return;
     }
     let Some(parent) = ids.get(id).copied() else {
+        ancestors.pop();
         return;
     };
     stack.push(id.to_string());
-    collect_gradient_stops(parent, opacity, ids, stops, stack);
+    collect_gradient_stops(parent, opacity, ids, styles, ancestors, stops, stack);
     stack.pop();
+    ancestors.pop();
 }
 
 fn inherited_gradient_attr(
@@ -3600,7 +4004,12 @@ fn segment_length(from: (f32, f32), to: (f32, f32)) -> f32 {
     ((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt()
 }
 
-fn path_marker_points(data: &str) -> (Vec<(f32, f32)>, bool) {
+struct MarkerSubpath {
+    points: Vec<(f32, f32)>,
+    closed: bool,
+}
+
+fn path_marker_subpaths(data: &str) -> Vec<MarkerSubpath> {
     let mut p = PathDataParser {
         data,
         pos: 0,
@@ -3612,7 +4021,8 @@ fn path_marker_points(data: &str) -> (Vec<(f32, f32)>, bool) {
         last_cubic_ctrl: None,
         last_quad_ctrl: None,
     };
-    let mut points = Vec::new();
+    let mut subpaths = Vec::new();
+    let mut points: Vec<(f32, f32)> = Vec::new();
     let mut closed = false;
     while p.skip_separators() {
         if let Some(c) = p.peek_cmd() {
@@ -3625,6 +4035,11 @@ fn path_marker_points(data: &str) -> (Vec<(f32, f32)>, bool) {
                 let Some((x, y)) = p.pair(relative) else {
                     break;
                 };
+                if points.len() >= 2 {
+                    subpaths.push(MarkerSubpath { points, closed });
+                }
+                points = Vec::new();
+                closed = false;
                 p.x = x;
                 p.y = y;
                 p.sx = x;
@@ -3720,7 +4135,10 @@ fn path_marker_points(data: &str) -> (Vec<(f32, f32)>, bool) {
             _ => break,
         }
     }
-    (points, closed)
+    if points.len() >= 2 {
+        subpaths.push(MarkerSubpath { points, closed });
+    }
+    subpaths
 }
 
 fn number(value: &str) -> Option<f32> {
@@ -4302,6 +4720,19 @@ mod tests {
     }
 
     #[test]
+    fn native_rasterizer_preserves_image_aspect_ratio_by_default() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="20" height="20"><image width="20" height="20" href="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMiIgaGVpZ2h0PSIxIj48cmVjdCB3aWR0aD0iMiIgaGVpZ2h0PSIxIiBmaWxsPSJibGFjayIvPjwvc3ZnPg=="/></svg>"##,
+            20,
+            20,
+        )
+        .unwrap();
+        assert_eq!(alpha_at(&data, 20, 10, 2), 0);
+        assert!(painted_at(&data, 20, 10, 10));
+        assert_eq!(alpha_at(&data, 20, 10, 18), 0);
+    }
+
+    #[test]
     fn native_rasterizer_resolves_linear_gradient_paint() {
         let data = rasterize_svg_to_rgba(
             r##"<svg width="20" height="10"><defs><linearGradient id="g"><stop offset="0%" stop-color="red"/><stop offset="100%" stop-color="blue"/></linearGradient></defs><rect width="20" height="10" fill="url(#g)"/></svg>"##,
@@ -4310,6 +4741,25 @@ mod tests {
         )
         .unwrap();
         assert!(has_painted_pixel(&data));
+    }
+
+    #[test]
+    fn native_rasterizer_applies_stylesheet_rules_to_gradient_stops() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="20" height="10">
+                <style>.hot { stop-color: rgb(255, 0, 0); stop-opacity: 1 }</style>
+                <defs><linearGradient id="g"><stop class="hot" offset="0%"/><stop offset="100%" stop-color="blue"/></linearGradient></defs>
+                <rect width="20" height="10" fill="url(#g)"/>
+            </svg>"##,
+            20,
+            10,
+        )
+        .unwrap();
+        let (r, g, b, a) = rgba_at(&data, 20, 1, 5);
+        assert!(
+            r > 150 && g < 80 && b < 120 && a > 200,
+            "gradient stop pixel was {r},{g},{b},{a}"
+        );
     }
 
     #[test]
@@ -4510,6 +4960,34 @@ mod tests {
     }
 
     #[test]
+    fn native_rasterizer_applies_text_path_text_length_spacing() {
+        let normal = rasterize_svg_to_rgba(
+            r##"<svg width="130" height="40">
+                <defs><path id="baseline" d="M10 28 H120"/></defs>
+                <text fill="black" font-size="20"><textPath href="#baseline">II</textPath></text>
+            </svg>"##,
+            130,
+            40,
+        )
+        .unwrap();
+        let adjusted = rasterize_svg_to_rgba(
+            r##"<svg width="130" height="40">
+                <defs><path id="baseline" d="M10 28 H120"/></defs>
+                <text fill="black" font-size="20"><textPath href="#baseline" textLength="80">II</textPath></text>
+            </svg>"##,
+            130,
+            40,
+        )
+        .unwrap();
+        let normal_bounds = painted_bounds(&normal, 130).expect("normal textPath bounds");
+        let adjusted_bounds = painted_bounds(&adjusted, 130).expect("adjusted textPath bounds");
+        assert!(
+            adjusted_bounds.2 > normal_bounds.2 + 30,
+            "textPath textLength should widen painted text, normal={normal_bounds:?} adjusted={adjusted_bounds:?}"
+        );
+    }
+
+    #[test]
     fn native_rasterizer_applies_per_character_text_position_lists() {
         let data = rasterize_svg_to_rgba(
             r#"<svg width="100" height="30"><text x="4 50" y="24 24" fill="black" font-size="20">AB</text></svg>"#,
@@ -4557,6 +5035,38 @@ mod tests {
     }
 
     #[test]
+    fn native_rasterizer_applies_evenodd_clip_rule() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="20" height="20">
+                <defs><clipPath id="c"><path clip-rule="evenodd" d="M1 1 H19 V19 H1 Z M6 6 H14 V14 H6 Z"/></clipPath></defs>
+                <rect width="20" height="20" fill="black" clip-path="url(#c)"/>
+            </svg>"##,
+            20,
+            20,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 20, 3, 3));
+        assert_eq!(alpha_at(&data, 20, 10, 10), 0);
+    }
+
+    #[test]
+    fn native_rasterizer_applies_object_bounding_box_clip_path_units() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="24" height="12">
+                <defs><clipPath id="c" clipPathUnits="objectBoundingBox">
+                    <rect x="0" y="0" width="0.5" height="1"/>
+                </clipPath></defs>
+                <rect x="4" y="2" width="12" height="8" fill="black" clip-path="url(#c)"/>
+            </svg>"##,
+            24,
+            12,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 24, 7, 6));
+        assert!(!painted_at(&data, 24, 13, 6));
+    }
+
+    #[test]
     fn native_rasterizer_applies_luminance_mask() {
         let data = rasterize_svg_to_rgba(
             r##"<svg width="20" height="10"><defs><mask id="m"><rect width="5" height="10" fill="white"/></mask></defs><rect width="20" height="10" mask="url(#m)"/></svg>"##,
@@ -4566,6 +5076,75 @@ mod tests {
         .unwrap();
         assert!(painted_at(&data, 20, 2, 2));
         assert!(!painted_at(&data, 20, 12, 2));
+    }
+
+    #[test]
+    fn native_rasterizer_applies_alpha_mask_type() {
+        let alpha_mask = rasterize_svg_to_rgba(
+            r##"<svg width="20" height="10"><defs><mask id="m" mask-type="alpha"><rect width="10" height="10" fill="black"/></mask></defs><rect width="20" height="10" fill="red" mask="url(#m)"/></svg>"##,
+            20,
+            10,
+        )
+        .unwrap();
+        let luminance_mask = rasterize_svg_to_rgba(
+            r##"<svg width="20" height="10"><defs><mask id="m"><rect width="10" height="10" fill="black"/></mask></defs><rect width="20" height="10" fill="red" mask="url(#m)"/></svg>"##,
+            20,
+            10,
+        )
+        .unwrap();
+        assert!(painted_at(&alpha_mask, 20, 5, 5));
+        assert_eq!(alpha_at(&luminance_mask, 20, 5, 5), 0);
+    }
+
+    #[test]
+    fn native_rasterizer_applies_object_bounding_box_mask_content_units() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="24" height="12">
+                <defs><mask id="m" maskContentUnits="objectBoundingBox">
+                    <rect x="0" y="0" width="50%" height="100%" fill="white"/>
+                </mask></defs>
+                <rect x="4" y="2" width="12" height="8" fill="black" mask="url(#m)"/>
+            </svg>"##,
+            24,
+            12,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 24, 7, 6));
+        assert!(!painted_at(&data, 24, 13, 6));
+    }
+
+    #[test]
+    fn native_rasterizer_clips_mask_to_user_space_region() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="24" height="12">
+                <defs><mask id="m" maskUnits="userSpaceOnUse" x="4" y="2" width="6" height="8">
+                    <rect width="24" height="12" fill="white"/>
+                </mask></defs>
+                <rect width="24" height="12" fill="black" mask="url(#m)"/>
+            </svg>"##,
+            24,
+            12,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 24, 7, 6));
+        assert!(!painted_at(&data, 24, 13, 6));
+    }
+
+    #[test]
+    fn native_rasterizer_clips_mask_to_object_bounding_box_region() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="24" height="12">
+                <defs><mask id="m" x="0" y="0" width="50%" height="100%">
+                    <rect width="24" height="12" fill="white"/>
+                </mask></defs>
+                <rect x="4" y="2" width="12" height="8" fill="black" mask="url(#m)"/>
+            </svg>"##,
+            24,
+            12,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 24, 7, 6));
+        assert!(!painted_at(&data, 24, 13, 6));
     }
 
     #[test]
@@ -4591,6 +5170,39 @@ mod tests {
     }
 
     #[test]
+    fn native_rasterizer_reverses_auto_start_reverse_marker_start() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="24" height="10">
+                <defs><marker id="m" markerWidth="4" markerHeight="4" refX="0" refY="2" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+                    <path d="M0 0 L4 2 L0 4 Z" fill="black"/>
+                </marker></defs>
+                <line x1="10" y1="5" x2="18" y2="5" stroke="none" marker-start="url(#m)"/>
+            </svg>"##,
+            24,
+            10,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 24, 7, 5));
+        assert!(!painted_at(&data, 24, 13, 5));
+    }
+
+    #[test]
+    fn native_rasterizer_defaults_marker_units_to_stroke_width() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="24" height="12">
+                <defs><marker id="m" refX="0" refY="1">
+                    <rect width="2" height="2" fill="black"/>
+                </marker></defs>
+                <line x1="4" y1="6" x2="12" y2="6" stroke="none" stroke-width="3" marker-end="url(#m)"/>
+            </svg>"##,
+            24,
+            12,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 24, 16, 6));
+    }
+
+    #[test]
     fn native_rasterizer_paints_polyline_marker_mid() {
         let data = rasterize_svg_to_rgba(
             r##"<svg width="24" height="16"><defs><marker id="m" markerWidth="4" markerHeight="4" refX="2" refY="2"><rect width="4" height="4" fill="black"/></marker></defs><polyline points="3,12 12,4 21,12" fill="none" stroke="black" marker-mid="url(#m)"/></svg>"##,
@@ -4599,6 +5211,15 @@ mod tests {
         )
         .unwrap();
         assert!(painted_at(&data, 24, 12, 4));
+    }
+
+    #[test]
+    fn marker_mid_angle_average_handles_180_wraparound() {
+        let angle = average_marker_angle(170.0, -170.0).abs();
+        assert!(
+            angle > 170.0,
+            "mid marker angle should follow the long-axis bisector, got {angle}"
+        );
     }
 
     #[test]
@@ -4613,9 +5234,24 @@ mod tests {
     }
 
     #[test]
+    fn native_rasterizer_keeps_path_markers_inside_each_subpath() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="24" height="12">
+                <defs><marker id="m" markerWidth="2" markerHeight="2" refX="1" refY="1" markerUnits="userSpaceOnUse"><rect width="2" height="2" fill="black"/></marker></defs>
+                <path d="M2 3 L6 3 M18 3 L22 3" fill="none" stroke="none" marker-end="url(#m)"/>
+            </svg>"##,
+            24,
+            12,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 24, 6, 3));
+        assert!(painted_at(&data, 24, 22, 3));
+    }
+
+    #[test]
     fn native_rasterizer_resolves_pattern_paint_server() {
         let data = rasterize_svg_to_rgba(
-            r##"<svg width="12" height="6"><defs><pattern id="p" width="4" height="4"><rect width="2" height="4" fill="black"/></pattern></defs><rect width="12" height="6" fill="url(#p)"/></svg>"##,
+            r##"<svg width="12" height="6"><defs><pattern id="p" patternUnits="userSpaceOnUse" width="4" height="4"><rect width="2" height="4" fill="black"/></pattern></defs><rect width="12" height="6" fill="url(#p)"/></svg>"##,
             12,
             6,
         )
@@ -4626,9 +5262,27 @@ mod tests {
     }
 
     #[test]
+    fn native_rasterizer_resolves_object_bounding_box_pattern_units() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="24" height="12">
+                <defs><pattern id="p" patternUnits="objectBoundingBox" patternContentUnits="objectBoundingBox" width="50%" height="100%">
+                    <rect width="25%" height="100%" fill="black"/>
+                </pattern></defs>
+                <rect x="4" y="2" width="12" height="8" fill="url(#p)"/>
+            </svg>"##,
+            24,
+            12,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 24, 5, 6));
+        assert!(!painted_at(&data, 24, 8, 6));
+        assert!(painted_at(&data, 24, 11, 6));
+    }
+
+    #[test]
     fn native_rasterizer_applies_basic_svg_blur_filter() {
         let data = rasterize_svg_to_rgba(
-            r##"<svg width="30" height="20"><defs><filter id="f"><feGaussianBlur stdDeviation="2"/></filter></defs><rect x="12" y="7" width="4" height="4" fill="black" filter="url(#f)"/></svg>"##,
+            r##"<svg width="30" height="20"><defs><filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="30" height="20"><feGaussianBlur stdDeviation="2"/></filter></defs><rect x="12" y="7" width="4" height="4" fill="black" filter="url(#f)"/></svg>"##,
             30,
             20,
         )
@@ -4640,13 +5294,65 @@ mod tests {
     #[test]
     fn native_rasterizer_applies_basic_svg_drop_shadow_filter() {
         let data = rasterize_svg_to_rgba(
-            r##"<svg width="30" height="20"><defs><filter id="f"><feDropShadow dx="8" dy="0" stdDeviation="0" flood-color="black"/></filter></defs><rect x="4" y="6" width="6" height="6" fill="red" filter="url(#f)"/></svg>"##,
+            r##"<svg width="30" height="20"><defs><filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="30" height="20"><feDropShadow dx="8" dy="0" stdDeviation="0" flood-color="black"/></filter></defs><rect x="4" y="6" width="6" height="6" fill="red" filter="url(#f)"/></svg>"##,
             30,
             20,
         )
         .unwrap();
         assert!(painted_at(&data, 30, 6, 8));
         assert!(painted_at(&data, 30, 14, 8));
+    }
+
+    #[test]
+    fn native_rasterizer_clips_filter_to_user_space_region() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="24" height="12">
+                <defs><filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="10" height="12">
+                    <feFlood flood-color="black"/>
+                </filter></defs>
+                <rect width="24" height="12" fill="red" filter="url(#f)"/>
+            </svg>"##,
+            24,
+            12,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 24, 5, 6));
+        assert!(!painted_at(&data, 24, 15, 6));
+    }
+
+    #[test]
+    fn native_rasterizer_clips_filter_to_object_bounding_box_region() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="24" height="12">
+                <defs><filter id="f" x="0" y="0" width="50%" height="100%">
+                    <feFlood flood-color="black"/>
+                </filter></defs>
+                <rect x="4" y="2" width="12" height="8" fill="red" filter="url(#f)"/>
+            </svg>"##,
+            24,
+            12,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 24, 7, 6));
+        assert!(!painted_at(&data, 24, 13, 6));
+    }
+
+    #[test]
+    fn native_rasterizer_resolves_object_bounding_box_filter_primitive_units() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="24" height="12">
+                <defs><filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="24" height="12" primitiveUnits="objectBoundingBox">
+                    <feOffset dx="50%" dy="0"/>
+                </filter></defs>
+                <rect x="2" y="3" width="8" height="4" fill="black" filter="url(#f)"/>
+            </svg>"##,
+            24,
+            12,
+        )
+        .unwrap();
+        assert!(!painted_at(&data, 24, 3, 5));
+        assert!(painted_at(&data, 24, 7, 5));
+        assert!(!painted_at(&data, 24, 14, 5));
     }
 
     #[test]
@@ -4669,6 +5375,27 @@ mod tests {
             "composited pixel was {r},{g},{b},{a}"
         );
         assert_eq!(alpha_at(&data, 20, 15, 5), 0);
+    }
+
+    #[test]
+    fn native_rasterizer_evaluates_svg_arithmetic_composite_filter() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="20" height="10">
+                <defs><filter id="f">
+                    <feFlood flood-color="rgb(0, 0, 255)" result="blue"/>
+                    <feComposite in="SourceGraphic" in2="blue" operator="arithmetic" k2="0.5" k3="0.5"/>
+                </filter></defs>
+                <rect x="2" y="2" width="8" height="6" fill="rgb(255, 0, 0)" filter="url(#f)"/>
+            </svg>"##,
+            20,
+            10,
+        )
+        .unwrap();
+        let (r, g, b, a) = rgba_at(&data, 20, 5, 5);
+        assert!(
+            r > 90 && r < 180 && g < 40 && b > 90 && b < 180 && a > 200,
+            "arithmetic composite pixel was {r},{g},{b},{a}"
+        );
     }
 
     #[test]
@@ -4737,6 +5464,46 @@ mod tests {
     }
 
     #[test]
+    fn native_rasterizer_evaluates_svg_color_matrix_hue_rotate() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="20" height="10">
+                <defs><filter id="f">
+                    <feColorMatrix type="hueRotate" values="120"/>
+                </filter></defs>
+                <rect x="2" y="2" width="8" height="6" fill="rgb(255, 0, 0)" filter="url(#f)"/>
+            </svg>"##,
+            20,
+            10,
+        )
+        .unwrap();
+        let (r, g, b, a) = rgba_at(&data, 20, 5, 5);
+        assert!(
+            r < 120 && g > 80 && b < 120 && a > 200,
+            "hue-rotate pixel was {r},{g},{b},{a}"
+        );
+    }
+
+    #[test]
+    fn native_rasterizer_evaluates_svg_color_matrix_luminance_to_alpha() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="20" height="10">
+                <defs><filter id="f">
+                    <feColorMatrix type="luminanceToAlpha"/>
+                </filter></defs>
+                <rect x="2" y="2" width="8" height="6" fill="rgb(255, 255, 255)" filter="url(#f)"/>
+            </svg>"##,
+            20,
+            10,
+        )
+        .unwrap();
+        let (r, g, b, a) = rgba_at(&data, 20, 5, 5);
+        assert!(
+            r < 20 && g < 20 && b < 20 && a > 200,
+            "luminance-to-alpha pixel was {r},{g},{b},{a}"
+        );
+    }
+
+    #[test]
     fn native_rasterizer_evaluates_svg_component_transfer_linear() {
         let data = rasterize_svg_to_rgba(
             r##"<svg width="20" height="10">
@@ -4776,5 +5543,36 @@ mod tests {
         .unwrap();
         let (_, _, _, a) = rgba_at(&data, 20, 5, 5);
         assert!((90..170).contains(&a), "alpha was {a}");
+    }
+
+    #[test]
+    fn native_rasterizer_evaluates_svg_morphology_dilate() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="20" height="10">
+                <defs><filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="20" height="10"><feMorphology operator="dilate" radius="2"/></filter></defs>
+                <rect x="8" y="4" width="2" height="2" fill="black" filter="url(#f)"/>
+            </svg>"##,
+            20,
+            10,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 20, 8, 4));
+        assert!(painted_at(&data, 20, 6, 4));
+        assert!(painted_at(&data, 20, 10, 4));
+    }
+
+    #[test]
+    fn native_rasterizer_evaluates_svg_morphology_erode() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="20" height="10">
+                <defs><filter id="f"><feMorphology operator="erode" radius="1"/></filter></defs>
+                <rect x="6" y="2" width="8" height="6" fill="black" filter="url(#f)"/>
+            </svg>"##,
+            20,
+            10,
+        )
+        .unwrap();
+        assert_eq!(alpha_at(&data, 20, 6, 4), 0);
+        assert!(painted_at(&data, 20, 8, 4));
     }
 }

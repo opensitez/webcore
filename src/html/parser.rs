@@ -62,6 +62,35 @@ pub(crate) struct HtmlParser {
     pub(crate) doctype: Option<crate::html::doctype::Doctype>,
 }
 
+fn svg_dom_tag_name(node: &crate::svg::SvgNode) -> String {
+    match &node.kind {
+        crate::svg::SvgElementKind::Svg => "svg".to_string(),
+        crate::svg::SvgElementKind::Group => "g".to_string(),
+        crate::svg::SvgElementKind::Defs => "defs".to_string(),
+        crate::svg::SvgElementKind::Symbol => "symbol".to_string(),
+        crate::svg::SvgElementKind::Use => "use".to_string(),
+        crate::svg::SvgElementKind::Path => "path".to_string(),
+        crate::svg::SvgElementKind::Rect => "rect".to_string(),
+        crate::svg::SvgElementKind::Circle => "circle".to_string(),
+        crate::svg::SvgElementKind::Ellipse => "ellipse".to_string(),
+        crate::svg::SvgElementKind::Line => "line".to_string(),
+        crate::svg::SvgElementKind::Polyline => "polyline".to_string(),
+        crate::svg::SvgElementKind::Polygon => "polygon".to_string(),
+        crate::svg::SvgElementKind::Text => "text".to_string(),
+        crate::svg::SvgElementKind::Tspan => "tspan".to_string(),
+        crate::svg::SvgElementKind::TextPath => "textPath".to_string(),
+        crate::svg::SvgElementKind::Image => "image".to_string(),
+        crate::svg::SvgElementKind::LinearGradient => "linearGradient".to_string(),
+        crate::svg::SvgElementKind::RadialGradient => "radialGradient".to_string(),
+        crate::svg::SvgElementKind::ClipPath => "clipPath".to_string(),
+        crate::svg::SvgElementKind::Mask => "mask".to_string(),
+        crate::svg::SvgElementKind::Pattern => "pattern".to_string(),
+        crate::svg::SvgElementKind::Marker => "marker".to_string(),
+        crate::svg::SvgElementKind::Style => "style".to_string(),
+        crate::svg::SvgElementKind::Unknown(name) => name.clone(),
+    }
+}
+
 impl HtmlParser {
     pub(crate) fn new(tokens: Vec<Token>) -> Self {
         Self {
@@ -147,6 +176,43 @@ impl HtmlParser {
         // Keep next_node_id in sync (for non-parser code that may need to allocate)
         self.next_node_id = self.next_node_id.max(arena_id.0 + 1);
         b
+    }
+
+    fn project_inline_svg_children(&mut self, node: &mut WebCore) {
+        let Some(doc) = node.svg_document.clone() else {
+            return;
+        };
+        if !doc.root.text.trim().is_empty() {
+            let mut text = self.new_box("#text");
+            text.text = doc.root.text.clone();
+            apply_property(std::sync::Arc::make_mut(&mut text.style), "display", "none");
+            node.children.push(text);
+        }
+        for child in &doc.root.children {
+            node.children.push(self.project_svg_node(child));
+        }
+    }
+
+    fn project_svg_node(&mut self, svg: &crate::svg::SvgNode) -> WebCore {
+        let mut node = self.new_box(&svg_dom_tag_name(svg));
+        for attr in &svg.attributes {
+            let name = match attr.namespace.as_deref() {
+                Some(ns) if !ns.is_empty() => format!("{}:{}", ns, attr.name),
+                _ => attr.name.clone(),
+            };
+            node.attributes.insert(name, attr.value.clone());
+        }
+        if !svg.text.trim().is_empty() {
+            let mut text = self.new_box("#text");
+            text.text = svg.text.clone();
+            apply_property(std::sync::Arc::make_mut(&mut text.style), "display", "none");
+            node.children.push(text);
+        }
+        for child in &svg.children {
+            node.children.push(self.project_svg_node(child));
+        }
+        apply_property(std::sync::Arc::make_mut(&mut node.style), "display", "none");
+        node
     }
 
     /// Fire the host hook (if any) for an open tag.
@@ -486,6 +552,7 @@ impl HtmlParser {
                             .and_then(|markup| crate::svg::parse_svg_document(markup).ok());
                         node.svg_viewbox_w = fallback.viewbox_w;
                         node.svg_viewbox_h = fallback.viewbox_h;
+                        self.project_inline_svg_children(&mut node);
 
                         // Only bake explicit HTML-attribute dimensions into the style.
                         // CSS cascade will override these. If no explicit dimensions,
@@ -900,6 +967,7 @@ impl HtmlParser {
                 .and_then(|markup| crate::svg::parse_svg_document(markup).ok());
             node.svg_viewbox_w = fallback.viewbox_w;
             node.svg_viewbox_h = fallback.viewbox_h;
+            self.project_inline_svg_children(&mut node);
             if let Some(w) = fallback.explicit_w {
                 apply_property(
                     std::sync::Arc::make_mut(&mut node.style),
