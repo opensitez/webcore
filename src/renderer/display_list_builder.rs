@@ -1596,6 +1596,9 @@ fn build_inline_text(
             e: usize,
             run_idx: Option<usize>,
             rtl: bool,
+            visual_x: Option<f32>,
+            visual_w: f32,
+            starts_visual_segment: bool,
         }
         let mut chunks: Vec<Chunk> = Vec::new();
 
@@ -1605,6 +1608,28 @@ fn build_inline_text(
                 let seg_s = vs.logical_start;
                 let seg_e = vs.logical_start + vs.length;
                 let is_rtl = (vs.level & 1) != 0;
+                if is_rtl {
+                    let mut s = seg_s;
+                    let mut e = seg_e.min(flat.len());
+                    while s < e && matches!(flat.as_bytes()[s], b' ' | b'\t' | b'\n' | b'\r') {
+                        s += 1;
+                    }
+                    while e > s && matches!(flat.as_bytes()[e - 1], b' ' | b'\t' | b'\n' | b'\r') {
+                        e -= 1;
+                    }
+                    if s < e {
+                        chunks.push(Chunk {
+                            s,
+                            e,
+                            run_idx: None,
+                            rtl: true,
+                            visual_x: Some(vs.x),
+                            visual_w: vs.width,
+                            starts_visual_segment: true,
+                        });
+                    }
+                    continue;
+                }
                 let mut seg_chunks: Vec<Chunk> = Vec::new();
                 for (ri, run) in node.layout.inline_runs.iter().enumerate() {
                     let rs = run.text_offset;
@@ -1617,6 +1642,9 @@ fn build_inline_text(
                             e: ce,
                             run_idx: Some(ri),
                             rtl: is_rtl,
+                            visual_x: None,
+                            visual_w: 0.0,
+                            starts_visual_segment: false,
                         });
                     }
                 }
@@ -1632,6 +1660,13 @@ fn build_inline_text(
                     }
                     seg_chunks.reverse();
                 }
+                for chunk in &mut seg_chunks {
+                    chunk.visual_x = Some(vs.x);
+                    chunk.visual_w = vs.width;
+                }
+                if let Some(first) = seg_chunks.first_mut() {
+                    first.starts_visual_segment = true;
+                }
                 chunks.extend(seg_chunks);
             }
         } else if node.layout.inline_runs.is_empty() {
@@ -1640,6 +1675,9 @@ fn build_inline_text(
                 e: line_end,
                 run_idx: None,
                 rtl: false,
+                visual_x: None,
+                visual_w: 0.0,
+                starts_visual_segment: false,
             });
         } else {
             for (ri, run) in node.layout.inline_runs.iter().enumerate() {
@@ -1651,6 +1689,9 @@ fn build_inline_text(
                         e: ce,
                         run_idx: Some(ri),
                         rtl: false,
+                        visual_x: None,
+                        visual_w: 0.0,
+                        starts_visual_segment: false,
                     });
                 }
             }
@@ -1739,9 +1780,53 @@ fn build_inline_text(
             } else {
                 None
             };
-            let x_pos = if chunk.rtl {
-                cursor_x
-            } else if let Some((start, _)) = char_x_start_end {
+            if chunk.starts_visual_segment {
+                if let Some(visual_x) = chunk.visual_x {
+                    cursor_x = lx + line.text_x_offset + visual_x;
+                }
+            }
+
+            let measured_advance = || {
+                crate::layout::inline_layout::measure_text_width_weighted(
+                    &draw_text,
+                    run_font_px,
+                    None,
+                    style_ref.font_weight,
+                    style_ref.font_style,
+                    1.0,
+                    &style_ref.font_family,
+                ) + run_letter_spc * draw_text.chars().count() as f32
+                    + run_word_spc * draw_text.chars().filter(|&c| c == ' ').count() as f32
+            };
+
+            let layout_advance = if !line.char_x.is_empty() {
+                let start_off = s.saturating_sub(line_start);
+                let end_off = e.saturating_sub(line_start);
+                if start_off < line.char_x.len() && end_off < line.char_x.len() {
+                    let advance = (line.char_x[end_off] - line.char_x[start_off]).abs();
+                    if advance > 0.0 && advance.is_finite() {
+                        Some(advance)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let mut chunk_advance = layout_advance.unwrap_or_else(measured_advance);
+            if chunk.rtl {
+                if let Some(visual_x) = chunk.visual_x {
+                    let segment_right = lx + line.text_x_offset + visual_x + chunk.visual_w;
+                    let remaining = (segment_right - cursor_x).max(0.0);
+                    if remaining.is_finite() && remaining > 0.0 {
+                        chunk_advance = chunk_advance.min(remaining);
+                    }
+                }
+            };
+
+            let x_pos = if let Some((start, _)) = char_x_start_end {
                 let exact_x = lx + line.text_x_offset + start;
                 if exact_x + 0.5 >= cursor_x {
                     exact_x
@@ -1970,45 +2055,20 @@ fn build_inline_text(
                 small_caps: style_ref.small_caps,
             });
 
-            let fallback_advance = || {
-                crate::layout::inline_layout::measure_text_width_weighted(
-                    &draw_text,
-                    run_font_px,
-                    None,
-                    style_ref.font_weight,
-                    style_ref.font_style,
-                    1.0,
-                    &style_ref.font_family,
-                ) + run_letter_spc * draw_text.chars().count() as f32
-                    + run_word_spc * draw_text.chars().filter(|&c| c == ' ').count() as f32
-            };
-
             // Advance cursor using char_x if available and sane. Some relayout
             // paths can leave byte-offset caret positions collapsed at a run
             // boundary; trusting those positions paints all chunks at one x.
             if chunk.rtl {
-                // For RTL chunks, advance cursor_x by the visual segment width
-                let start_off = s.saturating_sub(line_start);
-                let end_off = e.saturating_sub(line_start);
-                if start_off < line.char_x.len() && end_off < line.char_x.len() {
-                    let advance = (line.char_x[end_off] - line.char_x[start_off]).abs();
-                    cursor_x += if advance > 0.0 {
-                        advance
-                    } else {
-                        fallback_advance()
-                    };
-                } else {
-                    cursor_x += fallback_advance();
-                }
+                cursor_x += chunk_advance;
             } else if let Some((_, end)) = char_x_start_end {
                 let next = lx + line.text_x_offset + end;
                 if next > cursor_x + 0.5 {
                     cursor_x = next;
                 } else {
-                    cursor_x += fallback_advance();
+                    cursor_x += chunk_advance;
                 }
             } else {
-                cursor_x += fallback_advance();
+                cursor_x += chunk_advance;
             }
         }
     }
@@ -2578,7 +2638,6 @@ fn descendant_text(node: &WebCore, out: &mut String) {
     }
 }
 
-
 fn subtree_has(node: &WebCore, id: u32) -> bool {
     if node.node_id == id {
         return true;
@@ -2916,7 +2975,10 @@ pub(crate) fn to_math_auto(text: &str) -> String {
     while let Some(ch) = chars.next() {
         if is_math_letter(ch) {
             alphabetic_run.push(ch);
-            if chars.peek().map_or(true, |next_ch| !is_math_letter(*next_ch)) {
+            if chars
+                .peek()
+                .map_or(true, |next_ch| !is_math_letter(*next_ch))
+            {
                 if alphabetic_run.len() == 1 {
                     out.push(to_math_italic(alphabetic_run[0]));
                 } else {

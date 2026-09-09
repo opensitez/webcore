@@ -1025,7 +1025,9 @@ pub fn layout_inline_block(
                         let ay = match valign {
                             crate::types::VerticalAlign::Top => cursor_y,
                             crate::types::VerticalAlign::Bottom => cursor_y + line_h - box_h,
-                            crate::types::VerticalAlign::Middle => cursor_y + (line_h - box_h) / 2.0,
+                            crate::types::VerticalAlign::Middle => {
+                                cursor_y + (line_h - box_h) / 2.0
+                            }
                             _ => {
                                 // Baseline alignment uses the item's synthesized
                                 // ascent. For inline-block that is the bottom edge;
@@ -1076,7 +1078,8 @@ pub fn layout_inline_block(
                     ..
                 } if *text_start + *text_len > text_s => {
                     let seg_start = floor_cb(&flat_text, (*text_start).max(text_s));
-                    let seg_end = floor_cb(&flat_text, (*text_start + *text_len).min(flat_text.len()));
+                    let seg_end =
+                        floor_cb(&flat_text, (*text_start + *text_len).min(flat_text.len()));
                     if seg_start < seg_end && flat_text[seg_start..seg_end].trim().is_empty() {
                         text_x_off += item.advance;
                         continue;
@@ -1133,6 +1136,9 @@ pub fn layout_inline_block(
             match reused {
                 Some(prev) => {
                     ll.char_x = prev;
+                    if let Some(ol) = old_lines.get(old_line_idx) {
+                        ll.visual_segments = ol.visual_segments.clone();
+                    }
                     ll.char_x_key = key;
                 }
                 None => {
@@ -2322,14 +2328,10 @@ fn tokenize_text(
     );
 
     let measure_transformed = |engine: &LayoutEngine, s: &str| -> (f32, f32) {
-        let transformed = crate::renderer::display_list_builder::apply_text_transform(s, text_transform);
-        let w = engine.measure_text_cached(
-            &transformed,
-            font_px,
-            font_weight,
-            font_style,
-            font_family,
-        );
+        let transformed =
+            crate::renderer::display_list_builder::apply_text_transform(s, text_transform);
+        let w =
+            engine.measure_text_cached(&transformed, font_px, font_weight, font_style, font_family);
         let tracking = letter_spacing * transformed.chars().count() as f32;
         (w, tracking)
     };
@@ -2410,7 +2412,8 @@ fn tokenize_text(
                         let is_cjk = word_break != WordBreak::KeepAll
                             && ((ch >= '\u{3000}' && ch <= '\u{9fff}')
                                 || (ch >= '\u{f900}' && ch <= '\u{faff}'));
-                        let is_break_after = ch == '-' || ch == '\u{2013}' || ch == '\u{2014}' || is_cjk;
+                        let is_break_after =
+                            ch == '-' || ch == '\u{2013}' || ch == '\u{2014}' || is_cjk;
                         let is_break_before_cjk = is_cjk && rel > segment_start;
                         if is_break_before_cjk {
                             let segment = &word[segment_start..rel];
@@ -3567,6 +3570,7 @@ pub fn fill_char_x_for_line(
         for vs_idx in 0..line.visual_segments.len() {
             let vs_start = line.visual_segments[vs_idx].logical_start;
             let vs_end = vs_start + line.visual_segments[vs_idx].length;
+            let segment_x = cursor_x;
 
             // Find the inline run(s) that cover this visual segment
             for run in runs.iter() {
@@ -3594,8 +3598,8 @@ pub fn fill_char_x_for_line(
                 cursor_x += advance;
             }
 
-            // Update visual segment x and width
-            line.visual_segments[vs_idx].x = cursor_x - (cursor_x - cursor_x); // will be set properly below
+            line.visual_segments[vs_idx].x = segment_x;
+            line.visual_segments[vs_idx].width = (cursor_x - segment_x).max(0.0);
         }
 
         // Forward-fill NaN gaps
@@ -3608,26 +3612,6 @@ pub fn fill_char_x_for_line(
                     last = *p;
                 }
             }
-        }
-
-        // Set visual segment x/width
-        for vs in &mut line.visual_segments {
-            let vs_local_start = vs.logical_start.saturating_sub(line_start);
-            let vs_local_end = (vs.logical_start + vs.length)
-                .saturating_sub(line_start)
-                .min(positions.len().saturating_sub(1));
-            let x0 = if vs_local_start < positions.len() {
-                positions[vs_local_start]
-            } else {
-                0.0
-            };
-            let x1 = if vs_local_end < positions.len() {
-                positions[vs_local_end]
-            } else {
-                x0
-            };
-            vs.x = x0.min(x1);
-            vs.width = (x1 - x0).abs();
         }
 
         line.char_x = positions;

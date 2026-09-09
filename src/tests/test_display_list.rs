@@ -6,6 +6,7 @@ use crate::renderer::display_list::{DisplayList, ImageRef, PaintCmd};
 use crate::renderer::display_list_builder::{build_display_list, build_display_list_full};
 use crate::renderer::display_list_replay::{reduce_corner_radii, replay, replay_with_scroll};
 use crate::types::{Color, Rect};
+use crate::Renderer;
 
 fn build(html: &str) -> (EngineFrame, DisplayList) {
     let doc = parse_html(html);
@@ -31,6 +32,64 @@ fn build_full(html: &str) -> (EngineFrame, DisplayList) {
         "",
     );
     (f, list)
+}
+
+#[test]
+fn rtl_mixed_inline_text_commands_stay_inside_line_box() {
+    let (_frame, list) = build_full(
+        r##"<html dir="rtl"><body style="margin:0">
+             <div style="width:800px; font:16px sans-serif">
+               <span>محمد بن عبد الواحد</span>
+               <b>منصور السعدي</b>
+               <a href="#">المقدسي</a>
+             </div>
+           </body></html>"##,
+    );
+
+    let text_commands: Vec<(f32, String)> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Text { x, text, .. } if text.trim().len() > 1 => Some((*x, text.clone())),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !text_commands.is_empty(),
+        "expected rendered RTL text commands"
+    );
+    for (x, text) in text_commands {
+        assert!(
+            (0.0..=800.0).contains(&x),
+            "RTL text command '{text}' should start inside the 800px line box, got x={x:.1}"
+        );
+    }
+}
+
+#[test]
+fn rtl_visual_segments_keep_geometry_after_relayout_cache_reuse() {
+    let mut doc = parse_html(
+        r##"<html dir="rtl"><body style="margin:0">
+             <p id="t" style="width:604px;font:16px sans-serif">
+               محمد بن عبد الواحد <b>منصور السعدي</b> المقدسي، سنة 569 هـ. كُنِّي بأبي عبد الله.
+             </p>
+           </body></html>"##,
+    );
+    let mut renderer = Renderer::new();
+    renderer.layout_engine().layout(&mut doc, 800.0);
+    renderer.layout_engine().layout(&mut doc, 800.0);
+
+    let paragraph = crate::dom::query_selector(&doc.root, "#t").expect("paragraph should exist");
+    let visual_widths: Vec<f32> = paragraph
+        .layout
+        .line_cache
+        .iter()
+        .flat_map(|line| line.visual_segments.iter().map(|seg| seg.width))
+        .collect();
+    assert!(
+        visual_widths.iter().any(|w| *w > 1.0),
+        "cached relayout must preserve RTL visual segment geometry: {visual_widths:?}"
+    );
 }
 
 #[test]
@@ -1308,7 +1367,6 @@ fn sticky_clamped_to_containing_block_bottom() {
     );
 }
 
-
 // ── Pseudo-elements ─────────────────────────────────────────────────────────
 
 #[test]
@@ -1864,8 +1922,14 @@ fn radial_gradient_farthest_corner_and_closest_side_sizing() {
         r#"<div style="width:100px;height:60px;background:radial-gradient(circle closest-side at 20px 30px, red, blue)">x</div>"#,
     );
     let (_, _, rx1, ry1) = radial_gradient_geometry(&list1).expect("list1 gradient");
-    assert!((rx1 - 20.0).abs() < 0.01, "closest-side circle radius 20, got {rx1}");
-    assert!((ry1 - 20.0).abs() < 0.01, "closest-side circle radius 20, got {ry1}");
+    assert!(
+        (rx1 - 20.0).abs() < 0.01,
+        "closest-side circle radius 20, got {rx1}"
+    );
+    assert!(
+        (ry1 - 20.0).abs() < 0.01,
+        "closest-side circle radius 20, got {ry1}"
+    );
 
     // Ellipse farthest-corner at 0 0 in 100px x 50px box:
     // dx = 100, dy = 50 => rx = 100 * sqrt(2) ≈ 141.42, ry = 50 * sqrt(2) ≈ 70.71.
@@ -1873,8 +1937,14 @@ fn radial_gradient_farthest_corner_and_closest_side_sizing() {
         r#"<div style="width:100px;height:50px;background:radial-gradient(ellipse farthest-corner at left top, red, blue)">x</div>"#,
     );
     let (_, _, rx2, ry2) = radial_gradient_geometry(&list2).expect("list2 gradient");
-    assert!((rx2 - 100.0 * std::f32::consts::SQRT_2).abs() < 0.1, "ellipse rx passes through corner: {rx2}");
-    assert!((ry2 - 50.0 * std::f32::consts::SQRT_2).abs() < 0.1, "ellipse ry passes through corner: {ry2}");
+    assert!(
+        (rx2 - 100.0 * std::f32::consts::SQRT_2).abs() < 0.1,
+        "ellipse rx passes through corner: {rx2}"
+    );
+    assert!(
+        (ry2 - 50.0 * std::f32::consts::SQRT_2).abs() < 0.1,
+        "ellipse ry passes through corner: {ry2}"
+    );
 }
 
 #[test]
