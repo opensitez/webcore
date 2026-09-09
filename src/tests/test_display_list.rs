@@ -183,6 +183,38 @@ fn inline_svg_uses_cascaded_fill_color_when_rasterized() {
 }
 
 #[test]
+fn inline_svg_uses_css_animated_fill_when_rasterized() {
+    let (_, list) = build(
+        r#"<style>
+             @keyframes icon-fill { from { fill: rgb(255, 0, 0); } to { fill: rgb(0, 0, 255); } }
+             svg { fill: rgb(0, 0, 255); animation: icon-fill 10s linear; }
+           </style>
+           <svg style="width:20px;height:20px" viewBox="0 0 20 20">
+             <rect x="0" y="0" width="20" height="20"/>
+           </svg>"#,
+    );
+
+    let image = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Image {
+            data: ImageRef::Owned(data, w, h),
+            ..
+        } => Some((data, *w, *h)),
+        _ => None,
+    });
+    let (data, w, h) = image.expect("inline SVG should rasterize to an image command");
+    assert_eq!((w, h), (20, 20));
+    let idx = ((10 * w + 10) * 4) as usize;
+    assert!(
+        data[idx] > 200 && data[idx + 1] < 50 && data[idx + 2] < 50 && data[idx + 3] > 200,
+        "center pixel should use animated fill at animation start, got rgba({}, {}, {}, {})",
+        data[idx],
+        data[idx + 1],
+        data[idx + 2],
+        data[idx + 3]
+    );
+}
+
+#[test]
 fn inline_svg_resolves_inherited_custom_property_paint() {
     let (_, list) = build(
         r#"<div style="--icon-color: rgb(25, 103, 210)">

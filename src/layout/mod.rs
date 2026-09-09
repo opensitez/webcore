@@ -1247,19 +1247,21 @@ impl LayoutEngine {
         }
     }
 
-    /// Intrinsic dimensions of a replaced element: the decoded image, else the
-    /// `width`/`height` content attributes, else an `<svg>` viewBox. `None`
-    /// when the box is not replaced or its natural size is unknown.
+    /// Intrinsic dimensions of a replaced element: the decoded image/canvas
+    /// bitmap, else the `width`/`height` content attributes, else an `<svg>`
+    /// viewBox. `None` when the box is not replaced or its natural size is
+    /// unknown.
     ///
     /// Layout and the intrinsic-width walk both size replaced boxes, so they
     /// read the natural size from here and cannot disagree about it.
     pub(crate) fn intrinsic_dimensions(&self, node: &WebCore) -> Option<(f32, f32)> {
-        if node.is_image_element() {
+        if node.is_image_element() || node.tag == "canvas" {
             if node.image_width > 0 && node.image_height > 0 {
                 return Some((node.image_width as f32, node.image_height as f32));
             }
-            // Nothing decoded yet: the attributes stand in so the box reserves
-            // the right shape before the bytes arrive.
+            // Nothing decoded/allocated yet: the attributes stand in so the
+            // box reserves the right shape before the bytes arrive. A canvas
+            // has spec defaults even with no attributes.
             let attr = |k: &str| {
                 node.attributes
                     .get(k)
@@ -1268,6 +1270,11 @@ impl LayoutEngine {
                     .unwrap_or(0.0)
             };
             let (attr_w, attr_h) = (attr("width"), attr("height"));
+            if node.tag == "canvas" {
+                let w = if attr_w > 0.0 { attr_w } else { 300.0 };
+                let h = if attr_h > 0.0 { attr_h } else { 150.0 };
+                return Some((w, h));
+            }
             return match (attr_w > 0.0, attr_h > 0.0) {
                 (true, true) => Some((attr_w, attr_h)),
                 (true, false) => Some((attr_w, attr_w * 0.75)),

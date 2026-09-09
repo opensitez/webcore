@@ -80,6 +80,12 @@ pub(crate) fn extract_transitionable_style(s: &ComputedStyle) -> HashMap<String,
     );
     m.insert("color".into(), color_to_rgba(s.color));
     m.insert("background-color".into(), color_to_rgba(s.background_color));
+    if let Some(fill) = s.svg_fill {
+        m.insert("fill".into(), color_to_rgba(fill));
+    }
+    if let Some(stroke) = s.svg_stroke {
+        m.insert("stroke".into(), color_to_rgba(stroke));
+    }
     m.insert("border-top-color".into(), color_to_rgba(s.border_top_color));
     m.insert(
         "border-right-color".into(),

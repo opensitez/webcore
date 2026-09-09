@@ -330,4 +330,50 @@ mod tests {
         });
         assert!(painted, "the canvas bitmap never reached the display list");
     }
+
+    #[test]
+    fn dynamically_created_canvas_layout_uses_its_bitmap_size() {
+        // This is the path framework adapters use: create an element, append
+        // it, size it through content attributes, then draw through the 2D
+        // context. The canvas bitmap reaching the display list is not enough;
+        // layout has to give the replaced element a nonzero displayed box.
+        let mut doc = crate::load_html("<div id='host'></div>", 800.0);
+        let host = doc.get_element_by_id("host").expect("host");
+        let id = doc.create_element("canvas");
+        doc.append_child(host, id);
+        doc.set_attribute(id, "width", "40");
+        doc.set_attribute(id, "height", "20");
+        assert!(doc.get_context_2d(id));
+        doc.with_canvas_2d(id, |ctx| {
+            ctx.set_fill_color(Color::rgb(255, 0, 0));
+            ctx.fill_rect(0.0, 0.0, 40.0, 20.0);
+        })
+        .expect("canvas");
+
+        crate::LayoutEngine::new().layout(&mut doc, 800.0);
+        let canvas = doc.get_node(id).expect("canvas");
+        assert_eq!(canvas.layout.content_rect.w.round(), 40.0);
+        assert_eq!(canvas.layout.content_rect.h.round(), 20.0);
+
+        let list =
+            crate::renderer::display_list_builder::build_display_list(&doc.root, 800.0, 600.0);
+        let painted = list.commands.iter().any(|cmd| match cmd {
+            crate::renderer::display_list::PaintCmd::Image { rect, data } => {
+                let (bytes, w, h) = match data {
+                    crate::renderer::display_list::ImageRef::Owned(d, w, h) => {
+                        (d.as_slice(), *w, *h)
+                    }
+                    crate::renderer::display_list::ImageRef::Shared(d, w, h) => {
+                        (d.as_slice(), *w, *h)
+                    }
+                };
+                rect.w > 0.0
+                    && rect.h > 0.0
+                    && (w, h) == (40, 20)
+                    && bytes[..4] == [255, 0, 0, 255]
+            }
+            _ => false,
+        });
+        assert!(painted, "laid-out canvas bitmap never reached the display list");
+    }
 }

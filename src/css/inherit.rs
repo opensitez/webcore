@@ -51,6 +51,8 @@ fn is_inherited_css_prop(prop: &str) -> bool {
             | "text-indent"
             | "visibility"
             | "cursor"
+            | "fill"
+            | "stroke"
     )
 }
 

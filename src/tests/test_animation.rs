@@ -974,6 +974,37 @@ fn one_sided_to_keyframe_starts_from_underlying_style() {
 }
 
 #[test]
+fn svg_fill_keyframes_synthesize_underlying_style() {
+    let mut doc = parse_html(
+        r#"<html><head><style>
+            @keyframes icon-fill { to { fill: rgb(0, 0, 255); } }
+            svg { fill: rgb(255, 0, 0); animation: icon-fill 1s linear; }
+        </style></head><body>
+            <svg style="width:20px;height:20px" viewBox="0 0 20 20">
+              <rect width="20" height="20"/>
+            </svg>
+        </body></html>"#,
+    );
+    let mut engine = LayoutEngine::new();
+    engine.layout(&mut doc, 800.0);
+
+    let start = doc.active_animations[0].start_time;
+    doc.tick_animations(start + Duration::from_millis(500));
+    let fill = doc
+        .animation_overrides
+        .values()
+        .flat_map(|props| props.iter())
+        .find(|(prop, _)| prop == "fill")
+        .map(|(_, value)| value.as_str())
+        .expect("SVG fill animation should produce an override");
+
+    assert!(
+        fill.starts_with("rgba(128,0,128"),
+        "fill should interpolate from underlying red to keyframe blue, got {fill}"
+    );
+}
+
+#[test]
 fn tick_animations_needs_more_frames_while_running() {
     let mut doc = doc_with_animation("animation: spin 1s linear infinite;");
     let now = doc.active_animations[0].start_time + Duration::from_millis(100);
