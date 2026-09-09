@@ -794,6 +794,10 @@ pub(crate) fn build_pseudo_style_shared(
     ps.display = Display::Inline;
     ps.width = CssLength::Auto;
     ps.height = CssLength::Auto;
+    ps.min_width = CssLength::Zero;
+    ps.min_height = CssLength::Zero;
+    ps.max_width = CssLength::None;
+    ps.max_height = CssLength::None;
     ps.counter_reset.clear();
     ps.counter_increment.clear();
     ps.counter_set.clear();

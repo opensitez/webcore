@@ -131,6 +131,7 @@ pub fn layout_inline_block(
     // Set float context origin now that content_y is known
     if let Some(ref mut fc) = float_ctx {
         if establishes_own_float_context || (fc.origin_y == 0.0 && fc.floats.is_empty()) {
+            fc.origin_x = content_x;
             fc.origin_y = content_y;
         }
     }
@@ -649,7 +650,9 @@ pub fn layout_inline_block(
                     } else {
                         FloatSide::Left
                     };
-                    let placed = fc.place_float(
+                    let local_x = content_x - fc.origin_x;
+                    let placed = fc.place_float_in(
+                        local_x,
                         cursor_y - fc.origin_y,
                         float_w,
                         float_h,
@@ -676,7 +679,9 @@ pub fn layout_inline_block(
         let est_line_h = font_px * 1.2;
         let (mut fc_left, mut fc_right) = (0.0f32, content_w);
         if let Some(fc) = float_ctx.as_ref() {
-            fc.available_width(
+            let local_x = content_x - fc.origin_x;
+            fc.available_width_in(
+                local_x,
                 cursor_y - fc.origin_y,
                 est_line_h,
                 content_w,
@@ -731,7 +736,9 @@ pub fn layout_inline_block(
                     } else {
                         FloatSide::Left
                     };
-                    let placed = fc.place_float(
+                    let local_x = content_x - fc.origin_x;
+                    let placed = fc.place_float_in(
+                        local_x,
                         cursor_y - fc.origin_y,
                         float_w,
                         float_h,
@@ -749,7 +756,9 @@ pub fn layout_inline_block(
                     crate::layout::shift_rects(child, dx, dy);
 
                     // Width might have changed
-                    fc.available_width(
+                    let local_x = content_x - fc.origin_x;
+                    fc.available_width_in(
+                        local_x,
                         cursor_y - fc.origin_y,
                         est_line_h,
                         content_w,

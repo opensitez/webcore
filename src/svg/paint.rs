@@ -4725,6 +4725,22 @@ mod tests {
     }
 
     #[test]
+    fn native_rasterizer_paints_filled_child_under_group_clip_when_root_fill_none() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg fill="none" viewBox="0 0 20 10">
+                <g clip-path="url(#a)">
+                    <path fill="#000" d="M0 0h20v10H0z"/>
+                </g>
+                <defs><clipPath id="a"><path fill="#fff" d="M0 0h20v10H0z"/></clipPath></defs>
+            </svg>"##,
+            20,
+            10,
+        )
+        .unwrap();
+        assert!(has_painted_pixel(&data));
+    }
+
+    #[test]
     fn native_rasterizer_applies_group_transform() {
         let data = rasterize_svg_to_rgba(
             r#"<svg width="20" height="10"><g transform="translate(10,0)"><rect width="5" height="5"/></g></svg>"#,
@@ -5956,5 +5972,27 @@ mod tests {
         .unwrap();
         assert_eq!(alpha_at(&data, 20, 6, 4), 0);
         assert!(painted_at(&data, 20, 8, 4));
+    }
+
+    #[test]
+    fn native_rasterizer_paints_external_wordmark_svg_shape() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 140 22">
+                <g clip-path="url(#a)">
+                    <path fill="#0e65c0" d="M118 0h18v18h-18z"/>
+                    <path fill="#000" d="M0 .5h18v17H0zM24 .5h18v17H24zM48 .5h18v17H48zM72 .5h18v17H72zM96 .5h18v17H96z"/>
+                </g>
+                <defs><clipPath id="a"><path fill="#fff" d="M0 0h140v21.42H0z"/></clipPath></defs>
+            </svg>"##,
+            140,
+            22,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 140, 8, 8), "black wordmark path missing");
+        let (r, g, b, a) = rgba_at(&data, 140, 125, 8);
+        assert!(
+            r < 40 && g > 70 && b > 140 && a > 200,
+            "blue wordmark path was {r},{g},{b},{a}"
+        );
     }
 }

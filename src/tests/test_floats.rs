@@ -86,4 +86,38 @@ mod tests {
             row2_box.layout.content_rect.x
         );
     }
+
+    #[test]
+    fn right_float_narrows_nested_list_item_text() {
+        let html = r#"
+            <style>
+                body { margin: 0; }
+                #wrap { width: 420px; font-size: 16px; line-height: 20px; }
+                #pic { float: right; width: 120px; height: 100px; }
+                ul { margin: 0; padding-left: 32px; }
+            </style>
+            <div id="wrap">
+                <div id="pic"></div>
+                <ul>
+                    <li id="item">This list item should wrap before the right float instead of painting underneath it.</li>
+                </ul>
+            </div>
+        "#;
+        let doc = parse_and_layout(html, 500.0);
+        let item =
+            crate::tests::test_grid::find_by_id(&doc.root, "item").expect("list item not found");
+        let pic = crate::tests::test_grid::find_by_id(&doc.root, "pic").expect("float not found");
+        assert!(
+            !item.layout.line_cache.is_empty(),
+            "list item should have inline line cache"
+        );
+        let first = &item.layout.line_cache[0];
+        assert!(
+            first.x + first.width <= pic.layout.border_rect.x + 1.0,
+            "first list line should end before right float: line x={} w={}, float x={}",
+            first.x,
+            first.width,
+            pic.layout.border_rect.x
+        );
+    }
 }

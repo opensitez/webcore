@@ -390,6 +390,7 @@ pub enum FloatShape {
 #[derive(Debug, Default, Clone)]
 pub struct FloatContext {
     pub floats: Vec<FloatItem>,
+    pub origin_x: f32, // Document X of the context root
     pub origin_y: f32, // Document Y of the context root
 }
 
@@ -413,6 +414,39 @@ impl FloatContext {
                     }
                 } else {
                     let l = f.left_exclusion_at(y, line_h);
+                    if l < *out_right {
+                        *out_right = l;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn available_width_in(
+        &self,
+        x: f32,
+        y: f32,
+        line_h: f32,
+        containing_w: f32,
+        out_left: &mut f32,
+        out_right: &mut f32,
+    ) {
+        *out_left = 0.0;
+        *out_right = containing_w;
+        for f in &self.floats {
+            if f.rect.y < y + line_h && f.clear > y {
+                let f_left = f.left_exclusion_at(y, line_h);
+                let f_right = f.right_exclusion_at(y, line_h);
+                if f_right <= x || f_left >= x + containing_w {
+                    continue;
+                }
+                if f.side == FloatSide::Left {
+                    let r = (f_right - x).clamp(0.0, containing_w);
+                    if r > *out_left {
+                        *out_left = r;
+                    }
+                } else {
+                    let l = (f_left - x).clamp(0.0, containing_w);
                     if l < *out_right {
                         *out_right = l;
                     }
@@ -456,12 +490,35 @@ impl FloatContext {
         shape_outside: &str,
         shape_margin: f32,
     ) -> Rect {
+        self.place_float_in(
+            0.0,
+            current_y,
+            float_w,
+            float_h,
+            containing_w,
+            side,
+            shape_outside,
+            shape_margin,
+        )
+    }
+
+    pub fn place_float_in(
+        &mut self,
+        x: f32,
+        current_y: f32,
+        float_w: f32,
+        float_h: f32,
+        containing_w: f32,
+        side: FloatSide,
+        shape_outside: &str,
+        shape_margin: f32,
+    ) -> Rect {
         // Find the lowest Y position where the float fits horizontally.
         let mut y = current_y;
         loop {
             let mut left = 0.0f32;
             let mut right = containing_w;
-            self.available_width(y, float_h, containing_w, &mut left, &mut right);
+            self.available_width_in(x, y, float_h, containing_w, &mut left, &mut right);
             let available = right - left;
             if available >= float_w {
                 break;
@@ -481,14 +538,14 @@ impl FloatContext {
 
         let mut left = 0.0f32;
         let mut right = containing_w;
-        self.available_width(y, float_h, containing_w, &mut left, &mut right);
+        self.available_width_in(x, y, float_h, containing_w, &mut left, &mut right);
 
-        let x = if side == FloatSide::Left {
+        let local_x = if side == FloatSide::Left {
             left
         } else {
             right - float_w
         };
-        let rect = Rect::new(x, y, float_w, float_h);
+        let rect = Rect::new(x + local_x, y, float_w, float_h);
         self.floats.push(FloatItem {
             rect,
             side,
@@ -496,7 +553,7 @@ impl FloatContext {
             shape: parse_float_shape(shape_outside, float_w, float_h),
             shape_margin: shape_margin.max(0.0),
         });
-        rect
+        Rect::new(local_x, y, float_w, float_h)
     }
 }
 

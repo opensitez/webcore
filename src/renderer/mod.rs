@@ -105,6 +105,7 @@ impl Renderer {
         }
         if doc.poll_pending_images() {
             needs_relayout = true;
+            self.invalidate_display_list();
         }
         if self.layout_engine().poll_pending_fonts() {
             self.layout_engine().invalidate_cascade();
@@ -537,6 +538,12 @@ impl Renderer {
         let view_w = w / zoom;
         let view_h = h / zoom;
         self.viewport_h = view_h;
+        if doc.poll_pending_images() {
+            let engine = self.layout_engine();
+            engine.viewport_h = view_h;
+            engine.layout(doc, view_w);
+            self.invalidate_display_list();
+        }
         let doc_h =
             crate::types::Document::scroll_height(&doc.root).max(doc.root.layout.margin_rect.h);
         let doc_w = doc.root.layout.margin_rect.w;

@@ -2384,11 +2384,12 @@ fn collect_flat_text(node: &WebCore, out: &mut String) {
         return;
     }
     for child in &node.children {
+        if matches!(child.style.display, Display::None) {
+            continue;
+        }
         if child.tag == "br" {
             out.push('\n');
-        } else if matches!(child.style.display, Display::Inline | Display::None)
-            || child.tag == "#text"
-        {
+        } else if matches!(child.style.display, Display::Inline) || child.tag == "#text" {
             collect_flat_text(child, out);
         }
     }

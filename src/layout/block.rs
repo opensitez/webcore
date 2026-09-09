@@ -754,12 +754,14 @@ pub fn layout_block_with_fc(
     let mut fc_owned;
     let fc = if is_bfc {
         fc_owned = FloatContext::default();
+        fc_owned.origin_x = content_x;
         fc_owned.origin_y = content_y;
         &mut fc_owned
     } else if let Some(f) = parent_fc {
         f
     } else {
         fc_owned = FloatContext::default();
+        fc_owned.origin_x = content_x;
         fc_owned.origin_y = content_y;
         &mut fc_owned
     };
@@ -829,12 +831,11 @@ pub fn layout_block_with_fc(
     // If the parent passed a float context with floats, children need to
     // receive it so their inline content wraps around those floats.
     let mut seen_float = !is_bfc && !fc.floats.is_empty();
-    let mut has_own_floats = false; // tracks if THIS block has directly floated children
-                                    // Inline flow state for anonymous inline formatting contexts
+    // Inline flow state for anonymous inline formatting contexts.
     let mut inline_x = 0.0f32;
     let mut inline_line_h = 0.0f32;
-    /// Where the current line's inline run starts, and which children are on
-    /// it — a left float placed mid-line has to move them aside.
+    // Where the current line's inline run starts, and which children are on
+    // it: a left float placed mid-line has to move them aside.
     let mut inline_line_start_x = 0.0f32;
     let mut inline_line_paths: Vec<Vec<usize>> = Vec::new();
 
@@ -897,7 +898,6 @@ pub fn layout_block_with_fc(
 
         if !matches!(child_float, Float::None) {
             seen_float = true;
-            has_own_floats = true;
             // Layout float to get natural size
             engine.layout_box(
                 grid_child_mut(node, path),
@@ -946,7 +946,9 @@ pub fn layout_block_with_fc(
             } else {
                 FloatSide::Right
             };
-            let placed = fc.place_float(
+            let local_x = content_x - fc.origin_x;
+            let placed = fc.place_float_in(
+                local_x,
                 content_y + child_y - fc.origin_y,
                 float_w,
                 float_h,
@@ -1081,7 +1083,9 @@ pub fn layout_block_with_fc(
             let mut right_edge = child_content_w;
             let child_is_bfc = establishes_bfc(&ch.style);
             if child_is_bfc {
-                fc.available_width(
+                let local_x = content_x - fc.origin_x;
+                fc.available_width_in(
+                    local_x,
                     content_y + child_y - fc.origin_y,
                     child_h,
                     child_content_w,
