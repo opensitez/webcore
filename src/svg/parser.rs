@@ -3,6 +3,7 @@
 //! This parser intentionally starts with SVG document/tree concerns only. CSS
 //! cascade, layout, and paint are separate phases in this module.
 
+use super::animation::parse_animation_element;
 use super::tree::{SvgAttribute, SvgDocument, SvgNode};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,6 +37,7 @@ impl<'a> Parser<'a> {
         loop {
             self.skip_ws();
             if self.consume("/>") {
+                node.animation = parse_animation_element(&node);
                 return Ok(node);
             }
             if self.consume(">") {
@@ -56,6 +58,7 @@ impl<'a> Parser<'a> {
                         name, close
                     )));
                 }
+                node.animation = parse_animation_element(&node);
                 return Ok(node);
             }
             if self.starts_with("<!--") {
@@ -246,7 +249,10 @@ fn decode_xml_entities(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::svg::SvgElementKind;
+    use crate::svg::{
+        SvgAdditiveMode, SvgAnimateTransformType, SvgAnimationFillMode, SvgAnimationKind,
+        SvgAnimationTime, SvgCalcMode, SvgElementKind, SvgRepeatCount,
+    };
 
     #[test]
     fn parses_nested_svg_elements() {
@@ -326,6 +332,69 @@ mod tests {
             filter.children[3].children[0].kind,
             SvgElementKind::FeMergeNode
         );
+    }
+
+    #[test]
+    fn parses_animation_elements_as_typed_metadata() {
+        let doc = parse_svg_document(
+            r##"<svg>
+                <rect id="r" width="10" height="10">
+                  <animate attributeName="fill" from="red" to="blue" dur="750ms" begin="click;2s" repeatCount="3" fill="freeze" calcMode="discrete"/>
+                  <animateTransform attributeName="transform" type="rotate" values="0;90;180" keyTimes="0;0.5;1" additive="sum"/>
+                </rect>
+                <animateMotion xlink:href="#r" path="M0 0L10 0" rotate="auto"/>
+                <set attributeName="visibility" to="hidden" begin="indefinite"/>
+            </svg>"##,
+        )
+        .unwrap();
+
+        let animate = doc.root.children[0].children[0]
+            .animation
+            .as_ref()
+            .expect("animate metadata");
+        assert_eq!(animate.kind, SvgAnimationKind::Animate);
+        assert_eq!(animate.target_attribute.as_deref(), Some("fill"));
+        assert_eq!(animate.values.from.as_deref(), Some("red"));
+        assert_eq!(animate.values.to.as_deref(), Some("blue"));
+        assert_eq!(animate.dur, Some(SvgAnimationTime::Seconds(0.75)));
+        assert_eq!(
+            animate.begin,
+            vec![
+                SvgAnimationTime::Event("click".to_string()),
+                SvgAnimationTime::Seconds(2.0)
+            ]
+        );
+        assert_eq!(animate.repeat_count, SvgRepeatCount::Count(3.0));
+        assert_eq!(animate.fill_mode, SvgAnimationFillMode::Freeze);
+        assert_eq!(animate.calc_mode, SvgCalcMode::Discrete);
+
+        let transform = doc.root.children[0].children[1]
+            .animation
+            .as_ref()
+            .expect("animateTransform metadata");
+        assert_eq!(transform.kind, SvgAnimationKind::AnimateTransform);
+        assert_eq!(
+            transform.transform_type,
+            Some(SvgAnimateTransformType::Rotate)
+        );
+        assert_eq!(transform.values.values, vec!["0", "90", "180"]);
+        assert_eq!(transform.key_times, vec![0.0, 0.5, 1.0]);
+        assert_eq!(transform.additive, SvgAdditiveMode::Sum);
+
+        let motion = doc.root.children[1]
+            .animation
+            .as_ref()
+            .expect("animateMotion metadata");
+        assert_eq!(motion.kind, SvgAnimationKind::AnimateMotion);
+        assert_eq!(motion.href.as_deref(), Some("#r"));
+        assert_eq!(motion.path.as_deref(), Some("M0 0L10 0"));
+
+        let set = doc.root.children[2]
+            .animation
+            .as_ref()
+            .expect("set metadata");
+        assert_eq!(set.kind, SvgAnimationKind::Set);
+        assert_eq!(set.begin, vec![SvgAnimationTime::Indefinite]);
     }
 
     #[test]

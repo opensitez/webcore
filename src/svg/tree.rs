@@ -3,6 +3,8 @@
 //! This is intentionally small at first: it gives parser/style/paint code a
 //! typed home without changing rendering behavior yet.
 
+use super::animation::SvgAnimationElement;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SvgDocument {
     pub root: SvgNode,
@@ -14,6 +16,7 @@ pub struct SvgNode {
     pub attributes: Vec<SvgAttribute>,
     pub children: Vec<SvgNode>,
     pub text: String,
+    pub animation: Option<SvgAnimationElement>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +81,11 @@ pub enum SvgElementKind {
     Cursor,
     Style,
     Script,
+    Animate,
+    AnimateTransform,
+    AnimateMotion,
+    MPath,
+    Set,
     Unknown(String),
 }
 
@@ -137,6 +145,11 @@ impl SvgElementKind {
             "cursor" => Self::Cursor,
             "style" => Self::Style,
             "script" => Self::Script,
+            "animate" => Self::Animate,
+            "animateTransform" | "animatetransform" => Self::AnimateTransform,
+            "animateMotion" | "animatemotion" => Self::AnimateMotion,
+            "mpath" => Self::MPath,
+            "set" => Self::Set,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -149,6 +162,7 @@ impl SvgNode {
             attributes: Vec::new(),
             children: Vec::new(),
             text: String::new(),
+            animation: None,
         }
     }
 

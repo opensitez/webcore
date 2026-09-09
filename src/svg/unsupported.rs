@@ -45,15 +45,13 @@ pub fn unsupported_summary(doc: &SvgDocument) -> SvgUnsupportedSummary {
 fn collect_node(node: &SvgNode, summary: &mut SvgUnsupportedSummary) {
     match &node.kind {
         SvgElementKind::Script => {}
+        SvgElementKind::Animate
+        | SvgElementKind::AnimateMotion
+        | SvgElementKind::AnimateTransform
+        | SvgElementKind::MPath
+        | SvgElementKind::Set => {}
         SvgElementKind::Unknown(name) => {
-            if is_deferred_animation_element(name) {
-                inc(
-                    &mut summary.unsupported_elements,
-                    format!("{}:animation", name),
-                );
-            } else {
-                inc(&mut summary.unknown_elements, name.to_string());
-            }
+            inc(&mut summary.unknown_elements, name.to_string());
         }
         SvgElementKind::TextPath | SvgElementKind::Switch => {}
         _ => {}
@@ -78,17 +76,6 @@ fn collect_node(node: &SvgNode, summary: &mut SvgUnsupportedSummary) {
     for child in &node.children {
         collect_node(child, summary);
     }
-}
-
-fn is_deferred_animation_element(name: &str) -> bool {
-    matches!(
-        ascii_lower(name).as_str(),
-        "animate" | "animatemotion" | "animatetransform" | "set" | "mpath"
-    )
-}
-
-fn ascii_lower(s: &str) -> String {
-    s.bytes().map(|b| b.to_ascii_lowercase() as char).collect()
 }
 
 fn svg_kind_name(kind: &SvgElementKind) -> &str {
@@ -146,6 +133,11 @@ fn svg_kind_name(kind: &SvgElementKind) -> &str {
         SvgElementKind::Cursor => "cursor",
         SvgElementKind::Style => "style",
         SvgElementKind::Script => "script",
+        SvgElementKind::Animate => "animate",
+        SvgElementKind::AnimateTransform => "animateTransform",
+        SvgElementKind::AnimateMotion => "animateMotion",
+        SvgElementKind::MPath => "mpath",
+        SvgElementKind::Set => "set",
         SvgElementKind::Unknown(name) => name.as_str(),
     }
 }
@@ -181,10 +173,7 @@ mod tests {
         )
         .unwrap();
         let summary = unsupported_summary(&doc);
-        assert_eq!(
-            summary.unsupported_elements.get("animate:animation"),
-            Some(&1)
-        );
+        assert!(summary.unsupported_elements.is_empty());
         assert_eq!(summary.unknown_elements.get("made-up"), Some(&1));
         assert_eq!(summary.unsupported_attributes.get("rect@onclick"), Some(&1));
         assert_eq!(summary.unsupported_elements.get("foreignObject"), None);

@@ -2018,8 +2018,10 @@ fn state_for_node(
     for (_, _, rule) in &matches {
         apply_declarations(&mut state, &rule.important_declarations);
     }
-    if let Some(dom) = dom_node {
-        apply_dom_computed_style(&mut state, node, dom);
+    if ancestors.is_empty() {
+        if let Some(dom) = dom_node {
+            apply_dom_computed_style(&mut state, node, dom);
+        }
     }
     state
 }
@@ -2482,6 +2484,11 @@ fn svg_tag_name(node: &SvgNode) -> &str {
         SvgElementKind::Cursor => "cursor",
         SvgElementKind::Style => "style",
         SvgElementKind::Script => "script",
+        SvgElementKind::Animate => "animate",
+        SvgElementKind::AnimateTransform => "animateTransform",
+        SvgElementKind::AnimateMotion => "animateMotion",
+        SvgElementKind::MPath => "mpath",
+        SvgElementKind::Set => "set",
         SvgElementKind::Unknown(name) => name,
     }
 }
