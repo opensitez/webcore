@@ -300,13 +300,14 @@ fn normalize_css_value(v: &str) -> String {
 
 /// Normalize a CSS text block, converting pt to px so the CSS parser handles it.
 pub(crate) fn normalize_css_text(css: &str) -> String {
-    // Simple token replacement: find number+pt and replace with number*4/3 px
+    if !css.contains("pt") {
+        return css.to_string();
+    }
     let mut out = String::with_capacity(css.len());
-    let mut i = 0;
+    let mut last_copied = 0;
     let bytes = css.as_bytes();
+    let mut i = 0;
     while i < bytes.len() {
-        // Try to match number followed by "pt" (with word boundary)
-        // Find digits (possibly with decimal) followed by "pt" not followed by another alpha
         if bytes[i].is_ascii_digit()
             || (bytes[i] == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit())
         {
@@ -317,26 +318,25 @@ pub(crate) fn normalize_css_text(css: &str) -> String {
             while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
                 i += 1;
             }
-            // Check if followed by "pt" and then non-alpha
             if i + 1 < bytes.len() && bytes[i] == b'p' && bytes[i + 1] == b't' {
                 let after = i + 2;
                 let boundary = after >= bytes.len()
-                    || !bytes[after].is_ascii_alphanumeric() && bytes[after] != b'_';
+                    || (!bytes[after].is_ascii_alphanumeric() && bytes[after] != b'_');
                 if boundary {
                     if let Ok(n) = css[start..i].parse::<f32>() {
+                        out.push_str(&css[last_copied..start]);
                         let px = n * 4.0 / 3.0;
                         out.push_str(&format!("{:.4}px", px));
                         i += 2; // skip "pt"
+                        last_copied = i;
                         continue;
                     }
                 }
             }
-            // Not a pt value, emit original
-            out.push_str(&css[start..i]);
         } else {
-            out.push(bytes[i] as char);
             i += 1;
         }
     }
+    out.push_str(&css[last_copied..]);
     out
 }

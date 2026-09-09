@@ -408,7 +408,7 @@ fn parse_html_full(
         smooth_scrolls: Vec::new(),
         hover_changed: false,
         hover_sensitive_nodes: std::collections::HashSet::new(),
-        style_dirty: false,
+        style_dirty: !initial_cascade,
         prev_hovered_box: 0,
         cascade_styles: std::collections::HashMap::new(),
         pending_announcements: Vec::new(),

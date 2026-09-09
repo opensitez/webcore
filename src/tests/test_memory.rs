@@ -35,10 +35,11 @@ fn the_data_model_sizes_are_what_the_plan_says() {
     // (WebCore, ComputedStyle, LayoutBox) — update deliberately, with the
     // change that moved them.
     //
-    // 2016 → 3472: later standards coverage widened `ComputedStyle` again.
+    // 2016 → 3472 → 3480, WebCore 624 → 1344: SVG document integration and
+    // later CSS standards coverage widened ComputedStyle and WebCore.
     // This assertion is a measured record, not a threshold; update it with the
     // feature that intentionally moves the data model.
-    assert_eq!(sizes, (624, 3472, 224), "sizes moved");
+    assert_eq!(sizes, (1344, 3480, 224), "sizes moved");
 }
 
 #[test]
@@ -52,7 +53,7 @@ fn a_real_page_costs_what_the_plan_says() {
     // widening `ComputedStyle` moves this number loudly.
     assert_eq!(
         (nodes, node_bytes, distinct_styles, total),
-        (1132, 706_368, 1099, 4_522_096),
+        (1161, 1_560_384, 1128, 5_485_824),
         "demo.html: nodes, node bytes, DISTINCT styles, total"
     );
 }
@@ -332,7 +333,7 @@ fn the_rare_property_ceiling_is_worth_measuring_before_building() {
     walk(&doc.root, &mut total, &mut with_rare);
     assert_eq!(
         (total, with_rare),
-        (1132, 8),
+        (1161, 8),
         "rare-property usage on demo.html"
     );
 }

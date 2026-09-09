@@ -172,73 +172,343 @@ pub(crate) fn extract_counter_style_rules_cleaned(css: &str) -> Vec<CounterStyle
 }
 
 pub(crate) fn supports_condition_matches(condition: &str) -> bool {
-    let cond = condition.trim();
-    if cond.is_empty() {
-        return false;
-    }
-
-    if let Some(idx) = find_keyword_outside_parens(cond, " or ") {
-        return supports_condition_matches(&cond[..idx])
-            || supports_condition_matches(&cond[idx + 4..]);
-    }
-    if let Some(idx) = find_keyword_outside_parens(cond, " and ") {
-        return supports_condition_matches(&cond[..idx])
-            && supports_condition_matches(&cond[idx + 5..]);
-    }
-    if starts_with_keyword_ci(cond, "not") {
-        let rest = cond.get(3..).unwrap_or("").trim_start();
-        return !supports_condition_matches(rest);
-    }
-
-    let inner = strip_enclosing_condition_parens(cond);
-
-    if starts_with_keyword_ci(inner, "not")
-        || find_keyword_outside_parens(inner, " or ").is_some()
-        || find_keyword_outside_parens(inner, " and ").is_some()
-        || outer_parens_enclose(inner)
-    {
-        return supports_condition_matches(inner);
-    }
-
-    let inner_lower = inner.to_ascii_lowercase();
-    if inner_lower.starts_with("selector(") && inner.ends_with(')') {
-        let selector = &inner["selector(".len()..inner.len() - 1];
-        let selector = selector.trim();
-        if selector.is_empty() {
-            return false;
-        }
-        return split_selectors(selector).iter().all(|sel| {
-            let sel = sel.trim();
-            !sel.is_empty() && parse_selector(&strip_pseudo_element(sel).0).valid
-        });
-    }
-    if inner_lower.starts_with("font-format(") && inner.ends_with(')') {
-        let format = unquote_css_string(inner["font-format(".len()..inner.len() - 1].trim());
-        return supports_font_format(format.trim());
-    }
-    if inner_lower.starts_with("font-tech(") && inner.ends_with(')') {
-        let tech = inner["font-tech(".len()..inner.len() - 1].trim();
-        return supports_font_tech(tech);
-    }
-
-    let Some(colon) = inner.find(':') else {
-        return false;
-    };
-    let prop = inner[..colon].trim().to_ascii_lowercase();
-    let value = inner[colon + 1..].trim();
-
-    supports_declaration_matches(&prop, value)
+    let stripped = strip_css_comments(condition);
+    parse_and_eval_supports_condition(stripped.trim()).unwrap_or(false)
 }
 
-fn strip_enclosing_condition_parens(mut condition: &str) -> &str {
-    loop {
-        let trimmed = condition.trim();
-        if trimmed.starts_with('(') && trimmed.ends_with(')') && outer_parens_enclose(trimmed) {
-            condition = &trimmed[1..trimmed.len() - 1];
-        } else {
-            return trimmed;
-        }
+enum SupportsLogicalOp<'a> {
+    None,
+    And(Vec<&'a str>),
+    Or(Vec<&'a str>),
+}
+
+fn parse_and_eval_supports_condition(cond: &str) -> Option<bool> {
+    let cond = cond.trim();
+    if cond.is_empty() {
+        return None;
     }
+
+    if starts_with_keyword_ci(cond, "not") {
+        let rest = cond[3..].trim_start();
+        // Mixing 'not' with top-level 'and' or 'or' without parens is invalid syntax
+        if matches!(
+            scan_supports_operators_outside_parens(rest),
+            Ok(SupportsLogicalOp::And(_)) | Ok(SupportsLogicalOp::Or(_))
+        ) {
+            return None;
+        }
+        let inner_val = parse_and_eval_supports_in_parens(rest)?;
+        return Some(!inner_val);
+    }
+
+    match scan_supports_operators_outside_parens(cond) {
+        Err(_) => None, // Mixed 'and' and 'or' without parens is a syntax error
+        Ok(SupportsLogicalOp::And(parts)) => {
+            let mut result = true;
+            for part in parts {
+                let part_val = parse_and_eval_supports_in_parens(part.trim())?;
+                result = result && part_val;
+            }
+            Some(result)
+        }
+        Ok(SupportsLogicalOp::Or(parts)) => {
+            let mut result = false;
+            for part in parts {
+                let part_val = parse_and_eval_supports_in_parens(part.trim())?;
+                result = result || part_val;
+            }
+            Some(result)
+        }
+        Ok(SupportsLogicalOp::None) => parse_and_eval_supports_in_parens(cond),
+    }
+}
+
+fn parse_and_eval_supports_in_parens(s: &str) -> Option<bool> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    if s.starts_with('(') && s.ends_with(')') && outer_parens_enclose(s) {
+        let inner = s[1..s.len() - 1].trim();
+        if inner.is_empty() {
+            // General enclosed empty parentheses: valid syntax, does not match
+            return Some(false);
+        }
+
+        // Check if inner is a nested condition
+        if starts_with_keyword_ci(inner, "not")
+            || matches!(
+                scan_supports_operators_outside_parens(inner),
+                Ok(SupportsLogicalOp::And(_)) | Ok(SupportsLogicalOp::Or(_))
+            )
+            || (inner.starts_with('(') && inner.ends_with(')') && outer_parens_enclose(inner))
+        {
+            return parse_and_eval_supports_condition(inner);
+        }
+
+        // Check for function token inside parens, e.g. (selector(p))
+        if let Some((ident, args)) = parse_functional_token(inner) {
+            return Some(eval_functional_token(ident, args));
+        }
+
+        // Check for declaration inside parens: (prop: value)
+        if let Some(colon) = find_char_outside_quotes_and_parens(inner, ':') {
+            let prop = inner[..colon].trim();
+            let raw_val = inner[colon + 1..].trim();
+            if is_valid_css_property_name(prop) {
+                if let Some((clean_val, _important)) = strip_important_flag(raw_val) {
+                    return Some(supports_declaration_matches(
+                        &prop.to_ascii_lowercase(),
+                        clean_val,
+                    ));
+                } else {
+                    // Invalid exclamation flag like !bad
+                    return Some(false);
+                }
+            }
+        }
+
+        // Any other parenthesized content is <general-enclosed>
+        return Some(false);
+    }
+
+    // Top-level functional token, e.g. selector(...), font-format(...), font-tech(...)
+    if let Some((ident, args)) = parse_functional_token(s) {
+        return Some(eval_functional_token(ident, args));
+    }
+
+    // Neither enclosed in parens nor a valid functional token -> syntax error
+    None
+}
+
+fn eval_functional_token(ident: &str, args: &str) -> bool {
+    let ident_lower = ident.to_ascii_lowercase();
+    match ident_lower.as_str() {
+        "selector" => {
+            let selector = args.trim();
+            if selector.is_empty() {
+                return false;
+            }
+            split_selectors(selector).iter().all(|sel| {
+                let sel = sel.trim();
+                !sel.is_empty() && parse_selector(&strip_pseudo_element(sel).0).valid
+            })
+        }
+        "font-format" => {
+            let format = unquote_css_string(args.trim());
+            supports_font_format(format.trim())
+        }
+        "font-tech" => supports_font_tech(args.trim()),
+        _ => false, // <general-enclosed> unknown function: valid syntax, returns false
+    }
+}
+
+fn strip_important_flag(val: &str) -> Option<(&str, bool)> {
+    let bytes = val.as_bytes();
+    let mut last_excl = None;
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        match quote {
+            Some(q) => {
+                if bytes[i] == q {
+                    quote = None;
+                }
+            }
+            None => {
+                if bytes[i] == b'"' || bytes[i] == b'\'' {
+                    quote = Some(bytes[i]);
+                } else if bytes[i] == b'!' {
+                    last_excl = Some(i);
+                }
+            }
+        }
+        i += 1;
+    }
+
+    if let Some(idx) = last_excl {
+        let flag = val[idx + 1..].trim();
+        if flag.eq_ignore_ascii_case("important") {
+            Some((val[..idx].trim(), true))
+        } else {
+            None // invalid exclamation flag
+        }
+    } else {
+        Some((val, false))
+    }
+}
+
+fn scan_supports_operators_outside_parens(s: &str) -> Result<SupportsLogicalOp<'_>, ()> {
+    let bytes = s.as_bytes();
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+
+    let mut has_and = false;
+    let mut has_or = false;
+    let mut op_indices: Vec<(usize, usize)> = Vec::new();
+
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        match quote {
+            Some(q) => {
+                if bytes[i] == q {
+                    quote = None;
+                }
+            }
+            None => match bytes[i] {
+                b'"' | b'\'' => quote = Some(bytes[i]),
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                _ if depth == 0 => {
+                    if starts_with_ci(&bytes[i..], b"and") {
+                        let prev_ok = i == 0
+                            || bytes[i - 1].is_ascii_whitespace()
+                            || bytes[i - 1] == b')';
+                        let next_pos = i + 3;
+                        let next_ok = next_pos == bytes.len()
+                            || bytes[next_pos].is_ascii_whitespace()
+                            || bytes[next_pos] == b'(';
+                        if prev_ok && next_ok {
+                            has_and = true;
+                            op_indices.push((i, next_pos));
+                            i = next_pos;
+                            continue;
+                        }
+                    }
+                    if starts_with_ci(&bytes[i..], b"or") {
+                        let prev_ok = i == 0
+                            || bytes[i - 1].is_ascii_whitespace()
+                            || bytes[i - 1] == b')';
+                        let next_pos = i + 2;
+                        let next_ok = next_pos == bytes.len()
+                            || bytes[next_pos].is_ascii_whitespace()
+                            || bytes[next_pos] == b'(';
+                        if prev_ok && next_ok {
+                            has_or = true;
+                            op_indices.push((i, next_pos));
+                            i = next_pos;
+                            continue;
+                        }
+                    }
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+
+    if depth != 0 || quote.is_some() {
+        return Err(());
+    }
+
+    if has_and && has_or {
+        return Err(());
+    }
+
+    if op_indices.is_empty() {
+        return Ok(SupportsLogicalOp::None);
+    }
+
+    let mut parts = Vec::new();
+    let mut prev_end = 0;
+    for (start, end) in op_indices {
+        parts.push(&s[prev_end..start]);
+        prev_end = end;
+    }
+    parts.push(&s[prev_end..]);
+
+    if has_and {
+        Ok(SupportsLogicalOp::And(parts))
+    } else {
+        Ok(SupportsLogicalOp::Or(parts))
+    }
+}
+
+fn parse_functional_token(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim();
+    if !s.ends_with(')') {
+        return None;
+    }
+    let open = s.find('(')?;
+    let ident = s[..open].trim();
+    if ident.is_empty() || !is_valid_css_identifier(ident) {
+        return None;
+    }
+    if !outer_parens_enclose(&s[open..]) {
+        return None;
+    }
+    Some((ident, &s[open + 1..s.len() - 1]))
+}
+
+fn is_valid_css_identifier(ident: &str) -> bool {
+    let bytes = ident.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    if bytes[0] == b'-' {
+        if bytes.len() == 1 {
+            return false;
+        }
+        i = 1;
+    }
+    if !bytes[i].is_ascii_alphabetic() && bytes[i] != b'_' {
+        return false;
+    }
+    i += 1;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_alphanumeric() && bytes[i] != b'-' && bytes[i] != b'_' {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+fn is_valid_css_property_name(prop: &str) -> bool {
+    if prop.starts_with("--") {
+        return prop.len() > 2;
+    }
+    is_valid_css_identifier(prop)
+}
+
+fn find_char_outside_quotes_and_parens(s: &str, target: char) -> Option<usize> {
+    let target_byte = target as u8;
+    let bytes = s.as_bytes();
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        match quote {
+            Some(q) => {
+                if bytes[i] == q {
+                    quote = None;
+                }
+            }
+            None => match bytes[i] {
+                b'"' | b'\'' => quote = Some(bytes[i]),
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+                b if b == target_byte && depth == 0 => return Some(i),
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    None
 }
 
 fn outer_parens_enclose(s: &str) -> bool {
@@ -250,12 +520,12 @@ fn outer_parens_enclose(s: &str) -> bool {
     let mut quote: Option<u8> = None;
     let mut i = 0usize;
     while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
         match quote {
             Some(q) => {
-                if bytes[i] == b'\\' {
-                    i += 2;
-                    continue;
-                }
                 if bytes[i] == q {
                     quote = None;
                 }
@@ -276,6 +546,7 @@ fn outer_parens_enclose(s: &str) -> bool {
     }
     depth == 0 && quote.is_none()
 }
+
 
 fn supports_declaration_matches(prop: &str, value: &str) -> bool {
     use crate::types::CssValue;
@@ -382,42 +653,6 @@ fn starts_with_quoted_string(value: &str) -> bool {
         i += 1;
     }
     false
-}
-
-fn find_keyword_outside_parens(s: &str, needle: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let needle_bytes = needle.as_bytes();
-    let mut depth = 0usize;
-    let mut quote: Option<u8> = None;
-    let mut i = 0usize;
-
-    while i < bytes.len() {
-        match quote {
-            Some(q) => {
-                if bytes[i] == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if bytes[i] == q {
-                    quote = None;
-                }
-                i += 1;
-                continue;
-            }
-            None => match bytes[i] {
-                b'"' | b'\'' => quote = Some(bytes[i]),
-                b'(' => depth += 1,
-                b')' => depth = depth.saturating_sub(1),
-                _ => {}
-            },
-        }
-        if depth == 0 && starts_with_ci(&bytes[i..], needle_bytes) {
-            return Some(i);
-        }
-        i += 1;
-    }
-
-    None
 }
 
 fn starts_with_ci(haystack: &[u8], needle: &[u8]) -> bool {
@@ -564,7 +799,12 @@ fn parse_stylesheet_inner(
                     parse_stylesheet_inner(inner_block, parent_media, parent_layer)
                 {
                     let (scope_selector, scope_limit_selector) = extract_scope_selectors(at_header);
+                    let frame = crate::css::rule::ScopeFrame {
+                        root: scope_selector.clone(),
+                        limit: scope_limit_selector.clone(),
+                    };
                     for mut r in inner_rules {
+                        r.scopes.insert(0, frame.clone());
                         if r.scope_selector.is_none() {
                             r.scope_selector = scope_selector.clone();
                         }
@@ -788,25 +1028,20 @@ fn expand_nested_selectors(parent: &str, nested: &str) -> String {
     out.join(", ")
 }
 
-/// Strip `/* ... */` comments from CSS text.
 pub(crate) fn strip_css_comments(css: &str) -> String {
     let mut out = String::with_capacity(css.len());
-    let mut i = 0;
-    let bytes = css.as_bytes();
-    while i < bytes.len() {
-        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            if i + 1 < bytes.len() {
-                i += 2;
-            }
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        if let Some(end) = after.find("*/") {
+            rest = &after[end + 2..];
         } else {
-            out.push(bytes[i] as char);
-            i += 1;
+            rest = "";
+            break;
         }
     }
+    out.push_str(rest);
     out
 }
 

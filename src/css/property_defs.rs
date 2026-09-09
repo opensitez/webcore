@@ -5193,19 +5193,44 @@ fn apply_background(s: &mut ComputedStyle, v: &str) {
     if layers.len() > 1 {
         reset_background_fields(s);
 
-        let mut selected = None;
+        let mut all_image_layers: Vec<ComputedStyle> = Vec::new();
         let mut final_color = Color::TRANSPARENT;
         for layer in &layers {
             let mut parsed = ComputedStyle::default();
             apply_background_single_layer(&mut parsed, layer.trim());
-            if layer_has_background_image(&parsed) && selected.is_none() {
-                selected = Some(parsed.clone());
+            if layer_has_background_image(&parsed) {
+                all_image_layers.push(parsed.clone());
             }
             final_color = background_layer_color(layer.trim()).unwrap_or(parsed.background_color);
         }
 
-        if let Some(parsed) = selected {
-            copy_background_layer_fields(s, &parsed);
+        if !all_image_layers.is_empty() {
+            copy_background_layer_fields(s, &all_image_layers[0]);
+            if all_image_layers.len() > 1 {
+                let additional = all_image_layers[1..]
+                    .iter()
+                    .map(|layer| BackgroundLayer {
+                        image_url: layer.background_image_url.clone(),
+                        gradient_type: layer.gradient_type,
+                        gradient_angle: layer.gradient_angle,
+                        gradient_direction: layer.gradient_direction,
+                        gradient_radial_shape: layer.gradient_radial_shape,
+                        gradient_radial_size: layer.gradient_radial_size,
+                        gradient_radial_radius_x: layer.gradient_radial_radius_x.clone(),
+                        gradient_radial_radius_y: layer.gradient_radial_radius_y.clone(),
+                        gradient_radial_position_x: layer.gradient_radial_position_x.clone(),
+                        gradient_radial_position_y: layer.gradient_radial_position_y.clone(),
+                        gradient_stops: layer.rare().gradient_stops.clone(),
+                        position_x: layer.background_position_x.clone(),
+                        position_y: layer.background_position_y.clone(),
+                        size: layer.background_size,
+                        size_w: layer.background_size_w.clone(),
+                        size_h: layer.background_size_h.clone(),
+                        repeat: layer.background_repeat,
+                    })
+                    .collect();
+                s.rare_mut().additional_background_layers = additional;
+            }
         }
         s.background_color = final_color;
         return;
@@ -5227,6 +5252,7 @@ fn reset_background_fields(s: &mut ComputedStyle) {
     s.gradient_radial_position_x = CssLength::Percent(50.0);
     s.gradient_radial_position_y = CssLength::Percent(50.0);
     s.rare_mut().gradient_stops.clear();
+    s.rare_mut().additional_background_layers.clear();
     s.background_position_x = CssLength::Zero;
     s.background_position_y = CssLength::Zero;
     s.background_size = BackgroundSize::Auto;
@@ -5534,6 +5560,54 @@ fn apply_background_misc_tokens(s: &mut ComputedStyle, tokens: &[&str]) {
 }
 
 fn apply_background_image(s: &mut ComputedStyle, v: &str) {
+    let layers = crate::css::value_parse::split_top_level_commas(v);
+    if layers.len() > 1 {
+        s.background_image_url.clear();
+        s.gradient_type = GradientType::None;
+        s.rare_mut().gradient_stops.clear();
+        s.rare_mut().additional_background_layers.clear();
+        let mut all_image_layers: Vec<ComputedStyle> = Vec::new();
+        for layer in &layers {
+            let mut parsed = ComputedStyle::default();
+            apply_single_background_image(&mut parsed, layer.trim());
+            if layer_has_background_image(&parsed) {
+                all_image_layers.push(parsed);
+            }
+        }
+        if !all_image_layers.is_empty() {
+            copy_background_layer_fields(s, &all_image_layers[0]);
+            if all_image_layers.len() > 1 {
+                let additional = all_image_layers[1..]
+                    .iter()
+                    .map(|layer| BackgroundLayer {
+                        image_url: layer.background_image_url.clone(),
+                        gradient_type: layer.gradient_type,
+                        gradient_angle: layer.gradient_angle,
+                        gradient_direction: layer.gradient_direction,
+                        gradient_radial_shape: layer.gradient_radial_shape,
+                        gradient_radial_size: layer.gradient_radial_size,
+                        gradient_radial_radius_x: layer.gradient_radial_radius_x.clone(),
+                        gradient_radial_radius_y: layer.gradient_radial_radius_y.clone(),
+                        gradient_radial_position_x: layer.gradient_radial_position_x.clone(),
+                        gradient_radial_position_y: layer.gradient_radial_position_y.clone(),
+                        gradient_stops: layer.rare().gradient_stops.clone(),
+                        position_x: layer.background_position_x.clone(),
+                        position_y: layer.background_position_y.clone(),
+                        size: layer.background_size,
+                        size_w: layer.background_size_w.clone(),
+                        size_h: layer.background_size_h.clone(),
+                        repeat: layer.background_repeat,
+                    })
+                    .collect();
+                s.rare_mut().additional_background_layers = additional;
+            }
+        }
+        return;
+    }
+    apply_single_background_image(s, v);
+}
+
+fn apply_single_background_image(s: &mut ComputedStyle, v: &str) {
     let lower = v.to_ascii_lowercase();
     if lower.contains("gradient") {
         super::apply_gradient(s, v);

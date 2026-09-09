@@ -2543,7 +2543,7 @@ fn draw_text_cmd(
         // scripts where baseline underlines cut through glyphs.
         let baseline_y = phys_y + phys_px * 0.82;
         let offset = if decoration.underline_offset > 0.0 {
-            decoration.underline_offset
+            decoration.underline_offset * sc
         } else {
             thickness * 2.0
         };

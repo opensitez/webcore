@@ -13,32 +13,85 @@ use std::collections::{HashMap, HashSet};
 
 // ─── CSS Cascade ─────────────────────────────────────────────────────────────
 
-fn normal_cascade_sort_key(
+fn normal_cascade_cmp(
     rules: &[CssRule],
-    specificity: u32,
-    rule_idx: usize,
-) -> (u8, u32, u32, usize) {
-    let origin_rank = if is_author_origin(specificity) { 1 } else { 0 };
-    (
-        origin_rank,
-        rules[rule_idx].layer_rank,
-        specificity,
-        rule_idx,
-    )
+    a: (u32, usize, Option<u32>),
+    b: (u32, usize, Option<u32>),
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (sp_a, idx_a, prox_a) = a;
+    let (sp_b, idx_b, prox_b) = b;
+
+    let origin_a = if is_author_origin(sp_a) { 1 } else { 0 };
+    let origin_b = if is_author_origin(sp_b) { 1 } else { 0 };
+    match origin_a.cmp(&origin_b) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+
+    match rules[idx_a].layer_rank.cmp(&rules[idx_b].layer_rank) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+
+    match sp_a.cmp(&sp_b) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+
+    // CSS Cascade 6 §4.2: Scope Proximity
+    // For scoped declarations with equal specificity, the declaration with
+    // the shorter proximity from the scoping root to the scoped element wins.
+    if let (Some(dist_a), Some(dist_b)) = (prox_a, prox_b) {
+        match dist_b.cmp(&dist_a) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+
+    // Tie-break by stylesheet source order
+    idx_a.cmp(&idx_b)
 }
 
-fn important_cascade_sort_key(
+fn important_cascade_cmp(
     rules: &[CssRule],
-    specificity: u32,
-    rule_idx: usize,
-) -> (u32, u32, usize) {
-    let layer_rank = rules[rule_idx].layer_rank;
-    let reversed_layer_rank = if layer_rank == u32::MAX {
+    a: (u32, usize, Option<u32>),
+    b: (u32, usize, Option<u32>),
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (sp_a, idx_a, prox_a) = a;
+    let (sp_b, idx_b, prox_b) = b;
+
+    let layer_a = rules[idx_a].layer_rank;
+    let rev_layer_a = if layer_a == u32::MAX {
         0
     } else {
-        u32::MAX - layer_rank
+        u32::MAX - layer_a
     };
-    (reversed_layer_rank, specificity, rule_idx)
+    let layer_b = rules[idx_b].layer_rank;
+    let rev_layer_b = if layer_b == u32::MAX {
+        0
+    } else {
+        u32::MAX - layer_b
+    };
+    match rev_layer_a.cmp(&rev_layer_b) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+
+    match sp_a.cmp(&sp_b) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+
+    if let (Some(dist_a), Some(dist_b)) = (prox_a, prox_b) {
+        match dist_b.cmp(&dist_a) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+
+    idx_a.cmp(&idx_b)
 }
 
 fn clear_inherit_tracking_for_property(inherit_props: &mut HashSet<String>, prop: &str) {
@@ -128,16 +181,16 @@ fn apply_resolved_property_with_cascade_context(
 
 fn apply_state_matched_rules(
     state: &mut ComputedStyle,
-    matched: &mut Vec<(u32, usize)>,
+    matched: &mut Vec<(u32, usize, Option<u32>)>,
     stylesheet: &Stylesheet,
     local_vars: &HashMap<String, String>,
     parent_style: Option<&ComputedStyle>,
     revert_base: Option<&ComputedStyle>,
 ) {
-    matched.sort_by_key(|(sp, idx)| normal_cascade_sort_key(&stylesheet.rules, *sp, *idx));
+    matched.sort_by(|&a, &b| normal_cascade_cmp(&stylesheet.rules, a, b));
     let mut current_layer: Option<(bool, u32)> = None;
     let mut layer_start_style = state.clone();
-    for &(sp, ri) in matched.iter() {
+    for &(sp, ri, _) in matched.iter() {
         let rule = &stylesheet.rules[ri];
         let layer_key = (is_author_origin(sp), rule.layer_rank);
         if current_layer != Some(layer_key) {
@@ -157,11 +210,11 @@ fn apply_state_matched_rules(
         }
     }
 
-    matched.sort_by_key(|(sp, idx)| important_cascade_sort_key(&stylesheet.rules, *sp, *idx));
+    matched.sort_by(|&a, &b| important_cascade_cmp(&stylesheet.rules, a, b));
     for author_pass in [true, false] {
         let mut current_layer: Option<(bool, u32)> = None;
         let mut layer_start_style = state.clone();
-        for &(sp, ri) in matched.iter() {
+        for &(sp, ri, _) in matched.iter() {
             if is_author_origin(sp) != author_pass {
                 continue;
             }
@@ -776,7 +829,7 @@ fn blockify_flex_or_grid_item(style: &mut ComputedStyle) {
 }
 
 pub(crate) fn build_pseudo_style_shared(
-    matched: &mut Vec<(u32, usize)>,
+    matched: &mut Vec<(u32, usize, Option<u32>)>,
     base: &ComputedStyle,
     vars: &HashMap<String, String>,
     attrs: &crate::dom::attrs::AttrMap,
@@ -786,9 +839,9 @@ pub(crate) fn build_pseudo_style_shared(
         return None;
     }
     // CSS Cascade order for normal declarations is origin, then layer, then
-    // specificity/source order. Keeping origin first prevents a UA unlayered
+    // specificity/scope proximity/source order. Keeping origin first prevents a UA unlayered
     // rule from beating a layered author rule.
-    matched.sort_by_key(|(sp, idx)| normal_cascade_sort_key(rules, *sp, *idx));
+    matched.sort_by(|&a, &b| normal_cascade_cmp(rules, a, b));
     let mut ps = base.clone();
     // Reset non-inherited properties that should not leak from the originating element.
     ps.display = Display::Inline;
@@ -816,7 +869,7 @@ pub(crate) fn build_pseudo_style_shared(
     let pseudo_revert_base = ps.clone();
     let mut current_normal_layer: Option<(bool, u32)> = None;
     let mut normal_layer_start_style = ps.clone();
-    for &(sp, ri) in matched.iter() {
+    for &(sp, ri, _) in matched.iter() {
         let rule = &rules[ri];
         let layer_key = (is_author_origin(sp), rule.layer_rank);
         if current_normal_layer != Some(layer_key) {
@@ -845,10 +898,10 @@ pub(crate) fn build_pseudo_style_shared(
     // then UA, so a UA `!important` on a pseudo-element still wins.
     for author_pass in [true, false] {
         let mut important_matched = matched.clone();
-        important_matched.sort_by_key(|(sp, idx)| important_cascade_sort_key(rules, *sp, *idx));
+        important_matched.sort_by(|&a, &b| important_cascade_cmp(rules, a, b));
         let mut current_important_layer: Option<(bool, u32)> = None;
         let mut important_layer_start_style = ps.clone();
-        for &(sp, ri) in important_matched.iter() {
+        for &(sp, ri, _) in important_matched.iter() {
             if is_author_origin(sp) != author_pass {
                 continue;
             }
@@ -994,16 +1047,16 @@ pub(crate) type ShareCache = HashMap<(usize, String, String), std::sync::Arc<Com
 /// for the two paths to disagree about which rules apply to an element.
 #[derive(Clone, Default)]
 pub(crate) struct MatchSets {
-    pub matched: Vec<(u32, usize)>,
-    pub hover_matched: Vec<(u32, usize)>,
-    pub active_matched: Vec<(u32, usize)>,
-    pub visited_matched: Vec<(u32, usize)>,
-    pub before_matched: Vec<(u32, usize)>,
-    pub after_matched: Vec<(u32, usize)>,
-    pub selection_matched: Vec<(u32, usize)>,
-    pub placeholder_matched: Vec<(u32, usize)>,
-    pub marker_matched: Vec<(u32, usize)>,
-    pub backdrop_matched: Vec<(u32, usize)>,
+    pub matched: Vec<(u32, usize, Option<u32>)>,
+    pub hover_matched: Vec<(u32, usize, Option<u32>)>,
+    pub active_matched: Vec<(u32, usize, Option<u32>)>,
+    pub visited_matched: Vec<(u32, usize, Option<u32>)>,
+    pub before_matched: Vec<(u32, usize, Option<u32>)>,
+    pub after_matched: Vec<(u32, usize, Option<u32>)>,
+    pub selection_matched: Vec<(u32, usize, Option<u32>)>,
+    pub placeholder_matched: Vec<(u32, usize, Option<u32>)>,
+    pub marker_matched: Vec<(u32, usize, Option<u32>)>,
+    pub backdrop_matched: Vec<(u32, usize, Option<u32>)>,
 }
 
 /// Precomputed match results, keyed by `node_id`.
@@ -1079,16 +1132,16 @@ pub(crate) fn match_rules(
         if !rule.container_condition.is_empty() {
             continue;
         }
-        if !rule_matches_scope(
+        let Some(scope_proximity) = rule_matches_scope(
             rule,
             node,
             ancestors,
             child_index,
             sibling_count,
             &match_ctx,
-        ) {
+        ) else {
             continue;
-        }
+        };
         for sel in &rule.selectors {
             // Per-selector state flags are precomputed; nothing is scanned here.
             let has_hover = sel.has_hover;
@@ -1108,13 +1161,13 @@ pub(crate) fn match_rules(
                     &match_ctx,
                 ) {
                     if has_hover {
-                        sets.hover_matched.push((rule.specificity, rule_idx));
+                        sets.hover_matched.push((rule.specificity, rule_idx, scope_proximity));
                     }
                     if has_active {
-                        sets.active_matched.push((rule.specificity, rule_idx));
+                        sets.active_matched.push((rule.specificity, rule_idx, scope_proximity));
                     }
                     if has_visited {
-                        sets.visited_matched.push((rule.specificity, rule_idx));
+                        sets.visited_matched.push((rule.specificity, rule_idx, scope_proximity));
                     }
                     // With a hover chain live, the FULL selector is tested too:
                     // a `:hover` rule that matches now applies as a normal rule,
@@ -1129,7 +1182,7 @@ pub(crate) fn match_rules(
                             &match_ctx,
                         )
                     {
-                        sets.matched.push((rule.specificity, rule_idx));
+                        sets.matched.push((rule.specificity, rule_idx, scope_proximity));
                     }
                     break;
                 }
@@ -1143,19 +1196,19 @@ pub(crate) fn match_rules(
                 &match_ctx,
             ) {
                 match rule.pseudo_element {
-                    PseudoElement::Before => sets.before_matched.push((rule.specificity, rule_idx)),
-                    PseudoElement::After => sets.after_matched.push((rule.specificity, rule_idx)),
+                    PseudoElement::Before => sets.before_matched.push((rule.specificity, rule_idx, scope_proximity)),
+                    PseudoElement::After => sets.after_matched.push((rule.specificity, rule_idx, scope_proximity)),
                     PseudoElement::Selection => {
-                        sets.selection_matched.push((rule.specificity, rule_idx))
+                        sets.selection_matched.push((rule.specificity, rule_idx, scope_proximity))
                     }
                     PseudoElement::Placeholder => {
-                        sets.placeholder_matched.push((rule.specificity, rule_idx))
+                        sets.placeholder_matched.push((rule.specificity, rule_idx, scope_proximity))
                     }
-                    PseudoElement::Marker => sets.marker_matched.push((rule.specificity, rule_idx)),
+                    PseudoElement::Marker => sets.marker_matched.push((rule.specificity, rule_idx, scope_proximity)),
                     PseudoElement::Backdrop => {
-                        sets.backdrop_matched.push((rule.specificity, rule_idx))
+                        sets.backdrop_matched.push((rule.specificity, rule_idx, scope_proximity))
                     }
-                    PseudoElement::None => sets.matched.push((rule.specificity, rule_idx)),
+                    PseudoElement::None => sets.matched.push((rule.specificity, rule_idx, scope_proximity)),
                     PseudoElement::Ignored => {}
                 }
                 break;
@@ -1165,6 +1218,45 @@ pub(crate) fn match_rules(
     sets
 }
 
+fn element_matches_scope_selector(
+    sel: &CssSelector,
+    idx: usize,
+    node: &WebCore,
+    ancestors: &[AncestorInfo],
+    child_index: usize,
+    sibling_count: usize,
+    match_ctx: &MatchContext<'_>,
+) -> bool {
+    if idx == ancestors.len() {
+        sel.matches_with_ancestors_ctx(node, child_index, sibling_count, ancestors, match_ctx)
+    } else {
+        selector_matches_ancestor(sel, &ancestors[idx], &ancestors[..idx], match_ctx)
+    }
+}
+
+fn limit_matches_between(
+    limit_sel: &CssSelector,
+    from_idx: usize,
+    to_node: bool,
+    node: &WebCore,
+    ancestors: &[AncestorInfo],
+    child_index: usize,
+    sibling_count: usize,
+    match_ctx: &MatchContext<'_>,
+) -> bool {
+    for i in (from_idx + 1)..ancestors.len() {
+        if selector_matches_ancestor(limit_sel, &ancestors[i], &ancestors[..i], match_ctx) {
+            return true;
+        }
+    }
+    if to_node {
+        if limit_sel.matches_with_ancestors_ctx(node, child_index, sibling_count, ancestors, match_ctx) {
+            return true;
+        }
+    }
+    false
+}
+
 fn rule_matches_scope(
     rule: &CssRule,
     node: &WebCore,
@@ -1172,57 +1264,107 @@ fn rule_matches_scope(
     child_index: usize,
     sibling_count: usize,
     match_ctx: &MatchContext<'_>,
-) -> bool {
-    let Some(scope_selector) = &rule.scope_selector else {
-        return true;
-    };
-    let scope_root_index = if scope_selector.matches_with_ancestors_ctx(
-        node,
-        child_index,
-        sibling_count,
-        ancestors,
-        match_ctx,
-    ) {
-        None
+) -> Option<Option<u32>> {
+    use crate::css::rule::ScopeFrame;
+
+    let scopes: Vec<ScopeFrame> = if !rule.scopes.is_empty() {
+        rule.scopes.clone()
+    } else if rule.scope_selector.is_some() {
+        vec![ScopeFrame {
+            root: rule.scope_selector.clone(),
+            limit: rule.scope_limit_selector.clone(),
+        }]
     } else {
-        ancestors.iter().enumerate().find_map(|(i, ancestor)| {
-            selector_matches_ancestor(scope_selector, ancestor, &ancestors[..i], match_ctx)
-                .then_some(i)
-        })
+        return Some(None);
     };
 
-    let in_scope = scope_root_index.is_some()
-        || scope_selector.matches_with_ancestors_ctx(
-            node,
-            child_index,
-            sibling_count,
-            ancestors,
-            match_ctx,
-        );
-    if !in_scope {
-        return false;
-    }
+    let n = scopes.len();
+    let innermost = &scopes[n - 1];
 
-    let Some(scope_limit_selector) = &rule.scope_limit_selector else {
-        return true;
-    };
-    if scope_limit_selector.matches_with_ancestors_ctx(
-        node,
-        child_index,
-        sibling_count,
-        ancestors,
-        match_ctx,
-    ) {
-        return false;
-    }
-    let limit_start = scope_root_index.map_or(ancestors.len(), |root_index| root_index + 1);
-    for i in limit_start..ancestors.len() {
-        let ancestor = &ancestors[i];
-        if selector_matches_ancestor(scope_limit_selector, ancestor, &ancestors[..i], match_ctx) {
-            return false;
+    for idx in (0..=ancestors.len()).rev() {
+        let root_matches = match &innermost.root {
+            Some(sel) => element_matches_scope_selector(
+                sel,
+                idx,
+                node,
+                ancestors,
+                child_index,
+                sibling_count,
+                match_ctx,
+            ),
+            None => true,
+        };
+        if !root_matches {
+            continue;
+        }
+
+        if let Some(limit_sel) = &innermost.limit {
+            if limit_matches_between(
+                limit_sel,
+                idx,
+                true,
+                node,
+                ancestors,
+                child_index,
+                sibling_count,
+                match_ctx,
+            ) {
+                continue;
+            }
+        }
+
+        let mut curr_idx = idx;
+        let mut outer_ok = true;
+        for k in (0..n - 1).rev() {
+            let outer_frame = &scopes[k];
+            let mut found_outer = None;
+            for parent_idx in (0..=curr_idx).rev() {
+                let m = match &outer_frame.root {
+                    Some(sel) => element_matches_scope_selector(
+                        sel,
+                        parent_idx,
+                        node,
+                        ancestors,
+                        child_index,
+                        sibling_count,
+                        match_ctx,
+                    ),
+                    None => true,
+                };
+                if m {
+                    if let Some(limit_sel) = &outer_frame.limit {
+                        if limit_matches_between(
+                            limit_sel,
+                            parent_idx,
+                            true,
+                            node,
+                            ancestors,
+                            child_index,
+                            sibling_count,
+                            match_ctx,
+                        ) {
+                            continue;
+                        }
+                    }
+                    found_outer = Some(parent_idx);
+                    break;
+                }
+            }
+            if let Some(p_idx) = found_outer {
+                curr_idx = p_idx;
+            } else {
+                outer_ok = false;
+                break;
+            }
+        }
+
+        if outer_ok {
+            let distance = (ancestors.len() - idx) as u32;
+            return Some(Some(distance));
         }
     }
-    true
+
+    None
 }
 
 fn selector_matches_ancestor(
@@ -1379,11 +1521,11 @@ pub(crate) fn apply_cascade_inner(
         mut marker_matched,
         mut backdrop_matched,
     } = sets;
-    matched.sort_by_key(|(sp, idx)| normal_cascade_sort_key(&stylesheet.rules, *sp, *idx));
+    matched.sort_by(|&a, &b| normal_cascade_cmp(&stylesheet.rules, a, b));
     // Build variable scope: inherited from parent + any --custom-properties from matched rules.
     // Only clone the map when new custom properties are actually defined — most elements
     // don't define any, so we avoid O(vars) cloning at every node.
-    let has_new_vars = matched.iter().any(|(_, ri)| {
+    let has_new_vars = matched.iter().any(|(_, ri, _)| {
         stylesheet.rules[*ri]
             .declarations
             .keys()
@@ -1407,7 +1549,7 @@ pub(crate) fn apply_cascade_inner(
 
     let local_vars_owned = if has_new_vars || has_inline_vars {
         let mut vars = inherited_vars.clone();
-        for &(_, ri) in &matched {
+        for &(_, ri, _) in &matched {
             for (prop, val) in &stylesheet.rules[ri].declarations {
                 if prop.starts_with("--") {
                     vars.insert(prop.clone(), val.clone());
@@ -1441,7 +1583,7 @@ pub(crate) fn apply_cascade_inner(
     let mut current_normal_layer: Option<(bool, u32)> = None;
     let mut normal_layer_start_style = style.clone();
     let mut hints_applied = false;
-    for &(sp, ri) in &matched {
+    for &(sp, ri, _) in &matched {
         if is_author_origin(sp) && pre_author_normal_style.is_none() {
             apply_presentational_hints(&mut style, root, ancestors);
             hints_applied = true;
@@ -1574,11 +1716,11 @@ pub(crate) fn apply_cascade_inner(
     // field — Chrome answers `display: none` there, and now so does this.
     let mut important_matched = matched.clone();
     important_matched
-        .sort_by_key(|(sp, idx)| important_cascade_sort_key(&stylesheet.rules, *sp, *idx));
+        .sort_by(|&a, &b| important_cascade_cmp(&stylesheet.rules, a, b));
     for author_pass in [true, false] {
         let mut current_important_layer: Option<(bool, u32)> = None;
         let mut important_layer_start_style = style.clone();
-        for &(sp, ri) in &important_matched {
+        for &(sp, ri, _) in &important_matched {
             if is_author_origin(sp) != author_pass {
                 continue;
             }
@@ -1743,7 +1885,7 @@ pub(crate) fn apply_cascade_inner(
     // last, not first.
     let mut current_author_important_layer: Option<u32> = None;
     let mut author_important_layer_start_style = style.clone();
-    for &(sp, ri) in &important_matched {
+    for &(sp, ri, _) in &important_matched {
         if !is_author_origin(sp) {
             continue;
         }
@@ -1781,7 +1923,7 @@ pub(crate) fn apply_cascade_inner(
     }
     let mut current_ua_important_layer: Option<u32> = None;
     let mut ua_important_layer_start_style = style.clone();
-    for &(sp, ri) in &important_matched {
+    for &(sp, ri, _) in &important_matched {
         if is_author_origin(sp) {
             continue;
         }
@@ -1830,7 +1972,7 @@ pub(crate) fn apply_cascade_inner(
     // Preserve the resolved custom-property scope on computed style. Paint-time
     // consumers such as inline SVG need these inherited variables after cascade.
     style.custom_props = local_vars.clone();
-    let has_explicit_display = matched.iter().any(|&(_, ri)| {
+    let has_explicit_display = matched.iter().any(|&(_, ri, _)| {
         stylesheet.rules[ri]
             .declarations
             .iter()
@@ -1858,7 +2000,7 @@ pub(crate) fn apply_cascade_inner(
     // Store matched CSS rules for inspector (only when enabled).
     if stylesheet.inspect_mode {
         root.matched_rules.clear();
-        for &(sp, ri) in &matched {
+        for &(sp, ri, _) in &matched {
             let rule = &stylesheet.rules[ri];
             root.matched_rules.push(crate::types::MatchedRule {
                 selector: rule.original_selector.clone(),
@@ -2363,12 +2505,12 @@ fn apply_form_sizing_hints_after_ua(
     style: &mut ComputedStyle,
     root: &crate::types::WebCore,
     rules: &[CssRule],
-    matched: &[(u32, usize)],
+    matched: &[(u32, usize, Option<u32>)],
 ) {
     let author_declares = |property: &str| {
         matched
             .iter()
-            .any(|(sp, ri)| is_author_origin(*sp) && rules[*ri].declarations.contains_key(property))
+            .any(|(sp, ri, _)| is_author_origin(*sp) && rules[*ri].declarations.contains_key(property))
     };
 
     match root.tag.as_str() {

@@ -630,6 +630,95 @@ fn scope_limit_excludes_limit_subtree() {
 }
 
 #[test]
+fn scope_proximity_closer_root_wins() {
+    let doc = parse(
+        r#"<html><head><style>
+              /* .outer comes second in stylesheet, but has greater distance (2 hops) */
+              @scope (.inner) { p { color: rgb(10, 20, 30); } }
+              @scope (.outer) { p { color: rgb(40, 50, 60); } }
+           </style></head><body>
+              <div class="outer">
+                  <div class="inner">
+                      <p id="target">Text</p>
+                  </div>
+              </div>
+           </body></html>"#,
+    );
+    let target = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v.as_str()) == Some("target")
+    })
+    .unwrap();
+
+    // The closer scope (.inner, distance 1) must beat the more distant scope (.outer, distance 2)
+    // even though .outer was declared later in stylesheet order.
+    assert_eq!(target.style.color, Color::rgb(10, 20, 30));
+}
+
+#[test]
+fn scope_nested_intersection_and_limits() {
+    let doc = parse(
+        r#"<html><head><style>
+              p { color: rgb(1, 1, 1); }
+              @scope (.outer) to (.outer-stop) {
+                  @scope (.inner) to (.inner-stop) {
+                      p { color: rgb(10, 20, 30); }
+                  }
+              }
+           </style></head><body>
+              <!-- In both scopes: matches -->
+              <div class="outer">
+                  <div class="inner">
+                      <p id="in-both">Text</p>
+                  </div>
+              </div>
+              <!-- Inside .inner, but outside .outer: must not match -->
+              <div>
+                  <div class="inner">
+                      <p id="outside-outer">Text</p>
+                  </div>
+              </div>
+              <!-- Inside both, but blocked by outer limit: must not match -->
+              <div class="outer">
+                  <div class="outer-stop">
+                      <div class="inner">
+                          <p id="outer-stopped">Text</p>
+                      </div>
+                  </div>
+              </div>
+              <!-- Inside both, but blocked by inner limit: must not match -->
+              <div class="outer">
+                  <div class="inner">
+                      <div class="inner-stop">
+                          <p id="inner-stopped">Text</p>
+                      </div>
+                  </div>
+              </div>
+           </body></html>"#,
+    );
+    let in_both = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v.as_str()) == Some("in-both")
+    })
+    .unwrap();
+    let outside_outer = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v.as_str()) == Some("outside-outer")
+    })
+    .unwrap();
+    let outer_stopped = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v.as_str()) == Some("outer-stopped")
+    })
+    .unwrap();
+    let inner_stopped = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(|v| v.as_str()) == Some("inner-stopped")
+    })
+    .unwrap();
+
+    assert_eq!(in_both.style.color, Color::rgb(10, 20, 30), "in both scopes matches");
+    assert_eq!(outside_outer.style.color, Color::rgb(1, 1, 1), "outside outer scope does not match");
+    assert_eq!(outer_stopped.style.color, Color::rgb(1, 1, 1), "blocked by outer limit does not match");
+    assert_eq!(inner_stopped.style.color, Color::rgb(1, 1, 1), "blocked by inner limit does not match");
+}
+
+#[test]
 fn supports_unknown_declaration_drops_inner_rules() {
     let doc = parse(
         r#"<html><head><style>
@@ -731,6 +820,33 @@ fn supports_font_format_and_font_tech_conditions() {
     assert_eq!(p.style.color, Color::rgb(4, 5, 6));
     assert_eq!(p.style.background_color, Color::rgb(7, 8, 9));
     assert_eq!(p.style.border_top_color, Color::rgb(2, 2, 2));
+}
+
+#[test]
+fn supports_full_conditional_feature_grammar() {
+    let doc = parse(
+        r#"<html><head><style>
+              p { color: rgb(1, 1, 1); background-color: rgb(2, 2, 2); border-top-color: rgb(3, 3, 3); border-bottom-color: rgb(4, 4, 4); }
+              /* !important inside declaration must match */
+              @supports (display: flex !important) { p { color: rgb(10, 20, 30); } }
+              /* Bare declaration without parens must be rejected as invalid syntax */
+              @supports display: flex { p { color: rgb(99, 99, 99); } }
+              /* Mixed and/or without grouping parens must be rejected as syntax error */
+              @supports (display: flex) and (display: grid) or (display: block) { p { background-color: rgb(99, 99, 99); } }
+              /* Grouped and/or is valid */
+              @supports (display: flex) and ((display: grid) or (display: block)) { p { background-color: rgb(40, 50, 60); } }
+              /* General enclosed unknown feature in parens is valid syntax, evaluates to false, inverted by not */
+              @supports not (general-enclosed-unknown-feature: 123) { p { border-top-color: rgb(70, 80, 90); } }
+              /* Comments inside condition must be ignored */
+              @supports /* comment */ (/* inside */ display: flex /* after */) { p { border-bottom-color: rgb(11, 22, 33); } }
+           </style></head><body><p>Text</p></body></html>"#,
+    );
+    let p = find_box(&doc.root, &|b| b.tag == "p").unwrap();
+
+    assert_eq!(p.style.color, Color::rgb(10, 20, 30), "!important inside declaration matched, bare declaration rejected");
+    assert_eq!(p.style.background_color, Color::rgb(40, 50, 60), "mixed and/or without parens rejected, grouped accepted");
+    assert_eq!(p.style.border_top_color, Color::rgb(70, 80, 90), "general-enclosed feature parsed and inverted by not");
+    assert_eq!(p.style.border_bottom_color, Color::rgb(11, 22, 33), "comments inside condition ignored");
 }
 
 #[test]
@@ -1107,14 +1223,14 @@ fn font_shorthand_resolves_nested_custom_property_token() {
         matched
             .matched
             .iter()
-            .any(|(_, idx)| doc.stylesheet.rules[*idx]
+            .any(|(_, idx, _)| doc.stylesheet.rules[*idx]
                 .original_selector
                 .contains("neo-font-v2-heading-2xl-bold-cond")),
         "font utility did not match; matched selectors: {:?}",
         matched
             .matched
             .iter()
-            .map(|(_, idx)| doc.stylesheet.rules[*idx].original_selector.clone())
+            .map(|(_, idx, _)| doc.stylesheet.rules[*idx].original_selector.clone())
             .collect::<Vec<_>>()
     );
     assert_eq!(
@@ -9372,5 +9488,81 @@ fn hyphens_manual_adds_soft_hyphen_break_opportunities() {
     assert!(
         manual_lines > 1,
         "hyphens:manual should allow a soft-hyphen line break"
+    );
+}
+
+#[test]
+fn text_transform_full_size_kana_and_math_auto() {
+    use crate::renderer::display_list_builder::apply_text_transform;
+    use crate::types::TextTransform;
+
+    // Full-size-kana: small kana characters convert to normal-size kana
+    let transformed_kana = apply_text_transform("ぁぃぅぇぉっァィゥェォッ", TextTransform::FullSizeKana);
+    assert_eq!(transformed_kana, "あいうえおつアイウエオツ");
+
+    // Math-auto: single Latin and Greek letters become italic math symbols,
+    // while multi-letter words (functions/operators) remain upright.
+    let math_expr = apply_text_transform("x + sin(y) + a = 0", TextTransform::MathAuto);
+    assert!(math_expr.contains('𝑥'), "single letter x should become italic mathematical x: {math_expr}");
+    assert!(math_expr.contains('𝑦'), "single letter y should become italic mathematical y: {math_expr}");
+    assert!(math_expr.contains('𝑎'), "single letter a should become italic mathematical a: {math_expr}");
+    assert!(math_expr.contains("sin"), "multi-letter word 'sin' should stay upright: {math_expr}");
+}
+
+#[test]
+fn inline_fragment_geometry_and_pseudo_elements() {
+    let mut r = crate::Renderer::new();
+    let d = r.load_html(
+        r#"<style>
+            .with-pseudo::before { content: "PREFIX "; }
+        </style>
+        <div style="width:300px; font-size:16px;">
+            <span id="s1" style="padding: 2px 4px; border: 1px solid black;">plain inline</span>
+            <span id="s2" class="with-pseudo">with pseudo</span>
+        </div>"#,
+        400.0,
+    );
+
+    let s1 = d.get_element_by_id("s1").expect("s1 exists");
+    let s2 = d.get_element_by_id("s2").expect("s2 exists");
+
+    let r1 = d.get_bounding_client_rect(s1).expect("s1 has rect");
+    let r2 = d.get_bounding_client_rect(s2).expect("s2 has rect");
+
+    assert!(r1.w > 20.0, "s1 width should be positive: {r1:?}");
+    assert!(r1.h > 10.0, "s1 height should be positive: {r1:?}");
+
+    assert!(r2.w > 40.0, "s2 width should include ::before content: {r2:?}");
+    assert!(r2.h > 10.0, "s2 height should be positive: {r2:?}");
+}
+
+#[test]
+fn inline_line_break_at_hyphen_and_cjk() {
+    let mut r = crate::Renderer::new();
+    let d = r.load_html(
+        r#"<div id="hyphenated" style="width:60px; font-size:16px;">semi-structured</div>
+           <div id="cjk" style="width:60px; font-size:16px;">日本語の文章テスト</div>"#,
+        400.0,
+    );
+
+    let hyphenated = d.get_element_by_id("hyphenated").unwrap();
+    let cjk = d.get_element_by_id("cjk").unwrap();
+
+    let hyphen_lines = d
+        .get_box_by_id(hyphenated)
+        .map(|b| b.layout.line_cache.len())
+        .unwrap_or(0);
+    let cjk_lines = d
+        .get_box_by_id(cjk)
+        .map(|b| b.layout.line_cache.len())
+        .unwrap_or(0);
+
+    assert!(
+        hyphen_lines > 1,
+        "semi-structured should wrap at hyphen in narrow container, lines: {hyphen_lines}"
+    );
+    assert!(
+        cjk_lines > 1,
+        "CJK ideographs should wrap across multiple lines without spaces in narrow container, lines: {cjk_lines}"
     );
 }

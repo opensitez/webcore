@@ -146,6 +146,12 @@ pub struct CounterStyleRule {
     pub important_declarations: Declarations,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScopeFrame {
+    pub root: Option<CssSelector>,
+    pub limit: Option<CssSelector>,
+}
+
 #[derive(Clone, Debug)]
 pub struct CssRule {
     pub selectors: Vec<CssSelector>,
@@ -175,6 +181,7 @@ pub struct CssRule {
     pub container_name: String,              // optional container name (empty = unnamed)
     pub scope_selector: Option<CssSelector>, // @scope root selector, when present
     pub scope_limit_selector: Option<CssSelector>, // @scope limit selector from `to (...)`
+    pub scopes: Vec<ScopeFrame>,             // Nested scope frames, from outermost to innermost
     pub original_selector: String,           // verbatim selector text for roundtrip
     pub is_hover: bool,
     /// True if any declaration value contains `var(` — needs slow-path resolution.
@@ -198,6 +205,7 @@ impl Default for CssRule {
             container_name: String::new(),
             scope_selector: None,
             scope_limit_selector: None,
+            scopes: Vec::new(),
             original_selector: String::new(),
             is_hover: false,
             has_var_refs: false,

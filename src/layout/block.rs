@@ -1781,7 +1781,20 @@ pub fn layout_columns(
             &Constraints::new(col_w, col_x, col_y, font_px, root_font_px),
         );
 
-        col_cursor[col_idx] += child_h;
+        if let Some(max_col_h) = rbox.content_height {
+            if target.children[i].layout.border_rect.h > max_col_h {
+                let diff = target.children[i].layout.border_rect.h - max_col_h;
+                target.children[i].layout.border_rect.h = max_col_h;
+                target.children[i].layout.content_rect.h =
+                    (target.children[i].layout.content_rect.h - diff).max(0.0);
+                target.children[i].layout.padding_rect.h =
+                    (target.children[i].layout.padding_rect.h - diff).max(0.0);
+                target.children[i].layout.margin_rect.h =
+                    (target.children[i].layout.margin_rect.h - diff).max(0.0);
+            }
+        }
+
+        col_cursor[col_idx] += target.children[i].layout.margin_rect.h;
 
         let forced_after = matches!(
             target.children[i].style.break_after,

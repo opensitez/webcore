@@ -78,6 +78,29 @@ pub struct RareStyle {
     /// property only a transformed element uses should cost. `None` is the
     /// initial `50% 50%`.
     pub transform_origin: Option<(CssLength, CssLength)>,
+    /// Additional background layers (2nd, 3rd, etc.) for multi-layer backgrounds.
+    pub additional_background_layers: Vec<BackgroundLayer>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BackgroundLayer {
+    pub image_url: String,
+    pub gradient_type: GradientType,
+    pub gradient_angle: f32,
+    pub gradient_direction: GradientDirection,
+    pub gradient_radial_shape: GradientRadialShape,
+    pub gradient_radial_size: GradientRadialSize,
+    pub gradient_radial_radius_x: CssLength,
+    pub gradient_radial_radius_y: CssLength,
+    pub gradient_radial_position_x: CssLength,
+    pub gradient_radial_position_y: CssLength,
+    pub gradient_stops: Vec<GradientStop>,
+    pub position_x: CssLength,
+    pub position_y: CssLength,
+    pub size: BackgroundSize,
+    pub size_w: CssLength,
+    pub size_h: CssLength,
+    pub repeat: BackgroundRepeat,
 }
 
 impl RareStyle {
@@ -86,6 +109,7 @@ impl RareStyle {
         logical_box: Vec::new(),
         logical_borders: Vec::new(),
         transform_origin: None,
+        additional_background_layers: Vec::new(),
         grid_template_columns: Vec::new(),
         grid_template_rows: Vec::new(),
         grid_template_areas: Vec::new(),

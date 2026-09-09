@@ -621,6 +621,8 @@ pub fn layout_inline_block(
     let mut item_idx = 0usize;
     let mut line_cache: Vec<LayoutLine> = Vec::new();
     let mut atomic_pos: Vec<(Vec<usize>, f32, f32)> = Vec::new(); // (path, x, y)
+    let mut inline_fragment_rects: std::collections::HashMap<Vec<usize>, Rect> =
+        std::collections::HashMap::new();
     let mut old_line_idx = 0usize;
     let mut ends_with_break = false;
     let mut loop_guard = 0usize;
@@ -1004,32 +1006,56 @@ pub fn layout_inline_block(
             }
         }
 
-        // Collect atomic positions on this line
+        // Collect atomic positions and inline fragment rects on this line
         {
             let mut cur_x = line_x;
             for item in line_items {
-                if let InlineItemKind::Atomic { path, .. } = &item.kind {
-                    let child_node = resolve_path(node, path);
-                    let box_h = child_node
-                        .map(|n| n.layout.margin_rect.h)
-                        .unwrap_or(item.height);
-                    let valign = child_node
-                        .map(|n| n.style.vertical_align.clone())
-                        .unwrap_or(crate::types::VerticalAlign::Baseline);
-                    let ay = match valign {
-                        crate::types::VerticalAlign::Top => cursor_y,
-                        crate::types::VerticalAlign::Bottom => cursor_y + line_h - box_h,
-                        crate::types::VerticalAlign::Middle => cursor_y + (line_h - box_h) / 2.0,
-                        _ => {
-                            // Baseline alignment uses the item's synthesized
-                            // ascent. For inline-block that is the bottom edge;
-                            // for inline-flex/grid it can be the container's
-                            // own baseline contribution.
-                            let ay = cursor_y + line_asc - item.ascent;
-                            ay.max(cursor_y)
+                match &item.kind {
+                    InlineItemKind::Atomic { path, .. } => {
+                        let child_node = resolve_path(node, path);
+                        let box_h = child_node
+                            .map(|n| n.layout.margin_rect.h)
+                            .unwrap_or(item.height);
+                        let box_w = child_node
+                            .map(|n| n.layout.margin_rect.w)
+                            .unwrap_or(item.advance);
+                        let valign = child_node
+                            .map(|n| n.style.vertical_align.clone())
+                            .unwrap_or(crate::types::VerticalAlign::Baseline);
+                        let ay = match valign {
+                            crate::types::VerticalAlign::Top => cursor_y,
+                            crate::types::VerticalAlign::Bottom => cursor_y + line_h - box_h,
+                            crate::types::VerticalAlign::Middle => cursor_y + (line_h - box_h) / 2.0,
+                            _ => {
+                                // Baseline alignment uses the item's synthesized
+                                // ascent. For inline-block that is the bottom edge;
+                                // for inline-flex/grid it can be the container's
+                                // own baseline contribution.
+                                let ay = cursor_y + line_asc - item.ascent;
+                                ay.max(cursor_y)
+                            }
+                        };
+                        atomic_pos.push((path.clone(), cur_x, ay));
+                        let ar = Rect::new(cur_x, ay, box_w, box_h);
+                        for len in 1..path.len() {
+                            let p = path[..len].to_vec();
+                            inline_fragment_rects
+                                .entry(p)
+                                .and_modify(|existing| union_rect(existing, &ar))
+                                .or_insert(ar);
                         }
-                    };
-                    atomic_pos.push((path.clone(), cur_x, ay));
+                    }
+                    InlineItemKind::Text { path, .. } => {
+                        let r = Rect::new(cur_x, cursor_y, item.advance, line_h);
+                        for len in 1..=path.len() {
+                            let p = path[..len].to_vec();
+                            inline_fragment_rects
+                                .entry(p)
+                                .and_modify(|existing| union_rect(existing, &r))
+                                .or_insert(r);
+                        }
+                    }
+                    _ => {}
                 }
                 cur_x += item.advance;
             }
@@ -1049,8 +1075,8 @@ pub fn layout_inline_block(
                     text_len,
                     ..
                 } if *text_start + *text_len > text_s => {
-                    let seg_start = (*text_start).max(text_s);
-                    let seg_end = (*text_start + *text_len).min(flat_text.len());
+                    let seg_start = floor_cb(&flat_text, (*text_start).max(text_s));
+                    let seg_end = floor_cb(&flat_text, (*text_start + *text_len).min(flat_text.len()));
                     if seg_start < seg_end && flat_text[seg_start..seg_end].trim().is_empty() {
                         text_x_off += item.advance;
                         continue;
@@ -1293,6 +1319,42 @@ pub fn layout_inline_block(
         }
     }
 
+    // ── 6b. Position non-atomic inline element fragments ─────────────────────
+    for (path, rect) in inline_fragment_rects {
+        if let Some(target) = resolve_path_mut(node, &path) {
+            if target.style.is_inline_level()
+                && !matches!(
+                    target.style.display,
+                    Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+                )
+            {
+                let child_font_px = target.style.font_size_px(font_px, root_font_px);
+                let rb = engine.res_box(&target.style, child_font_px, 0.0, root_font_px);
+                target.layout.content_rect = rect;
+                target.layout.padding_rect = Rect::new(
+                    rect.x - rb.padding_left,
+                    rect.y - rb.padding_top,
+                    rect.w + rb.padding_left + rb.padding_right,
+                    rect.h + rb.padding_top + rb.padding_bottom,
+                );
+                target.layout.border_rect = Rect::new(
+                    target.layout.padding_rect.x - rb.border_left,
+                    target.layout.padding_rect.y - rb.border_top,
+                    target.layout.padding_rect.w + rb.border_left + rb.border_right,
+                    target.layout.padding_rect.h + rb.border_top + rb.border_bottom,
+                );
+                target.layout.margin_rect = Rect::new(
+                    target.layout.border_rect.x - rb.margin_left,
+                    target.layout.border_rect.y - rb.margin_top,
+                    target.layout.border_rect.w + rb.margin_left + rb.margin_right,
+                    target.layout.border_rect.h + rb.margin_top + rb.margin_bottom,
+                );
+                target.layout.scroll_width = target.layout.content_rect.w;
+                target.layout.scroll_height = target.layout.content_rect.h;
+            }
+        }
+    }
+
     // ── 7. Absolutely/fixed positioned children ────────────────────────────────
     //    Inline containers can still be containing blocks for absolutely-positioned
     //    children (e.g. a `position:relative` div whose only visible in-flow content
@@ -1478,6 +1540,24 @@ fn measure_metrics(items: &[InlineItem], strut_asc: f32, strut_desc: f32) -> (f3
     (max_asc + max_desc, max_asc, max_desc)
 }
 
+fn union_rect(a: &mut Rect, b: &Rect) {
+    if b.w <= 0.0 && b.h <= 0.0 {
+        return;
+    }
+    if a.w <= 0.0 && a.h <= 0.0 {
+        *a = *b;
+        return;
+    }
+    let x0 = a.x.min(b.x);
+    let y0 = a.y.min(b.y);
+    let x1 = (a.x + a.w).max(b.x + b.w);
+    let y1 = (a.y + a.h).max(b.y + b.h);
+    a.x = x0;
+    a.y = y0;
+    a.w = (x1 - x0).max(0.0);
+    a.h = (y1 - y0).max(0.0);
+}
+
 fn shifted_inline_metrics(
     vertical_align: &VerticalAlign,
     font_px: f32,
@@ -1502,7 +1582,8 @@ pub(crate) fn vertical_align_shift(
     line_height_px: f32,
 ) -> f32 {
     match vertical_align {
-        VerticalAlign::Super | VerticalAlign::Sub => font_px * 0.35,
+        VerticalAlign::Super => font_px * 0.35,
+        VerticalAlign::Sub => font_px * 0.20,
         VerticalAlign::TextTop => font_px * 0.25,
         VerticalAlign::TextBottom => -(font_px * 0.25),
         VerticalAlign::Length(length) => length.resolve(font_px, line_height_px, font_px),
@@ -1593,7 +1674,7 @@ pub enum InlineItemKind {
     Text {
         text_start: usize,
         text_len: usize,
-        box_idx: usize,
+        path: Vec<usize>,
     },
     /// An atomic inline-level child. `path` is a chain of child indices from
     /// the block container down to the actual node (e.g. [2, 0, 0] means
@@ -1671,6 +1752,8 @@ fn collect_items_inner(
         return;
     }
     let generated_content = node.style.rare().content.as_str();
+    let mut current_path = ancestor_path.to_vec();
+    current_path.push(box_idx);
 
     // Absolutely/fixed positioned elements are out of flow — skip them here;
     // they are laid out separately by layout_positioned.
@@ -1684,10 +1767,8 @@ fn collect_items_inner(
 
     // ── Float ─────────────────────────────────────────────────────────────
     if !matches!(node.style.float, crate::types::Float::None) {
-        let mut full_path = ancestor_path.to_vec();
-        full_path.push(box_idx);
         items.push(InlineItem {
-            kind: InlineItemKind::Float { path: full_path },
+            kind: InlineItemKind::Float { path: current_path },
             advance: 0.0,
             ascent: 0.0,
             descent: 0.0,
@@ -1737,7 +1818,7 @@ fn collect_items_inner(
                 item_ascent,
                 item_descent,
                 line_h,
-                box_idx,
+                &current_path,
                 items,
                 node.style.font_weight,
                 node.style.font_style,
@@ -1748,6 +1829,7 @@ fn collect_items_inner(
                 node.style.overflow_wrap,
                 node.style.hyphens,
                 previous_collapsible_space,
+                node.style.text_transform,
             );
             // ⛔ `node.style.clone()` now clones the ARC. This wants the
             // VALUE — it is mutated below and stored in an `InlineRun`.
@@ -1766,17 +1848,10 @@ fn collect_items_inner(
                 if ps.text_decoration.strikethrough {
                     run_style.text_decoration.strikethrough = true;
                 }
-                if ps.text_decoration.underline
-                    || ps.text_decoration.overline
-                    || ps.text_decoration.strikethrough
-                {
-                    run_style.text_decoration_color =
-                        Some(ps.text_decoration_color.unwrap_or(ps.color));
+                if run_style.text_decoration_color.is_none() {
+                    run_style.text_decoration_color = ps.text_decoration_color;
                 }
-                if matches!(
-                    run_style.text_decoration_style,
-                    crate::types::TextDecorationStyle::Solid
-                ) {
+                if run_style.text_decoration_style == TextDecorationStyle::Solid {
                     run_style.text_decoration_style = ps.text_decoration_style;
                 }
                 if run_style.text_decoration_thickness.is_auto() {
@@ -1849,8 +1924,7 @@ fn collect_items_inner(
         } else {
             font_px * 1.2
         };
-        let mut full_path = ancestor_path.to_vec();
-        full_path.push(box_idx);
+        let full_path = current_path.clone();
         let (item_ascent, item_descent) = if matches!(
             node.style.display,
             Display::InlineFlex | Display::InlineGrid
@@ -1858,9 +1932,17 @@ fn collect_items_inner(
             let a = box_h.min(ascent);
             (a, (box_h - a).max(0.0))
         } else if matches!(node.style.display, Display::InlineBlock) {
-            let baseline = node.layout.baseline - node.layout.margin_rect.y;
-            let a = baseline.clamp(0.0, box_h);
-            (a, (box_h - a).max(0.0))
+            // CSS 2.1 §10.8.1: baseline of an 'inline-block' is the baseline of its
+            // LAST line box in normal flow, unless it has no in-flow line boxes
+            // or overflow is not 'visible' — then baseline is the bottom margin edge.
+            let has_visible_overflow = matches!(node.style.overflow_x, Overflow::Visible)
+                && matches!(node.style.overflow_y, Overflow::Visible);
+            if has_visible_overflow && node.layout.baseline > 0.0 {
+                let a = (node.layout.baseline - node.layout.margin_rect.y).max(0.0);
+                (a, (box_h - a).max(0.0))
+            } else {
+                (box_h, 0.0)
+            }
         } else {
             (box_h, 0.0)
         };
@@ -1895,7 +1977,7 @@ fn collect_items_inner(
             items,
             runs,
             text_offset,
-            box_idx,
+            &current_path,
             previous_collapsible_space,
         );
     }
@@ -1920,7 +2002,7 @@ fn collect_items_inner(
             item_ascent,
             item_descent,
             line_h,
-            box_idx,
+            &current_path,
             items,
             node.style.font_weight,
             node.style.font_style,
@@ -1931,6 +2013,7 @@ fn collect_items_inner(
             node.style.overflow_wrap,
             node.style.hyphens,
             previous_collapsible_space,
+            node.style.text_transform,
         );
         runs.push(InlineRun {
             text_offset: start,
@@ -1965,7 +2048,7 @@ fn collect_items_inner(
             kind: InlineItemKind::Text {
                 text_start: *text_offset,
                 text_len: 0,
-                box_idx,
+                path: current_path.clone(),
             },
             advance: inline_left,
             ascent: 0.0,
@@ -1978,8 +2061,7 @@ fn collect_items_inner(
 
     // ── Recurse into children ─────────────────────────────────────────────
     let runs_before = runs.len();
-    let mut child_path = ancestor_path.to_vec();
-    child_path.push(box_idx);
+    let child_path = current_path.clone();
     // Pass this element's style to children for inline visual effects that
     // apply through the inline box rather than normal CSS inheritance.
     let deco_source = if node.style.text_decoration.underline
@@ -2026,7 +2108,7 @@ fn collect_items_inner(
             items,
             runs,
             text_offset,
-            box_idx,
+            &current_path,
             previous_collapsible_space,
         );
     }
@@ -2037,7 +2119,7 @@ fn collect_items_inner(
             kind: InlineItemKind::Text {
                 text_start: *text_offset,
                 text_len: 0,
-                box_idx,
+                path: current_path.clone(),
             },
             advance: inline_right,
             ascent: 0.0,
@@ -2068,7 +2150,7 @@ fn emit_generated_inline_content(
     items: &mut Vec<InlineItem>,
     runs: &mut Vec<InlineRun>,
     text_offset: &mut usize,
-    box_idx: usize,
+    path: &[usize],
     previous_collapsible_space: &mut bool,
 ) {
     if content.is_empty() {
@@ -2088,7 +2170,7 @@ fn emit_generated_inline_content(
             kind: InlineItemKind::Text {
                 text_start: *text_offset,
                 text_len: 0,
-                box_idx,
+                path: path.to_vec(),
             },
             advance: left,
             ascent: 0.0,
@@ -2112,7 +2194,7 @@ fn emit_generated_inline_content(
         item_ascent,
         item_descent,
         line_h,
-        box_idx,
+        path,
         items,
         style.font_weight,
         style.font_style,
@@ -2123,6 +2205,7 @@ fn emit_generated_inline_content(
         style.overflow_wrap,
         style.hyphens,
         previous_collapsible_space,
+        style.text_transform,
     );
     let emitted_text_w = items[items_before_text..]
         .iter()
@@ -2141,7 +2224,7 @@ fn emit_generated_inline_content(
                 kind: InlineItemKind::Text {
                     text_start: *text_offset,
                     text_len: 0,
-                    box_idx,
+                    path: path.to_vec(),
                 },
                 advance: extra,
                 ascent: 0.0,
@@ -2163,7 +2246,7 @@ fn emit_generated_inline_content(
             kind: InlineItemKind::Text {
                 text_start: *text_offset,
                 text_len: 0,
-                box_idx,
+                path: path.to_vec(),
             },
             advance: right,
             ascent: 0.0,
@@ -2216,7 +2299,7 @@ fn tokenize_text(
     ascent: f32,
     descent: f32,
     line_h: f32,
-    box_idx: usize,
+    path: &[usize],
     items: &mut Vec<InlineItem>,
     font_weight: FontWeight,
     font_style: FontStyle,
@@ -2227,6 +2310,7 @@ fn tokenize_text(
     overflow_wrap: OverflowWrap,
     hyphens: Hyphens,
     previous_collapsible_space: &mut bool,
+    text_transform: TextTransform,
 ) {
     if text.is_empty() {
         return;
@@ -2236,6 +2320,19 @@ fn tokenize_text(
         white_space,
         WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine
     );
+
+    let measure_transformed = |engine: &LayoutEngine, s: &str| -> (f32, f32) {
+        let transformed = crate::renderer::display_list_builder::apply_text_transform(s, text_transform);
+        let w = engine.measure_text_cached(
+            &transformed,
+            font_px,
+            font_weight,
+            font_style,
+            font_family,
+        );
+        let tracking = letter_spacing * transformed.chars().count() as f32;
+        (w, tracking)
+    };
 
     let mut word_start = 0usize;
     let mut i = 0usize;
@@ -2255,28 +2352,26 @@ fn tokenize_text(
             *previous_collapsible_space = false;
             // Emit word — use cached measurement to avoid redundant font shaping
             let word = &text[word_start..i];
-            let break_inside_word =
-                matches!(word_break, WordBreak::BreakAll | WordBreak::BreakWord)
-                    || matches!(
-                        overflow_wrap,
-                        OverflowWrap::Anywhere | OverflowWrap::BreakWord
-                    );
+            let break_inside_word = matches!(word_break, WordBreak::BreakAll);
+            let has_subword_breaks = word.chars().any(|ch| {
+                (ch == '\u{00ad}' && hyphens != Hyphens::None)
+                    || ch == '-'
+                    || ch == '\u{2013}'
+                    || ch == '\u{2014}'
+                    || (word_break != WordBreak::KeepAll
+                        && ((ch >= '\u{3000}' && ch <= '\u{9fff}')
+                            || (ch >= '\u{f900}' && ch <= '\u{faff}')))
+            });
             if break_inside_word {
                 for (rel, ch) in word.char_indices() {
                     let next = rel + ch.len_utf8();
                     let part = &word[rel..next];
-                    let w = engine.measure_text_cached(
-                        part,
-                        font_px,
-                        font_weight,
-                        font_style,
-                        font_family,
-                    );
+                    let (w, _) = measure_transformed(engine, part);
                     items.push(InlineItem {
                         kind: InlineItemKind::Text {
                             text_start: base_offset + word_start + rel,
                             text_len: next - rel,
-                            box_idx,
+                            path: path.to_vec(),
                         },
                         advance: w + letter_spacing,
                         ascent,
@@ -2286,77 +2381,101 @@ fn tokenize_text(
                         breakable: word_start > 0 || rel > 0,
                     });
                 }
-            } else if hyphens != Hyphens::None && word.contains('\u{00ad}') {
+            } else if has_subword_breaks {
                 let mut segment_start = 0usize;
-                let mut starts_after_soft_hyphen = false;
+                let mut starts_after_break = word_start > 0;
                 for (rel, ch) in word.char_indices() {
-                    if ch != '\u{00ad}' {
-                        continue;
+                    let next_rel = rel + ch.len_utf8();
+                    if ch == '\u{00ad}' && hyphens != Hyphens::None {
+                        if rel > segment_start {
+                            let segment = &word[segment_start..rel];
+                            let (w, tracking) = measure_transformed(engine, segment);
+                            items.push(InlineItem {
+                                kind: InlineItemKind::Text {
+                                    text_start: base_offset + word_start + segment_start,
+                                    text_len: rel - segment_start,
+                                    path: path.to_vec(),
+                                },
+                                advance: w + tracking,
+                                ascent,
+                                descent,
+                                height: line_h,
+                                is_space: false,
+                                breakable: starts_after_break,
+                            });
+                        }
+                        segment_start = next_rel;
+                        starts_after_break = true;
+                    } else {
+                        let is_cjk = word_break != WordBreak::KeepAll
+                            && ((ch >= '\u{3000}' && ch <= '\u{9fff}')
+                                || (ch >= '\u{f900}' && ch <= '\u{faff}'));
+                        let is_break_after = ch == '-' || ch == '\u{2013}' || ch == '\u{2014}' || is_cjk;
+                        let is_break_before_cjk = is_cjk && rel > segment_start;
+                        if is_break_before_cjk {
+                            let segment = &word[segment_start..rel];
+                            let (w, tracking) = measure_transformed(engine, segment);
+                            items.push(InlineItem {
+                                kind: InlineItemKind::Text {
+                                    text_start: base_offset + word_start + segment_start,
+                                    text_len: rel - segment_start,
+                                    path: path.to_vec(),
+                                },
+                                advance: w + tracking,
+                                ascent,
+                                descent,
+                                height: line_h,
+                                is_space: false,
+                                breakable: starts_after_break,
+                            });
+                            segment_start = rel;
+                            starts_after_break = true;
+                        }
+                        if is_break_after {
+                            let segment = &word[segment_start..next_rel];
+                            let (w, tracking) = measure_transformed(engine, segment);
+                            items.push(InlineItem {
+                                kind: InlineItemKind::Text {
+                                    text_start: base_offset + word_start + segment_start,
+                                    text_len: next_rel - segment_start,
+                                    path: path.to_vec(),
+                                },
+                                advance: w + tracking,
+                                ascent,
+                                descent,
+                                height: line_h,
+                                is_space: false,
+                                breakable: starts_after_break,
+                            });
+                            segment_start = next_rel;
+                            starts_after_break = true;
+                        }
                     }
-                    if rel > segment_start {
-                        let segment = &word[segment_start..rel];
-                        let w = engine.measure_text_cached(
-                            segment,
-                            font_px,
-                            font_weight,
-                            font_style,
-                            font_family,
-                        );
-                        let tracking = letter_spacing * segment.chars().count() as f32;
-                        items.push(InlineItem {
-                            kind: InlineItemKind::Text {
-                                text_start: base_offset + word_start + segment_start,
-                                text_len: rel - segment_start,
-                                box_idx,
-                            },
-                            advance: w + tracking,
-                            ascent,
-                            descent,
-                            height: line_h,
-                            is_space: false,
-                            breakable: word_start > 0 || starts_after_soft_hyphen,
-                        });
-                    }
-                    segment_start = rel + ch.len_utf8();
-                    starts_after_soft_hyphen = true;
                 }
                 if segment_start < word.len() {
                     let segment = &word[segment_start..];
-                    let w = engine.measure_text_cached(
-                        segment,
-                        font_px,
-                        font_weight,
-                        font_style,
-                        font_family,
-                    );
-                    let tracking = letter_spacing * segment.chars().count() as f32;
+                    let (w, tracking) = measure_transformed(engine, segment);
                     items.push(InlineItem {
                         kind: InlineItemKind::Text {
                             text_start: base_offset + word_start + segment_start,
                             text_len: word.len() - segment_start,
-                            box_idx,
+                            path: path.to_vec(),
                         },
                         advance: w + tracking,
                         ascent,
                         descent,
                         height: line_h,
                         is_space: false,
-                        breakable: word_start > 0 || starts_after_soft_hyphen,
+                        breakable: starts_after_break,
                     });
                 }
             } else {
-                let w =
-                    engine.measure_text_cached(word, font_px, font_weight, font_style, font_family);
-                // css-text-3 §8.2: tracking is inserted after EVERY typographic
-                // character unit, the last one included — a browser's box for
-                // `letter-spacing: 4px` on five letters is twenty pixels wider,
-                // not sixteen.
-                let tracking = letter_spacing * word.chars().count() as f32;
+                let (w, tracking) = measure_transformed(engine, word);
                 items.push(InlineItem {
                     kind: InlineItemKind::Text {
                         text_start: base_offset + word_start,
                         text_len: i - word_start,
-                        box_idx,
+                        path: path.to_vec(),
                     },
                     advance: w + tracking,
                     ascent,
@@ -2380,7 +2499,7 @@ fn tokenize_text(
                 kind: InlineItemKind::Text {
                     text_start: base_offset + i,
                     text_len: ch_len,
-                    box_idx,
+                    path: path.to_vec(),
                 },
                 advance: 0.0,
                 ascent,
@@ -2426,7 +2545,7 @@ fn tokenize_text(
                 kind: InlineItemKind::Text {
                     text_start: base_offset + i,
                     text_len: ch_len,
-                    box_idx,
+                    path: path.to_vec(),
                 },
                 advance,
                 ascent,
@@ -3258,6 +3377,17 @@ fn measure_font_ratios(fs: &mut cosmic_text::FontSystem, family: &str) -> Option
 /// ⛔ Must cover every input that moves a glyph. A field left out here is a
 /// stale-position bug that renders as text drawn at the wrong offsets, which no
 /// other test would catch. `0` means "do not reuse".
+pub(crate) fn floor_cb(s: &str, idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    let mut i = idx;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 fn char_x_fingerprint(
     flat: &str,
     runs: &[InlineRun],
@@ -3562,7 +3692,7 @@ fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {
     {
         return;
     }
-    if !node.style.before_content.is_empty() {
+    if !is_root && !node.style.before_content.is_empty() {
         push_flat_rendered_text(out, &node.style.before_content, &node.style);
     }
     if node.is_text_node() {
@@ -3594,7 +3724,7 @@ fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {
     } else {
         generated_content
     };
-    if !rendered_text.is_empty() {
+    if !rendered_text.is_empty() && (is_root || node.children.is_empty()) {
         out.push_str(rendered_text);
     }
     if !generated_content.is_empty() {
@@ -3609,7 +3739,7 @@ fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {
         }
         collect_flat_text_inner(child, out, false);
     }
-    if !node.style.after_content.is_empty() {
+    if !is_root && !node.style.after_content.is_empty() {
         push_flat_rendered_text(out, &node.style.after_content, &node.style);
     }
 }

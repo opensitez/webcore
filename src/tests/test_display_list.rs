@@ -1176,6 +1176,139 @@ fn sticky_position_creates_a_stacking_context() {
     );
 }
 
+#[test]
+fn sticky_inside_overflow_scroll_container_uses_container_scrollport() {
+    let html = r#"
+        <style>
+          body { margin: 0; }
+          #scroller {
+            overflow: scroll;
+            width: 200px;
+            height: 200px;
+            margin-top: 100px;
+          }
+          #spacer {
+            height: 100px;
+          }
+          #sticky {
+            position: sticky;
+            top: 10px;
+            width: 50px;
+            height: 30px;
+            background-color: rgb(255, 0, 0);
+          }
+          #content {
+            height: 800px;
+          }
+        </style>
+        <div id="scroller">
+          <div id="spacer"></div>
+          <div id="sticky"></div>
+          <div id="content"></div>
+        </div>
+    "#;
+    let doc = parse_html(html);
+    let mut f = EngineFrame::new(doc, 800.0, 800.0);
+    f.update_frame();
+
+    let scroller_id = f.doc.get_element_by_id("scroller").expect("scroller");
+    f.doc.element_scroll_to(scroller_id, 0.0, 150.0);
+
+    let list = build_display_list_full(
+        &f.doc.root,
+        800.0,
+        800.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+
+    let red = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::FillRect { rect, color, .. }
+                if color.r == 255 && color.g == 0 && color.b == 0 =>
+            {
+                Some(*rect)
+            }
+            _ => None,
+        })
+        .expect("sticky box should paint a red background");
+
+    assert!(
+        (red.y - 110.0).abs() < 0.1,
+        "sticky element should stick to container scrollport top (100 + 10 = 110), got {}",
+        red.y
+    );
+}
+
+#[test]
+fn sticky_clamped_to_containing_block_bottom() {
+    let html = r#"
+        <style>
+          body { margin: 0; }
+          #section {
+            height: 300px;
+            margin-top: 100px;
+            background-color: rgb(0, 0, 255);
+          }
+          #sticky {
+            position: sticky;
+            top: 10px;
+            width: 50px;
+            height: 40px;
+            background-color: rgb(255, 0, 0);
+          }
+          #rest {
+            height: 1000px;
+          }
+        </style>
+        <div id="section">
+          <div id="sticky"></div>
+        </div>
+        <div id="rest"></div>
+    "#;
+    let doc = parse_html(html);
+    let mut f = EngineFrame::new(doc, 800.0, 600.0);
+    f.update_frame();
+
+    let list = build_display_list_full(
+        &f.doc.root,
+        800.0,
+        600.0,
+        0.0,
+        500.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+
+    let red = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::FillRect { rect, color, .. }
+                if color.r == 255 && color.g == 0 && color.b == 0 =>
+            {
+                Some(*rect)
+            }
+            _ => None,
+        })
+        .expect("sticky box should paint a red background");
+
+    assert!(
+        (red.y - 360.0).abs() < 0.1,
+        "sticky element should be clamped to containing block bottom (400 - 40 = 360), got {}",
+        red.y
+    );
+}
+
+
 // ── Pseudo-elements ─────────────────────────────────────────────────────────
 
 #[test]
@@ -1721,6 +1854,43 @@ fn radial_gradient_explicit_circle_radius_stays_circular() {
     let (_, _, rx, ry) = radial_gradient_geometry(&list).expect("a radial gradient was painted");
     assert!((rx - 25.0).abs() < 0.001, "circle x radius, got {rx}");
     assert!((ry - 25.0).abs() < 0.001, "circle y radius, got {ry}");
+}
+
+#[test]
+fn radial_gradient_farthest_corner_and_closest_side_sizing() {
+    // Circle closest-side at 20px 30px in 100px x 60px box:
+    // left=20, right=80, top=30, bottom=30 => min is 20.
+    let (_, list1) = build(
+        r#"<div style="width:100px;height:60px;background:radial-gradient(circle closest-side at 20px 30px, red, blue)">x</div>"#,
+    );
+    let (_, _, rx1, ry1) = radial_gradient_geometry(&list1).expect("list1 gradient");
+    assert!((rx1 - 20.0).abs() < 0.01, "closest-side circle radius 20, got {rx1}");
+    assert!((ry1 - 20.0).abs() < 0.01, "closest-side circle radius 20, got {ry1}");
+
+    // Ellipse farthest-corner at 0 0 in 100px x 50px box:
+    // dx = 100, dy = 50 => rx = 100 * sqrt(2) ≈ 141.42, ry = 50 * sqrt(2) ≈ 70.71.
+    let (_, list2) = build(
+        r#"<div style="width:100px;height:50px;background:radial-gradient(ellipse farthest-corner at left top, red, blue)">x</div>"#,
+    );
+    let (_, _, rx2, ry2) = radial_gradient_geometry(&list2).expect("list2 gradient");
+    assert!((rx2 - 100.0 * std::f32::consts::SQRT_2).abs() < 0.1, "ellipse rx passes through corner: {rx2}");
+    assert!((ry2 - 50.0 * std::f32::consts::SQRT_2).abs() < 0.1, "ellipse ry passes through corner: {ry2}");
+}
+
+#[test]
+fn multiple_background_gradient_layers_are_painted() {
+    let (_, list) = build(
+        r#"<div style="width:100px;height:50px;background-image:linear-gradient(red, blue), radial-gradient(circle, green, yellow)">x</div>"#,
+    );
+    let gradient_count = list
+        .commands
+        .iter()
+        .filter(|cmd| matches!(cmd, PaintCmd::Gradient { .. }))
+        .count();
+    assert_eq!(
+        gradient_count, 2,
+        "both gradient layers should be painted, got {gradient_count}"
+    );
 }
 
 #[test]

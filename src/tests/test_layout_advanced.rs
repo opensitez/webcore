@@ -1558,3 +1558,20 @@ fn column_width_floors_at_zero_not_one_pixel() {
         a.layout.border_rect.w
     );
 }
+
+#[test]
+fn a_tall_block_does_not_exceed_the_column_height_budget() {
+    let html = r#"
+        <div style="column-count:2; height:100px; width:200px; column-gap:0;">
+          <div id="tall" style="height:250px">tall</div>
+        </div>
+    "#;
+    let doc = parse_and_layout(html, 900.0);
+    let tall = find_by_id(&doc.root, "tall").unwrap();
+    assert!(
+        tall.layout.border_rect.h <= 100.0 + 0.5,
+        "a block taller than the column budget (100px) must be fragmented, not overflow whole; got height {}",
+        tall.layout.border_rect.h
+    );
+}
+
