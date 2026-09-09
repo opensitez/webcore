@@ -218,20 +218,24 @@ impl Document {
                         self.keyboard_focus = false;
                         self.focused_box = new_focus;
                         if old_focus != 0 {
+                            self.svg_trigger_event(old_focus, "blur");
                             let mut e = HtmlEvent::new(HtmlEventType::Blur);
                             e.target = old_focus;
                             e.related_target = new_focus;
                             self.dispatch_input_event(e);
+                            self.svg_trigger_event(old_focus, "focusout");
                             let mut e = HtmlEvent::new(HtmlEventType::FocusOut);
                             e.target = old_focus;
                             e.related_target = new_focus;
                             self.dispatch_input_event(e);
                         }
                         if new_focus != 0 {
+                            self.svg_trigger_event(new_focus, "focus");
                             let mut e = HtmlEvent::new(HtmlEventType::Focus);
                             e.target = new_focus;
                             e.related_target = old_focus;
                             self.dispatch_input_event(e);
+                            self.svg_trigger_event(new_focus, "focusin");
                             let mut e = HtmlEvent::new(HtmlEventType::FocusIn);
                             e.target = new_focus;
                             e.related_target = old_focus;
@@ -794,6 +798,9 @@ impl Document {
 
         // Also dispatch through NodeId-based event system
         if old_id != 0 {
+            if self.svg_trigger_event(old_id, "mouseout") {
+                redraw = true;
+            }
             let mut e = crate::dom::events::DomEvent::new("mouseout", old_id);
             e.related_target = new_id;
             e.client_x = client_pos.0;
@@ -801,6 +808,9 @@ impl Document {
             self.dispatch_dom_event(&mut e);
         }
         if new_id != 0 {
+            if self.svg_trigger_event(new_id, "mouseover") {
+                redraw = true;
+            }
             let mut e = crate::dom::events::DomEvent::new("mouseover", new_id);
             e.related_target = old_id;
             e.client_x = client_pos.0;

@@ -360,7 +360,10 @@ mod tests {
         assert_eq!(
             animate.begin,
             vec![
-                SvgAnimationTime::Event("click".to_string()),
+                SvgAnimationTime::Event {
+                    event: "click".to_string(),
+                    offset: 0.0
+                },
                 SvgAnimationTime::Seconds(2.0)
             ]
         );

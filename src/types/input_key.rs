@@ -63,6 +63,15 @@ impl Document {
         let mut redraw = handled;
 
         if !evt.default_prevented {
+            if etype == crate::dom::HtmlEventType::KeyDown {
+                let key = ch
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| crate::dom::events::key_name_for_code(key_code).to_string());
+                if self.svg_trigger_access_key(&key) {
+                    redraw = true;
+                }
+            }
+
             // Check if a form input is focused — route keys there first
             let form_handled = if self.focused_box != 0
                 && etype == crate::dom::HtmlEventType::KeyDown

@@ -46,6 +46,7 @@ fn collect_node(node: &SvgNode, summary: &mut SvgUnsupportedSummary) {
     match &node.kind {
         SvgElementKind::Script => {}
         SvgElementKind::Animate
+        | SvgElementKind::AnimateColor
         | SvgElementKind::AnimateMotion
         | SvgElementKind::AnimateTransform
         | SvgElementKind::MPath
@@ -134,6 +135,7 @@ fn svg_kind_name(kind: &SvgElementKind) -> &str {
         SvgElementKind::Style => "style",
         SvgElementKind::Script => "script",
         SvgElementKind::Animate => "animate",
+        SvgElementKind::AnimateColor => "animateColor",
         SvgElementKind::AnimateTransform => "animateTransform",
         SvgElementKind::AnimateMotion => "animateMotion",
         SvgElementKind::MPath => "mpath",

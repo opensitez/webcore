@@ -367,13 +367,41 @@ mod tests {
                         (d.as_slice(), *w, *h)
                     }
                 };
-                rect.w > 0.0
-                    && rect.h > 0.0
-                    && (w, h) == (40, 20)
-                    && bytes[..4] == [255, 0, 0, 255]
+                rect.w > 0.0 && rect.h > 0.0 && (w, h) == (40, 20) && bytes[..4] == [255, 0, 0, 255]
             }
             _ => false,
         });
-        assert!(painted, "laid-out canvas bitmap never reached the display list");
+        assert!(
+            painted,
+            "laid-out canvas bitmap never reached the display list"
+        );
+    }
+
+    #[test]
+    fn drawn_canvas_bitmap_reaches_rendered_pixels() {
+        let mut doc = crate::load_html("<div id='host'></div>", 800.0);
+        let host = doc.get_element_by_id("host").expect("host");
+        let id = doc.create_element("canvas");
+        doc.append_child(host, id);
+        doc.set_attribute(id, "width", "40");
+        doc.set_attribute(id, "height", "20");
+        doc.with_canvas_2d(id, |ctx| {
+            ctx.set_fill_color(Color::rgb(255, 0, 0));
+            ctx.fill_rect(0.0, 0.0, 40.0, 20.0);
+        })
+        .expect("canvas");
+
+        crate::LayoutEngine::new().layout(&mut doc, 800.0);
+        let mut pixmap = tiny_skia::Pixmap::new(800, 600).expect("pixmap");
+        let mut renderer = crate::Renderer::new();
+        renderer.render(&mut doc, &mut pixmap, 1.0);
+
+        let data = pixmap.data();
+        let idx = (10 * 800 + 10) * 4;
+        assert!(
+            data[idx] > 200 && data[idx + 1] < 40 && data[idx + 2] < 40 && data[idx + 3] == 255,
+            "canvas rendered pixel was {:?}",
+            &data[idx..idx + 4]
+        );
     }
 }

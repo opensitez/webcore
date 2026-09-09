@@ -619,6 +619,7 @@ impl Document {
         let id = node.attributes.get("id").cloned().unwrap_or_default();
         let name = node.attributes.get("name").cloned().unwrap_or_default();
         let text = node.text.clone();
+        self.svg_trigger_event(node_id, "click");
         if let Some(ref mut cb) = self.on_form_event {
             cb(&FormEvent {
                 tag,

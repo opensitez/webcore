@@ -971,6 +971,7 @@ impl Document {
     /// only the user agent creates trusted events (DOM §2.2).
     pub fn dispatch_event(&mut self, event: &mut crate::dom::events::DomEvent) -> bool {
         event.is_trusted = false;
+        self.svg_trigger_event(event.target, event.event_type.as_str());
         // `dispatch_on_tree` only READS the tree, but `event_targets` is a
         // field of the same struct — so the path is collected first and the
         // dispatch runs against it, keeping the borrows apart.
@@ -2726,9 +2727,75 @@ impl Document {
         svg_root.svg_animation_controls.push((
             animation_path,
             kind.to_string(),
-            elapsed + offset_s.max(0.0),
+            elapsed + offset_s,
         ));
         true
+    }
+
+    /// Queue SVG eventbase instance times for animations targeting this node.
+    pub(crate) fn svg_trigger_event(&mut self, target_id: u32, event_name: &str) -> bool {
+        let Some(event_target_path) = self
+            .find_webcore(target_id)
+            .and_then(|node| node.svg_tree_path.clone())
+        else {
+            return false;
+        };
+
+        let now = std::time::Instant::now();
+        let Some(svg_root) = find_svg_owner_for_node_mut(&mut self.root, target_id) else {
+            return false;
+        };
+        let Some(doc) = svg_root.svg_document.clone() else {
+            return false;
+        };
+        let start = *svg_root.svg_animation_start_time.get_or_insert(now);
+        let elapsed = now.duration_since(start).as_secs_f32();
+        let controls = crate::svg::animation::animation_controls_for_event(
+            &doc,
+            &event_target_path,
+            event_name,
+            elapsed,
+        );
+        if controls.is_empty() {
+            return false;
+        }
+        svg_root.svg_animation_controls.extend(controls);
+        true
+    }
+
+    /// Queue document-level SVG `accessKey(...)` SMIL instance times.
+    pub(crate) fn svg_trigger_access_key(&mut self, key: &str) -> bool {
+        if key.is_empty() {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        let mut queued = false;
+
+        fn walk(node: &mut crate::types::WebCore, key: &str, now: std::time::Instant) -> bool {
+            let mut queued = false;
+            if let Some(doc) = node.svg_document.clone() {
+                let start = *node.svg_animation_start_time.get_or_insert(now);
+                let elapsed = now.duration_since(start).as_secs_f32();
+                let controls =
+                    crate::svg::animation::animation_controls_for_access_key(&doc, key, elapsed);
+                if !controls.is_empty() {
+                    node.svg_animation_controls.extend(controls);
+                    queued = true;
+                }
+            }
+            for child in &mut node.children {
+                queued |= walk(child, key, now);
+            }
+            if let Some(shadow) = &mut node.shadow_root {
+                for child in &mut shadow.children {
+                    queued |= walk(child, key, now);
+                }
+            }
+            queued
+        }
+
+        queued |= walk(&mut self.root, key, now);
+        queued
     }
 
     // ── Internal helpers ──
@@ -2891,7 +2958,14 @@ impl Document {
 fn is_svg_animation_dom_tag(tag: &str) -> bool {
     matches!(
         tag,
-        "animate" | "animatetransform" | "animateTransform" | "animatemotion" | "animateMotion" | "set"
+        "animate"
+            | "animatecolor"
+            | "animateColor"
+            | "animatetransform"
+            | "animateTransform"
+            | "animatemotion"
+            | "animateMotion"
+            | "set"
     )
 }
 

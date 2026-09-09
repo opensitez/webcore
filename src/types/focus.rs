@@ -67,20 +67,24 @@ impl Document {
         self.keyboard_focus = true;
         self.focused_box = new_focus;
         if old_focus != 0 {
+            self.svg_trigger_event(old_focus, "blur");
             let mut e = HtmlEvent::new(HtmlEventType::Blur);
             e.target = old_focus;
             e.related_target = new_focus;
             self.dispatch_input_event(e);
+            self.svg_trigger_event(old_focus, "focusout");
             let mut e = HtmlEvent::new(HtmlEventType::FocusOut);
             e.target = old_focus;
             e.related_target = new_focus;
             self.dispatch_input_event(e);
         }
         if new_focus != 0 {
+            self.svg_trigger_event(new_focus, "focus");
             let mut e = HtmlEvent::new(HtmlEventType::Focus);
             e.target = new_focus;
             e.related_target = old_focus;
             self.dispatch_input_event(e);
+            self.svg_trigger_event(new_focus, "focusin");
             let mut e = HtmlEvent::new(HtmlEventType::FocusIn);
             e.target = new_focus;
             e.related_target = old_focus;

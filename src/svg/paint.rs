@@ -487,6 +487,12 @@ fn paint_node<'a>(
         | SvgElementKind::Desc
         | SvgElementKind::Metadata
         | SvgElementKind::Script
+        | SvgElementKind::Animate
+        | SvgElementKind::AnimateColor
+        | SvgElementKind::AnimateTransform
+        | SvgElementKind::AnimateMotion
+        | SvgElementKind::MPath
+        | SvgElementKind::Set
         | SvgElementKind::Filter
         | SvgElementKind::FeGaussianBlur
         | SvgElementKind::FeOffset
@@ -2485,6 +2491,7 @@ fn svg_tag_name(node: &SvgNode) -> &str {
         SvgElementKind::Style => "style",
         SvgElementKind::Script => "script",
         SvgElementKind::Animate => "animate",
+        SvgElementKind::AnimateColor => "animateColor",
         SvgElementKind::AnimateTransform => "animateTransform",
         SvgElementKind::AnimateMotion => "animateMotion",
         SvgElementKind::MPath => "mpath",
