@@ -269,8 +269,11 @@ pub fn load_html_reusing(
     // Post-layout: load background images (layout may re-run cascade with viewport)
     svg::load_background_images(&mut doc.root, &doc.base_url.clone());
     // Fire DOMContentLoaded — listeners registered before load_html can react.
-    let evt = dom::HtmlEvent::new(dom::HtmlEventType::DOMContentLoaded);
+    let mut evt = dom::HtmlEvent::new(dom::HtmlEventType::DOMContentLoaded);
+    evt.target = doc.root.node_id;
     doc.dispatch_input_event(evt);
+    doc.svg_trigger_projected_tree_event("DOMContentLoaded");
+    doc.svg_trigger_projected_tree_event("load");
     doc
 }
 

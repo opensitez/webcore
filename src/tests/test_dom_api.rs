@@ -2224,6 +2224,60 @@ fn svg_mouseover_event_starts_matching_smil_animation() {
 }
 
 #[test]
+fn svg_load_event_starts_matching_smil_animation_after_parse() {
+    let doc = crate::load_html(
+        r#"<svg id="icon" viewBox="0 0 10 10">
+             <rect id="box" x="0" width="10" height="10">
+               <animate id="move" attributeName="x" values="0;10" begin="load" dur="2s"/>
+             </rect>
+           </svg>"#,
+        400.0,
+    );
+
+    let svg = doc.get_element_by_id("icon").unwrap();
+    let root = doc.get_box_by_id(svg).unwrap();
+    assert_eq!(root.svg_animation_controls.len(), 1);
+    assert_eq!(root.svg_animation_controls[0].0, vec![0, 0]);
+    assert_eq!(root.svg_animation_controls[0].1, "begin");
+}
+
+#[test]
+fn svg_dom_content_loaded_event_starts_matching_smil_animation_after_parse() {
+    let doc = crate::load_html(
+        r#"<svg id="icon" viewBox="0 0 10 10">
+             <rect id="box" x="0" width="10" height="10">
+               <animate id="move" attributeName="x" values="0;10" begin="DOMContentLoaded" dur="2s"/>
+             </rect>
+           </svg>"#,
+        400.0,
+    );
+
+    let svg = doc.get_element_by_id("icon").unwrap();
+    let root = doc.get_box_by_id(svg).unwrap();
+    assert_eq!(root.svg_animation_controls.len(), 1);
+    assert_eq!(root.svg_animation_controls[0].0, vec![0, 0]);
+    assert_eq!(root.svg_animation_controls[0].1, "begin");
+}
+
+#[test]
+fn svg_unload_event_starts_matching_smil_animation() {
+    let mut doc = parse_html(
+        r#"<svg id="icon" viewBox="0 0 10 10">
+             <rect id="box" x="0" width="10" height="10">
+               <animate id="move" attributeName="x" values="0;10" begin="unload" dur="2s"/>
+             </rect>
+           </svg>"#,
+    );
+
+    assert!(doc.svg_trigger_projected_tree_event("unload"));
+    let svg = doc.get_element_by_id("icon").unwrap();
+    let root = doc.get_box_by_id(svg).unwrap();
+    assert_eq!(root.svg_animation_controls.len(), 1);
+    assert_eq!(root.svg_animation_controls[0].0, vec![0, 0]);
+    assert_eq!(root.svg_animation_controls[0].1, "begin");
+}
+
+#[test]
 fn svg_dispatch_event_starts_matching_smil_animation() {
     let mut doc = parse_html(
         r#"<svg id="icon" viewBox="0 0 10 10">
@@ -2286,4 +2340,54 @@ fn svg_access_key_animation_starts_from_keydown() {
     assert_eq!(root.svg_animation_controls.len(), 1);
     assert_eq!(root.svg_animation_controls[0].0, vec![0, 0]);
     assert_eq!(root.svg_animation_controls[0].1, "begin");
+}
+
+#[test]
+fn svg_keyup_event_starts_matching_smil_animation_on_focused_svg_node() {
+    let mut doc = parse_html(
+        r#"<svg id="icon" viewBox="0 0 10 10">
+             <rect id="box" tabindex="0" x="0" width="10" height="10">
+               <animate id="move" attributeName="x" values="0;10" begin="keyup" dur="2s"/>
+             </rect>
+           </svg>"#,
+    );
+    let rect = doc.get_element_by_id("box").unwrap();
+    doc.focused_box = rect;
+
+    assert!(doc.process_key_event(
+        crate::dom::HtmlEventType::KeyUp,
+        'k' as u32,
+        Some('k'),
+        false,
+        false,
+        false,
+        false,
+    ));
+
+    let svg = doc.get_element_by_id("icon").unwrap();
+    let root = doc.get_box_by_id(svg).unwrap();
+    assert_eq!(root.svg_animation_controls.len(), 1);
+    assert_eq!(root.svg_animation_controls[0].0, vec![0, 0]);
+    assert_eq!(root.svg_animation_controls[0].1, "begin");
+}
+
+#[test]
+fn svg_pointer_and_mouse_edge_events_start_matching_smil_animation() {
+    let mut doc = parse_html(
+        r#"<svg id="icon" viewBox="0 0 10 10">
+             <rect id="box" x="0" width="10" height="10">
+               <animate id="enter" attributeName="x" values="0;10" begin="mouseenter" dur="2s"/>
+               <animate id="pointer" attributeName="y" values="0;10" begin="pointerenter" dur="2s"/>
+             </rect>
+           </svg>"#,
+    );
+    let rect = doc.get_element_by_id("box").unwrap();
+    assert!(doc.svg_trigger_event(rect, "mouseenter"));
+    assert!(doc.svg_trigger_event(rect, "pointerenter"));
+
+    let svg = doc.get_element_by_id("icon").unwrap();
+    let root = doc.get_box_by_id(svg).unwrap();
+    assert_eq!(root.svg_animation_controls.len(), 2);
+    assert_eq!(root.svg_animation_controls[0].0, vec![0, 0]);
+    assert_eq!(root.svg_animation_controls[1].0, vec![0, 1]);
 }

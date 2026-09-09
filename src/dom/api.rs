@@ -2763,6 +2763,23 @@ impl Document {
         true
     }
 
+    /// Queue SVG eventbase instance times for every projected SVG node.
+    pub(crate) fn svg_trigger_projected_tree_event(&mut self, event_name: &str) -> bool {
+        fn collect_projected_svg_node_ids(node: &WebCore, out: &mut Vec<u32>) {
+            if node.node_id != 0 && node.svg_tree_path.is_some() {
+                out.push(node.node_id);
+            }
+            for child in &node.children {
+                collect_projected_svg_node_ids(child, out);
+            }
+        }
+
+        let mut ids = Vec::new();
+        collect_projected_svg_node_ids(&self.root, &mut ids);
+        ids.into_iter()
+            .any(|id| self.svg_trigger_event(id, event_name))
+    }
+
     /// Queue document-level SVG `accessKey(...)` SMIL instance times.
     pub(crate) fn svg_trigger_access_key(&mut self, key: &str) -> bool {
         if key.is_empty() {

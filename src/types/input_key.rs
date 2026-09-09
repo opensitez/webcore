@@ -63,6 +63,9 @@ impl Document {
         let mut redraw = handled;
 
         if !evt.default_prevented {
+            if self.svg_trigger_event(target, etype.as_str()) {
+                redraw = true;
+            }
             if etype == crate::dom::HtmlEventType::KeyDown {
                 let key = ch
                     .map(|c| c.to_string())

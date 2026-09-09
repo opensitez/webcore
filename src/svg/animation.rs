@@ -67,6 +67,8 @@ pub enum SvgAnimationTime {
         event: String,
         offset: f32,
     },
+    Media,
+    Wallclock(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,6 +234,12 @@ fn parse_time_value(raw: &str) -> Option<SvgAnimationTime> {
     if let Some(eventbase) = parse_eventbase_time(value) {
         return Some(eventbase);
     }
+    if value.eq_ignore_ascii_case("media") {
+        return Some(SvgAnimationTime::Media);
+    }
+    if let Some(wallclock) = parse_wallclock_time(value) {
+        return Some(wallclock);
+    }
     if value.eq_ignore_ascii_case("indefinite") {
         return Some(SvgAnimationTime::Indefinite);
     }
@@ -256,6 +264,20 @@ fn parse_time_value(raw: &str) -> Option<SvgAnimationTime> {
         });
     }
     value.parse::<f32>().ok().map(SvgAnimationTime::Seconds)
+}
+
+fn parse_wallclock_time(value: &str) -> Option<SvgAnimationTime> {
+    let value = value.trim();
+    let open = value.find('(')?;
+    let close = value.rfind(')')?;
+    if close <= open || !value[..open].eq_ignore_ascii_case("wallclock") {
+        return None;
+    }
+    let clock = value[open + 1..close].trim();
+    if clock.is_empty() || !value[close + 1..].trim().is_empty() {
+        return None;
+    }
+    Some(SvgAnimationTime::Wallclock(clock.to_string()))
 }
 
 fn parse_clock_seconds(value: &str) -> Option<f32> {
@@ -605,6 +627,7 @@ pub(crate) fn sample_svg_animation_overrides_with_controls(
     let mut id_paths = Vec::new();
     collect_id_refs(&doc.root, &mut Vec::new(), &mut id_paths);
     let animation_defs = collect_animation_defs(&doc.root);
+    let animation_paths = collect_animation_def_paths(&doc.root);
 
     let mut out = Vec::new();
     collect_animation_samples(
@@ -615,6 +638,7 @@ pub(crate) fn sample_svg_animation_overrides_with_controls(
         elapsed_s,
         &id_paths,
         &animation_defs,
+        &animation_paths,
         controls,
         still_running,
         &mut out,
@@ -702,6 +726,27 @@ fn collect_animation_defs_in_node(node: &SvgNode, out: &mut HashMap<String, SvgA
     }
 }
 
+fn collect_animation_def_paths(root: &SvgNode) -> HashMap<String, Vec<usize>> {
+    let mut out = HashMap::new();
+    collect_animation_def_paths_in_node(root, &mut Vec::new(), &mut out);
+    out
+}
+
+fn collect_animation_def_paths_in_node(
+    node: &SvgNode,
+    path: &mut Vec<usize>,
+    out: &mut HashMap<String, Vec<usize>>,
+) {
+    if let (Some(id), Some(_)) = (node.attr("id"), &node.animation) {
+        out.insert(id.to_string(), path.clone());
+    }
+    for (idx, child) in node.children.iter().enumerate() {
+        path.push(idx);
+        collect_animation_def_paths_in_node(child, path, out);
+        path.pop();
+    }
+}
+
 fn collect_animation_samples(
     root: &SvgNode,
     node: &SvgNode,
@@ -710,6 +755,7 @@ fn collect_animation_samples(
     elapsed_s: f32,
     id_paths: &[(String, Vec<usize>, Option<String>)],
     animation_defs: &HashMap<String, SvgAnimationElement>,
+    animation_paths: &HashMap<String, Vec<usize>>,
     controls: &[SvgAnimationControl],
     still_running: &mut bool,
     out: &mut Vec<SvgAnimationOverride>,
@@ -742,6 +788,7 @@ fn collect_animation_samples(
                 motion_path.as_deref(),
                 base_value.as_deref(),
                 animation_defs,
+                animation_paths,
                 controls,
                 path,
             ),
@@ -749,7 +796,14 @@ fn collect_animation_samples(
             active_values.insert((target_path.clone(), attr.clone()), sample.clone());
             out.push((target_path, attr, sample));
         }
-        if animation_still_running(anim, path, elapsed_s, animation_defs, controls) {
+        if animation_still_running(
+            anim,
+            path,
+            elapsed_s,
+            animation_defs,
+            animation_paths,
+            controls,
+        ) {
             *still_running = true;
         }
     }
@@ -765,6 +819,7 @@ fn collect_animation_samples(
             elapsed_s,
             id_paths,
             animation_defs,
+            animation_paths,
             controls,
             still_running,
             out,
@@ -915,6 +970,7 @@ fn sample_animation_override(
     motion_path: Option<&str>,
     base_value: Option<&str>,
     animation_defs: &HashMap<String, SvgAnimationElement>,
+    animation_paths: &HashMap<String, Vec<usize>>,
     controls: &[SvgAnimationControl],
     animation_path: &[usize],
 ) -> Option<(String, String)> {
@@ -925,6 +981,7 @@ fn sample_animation_override(
             motion_path,
             base_value,
             animation_defs,
+            animation_paths,
             controls,
             animation_path,
         )
@@ -936,6 +993,7 @@ fn sample_animation_override(
         elapsed_s,
         base_value,
         animation_defs,
+        animation_paths,
         controls,
         animation_path,
     )?;
@@ -953,11 +1011,18 @@ fn sample_animation(
     elapsed_s: f32,
     base_value: Option<&str>,
     animation_defs: &HashMap<String, SvgAnimationElement>,
+    animation_paths: &HashMap<String, Vec<usize>>,
     controls: &[SvgAnimationControl],
     animation_path: &[usize],
 ) -> Option<String> {
-    let begin_s =
-        begin_seconds_for_path(anim, animation_path, elapsed_s, animation_defs, controls)?;
+    let begin_s = begin_seconds_for_path(
+        anim,
+        animation_path,
+        elapsed_s,
+        animation_defs,
+        animation_paths,
+        controls,
+    )?;
     if elapsed_s < begin_s {
         return None;
     }
@@ -974,6 +1039,7 @@ fn sample_animation(
             animation_path,
             begin_s,
             animation_defs,
+            animation_paths,
             controls,
         );
         if local_s > active_s {
@@ -993,6 +1059,7 @@ fn sample_animation(
         begin_s,
         dur_s,
         animation_defs,
+        animation_paths,
         controls,
     );
     if local_s > active_s {
@@ -1019,14 +1086,29 @@ fn animation_still_running(
     animation_path: &[usize],
     elapsed_s: f32,
     animation_defs: &HashMap<String, SvgAnimationElement>,
+    animation_paths: &HashMap<String, Vec<usize>>,
     controls: &[SvgAnimationControl],
 ) -> bool {
-    let Some(begin_s) =
-        begin_seconds_for_path(anim, animation_path, elapsed_s, animation_defs, controls)
-    else {
+    let Some(begin_s) = begin_seconds_for_path(
+        anim,
+        animation_path,
+        elapsed_s,
+        animation_defs,
+        animation_paths,
+        controls,
+    ) else {
         if controls.iter().any(|(path, kind, at)| {
             path.as_slice() == animation_path && kind == "begin" && *at > elapsed_s
         }) {
+            return true;
+        }
+        if has_pending_runtime_syncbase_begin(
+            anim,
+            elapsed_s,
+            animation_defs,
+            animation_paths,
+            controls,
+        ) {
             return true;
         }
         return false;
@@ -1040,6 +1122,7 @@ fn animation_still_running(
             animation_path,
             begin_s,
             animation_defs,
+            animation_paths,
             controls,
         );
         return active_s.is_finite() && elapsed_s - begin_s <= active_s;
@@ -1054,6 +1137,7 @@ fn animation_still_running(
             begin_s,
             dur_s,
             animation_defs,
+            animation_paths,
             controls,
         )
 }
@@ -1063,10 +1147,17 @@ fn begin_seconds_for_path(
     animation_path: &[usize],
     elapsed_s: f32,
     animation_defs: &HashMap<String, SvgAnimationElement>,
+    animation_paths: &HashMap<String, Vec<usize>>,
     controls: &[SvgAnimationControl],
 ) -> Option<f32> {
-    let runtime_begin =
-        runtime_begin_seconds(anim, animation_path, elapsed_s, animation_defs, controls);
+    let runtime_begin = runtime_begin_seconds(
+        anim,
+        animation_path,
+        elapsed_s,
+        animation_defs,
+        animation_paths,
+        controls,
+    );
     runtime_begin.or_else(|| begin_seconds(anim, animation_defs))
 }
 
@@ -1075,8 +1166,34 @@ fn runtime_begin_seconds(
     animation_path: &[usize],
     elapsed_s: f32,
     animation_defs: &HashMap<String, SvgAnimationElement>,
+    animation_paths: &HashMap<String, Vec<usize>>,
     controls: &[SvgAnimationControl],
 ) -> Option<f32> {
+    runtime_begin_seconds_inner(
+        anim,
+        animation_path,
+        elapsed_s,
+        animation_defs,
+        animation_paths,
+        controls,
+        &mut Vec::new(),
+    )
+}
+
+fn runtime_begin_seconds_inner(
+    anim: &SvgAnimationElement,
+    animation_path: &[usize],
+    elapsed_s: f32,
+    animation_defs: &HashMap<String, SvgAnimationElement>,
+    animation_paths: &HashMap<String, Vec<usize>>,
+    controls: &[SvgAnimationControl],
+    stack: &mut Vec<Vec<usize>>,
+) -> Option<f32> {
+    if stack.iter().any(|seen| seen.as_slice() == animation_path) {
+        return None;
+    }
+    stack.push(animation_path.to_vec());
+
     let mut begins: Vec<f32> = controls
         .iter()
         .filter(|(path, kind, at)| {
@@ -1084,9 +1201,20 @@ fn runtime_begin_seconds(
         })
         .map(|(_, _, at)| *at)
         .collect();
+    begins.extend(anim.begin.iter().filter_map(|time| {
+        runtime_syncbase_instance_seconds(
+            time,
+            elapsed_s,
+            animation_defs,
+            animation_paths,
+            controls,
+            stack,
+            true,
+        )
+    }));
     begins.sort_by(|a, b| a.total_cmp(b));
 
-    match anim.restart {
+    let accepted = match anim.restart {
         SvgAnimationRestart::Always => begins.into_iter().max_by(|a, b| a.total_cmp(b)),
         SvgAnimationRestart::Never => begins.into_iter().next(),
         SvgAnimationRestart::WhenNotActive => {
@@ -1103,6 +1231,7 @@ fn runtime_begin_seconds(
                                     prev,
                                     dur_s,
                                     animation_defs,
+                                    animation_paths,
                                     controls,
                                 )
                     }
@@ -1115,7 +1244,92 @@ fn runtime_begin_seconds(
             }
             accepted
         }
-    }
+    };
+
+    stack.pop();
+    accepted
+}
+
+fn runtime_syncbase_instance_seconds(
+    time: &SvgAnimationTime,
+    elapsed_s: f32,
+    animation_defs: &HashMap<String, SvgAnimationElement>,
+    animation_paths: &HashMap<String, Vec<usize>>,
+    controls: &[SvgAnimationControl],
+    stack: &mut Vec<Vec<usize>>,
+    require_due: bool,
+) -> Option<f32> {
+    let SvgAnimationTime::Syncbase { id, event, offset } = time else {
+        return None;
+    };
+    let referenced_path = animation_paths.get(id)?;
+    let referenced = animation_defs.get(id)?;
+    let begin = runtime_begin_seconds_inner(
+        referenced,
+        referenced_path,
+        elapsed_s,
+        animation_defs,
+        animation_paths,
+        controls,
+        stack,
+    )
+    .or_else(|| begin_seconds(referenced, animation_defs))?;
+    let base = match event {
+        SvgSyncbaseEvent::Begin => begin,
+        SvgSyncbaseEvent::End => {
+            let dur_s = duration_seconds(referenced)?;
+            begin
+                + active_duration_seconds_for_path(
+                    referenced,
+                    referenced_path,
+                    begin,
+                    dur_s,
+                    animation_defs,
+                    animation_paths,
+                    controls,
+                )
+        }
+        SvgSyncbaseEvent::Repeat(repeat) => {
+            let dur_s = duration_seconds(referenced)?;
+            let active_s = active_duration_seconds_for_path(
+                referenced,
+                referenced_path,
+                begin,
+                dur_s,
+                animation_defs,
+                animation_paths,
+                controls,
+            );
+            let repeat_at = begin + dur_s * *repeat as f32;
+            if repeat_at - begin > active_s {
+                return None;
+            }
+            repeat_at
+        }
+    };
+    let instance = base + *offset;
+    (!require_due || instance <= elapsed_s).then_some(instance)
+}
+
+fn has_pending_runtime_syncbase_begin(
+    anim: &SvgAnimationElement,
+    elapsed_s: f32,
+    animation_defs: &HashMap<String, SvgAnimationElement>,
+    animation_paths: &HashMap<String, Vec<usize>>,
+    controls: &[SvgAnimationControl],
+) -> bool {
+    anim.begin.iter().any(|time| {
+        runtime_syncbase_instance_seconds(
+            time,
+            elapsed_s,
+            animation_defs,
+            animation_paths,
+            controls,
+            &mut Vec::new(),
+            false,
+        )
+        .is_some_and(|begin| begin > elapsed_s)
+    })
 }
 
 fn begin_seconds(
@@ -1143,6 +1357,8 @@ fn duration_seconds(anim: &SvgAnimationElement) -> Option<f32> {
         | SvgAnimationTime::AccessKey { .. }
         | SvgAnimationTime::Event { .. }
         | SvgAnimationTime::Eventbase { .. }
+        | SvgAnimationTime::Media
+        | SvgAnimationTime::Wallclock(_)
         | SvgAnimationTime::Syncbase { .. } => None,
     }
 }
@@ -1154,6 +1370,8 @@ fn min_seconds(anim: &SvgAnimationElement) -> Option<f32> {
         | SvgAnimationTime::AccessKey { .. }
         | SvgAnimationTime::Event { .. }
         | SvgAnimationTime::Eventbase { .. }
+        | SvgAnimationTime::Media
+        | SvgAnimationTime::Wallclock(_)
         | SvgAnimationTime::Syncbase { .. } => None,
     }
 }
@@ -1165,6 +1383,8 @@ fn max_seconds(anim: &SvgAnimationElement) -> Option<f32> {
         | SvgAnimationTime::AccessKey { .. }
         | SvgAnimationTime::Event { .. }
         | SvgAnimationTime::Eventbase { .. }
+        | SvgAnimationTime::Media
+        | SvgAnimationTime::Wallclock(_)
         | SvgAnimationTime::Syncbase { .. } => None,
     }
 }
@@ -1195,6 +1415,7 @@ fn active_duration_seconds_for_path(
     begin_s: f32,
     dur_s: f32,
     animation_defs: &HashMap<String, SvgAnimationElement>,
+    _animation_paths: &HashMap<String, Vec<usize>>,
     controls: &[SvgAnimationControl],
 ) -> f32 {
     let active = active_duration_seconds(anim, begin_s, dur_s, animation_defs);
@@ -1214,6 +1435,7 @@ fn set_active_duration_seconds_for_path(
     animation_path: &[usize],
     begin_s: f32,
     animation_defs: &HashMap<String, SvgAnimationElement>,
+    animation_paths: &HashMap<String, Vec<usize>>,
     controls: &[SvgAnimationControl],
 ) -> f32 {
     if let Some(dur_s) = duration_seconds(anim) {
@@ -1223,6 +1445,7 @@ fn set_active_duration_seconds_for_path(
             begin_s,
             dur_s,
             animation_defs,
+            animation_paths,
             controls,
         );
     }
@@ -1294,7 +1517,9 @@ fn resolve_time_seconds(
         SvgAnimationTime::Indefinite
         | SvgAnimationTime::AccessKey { .. }
         | SvgAnimationTime::Event { .. }
-        | SvgAnimationTime::Eventbase { .. } => None,
+        | SvgAnimationTime::Eventbase { .. }
+        | SvgAnimationTime::Media
+        | SvgAnimationTime::Wallclock(_) => None,
         SvgAnimationTime::Syncbase { id, event, offset } => {
             if stack.iter().any(|seen| seen == id) {
                 return None;
@@ -1344,6 +1569,8 @@ fn repeat_duration_seconds(anim: &SvgAnimationElement) -> Option<f32> {
         SvgAnimationTime::AccessKey { .. }
         | SvgAnimationTime::Event { .. }
         | SvgAnimationTime::Eventbase { .. }
+        | SvgAnimationTime::Media
+        | SvgAnimationTime::Wallclock(_)
         | SvgAnimationTime::Syncbase { .. } => None,
     }
 }
@@ -1449,9 +1676,9 @@ fn eased_segment_progress(anim: &SvgAnimationElement, idx: usize, local_t: f32) 
 }
 
 fn sample_paced_values(values: &[String], progress: f32) -> Option<String> {
-    let parsed: Vec<Vec<f32>> = values
+    let parsed: Vec<Vec<(f32, String)>> = values
         .iter()
-        .map(|value| parse_number_tokens(value))
+        .map(|value| parse_numeric_components(value))
         .collect::<Option<_>>()?;
     if parsed.len() < 2 || parsed.windows(2).any(|pair| pair[0].len() != pair[1].len()) {
         return None;
@@ -1459,10 +1686,17 @@ fn sample_paced_values(values: &[String], progress: f32) -> Option<String> {
     let mut distances = Vec::new();
     let mut total = 0.0;
     for pair in parsed.windows(2) {
+        if pair[0]
+            .iter()
+            .zip(pair[1].iter())
+            .any(|(a, b)| matching_numeric_suffix(&a.1, &b.1).is_none())
+        {
+            return None;
+        }
         let distance = pair[0]
             .iter()
             .zip(pair[1].iter())
-            .map(|(a, b)| (b - a).powi(2))
+            .map(|(a, b)| (b.0 - a.0).powi(2))
             .sum::<f32>()
             .sqrt();
         distances.push(distance);
@@ -1483,8 +1717,11 @@ fn sample_paced_values(values: &[String], progress: f32) -> Option<String> {
                 parsed[idx]
                     .iter()
                     .zip(parsed[idx + 1].iter())
-                    .map(|(a, b)| format_number(a + (b - a) * t))
-                    .collect::<Vec<_>>()
+                    .map(|(a, b)| {
+                        matching_numeric_suffix(&a.1, &b.1)
+                            .map(|suffix| format_dimension(a.0 + (b.0 - a.0) * t, suffix))
+                    })
+                    .collect::<Option<Vec<_>>>()?
                     .join(" "),
             );
         }
@@ -1596,69 +1833,117 @@ fn current_iteration(local_s: f32, dur_s: f32, active_s: f32) -> u32 {
 }
 
 fn add_numeric_values(a: &str, b: &str) -> Option<String> {
-    let a = parse_number_tokens(a)?;
-    let b = parse_number_tokens(b)?;
+    let a = parse_numeric_components(a)?;
+    let b = parse_numeric_components(b)?;
     if a.len() != b.len() || a.is_empty() {
         return None;
     }
     Some(
         a.iter()
             .zip(b.iter())
-            .map(|(x, y)| format_number(x + y))
-            .collect::<Vec<_>>()
+            .map(|(x, y)| {
+                matching_numeric_suffix(&x.1, &y.1)
+                    .map(|suffix| format_dimension(x.0 + y.0, suffix))
+            })
+            .collect::<Option<Vec<_>>>()?
             .join(" "),
     )
 }
 
 fn subtract_numeric_values(a: &str, b: &str) -> Option<String> {
-    let a = parse_number_tokens(a)?;
-    let b = parse_number_tokens(b)?;
+    let a = parse_numeric_components(a)?;
+    let b = parse_numeric_components(b)?;
     if a.len() != b.len() || a.is_empty() {
         return None;
     }
     Some(
         a.iter()
             .zip(b.iter())
-            .map(|(x, y)| format_number(x - y))
-            .collect::<Vec<_>>()
+            .map(|(x, y)| {
+                matching_numeric_suffix(&x.1, &y.1)
+                    .map(|suffix| format_dimension(x.0 - y.0, suffix))
+            })
+            .collect::<Option<Vec<_>>>()?
             .join(" "),
     )
 }
 
 fn scale_numeric_value(value: &str, factor: f32) -> Option<String> {
-    let values = parse_number_tokens(value)?;
+    let values = parse_numeric_components(value)?;
     if values.is_empty() {
         return None;
     }
     Some(
         values
             .iter()
-            .map(|value| format_number(value * factor))
+            .map(|value| format_dimension(value.0 * factor, &value.1))
             .collect::<Vec<_>>()
             .join(" "),
     )
 }
 
 fn interpolate_number_lists(from: &str, to: &str, t: f32) -> Option<String> {
-    let a = parse_number_tokens(from)?;
-    let b = parse_number_tokens(to)?;
+    let a = parse_numeric_components(from)?;
+    let b = parse_numeric_components(to)?;
     if a.len() != b.len() || a.is_empty() {
         return None;
     }
     Some(
         a.iter()
             .zip(b.iter())
-            .map(|(x, y)| format_number(x + (y - x) * t))
-            .collect::<Vec<_>>()
+            .map(|(x, y)| {
+                matching_numeric_suffix(&x.1, &y.1)
+                    .map(|suffix| format_dimension(x.0 + (y.0 - x.0) * t, suffix))
+            })
+            .collect::<Option<Vec<_>>>()?
             .join(" "),
     )
 }
 
 fn parse_number_tokens(raw: &str) -> Option<Vec<f32>> {
+    parse_numeric_components(raw).map(|values| values.into_iter().map(|(value, _)| value).collect())
+}
+
+fn parse_numeric_components(raw: &str) -> Option<Vec<(f32, String)>> {
     raw.split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
         .filter(|part| !part.is_empty())
-        .map(|part| part.parse::<f32>().ok())
+        .map(parse_numeric_component)
         .collect()
+}
+
+fn parse_numeric_component(part: &str) -> Option<(f32, String)> {
+    let split = part
+        .char_indices()
+        .find(|(idx, ch)| {
+            *idx > 0
+                && !ch.is_ascii_digit()
+                && *ch != '.'
+                && *ch != 'e'
+                && *ch != 'E'
+                && *ch != '+'
+                && *ch != '-'
+        })
+        .map(|(idx, _)| idx)
+        .unwrap_or(part.len());
+    let number = part[..split].parse::<f32>().ok()?;
+    let suffix = part[split..].to_string();
+    Some((number, suffix))
+}
+
+fn matching_numeric_suffix<'a>(a: &'a str, b: &'a str) -> Option<&'a str> {
+    if a == b {
+        Some(a)
+    } else if a.is_empty() {
+        Some(b)
+    } else if b.is_empty() {
+        Some(a)
+    } else {
+        None
+    }
+}
+
+fn format_dimension(value: f32, suffix: &str) -> String {
+    format!("{}{}", format_number(value), suffix)
 }
 
 fn format_number(value: f32) -> String {
@@ -1720,11 +2005,18 @@ fn sample_motion_transform(
     motion_path: Option<&str>,
     base_value: Option<&str>,
     animation_defs: &HashMap<String, SvgAnimationElement>,
+    animation_paths: &HashMap<String, Vec<usize>>,
     controls: &[SvgAnimationControl],
     animation_path: &[usize],
 ) -> Option<String> {
-    let begin_s =
-        begin_seconds_for_path(anim, animation_path, elapsed_s, animation_defs, controls)?;
+    let begin_s = begin_seconds_for_path(
+        anim,
+        animation_path,
+        elapsed_s,
+        animation_defs,
+        animation_paths,
+        controls,
+    )?;
     if elapsed_s < begin_s {
         return None;
     }
@@ -1739,6 +2031,7 @@ fn sample_motion_transform(
         begin_s,
         dur_s,
         animation_defs,
+        animation_paths,
         controls,
     );
     if local_s > active_s {
@@ -1978,6 +2271,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_media_and_wallclock_timing_as_typed_values() {
+        assert_eq!(parse_time_value("media"), Some(SvgAnimationTime::Media));
+        assert_eq!(
+            parse_time_value("wallclock(2026-09-09T12:00:00Z)"),
+            Some(SvgAnimationTime::Wallclock(
+                "2026-09-09T12:00:00Z".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_time_value("load"),
+            Some(SvgAnimationTime::Event {
+                event: "load".to_string(),
+                offset: 0.0,
+            })
+        );
+    }
+
+    #[test]
     fn set_animation_removes_after_duration_by_default() {
         let doc = parse_svg_document(
             r#"<svg><rect><set attributeName="visibility" to="hidden" dur="1s"/></rect></svg>"#,
@@ -2181,6 +2492,18 @@ mod tests {
     }
 
     #[test]
+    fn paced_values_preserve_matching_length_units() {
+        let doc = parse_svg_document(
+            r#"<svg><rect><animate attributeName="x" values="0px;100px;110px" dur="2s" calcMode="paced"/></rect></svg>"#,
+        )
+        .unwrap();
+        let mut running = false;
+        let overrides = sample_svg_animation_overrides(&doc, 1.0, &mut running);
+        assert!(running);
+        assert_eq!(overrides[0].2, "55px");
+    }
+
+    #[test]
     fn discrete_values_use_equal_duration_buckets() {
         let doc = parse_svg_document(
             r#"<svg><rect><animate attributeName="visibility" values="hidden;visible" calcMode="discrete" dur="2s"/></rect></svg>"#,
@@ -2244,6 +2567,36 @@ mod tests {
         let overrides = sample_svg_animation_overrides(&doc, 1.0, &mut running);
         assert!(running);
         assert_eq!(overrides, vec![(vec![0], "x".to_string(), "7".to_string())]);
+    }
+
+    #[test]
+    fn interpolates_matching_length_units() {
+        let doc = parse_svg_document(
+            r#"<svg><rect><animate attributeName="x" from="10px" to="20px" dur="2s"/></rect></svg>"#,
+        )
+        .unwrap();
+        let mut running = false;
+        let overrides = sample_svg_animation_overrides(&doc, 1.0, &mut running);
+        assert!(running);
+        assert_eq!(
+            overrides,
+            vec![(vec![0], "x".to_string(), "15px".to_string())]
+        );
+    }
+
+    #[test]
+    fn interpolates_matching_percent_units() {
+        let doc = parse_svg_document(
+            r#"<svg><rect><animate attributeName="width" values="0%;100%" dur="2s"/></rect></svg>"#,
+        )
+        .unwrap();
+        let mut running = false;
+        let overrides = sample_svg_animation_overrides(&doc, 1.0, &mut running);
+        assert!(running);
+        assert_eq!(
+            overrides,
+            vec![(vec![0], "width".to_string(), "50%".to_string())]
+        );
     }
 
     #[test]
@@ -2328,6 +2681,71 @@ mod tests {
         assert!(running);
         assert_eq!(during.len(), 2);
         assert_eq!(during[1], (vec![0], "y".to_string(), "5".to_string()));
+    }
+
+    #[test]
+    fn runtime_syncbase_begin_starts_from_referenced_runtime_begin() {
+        let doc = parse_svg_document(
+            r##"<svg><rect><animate id="a" attributeName="x" values="0;10" begin="click" dur="2s"/><animate attributeName="y" values="0;10" begin="a.begin+0.5s" dur="2s"/></rect></svg>"##,
+        )
+        .unwrap();
+        let controls = vec![(vec![0, 0], "begin".to_string(), 1.0)];
+
+        let mut running = false;
+        let overrides =
+            sample_svg_animation_overrides_with_controls(&doc, 1.75, &controls, &mut running);
+        assert!(running);
+        assert_eq!(
+            overrides,
+            vec![
+                (vec![0], "x".to_string(), "3.75".to_string()),
+                (vec![0], "y".to_string(), "1.25".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_syncbase_end_starts_from_referenced_runtime_end() {
+        let doc = parse_svg_document(
+            r##"<svg><rect><animate id="a" attributeName="x" values="0;10" begin="click" dur="2s"/><animate attributeName="y" values="0;10" begin="a.end+0.5s" dur="2s"/></rect></svg>"##,
+        )
+        .unwrap();
+        let controls = vec![(vec![0, 0], "begin".to_string(), 1.0)];
+
+        let mut running = false;
+        let before =
+            sample_svg_animation_overrides_with_controls(&doc, 3.25, &controls, &mut running);
+        assert_eq!(before.len(), 0);
+        assert!(running);
+
+        running = false;
+        let during =
+            sample_svg_animation_overrides_with_controls(&doc, 3.75, &controls, &mut running);
+        assert!(running);
+        assert_eq!(during, vec![(vec![0], "y".to_string(), "1.25".to_string())]);
+    }
+
+    #[test]
+    fn runtime_syncbase_repeat_starts_from_referenced_runtime_iteration() {
+        let doc = parse_svg_document(
+            r##"<svg><rect><animate id="a" attributeName="x" values="0;10" begin="click" dur="1s" repeatCount="4"/><animate attributeName="y" values="0;10" begin="a.repeat(2)+0.5s" dur="1s"/></rect></svg>"##,
+        )
+        .unwrap();
+        let controls = vec![(vec![0, 0], "begin".to_string(), 1.0)];
+
+        let mut running = false;
+        let before =
+            sample_svg_animation_overrides_with_controls(&doc, 3.25, &controls, &mut running);
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].1, "x");
+        assert!(running);
+
+        running = false;
+        let during =
+            sample_svg_animation_overrides_with_controls(&doc, 3.75, &controls, &mut running);
+        assert!(running);
+        assert_eq!(during.len(), 2);
+        assert_eq!(during[1], (vec![0], "y".to_string(), "2.5".to_string()));
     }
 
     #[test]

@@ -137,6 +137,11 @@ impl EngineFrame {
 
     /// Load HTML with a base URL for resolving relative links and resources.
     pub fn load_html_with_base(&mut self, html: &str, base_url: &str) {
+        if !self.doc.fire_window_event("beforeunload") {
+            return;
+        }
+        self.doc.svg_trigger_projected_tree_event("unload");
+        self.doc.fire_window_event("unload");
         self.doc = crate::load_html_with_registry(
             html,
             base_url,

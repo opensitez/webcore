@@ -80,6 +80,9 @@ impl Document {
         let mut redraw = false;
         match etype {
             HtmlEventType::MouseMove => {
+                if hit_node_id != 0 && self.svg_trigger_event(hit_node_id, etype.as_str()) {
+                    redraw = true;
+                }
                 // A held knob follows the pointer, wherever it has got to —
                 // including outside the control, which is why this is keyed on
                 // the element being HELD and not on what the move hit.
@@ -174,6 +177,9 @@ impl Document {
                 }
             }
             HtmlEventType::MouseDown | HtmlEventType::PointerDown => {
+                if hit_node_id != 0 && self.svg_trigger_event(hit_node_id, etype.as_str()) {
+                    redraw = true;
+                }
                 if self.active_box != hit_node_id {
                     self.active_box = hit_node_id;
                     redraw = true;
@@ -285,6 +291,9 @@ impl Document {
                 }
             }
             HtmlEventType::MouseUp | HtmlEventType::PointerUp => {
+                if hit_node_id != 0 && self.svg_trigger_event(hit_node_id, etype.as_str()) {
+                    redraw = true;
+                }
                 // Letting go of a knob. FIRST, so the last position the
                 // pointer reached is the value that gets committed — and
                 // before any of the click routing below, which must not see a
@@ -801,6 +810,15 @@ impl Document {
             if self.svg_trigger_event(old_id, "mouseout") {
                 redraw = true;
             }
+            if self.svg_trigger_event(old_id, "mouseleave") {
+                redraw = true;
+            }
+            if self.svg_trigger_event(old_id, "pointerout") {
+                redraw = true;
+            }
+            if self.svg_trigger_event(old_id, "pointerleave") {
+                redraw = true;
+            }
             let mut e = crate::dom::events::DomEvent::new("mouseout", old_id);
             e.related_target = new_id;
             e.client_x = client_pos.0;
@@ -809,6 +827,15 @@ impl Document {
         }
         if new_id != 0 {
             if self.svg_trigger_event(new_id, "mouseover") {
+                redraw = true;
+            }
+            if self.svg_trigger_event(new_id, "mouseenter") {
+                redraw = true;
+            }
+            if self.svg_trigger_event(new_id, "pointerover") {
+                redraw = true;
+            }
+            if self.svg_trigger_event(new_id, "pointerenter") {
                 redraw = true;
             }
             let mut e = crate::dom::events::DomEvent::new("mouseover", new_id);
