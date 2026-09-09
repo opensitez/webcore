@@ -117,6 +117,11 @@ fn svg_dom_tag_name(node: &crate::svg::SvgNode) -> String {
         crate::svg::SvgElementKind::Cursor => "cursor".to_string(),
         crate::svg::SvgElementKind::Style => "style".to_string(),
         crate::svg::SvgElementKind::Script => "script".to_string(),
+        crate::svg::SvgElementKind::Animate => "animate".to_string(),
+        crate::svg::SvgElementKind::AnimateTransform => "animateTransform".to_string(),
+        crate::svg::SvgElementKind::AnimateMotion => "animateMotion".to_string(),
+        crate::svg::SvgElementKind::MPath => "mpath".to_string(),
+        crate::svg::SvgElementKind::Set => "set".to_string(),
         crate::svg::SvgElementKind::Unknown(name) => name.clone(),
     }
 }

@@ -73,6 +73,14 @@ pub struct WebCore {
     /// Empty path means the `<svg>` root itself; child indexes are SVG-tree
     /// indexes, excluding projected text boxes.
     pub svg_tree_path: Option<Vec<usize>>,
+    /// Sampled SVG animation attribute overrides for this inline SVG root.
+    /// Each entry is `(native_svg_path, attribute_name, sampled_value)`.
+    pub svg_animation_overrides: Vec<(Vec<usize>, String, String)>,
+    /// Script/DOM SVG animation control instance times.
+    /// Each entry is `(native_svg_animation_path, "begin"|"end", time_seconds)`.
+    pub svg_animation_controls: Vec<(Vec<usize>, String, f32)>,
+    /// Start time for declarative SVG animation timelines rooted at this node.
+    pub svg_animation_start_time: Option<std::time::Instant>,
     /// SVG viewBox intrinsic dimensions (width, height). Used for aspect ratio
     /// sizing in layout and on-demand rasterization at the correct display size.
     pub svg_viewbox_w: f32,

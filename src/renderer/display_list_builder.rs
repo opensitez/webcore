@@ -993,6 +993,29 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                         if raster_w > 0 && raster_h > 0 {
                             let c = node.style.color;
                             let rgba = if let Some(ref doc) = node.svg_document {
+                                let sampled_overrides;
+                                let overrides = if node.svg_animation_overrides.is_empty() {
+                                    let mut running = false;
+                                    sampled_overrides =
+                                        crate::svg::animation::sample_svg_animation_overrides(
+                                            doc,
+                                            0.0,
+                                            &mut running,
+                                        );
+                                    sampled_overrides.as_slice()
+                                } else {
+                                    node.svg_animation_overrides.as_slice()
+                                };
+                                let animated_doc;
+                                let doc = if overrides.is_empty() {
+                                    doc
+                                } else {
+                                    animated_doc =
+                                        crate::svg::svg_document_with_animation_overrides(
+                                            doc, overrides,
+                                        );
+                                    &animated_doc
+                                };
                                 let (current_color, fill, stroke) = if node.tag == "svg" {
                                     (c, node.style.svg_fill, node.style.svg_stroke)
                                 } else {

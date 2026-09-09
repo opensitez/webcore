@@ -323,6 +323,9 @@ impl WebCore {
 
             svg_document: None,
             svg_tree_path: None,
+            svg_animation_overrides: Vec::new(),
+            svg_animation_controls: Vec::new(),
+            svg_animation_start_time: None,
             svg_viewbox_w: 0.0,
             svg_viewbox_h: 0.0,
 

@@ -2407,6 +2407,10 @@ impl LayoutEngine {
             doc.sync_transitions(now, did_cascade);
         }
         doc.tick_animations(now);
+        let svg_animations_running = crate::svg::tick_svg_animations(&mut doc.root, now);
+        if svg_animations_running {
+            doc.needs_animation_frame = true;
+        }
         doc.tick_smooth_scrolls(now);
         if !doc.animation_overrides.is_empty() {
             let overrides = doc.animation_overrides.clone();

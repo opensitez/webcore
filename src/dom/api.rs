@@ -2689,6 +2689,48 @@ impl Document {
         }
     }
 
+    /// SVGAnimationElement.beginElement().
+    pub fn svg_begin_element(&mut self, id: u32) -> bool {
+        self.svg_begin_element_at(id, 0.0)
+    }
+
+    /// SVGAnimationElement.beginElementAt(offset).
+    pub fn svg_begin_element_at(&mut self, id: u32, offset_s: f32) -> bool {
+        self.push_svg_animation_control(id, "begin", offset_s)
+    }
+
+    /// SVGAnimationElement.endElement().
+    pub fn svg_end_element(&mut self, id: u32) -> bool {
+        self.svg_end_element_at(id, 0.0)
+    }
+
+    /// SVGAnimationElement.endElementAt(offset).
+    pub fn svg_end_element_at(&mut self, id: u32, offset_s: f32) -> bool {
+        self.push_svg_animation_control(id, "end", offset_s)
+    }
+
+    fn push_svg_animation_control(&mut self, id: u32, kind: &str, offset_s: f32) -> bool {
+        let Some(animation_path) = self
+            .find_webcore(id)
+            .filter(|node| is_svg_animation_dom_tag(&node.tag))
+            .and_then(|node| node.svg_tree_path.clone())
+        else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        let Some(svg_root) = find_svg_owner_for_node_mut(&mut self.root, id) else {
+            return false;
+        };
+        let start = *svg_root.svg_animation_start_time.get_or_insert(now);
+        let elapsed = now.duration_since(start).as_secs_f32();
+        svg_root.svg_animation_controls.push((
+            animation_path,
+            kind.to_string(),
+            elapsed + offset_s.max(0.0),
+        ));
+        true
+    }
+
     // ── Internal helpers ──
 
     /// Find a shared reference to an WebCore by node_id.
@@ -2845,6 +2887,47 @@ impl Document {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+fn is_svg_animation_dom_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "animate" | "animatetransform" | "animateTransform" | "animatemotion" | "animateMotion" | "set"
+    )
+}
+
+fn find_svg_owner_for_node_mut(node: &mut WebCore, id: u32) -> Option<&mut WebCore> {
+    if node.svg_document.is_some() && webcore_contains_node_id(node, id) {
+        return Some(node);
+    }
+    for child in &mut node.children {
+        if let Some(found) = find_svg_owner_for_node_mut(child, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn webcore_contains_node_id(node: &WebCore, id: u32) -> bool {
+    if node.node_id == id {
+        return true;
+    }
+    if node
+        .shadow_root
+        .as_ref()
+        .map(|shadow| {
+            shadow
+                .children
+                .iter()
+                .any(|child| webcore_contains_node_id(child, id))
+        })
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    node.children
+        .iter()
+        .any(|child| webcore_contains_node_id(child, id))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct InlineStyleDecl {
