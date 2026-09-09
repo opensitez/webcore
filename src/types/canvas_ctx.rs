@@ -297,10 +297,15 @@ impl WebCore {
     pub fn new(tag: impl Into<String>) -> Self {
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT_ID: AtomicU32 = AtomicU32::new(500_000);
+        let tag = tag.into();
+        let mut style = ComputedStyle::default();
+        if tag == "#text" {
+            style.display = crate::types::Display::Inline;
+        }
         Self {
-            tag: tag.into(),
+            tag,
             node_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
-            style: std::sync::Arc::new(ComputedStyle::default()),
+            style: std::sync::Arc::new(style),
             attributes: crate::dom::attrs::AttrMap::new(),
             text: String::new(),
             children: Vec::new(),
@@ -313,6 +318,13 @@ impl WebCore {
             image_data: None,
             image_width: 0,
             image_height: 0,
+            animated_image: None,
+            animated_image_frame: 0,
+            animated_image_last_tick: None,
+            media_current_time: 0.0,
+            media_duration: None,
+            media_paused: true,
+            media_ended: false,
 
             bg_image_data: None,
             mask_image_data: None,

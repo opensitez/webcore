@@ -32,18 +32,67 @@ pub(crate) fn collapse_whitespace(s: &str) -> String {
     out
 }
 
-/// Parse a `srcset` attribute and return the best URL.
-/// For `w` descriptors, picks the smallest available (conservative choice when display size unknown).
-/// For `x` descriptors, picks the 1x version (or closest).
-/// Falls back to the first entry.
 pub(crate) fn parse_srcset_url(srcset: &str) -> Option<String> {
-    let mut best_url: Option<String> = None;
-    let mut best_w: f32 = f32::MAX;
-    let mut best_x: f32 = 0.0;
-    let mut has_w = false;
-    let mut has_x = false;
+    parse_srcset_url_for(srcset, None, 800.0, 600.0, 1.0)
+}
 
-    for entry in srcset.split(',') {
+pub(crate) fn parse_srcset_url_for(
+    srcset: &str,
+    sizes: Option<&str>,
+    viewport_w: f32,
+    viewport_h: f32,
+    device_pixel_ratio: f32,
+) -> Option<String> {
+    let candidates = parse_srcset_candidates(srcset);
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let dpr = device_pixel_ratio.max(0.01);
+    if candidates.iter().any(|c| c.width.is_some()) {
+        let source_size = parse_sizes_width(sizes, viewport_w, viewport_h);
+        let target = source_size * dpr;
+        return candidates
+            .iter()
+            .filter_map(|c| c.width.map(|w| (c, w)))
+            .filter(|(_, w)| *w >= target)
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .filter_map(|c| c.width.map(|w| (c, w)))
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            })
+            .map(|(c, _)| c.url.clone());
+    }
+
+    candidates
+        .iter()
+        .min_by(|a, b| {
+            let ad = a.density.unwrap_or(1.0);
+            let bd = b.density.unwrap_or(1.0);
+            let a_good = ad >= dpr;
+            let b_good = bd >= dpr;
+            match (a_good, b_good) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                (true, true) => ad.partial_cmp(&bd).unwrap_or(std::cmp::Ordering::Equal),
+                (false, false) => bd.partial_cmp(&ad).unwrap_or(std::cmp::Ordering::Equal),
+            }
+        })
+        .map(|c| c.url.clone())
+}
+
+#[derive(Debug)]
+struct SrcsetCandidate {
+    url: String,
+    width: Option<f32>,
+    density: Option<f32>,
+}
+
+fn parse_srcset_candidates(srcset: &str) -> Vec<SrcsetCandidate> {
+    let mut candidates = Vec::new();
+    for entry in split_comma_list(srcset) {
         let entry = entry.trim();
         if entry.is_empty() {
             continue;
@@ -53,43 +102,85 @@ pub(crate) fn parse_srcset_url(srcset: &str) -> Option<String> {
             Some(u) if !u.is_empty() => u,
             _ => continue,
         };
+        let mut width = None;
+        let mut density = None;
         if let Some(descriptor) = parts.next() {
             if let Some(w_str) = descriptor.strip_suffix('w') {
-                has_w = true;
                 if let Ok(w) = w_str.parse::<f32>() {
-                    if w < best_w {
-                        best_w = w;
-                        best_url = Some(url.to_string());
-                    }
+                    width = Some(w.max(0.0));
                 }
             } else if let Some(x_str) = descriptor.strip_suffix('x') {
-                has_x = true;
                 if let Ok(x) = x_str.parse::<f32>() {
-                    // Prefer 1x, but take largest if no 1x
-                    if (x - 1.0).abs() < (best_x - 1.0).abs() || best_url.is_none() {
-                        best_x = x;
-                        best_url = Some(url.to_string());
-                    }
+                    density = Some(x.max(0.0));
                 }
             }
-        } else {
-            // No descriptor — this is the default candidate
-            if !has_w && !has_x {
-                best_url = Some(url.to_string());
+        }
+        candidates.push(SrcsetCandidate {
+            url: url.to_string(),
+            width,
+            density,
+        });
+    }
+    candidates
+}
+
+fn parse_sizes_width(sizes: Option<&str>, viewport_w: f32, viewport_h: f32) -> f32 {
+    let viewport_w = viewport_w.max(1.0);
+    let viewport_h = viewport_h.max(1.0);
+    let Some(sizes) = sizes else {
+        return viewport_w;
+    };
+    for item in split_comma_list(sizes) {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let (condition, length) = split_size_condition(item);
+        if !condition.is_empty() && !crate::css::evaluate_media(condition, viewport_w, viewport_h) {
+            continue;
+        }
+        if let Some(length) = crate::css::value_parse::parse_length_checked(length) {
+            let resolved = length.resolve_vp(16.0, viewport_w, 16.0, viewport_w, viewport_h);
+            if resolved > 0.0 {
+                return resolved;
             }
         }
     }
+    viewport_w
+}
 
-    // If we had w descriptors but all were webp (skipped), fall back to first parseable
-    if best_url.is_none() {
-        let entry = srcset.split(',').next()?.trim();
-        let url = entry.split_whitespace().next()?;
-        if !url.is_empty() {
-            return Some(url.to_string());
+fn split_size_condition(item: &str) -> (&str, &str) {
+    let mut depth = 0usize;
+    for (idx, ch) in item.char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => depth = depth.saturating_sub(1),
+            c if c.is_ascii_whitespace() && depth == 0 => {
+                return (item[..idx].trim(), item[idx..].trim());
+            }
+            _ => {}
         }
     }
+    ("", item.trim())
+}
 
-    best_url
+fn split_comma_list(input: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (idx, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(&input[start..idx]);
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    out.push(&input[start..]);
+    out
 }
 
 /// Resolve the best `<source>` for a `<picture>` element and set it on the child `<img>`.
@@ -102,9 +193,9 @@ pub(crate) fn resolve_picture_source(picture: &mut WebCore, base_url: &str, vw: 
         if child.tag != "source" {
             continue;
         }
-        // Skip image/webp — our image decoder may not support it
         if let Some(typ) = child.attributes.get("type") {
-            if typ.contains("webp") {
+            let typ = typ.split(';').next().unwrap_or("").trim();
+            if !typ.is_empty() && !supported_image_type(typ) {
                 continue;
             }
         }
@@ -121,7 +212,19 @@ pub(crate) fn resolve_picture_source(picture: &mut WebCore, base_url: &str, vw: 
         }
         // Extract URL from srcset
         if let Some(srcset) = child.attributes.get("srcset") {
-            if let Some(url) = parse_srcset_url(srcset) {
+            let sizes = child
+                .attributes
+                .get("sizes")
+                .map(|s| s.as_str())
+                .or_else(|| {
+                    picture
+                        .children
+                        .iter()
+                        .find(|c| c.tag == "img")
+                        .and_then(|img| img.attributes.get("sizes"))
+                        .map(|s| s.as_str())
+                });
+            if let Some(url) = parse_srcset_url_for(srcset, sizes, vw, vh, 1.0) {
                 best_url = Some(url);
                 best_width = child.attributes.get("width").cloned();
                 best_height = child.attributes.get("height").cloned();
@@ -164,13 +267,47 @@ pub(crate) fn resolve_picture_source(picture: &mut WebCore, base_url: &str, vw: 
     }
 }
 
+fn supported_image_type(typ: &str) -> bool {
+    matches!(
+        typ.to_ascii_lowercase().as_str(),
+        "image/png"
+            | "image/jpeg"
+            | "image/jpg"
+            | "image/gif"
+            | "image/webp"
+            | "image/bmp"
+            | "image/svg+xml"
+    )
+}
+
 /// Post-pass: re-resolve `<picture>` elements with real viewport dimensions.
 pub fn resolve_picture_elements(node: &mut WebCore, base_url: &str, vw: f32, vh: f32) {
     if node.tag == "picture" {
         resolve_picture_source(node, base_url, vw, vh);
+        for child in &mut node.children {
+            if child.tag != "img" {
+                resolve_picture_elements(child, base_url, vw, vh);
+            }
+        }
+        return;
+    } else if node.tag == "img" {
+        resolve_img_source(node, base_url, vw, vh);
     }
     for child in &mut node.children {
         resolve_picture_elements(child, base_url, vw, vh);
+    }
+}
+
+fn resolve_img_source(node: &mut WebCore, base_url: &str, vw: f32, vh: f32) {
+    if let Some(srcset) = node.attributes.get("srcset") {
+        let sizes = node.attributes.get("sizes").map(|s| s.as_str());
+        if let Some(best) = parse_srcset_url_for(srcset, sizes, vw, vh, 1.0) {
+            node.resolved_src = resolve_url(&best, base_url);
+            return;
+        }
+    }
+    if let Some(src) = node.attributes.get("src") {
+        node.resolved_src = resolve_url(src, base_url);
     }
 }
 

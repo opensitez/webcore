@@ -291,7 +291,7 @@ pub fn layout_flex(
         }
         // CSS Flexbox §4: blockify inline-level flex items (temporary — restored after layout)
         let saved_display = child.style.display;
-        if matches!(child.style.display, Display::Inline) {
+        if child.tag != "#text" && matches!(child.style.display, Display::Inline) {
             std::sync::Arc::make_mut(&mut child.style).display = Display::Block;
         }
 

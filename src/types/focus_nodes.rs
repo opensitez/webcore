@@ -17,6 +17,7 @@ pub fn is_focusable_node(node: &WebCore) -> bool {
     let tag = node.tag.as_str();
     matches!(tag, "button" | "input" | "textarea" | "select")
         || (tag == "a" && node.attributes.contains_key("href"))
+        || (matches!(tag, "audio" | "video") && node.attributes.contains_key("controls"))
         || node.attributes.get("tabindex")
             .and_then(|v| v.parse::<i32>().ok())
             .is_some()                          // any explicit tabindex (incl. -1)
@@ -51,6 +52,7 @@ pub(crate) fn collect_focusable_ordered(
     // Determine whether this element is in the tab order.
     let native = matches!(tag, "button" | "input" | "textarea" | "select")
         || (tag == "a" && node.attributes.contains_key("href"))
+        || (matches!(tag, "audio" | "video") && node.attributes.contains_key("controls"))
         || node
             .attributes
             .get("contenteditable")

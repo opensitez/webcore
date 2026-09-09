@@ -1027,11 +1027,27 @@ pub fn layout_inline_block(
         }
 
         // Build LayoutLine
-        // Compute text_x_offset: sum of advances of items before first text item
+        // Compute text_x_offset: sum of advances before the first retained text
+        // byte on the line. Leading collapsible whitespace can be a Text item
+        // before an atomic inline child; stopping at that whitespace paints the
+        // visible text under the atomic child.
+        let flat_text = collect_flat_text(node);
         let mut text_x_off = 0.0f32;
         for item in line_items.iter() {
             match &item.kind {
-                InlineItemKind::Text { .. } => break,
+                InlineItemKind::Text {
+                    text_start,
+                    text_len,
+                    ..
+                } if *text_start + *text_len > text_s => {
+                    let seg_start = (*text_start).max(text_s);
+                    let seg_end = (*text_start + *text_len).min(flat_text.len());
+                    if seg_start < seg_end && flat_text[seg_start..seg_end].trim().is_empty() {
+                        text_x_off += item.advance;
+                        continue;
+                    }
+                    break;
+                }
                 _ => text_x_off += item.advance,
             }
         }
@@ -1055,7 +1071,6 @@ pub fn layout_inline_block(
 
         // Resolve BiDi visual segments for this line
         let para_dir = node.style.direction;
-        let flat_text = collect_flat_text(node);
         resolve_bidi_line(&flat_text, &mut ll, para_dir, node.style.unicode_bidi);
 
         // Fill per-character x positions using real glyph metrics, shaped at
@@ -1793,26 +1808,6 @@ fn collect_items_inner(
         return;
     }
 
-    if !node.style.before_content.is_empty() {
-        let pseudo_style = node
-            .style
-            .before_style
-            .as_deref()
-            .unwrap_or_else(|| node.style.as_ref());
-        emit_generated_inline_content(
-            engine,
-            &node.style.before_content,
-            pseudo_style,
-            font_px,
-            root_font_px,
-            items,
-            runs,
-            text_offset,
-            box_idx,
-            previous_collapsible_space,
-        );
-    }
-
     // ── Atomic inline-block ───────────────────────────────────────────────
     // Also treat inline elements that contain block-level children as atomic.
     // This handles the "block inside inline" case (e.g. <a><strong display:block>).
@@ -1874,6 +1869,26 @@ fn collect_items_inner(
         });
         *previous_collapsible_space = false;
         return;
+    }
+
+    if !node.style.before_content.is_empty() {
+        let pseudo_style = node
+            .style
+            .before_style
+            .as_deref()
+            .unwrap_or_else(|| node.style.as_ref());
+        emit_generated_inline_content(
+            engine,
+            &node.style.before_content,
+            pseudo_style,
+            font_px,
+            root_font_px,
+            items,
+            runs,
+            text_offset,
+            box_idx,
+            previous_collapsible_space,
+        );
     }
 
     // ── Own text ──────────────────────────────────────────────────────────
@@ -3530,6 +3545,14 @@ pub fn collect_flat_text(node: &WebCore) -> String {
 
 fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {
     let generated_content = node.style.rare().content.as_str();
+    if !is_root
+        && matches!(
+            node.style.display,
+            Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+        )
+    {
+        return;
+    }
     if !node.style.before_content.is_empty() {
         push_flat_rendered_text(out, &node.style.before_content, &node.style);
     }
@@ -3557,14 +3580,6 @@ fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {
     // Atomic inline-blocks are emitted as Atomic items by the parent; their internal
     // text is NOT part of the parent's flat-text string. However when we are rendering
     // the inline-block itself (is_root=true) we DO want its own text content.
-    if !is_root
-        && matches!(
-            node.style.display,
-            Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
-        )
-    {
-        return;
-    }
     let rendered_text = if generated_content.is_empty() {
         node.text.as_str()
     } else {

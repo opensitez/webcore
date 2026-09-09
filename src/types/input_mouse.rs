@@ -445,6 +445,18 @@ impl Document {
                                 // answer.
                                 self.style_dirty = true;
                             }
+                            if hit_node_id != 0 && button == 0 && self.is_media_element(hit_node_id)
+                            {
+                                if let Some(time) =
+                                    self.media_seek_time_for_point(hit_node_id, doc_pt)
+                                {
+                                    if self.media_set_current_time(hit_node_id, time) {
+                                        redraw = true;
+                                    }
+                                } else if self.media_toggle_playback(hit_node_id) {
+                                    redraw = true;
+                                }
+                            }
                             // **Activating a `<summary>` toggles its `<details>`**
                             // (HTML §4.11.1). The summary already draws a pointer
                             // cursor and a disclosure marker, so the control looked

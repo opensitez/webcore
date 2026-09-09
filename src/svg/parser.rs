@@ -47,6 +47,10 @@ impl<'a> Parser<'a> {
         }
 
         loop {
+            if self.pos >= self.input.len() {
+                node.animation = parse_animation_element(&node);
+                return Ok(node);
+            }
             if self.starts_with("</") {
                 self.pos += 2;
                 let close = self.parse_name()?;
@@ -65,6 +69,10 @@ impl<'a> Parser<'a> {
                 self.skip_comment()?;
                 continue;
             }
+            if self.starts_with("<!") && !self.starts_with("<![CDATA[") {
+                self.skip_declaration()?;
+                continue;
+            }
             if self.starts_with("<![CDATA[") {
                 node.text.push_str(&self.parse_cdata()?);
                 continue;
@@ -76,6 +84,9 @@ impl<'a> Parser<'a> {
             let text = self.parse_text();
             if !text.is_empty() {
                 node.text.push_str(&decode_xml_entities(&text));
+            } else if self.pos < self.input.len() {
+                let ch = self.peek_char().expect("pos checked");
+                self.pos += ch.len_utf8();
             }
         }
     }
@@ -179,6 +190,10 @@ impl<'a> Parser<'a> {
                 self.skip_comment()?;
                 continue;
             }
+            if self.starts_with("<!") {
+                self.skip_declaration()?;
+                continue;
+            }
             break;
         }
         Ok(())
@@ -191,6 +206,29 @@ impl<'a> Parser<'a> {
         };
         self.pos += end_rel + 3;
         Ok(())
+    }
+
+    fn skip_declaration(&mut self) -> Result<(), SvgParseError> {
+        self.expect("<!")?;
+        let mut quote: Option<char> = None;
+        let mut bracket_depth = 0usize;
+        while let Some(ch) = self.peek_char() {
+            self.pos += ch.len_utf8();
+            if let Some(q) = quote {
+                if ch == q {
+                    quote = None;
+                }
+                continue;
+            }
+            match ch {
+                '"' | '\'' => quote = Some(ch),
+                '[' => bracket_depth += 1,
+                ']' => bracket_depth = bracket_depth.saturating_sub(1),
+                '>' if bracket_depth == 0 => return Ok(()),
+                _ => {}
+            }
+        }
+        Err(self.error("unterminated declaration"))
     }
 
     fn skip_ws(&mut self) {
@@ -239,11 +277,41 @@ fn decode_xml_entities(s: &str) -> String {
     if !s.contains('&') {
         return s.to_string();
     }
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp..];
+        let Some(semi) = rest.find(';') else {
+            out.push_str(rest);
+            return out;
+        };
+        let entity = &rest[1..semi];
+        let decoded = match entity {
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "amp" => Some('&'),
+            _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+                u32::from_str_radix(&entity[2..], 16)
+                    .ok()
+                    .and_then(char::from_u32)
+            }
+            _ if entity.starts_with('#') => {
+                entity[1..].parse::<u32>().ok().and_then(char::from_u32)
+            }
+            _ => None,
+        };
+        if let Some(ch) = decoded {
+            out.push(ch);
+        } else {
+            out.push_str(&rest[..=semi]);
+        }
+        rest = &rest[semi + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -412,8 +480,31 @@ mod tests {
     }
 
     #[test]
+    fn skips_doctype_and_child_declarations() {
+        let doc = parse_svg_document(
+            r#"<?xml version="1.0"?>
+               <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd" [
+                 <!ENTITY local "ignored">
+               ]>
+               <svg><!ENTITY child "ignored"><text>&#x41;&#66;&amp;</text></svg>"#,
+        )
+        .unwrap();
+        assert_eq!(doc.root.kind, SvgElementKind::Svg);
+        assert_eq!(doc.root.children[0].kind, SvgElementKind::Text);
+        assert_eq!(doc.root.children[0].text, "AB&");
+    }
+
+    #[test]
     fn reports_mismatched_closing_tag() {
         let err = parse_svg_document("<svg><g></svg>").unwrap_err();
         assert!(err.message.contains("mismatched closing tag"));
+    }
+
+    #[test]
+    fn tolerates_unclosed_svg_at_eof() {
+        let doc = parse_svg_document(r#"<svg viewBox="0 0 10 10"><path d="M0 0L10 10">"#)
+            .expect("unclosed inline svg should not hang");
+        assert_eq!(doc.root.kind, SvgElementKind::Svg);
+        assert_eq!(doc.root.children[0].kind, SvgElementKind::Path);
     }
 }

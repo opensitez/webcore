@@ -40,7 +40,18 @@ pub fn parse_html_with_hooks<F>(html: &str, base_url: &str, hook: F) -> Document
 where
     F: FnMut(&str, &crate::dom::attrs::AttrMap) + 'static,
 {
-    parse_html_full(html, base_url, Some(Box::new(hook)), None)
+    parse_html_full(html, base_url, Some(Box::new(hook)), None, true)
+}
+
+pub(crate) fn parse_html_with_hooks_defer_cascade<F>(
+    html: &str,
+    base_url: &str,
+    hook: F,
+) -> Document
+where
+    F: FnMut(&str, &crate::dom::attrs::AttrMap) + 'static,
+{
+    parse_html_full(html, base_url, Some(Box::new(hook)), None, false)
 }
 
 /// Parse HTML with both a tag hook and a script/noscript callback.
@@ -70,6 +81,7 @@ where
         base_url,
         Some(Box::new(hook)),
         Some(Box::new(on_script)),
+        true,
     )
 }
 
@@ -78,6 +90,7 @@ fn parse_html_full(
     base_url: &str,
     on_open_tag: Option<Box<dyn FnMut(&str, &crate::dom::attrs::AttrMap) + 'static>>,
     on_script: Option<Box<dyn FnMut(&str, &crate::dom::attrs::AttrMap, &str) -> bool + 'static>>,
+    initial_cascade: bool,
 ) -> Document {
     // SVG blocks are now handled inline by the tokenizer/parser — no pre-pass needed.
     let tokens = tokenize(html);
@@ -359,6 +372,7 @@ fn parse_html_full(
         linked_stylesheets,
         editor: crate::dom::Editor::new(),
         canvas_surfaces: crate::canvas::CanvasSurfaces::default(),
+        media_states: crate::types::MediaStateMap::new(),
         event_targets: crate::dom::events::EventTargetMap::new(),
         scroll_x: 0.0,
         scroll_y: 0.0,
@@ -431,27 +445,30 @@ fn parse_html_full(
         }
     }
 
-    // Apply cascade (basic pass — lib.rs re-runs with viewport dimensions)
-    let root_font_px = 16.0;
-    doc.stylesheet.rebuild_index();
-    let target_id = doc.fragment_target_id();
-    apply_cascade_vp_hover_target_url(
-        &mut doc.root,
-        &doc.stylesheet,
-        None,
-        root_font_px,
-        0.0,
-        0.0,
-        0,
-        false,
-        &std::collections::HashSet::new(),
-        target_id,
-        &doc.base_url,
-    );
+    if initial_cascade {
+        // Apply cascade (basic pass — lib.rs re-runs with viewport dimensions)
+        let root_font_px = 16.0;
+        doc.stylesheet.rebuild_index();
+        let target_id = doc.fragment_target_id();
+        apply_cascade_vp_hover_target_url(
+            &mut doc.root,
+            &doc.stylesheet,
+            None,
+            root_font_px,
+            0.0,
+            0.0,
+            0,
+            false,
+            &std::collections::HashSet::new(),
+            target_id,
+            &doc.base_url,
+        );
+    }
 
     // Post-cascade fixes
     apply_details_summary_post_cascade(&mut doc.root);
     number_lists(&mut doc.root);
+    doc.initialize_media_elements();
 
     doc
 }

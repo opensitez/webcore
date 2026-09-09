@@ -25,6 +25,7 @@ impl Document {
             linked_stylesheets: Vec::new(),
             editor: Editor::new(),
             canvas_surfaces: crate::canvas::CanvasSurfaces::default(),
+            media_states: crate::types::MediaStateMap::new(),
             event_targets: crate::dom::events::EventTargetMap::new(),
             scroll_x: 0.0,
             scroll_y: 0.0,
@@ -91,9 +92,34 @@ impl Document {
             None => return false,
         };
         let mut loaded_any = false;
-        while let Ok((path, decoded)) = rx.try_recv() {
+        while let Ok((path, target, decoded)) = rx.try_recv() {
+            let mut loaded_target = false;
             if let Some(node) = find_node_by_path_mut(&mut self.root, &path) {
-                crate::html::set_decoded_image_on_node(node, decoded);
+                match target {
+                    PendingImageTarget::Element => {
+                        crate::html::set_decoded_image_on_node(node, decoded);
+                        loaded_target = true;
+                    }
+                    PendingImageTarget::Background => {
+                        if let Some((data, w, h)) = crate::html::decoded_image_pixels(decoded) {
+                            node.bg_image_data = Some(std::sync::Arc::new(data));
+                            node.bg_image_width = w;
+                            node.bg_image_height = h;
+                            loaded_target = true;
+                        }
+                    }
+                    PendingImageTarget::Mask => {
+                        if let Some((data, w, h)) = crate::html::decoded_image_pixels(decoded) {
+                            node.mask_image_data = Some(std::sync::Arc::new(data));
+                            node.mask_image_width = w;
+                            node.mask_image_height = h;
+                            loaded_target = true;
+                        }
+                    }
+                }
+            }
+            if loaded_target {
+                mark_layout_path_dirty(&mut self.root, &path);
                 loaded_any = true;
             }
         }
@@ -105,6 +131,44 @@ impl Document {
             self.pending_images = None;
         }
         loaded_any
+    }
+
+    /// Advance animated image frames. Returns true when pixels changed and the
+    /// caller should repaint.
+    pub fn tick_animated_images(&mut self, now: std::time::Instant) -> bool {
+        fn tick_node(node: &mut WebCore, now: std::time::Instant) -> bool {
+            let mut changed = false;
+            if let Some(animated) = node.animated_image.as_ref() {
+                if animated.frames.len() > 1 {
+                    let current = node
+                        .animated_image_frame
+                        .min(animated.frames.len().saturating_sub(1));
+                    let last = node.animated_image_last_tick.unwrap_or(now);
+                    let delay = std::time::Duration::from_millis(
+                        animated.frames[current].duration_ms.max(10) as u64,
+                    );
+                    if now.duration_since(last) >= delay {
+                        let next = (current + 1) % animated.frames.len();
+                        node.animated_image_frame = next;
+                        node.animated_image_last_tick = Some(now);
+                        node.image_data = Some(animated.frames[next].pixels.clone());
+                        changed = true;
+                    } else if node.animated_image_last_tick.is_none() {
+                        node.animated_image_last_tick = Some(now);
+                    }
+                }
+            }
+            for child in &mut node.children {
+                changed |= tick_node(child, now);
+            }
+            changed
+        }
+
+        tick_node(&mut self.root, now)
+    }
+
+    pub fn has_animated_images(&self) -> bool {
+        has_animated_images(&self.root)
     }
 
     /// Rebuild the O(1) node index by walking the tree and storing pointers.
@@ -283,4 +347,35 @@ impl Document {
             .map(|body| locks(&body.style))
             .unwrap_or(false)
     }
+}
+
+fn has_animated_images(node: &WebCore) -> bool {
+    node.animated_image
+        .as_ref()
+        .is_some_and(|animated| animated.frames.len() > 1)
+        || node.children.iter().any(has_animated_images)
+}
+
+fn mark_layout_path_dirty(node: &mut WebCore, path: &[usize]) -> bool {
+    if path.is_empty() {
+        mark_layout_node_dirty(node);
+        return true;
+    }
+    let Some(child) = node.children.get_mut(path[0]) else {
+        return false;
+    };
+    if mark_layout_path_dirty(child, &path[1..]) {
+        node.layout.cached_intrinsic_w.set(f32::NAN);
+        node.layout.intrinsic_dirty = true;
+        node.has_dirty_layout_descendant = true;
+        return true;
+    }
+    false
+}
+
+fn mark_layout_node_dirty(node: &mut WebCore) {
+    node.layout.layout_dirty = true;
+    node.layout.cached_intrinsic_w.set(f32::NAN);
+    node.layout.intrinsic_dirty = true;
+    node.has_dirty_layout_descendant = true;
 }

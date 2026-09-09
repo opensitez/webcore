@@ -84,6 +84,9 @@ pub fn set_image_on_node(node: &mut WebCore, data: Vec<u8>, w: u32, h: u32) {
     node.image_data = Some(std::sync::Arc::new(data));
     node.image_width = w;
     node.image_height = h;
+    node.animated_image = None;
+    node.animated_image_frame = 0;
+    node.animated_image_last_tick = None;
 }
 
 /// Set decoded image (raster or SVG) on an img node.
@@ -94,6 +97,17 @@ pub fn set_decoded_image_on_node(node: &mut WebCore, decoded: DecodedImage) {
             node.image_data = Some(data);
             node.image_width = w;
             node.image_height = h;
+            node.animated_image = None;
+            node.animated_image_frame = 0;
+            node.animated_image_last_tick = None;
+        }
+        DecodedImage::Animated(animated) => {
+            node.image_data = animated.frames.first().map(|frame| frame.pixels.clone());
+            node.image_width = animated.width;
+            node.image_height = animated.height;
+            node.animated_image = Some(animated);
+            node.animated_image_frame = 0;
+            node.animated_image_last_tick = Some(std::time::Instant::now());
         }
         DecodedImage::Svg(markup, iw, ih) => {
             node.svg_document = crate::svg::parse_svg_document(&markup).ok();
@@ -102,6 +116,9 @@ pub fn set_decoded_image_on_node(node: &mut WebCore, decoded: DecodedImage) {
             // Set intrinsic dimensions so layout can compute aspect ratio
             node.image_width = iw.ceil() as u32;
             node.image_height = ih.ceil() as u32;
+            node.animated_image = None;
+            node.animated_image_frame = 0;
+            node.animated_image_last_tick = None;
         }
     }
 }
@@ -168,44 +185,79 @@ fn load_image_data_url(src: &str) -> Option<(Vec<u8>, u32, u32)> {
 }
 
 fn image_data_url_bytes(src: &str) -> Option<Vec<u8>> {
-    // data:image/png;base64,<data>
+    // data:image/png;base64,<data> or data:image/svg+xml,<percent-encoded markup>
     let comma = src.find(',')?;
     let header = &src[5..comma]; // strip "data:"
     let encoded = &src[comma + 1..];
     let is_base64 = header.contains("base64");
     if !is_base64 {
-        return None;
+        return Some(percent_decode_data_url_payload(encoded));
     }
     base64_decode(encoded)
+}
+
+fn percent_decode_data_url_payload(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+fn hex_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Result of decoding image bytes: either rasterized RGBA or SVG markup to rasterize later.
 #[derive(Clone)]
 pub enum DecodedImage {
     Raster(std::sync::Arc<Vec<u8>>, u32, u32),
+    Animated(AnimatedImage),
     Svg(String, f32, f32), // markup, intrinsic_w, intrinsic_h
 }
 
+#[derive(Clone, Debug)]
+pub struct AnimatedImageFrame {
+    pub pixels: std::sync::Arc<Vec<u8>>,
+    pub duration_ms: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct AnimatedImage {
+    pub width: u32,
+    pub height: u32,
+    pub frames: Vec<AnimatedImageFrame>,
+}
+
 pub fn decode_image_bytes_ex(bytes: &[u8]) -> Option<DecodedImage> {
+    if let Some(animated) = decode_animated_image(bytes) {
+        if animated.frames.len() > 1 {
+            return Some(DecodedImage::Animated(animated));
+        }
+    }
+
     // Try raster formats first (PNG, JPEG, GIF, WebP, BMP)
     if let Ok(img) = image::load_from_memory(bytes) {
         {
             let rgba = img.to_rgba8();
             let (w, h) = rgba.dimensions();
-            // Premultiply alpha — tiny_skia expects premultiplied RGBA.
             let mut raw = rgba.into_raw();
-            for pixel in raw.chunks_exact_mut(4) {
-                let a = pixel[3] as u16;
-                if a == 0 {
-                    pixel[0] = 0;
-                    pixel[1] = 0;
-                    pixel[2] = 0;
-                } else if a < 255 {
-                    pixel[0] = ((pixel[0] as u16 * a) / 255) as u8;
-                    pixel[1] = ((pixel[1] as u16 * a) / 255) as u8;
-                    pixel[2] = ((pixel[2] as u16 * a) / 255) as u8;
-                }
-            }
+            premultiply_rgba(&mut raw);
             return Some(DecodedImage::Raster(std::sync::Arc::new(raw), w, h));
         }
     }
@@ -226,9 +278,81 @@ fn svg_intrinsic_size(svg: &str) -> (f32, f32) {
 }
 
 pub fn decode_image_bytes(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
-    match decode_image_bytes_ex(bytes)? {
+    decoded_image_pixels(decode_image_bytes_ex(bytes)?)
+}
+
+pub fn decoded_image_pixels(decoded: DecodedImage) -> Option<(Vec<u8>, u32, u32)> {
+    match decoded {
         DecodedImage::Raster(data, w, h) => Some((data.as_ref().clone(), w, h)),
+        DecodedImage::Animated(animated) => animated.frames.first().map(|frame| {
+            (
+                frame.pixels.as_ref().clone(),
+                animated.width,
+                animated.height,
+            )
+        }),
         DecodedImage::Svg(svg, _, _) => crate::svg::rasterize_svg_intrinsic(&svg),
+    }
+}
+
+fn decode_animated_image(bytes: &[u8]) -> Option<AnimatedImage> {
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return decode_animation_frames(
+            image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?,
+        );
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return decode_animation_frames(
+            image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).ok()?,
+        );
+    }
+    None
+}
+
+fn decode_animation_frames<'a, D>(decoder: D) -> Option<AnimatedImage>
+where
+    D: image::AnimationDecoder<'a> + image::ImageDecoder,
+{
+    let (width, height) = decoder.dimensions();
+    let frames = decoder.into_frames().collect_frames().ok()?;
+    if frames.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(frames.len());
+    for frame in frames {
+        let delay_ms = frame.delay().numer_denom_ms();
+        let duration_ms = if delay_ms.0 == 0 {
+            100
+        } else {
+            ((delay_ms.0 as f64 / delay_ms.1.max(1) as f64).round() as u32).max(10)
+        };
+        let buffer = frame.into_buffer();
+        let mut raw = buffer.into_raw();
+        premultiply_rgba(&mut raw);
+        out.push(AnimatedImageFrame {
+            pixels: std::sync::Arc::new(raw),
+            duration_ms,
+        });
+    }
+    Some(AnimatedImage {
+        width,
+        height,
+        frames: out,
+    })
+}
+
+fn premultiply_rgba(raw: &mut [u8]) {
+    for pixel in raw.chunks_exact_mut(4) {
+        let a = pixel[3] as u16;
+        if a == 0 {
+            pixel[0] = 0;
+            pixel[1] = 0;
+            pixel[2] = 0;
+        } else if a < 255 {
+            pixel[0] = ((pixel[0] as u16 * a) / 255) as u8;
+            pixel[1] = ((pixel[1] as u16 * a) / 255) as u8;
+            pixel[2] = ((pixel[2] as u16 * a) / 255) as u8;
+        }
     }
 }
 

@@ -48,6 +48,7 @@ pub mod transform;
 pub mod webcore_node;
 pub mod wheel_scroll;
 
+pub use crate::video::*;
 pub use animation_helpers::*;
 pub use animation_types::*;
 pub use announcement::*;

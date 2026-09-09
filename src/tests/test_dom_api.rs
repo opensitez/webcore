@@ -14,6 +14,89 @@ fn get_element_by_id_finds_element() {
 }
 
 #[test]
+fn srcset_width_descriptors_select_candidate_for_source_size() {
+    assert_eq!(
+        crate::html::parse_srcset_url_for(
+            "small.webp 320w, medium.webp 640w, large.webp 1280w",
+            Some("50vw"),
+            1200.0,
+            800.0,
+            1.0,
+        )
+        .as_deref(),
+        Some("medium.webp")
+    );
+    assert_eq!(
+        crate::html::parse_srcset_url_for(
+            "small.webp 320w, medium.webp 640w, large.webp 1280w",
+            Some("(max-width: 600px) 320px, 900px"),
+            1200.0,
+            800.0,
+            1.0,
+        )
+        .as_deref(),
+        Some("large.webp")
+    );
+}
+
+#[test]
+fn srcset_density_descriptors_select_for_device_pixel_ratio() {
+    assert_eq!(
+        crate::html::parse_srcset_url_for(
+            "one.webp 1x, two.webp 2x, three.webp 3x",
+            None,
+            800.0,
+            600.0,
+            2.0
+        )
+        .as_deref(),
+        Some("two.webp")
+    );
+}
+
+#[test]
+fn img_srcset_current_source_is_resolved_with_viewport_without_mutating_src() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html_with_base(
+        r#"<img id="hero" src="fallback.jpg"
+             srcset="small.webp 320w, medium.webp 640w, large.webp 1280w"
+             sizes="50vw">"#,
+        "https://example.test/news/index.html",
+        1200.0,
+        800.0,
+    );
+    let img = doc.get_element_by_id("hero").unwrap();
+    assert_eq!(
+        doc.get_attribute(img, "src").as_deref(),
+        Some("fallback.jpg")
+    );
+    assert_eq!(
+        doc.find_webcore(img).unwrap().resolved_src,
+        "https://example.test/news/medium.webp"
+    );
+}
+
+#[test]
+fn picture_accepts_webp_source_and_skips_unsupported_image_types() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html_with_base(
+        r#"<picture>
+             <source type="image/avif" srcset="hero.avif">
+             <source type="image/webp" srcset="hero-small.webp 320w, hero-large.webp 900w" sizes="700px">
+             <img id="hero" src="fallback.jpg">
+           </picture>"#,
+        "https://example.test/",
+        1000.0,
+        800.0,
+    );
+    let img = doc.get_element_by_id("hero").unwrap();
+    assert_eq!(
+        doc.find_webcore(img).unwrap().resolved_src,
+        "https://example.test/hero-large.webp"
+    );
+}
+
+#[test]
 fn get_element_by_id_returns_none_for_missing() {
     let doc = parse_html("<div>hello</div>");
     assert!(doc.get_element_by_id("nope").is_none());
@@ -2186,6 +2269,419 @@ fn svg_animation_dom_controls_target_projected_animation_node() {
 }
 
 #[test]
+fn svg_animation_element_read_api_exposes_target_and_timing() {
+    let doc = parse_html(
+        r##"<svg id="icon" viewBox="0 0 10 10">
+             <rect id="box" x="0" width="10" height="10"/>
+             <animate id="move" href="#box" attributeName="x" values="0;10" begin="1.5s" dur="2s"/>
+           </svg>"##,
+    );
+    let animation = doc.get_element_by_id("move").unwrap();
+    let target = doc.get_element_by_id("box").unwrap();
+
+    assert_eq!(doc.svg_animation_target_element(animation), Some(target));
+    assert_eq!(doc.svg_animation_start_time(animation), Some(1.5));
+    assert_eq!(doc.svg_animation_current_time(animation), Some(0.0));
+    assert_eq!(doc.svg_animation_simple_duration(animation), Some(2.0));
+}
+
+#[test]
+fn html_media_play_pause_tick_and_events_are_stateful() {
+    use crate::dom::events::ListenerOptions;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    let mut doc =
+        parse_html(r#"<video id="movie" src="clip.mp4" data-duration="2" preload="none"></video>"#);
+    let video = doc.get_element_by_id("movie").unwrap();
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    for event_type in [
+        "loadedmetadata",
+        "durationchange",
+        "play",
+        "playing",
+        "timeupdate",
+        "ended",
+    ] {
+        let seen = seen.clone();
+        doc.add_event_listener(
+            video,
+            event_type,
+            Box::new(move |event, _doc: &mut crate::Document| {
+                seen.lock().unwrap().push(event.event_type.clone());
+            }),
+            ListenerOptions::default(),
+        );
+    }
+
+    assert_eq!(doc.media_current_src(video).as_deref(), Some("clip.mp4"));
+    assert_eq!(doc.media_paused(video), Some(true));
+    assert_eq!(doc.media_duration(video), Some(2.0));
+    assert!(doc.media_play(video));
+    assert_eq!(doc.media_paused(video), Some(false));
+
+    let start = Instant::now();
+    doc.media_states.get_mut(&video).unwrap().last_tick = Some(start);
+    assert!(doc.tick_media(start + Duration::from_millis(750)));
+    assert!(doc.media_current_time(video).unwrap() >= 0.74);
+
+    doc.tick_media(start + Duration::from_millis(2500));
+    assert_eq!(doc.media_current_time(video), Some(2.0));
+    assert_eq!(doc.media_ended(video), Some(true));
+    assert_eq!(doc.media_paused(video), Some(true));
+
+    let seen = seen.lock().unwrap();
+    assert!(seen.iter().any(|e| e == "loadedmetadata"));
+    assert!(seen.iter().any(|e| e == "play"));
+    assert!(seen.iter().any(|e| e == "playing"));
+    assert!(seen.iter().any(|e| e == "timeupdate"));
+    assert!(seen.iter().any(|e| e == "ended"));
+}
+
+#[test]
+fn clicking_video_toggles_media_playback() {
+    let doc = parse_html(
+        r#"<video id="movie" controls width="320" height="180" src="clip.mp4"></video>"#,
+    );
+    let mut frame = crate::frame::EngineFrame::new(doc, 800.0, 600.0);
+    frame.update_frame();
+
+    let video = frame.doc.get_element_by_id("movie").unwrap();
+    let rect = frame.doc.find_webcore(video).unwrap().layout.border_rect;
+    let point = (rect.x + rect.w * 0.5, rect.y + rect.h * 0.5);
+
+    assert_eq!(frame.doc.media_paused(video), Some(true));
+    frame
+        .doc
+        .process_mouse_event(crate::dom::HtmlEventType::MouseDown, point, 0);
+    frame
+        .doc
+        .process_mouse_event(crate::dom::HtmlEventType::MouseUp, point, 0);
+    assert_eq!(frame.doc.media_paused(video), Some(false));
+    let list =
+        crate::renderer::display_list_builder::build_display_list(&frame.doc.root, 800.0, 600.0);
+    assert!(
+        list.commands.iter().any(|cmd| matches!(
+            cmd,
+            crate::renderer::display_list::PaintCmd::Text { text, .. } if text == "Pause"
+        )),
+        "media display list should reflect playing state"
+    );
+
+    frame
+        .doc
+        .process_mouse_event(crate::dom::HtmlEventType::MouseDown, point, 0);
+    frame
+        .doc
+        .process_mouse_event(crate::dom::HtmlEventType::MouseUp, point, 0);
+    assert_eq!(frame.doc.media_paused(video), Some(true));
+}
+
+#[test]
+fn clicking_video_timeline_seeks_without_toggling_playback() {
+    let doc = parse_html(
+        r#"<video id="movie" controls width="320" height="180" data-duration="100" preload="none" src="clip.mp4"></video>"#,
+    );
+    let mut frame = crate::frame::EngineFrame::new(doc, 800.0, 600.0);
+    frame.update_frame();
+
+    let video = frame.doc.get_element_by_id("movie").unwrap();
+    assert_eq!(frame.doc.media_paused(video), Some(true));
+
+    let rect = frame.doc.find_webcore(video).unwrap().layout.content_rect;
+    let timeline_w = rect.w - 116.0;
+    let point = (rect.x + 54.0 + timeline_w * 0.5, rect.y + rect.h - 17.0);
+
+    frame
+        .doc
+        .process_mouse_event(crate::dom::HtmlEventType::MouseDown, point, 0);
+    frame
+        .doc
+        .process_mouse_event(crate::dom::HtmlEventType::MouseUp, point, 0);
+
+    let time = frame.doc.media_current_time(video).unwrap();
+    assert!((49.0..=51.0).contains(&time));
+    assert_eq!(frame.doc.media_paused(video), Some(true));
+}
+
+#[test]
+fn controlled_media_is_focusable_and_keyboard_activates_playback() {
+    let mut doc =
+        parse_html(r#"<video id="movie" controls preload="none" src="clip.mp4"></video>"#);
+    let video = doc.get_element_by_id("movie").unwrap();
+    doc.focus(video);
+
+    assert_eq!(doc.media_paused(video), Some(true));
+    assert!(doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        32,
+        Some(' '),
+        false,
+        false,
+        false,
+        false
+    ));
+    assert_eq!(doc.media_paused(video), Some(false));
+    assert!(doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        13,
+        None,
+        false,
+        false,
+        false,
+        false
+    ));
+    assert_eq!(doc.media_paused(video), Some(true));
+}
+
+#[test]
+fn media_load_without_source_reports_no_source_instead_of_ready() {
+    use crate::dom::events::ListenerOptions;
+    use std::sync::{Arc, Mutex};
+
+    let mut doc = parse_html(r#"<video id="movie" preload="none"></video>"#);
+    let video = doc.get_element_by_id("movie").unwrap();
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    for event_type in ["loadstart", "error", "loadedmetadata", "canplay"] {
+        let seen = seen.clone();
+        doc.add_event_listener(
+            video,
+            event_type,
+            Box::new(move |event, _doc: &mut crate::Document| {
+                seen.lock().unwrap().push(event.event_type.clone());
+            }),
+            ListenerOptions::default(),
+        );
+    }
+
+    assert!(!doc.media_play(video));
+    assert_eq!(
+        doc.media_network_state(video),
+        Some(crate::types::MEDIA_NETWORK_NO_SOURCE)
+    );
+    assert_eq!(
+        doc.media_ready_state(video),
+        Some(crate::types::MEDIA_HAVE_NOTHING)
+    );
+    assert_eq!(doc.media_paused(video), Some(true));
+    assert_eq!(
+        seen.lock().unwrap().as_slice(),
+        &["loadstart".to_string(), "error".to_string()]
+    );
+}
+
+#[test]
+fn html_media_load_selects_source_and_fires_ready_events() {
+    use crate::dom::events::ListenerOptions;
+    use std::sync::{Arc, Mutex};
+
+    let mut doc =
+        parse_html(r#"<audio id="sound" data-duration="3"><source src="tone.ogg"></audio>"#);
+    let audio = doc.get_element_by_id("sound").unwrap();
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    for event_type in [
+        "loadstart",
+        "loadedmetadata",
+        "durationchange",
+        "loadeddata",
+        "canplay",
+        "canplaythrough",
+    ] {
+        let seen = seen.clone();
+        doc.add_event_listener(
+            audio,
+            event_type,
+            Box::new(move |event, _doc: &mut crate::Document| {
+                seen.lock().unwrap().push(event.event_type.clone());
+            }),
+            ListenerOptions::default(),
+        );
+    }
+
+    assert_eq!(doc.media_current_src(audio).as_deref(), Some("tone.ogg"));
+    assert!(doc.media_load(audio));
+    assert_eq!(doc.media_duration(audio), Some(3.0));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            "loadstart",
+            "loadedmetadata",
+            "durationchange",
+            "loadeddata",
+            "canplay",
+            "canplaythrough"
+        ]
+    );
+}
+
+#[test]
+fn html_media_source_selection_uses_type_support() {
+    let doc = parse_html(
+        r#"<video id="movie">
+            <source src="clip.mov" type="video/quicktime">
+            <source src="clip.mp4" type="video/mp4; codecs=&quot;avc1.42E01E&quot;">
+        </video>"#,
+    );
+    let video = doc.get_element_by_id("movie").unwrap();
+
+    assert_eq!(doc.media_can_play_type(video, "video/quicktime"), Some(""));
+    assert_eq!(doc.media_can_play_type(video, "video/mp4"), Some("maybe"));
+    assert_eq!(doc.media_current_src(video).as_deref(), Some("clip.mp4"));
+}
+
+#[test]
+fn html_media_exposes_ready_network_and_reflected_attributes() {
+    let mut doc =
+        parse_html(r#"<video id="movie" controls loop preload="none" src="clip.mp4"></video>"#);
+    let video = doc.get_element_by_id("movie").unwrap();
+
+    assert_eq!(doc.media_controls(video), Some(true));
+    assert_eq!(doc.media_autoplay(video), Some(false));
+    assert_eq!(doc.media_loop(video), Some(true));
+    assert_eq!(doc.media_preload(video).as_deref(), Some("none"));
+    assert_eq!(
+        doc.media_network_state(video),
+        Some(crate::types::MEDIA_NETWORK_IDLE)
+    );
+    assert_eq!(
+        doc.media_ready_state(video),
+        Some(crate::types::MEDIA_HAVE_NOTHING)
+    );
+
+    assert!(doc.media_load(video));
+    assert_eq!(
+        doc.media_ready_state(video),
+        Some(crate::types::MEDIA_HAVE_ENOUGH_DATA)
+    );
+}
+
+#[test]
+fn html_media_text_tracks_are_discovered_from_track_children() {
+    let doc = parse_html(
+        r#"<video id="movie">
+             <track kind="captions" label="English CC" srclang="en" src="captions.vtt" default>
+             <track kind="bogus" label="Fallback" src="fallback.vtt">
+           </video>"#,
+    );
+    let video = doc.get_element_by_id("movie").unwrap();
+    let tracks = doc.media_text_tracks(video).unwrap();
+
+    assert_eq!(tracks.len(), 2);
+    assert_eq!(tracks[0].kind, "captions");
+    assert_eq!(tracks[0].label, "English CC");
+    assert_eq!(tracks[0].language, "en");
+    assert_eq!(tracks[0].src, "captions.vtt");
+    assert!(tracks[0].default);
+    assert_eq!(tracks[1].kind, "subtitles");
+    assert_eq!(tracks[1].src, "fallback.vtt");
+}
+
+#[test]
+fn html_media_autoplay_initializes_playback_state_after_parse() {
+    let mut doc = parse_html(
+        r#"<video id="movie" autoplay loop preload="none" src="clip.mp4" data-duration="8"></video>"#,
+    );
+    let video = doc.get_element_by_id("movie").unwrap();
+
+    assert_eq!(doc.media_autoplay(video), Some(true));
+    assert_eq!(doc.media_paused(video), Some(false));
+    assert_eq!(
+        doc.media_ready_state(video),
+        Some(crate::types::MEDIA_HAVE_ENOUGH_DATA)
+    );
+    assert!(doc
+        .media_states
+        .get(&video)
+        .is_some_and(|s| s.metadata_loaded));
+}
+
+#[test]
+fn html_media_playback_rate_and_loop_affect_time_progression() {
+    use std::time::{Duration, Instant};
+
+    let mut doc = parse_html(r#"<video id="movie" loop data-duration="1" src="clip.mp4"></video>"#);
+    let video = doc.get_element_by_id("movie").unwrap();
+
+    assert_eq!(doc.media_playback_rate(video), Some(1.0));
+    assert!(doc.media_set_playback_rate(video, 2.0));
+    assert_eq!(doc.media_playback_rate(video), Some(2.0));
+    assert!(doc.media_play(video));
+
+    let start = Instant::now();
+    doc.media_states.get_mut(&video).unwrap().last_tick = Some(start);
+    assert!(doc.tick_media(start + Duration::from_millis(750)));
+    assert_eq!(doc.media_ended(video), Some(false));
+    assert!(doc.media_current_time(video).unwrap() < 1.0);
+}
+
+#[test]
+fn html_media_volume_muted_and_playback_rate_are_stateful() {
+    let mut doc = parse_html(r#"<audio id="sound" src="tone.ogg"></audio>"#);
+    let audio = doc.get_element_by_id("sound").unwrap();
+
+    assert_eq!(doc.media_volume(audio), Some(1.0));
+    assert!(doc.media_set_volume(audio, 0.25));
+    assert_eq!(doc.media_volume(audio), Some(0.25));
+    assert!(doc.media_set_volume(audio, 3.0));
+    assert_eq!(doc.media_volume(audio), Some(1.0));
+
+    assert_eq!(doc.media_muted(audio), Some(false));
+    assert!(doc.media_set_muted(audio, true));
+    assert_eq!(doc.media_muted(audio), Some(true));
+
+    assert!(!doc.media_set_playback_rate(audio, 0.0));
+    assert!(doc.media_set_playback_rate(audio, 1.5));
+    assert_eq!(doc.media_playback_rate(audio), Some(1.5));
+}
+
+#[test]
+fn html_media_eventbase_starts_svg_animation_by_dom_id() {
+    let mut doc = parse_html(
+        r##"
+        <video id="movie" data-duration="5" src="clip.mp4"></video>
+        <svg width="20" height="20">
+          <rect id="box" x="0" y="0" width="10" height="10">
+            <animate id="move" attributeName="x" from="0" to="10" begin="movie.play" dur="1s"/>
+          </rect>
+        </svg>
+        "##,
+    );
+    let video = doc.get_element_by_id("movie").unwrap();
+    assert!(doc.media_play(video));
+
+    let svg_root = doc.query_selector("svg").unwrap();
+    let root = doc.find_webcore(svg_root).unwrap();
+    assert_eq!(root.svg_animation_controls.len(), 1);
+    assert_eq!(root.svg_animation_controls[0].0, vec![0, 0]);
+    assert_eq!(root.svg_animation_controls[0].1, "begin");
+}
+
+#[test]
+fn non_svg_dispatch_eventbase_starts_svg_animation_by_dom_id() {
+    let mut doc = parse_html(
+        r##"
+        <button id="go">go</button>
+        <svg width="20" height="20">
+          <rect id="box" x="0" y="0" width="10" height="10">
+            <animate id="move" attributeName="x" from="0" to="10" begin="go.click" dur="1s"/>
+          </rect>
+        </svg>
+        "##,
+    );
+    let button = doc.get_element_by_id("go").unwrap();
+    let mut event = crate::dom::events::DomEvent::new("click", button);
+    doc.dispatch_event(&mut event);
+
+    let svg_root = doc.query_selector("svg").unwrap();
+    let root = doc.find_webcore(svg_root).unwrap();
+    assert_eq!(root.svg_animation_controls.len(), 1);
+    assert_eq!(root.svg_animation_controls[0].0, vec![0, 0]);
+    assert_eq!(root.svg_animation_controls[0].1, "begin");
+}
+
+#[test]
 fn svg_click_event_starts_matching_smil_animation() {
     let mut doc = parse_html(
         r#"<svg id="icon" viewBox="0 0 10 10">
@@ -2390,4 +2886,97 @@ fn svg_pointer_and_mouse_edge_events_start_matching_smil_animation() {
     assert_eq!(root.svg_animation_controls.len(), 2);
     assert_eq!(root.svg_animation_controls[0].0, vec![0, 0]);
     assert_eq!(root.svg_animation_controls[1].0, vec![0, 1]);
+}
+
+fn tiny_animated_gif() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+        encoder
+            .set_repeat(image::codecs::gif::Repeat::Infinite)
+            .unwrap();
+        let red = image::RgbaImage::from_raw(1, 1, vec![255, 0, 0, 255]).unwrap();
+        let blue = image::RgbaImage::from_raw(1, 1, vec![0, 0, 255, 255]).unwrap();
+        encoder
+            .encode_frame(image::Frame::from_parts(
+                red,
+                0,
+                0,
+                image::Delay::from_numer_denom_ms(20, 1),
+            ))
+            .unwrap();
+        encoder
+            .encode_frame(image::Frame::from_parts(
+                blue,
+                0,
+                0,
+                image::Delay::from_numer_denom_ms(20, 1),
+            ))
+            .unwrap();
+    }
+    bytes
+}
+
+#[test]
+fn gif_decode_preserves_animation_frames() {
+    let decoded = crate::html::decode_image_bytes_ex(&tiny_animated_gif()).unwrap();
+    let crate::html::DecodedImage::Animated(animated) = decoded else {
+        panic!("animated GIF should decode as animated image");
+    };
+    assert_eq!((animated.width, animated.height), (1, 1));
+    assert_eq!(animated.frames.len(), 2);
+    assert_eq!(&animated.frames[0].pixels[..4], &[255, 0, 0, 255]);
+    assert_eq!(&animated.frames[1].pixels[..4], &[0, 0, 255, 255]);
+}
+
+#[test]
+fn animated_image_tick_advances_rendered_pixels_without_layout() {
+    let decoded = crate::html::decode_image_bytes_ex(&tiny_animated_gif()).unwrap();
+    let mut node = crate::types::WebCore::new("img");
+    crate::html::set_decoded_image_on_node(&mut node, decoded);
+    node.animated_image_last_tick = Some(std::time::Instant::now());
+
+    let mut doc = crate::types::Document::new();
+    doc.root.children.push(node);
+    let start_pixels = doc.root.children[0].image_data.clone().unwrap();
+    let now = doc.root.children[0].animated_image_last_tick.unwrap()
+        + std::time::Duration::from_millis(25);
+
+    assert!(doc.tick_animated_images(now));
+    let next_pixels = doc.root.children[0].image_data.clone().unwrap();
+    assert_ne!(&start_pixels[..4], &next_pixels[..4]);
+    assert_eq!(&next_pixels[..4], &[0, 0, 255, 255]);
+    assert!(doc.has_animated_images());
+    assert!(!doc.needs_animation_frame);
+}
+
+#[test]
+fn async_animated_image_install_marks_intrinsic_layout_dirty() {
+    let decoded = crate::html::decode_image_bytes_ex(&tiny_animated_gif()).unwrap();
+    let mut doc = crate::types::Document::new();
+    doc.root.children.push(crate::types::WebCore::new("img"));
+    doc.root.layout.layout_dirty = false;
+    doc.root.layout.intrinsic_dirty = false;
+    doc.root.has_dirty_layout_descendant = false;
+    doc.root.children[0].layout.layout_dirty = false;
+    doc.root.children[0].layout.intrinsic_dirty = false;
+    doc.root.children[0].has_dirty_layout_descendant = false;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send((vec![0], crate::types::PendingImageTarget::Element, decoded))
+        .unwrap();
+    doc.pending_images = Some(rx);
+
+    assert!(doc.poll_pending_images());
+    assert_eq!(
+        (
+            doc.root.children[0].image_width,
+            doc.root.children[0].image_height
+        ),
+        (1, 1)
+    );
+    assert!(doc.root.children[0].layout.layout_dirty);
+    assert!(doc.root.children[0].layout.intrinsic_dirty);
+    assert!(doc.root.has_dirty_layout_descendant);
+    assert!(doc.root.layout.intrinsic_dirty);
 }

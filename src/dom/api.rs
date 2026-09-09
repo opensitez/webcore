@@ -971,7 +971,9 @@ impl Document {
     /// only the user agent creates trusted events (DOM §2.2).
     pub fn dispatch_event(&mut self, event: &mut crate::dom::events::DomEvent) -> bool {
         event.is_trusted = false;
-        self.svg_trigger_event(event.target, event.event_type.as_str());
+        if !self.svg_trigger_event(event.target, event.event_type.as_str()) {
+            self.svg_trigger_event_from_dom_id(event.target, event.event_type.as_str());
+        }
         // `dispatch_on_tree` only READS the tree, but `event_targets` is a
         // field of the same struct — so the path is collected first and the
         // dispatch runs against it, keeping the borrows apart.
@@ -2710,6 +2712,53 @@ impl Document {
         self.push_svg_animation_control(id, "end", offset_s)
     }
 
+    /// SVGAnimationElement.targetElement.
+    pub fn svg_animation_target_element(&self, id: u32) -> Option<u32> {
+        let animation_path = self
+            .find_webcore(id)
+            .filter(|node| is_svg_animation_dom_tag(&node.tag))
+            .and_then(|node| node.svg_tree_path.clone())?;
+        let svg_root = find_svg_owner_for_node(&self.root, id)?;
+        let doc = svg_root.svg_document.as_ref()?;
+        let target_path =
+            crate::svg::animation::animation_target_path_for_path(doc, &animation_path)?;
+        find_projected_svg_node_id_for_path(svg_root, &target_path)
+    }
+
+    /// SVGAnimationElement.getStartTime().
+    pub fn svg_animation_start_time(&self, id: u32) -> Option<f32> {
+        let animation_path = self
+            .find_webcore(id)
+            .filter(|node| is_svg_animation_dom_tag(&node.tag))
+            .and_then(|node| node.svg_tree_path.clone())?;
+        let svg_root = find_svg_owner_for_node(&self.root, id)?;
+        let doc = svg_root.svg_document.as_ref()?;
+        let elapsed = svg_animation_elapsed_seconds(svg_root);
+        crate::svg::animation::animation_start_seconds_for_path(
+            doc,
+            &animation_path,
+            elapsed,
+            &svg_root.svg_animation_controls,
+        )
+    }
+
+    /// SVGAnimationElement.getCurrentTime().
+    pub fn svg_animation_current_time(&self, id: u32) -> Option<f32> {
+        let svg_root = find_svg_owner_for_node(&self.root, id)?;
+        Some(svg_animation_elapsed_seconds(svg_root))
+    }
+
+    /// SVGAnimationElement.getSimpleDuration().
+    pub fn svg_animation_simple_duration(&self, id: u32) -> Option<f32> {
+        let animation_path = self
+            .find_webcore(id)
+            .filter(|node| is_svg_animation_dom_tag(&node.tag))
+            .and_then(|node| node.svg_tree_path.clone())?;
+        let svg_root = find_svg_owner_for_node(&self.root, id)?;
+        let doc = svg_root.svg_document.as_ref()?;
+        crate::svg::animation::animation_simple_duration_seconds_for_path(doc, &animation_path)
+    }
+
     fn push_svg_animation_control(&mut self, id: u32, kind: &str, offset_s: f32) -> bool {
         let Some(animation_path) = self
             .find_webcore(id)
@@ -2761,6 +2810,56 @@ impl Document {
         }
         svg_root.svg_animation_controls.extend(controls);
         true
+    }
+
+    /// Queue SVG eventbase instance times for DOM events fired by non-SVG nodes.
+    pub(crate) fn svg_trigger_event_from_dom_id(
+        &mut self,
+        target_id: u32,
+        event_name: &str,
+    ) -> bool {
+        let Some(event_target_id) = self.get_attribute(target_id, "id") else {
+            return false;
+        };
+        if event_target_id.is_empty() {
+            return false;
+        }
+
+        fn collect_svg_roots(node: &WebCore, out: &mut Vec<u32>) {
+            if node.svg_document.is_some() {
+                out.push(node.node_id);
+            }
+            for child in &node.children {
+                collect_svg_roots(child, out);
+            }
+        }
+
+        let mut svg_root_ids = Vec::new();
+        collect_svg_roots(&self.root, &mut svg_root_ids);
+        let now = std::time::Instant::now();
+        let mut changed = false;
+        for svg_root_id in svg_root_ids {
+            let Some(svg_root) = self.find_webcore_mut(svg_root_id) else {
+                continue;
+            };
+            let Some(doc) = svg_root.svg_document.clone() else {
+                continue;
+            };
+            let start = *svg_root.svg_animation_start_time.get_or_insert(now);
+            let elapsed = now.duration_since(start).as_secs_f32();
+            let controls = crate::svg::animation::animation_controls_for_external_event_id(
+                &doc,
+                &event_target_id,
+                event_name,
+                elapsed,
+            );
+            if controls.is_empty() {
+                continue;
+            }
+            svg_root.svg_animation_controls.extend(controls);
+            changed = true;
+        }
+        changed
     }
 
     /// Queue SVG eventbase instance times for every projected SVG node.
@@ -2986,6 +3085,18 @@ fn is_svg_animation_dom_tag(tag: &str) -> bool {
     )
 }
 
+fn find_svg_owner_for_node(node: &WebCore, id: u32) -> Option<&WebCore> {
+    if node.svg_document.is_some() && webcore_contains_node_id(node, id) {
+        return Some(node);
+    }
+    for child in &node.children {
+        if let Some(found) = find_svg_owner_for_node(child, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn find_svg_owner_for_node_mut(node: &mut WebCore, id: u32) -> Option<&mut WebCore> {
     if node.svg_document.is_some() && webcore_contains_node_id(node, id) {
         return Some(node);
@@ -3018,6 +3129,36 @@ fn webcore_contains_node_id(node: &WebCore, id: u32) -> bool {
     node.children
         .iter()
         .any(|child| webcore_contains_node_id(child, id))
+}
+
+fn find_projected_svg_node_id_for_path(node: &WebCore, path: &[usize]) -> Option<u32> {
+    if node
+        .svg_tree_path
+        .as_deref()
+        .is_some_and(|found| found == path)
+    {
+        return Some(node.node_id);
+    }
+    if let Some(shadow) = &node.shadow_root {
+        for child in &shadow.children {
+            if let Some(found) = find_projected_svg_node_id_for_path(child, path) {
+                return Some(found);
+            }
+        }
+    }
+    for child in &node.children {
+        if let Some(found) = find_projected_svg_node_id_for_path(child, path) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn svg_animation_elapsed_seconds(svg_root: &WebCore) -> f32 {
+    svg_root
+        .svg_animation_start_time
+        .map(|start| start.elapsed().as_secs_f32())
+        .unwrap_or(0.0)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

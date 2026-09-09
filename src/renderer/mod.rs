@@ -13,6 +13,7 @@ use cosmic_text::{
 };
 use tiny_skia::{FillRule, Mask, Paint, PathBuilder, Pixmap, Rect as SkRect, Stroke, Transform};
 use winit::event::{TouchPhase, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::Key;
 
 pub struct Renderer {
@@ -79,6 +80,66 @@ impl Renderer {
 
     pub fn invalidate_display_list(&mut self) {
         self.display_list_dirty = true;
+    }
+
+    /// Run browser-owned idle work for a document and configure the next event
+    /// loop wakeup. Browser shells should call this from `about_to_wait` instead
+    /// of scheduling individual engine features themselves.
+    pub fn drive_document_idle(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        doc: Option<&mut Document>,
+        viewport_w: f32,
+        viewport_h: f32,
+    ) -> bool {
+        let Some(doc) = doc else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return false;
+        };
+
+        let mut needs_redraw = false;
+        let mut needs_relayout = false;
+
+        if doc.editor.has_focus && doc.editor.blink_update() {
+            needs_redraw = true;
+        }
+        if doc.poll_pending_images() {
+            needs_relayout = true;
+        }
+        if self.layout_engine().poll_pending_fonts() {
+            self.layout_engine().invalidate_cascade();
+            needs_relayout = true;
+        }
+        if needs_relayout {
+            let engine = self.layout_engine();
+            engine.viewport_h = viewport_h;
+            engine.layout(doc, viewport_w);
+            needs_redraw = true;
+        }
+        if doc.tick_animated_images(std::time::Instant::now()) {
+            self.invalidate_display_list();
+            needs_redraw = true;
+        }
+
+        let has_timed_work = doc.editor.has_focus
+            || doc.needs_animation_frame
+            || !doc.active_animations.is_empty()
+            || !doc.transition_states.is_empty()
+            || doc.has_animated_images()
+            || doc.pending_images.is_some()
+            || self.layout_engine().has_pending_fonts();
+
+        if has_timed_work {
+            let mut deadline = std::time::Instant::now() + std::time::Duration::from_millis(16);
+            if doc.editor.has_focus {
+                deadline = deadline.min(doc.editor.next_blink_deadline());
+            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
+
+        needs_redraw
     }
 
     #[cfg(test)]
@@ -438,6 +499,31 @@ impl Renderer {
             Some(self),
         );
         // Sync engine state so subsequent layout() calls use the right viewport
+        let engine = self.layout_engine();
+        engine.viewport_h = viewport_height;
+        doc
+    }
+
+    pub fn load_html_with_base_and_stylesheet_loader(
+        &mut self,
+        html: &str,
+        base_url: &str,
+        viewport_width: f32,
+        viewport_height: f32,
+        stylesheet_loader: std::sync::Arc<
+            dyn Fn(&str) -> Result<String, String> + Send + Sync + 'static,
+        >,
+    ) -> crate::Document {
+        let registry = self.component_registry.clone();
+        let doc = crate::load_html_reusing_with_stylesheet_loader(
+            html,
+            base_url,
+            viewport_width,
+            viewport_height,
+            registry,
+            Some(self),
+            Some(stylesheet_loader),
+        );
         let engine = self.layout_engine();
         engine.viewport_h = viewport_height;
         doc

@@ -56,6 +56,15 @@ pub struct WebCore {
     pub image_data: Option<std::sync::Arc<Vec<u8>>>,
     pub image_width: u32,
     pub image_height: u32,
+    pub animated_image: Option<crate::html::AnimatedImage>,
+    pub animated_image_frame: usize,
+    pub animated_image_last_tick: Option<std::time::Instant>,
+
+    // Render-facing HTML media state mirrored from Document.media_states.
+    pub media_current_time: f32,
+    pub media_duration: Option<f32>,
+    pub media_paused: bool,
+    pub media_ended: bool,
 
     // Background image pixel data (RGBA8, row-major)
     pub bg_image_data: Option<std::sync::Arc<Vec<u8>>>,

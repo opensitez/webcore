@@ -193,6 +193,10 @@ impl EngineFrame {
         }
         self.engine.poll_pending_fonts();
 
+        if self.doc.tick_animated_images(std::time::Instant::now()) {
+            self.needs_paint = true;
+        }
+
         // 2. Check if hover changed (set by process_mouse_event)
         if self.doc.hover_changed {
             self.needs_style = true;
@@ -255,6 +259,7 @@ impl EngineFrame {
             || self.needs_layout
             || self.doc.hover_changed
             || self.doc.needs_animation_frame
+            || self.doc.has_animated_images()
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -775,6 +780,7 @@ impl EngineFrame {
         self.doc.needs_animation_frame
             || !self.doc.active_animations.is_empty()
             || !self.doc.transition_states.is_empty()
+            || self.doc.has_animated_images()
     }
 
     // ═══════════════════════════════════════════════════════════════════════════

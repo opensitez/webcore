@@ -1294,9 +1294,16 @@ pub(crate) fn apply_cascade_inner(
     // Text and comment nodes are not elements — they inherit from their
     // parent but must never match CSS selectors (including `*`).
     if !root.is_element() {
+        let saved_display = root.style.display;
         if let Some(p) = parent_style {
             std::sync::Arc::make_mut(&mut root.style).inherit_from(p);
         }
+        let display = if root.tag == "#text" {
+            Display::Inline
+        } else {
+            saved_display
+        };
+        std::sync::Arc::make_mut(&mut root.style).display = display;
         return;
     }
 
@@ -1325,7 +1332,6 @@ pub(crate) fn apply_cascade_inner(
         style.inherit_from(p);
         style.relative_font_weight_base = Some(p.font_weight);
     }
-
     // Selector matching — the SAME function the parallel pass runs, so a
     // precomputed result and an inline one can never disagree.
     let precomputed_here = precomputed

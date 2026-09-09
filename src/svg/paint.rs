@@ -16,6 +16,7 @@ use crate::css::{
     parse_color, parse_stylesheet, resolve_var_references, AttrOp, Combinator, CssRule,
     CssSelector, Declarations, SelectorPart,
 };
+use crate::svg::animation::{WEBCORE_ANIMATED_ATTR_NS, WEBCORE_ANIMATED_ATTR_PREFIX};
 use crate::svg::condition;
 use crate::types::{Color, Direction, Overflow, WebCore};
 use std::borrow::Cow;
@@ -2024,15 +2025,14 @@ fn state_for_node(
     for (_, _, rule) in &matches {
         apply_declarations(&mut state, &rule.important_declarations);
     }
-    if ancestors.is_empty() {
-        if let Some(dom) = dom_node {
-            apply_dom_computed_style(&mut state, node, dom);
-        }
+    if let Some(dom) = dom_node {
+        apply_dom_computed_style(&mut state, node, dom, ancestors.is_empty());
     }
+    apply_animated_paint_attrs(&mut state, node);
     state
 }
 
-fn apply_dom_computed_style(state: &mut PaintState, svg: &SvgNode, node: &WebCore) {
+fn apply_dom_computed_style(state: &mut PaintState, svg: &SvgNode, node: &WebCore, is_root: bool) {
     let style = node.style.as_ref();
     let font_px = style.font_size_px(state.font_size, 16.0);
     state.visible = state.visible && style.visibility;
@@ -2040,15 +2040,17 @@ fn apply_dom_computed_style(state: &mut PaintState, svg: &SvgNode, node: &WebCor
     if let Some(fill) = style.svg_fill {
         if fill != Color::BLACK || svg_has_resolved_paint_attr(svg, "fill") {
             state.fill = Some(PaintSource::Color(fill));
+        } else if is_root {
+            state.fill = None;
         }
-    } else {
+    } else if is_root {
         state.fill = None;
     }
     if let Some(stroke) = style.svg_stroke {
         if stroke != Color::BLACK || svg_has_resolved_paint_attr(svg, "stroke") {
             state.stroke = Some(PaintSource::Color(stroke));
         }
-    } else {
+    } else if is_root {
         state.stroke = None;
     }
     state.custom_props = style.custom_props.clone();
@@ -2095,6 +2097,18 @@ fn svg_has_resolved_paint_attr(node: &SvgNode, name: &str) -> bool {
                 && !value.trim().starts_with("url(")
         })
     })
+}
+
+fn apply_animated_paint_attrs(state: &mut PaintState, node: &SvgNode) {
+    for marker in node.attributes.iter().filter(|attr| {
+        attr.namespace.as_deref() == Some(WEBCORE_ANIMATED_ATTR_NS)
+            && attr.name.starts_with(WEBCORE_ANIMATED_ATTR_PREFIX)
+    }) {
+        let name = &marker.name[WEBCORE_ANIMATED_ATTR_PREFIX.len()..];
+        if let Some(value) = node.attr(name).map(str::to_string) {
+            apply_paint_attr(state, name, &value);
+        }
+    }
 }
 
 fn svg_dom_child(parent: &WebCore, svg_child_index: usize) -> Option<&WebCore> {

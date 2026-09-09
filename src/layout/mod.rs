@@ -1249,13 +1249,17 @@ impl LayoutEngine {
 
     /// Intrinsic dimensions of a replaced element: the decoded image/canvas
     /// bitmap, else the `width`/`height` content attributes, else an `<svg>`
-    /// viewBox. `None` when the box is not replaced or its natural size is
-    /// unknown.
+    /// viewBox. Media elements use their HTML fallback dimensions until a
+    /// decoder can report stream metadata. `None` when the box is not replaced
+    /// or its natural size is unknown.
     ///
     /// Layout and the intrinsic-width walk both size replaced boxes, so they
     /// read the natural size from here and cannot disagree about it.
     pub(crate) fn intrinsic_dimensions(&self, node: &WebCore) -> Option<(f32, f32)> {
-        if node.is_image_element() || node.tag == "canvas" {
+        if node.is_image_element()
+            || node.tag == "canvas"
+            || matches!(node.tag.as_str(), "audio" | "video")
+        {
             if node.image_width > 0 && node.image_height > 0 {
                 return Some((node.image_width as f32, node.image_height as f32));
             }
@@ -1270,6 +1274,16 @@ impl LayoutEngine {
                     .unwrap_or(0.0)
             };
             let (attr_w, attr_h) = (attr("width"), attr("height"));
+            if node.tag == "video" {
+                let w = if attr_w > 0.0 { attr_w } else { 300.0 };
+                let h = if attr_h > 0.0 { attr_h } else { 150.0 };
+                return Some((w, h));
+            }
+            if node.tag == "audio" {
+                let w = if attr_w > 0.0 { attr_w } else { 300.0 };
+                let h = if attr_h > 0.0 { attr_h } else { 54.0 };
+                return Some((w, h));
+            }
             if node.tag == "canvas" {
                 let w = if attr_w > 0.0 { attr_w } else { 300.0 };
                 let h = if attr_h > 0.0 { attr_h } else { 150.0 };
@@ -2070,10 +2084,10 @@ impl LayoutEngine {
         parent_font_px: f32,
         root_font_px: f32,
     ) -> f32 {
-        if content.is_empty() {
-            return 0.0;
-        }
         let Some(style) = style else {
+            if content.is_empty() {
+                return 0.0;
+            }
             return self.measure_text_cached(
                 content,
                 parent_font_px,
@@ -2086,6 +2100,8 @@ impl LayoutEngine {
         let rb = self.res_box(style, font_px, 0.0, root_font_px);
         let content_w = if !style.width.is_auto() && !matches!(style.width, CssLength::Percent(_)) {
             self.res_len(&style.width, font_px, 0.0, root_font_px)
+        } else if content.is_empty() {
+            0.0
         } else {
             self.measure_text_cached(
                 content,
@@ -2411,6 +2427,7 @@ impl LayoutEngine {
         if svg_animations_running {
             doc.needs_animation_frame = true;
         }
+        doc.tick_media(now);
         doc.tick_smooth_scrolls(now);
         if !doc.animation_overrides.is_empty() {
             let overrides = doc.animation_overrides.clone();

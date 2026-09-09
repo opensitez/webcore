@@ -72,6 +72,69 @@ fn collapsible_space_across_inline_boundaries_is_not_measured_or_painted_twice()
 }
 
 #[test]
+fn text_nodes_inside_inline_block_controls_remain_inline() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        r#"<style>
+             body { margin: 0; font: 14px/21px Arial; }
+             button { display: inline-block; padding: 6px 12px; white-space: nowrap; }
+             i { display: inline-block; width: 14px; height: 16px; vertical-align: middle; }
+             i::before { content: "X"; }
+             button::after {
+               display: inline-block;
+               width: 0;
+               height: 0;
+               margin-left: .255em;
+               vertical-align: .255em;
+               content: "";
+               border-top: .3em solid;
+               border-right: .3em solid transparent;
+               border-bottom: 0;
+               border-left: .3em solid transparent;
+             }
+           </style>
+           <button id="lang">
+             <i></i>
+             Français
+           </button>"#,
+        400.0,
+    );
+    let button = d.get_element_by_id("lang").unwrap();
+    let button_rect = d.get_bounding_client_rect(button).unwrap();
+    assert!(
+        button_rect.h < 40.0,
+        "inline icon plus text should share one line, got height {}",
+        button_rect.h
+    );
+    assert!(
+        button_rect.w > 90.0,
+        "inline-block shrink-to-fit width should include icon plus text, got {}",
+        button_rect.w
+    );
+
+    let node = d.find_webcore(button).unwrap();
+    let text = node
+        .children
+        .iter()
+        .find(|child| child.tag == "#text")
+        .expect("button text node");
+    assert_eq!(text.style.display, Display::Inline);
+
+    let flat = crate::layout::inline_layout::collect_flat_text(node);
+    assert!(
+        !flat.contains('X'),
+        "generated content inside an atomic inline-block child must not leak into the parent text run"
+    );
+    assert!(flat.contains("Français"));
+    let line = node.layout.line_cache.first().expect("button line");
+    assert!(
+        line.text_x_offset > 13.0,
+        "visible text should be offset past the atomic icon, got {}",
+        line.text_x_offset
+    );
+}
+
+#[test]
 fn absolute_dropdown_wrapper_does_not_raise_flex_nav_item() {
     let doc = parse_and_layout(
         r#"<style>

@@ -61,6 +61,7 @@ pub mod markdown;
 pub mod platform;
 pub mod renderer;
 pub mod svg;
+pub mod video;
 pub mod widgets;
 /// WHATWG HTML §7 — browsing contexts and the `Window` interface.
 pub mod window;
@@ -156,6 +157,28 @@ pub fn load_html_reusing(
     registry: types::ComponentRegistry,
     reuse: Option<&mut Renderer>,
 ) -> Document {
+    load_html_reusing_with_stylesheet_loader(
+        html,
+        base_url,
+        viewport_width,
+        viewport_height,
+        registry,
+        reuse,
+        None,
+    )
+}
+
+pub fn load_html_reusing_with_stylesheet_loader(
+    html: &str,
+    base_url: &str,
+    viewport_width: f32,
+    viewport_height: f32,
+    registry: types::ComponentRegistry,
+    reuse: Option<&mut Renderer>,
+    stylesheet_loader: Option<
+        std::sync::Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync + 'static>,
+    >,
+) -> Document {
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
         mpsc, Arc,
@@ -167,36 +190,39 @@ pub fn load_html_reusing(
     let css_idx = Arc::new(AtomicUsize::new(0));
     let css_idx2 = css_idx.clone();
     let base_owned = base_url.to_string();
+    let stylesheet_loader = stylesheet_loader.unwrap_or_else(|| Arc::new(|url| fetch_text(url)));
 
     let t0 = std::time::Instant::now();
-    let mut doc = parse_html_with_hooks(html, base_url, move |tag, attrs| {
-        if tag == "link"
-            && attrs
-                .get("rel")
-                .map(|s| s.eq_ignore_ascii_case("stylesheet"))
-                .unwrap_or(false)
-            && !attrs.contains_key("disabled")
-        {
-            if let Some(href) = attrs.get("href") {
-                let abs = resolve_css_url(&base_owned, href);
-                let media = attrs.get("media").cloned().unwrap_or_default();
-                eprintln!("  CSS fetch: {abs}");
-                let sender = css_tx2.clone();
-                let idx = css_idx2.fetch_add(1, Ordering::SeqCst);
-                std::thread::spawn(move || {
-                    let t = std::time::Instant::now();
-                    let text = fetch_text(&abs).unwrap_or_default();
-                    eprintln!(
-                        "  CSS done:  {} ({:.0}ms, {} bytes)",
-                        abs,
-                        t.elapsed().as_millis(),
-                        text.len()
-                    );
-                    let _ = sender.send((idx, abs, text, media));
-                });
+    let mut doc =
+        crate::html::parse_html_with_hooks_defer_cascade(html, base_url, move |tag, attrs| {
+            if tag == "link"
+                && attrs
+                    .get("rel")
+                    .map(|s| s.eq_ignore_ascii_case("stylesheet"))
+                    .unwrap_or(false)
+                && !attrs.contains_key("disabled")
+            {
+                if let Some(href) = attrs.get("href") {
+                    let abs = resolve_css_url(&base_owned, href);
+                    let media = attrs.get("media").cloned().unwrap_or_default();
+                    eprintln!("  CSS fetch: {abs}");
+                    let sender = css_tx2.clone();
+                    let idx = css_idx2.fetch_add(1, Ordering::SeqCst);
+                    let loader = stylesheet_loader.clone();
+                    std::thread::spawn(move || {
+                        let t = std::time::Instant::now();
+                        let text = loader(&abs).unwrap_or_default();
+                        eprintln!(
+                            "  CSS done:  {} ({:.0}ms, {} bytes)",
+                            abs,
+                            t.elapsed().as_millis(),
+                            text.len()
+                        );
+                        let _ = sender.send((idx, abs, text, media));
+                    });
+                }
             }
-        }
-    });
+        });
     eprintln!("Parse: {:.0}ms", t0.elapsed().as_millis());
     drop(css_tx); // close sender so rx.iter() terminates after all threads finish
 
@@ -245,9 +271,6 @@ pub fn load_html_reusing(
     let base = doc.base_url.clone();
     html::resolve_picture_elements(&mut doc.root, &base, viewport_width, viewport_height);
 
-    // Start async image fetches (non-blocking — results arrive via poll_pending_images).
-    start_async_image_fetches(&mut doc);
-
     let t3 = std::time::Instant::now();
     let mut owned: Option<Renderer> = None;
     let renderer: &mut Renderer = match reuse {
@@ -268,6 +291,7 @@ pub fn load_html_reusing(
 
     // Post-layout: load background images (layout may re-run cascade with viewport)
     svg::load_background_images(&mut doc.root, &doc.base_url.clone());
+    start_async_image_fetches(&mut doc);
     // Fire DOMContentLoaded — listeners registered before load_html can react.
     let mut evt = dom::HtmlEvent::new(dom::HtmlEventType::DOMContentLoaded);
     evt.target = doc.root.node_id;
@@ -280,17 +304,17 @@ pub fn load_html_reusing(
 /// Walk the DOM tree, find all <img> nodes with a remote `resolved_src`,
 /// fire off parallel fetch threads, store channel on Document for async polling.
 fn start_async_image_fetches(doc: &mut types::Document) {
-    let mut pending: Vec<(Vec<usize>, String)> = Vec::new();
-    collect_remote_images(&doc.root, &mut Vec::new(), &mut pending);
+    let mut pending: Vec<(Vec<usize>, types::PendingImageTarget, String)> = Vec::new();
+    collect_remote_images(&doc.root, &doc.base_url, &mut Vec::new(), &mut pending);
     if pending.is_empty() {
         return;
     }
 
-    let (tx, rx) = std::sync::mpsc::channel::<(Vec<usize>, html::DecodedImage)>();
+    let (tx, rx) = std::sync::mpsc::channel::<types::PendingImageResult>();
     let in_flight = doc.images_in_flight.clone();
     in_flight.store(pending.len(), std::sync::atomic::Ordering::SeqCst);
 
-    for (path, url) in pending {
+    for (path, target, url) in pending {
         let sender = tx.clone();
         let counter = in_flight.clone();
         std::thread::spawn(move || {
@@ -302,7 +326,7 @@ fn start_async_image_fetches(doc: &mut types::Document) {
                 .and_then(|r| r.bytes().ok())
                 .and_then(|bytes| html::decode_image_bytes_ex(&bytes));
             if let Some(decoded) = result {
-                let _ = sender.send((path, decoded));
+                let _ = sender.send((path, target, decoded));
             }
             counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         });
@@ -312,18 +336,61 @@ fn start_async_image_fetches(doc: &mut types::Document) {
 
 fn collect_remote_images(
     node: &types::WebCore,
+    base_url: &str,
     path: &mut Vec<usize>,
-    pending: &mut Vec<(Vec<usize>, String)>,
+    pending: &mut Vec<(Vec<usize>, types::PendingImageTarget, String)>,
 ) {
-    if node.is_image_element() && node.image_data.is_none() {
-        let url = &node.resolved_src;
+    if (node.is_image_element() || node.tag == "video") && node.image_data.is_none() {
+        let resolved;
+        let url = if !node.resolved_src.is_empty() {
+            node.resolved_src.as_str()
+        } else {
+            let raw = if node.tag == "video" {
+                node.attributes.get("poster").map(|s| s.as_str())
+            } else {
+                node.attributes.get("src").map(|s| s.as_str())
+            };
+            match raw {
+                Some(raw) => {
+                    resolved = html::resolve_url(raw, base_url);
+                    resolved.as_str()
+                }
+                None => "",
+            }
+        };
         if url.starts_with("http://") || url.starts_with("https://") {
-            pending.push((path.clone(), url.clone()));
+            pending.push((
+                path.clone(),
+                types::PendingImageTarget::Element,
+                url.to_string(),
+            ));
+        }
+    }
+    if node.bg_image_data.is_none() && !node.style.background_image_url.is_empty() {
+        let resolved = html::resolve_url(&node.style.background_image_url, base_url);
+        let url = resolved.as_str();
+        if url.starts_with("http://") || url.starts_with("https://") {
+            pending.push((
+                path.clone(),
+                types::PendingImageTarget::Background,
+                url.to_string(),
+            ));
+        }
+    }
+    if node.mask_image_data.is_none() && !node.style.rare().mask_image_url.is_empty() {
+        let resolved = html::resolve_url(&node.style.rare().mask_image_url, base_url);
+        let url = resolved.as_str();
+        if url.starts_with("http://") || url.starts_with("https://") {
+            pending.push((
+                path.clone(),
+                types::PendingImageTarget::Mask,
+                url.to_string(),
+            ));
         }
     }
     for (i, child) in node.children.iter().enumerate() {
         path.push(i);
-        collect_remote_images(child, path, pending);
+        collect_remote_images(child, base_url, path, pending);
         path.pop();
     }
 }

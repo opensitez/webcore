@@ -27,6 +27,15 @@ pub struct SmoothScrollState {
     pub duration: std::time::Duration,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingImageTarget {
+    Element,
+    Background,
+    Mask,
+}
+
+pub type PendingImageResult = (Vec<usize>, PendingImageTarget, crate::html::DecodedImage);
+
 pub struct Document {
     pub root: WebCore,
     pub stylesheet: Stylesheet,
@@ -83,6 +92,8 @@ pub struct Document {
     /// The pixels stay on the element in `WebCore::image_data`; this is what
     /// persists between two calls from a page. See `canvas::CanvasSurfaces`.
     pub canvas_surfaces: crate::canvas::CanvasSurfaces,
+    /// Playback state for `<audio>` and `<video>` elements, keyed by node id.
+    pub media_states: MediaStateMap,
     /// NodeId-based event system with capture/bubble phases.
     pub event_targets: crate::dom::events::EventTargetMap,
     /// Viewport scroll position in logical pixels (managed by Renderer::render).
@@ -249,7 +260,7 @@ pub struct Document {
     // ── Async image loading ─────────────────────────────────────────────────
     /// Receiver for images arriving from background fetch threads.
     /// Each message is (node_path, decoded_rgba, width, height).
-    pub pending_images: Option<std::sync::mpsc::Receiver<(Vec<usize>, crate::html::DecodedImage)>>,
+    pub pending_images: Option<std::sync::mpsc::Receiver<PendingImageResult>>,
     /// Number of image fetches still in flight.
     pub images_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -701,6 +712,7 @@ impl Clone for Document {
             // a document starts from the default context, the same way it
             // starts with no event listeners.
             canvas_surfaces: crate::canvas::CanvasSurfaces::default(),
+            media_states: self.media_states.clone(),
             event_targets: crate::dom::events::EventTargetMap::new(), // listeners not cloned
             scroll_x: self.scroll_x,
             scroll_y: self.scroll_y,

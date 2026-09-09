@@ -33,6 +33,93 @@ fn build_full(html: &str) -> (EngineFrame, DisplayList) {
     (f, list)
 }
 
+#[test]
+fn video_with_controls_paints_media_surface() {
+    let (_frame, list) =
+        build(r#"<video id="movie" controls width="320" height="180" data-duration="75"></video>"#);
+    assert!(
+        list.commands.iter().any(|cmd| matches!(
+            cmd,
+            PaintCmd::FillRect { color, .. } if color.r == 16 && color.g == 18 && color.b == 24
+        )),
+        "video should paint a media viewport"
+    );
+    assert!(
+        list.commands.iter().any(|cmd| matches!(
+            cmd,
+            PaintCmd::Text { text, .. } if text == "Play"
+        )),
+        "video controls should paint an activation label"
+    );
+    assert!(
+        list.commands.iter().any(|cmd| matches!(
+            cmd,
+            PaintCmd::Text { text, .. } if text == "1:15"
+        )),
+        "video controls should paint the media duration"
+    );
+}
+
+#[test]
+fn autoplay_background_video_without_frame_does_not_paint_debug_label() {
+    let (_frame, list) = build(
+        r#"<video id="player-bg" autoplay muted loop width="320" height="180">
+             <source src="hero.mp4" type="video/mp4">
+           </video>"#,
+    );
+    assert!(
+        !list.commands.iter().any(|cmd| matches!(
+            cmd,
+            PaintCmd::FillRect { color, .. } if color.r == 16 && color.g == 18 && color.b == 24
+        )),
+        "uncontrolled videos without decoded pixels should not cover page fallback content"
+    );
+    assert!(
+        !list.commands.iter().any(|cmd| matches!(
+            cmd,
+            PaintCmd::Text { text, .. } if text == "No video frame"
+        )),
+        "uncontrolled videos must not expose internal no-frame placeholders"
+    );
+}
+
+#[test]
+fn video_svg_poster_paints_through_native_svg_path() {
+    let poster = "data:image/svg+xml,%3Csvg%20viewBox='0%200%2010%2010'%20xmlns='http://www.w3.org/2000/svg'%3E%3Crect%20width='10'%20height='10'%20fill='red'/%3E%3C/svg%3E";
+    let html = format!(
+        r#"<video controls width="100" height="80" poster="{}"></video>"#,
+        poster
+    );
+    let (_frame, list) = build(&html);
+    assert!(
+        list.commands.iter().any(|cmd| matches!(
+            cmd,
+            PaintCmd::Image { data: ImageRef::Owned(_, w, h), .. } if *w == 100 && *h == 80
+        )),
+        "SVG video posters should rasterize through the native SVG image path"
+    );
+}
+
+#[test]
+fn audio_with_controls_paints_compact_media_surface() {
+    let (_frame, list) =
+        build(r#"<audio id="sound" controls data-duration="9"><source src="tone.ogg"></audio>"#);
+    assert!(
+        list.commands.iter().any(|cmd| matches!(
+            cmd,
+            PaintCmd::FillRect { color, .. } if color.r == 245 && color.g == 247 && color.b == 250
+        )),
+        "audio should paint a compact media surface"
+    );
+    assert!(
+        list.commands.iter().any(|cmd| matches!(
+            cmd,
+            PaintCmd::Text { text, .. } if text == "0:09"
+        )),
+        "audio controls should paint the media duration"
+    );
+}
+
 fn count_opaque_pixels(pixmap: &tiny_skia::Pixmap, x0: u32, y0: u32, x1: u32, y1: u32) -> usize {
     let width = pixmap.width();
     let height = pixmap.height();

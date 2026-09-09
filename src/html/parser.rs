@@ -732,13 +732,15 @@ impl HtmlParser {
 
                     // <img> handling
                     if tag == "img" {
-                        // If srcset is present, pick the best URL and override src
+                        let mut load_src = node.attributes.get("src").cloned();
+                        // `srcset` selects the current image candidate without
+                        // mutating the authored `src` content attribute.
                         if let Some(srcset) = node.attributes.get("srcset").cloned() {
                             if let Some(best) = parse_srcset_url(&srcset) {
-                                node.attributes.insert("src".to_string(), best);
+                                load_src = Some(best);
                             }
                         }
-                        if let Some(src) = node.attributes.get("src").cloned() {
+                        if let Some(src) = load_src {
                             let resolved = resolve_url(&src, &self.base_url);
                             let is_remote =
                                 resolved.starts_with("http://") || resolved.starts_with("https://");
@@ -1061,17 +1063,31 @@ impl HtmlParser {
         apply_presentational_attrs(&mut node);
 
         if tag == "img" {
-            // If srcset is present, pick the best URL from it and override src
+            let mut load_src = node.attributes.get("src").cloned();
+            // `srcset` selects the current image candidate without mutating the
+            // authored `src` content attribute.
             if let Some(srcset) = node.attributes.get("srcset").cloned() {
                 if let Some(best) = parse_srcset_url(&srcset) {
-                    node.attributes.insert("src".to_string(), best);
+                    load_src = Some(best);
                 }
             }
-            if let Some(src) = node.attributes.get("src").cloned() {
+            if let Some(src) = load_src {
                 let resolved = resolve_url(&src, &self.base_url);
                 let is_remote = resolved.starts_with("http://") || resolved.starts_with("https://");
                 if !is_remote {
                     if let Some(decoded) = load_decoded_image_from_src(&src, &self.base_url) {
+                        set_decoded_image_on_node(&mut node, decoded);
+                    }
+                }
+                node.resolved_src = resolved;
+            }
+        }
+        if tag == "video" {
+            if let Some(poster) = node.attributes.get("poster").cloned() {
+                let resolved = resolve_url(&poster, &self.base_url);
+                let is_remote = resolved.starts_with("http://") || resolved.starts_with("https://");
+                if !is_remote {
+                    if let Some(decoded) = load_decoded_image_from_src(&poster, &self.base_url) {
                         set_decoded_image_on_node(&mut node, decoded);
                     }
                 }

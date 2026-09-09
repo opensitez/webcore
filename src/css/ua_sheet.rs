@@ -137,8 +137,7 @@ nobr { white-space: nowrap; }
 wbr  { display: inline; }
 br { display: inline; }
 img, svg { display: inline-block; break-inside: avoid; }
-canvas, video { display: inline-block; }
-audio { display: inline; }
+canvas, video, audio { display: inline-block; }
 iframe { display: inline-block; border: 2px inset; }
 output { display: inline; }
 table { display: table; border-collapse: separate; border-spacing: 2px; box-sizing: border-box; }

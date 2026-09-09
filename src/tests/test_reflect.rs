@@ -133,14 +133,15 @@ fn a_url_attribute_resolves_against_the_base_and_is_empty_when_absent() {
     // deliberately not in the table.
     let d = page();
     assert_eq!(s(&d, "i1", "src"), "http://example.com/dir/p.png");
-    // ⛔ A REAL defect, found here: with a `srcset`, the parser overwrites the
-    // `src` CONTENT ATTRIBUTE with the chosen candidate — so `img.src`
-    // answers the srcset URL. Chrome keeps `src` as authored and exposes the
-    // chosen one as `currentSrc`. Pinned as it behaves today.
     assert_eq!(
         s(&d, "i3", "src"),
+        "http://example.com/dir/p.png",
+        "srcset must not mutate the authored src content attribute"
+    );
+    assert_eq!(
+        d.find_webcore(el(&d, "i3")).unwrap().resolved_src,
         "http://example.com/dir/p2.png",
-        "Chrome answers .../p.png here — see architecture.md"
+        "srcset selects the current image candidate separately"
     );
     assert_eq!(s(&d, "a1", "href"), "http://example.com/dir/x.html");
     assert_eq!(s(&d, "l1", "href"), "http://example.com/dir/s.css");

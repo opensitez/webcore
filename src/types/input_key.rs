@@ -67,6 +67,14 @@ impl Document {
                 redraw = true;
             }
             if etype == crate::dom::HtmlEventType::KeyDown {
+                if self.focused_box != 0
+                    && self.is_media_element(self.focused_box)
+                    && matches!(key_code, 13 | 32)
+                {
+                    if self.media_toggle_playback(self.focused_box) {
+                        redraw = true;
+                    }
+                }
                 let key = ch
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| crate::dom::events::key_name_for_code(key_code).to_string());

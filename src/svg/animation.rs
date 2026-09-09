@@ -10,6 +10,9 @@ use crate::types::WebCore;
 use crate::types::{apply_easing, EasingFn};
 use std::collections::HashMap;
 
+pub(crate) const WEBCORE_ANIMATED_ATTR_NS: &str = "webcore";
+pub(crate) const WEBCORE_ANIMATED_ATTR_PREFIX: &str = "animated-";
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct SvgAnimationElement {
     pub kind: SvgAnimationKind,
@@ -669,6 +672,24 @@ pub(crate) fn animation_controls_for_event(
     out
 }
 
+pub(crate) fn animation_controls_for_external_event_id(
+    doc: &SvgDocument,
+    event_target_id: &str,
+    event_name: &str,
+    elapsed_s: f32,
+) -> Vec<SvgAnimationControl> {
+    let mut out = Vec::new();
+    collect_animation_external_event_controls(
+        &doc.root,
+        &mut Vec::new(),
+        event_target_id,
+        event_name,
+        elapsed_s,
+        &mut out,
+    );
+    out
+}
+
 pub(crate) fn animation_controls_for_access_key(
     doc: &SvgDocument,
     key: &str,
@@ -679,6 +700,52 @@ pub(crate) fn animation_controls_for_access_key(
     out
 }
 
+pub(crate) fn animation_start_seconds_for_path(
+    doc: &SvgDocument,
+    animation_path: &[usize],
+    elapsed_s: f32,
+    controls: &[SvgAnimationControl],
+) -> Option<f32> {
+    let node = node_at_path_ref(&doc.root, animation_path)?;
+    let anim = node.animation.as_ref()?;
+    let animation_defs = collect_animation_defs(&doc.root);
+    let animation_paths = collect_animation_def_paths(&doc.root);
+    begin_seconds_for_path(
+        anim,
+        animation_path,
+        elapsed_s,
+        &animation_defs,
+        &animation_paths,
+        controls,
+    )
+}
+
+pub(crate) fn animation_simple_duration_seconds_for_path(
+    doc: &SvgDocument,
+    animation_path: &[usize],
+) -> Option<f32> {
+    let node = node_at_path_ref(&doc.root, animation_path)?;
+    let anim = node.animation.as_ref()?;
+    duration_seconds(anim)
+}
+
+pub(crate) fn animation_target_path_for_path(
+    doc: &SvgDocument,
+    animation_path: &[usize],
+) -> Option<Vec<usize>> {
+    let node = node_at_path_ref(&doc.root, animation_path)?;
+    let anim = node.animation.as_ref()?;
+    if let Some(target_id) = anim.href.as_deref().and_then(|href| href.strip_prefix('#')) {
+        let mut id_paths = Vec::new();
+        collect_id_refs(&doc.root, &mut Vec::new(), &mut id_paths);
+        return id_paths
+            .into_iter()
+            .find(|(id, _, _)| id == target_id)
+            .map(|(_, path, _)| path);
+    }
+    (!animation_path.is_empty()).then(|| animation_path[..animation_path.len() - 1].to_vec())
+}
+
 pub(crate) fn svg_document_with_animation_overrides(
     doc: &SvgDocument,
     overrides: &[SvgAnimationOverride],
@@ -687,6 +754,7 @@ pub(crate) fn svg_document_with_animation_overrides(
     for (path, name, value) in overrides {
         if let Some(node) = node_at_path_mut(&mut doc.root, path) {
             set_attr(node, name, value);
+            mark_animated_attr(node, name);
         }
     }
     doc
@@ -884,6 +952,45 @@ fn collect_animation_event_controls(
             event_name,
             elapsed_s,
             id_paths,
+            out,
+        );
+        path.pop();
+    }
+}
+
+fn collect_animation_external_event_controls(
+    node: &SvgNode,
+    path: &mut Vec<usize>,
+    event_target_id: &str,
+    event_name: &str,
+    elapsed_s: f32,
+    out: &mut Vec<SvgAnimationControl>,
+) {
+    if let Some(anim) = &node.animation {
+        for time in &anim.begin {
+            if let SvgAnimationTime::Eventbase { id, event, offset } = time {
+                if id == event_target_id && event.eq_ignore_ascii_case(event_name) {
+                    out.push((path.clone(), "begin".to_string(), elapsed_s + offset));
+                }
+            }
+        }
+        for time in &anim.end {
+            if let SvgAnimationTime::Eventbase { id, event, offset } = time {
+                if id == event_target_id && event.eq_ignore_ascii_case(event_name) {
+                    out.push((path.clone(), "end".to_string(), elapsed_s + offset));
+                }
+            }
+        }
+    }
+
+    for (idx, child) in node.children.iter().enumerate() {
+        path.push(idx);
+        collect_animation_external_event_controls(
+            child,
+            path,
+            event_target_id,
+            event_name,
+            elapsed_s,
             out,
         );
         path.pop();
@@ -2182,6 +2289,20 @@ fn set_attr(node: &mut SvgNode, name: &str, value: &str) {
     }
 }
 
+fn mark_animated_attr(node: &mut SvgNode, name: &str) {
+    let marker = format!("{WEBCORE_ANIMATED_ATTR_PREFIX}{name}");
+    if node.attributes.iter().any(|attr| {
+        attr.namespace.as_deref() == Some(WEBCORE_ANIMATED_ATTR_NS) && attr.name == marker
+    }) {
+        return;
+    }
+    node.attributes.push(SvgAttribute {
+        namespace: Some(WEBCORE_ANIMATED_ATTR_NS.to_string()),
+        name: marker,
+        value: String::from("1"),
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2286,6 +2407,43 @@ mod tests {
                 offset: 0.0,
             })
         );
+    }
+
+    #[test]
+    fn media_duration_is_ignored_for_svg_set_animation_elements() {
+        let doc = parse_svg_document(
+            r#"<svg><rect><set attributeName="visibility" to="hidden" dur="media"/></rect></svg>"#,
+        )
+        .unwrap();
+
+        let mut running = false;
+        let sampled = sample_svg_animation_overrides(&doc, 3.0, &mut running);
+        assert!(!running);
+        assert_eq!(
+            sampled,
+            vec![(vec![0], "visibility".to_string(), "hidden".to_string())]
+        );
+    }
+
+    #[test]
+    fn media_min_and_max_are_ignored_for_svg_animation_elements() {
+        let min_doc = parse_svg_document(
+            r#"<svg><rect><set attributeName="visibility" to="hidden" dur="1s" min="media"/></rect></svg>"#,
+        )
+        .unwrap();
+        let mut running = false;
+        let after_min = sample_svg_animation_overrides(&min_doc, 1.5, &mut running);
+        assert!(!running);
+        assert!(after_min.is_empty());
+
+        let max_doc = parse_svg_document(
+            r#"<svg><rect><animate attributeName="x" values="0;10" dur="1s" repeatCount="3" max="media"/></rect></svg>"#,
+        )
+        .unwrap();
+        running = false;
+        let sampled = sample_svg_animation_overrides(&max_doc, 2.5, &mut running);
+        assert!(running);
+        assert_eq!(sampled, vec![(vec![0], "x".to_string(), "5".to_string())]);
     }
 
     #[test]

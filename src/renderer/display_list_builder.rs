@@ -944,7 +944,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         // ── (o) Form elements (content only — box decoration handled by CSS steps above)
         build_form_element(node, list, eff_sx, eff_sy);
 
-        // ── (p) Image / SVG / Canvas ─────────────────────────────────────────
+        // ── (p) Image / SVG / Canvas / Media ────────────────────────────────
         //
         // `<canvas>` joins `<img>` here because by this point it IS one: a canvas
         // keeps its bitmap in `image_data` exactly as a decoded image does, and
@@ -952,6 +952,10 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         // replay reads. Everything the 2D context drew is already in those bytes,
         // so painting a canvas is painting its bitmap and nothing else — which is
         // also what the spec says a canvas is.
+        if node.tag == "video" || node.tag == "audio" {
+            crate::video::build_media_element(node, list, eff_sx, eff_sy);
+        }
+
         if node.is_image_element() || node.tag == "svg" || node.tag == "canvas" {
             if let Some(ref data) = node.image_data {
                 if node.image_width > 0 && node.image_height > 0 {
@@ -1507,12 +1511,29 @@ fn build_inline_text(
             // For RTL chunks, char_x byte offsets don't correspond to visual
             // position (logical byte 0 of Arabic maps to the rightmost glyph).
             // Use cursor_x instead, which advances in visual order.
+            let char_x_start_end = if !chunk.rtl && !line.char_x.is_empty() {
+                let start_off = s.saturating_sub(line_start);
+                let end_off = e.saturating_sub(line_start);
+                if start_off < line.char_x.len() && end_off < line.char_x.len() {
+                    let start = line.char_x[start_off];
+                    let end = line.char_x[end_off];
+                    if start.is_finite() && end.is_finite() && end > start {
+                        Some((start, end))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let x_pos = if chunk.rtl {
                 cursor_x
-            } else if !line.char_x.is_empty() {
-                let char_offset = s - line_start;
-                if char_offset < line.char_x.len() {
-                    lx + line.text_x_offset + line.char_x[char_offset]
+            } else if let Some((start, _)) = char_x_start_end {
+                let exact_x = lx + line.text_x_offset + start;
+                if exact_x + 0.5 >= cursor_x {
+                    exact_x
                 } else {
                     cursor_x
                 }
@@ -1732,19 +1753,45 @@ fn build_inline_text(
                 small_caps: style_ref.small_caps,
             });
 
-            // Advance cursor using char_x if available
+            let fallback_advance = || {
+                crate::layout::inline_layout::measure_text_width_weighted(
+                    &draw_text,
+                    run_font_px,
+                    None,
+                    style_ref.font_weight,
+                    style_ref.font_style,
+                    1.0,
+                    &style_ref.font_family,
+                ) + run_letter_spc * draw_text.chars().count() as f32
+                    + run_word_spc * draw_text.chars().filter(|&c| c == ' ').count() as f32
+            };
+
+            // Advance cursor using char_x if available and sane. Some relayout
+            // paths can leave byte-offset caret positions collapsed at a run
+            // boundary; trusting those positions paints all chunks at one x.
             if chunk.rtl {
                 // For RTL chunks, advance cursor_x by the visual segment width
                 let start_off = s.saturating_sub(line_start);
                 let end_off = e.saturating_sub(line_start);
                 if start_off < line.char_x.len() && end_off < line.char_x.len() {
-                    cursor_x += (line.char_x[end_off] - line.char_x[start_off]).abs();
+                    let advance = (line.char_x[end_off] - line.char_x[start_off]).abs();
+                    cursor_x += if advance > 0.0 {
+                        advance
+                    } else {
+                        fallback_advance()
+                    };
+                } else {
+                    cursor_x += fallback_advance();
                 }
-            } else if !line.char_x.is_empty() {
-                let end_off = e - line_start;
-                if end_off < line.char_x.len() {
-                    cursor_x = lx + line.text_x_offset + line.char_x[end_off];
+            } else if let Some((_, end)) = char_x_start_end {
+                let next = lx + line.text_x_offset + end;
+                if next > cursor_x + 0.5 {
+                    cursor_x = next;
+                } else {
+                    cursor_x += fallback_advance();
                 }
+            } else {
+                cursor_x += fallback_advance();
             }
         }
     }
@@ -2870,7 +2917,7 @@ fn collect_explicit_z_descendants<'a>(node: &'a WebCore, out: &mut Vec<&'a WebCo
 /// ⛔ Both properties were parsed into `ComputedStyle` and read by nobody, so
 /// every replaced element painted stretched to its content box — the `fill`
 /// behaviour — whatever the author asked for.
-fn object_fit_rect(
+pub(crate) fn object_fit_rect(
     style: &crate::types::ComputedStyle,
     cr: Rect,
     iw: f32,
