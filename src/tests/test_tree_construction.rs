@@ -16,8 +16,10 @@
 //! An external suite (html5lib-tests) is the eventual goal; this is ours until
 //! then, and it stays useful afterwards because it is small enough to read.
 
-use crate::parse_html;
 use crate::types::WebCore;
+use crate::{parse_html, parse_html_with_scripts};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// Render one node in the canonical form described above.
 fn canon_into(node: &WebCore, depth: usize, out: &mut String) {
@@ -104,6 +106,33 @@ fn inline_svg_projects_native_children_into_the_tree() {
     assert_eq!(
         path.attributes.get("xlink:href").map(String::as_str),
         Some("#p")
+    );
+}
+
+#[test]
+fn inline_svg_script_uses_script_hook() {
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let seen_for_hook = seen.clone();
+    let _doc = parse_html_with_scripts(
+        r#"<svg><script type="application/ecmascript">window.__svg = 1;</script></svg>"#,
+        "",
+        |_, _| {},
+        move |tag, attrs, text| {
+            seen_for_hook.borrow_mut().push((
+                tag.to_string(),
+                attrs.get("type").cloned(),
+                text.trim().to_string(),
+            ));
+            true
+        },
+    );
+    assert_eq!(
+        seen.borrow().as_slice(),
+        &[(
+            "script".to_string(),
+            Some("application/ecmascript".to_string()),
+            "window.__svg = 1;".to_string()
+        )]
     );
 }
 

@@ -272,6 +272,63 @@ mod tests {
     }
 
     #[test]
+    fn parses_switch_and_view_as_typed_elements() {
+        let doc =
+            parse_svg_document(r#"<svg><switch><view id="v"/><cursor id="c"/><rect width="1" height="1"/></switch></svg>"#)
+                .unwrap();
+        assert_eq!(doc.root.children[0].kind, SvgElementKind::Switch);
+        assert_eq!(doc.root.children[0].children[0].kind, SvgElementKind::View);
+        assert_eq!(
+            doc.root.children[0].children[1].kind,
+            SvgElementKind::Cursor
+        );
+    }
+
+    #[test]
+    fn parses_foreign_object_as_typed_element() {
+        let doc = parse_svg_document(
+            r#"<svg><foreignObject width="10" height="10"><div>HTML</div></foreignObject></svg>"#,
+        )
+        .unwrap();
+        assert_eq!(doc.root.children[0].kind, SvgElementKind::ForeignObject);
+        assert_eq!(
+            doc.root.children[0].children[0].kind,
+            SvgElementKind::Unknown("div".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_metadata_and_anchor_as_typed_elements() {
+        let doc = parse_svg_document(
+            r##"<svg><title>Name</title><desc>Desc</desc><metadata>m</metadata><a href="#x"><rect/></a></svg>"##,
+        )
+        .unwrap();
+        assert_eq!(doc.root.children[0].kind, SvgElementKind::Title);
+        assert_eq!(doc.root.children[1].kind, SvgElementKind::Desc);
+        assert_eq!(doc.root.children[2].kind, SvgElementKind::Metadata);
+        assert_eq!(doc.root.children[3].kind, SvgElementKind::Anchor);
+    }
+
+    #[test]
+    fn parses_filter_primitives_as_typed_elements() {
+        let doc = parse_svg_document(
+            r#"<svg><filter><feGaussianBlur/><feOffset/><feComponentTransfer><feFuncA/></feComponentTransfer><feMerge><feMergeNode/></feMerge></filter></svg>"#,
+        )
+        .unwrap();
+        let filter = &doc.root.children[0];
+        assert_eq!(filter.kind, SvgElementKind::Filter);
+        assert_eq!(filter.children[0].kind, SvgElementKind::FeGaussianBlur);
+        assert_eq!(filter.children[1].kind, SvgElementKind::FeOffset);
+        assert_eq!(filter.children[2].kind, SvgElementKind::FeComponentTransfer);
+        assert_eq!(filter.children[2].children[0].kind, SvgElementKind::FeFuncA);
+        assert_eq!(filter.children[3].kind, SvgElementKind::FeMerge);
+        assert_eq!(
+            filter.children[3].children[0].kind,
+            SvgElementKind::FeMergeNode
+        );
+    }
+
+    #[test]
     fn skips_comments_and_preserves_cdata_text() {
         let doc = parse_svg_document(
             "<svg><!-- hidden --><style><![CDATA[path{fill:red}]]></style></svg>",

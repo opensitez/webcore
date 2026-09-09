@@ -79,14 +79,44 @@ fn svg_dom_tag_name(node: &crate::svg::SvgNode) -> String {
         crate::svg::SvgElementKind::Text => "text".to_string(),
         crate::svg::SvgElementKind::Tspan => "tspan".to_string(),
         crate::svg::SvgElementKind::TextPath => "textPath".to_string(),
+        crate::svg::SvgElementKind::Title => "title".to_string(),
+        crate::svg::SvgElementKind::Desc => "desc".to_string(),
+        crate::svg::SvgElementKind::Metadata => "metadata".to_string(),
+        crate::svg::SvgElementKind::Anchor => "a".to_string(),
+        crate::svg::SvgElementKind::ForeignObject => "foreignObject".to_string(),
         crate::svg::SvgElementKind::Image => "image".to_string(),
         crate::svg::SvgElementKind::LinearGradient => "linearGradient".to_string(),
         crate::svg::SvgElementKind::RadialGradient => "radialGradient".to_string(),
         crate::svg::SvgElementKind::ClipPath => "clipPath".to_string(),
         crate::svg::SvgElementKind::Mask => "mask".to_string(),
+        crate::svg::SvgElementKind::Filter => "filter".to_string(),
+        crate::svg::SvgElementKind::FeGaussianBlur => "feGaussianBlur".to_string(),
+        crate::svg::SvgElementKind::FeOffset => "feOffset".to_string(),
+        crate::svg::SvgElementKind::FeDropShadow => "feDropShadow".to_string(),
+        crate::svg::SvgElementKind::FeFlood => "feFlood".to_string(),
+        crate::svg::SvgElementKind::FeComposite => "feComposite".to_string(),
+        crate::svg::SvgElementKind::FeBlend => "feBlend".to_string(),
+        crate::svg::SvgElementKind::FeColorMatrix => "feColorMatrix".to_string(),
+        crate::svg::SvgElementKind::FeComponentTransfer => "feComponentTransfer".to_string(),
+        crate::svg::SvgElementKind::FeFuncR => "feFuncR".to_string(),
+        crate::svg::SvgElementKind::FeFuncG => "feFuncG".to_string(),
+        crate::svg::SvgElementKind::FeFuncB => "feFuncB".to_string(),
+        crate::svg::SvgElementKind::FeFuncA => "feFuncA".to_string(),
+        crate::svg::SvgElementKind::FeMorphology => "feMorphology".to_string(),
+        crate::svg::SvgElementKind::FeMerge => "feMerge".to_string(),
+        crate::svg::SvgElementKind::FeMergeNode => "feMergeNode".to_string(),
+        crate::svg::SvgElementKind::FeImage => "feImage".to_string(),
+        crate::svg::SvgElementKind::FeTile => "feTile".to_string(),
+        crate::svg::SvgElementKind::FeConvolveMatrix => "feConvolveMatrix".to_string(),
+        crate::svg::SvgElementKind::FeDisplacementMap => "feDisplacementMap".to_string(),
         crate::svg::SvgElementKind::Pattern => "pattern".to_string(),
         crate::svg::SvgElementKind::Marker => "marker".to_string(),
+        crate::svg::SvgElementKind::Stop => "stop".to_string(),
+        crate::svg::SvgElementKind::Switch => "switch".to_string(),
+        crate::svg::SvgElementKind::View => "view".to_string(),
+        crate::svg::SvgElementKind::Cursor => "cursor".to_string(),
         crate::svg::SvgElementKind::Style => "style".to_string(),
+        crate::svg::SvgElementKind::Script => "script".to_string(),
         crate::svg::SvgElementKind::Unknown(name) => name.clone(),
     }
 }
@@ -182,19 +212,22 @@ impl HtmlParser {
         let Some(doc) = node.svg_document.clone() else {
             return;
         };
+        node.svg_tree_path = Some(Vec::new());
         if !doc.root.text.trim().is_empty() {
             let mut text = self.new_box("#text");
             text.text = doc.root.text.clone();
             apply_property(std::sync::Arc::make_mut(&mut text.style), "display", "none");
             node.children.push(text);
         }
-        for child in &doc.root.children {
-            node.children.push(self.project_svg_node(child));
+        for (index, child) in doc.root.children.iter().enumerate() {
+            node.children
+                .push(self.project_svg_node(child, vec![index]));
         }
     }
 
-    fn project_svg_node(&mut self, svg: &crate::svg::SvgNode) -> WebCore {
+    fn project_svg_node(&mut self, svg: &crate::svg::SvgNode, path: Vec<usize>) -> WebCore {
         let mut node = self.new_box(&svg_dom_tag_name(svg));
+        node.svg_tree_path = Some(path.clone());
         for attr in &svg.attributes {
             let name = match attr.namespace.as_deref() {
                 Some(ns) if !ns.is_empty() => format!("{}:{}", ns, attr.name),
@@ -208,11 +241,33 @@ impl HtmlParser {
             apply_property(std::sync::Arc::make_mut(&mut text.style), "display", "none");
             node.children.push(text);
         }
-        for child in &svg.children {
-            node.children.push(self.project_svg_node(child));
+        for (index, child) in svg.children.iter().enumerate() {
+            let mut child_path = path.clone();
+            child_path.push(index);
+            node.children.push(self.project_svg_node(child, child_path));
         }
+        apply_presentational_attrs(&mut node);
         apply_property(std::sync::Arc::make_mut(&mut node.style), "display", "none");
         node
+    }
+
+    fn process_svg_script_hooks(&mut self, node: &crate::svg::SvgNode) {
+        if matches!(node.kind, crate::svg::SvgElementKind::Script) {
+            let mut attrs = crate::dom::attrs::AttrMap::new();
+            for attr in &node.attributes {
+                let name = match attr.namespace.as_deref() {
+                    Some(ns) if !ns.is_empty() => format!("{}:{}", ns, attr.name),
+                    _ => attr.name.clone(),
+                };
+                attrs.insert(name, attr.value.clone());
+            }
+            if let Some(ref mut on_script) = self.on_script {
+                on_script("script", &attrs, &node.text);
+            }
+        }
+        for child in &node.children {
+            self.process_svg_script_hooks(child);
+        }
     }
 
     /// Fire the host hook (if any) for an open tag.
@@ -529,14 +584,15 @@ impl HtmlParser {
                         continue;
                     }
 
-                    // SVG: collect raw markup and rasterize to an <img> node.
+                    // SVG: collect the foreign-content source and parse it into
+                    // the native SVG tree used by layout, inspection, and paint.
                     if tag == "svg" {
                         let svg_body = if !self_closing {
                             self.collect_raw_text_until("svg")
                         } else {
                             String::new()
                         };
-                        let fallback = crate::svg::build_inline_svg_fallback(&attrs, &svg_body);
+                        let source = crate::svg::build_inline_svg_source(&attrs, &svg_body);
 
                         let mut node = self.new_box("svg");
                         node.attributes = attrs;
@@ -545,32 +601,33 @@ impl HtmlParser {
                             "display",
                             "inline-block",
                         );
-                        node.svg_markup = Some(fallback.markup);
-                        node.svg_document = node
-                            .svg_markup
-                            .as_deref()
-                            .and_then(|markup| crate::svg::parse_svg_document(markup).ok());
-                        node.svg_viewbox_w = fallback.viewbox_w;
-                        node.svg_viewbox_h = fallback.viewbox_h;
+                        let svg_document = crate::svg::parse_svg_document(&source.markup).ok();
+                        if let Some(ref doc) = svg_document {
+                            self.process_svg_script_hooks(&doc.root);
+                        }
+                        node.svg_document = svg_document;
+                        node.svg_viewbox_w = source.viewbox_w;
+                        node.svg_viewbox_h = source.viewbox_h;
                         self.project_inline_svg_children(&mut node);
 
                         // Only bake explicit HTML-attribute dimensions into the style.
                         // CSS cascade will override these. If no explicit dimensions,
                         // the layout engine uses svg_viewbox_w/h.
-                        if let Some(w) = fallback.explicit_w {
+                        if let Some(w) = source.explicit_w {
                             apply_property(
                                 std::sync::Arc::make_mut(&mut node.style),
                                 "width",
                                 &format!("{}px", w),
                             );
                         }
-                        if let Some(h) = fallback.explicit_h {
+                        if let Some(h) = source.explicit_h {
                             apply_property(
                                 std::sync::Arc::make_mut(&mut node.style),
                                 "height",
                                 &format!("{}px", h),
                             );
                         }
+                        apply_presentational_attrs(&mut node);
 
                         // Don't rasterize here — deferred to render time at the correct display size.
                         stack.last_mut().unwrap().node.children.push(node);
@@ -945,14 +1002,15 @@ impl HtmlParser {
             return;
         }
 
-        // SVG: collect raw markup and parse viewBox for intrinsic sizing
+        // SVG: collect the foreign-content source and parse it into the native
+        // SVG tree for intrinsic sizing, DOM projection, and paint.
         if tag == "svg" {
             let svg_body = if !self_closing {
                 self.collect_raw_text_until("svg")
             } else {
                 String::new()
             };
-            let fallback = crate::svg::build_inline_svg_fallback(&attrs, &svg_body);
+            let source = crate::svg::build_inline_svg_source(&attrs, &svg_body);
             let mut node = self.new_box("svg");
             node.attributes = attrs;
             apply_property(
@@ -960,22 +1018,22 @@ impl HtmlParser {
                 "display",
                 "inline-block",
             );
-            node.svg_markup = Some(fallback.markup);
-            node.svg_document = node
-                .svg_markup
-                .as_deref()
-                .and_then(|markup| crate::svg::parse_svg_document(markup).ok());
-            node.svg_viewbox_w = fallback.viewbox_w;
-            node.svg_viewbox_h = fallback.viewbox_h;
+            let svg_document = crate::svg::parse_svg_document(&source.markup).ok();
+            if let Some(ref doc) = svg_document {
+                self.process_svg_script_hooks(&doc.root);
+            }
+            node.svg_document = svg_document;
+            node.svg_viewbox_w = source.viewbox_w;
+            node.svg_viewbox_h = source.viewbox_h;
             self.project_inline_svg_children(&mut node);
-            if let Some(w) = fallback.explicit_w {
+            if let Some(w) = source.explicit_w {
                 apply_property(
                     std::sync::Arc::make_mut(&mut node.style),
                     "width",
                     &format!("{}px", w),
                 );
             }
-            if let Some(h) = fallback.explicit_h {
+            if let Some(h) = source.explicit_h {
                 apply_property(
                     std::sync::Arc::make_mut(&mut node.style),
                     "height",

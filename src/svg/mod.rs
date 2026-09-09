@@ -1,24 +1,24 @@
 //! SVG support for webcore.
 //!
-//! SVG is parsed into a native tree and rasterized by webcore. The legacy
-//! fallback module still owns compatibility helpers used by HTML call sites
-//! during migration, but the default SVG image raster path no longer depends on
-//! resvg.
+//! SVG is parsed into a native tree and rasterized by webcore. HTML integration
+//! builds source text only as parser input; paint uses `SvgDocument`.
 
-pub mod fallback;
+pub(crate) mod condition;
 pub mod geometry;
 pub mod paint;
 pub mod parser;
+pub mod path;
+pub mod resources;
+pub mod source;
 pub mod tree;
+pub mod unsupported;
 
-pub use fallback::{load_background_images, rasterize_svg_intrinsic, rasterize_svg_to_rgba};
 pub use geometry::{intrinsic_size_from_markup, PreserveAspectRatio, SvgLength, SvgViewBox};
-pub use paint::rasterize_svg_document_to_rgba;
-pub(crate) use paint::rasterize_svg_document_to_rgba_with_vars;
+pub(crate) use paint::rasterize_svg_document_to_rgba_with_dom;
+pub use paint::{rasterize_svg_document_to_rgba, rasterize_svg_intrinsic, rasterize_svg_to_rgba};
 pub use parser::{parse_svg_document, SvgParseError};
+pub use resources::load_background_images;
 pub use tree::{SvgAttribute, SvgDocument, SvgElementKind, SvgNode};
+pub use unsupported::{unsupported_summary, SvgUnsupportedSummary};
 
-pub(crate) use fallback::{
-    build_inline_svg_fallback, parse_px, parse_svg_length_px, parse_viewbox_value,
-    prepare_svg_for_rasterization, style_px,
-};
+pub(crate) use source::build_inline_svg_source;

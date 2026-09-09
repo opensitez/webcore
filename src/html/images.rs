@@ -87,7 +87,7 @@ pub fn set_image_on_node(node: &mut WebCore, data: Vec<u8>, w: u32, h: u32) {
 }
 
 /// Set decoded image (raster or SVG) on an img node.
-/// SVGs are stored as markup for deferred rasterization at the correct display size.
+/// SVGs are parsed into the native SVG tree and rasterized at paint size.
 pub fn set_decoded_image_on_node(node: &mut WebCore, decoded: DecodedImage) {
     match decoded {
         DecodedImage::Raster(data, w, h) => {
@@ -96,12 +96,7 @@ pub fn set_decoded_image_on_node(node: &mut WebCore, decoded: DecodedImage) {
             node.image_height = h;
         }
         DecodedImage::Svg(markup, iw, ih) => {
-            // Store SVG for paint-time rasterization at the layout-determined size
-            node.svg_markup = Some(markup);
-            node.svg_document = node
-                .svg_markup
-                .as_deref()
-                .and_then(|markup| crate::svg::parse_svg_document(markup).ok());
+            node.svg_document = crate::svg::parse_svg_document(&markup).ok();
             node.svg_viewbox_w = iw;
             node.svg_viewbox_h = ih;
             // Set intrinsic dimensions so layout can compute aspect ratio
@@ -233,7 +228,7 @@ fn svg_intrinsic_size(svg: &str) -> (f32, f32) {
 pub fn decode_image_bytes(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
     match decode_image_bytes_ex(bytes)? {
         DecodedImage::Raster(data, w, h) => Some((data.as_ref().clone(), w, h)),
-        DecodedImage::Svg(svg, _, _) => rasterize_svg_intrinsic(&svg),
+        DecodedImage::Svg(svg, _, _) => crate::svg::rasterize_svg_intrinsic(&svg),
     }
 }
 

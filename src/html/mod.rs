@@ -1,5 +1,5 @@
 //! HTML: the tokenizer, the tree-construction parser, and the pieces the
-//! parse needs — charset sniffing, entity decoding, image loading, SVG.
+//! parse needs — charset sniffing, entity decoding, image loading.
 //!
 //! ⛔ DECLARES and RE-EXPORTS. This file held 3,304 lines; the folder around
 //! it existed the whole time. Call sites say `crate::html::X`, so the glob
@@ -25,7 +25,6 @@ pub mod presentational;
 pub mod public_api;
 pub mod serializer;
 pub mod streaming;
-pub mod svg;
 pub mod table_normalize;
 pub mod tokenizer;
 pub mod validity;
@@ -47,7 +46,6 @@ pub use presentational::*;
 pub use public_api::*;
 pub use serializer::*;
 pub use streaming::*;
-pub use svg::*;
 pub use table_normalize::*;
 pub use tokenizer::*;
 pub use validity::*;

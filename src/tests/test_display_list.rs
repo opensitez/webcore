@@ -212,6 +212,35 @@ fn inline_svg_resolves_inherited_custom_property_paint() {
 }
 
 #[test]
+fn inline_svg_child_selector_style_reaches_native_paint() {
+    let (_, list) = build(
+        r#"<style>svg rect.badge { fill: rgb(12, 150, 90); }</style>
+           <svg style="width:20px;height:20px" viewBox="0 0 20 20">
+             <rect class="badge" x="0" y="0" width="20" height="20" fill="red"/>
+           </svg>"#,
+    );
+
+    let image = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Image {
+            data: ImageRef::Owned(data, w, h),
+            ..
+        } => Some((data, *w, *h)),
+        _ => None,
+    });
+    let (data, w, h) = image.expect("inline SVG should rasterize to an image command");
+    assert_eq!((w, h), (20, 20));
+    let idx = ((10 * w + 10) * 4) as usize;
+    assert!(
+        data[idx] < 40 && data[idx + 1] > 120 && data[idx + 2] > 70 && data[idx + 3] > 200,
+        "center pixel should come from DOM-cascaded projected child style, got rgba({}, {}, {}, {})",
+        data[idx],
+        data[idx + 1],
+        data[idx + 2],
+        data[idx + 3]
+    );
+}
+
+#[test]
 fn decoded_svg_image_uses_parsed_native_svg_tree_when_rasterized() {
     fn find_img_mut(node: &mut crate::WebCore) -> Option<&mut crate::WebCore> {
         if node.tag == "img" {

@@ -981,11 +981,11 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                         list.push(PaintCmd::PopClip);
                     }
                 }
-            } else if node.tag == "svg" || (node.is_image_element() && node.svg_markup.is_some()) {
-                // SVG: rasterize on demand. Inline SVG prefers the parsed
-                // native tree; markup remains for external SVG images and
-                // round-trip compatibility during migration.
-                if node.svg_document.is_some() || node.svg_markup.is_some() {
+            } else if node.tag == "svg" || (node.is_image_element() && node.svg_document.is_some())
+            {
+                // SVG: rasterize the parsed native tree on demand at the
+                // layout-determined size.
+                if node.svg_document.is_some() {
                     let cr = node.layout.content_rect;
                     if cr.w > 0.0 && cr.h > 0.0 {
                         let raster_w = cr.w.round() as u32;
@@ -1003,7 +1003,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                                     )
                                 };
                                 if node.tag == "svg" {
-                                    crate::svg::rasterize_svg_document_to_rgba_with_vars(
+                                    crate::svg::rasterize_svg_document_to_rgba_with_dom(
                                         doc,
                                         raster_w,
                                         raster_h,
@@ -1012,6 +1012,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                                         fill,
                                         stroke,
                                         &node.style.custom_props,
+                                        Some(node),
                                     )
                                 } else {
                                     crate::svg::rasterize_svg_document_to_rgba(
@@ -1025,16 +1026,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                                     )
                                 }
                             } else {
-                                node.svg_markup.as_ref().and_then(|markup| {
-                                    let color_hex = format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b);
-                                    let colored = crate::svg::prepare_svg_for_rasterization(
-                                        markup,
-                                        &color_hex,
-                                        node.style.svg_fill,
-                                        node.style.svg_stroke,
-                                    );
-                                    crate::svg::rasterize_svg_to_rgba(&colored, raster_w, raster_h)
-                                })
+                                None
                             };
                             if let Some(rgba) = rgba {
                                 let clips_radius = radii_arr.iter().any(|r| *r > 0.5)

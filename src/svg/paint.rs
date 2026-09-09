@@ -4,6 +4,10 @@ use super::geometry::{
     intrinsic_size_from_markup, parse_preserve_aspect_ratio, parse_svg_length, parse_view_box,
     AlignX, AlignY, PreserveAspectRatio, SvgLength, SvgViewBox,
 };
+use super::path::{
+    flatten_path_points, number, number_list, parse_path_data, parse_transform_list,
+    path_marker_subpaths, path_polyline_length, point_at_path_distance,
+};
 use super::{parse_svg_document, SvgDocument, SvgElementKind, SvgNode};
 use crate::canvas::{
     Canvas, Font, FontStyle, FontWeight, Matrix, TextAlign, TextBaseline, TinySkiaCanvas,
@@ -12,11 +16,13 @@ use crate::css::{
     parse_color, parse_stylesheet, resolve_var_references, AttrOp, Combinator, CssRule,
     CssSelector, Declarations, SelectorPart,
 };
-use crate::types::Color;
+use crate::svg::condition;
+use crate::types::{Color, Direction, Overflow, WebCore};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use tiny_skia::{
     FillRule, GradientStop as SkGradientStop, LineCap, LineJoin, LinearGradient, Mask, MaskType,
-    Paint, Path, PathBuilder, PathSegment, Pixmap, PixmapPaint, PixmapRef, Point as SkPoint,
+    Paint, Path, PathBuilder, Pixmap, PixmapPaint, PixmapRef, Point as SkPoint,
     PremultipliedColorU8, RadialGradient, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
@@ -47,6 +53,7 @@ struct PaintState {
     word_spacing: f32,
     text_align: TextAlign,
     text_baseline: TextBaseline,
+    direction: Direction,
     baseline_shift: f32,
     viewport_width: f32,
     viewport_height: f32,
@@ -57,6 +64,7 @@ struct PaintState {
     stroke_miterlimit: f32,
     stroke_dasharray: Option<Vec<f32>>,
     stroke_dashoffset: f32,
+    non_scaling_stroke: bool,
     fill_rule: FillRule,
     clip_rule: FillRule,
     mask_type: MaskType,
@@ -82,6 +90,7 @@ impl Default for PaintState {
             word_spacing: 0.0,
             text_align: TextAlign::Start,
             text_baseline: TextBaseline::Alphabetic,
+            direction: Direction::LTR,
             baseline_shift: 0.0,
             viewport_width: 0.0,
             viewport_height: 0.0,
@@ -92,6 +101,7 @@ impl Default for PaintState {
             stroke_miterlimit: 4.0,
             stroke_dasharray: None,
             stroke_dashoffset: 0.0,
+            non_scaling_stroke: false,
             fill_rule: FillRule::Winding,
             clip_rule: FillRule::Winding,
             mask_type: MaskType::Luminance,
@@ -147,6 +157,30 @@ pub(crate) fn rasterize_svg_document_to_rgba_with_vars(
     stroke: Option<Color>,
     custom_props: &HashMap<String, String>,
 ) -> Option<Vec<u8>> {
+    rasterize_svg_document_to_rgba_with_dom(
+        doc,
+        width,
+        height,
+        intrinsic_size,
+        current_color,
+        fill,
+        stroke,
+        custom_props,
+        None,
+    )
+}
+
+pub(crate) fn rasterize_svg_document_to_rgba_with_dom(
+    doc: &SvgDocument,
+    width: u32,
+    height: u32,
+    intrinsic_size: (f32, f32),
+    current_color: Color,
+    fill: Option<Color>,
+    stroke: Option<Color>,
+    custom_props: &HashMap<String, String>,
+    dom_root: Option<&WebCore>,
+) -> Option<Vec<u8>> {
     if width == 0 || height == 0 {
         return None;
     }
@@ -192,6 +226,7 @@ pub(crate) fn rasterize_svg_document_to_rgba_with_vars(
         &mut Vec::new(),
         None,
         true,
+        dom_root,
     );
     Some(pixmap.data().to_vec())
 }
@@ -240,8 +275,9 @@ fn paint_node<'a>(
     stack: &mut Vec<String>,
     clip: Option<&Mask>,
     allow_filter: bool,
+    dom_node: Option<&WebCore>,
 ) {
-    let mut state = state_for_node(node, inherited, styles, ancestors);
+    let mut state = state_for_node(node, inherited, styles, ancestors, dom_node);
     if !state.visible {
         return;
     }
@@ -327,6 +363,7 @@ fn paint_node<'a>(
                         stack,
                         active_clip,
                         false,
+                        dom_node,
                     );
                     stack.pop();
                     apply_svg_filter(&mut layer, filter_node, node, &state, transform);
@@ -344,9 +381,63 @@ fn paint_node<'a>(
             }
         }
     }
+    if matches!(node.kind, SvgElementKind::Switch) {
+        if state.opacity < 0.999 {
+            let Some(mut layer) = Pixmap::new(pixmap.width(), pixmap.height()) else {
+                return;
+            };
+            let mut child_state = state.clone();
+            child_state.opacity = 1.0;
+            paint_switch_child(
+                node,
+                &mut layer,
+                child_state,
+                transform,
+                ids,
+                styles,
+                ancestors,
+                stack,
+                active_clip,
+                allow_filter,
+                dom_node,
+            );
+            let paint = PixmapPaint {
+                opacity: state.opacity.clamp(0.0, 1.0),
+                blend_mode: tiny_skia::BlendMode::SourceOver,
+                quality: tiny_skia::FilterQuality::Nearest,
+            };
+            pixmap.draw_pixmap(
+                0,
+                0,
+                layer.as_ref(),
+                &paint,
+                Transform::identity(),
+                active_clip,
+            );
+        } else {
+            paint_switch_child(
+                node,
+                pixmap,
+                state,
+                transform,
+                ids,
+                styles,
+                ancestors,
+                stack,
+                active_clip,
+                allow_filter,
+                dom_node,
+            );
+        }
+        return;
+    }
     if matches!(
         node.kind,
-        SvgElementKind::Svg | SvgElementKind::Group | SvgElementKind::Unknown(_)
+        SvgElementKind::Svg
+            | SvgElementKind::Group
+            | SvgElementKind::Anchor
+            | SvgElementKind::Stop
+            | SvgElementKind::Unknown(_)
     ) && state.opacity < 0.999
     {
         let Some(mut layer) = Pixmap::new(pixmap.width(), pixmap.height()) else {
@@ -365,6 +456,7 @@ fn paint_node<'a>(
             stack,
             active_clip,
             allow_filter,
+            dom_node,
         );
         let paint = PixmapPaint {
             opacity: state.opacity.clamp(0.0, 1.0),
@@ -382,8 +474,40 @@ fn paint_node<'a>(
         return;
     }
     match node.kind {
-        SvgElementKind::Svg | SvgElementKind::Group | SvgElementKind::Unknown(_) => {}
-        SvgElementKind::Defs | SvgElementKind::Symbol | SvgElementKind::Style => return,
+        SvgElementKind::Svg
+        | SvgElementKind::Group
+        | SvgElementKind::Anchor
+        | SvgElementKind::Stop
+        | SvgElementKind::Unknown(_) => {}
+        SvgElementKind::Defs
+        | SvgElementKind::Symbol
+        | SvgElementKind::View
+        | SvgElementKind::Cursor
+        | SvgElementKind::Title
+        | SvgElementKind::Desc
+        | SvgElementKind::Metadata
+        | SvgElementKind::Script
+        | SvgElementKind::Filter
+        | SvgElementKind::FeGaussianBlur
+        | SvgElementKind::FeOffset
+        | SvgElementKind::FeDropShadow
+        | SvgElementKind::FeFlood
+        | SvgElementKind::FeComposite
+        | SvgElementKind::FeBlend
+        | SvgElementKind::FeColorMatrix
+        | SvgElementKind::FeComponentTransfer
+        | SvgElementKind::FeFuncR
+        | SvgElementKind::FeFuncG
+        | SvgElementKind::FeFuncB
+        | SvgElementKind::FeFuncA
+        | SvgElementKind::FeMorphology
+        | SvgElementKind::FeMerge
+        | SvgElementKind::FeMergeNode
+        | SvgElementKind::FeImage
+        | SvgElementKind::FeTile
+        | SvgElementKind::FeConvolveMatrix
+        | SvgElementKind::FeDisplacementMap
+        | SvgElementKind::Style => return,
         SvgElementKind::Use => {
             paint_use(
                 node,
@@ -561,6 +685,9 @@ fn paint_node<'a>(
                 }
             }
         }
+        SvgElementKind::ForeignObject => {
+            paint_foreign_object(node, pixmap, &state, transform, active_clip);
+        }
         SvgElementKind::Image => {
             paint_image(node, pixmap, &state, transform, active_clip);
         }
@@ -590,6 +717,7 @@ fn paint_node<'a>(
         stack,
         active_clip,
         allow_filter,
+        dom_node,
     );
 }
 
@@ -604,9 +732,10 @@ fn paint_children<'a>(
     stack: &mut Vec<String>,
     clip: Option<&Mask>,
     allow_filter: bool,
+    dom_node: Option<&WebCore>,
 ) {
     ancestors.push(node);
-    for child in &node.children {
+    for (index, child) in node.children.iter().enumerate() {
         paint_node(
             child,
             pixmap,
@@ -618,6 +747,44 @@ fn paint_children<'a>(
             stack,
             clip,
             allow_filter,
+            dom_node.and_then(|dom| svg_dom_child(dom, index)),
+        );
+    }
+    ancestors.pop();
+}
+
+fn paint_switch_child<'a>(
+    node: &'a SvgNode,
+    pixmap: &mut Pixmap,
+    state: PaintState,
+    transform: Transform,
+    ids: &HashMap<String, &'a SvgNode>,
+    styles: &[CssRule],
+    ancestors: &mut Vec<&'a SvgNode>,
+    stack: &mut Vec<String>,
+    clip: Option<&Mask>,
+    allow_filter: bool,
+    dom_node: Option<&WebCore>,
+) {
+    ancestors.push(node);
+    if let Some((index, child)) = node
+        .children
+        .iter()
+        .enumerate()
+        .find(|(_, child)| condition::switch_accepts(child))
+    {
+        paint_node(
+            child,
+            pixmap,
+            state,
+            transform,
+            ids,
+            styles,
+            ancestors,
+            stack,
+            clip,
+            allow_filter,
+            dom_node.and_then(|dom| svg_dom_child(dom, index)),
         );
     }
     ancestors.pop();
@@ -737,7 +904,7 @@ fn paint_text_tree<'a>(
         ) {
             continue;
         }
-        let child_state = state_for_node(child, state.clone(), styles, ancestors);
+        let child_state = state_for_node(child, state.clone(), styles, ancestors, None);
         if matches!(child.kind, SvgElementKind::TextPath) {
             cursor.x += paint_text_path(
                 child,
@@ -798,6 +965,7 @@ fn paint_positioned_text_onto(
     font_system: &mut cosmic_text::FontSystem,
     swash_cache: &mut cosmic_text::SwashCache,
 ) -> f32 {
+    let text = svg_directional_text(text, state.direction);
     let xs = node
         .attr_ascii_case_insensitive("x")
         .map(svg_text_length_list)
@@ -865,6 +1033,7 @@ fn paint_text_path(
     if text.is_empty() {
         return 0.0;
     }
+    let text = svg_directional_text(&text, state.direction);
     let Some(id) = href_id(node) else {
         return 0.0;
     };
@@ -878,6 +1047,9 @@ fn paint_text_path(
         return 0.0;
     };
     let samples = flatten_path_points(&path);
+    let side_right = node
+        .attr_ascii_case_insensitive("side")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("right"));
     let total_len = path_polyline_length(&samples);
     if samples.len() < 2 || total_len <= 0.0 {
         return 0.0;
@@ -894,7 +1066,12 @@ fn paint_text_path(
     canvas.set_text_align(TextAlign::Start);
     canvas.set_text_baseline(state.text_baseline);
     let natural_advance = canvas.measure_text(&text).width;
-    let target_length = attr_length(node, "textLength", LengthAxis::X, state);
+    let start_offset = text_path_start_offset(node, state, total_len);
+    let method_stretch = node
+        .attr_ascii_case_insensitive("method")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("stretch"));
+    let target_length = attr_length(node, "textLength", LengthAxis::X, state)
+        .or_else(|| method_stretch.then_some((total_len - start_offset).max(0.0)));
     let length_adjust = node
         .attr_ascii_case_insensitive("lengthAdjust")
         .unwrap_or("spacing")
@@ -907,7 +1084,7 @@ fn paint_text_path(
         0.0
     };
     let total_letter_spacing = state.letter_spacing + extra_letter_spacing;
-    let mut distance = text_path_start_offset(node, state, total_len);
+    let mut distance = start_offset;
     distance += match state.text_align {
         TextAlign::Center => -natural_advance / 2.0,
         TextAlign::End | TextAlign::Right => -natural_advance,
@@ -918,7 +1095,12 @@ fn paint_text_path(
         let s = ch.to_string();
         let char_advance = canvas.measure_text(&s).width;
         let mid = distance + char_advance / 2.0;
-        if let Some((x, y, angle)) = point_at_path_distance(&samples, mid) {
+        if let Some((mut x, mut y, angle)) = point_at_path_distance(&samples, mid) {
+            if side_right {
+                let offset = state.font_size.max(1.0);
+                x += -angle.sin() * offset;
+                y += angle.cos() * offset;
+            }
             let local = transform
                 .pre_translate(x, y + state.baseline_shift)
                 .pre_rotate(angle.to_degrees())
@@ -957,6 +1139,17 @@ fn collect_svg_text(node: &SvgNode) -> String {
     text
 }
 
+fn svg_directional_text(text: &str, direction: Direction) -> Cow<'_, str> {
+    if text.is_empty() || matches!(direction, Direction::LTR) {
+        return Cow::Borrowed(text);
+    }
+    let info = unicode_bidi::BidiInfo::new(text, Some(unicode_bidi::Level::rtl()));
+    let Some(para) = info.paragraphs.first() else {
+        return Cow::Borrowed(text);
+    };
+    Cow::Owned(info.reorder_line(para, para.range.clone()).into_owned())
+}
+
 fn text_path_start_offset(node: &SvgNode, state: &PaintState, path_len: f32) -> f32 {
     let Some(raw) = node.attr_ascii_case_insensitive("startOffset") else {
         return 0.0;
@@ -981,6 +1174,7 @@ fn paint_text_onto(
     font_system: &mut cosmic_text::FontSystem,
     swash_cache: &mut cosmic_text::SwashCache,
 ) -> f32 {
+    let text = svg_directional_text(text, state.direction);
     let mut canvas = TinySkiaCanvas::with_text(pixmap, font_system, swash_cache);
     canvas.set_transform(Matrix::from_tiny_skia(transform));
     canvas.set_global_alpha(state.opacity);
@@ -992,12 +1186,12 @@ fn paint_text_onto(
     });
     canvas.set_text_align(state.text_align);
     canvas.set_text_baseline(state.text_baseline);
-    let advance = canvas.measure_text(text).width;
-    let adjusted_advance = text_length_adjusted_advance(text, advance, target_length);
+    let advance = canvas.measure_text(&text).width;
+    let adjusted_advance = text_length_adjusted_advance(&text, advance, target_length);
     let extra_letter_spacing = if length_adjust.eq_ignore_ascii_case("spacing")
         || length_adjust.eq_ignore_ascii_case("spacingAndGlyphs")
     {
-        text_length_extra_spacing(text, advance, target_length)
+        text_length_extra_spacing(&text, advance, target_length)
     } else {
         0.0
     };
@@ -1007,7 +1201,7 @@ fn paint_text_onto(
         paint_spaced_text_onto(
             &mut canvas,
             state,
-            text,
+            &text,
             x,
             y,
             adjusted_advance,
@@ -1017,13 +1211,13 @@ fn paint_text_onto(
     }
     if let Some(color) = state.fill.as_ref().and_then(flat_paint_color) {
         canvas.set_fill_color(to_canvas_color(color));
-        canvas.fill_text(text, x, y);
+        canvas.fill_text(&text, x, y);
     }
     if let Some(color) = state.stroke.as_ref().and_then(flat_paint_color) {
         if state.stroke_width > 0.0 {
             canvas.set_stroke_color(to_canvas_color(color));
             canvas.set_line_width(state.stroke_width);
-            canvas.stroke_text(text, x, y);
+            canvas.stroke_text(&text, x, y);
         }
     }
     adjusted_advance
@@ -1111,6 +1305,95 @@ fn flat_paint_color(source: &PaintSource) -> Option<Color> {
 
 fn to_canvas_color(color: Color) -> crate::canvas::Color {
     crate::canvas::Color::rgba(color.r, color.g, color.b, color.a)
+}
+
+fn paint_foreign_object(
+    node: &SvgNode,
+    pixmap: &mut Pixmap,
+    state: &PaintState,
+    transform: Transform,
+    clip: Option<&Mask>,
+) {
+    let x = attr_length(node, "x", LengthAxis::X, state).unwrap_or(0.0);
+    let y = attr_length(node, "y", LengthAxis::Y, state).unwrap_or(0.0);
+    let w = attr_length(node, "width", LengthAxis::X, state).unwrap_or(0.0);
+    let h = attr_length(node, "height", LengthAxis::Y, state).unwrap_or(0.0);
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let raster_w = w.ceil().max(1.0) as u32;
+    let raster_h = h.ceil().max(1.0) as u32;
+    let Some(mut layer) = Pixmap::new(raster_w, raster_h) else {
+        return;
+    };
+    let fragment = foreign_object_html_fragment(node);
+    let html = format!(
+        r#"<!doctype html><html><head><style>html,body{{margin:0;padding:0;background:transparent;overflow:hidden;}}</style></head><body>{fragment}</body></html>"#
+    );
+    let mut doc = crate::load_html_vp(&html, w, h);
+    doc.scroll_x = 0.0;
+    doc.scroll_y = 0.0;
+    let mut renderer = crate::Renderer::new();
+    renderer.render(&mut doc, &mut layer, 1.0);
+    let mut paint = PixmapPaint::default();
+    paint.opacity = state.opacity.clamp(0.0, 1.0);
+    pixmap.draw_pixmap(
+        0,
+        0,
+        layer.as_ref(),
+        &paint,
+        transform.pre_translate(x, y),
+        clip,
+    );
+}
+
+fn foreign_object_html_fragment(node: &SvgNode) -> String {
+    let mut out = String::new();
+    out.push_str(&escape_html_text(&node.text));
+    for child in &node.children {
+        serialize_svg_subtree_as_markup(child, &mut out);
+    }
+    out
+}
+
+fn serialize_svg_subtree_as_markup(node: &SvgNode, out: &mut String) {
+    let tag = svg_tag_name(node);
+    out.push('<');
+    out.push_str(tag);
+    for attr in &node.attributes {
+        out.push(' ');
+        if let Some(namespace) = attr.namespace.as_deref().filter(|ns| !ns.is_empty()) {
+            out.push_str(namespace);
+            out.push(':');
+        }
+        out.push_str(&attr.name);
+        out.push_str("=\"");
+        out.push_str(&escape_html_attr(&attr.value));
+        out.push('"');
+    }
+    out.push('>');
+    out.push_str(&escape_html_text(&node.text));
+    for child in &node.children {
+        serialize_svg_subtree_as_markup(child, out);
+    }
+    out.push_str("</");
+    out.push_str(tag);
+    out.push('>');
+}
+
+fn escape_html_attr(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn escape_html_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn paint_image(
@@ -1236,11 +1519,12 @@ fn paint_use<'a>(
                     stack,
                     clip,
                     true,
+                    None,
                 );
             }
         }
         _ => paint_node(
-            target, pixmap, state, transform, ids, styles, ancestors, stack, clip, true,
+            target, pixmap, state, transform, ids, styles, ancestors, stack, clip, true, None,
         ),
     }
     stack.pop();
@@ -1416,8 +1700,10 @@ fn paint_marker_ref<'a>(
     if !matches!(marker.kind, SvgElementKind::Marker) {
         return;
     }
-    let ref_x = attr_length(marker, "refX", LengthAxis::X, &state).unwrap_or(0.0);
-    let ref_y = attr_length(marker, "refY", LengthAxis::Y, &state).unwrap_or(0.0);
+    let marker_w = attr_length(marker, "markerWidth", LengthAxis::X, &state).unwrap_or(3.0);
+    let marker_h = attr_length(marker, "markerHeight", LengthAxis::Y, &state).unwrap_or(3.0);
+    let ref_x = marker_ref_length(marker, "refX", LengthAxis::X, marker_w, &state).unwrap_or(0.0);
+    let ref_y = marker_ref_length(marker, "refY", LengthAxis::Y, marker_h, &state).unwrap_or(0.0);
     let marker_angle = match marker.attr("orient").unwrap_or("0").trim() {
         "auto" => angle,
         "auto-start-reverse" if attr == "marker-start" => angle + 180.0,
@@ -1435,10 +1721,6 @@ fn paint_marker_ref<'a>(
         .attr_ascii_case_insensitive("viewBox")
         .and_then(|v| parse_view_box(Some(v)))
     {
-        let marker_w =
-            attr_length(marker, "markerWidth", LengthAxis::X, &state).unwrap_or(vb.width);
-        let marker_h =
-            attr_length(marker, "markerHeight", LengthAxis::Y, &state).unwrap_or(vb.height);
         marker_transform = marker_transform
             .pre_scale(marker_w / vb.width, marker_h / vb.height)
             .pre_translate(-vb.min_x, -vb.min_y);
@@ -1456,6 +1738,7 @@ fn paint_marker_ref<'a>(
             stack,
             clip,
             true,
+            None,
         );
     }
     stack.pop();
@@ -1522,7 +1805,7 @@ fn clip_mask_for_node<'a>(
     };
     ancestors.push(clip_node);
     for child in &clip_node.children {
-        let child_state = state_for_node(child, state.clone(), styles, ancestors);
+        let child_state = state_for_node(child, state.clone(), styles, ancestors, None);
         if let Some(path) = node_path(child, &child_state) {
             mask.fill_path(&path, child_state.clip_rule, true, clip_transform);
         }
@@ -1585,7 +1868,7 @@ fn svg_mask_for_node<'a>(
     }
     let mut mask_pixmap = Pixmap::new(width, height)?;
     ancestors.push(mask_node);
-    let mut mask_state = state_for_node(mask_node, PaintState::default(), styles, ancestors);
+    let mut mask_state = state_for_node(mask_node, PaintState::default(), styles, ancestors, None);
     let mask_transform = if mask_node
         .attr("maskContentUnits")
         .is_some_and(|value| value == "objectBoundingBox")
@@ -1613,6 +1896,7 @@ fn svg_mask_for_node<'a>(
             stack,
             None,
             true,
+            None,
         );
     }
     stack.pop();
@@ -1706,6 +1990,7 @@ fn state_for_node(
     mut state: PaintState,
     styles: &[CssRule],
     ancestors: &[&SvgNode],
+    dom_node: Option<&WebCore>,
 ) -> PaintState {
     for attr in &node.attributes {
         if attr.namespace.is_none() && attr.name != "style" {
@@ -1733,7 +2018,86 @@ fn state_for_node(
     for (_, _, rule) in &matches {
         apply_declarations(&mut state, &rule.important_declarations);
     }
+    if let Some(dom) = dom_node {
+        apply_dom_computed_style(&mut state, node, dom);
+    }
     state
+}
+
+fn apply_dom_computed_style(state: &mut PaintState, svg: &SvgNode, node: &WebCore) {
+    let style = node.style.as_ref();
+    let font_px = style.font_size_px(state.font_size, 16.0);
+    state.visible = state.visible && style.visibility;
+    state.current_color = style.color;
+    if let Some(fill) = style.svg_fill {
+        if fill != Color::BLACK || svg_has_resolved_paint_attr(svg, "fill") {
+            state.fill = Some(PaintSource::Color(fill));
+        }
+    } else {
+        state.fill = None;
+    }
+    if let Some(stroke) = style.svg_stroke {
+        if stroke != Color::BLACK || svg_has_resolved_paint_attr(svg, "stroke") {
+            state.stroke = Some(PaintSource::Color(stroke));
+        }
+    } else {
+        state.stroke = None;
+    }
+    state.custom_props = style.custom_props.clone();
+    state.font_family = style.font_family.clone();
+    state.font_size = font_px;
+    state.font_weight = if style.font_weight.is_bold() {
+        FontWeight::Bold
+    } else {
+        FontWeight::Normal
+    };
+    state.font_style = match style.font_style {
+        crate::types::FontStyle::Italic | crate::types::FontStyle::Oblique => FontStyle::Italic,
+        crate::types::FontStyle::Normal => FontStyle::Normal,
+    };
+    state.letter_spacing = style.letter_spacing.resolve(font_px, font_px, 16.0);
+    state.word_spacing = style.word_spacing.resolve(font_px, font_px, 16.0);
+    state.text_align = match style.text_align {
+        crate::types::TextAlign::Left => TextAlign::Left,
+        crate::types::TextAlign::Right => TextAlign::Right,
+        crate::types::TextAlign::Center => TextAlign::Center,
+        crate::types::TextAlign::End => TextAlign::End,
+        crate::types::TextAlign::Justify | crate::types::TextAlign::Start => TextAlign::Start,
+    };
+    state.direction = style.direction;
+    state.opacity *= style.opacity.clamp(0.0, 1.0);
+    state.overflow_visible = matches!(style.overflow_x, Overflow::Visible)
+        && matches!(style.overflow_y, Overflow::Visible);
+}
+
+fn svg_has_resolved_paint_attr(node: &SvgNode, name: &str) -> bool {
+    node.attr(name).is_some_and(|value| {
+        let value = value.trim();
+        !value.eq_ignore_ascii_case("currentColor")
+            && !value.contains("var(")
+            && !value.starts_with("url(")
+    }) || node.attr("style").is_some_and(|style| {
+        style.split(';').any(|decl| {
+            let Some((prop, value)) = decl.split_once(':') else {
+                return false;
+            };
+            prop.trim().eq_ignore_ascii_case(name)
+                && !value.trim().eq_ignore_ascii_case("currentColor")
+                && !value.contains("var(")
+                && !value.trim().starts_with("url(")
+        })
+    })
+}
+
+fn svg_dom_child(parent: &WebCore, svg_child_index: usize) -> Option<&WebCore> {
+    let parent_path = parent.svg_tree_path.as_ref()?;
+    parent.children.iter().find(|child| {
+        child.svg_tree_path.as_ref().is_some_and(|path| {
+            path.len() == parent_path.len() + 1
+                && path.starts_with(parent_path)
+                && path.last() == Some(&svg_child_index)
+        })
+    })
 }
 
 fn apply_declarations(state: &mut PaintState, declarations: &Declarations) {
@@ -2080,14 +2444,44 @@ fn svg_tag_name(node: &SvgNode) -> &str {
         SvgElementKind::Text => "text",
         SvgElementKind::Tspan => "tspan",
         SvgElementKind::TextPath => "textPath",
+        SvgElementKind::Title => "title",
+        SvgElementKind::Desc => "desc",
+        SvgElementKind::Metadata => "metadata",
+        SvgElementKind::Anchor => "a",
+        SvgElementKind::ForeignObject => "foreignObject",
         SvgElementKind::Image => "image",
         SvgElementKind::LinearGradient => "linearGradient",
         SvgElementKind::RadialGradient => "radialGradient",
         SvgElementKind::ClipPath => "clipPath",
         SvgElementKind::Mask => "mask",
+        SvgElementKind::Filter => "filter",
+        SvgElementKind::FeGaussianBlur => "feGaussianBlur",
+        SvgElementKind::FeOffset => "feOffset",
+        SvgElementKind::FeDropShadow => "feDropShadow",
+        SvgElementKind::FeFlood => "feFlood",
+        SvgElementKind::FeComposite => "feComposite",
+        SvgElementKind::FeBlend => "feBlend",
+        SvgElementKind::FeColorMatrix => "feColorMatrix",
+        SvgElementKind::FeComponentTransfer => "feComponentTransfer",
+        SvgElementKind::FeFuncR => "feFuncR",
+        SvgElementKind::FeFuncG => "feFuncG",
+        SvgElementKind::FeFuncB => "feFuncB",
+        SvgElementKind::FeFuncA => "feFuncA",
+        SvgElementKind::FeMorphology => "feMorphology",
+        SvgElementKind::FeMerge => "feMerge",
+        SvgElementKind::FeMergeNode => "feMergeNode",
+        SvgElementKind::FeImage => "feImage",
+        SvgElementKind::FeTile => "feTile",
+        SvgElementKind::FeConvolveMatrix => "feConvolveMatrix",
+        SvgElementKind::FeDisplacementMap => "feDisplacementMap",
         SvgElementKind::Pattern => "pattern",
         SvgElementKind::Marker => "marker",
+        SvgElementKind::Stop => "stop",
+        SvgElementKind::Switch => "switch",
+        SvgElementKind::View => "view",
+        SvgElementKind::Cursor => "cursor",
         SvgElementKind::Style => "style",
+        SvgElementKind::Script => "script",
         SvgElementKind::Unknown(name) => name,
     }
 }
@@ -2164,6 +2558,9 @@ fn apply_paint_attr(state: &mut PaintState, name: &str, value: &str) {
             if let Some(v) = number(value) {
                 state.stroke_dashoffset = v;
             }
+        }
+        "vector-effect" => {
+            state.non_scaling_stroke = value.trim().eq_ignore_ascii_case("non-scaling-stroke");
         }
         "fill-rule" => {
             state.fill_rule = if value.trim().eq_ignore_ascii_case("evenodd") {
@@ -2270,6 +2667,12 @@ fn apply_paint_attr(state: &mut PaintState, name: &str, value: &str) {
                 "middle" => TextAlign::Center,
                 "end" => TextAlign::End,
                 _ => TextAlign::Start,
+            };
+        }
+        "direction" => {
+            state.direction = match value.trim().to_ascii_lowercase().as_str() {
+                "rtl" => Direction::RTL,
+                _ => Direction::LTR,
             };
         }
         "dominant-baseline" | "alignment-baseline" => {
@@ -2383,16 +2786,31 @@ fn apply_svg_filter(
                 &results,
             );
             next = blend_filter_pixmaps(&second, &next, child.attr("mode").unwrap_or("normal"));
+        } else if tag.eq_ignore_ascii_case("feDisplacementMap") {
+            let map = filter_input_named(
+                child.attr("in2").unwrap_or("SourceGraphic"),
+                &source,
+                &current,
+                &results,
+            );
+            next = displacement_map_filter_pixmap(&next, &map, child);
         } else if tag.eq_ignore_ascii_case("feColorMatrix") {
             next = color_matrix_filter_pixmap(
                 &next,
                 child.attr("type").unwrap_or("matrix"),
                 child.attr("values").unwrap_or(""),
             );
+        } else if tag.eq_ignore_ascii_case("feConvolveMatrix") {
+            next = convolve_matrix_filter_pixmap(&next, child);
         } else if tag.eq_ignore_ascii_case("feComponentTransfer") {
             next = component_transfer_filter_pixmap(&next, child);
         } else if tag.eq_ignore_ascii_case("feMorphology") {
             next = morphology_filter_pixmap(&next, child, &primitive_state);
+        } else if tag.eq_ignore_ascii_case("feImage") {
+            next = image_filter_pixmap(child, &primitive_state, pixmap.width(), pixmap.height())
+                .unwrap_or_else(|| Pixmap::new(pixmap.width(), pixmap.height()).unwrap_or(next));
+        } else if tag.eq_ignore_ascii_case("feTile") {
+            next = tile_filter_pixmap(&next);
         } else if tag.eq_ignore_ascii_case("feMerge") {
             let Some(mut merged) = Pixmap::new(pixmap.width(), pixmap.height()) else {
                 continue;
@@ -2691,6 +3109,49 @@ fn arithmetic_composite_filter_pixmaps(
     out
 }
 
+fn displacement_map_filter_pixmap(input: &Pixmap, map: &Pixmap, node: &SvgNode) -> Pixmap {
+    let scale = node.attr("scale").and_then(number).unwrap_or(0.0);
+    if scale == 0.0 {
+        return input.to_owned();
+    }
+    let x_channel = node.attr("xChannelSelector").unwrap_or("A").trim();
+    let y_channel = node.attr("yChannelSelector").unwrap_or("A").trim();
+    let mut out = Pixmap::new(input.width(), input.height()).expect("filter dimensions are valid");
+    let width = input.width() as i32;
+    let height = input.height() as i32;
+    for y in 0..height {
+        for x in 0..width {
+            let map_px = map
+                .pixel(x as u32, y as u32)
+                .unwrap_or_else(|| PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap());
+            let dx = (filter_channel(map_px, x_channel) - 0.5) * scale;
+            let dy = (filter_channel(map_px, y_channel) - 0.5) * scale;
+            let sx = (x as f32 + dx).round() as i32;
+            let sy = (y as f32 + dy).round() as i32;
+            let index = (y as u32 * input.width() + x as u32) as usize;
+            out.pixels_mut()[index] = if sx >= 0 && sy >= 0 && sx < width && sy < height {
+                input
+                    .pixel(sx as u32, sy as u32)
+                    .unwrap_or_else(|| PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap())
+            } else {
+                PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap()
+            };
+        }
+    }
+    out
+}
+
+fn filter_channel(px: PremultipliedColorU8, channel: &str) -> f32 {
+    let (r, g, b, a) = pixel_unpremul_rgba(px);
+    let value = match channel {
+        "R" | "r" => r,
+        "G" | "g" => g,
+        "B" | "b" => b,
+        _ => a,
+    };
+    value as f32 / 255.0
+}
+
 fn component_transfer_filter_pixmap(input: &Pixmap, node: &SvgNode) -> Pixmap {
     let funcs = component_transfer_funcs(node);
     let mut out = Pixmap::new(input.width(), input.height()).expect("filter dimensions are valid");
@@ -2793,6 +3254,125 @@ fn table_transfer(value: f32, table: &[f32], discrete: bool) -> f32 {
     }
     let t = scaled - i as f32;
     table[i] + (table[i + 1] - table[i]) * t
+}
+
+fn convolve_matrix_filter_pixmap(input: &Pixmap, node: &SvgNode) -> Pixmap {
+    let kernel = node
+        .attr("kernelMatrix")
+        .map(number_list)
+        .unwrap_or_default();
+    let Some((order_x, order_y)) = convolve_order(node, kernel.len()) else {
+        return input.to_owned();
+    };
+    if kernel.len() != order_x * order_y {
+        return input.to_owned();
+    }
+    let sum: f32 = kernel.iter().sum();
+    let divisor = node
+        .attr("divisor")
+        .and_then(number)
+        .filter(|v| v.is_finite() && *v != 0.0)
+        .unwrap_or_else(|| if sum != 0.0 { sum } else { 1.0 });
+    let bias = node.attr("bias").and_then(number).unwrap_or(0.0);
+    let target_x = node
+        .attr("targetX")
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value < order_x)
+        .unwrap_or(order_x / 2);
+    let target_y = node
+        .attr("targetY")
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value < order_y)
+        .unwrap_or(order_y / 2);
+    let preserve_alpha = node
+        .attr("preserveAlpha")
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("true"));
+    let edge_mode = node.attr("edgeMode").unwrap_or("duplicate").trim();
+    let mut out = Pixmap::new(input.width(), input.height()).expect("filter dimensions are valid");
+    let width = input.width() as i32;
+    let height = input.height() as i32;
+
+    for y in 0..height {
+        for x in 0..width {
+            let mut r = 0.0f32;
+            let mut g = 0.0f32;
+            let mut b = 0.0f32;
+            let mut a = 0.0f32;
+            for ky in 0..order_y {
+                for kx in 0..order_x {
+                    let sx = x + kx as i32 - target_x as i32;
+                    let sy = y + ky as i32 - target_y as i32;
+                    let Some(px) = convolve_sample(input, sx, sy, edge_mode) else {
+                        continue;
+                    };
+                    let (pr, pg, pb, pa) = pixel_unpremul_rgba(px);
+                    let weight = kernel[ky * order_x + kx];
+                    r += pr as f32 * weight;
+                    g += pg as f32 * weight;
+                    b += pb as f32 * weight;
+                    a += pa as f32 * weight;
+                }
+            }
+            let src_alpha = input
+                .pixel(x as u32, y as u32)
+                .map(|px| px.alpha())
+                .unwrap_or(0);
+            let alpha = if preserve_alpha {
+                src_alpha as f32 / 255.0
+            } else {
+                a / divisor / 255.0 + bias
+            };
+            let index = (y as u32 * input.width() + x as u32) as usize;
+            out.pixels_mut()[index] = premul_from_unit_rgba(
+                r / divisor / 255.0 + bias,
+                g / divisor / 255.0 + bias,
+                b / divisor / 255.0 + bias,
+                alpha,
+            );
+        }
+    }
+    out
+}
+
+fn convolve_order(node: &SvgNode, kernel_len: usize) -> Option<(usize, usize)> {
+    if let Some(order) = node.attr("order") {
+        let values: Vec<usize> = order
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|part| !part.trim().is_empty())
+            .filter_map(|part| part.trim().parse::<usize>().ok())
+            .collect();
+        return match values.as_slice() {
+            [one] if *one > 0 => Some((*one, *one)),
+            [x, y] if *x > 0 && *y > 0 => Some((*x, *y)),
+            _ => None,
+        };
+    }
+    let side = (kernel_len as f32).sqrt() as usize;
+    if side > 0 && side * side == kernel_len {
+        Some((side, side))
+    } else {
+        None
+    }
+}
+
+fn convolve_sample(
+    input: &Pixmap,
+    x: i32,
+    y: i32,
+    edge_mode: &str,
+) -> Option<PremultipliedColorU8> {
+    let width = input.width() as i32;
+    let height = input.height() as i32;
+    let (x, y) = if x >= 0 && y >= 0 && x < width && y < height {
+        (x, y)
+    } else if edge_mode.eq_ignore_ascii_case("wrap") {
+        (x.rem_euclid(width), y.rem_euclid(height))
+    } else if edge_mode.eq_ignore_ascii_case("none") {
+        return Some(PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap());
+    } else {
+        (x.clamp(0, width - 1), y.clamp(0, height - 1))
+    };
+    input.pixel(x as u32, y as u32)
 }
 
 fn morphology_filter_pixmap(input: &Pixmap, node: &SvgNode, state: &PaintState) -> Pixmap {
@@ -3028,6 +3608,117 @@ fn offset_pixmap(pixmap: &mut Pixmap, dx: f32, dy: f32) {
     *pixmap = out;
 }
 
+fn tile_filter_pixmap(input: &Pixmap) -> Pixmap {
+    let Some((left, top, right, bottom)) = pixmap_alpha_bounds(input) else {
+        return input.to_owned();
+    };
+    let tile_w = right - left + 1;
+    let tile_h = bottom - top + 1;
+    if tile_w == 0 || tile_h == 0 {
+        return input.to_owned();
+    }
+    let Some(mut tile) = Pixmap::new(tile_w, tile_h) else {
+        return input.to_owned();
+    };
+    let input_w = input.width() as usize;
+    let tile_w_usize = tile_w as usize;
+    for y in 0..tile_h as usize {
+        for x in 0..tile_w_usize {
+            let src = input.pixels()[(top as usize + y) * input_w + left as usize + x];
+            tile.pixels_mut()[y * tile_w_usize + x] = src;
+        }
+    }
+
+    let Some(mut out) = Pixmap::new(input.width(), input.height()) else {
+        return input.to_owned();
+    };
+    let paint = PixmapPaint {
+        opacity: 1.0,
+        blend_mode: tiny_skia::BlendMode::SourceOver,
+        quality: tiny_skia::FilterQuality::Nearest,
+    };
+    let x_start = -((left as i32).rem_euclid(tile_w as i32));
+    let y_start = -((top as i32).rem_euclid(tile_h as i32));
+    let mut y = y_start;
+    while y < input.height() as i32 {
+        let mut x = x_start;
+        while x < input.width() as i32 {
+            out.draw_pixmap(x, y, tile.as_ref(), &paint, Transform::identity(), None);
+            x += tile_w as i32;
+        }
+        y += tile_h as i32;
+    }
+    out
+}
+
+fn image_filter_pixmap(
+    node: &SvgNode,
+    state: &PaintState,
+    width: u32,
+    height: u32,
+) -> Option<Pixmap> {
+    let href = svg_href_value(node)?;
+    let (rgba, iw, ih) = crate::html::load_image_from_src(href, "")?;
+    if iw == 0 || ih == 0 {
+        return None;
+    }
+    let src = PixmapRef::from_bytes(&rgba, iw, ih)?;
+    let mut out = Pixmap::new(width, height)?;
+    let x = attr_length(node, "x", LengthAxis::X, state).unwrap_or(0.0);
+    let y = attr_length(node, "y", LengthAxis::Y, state).unwrap_or(0.0);
+    let w = attr_length(node, "width", LengthAxis::X, state).unwrap_or(iw as f32);
+    let h = attr_length(node, "height", LengthAxis::Y, state).unwrap_or(ih as f32);
+    if w <= 0.0 || h <= 0.0 {
+        return Some(out);
+    }
+    let mut paint = PixmapPaint::default();
+    paint.opacity = state.opacity.clamp(0.0, 1.0);
+    let image_transform = Transform::from_translate(x, y).pre_concat(view_box_transform(
+        SvgViewBox {
+            min_x: 0.0,
+            min_y: 0.0,
+            width: iw as f32,
+            height: ih as f32,
+        },
+        w,
+        h,
+        parse_preserve_aspect_ratio(node.attr_ascii_case_insensitive("preserveAspectRatio")),
+    ));
+    out.draw_pixmap(0, 0, src, &paint, image_transform, None);
+    Some(out)
+}
+
+fn pixmap_alpha_bounds(pixmap: &Pixmap) -> Option<(u32, u32, u32, u32)> {
+    let mut left = pixmap.width();
+    let mut top = pixmap.height();
+    let mut right = 0;
+    let mut bottom = 0;
+    let width = pixmap.width() as usize;
+    for (idx, px) in pixmap.pixels().iter().enumerate() {
+        if px.alpha() == 0 {
+            continue;
+        }
+        let x = (idx % width) as u32;
+        let y = (idx / width) as u32;
+        left = left.min(x);
+        top = top.min(y);
+        right = right.max(x);
+        bottom = bottom.max(y);
+    }
+    (left <= right && top <= bottom).then_some((left, top, right, bottom))
+}
+
+fn svg_href_value(node: &SvgNode) -> Option<&str> {
+    node.attr("href")
+        .or_else(|| node.attr("xlink:href"))
+        .or_else(|| {
+            node.attributes
+                .iter()
+                .find(|a| a.namespace.as_deref() == Some("xlink") && a.name == "href")
+                .map(|a| a.value.as_str())
+        })
+}
+
 fn parse_url_id(value: &str) -> Option<&str> {
     let value = value.trim();
     let inside = value.strip_prefix("url(")?.strip_suffix(')')?.trim();
@@ -3171,15 +3862,22 @@ fn paint_path_stroke<'a>(
     if state.stroke_width <= 0.0 {
         return;
     }
+    let stroke_scale = if state.non_scaling_stroke {
+        transform_scale(transform)
+    } else {
+        1.0
+    };
     let mut stroke = Stroke::default();
-    stroke.width = state.stroke_width;
+    stroke.width = state.stroke_width / stroke_scale;
     stroke.line_cap = state.stroke_linecap;
     stroke.line_join = state.stroke_linejoin;
     stroke.miter_limit = state.stroke_miterlimit;
-    stroke.dash = state
-        .stroke_dasharray
-        .clone()
-        .and_then(|dash| StrokeDash::new(dash, state.stroke_dashoffset));
+    stroke.dash = state.stroke_dasharray.clone().and_then(|dash| {
+        StrokeDash::new(
+            dash.into_iter().map(|value| value / stroke_scale).collect(),
+            state.stroke_dashoffset / stroke_scale,
+        )
+    });
     with_paint_source(
         source,
         state,
@@ -3192,6 +3890,12 @@ fn paint_path_stroke<'a>(
             pixmap.stroke_path(path, paint, &stroke, transform, clip);
         },
     );
+}
+
+fn transform_scale(transform: Transform) -> f32 {
+    let sx = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
+    let sy = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
+    ((sx + sy) / 2.0).max(0.0001)
 }
 
 fn with_paint_source<'a>(
@@ -3316,6 +4020,7 @@ fn render_pattern_tile<'a>(
                 stack,
                 None,
                 true,
+                None,
             );
         }
         return Some(tile);
@@ -3332,6 +4037,7 @@ fn render_pattern_tile<'a>(
             stack,
             None,
             true,
+            None,
         );
     }
     Some(tile)
@@ -3594,11 +4300,11 @@ fn collect_gradient_stops<'a>(
     stack: &mut Vec<String>,
 ) {
     ancestors.push(node);
-    let gradient_state = state_for_node(node, PaintState::default(), styles, ancestors);
+    let gradient_state = state_for_node(node, PaintState::default(), styles, ancestors, None);
     for child in &node.children {
         if svg_tag_name(child).eq_ignore_ascii_case("stop") {
             let offset = percent_or_number(child.attr("offset").unwrap_or("0")).unwrap_or(0.0);
-            let stop_state = state_for_node(child, gradient_state.clone(), styles, ancestors);
+            let stop_state = state_for_node(child, gradient_state.clone(), styles, ancestors, None);
             let color = with_alpha(stop_state.stop_color, stop_state.stop_opacity);
             stops.push(SkGradientStop::new(
                 offset,
@@ -3734,6 +4440,23 @@ enum LengthAxis {
 fn attr_length(node: &SvgNode, name: &str, axis: LengthAxis, state: &PaintState) -> Option<f32> {
     node.attr_ascii_case_insensitive(name)
         .and_then(|value| resolve_svg_length(value, axis, state))
+}
+
+fn marker_ref_length(
+    marker: &SvgNode,
+    name: &str,
+    axis: LengthAxis,
+    marker_size: f32,
+    state: &PaintState,
+) -> Option<f32> {
+    let value = marker.attr_ascii_case_insensitive(name)?.trim();
+    match value {
+        "left" | "top" => Some(0.0),
+        "center" => Some(marker_size / 2.0),
+        "right" | "bottom" => Some(marker_size),
+        percent if percent.ends_with('%') => number(percent).map(|v| v / 100.0 * marker_size),
+        _ => resolve_svg_length(value, axis, state),
+    }
 }
 
 fn resolve_svg_length(value: &str, axis: LengthAxis, state: &PaintState) -> Option<f32> {
@@ -3883,654 +4606,6 @@ fn points_path_from_pairs(points: &[(f32, f32)], close: bool) -> Option<Path> {
     b.finish()
 }
 
-fn flatten_path_points(path: &Path) -> Vec<(f32, f32)> {
-    let mut points = Vec::new();
-    let mut start = (0.0f32, 0.0f32);
-    let mut current = (0.0f32, 0.0f32);
-    for segment in path.segments() {
-        match segment {
-            PathSegment::MoveTo(p) => {
-                start = (p.x, p.y);
-                current = start;
-                points.push(current);
-            }
-            PathSegment::LineTo(p) => {
-                current = (p.x, p.y);
-                points.push(current);
-            }
-            PathSegment::QuadTo(c, p) => {
-                let end = (p.x, p.y);
-                for (_, to) in flatten_quad_points(current, (c.x, c.y), end) {
-                    points.push(to);
-                }
-                current = end;
-            }
-            PathSegment::CubicTo(c1, c2, p) => {
-                let end = (p.x, p.y);
-                for (_, to) in flatten_cubic_points(current, (c1.x, c1.y), (c2.x, c2.y), end) {
-                    points.push(to);
-                }
-                current = end;
-            }
-            PathSegment::Close => {
-                current = start;
-                points.push(current);
-            }
-        }
-    }
-    points
-}
-
-fn flatten_quad_points(
-    p0: (f32, f32),
-    c: (f32, f32),
-    p1: (f32, f32),
-) -> Vec<((f32, f32), (f32, f32))> {
-    let mut out = Vec::new();
-    let mut prev = p0;
-    for i in 1..=16 {
-        let t = i as f32 / 16.0;
-        let mt = 1.0 - t;
-        let next = (
-            mt * mt * p0.0 + 2.0 * mt * t * c.0 + t * t * p1.0,
-            mt * mt * p0.1 + 2.0 * mt * t * c.1 + t * t * p1.1,
-        );
-        out.push((prev, next));
-        prev = next;
-    }
-    out
-}
-
-fn flatten_cubic_points(
-    p0: (f32, f32),
-    c1: (f32, f32),
-    c2: (f32, f32),
-    p1: (f32, f32),
-) -> Vec<((f32, f32), (f32, f32))> {
-    let mut out = Vec::new();
-    let mut prev = p0;
-    for i in 1..=24 {
-        let t = i as f32 / 24.0;
-        let mt = 1.0 - t;
-        let next = (
-            mt.powi(3) * p0.0
-                + 3.0 * mt.powi(2) * t * c1.0
-                + 3.0 * mt * t.powi(2) * c2.0
-                + t.powi(3) * p1.0,
-            mt.powi(3) * p0.1
-                + 3.0 * mt.powi(2) * t * c1.1
-                + 3.0 * mt * t.powi(2) * c2.1
-                + t.powi(3) * p1.1,
-        );
-        out.push((prev, next));
-        prev = next;
-    }
-    out
-}
-
-fn path_polyline_length(points: &[(f32, f32)]) -> f32 {
-    points
-        .windows(2)
-        .map(|pair| segment_length(pair[0], pair[1]))
-        .sum()
-}
-
-fn point_at_path_distance(points: &[(f32, f32)], distance: f32) -> Option<(f32, f32, f32)> {
-    let mut remaining = distance.max(0.0);
-    for pair in points.windows(2) {
-        let from = pair[0];
-        let to = pair[1];
-        let len = segment_length(from, to);
-        if len <= f32::EPSILON {
-            continue;
-        }
-        if remaining <= len {
-            let t = remaining / len;
-            let x = from.0 + (to.0 - from.0) * t;
-            let y = from.1 + (to.1 - from.1) * t;
-            return Some((x, y, (to.1 - from.1).atan2(to.0 - from.0)));
-        }
-        remaining -= len;
-    }
-    points.windows(2).last().and_then(|pair| {
-        let from = pair[0];
-        let to = pair[1];
-        let len = segment_length(from, to);
-        (len > f32::EPSILON).then(|| (to.0, to.1, (to.1 - from.1).atan2(to.0 - from.0)))
-    })
-}
-
-fn segment_length(from: (f32, f32), to: (f32, f32)) -> f32 {
-    ((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt()
-}
-
-struct MarkerSubpath {
-    points: Vec<(f32, f32)>,
-    closed: bool,
-}
-
-fn path_marker_subpaths(data: &str) -> Vec<MarkerSubpath> {
-    let mut p = PathDataParser {
-        data,
-        pos: 0,
-        cmd: 'M',
-        x: 0.0,
-        y: 0.0,
-        sx: 0.0,
-        sy: 0.0,
-        last_cubic_ctrl: None,
-        last_quad_ctrl: None,
-    };
-    let mut subpaths = Vec::new();
-    let mut points: Vec<(f32, f32)> = Vec::new();
-    let mut closed = false;
-    while p.skip_separators() {
-        if let Some(c) = p.peek_cmd() {
-            p.cmd = c;
-            p.pos += c.len_utf8();
-        }
-        let relative = p.cmd.is_ascii_lowercase();
-        match p.cmd.to_ascii_uppercase() {
-            'M' => {
-                let Some((x, y)) = p.pair(relative) else {
-                    break;
-                };
-                if points.len() >= 2 {
-                    subpaths.push(MarkerSubpath { points, closed });
-                }
-                points = Vec::new();
-                closed = false;
-                p.x = x;
-                p.y = y;
-                p.sx = x;
-                p.sy = y;
-                points.push((x, y));
-                p.cmd = if relative { 'l' } else { 'L' };
-                p.clear_controls();
-            }
-            'L' => {
-                let Some((x, y)) = p.pair(relative) else {
-                    break;
-                };
-                p.x = x;
-                p.y = y;
-                points.push((x, y));
-                p.clear_controls();
-            }
-            'H' => {
-                let Some(mut x) = p.num() else { break };
-                if relative {
-                    x += p.x;
-                }
-                p.x = x;
-                points.push((p.x, p.y));
-                p.clear_controls();
-            }
-            'V' => {
-                let Some(mut y) = p.num() else { break };
-                if relative {
-                    y += p.y;
-                }
-                p.y = y;
-                points.push((p.x, p.y));
-                p.clear_controls();
-            }
-            'C' => {
-                if p.pair(relative).is_none() || p.pair(relative).is_none() {
-                    break;
-                }
-                let Some((x, y)) = p.pair(relative) else {
-                    break;
-                };
-                p.x = x;
-                p.y = y;
-                points.push((x, y));
-                p.clear_controls();
-            }
-            'S' | 'Q' => {
-                if p.pair(relative).is_none() {
-                    break;
-                }
-                let Some((x, y)) = p.pair(relative) else {
-                    break;
-                };
-                p.x = x;
-                p.y = y;
-                points.push((x, y));
-                p.clear_controls();
-            }
-            'T' => {
-                let Some((x, y)) = p.pair(relative) else {
-                    break;
-                };
-                p.x = x;
-                p.y = y;
-                points.push((x, y));
-                p.clear_controls();
-            }
-            'A' => {
-                if p.num().is_none()
-                    || p.num().is_none()
-                    || p.num().is_none()
-                    || p.flag().is_none()
-                    || p.flag().is_none()
-                {
-                    break;
-                }
-                let Some((x, y)) = p.pair(relative) else {
-                    break;
-                };
-                p.x = x;
-                p.y = y;
-                points.push((x, y));
-                p.clear_controls();
-            }
-            'Z' => {
-                points.push((p.sx, p.sy));
-                p.x = p.sx;
-                p.y = p.sy;
-                closed = true;
-                p.clear_controls();
-            }
-            _ => break,
-        }
-    }
-    if points.len() >= 2 {
-        subpaths.push(MarkerSubpath { points, closed });
-    }
-    subpaths
-}
-
-fn number(value: &str) -> Option<f32> {
-    let token = value
-        .trim()
-        .split(|c: char| c == ';' || c.is_whitespace())
-        .next()
-        .unwrap_or("");
-    let end = token
-        .char_indices()
-        .take_while(|(_, c)| c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | 'e' | 'E'))
-        .last()
-        .map(|(idx, c)| idx + c.len_utf8())
-        .unwrap_or(0);
-    if end == 0 {
-        return None;
-    }
-    token[..end].parse::<f32>().ok().filter(|v| v.is_finite())
-}
-
-fn number_list(value: &str) -> Vec<f32> {
-    value
-        .split(|c: char| c == ',' || c.is_whitespace())
-        .filter_map(number)
-        .collect()
-}
-
-fn parse_transform_list(value: &str) -> Option<Transform> {
-    let mut rest = value.trim();
-    let mut transform = Transform::identity();
-    while !rest.is_empty() {
-        let open = rest.find('(')?;
-        let name = rest[..open].trim();
-        let close_rel = rest[open + 1..].find(')')?;
-        let args = number_list(&rest[open + 1..open + 1 + close_rel]);
-        let local = match name {
-            "matrix" if args.len() >= 6 => {
-                Transform::from_row(args[0], args[1], args[2], args[3], args[4], args[5])
-            }
-            "translate" if !args.is_empty() => {
-                Transform::from_translate(args[0], args.get(1).copied().unwrap_or(0.0))
-            }
-            "scale" if !args.is_empty() => {
-                Transform::from_scale(args[0], args.get(1).copied().unwrap_or(args[0]))
-            }
-            "rotate" if args.len() >= 3 => Transform::from_rotate_at(args[0], args[1], args[2]),
-            "rotate" if !args.is_empty() => Transform::from_rotate(args[0]),
-            "skewX" if !args.is_empty() => Transform::from_skew(args[0].to_radians().tan(), 0.0),
-            "skewY" if !args.is_empty() => Transform::from_skew(0.0, args[0].to_radians().tan()),
-            _ => return None,
-        };
-        transform = transform.pre_concat(local);
-        rest = rest[open + 1 + close_rel + 1..].trim_start();
-    }
-    Some(transform)
-}
-
-fn parse_path_data(data: &str) -> Option<Path> {
-    let mut p = PathDataParser {
-        data,
-        pos: 0,
-        cmd: 'M',
-        x: 0.0,
-        y: 0.0,
-        sx: 0.0,
-        sy: 0.0,
-        last_cubic_ctrl: None,
-        last_quad_ctrl: None,
-    };
-    let mut b = PathBuilder::new();
-    while p.skip_separators() {
-        if let Some(c) = p.peek_cmd() {
-            p.cmd = c;
-            p.pos += c.len_utf8();
-        }
-        let relative = p.cmd.is_ascii_lowercase();
-        match p.cmd.to_ascii_uppercase() {
-            'M' => {
-                let (x, y) = p.pair(relative)?;
-                b.move_to(x, y);
-                p.x = x;
-                p.y = y;
-                p.sx = x;
-                p.sy = y;
-                p.cmd = if relative { 'l' } else { 'L' };
-                p.clear_controls();
-            }
-            'L' => {
-                let (x, y) = p.pair(relative)?;
-                b.line_to(x, y);
-                p.x = x;
-                p.y = y;
-                p.clear_controls();
-            }
-            'H' => {
-                let mut x = p.num()?;
-                if relative {
-                    x += p.x;
-                }
-                b.line_to(x, p.y);
-                p.x = x;
-                p.clear_controls();
-            }
-            'V' => {
-                let mut y = p.num()?;
-                if relative {
-                    y += p.y;
-                }
-                b.line_to(p.x, y);
-                p.y = y;
-                p.clear_controls();
-            }
-            'C' => {
-                let (x1, y1) = p.pair(relative)?;
-                let (x2, y2) = p.pair(relative)?;
-                let (x, y) = p.pair(relative)?;
-                b.cubic_to(x1, y1, x2, y2, x, y);
-                p.x = x;
-                p.y = y;
-                p.last_cubic_ctrl = Some((x2, y2));
-                p.last_quad_ctrl = None;
-            }
-            'S' => {
-                let (x1, y1) = p
-                    .last_cubic_ctrl
-                    .map(|(cx, cy)| (p.x * 2.0 - cx, p.y * 2.0 - cy))
-                    .unwrap_or((p.x, p.y));
-                let (x2, y2) = p.pair(relative)?;
-                let (x, y) = p.pair(relative)?;
-                b.cubic_to(x1, y1, x2, y2, x, y);
-                p.x = x;
-                p.y = y;
-                p.last_cubic_ctrl = Some((x2, y2));
-                p.last_quad_ctrl = None;
-            }
-            'Q' => {
-                let (x1, y1) = p.pair(relative)?;
-                let (x, y) = p.pair(relative)?;
-                b.quad_to(x1, y1, x, y);
-                p.x = x;
-                p.y = y;
-                p.last_quad_ctrl = Some((x1, y1));
-                p.last_cubic_ctrl = None;
-            }
-            'T' => {
-                let (x1, y1) = p
-                    .last_quad_ctrl
-                    .map(|(qx, qy)| (p.x * 2.0 - qx, p.y * 2.0 - qy))
-                    .unwrap_or((p.x, p.y));
-                let (x, y) = p.pair(relative)?;
-                b.quad_to(x1, y1, x, y);
-                p.x = x;
-                p.y = y;
-                p.last_quad_ctrl = Some((x1, y1));
-                p.last_cubic_ctrl = None;
-            }
-            'A' => {
-                let rx = p.num()?.abs();
-                let ry = p.num()?.abs();
-                let angle = p.num()?;
-                let large_arc = p.flag()?;
-                let sweep = p.flag()?;
-                let (x, y) = p.pair(relative)?;
-                arc_to_cubic(&mut b, p.x, p.y, rx, ry, angle, large_arc, sweep, x, y);
-                p.x = x;
-                p.y = y;
-                p.clear_controls();
-            }
-            'Z' => {
-                b.close();
-                p.x = p.sx;
-                p.y = p.sy;
-                p.clear_controls();
-            }
-            _ => return None,
-        }
-    }
-    b.finish()
-}
-
-struct PathDataParser<'a> {
-    data: &'a str,
-    pos: usize,
-    cmd: char,
-    x: f32,
-    y: f32,
-    sx: f32,
-    sy: f32,
-    last_cubic_ctrl: Option<(f32, f32)>,
-    last_quad_ctrl: Option<(f32, f32)>,
-}
-
-impl<'a> PathDataParser<'a> {
-    fn skip_separators(&mut self) -> bool {
-        while let Some(c) = self.peek() {
-            if c.is_whitespace() || c == ',' {
-                self.pos += c.len_utf8();
-            } else {
-                break;
-            }
-        }
-        self.pos < self.data.len()
-    }
-
-    fn peek_cmd(&self) -> Option<char> {
-        self.peek().filter(|c| c.is_ascii_alphabetic())
-    }
-
-    fn peek(&self) -> Option<char> {
-        self.data[self.pos..].chars().next()
-    }
-
-    fn pair(&mut self, relative: bool) -> Option<(f32, f32)> {
-        let mut x = self.num()?;
-        let mut y = self.num()?;
-        if relative {
-            x += self.x;
-            y += self.y;
-        }
-        Some((x, y))
-    }
-
-    fn flag(&mut self) -> Option<bool> {
-        self.skip_separators();
-        match self.peek()? {
-            '0' => {
-                self.pos += 1;
-                Some(false)
-            }
-            '1' => {
-                self.pos += 1;
-                Some(true)
-            }
-            _ => None,
-        }
-    }
-
-    fn clear_controls(&mut self) {
-        self.last_cubic_ctrl = None;
-        self.last_quad_ctrl = None;
-    }
-
-    fn num(&mut self) -> Option<f32> {
-        self.skip_separators();
-        let start = self.pos;
-        let mut saw_digit = false;
-        let mut saw_exp = false;
-        while let Some(c) = self.peek() {
-            let ok = if c.is_ascii_digit() {
-                saw_digit = true;
-                true
-            } else if matches!(c, '+' | '-') {
-                self.pos == start || saw_exp
-            } else if c == '.' {
-                true
-            } else if matches!(c, 'e' | 'E') {
-                saw_exp = true;
-                true
-            } else {
-                false
-            };
-            if !ok {
-                break;
-            }
-            if saw_exp && !matches!(c, 'e' | 'E') {
-                saw_exp = false;
-            }
-            self.pos += c.len_utf8();
-        }
-        if !saw_digit || self.pos == start {
-            return None;
-        }
-        self.data[start..self.pos].parse::<f32>().ok()
-    }
-}
-
-fn arc_to_cubic(
-    b: &mut PathBuilder,
-    x1: f32,
-    y1: f32,
-    mut rx: f32,
-    mut ry: f32,
-    x_axis_rotation: f32,
-    large_arc: bool,
-    sweep: bool,
-    x2: f32,
-    y2: f32,
-) {
-    if rx == 0.0 || ry == 0.0 || ((x1 - x2).abs() < f32::EPSILON && (y1 - y2).abs() < f32::EPSILON)
-    {
-        b.line_to(x2, y2);
-        return;
-    }
-
-    let phi = x_axis_rotation.to_radians();
-    let cos_phi = phi.cos();
-    let sin_phi = phi.sin();
-    let dx = (x1 - x2) / 2.0;
-    let dy = (y1 - y2) / 2.0;
-    let x1p = cos_phi * dx + sin_phi * dy;
-    let y1p = -sin_phi * dx + cos_phi * dy;
-
-    let lambda = x1p.powi(2) / rx.powi(2) + y1p.powi(2) / ry.powi(2);
-    if lambda > 1.0 {
-        let scale = lambda.sqrt();
-        rx *= scale;
-        ry *= scale;
-    }
-
-    let rx2 = rx.powi(2);
-    let ry2 = ry.powi(2);
-    let x1p2 = x1p.powi(2);
-    let y1p2 = y1p.powi(2);
-    let denom = rx2 * y1p2 + ry2 * x1p2;
-    if denom == 0.0 {
-        b.line_to(x2, y2);
-        return;
-    }
-    let sign = if large_arc == sweep { -1.0 } else { 1.0 };
-    let coef = sign
-        * ((rx2 * ry2 - rx2 * y1p2 - ry2 * x1p2) / denom)
-            .max(0.0)
-            .sqrt();
-    let cxp = coef * (rx * y1p / ry);
-    let cyp = coef * (-ry * x1p / rx);
-    let cx = cos_phi * cxp - sin_phi * cyp + (x1 + x2) / 2.0;
-    let cy = sin_phi * cxp + cos_phi * cyp + (y1 + y2) / 2.0;
-
-    let theta1 = angle_between(1.0, 0.0, (x1p - cxp) / rx, (y1p - cyp) / ry);
-    let mut delta = angle_between(
-        (x1p - cxp) / rx,
-        (y1p - cyp) / ry,
-        (-x1p - cxp) / rx,
-        (-y1p - cyp) / ry,
-    );
-    if !sweep && delta > 0.0 {
-        delta -= std::f32::consts::TAU;
-    } else if sweep && delta < 0.0 {
-        delta += std::f32::consts::TAU;
-    }
-
-    let segments = (delta.abs() / (std::f32::consts::FRAC_PI_2))
-        .ceil()
-        .max(1.0) as usize;
-    let step = delta / segments as f32;
-    for i in 0..segments {
-        let t1 = theta1 + i as f32 * step;
-        arc_segment_to_cubic(b, cx, cy, rx, ry, cos_phi, sin_phi, t1, t1 + step);
-    }
-}
-
-fn angle_between(ux: f32, uy: f32, vx: f32, vy: f32) -> f32 {
-    let dot = ux * vx + uy * vy;
-    let len = ((ux * ux + uy * uy) * (vx * vx + vy * vy)).sqrt();
-    let angle = (dot / len).clamp(-1.0, 1.0).acos();
-    if ux * vy - uy * vx < 0.0 {
-        -angle
-    } else {
-        angle
-    }
-}
-
-fn arc_segment_to_cubic(
-    b: &mut PathBuilder,
-    cx: f32,
-    cy: f32,
-    rx: f32,
-    ry: f32,
-    cos_phi: f32,
-    sin_phi: f32,
-    t1: f32,
-    t2: f32,
-) {
-    let delta = t2 - t1;
-    let alpha = (4.0 / 3.0) * (delta / 4.0).tan();
-    let (sin_t1, cos_t1) = t1.sin_cos();
-    let (sin_t2, cos_t2) = t2.sin_cos();
-    let p1 = (cos_t1 - alpha * sin_t1, sin_t1 + alpha * cos_t1);
-    let p2 = (cos_t2 + alpha * sin_t2, sin_t2 - alpha * cos_t2);
-    let p = (cos_t2, sin_t2);
-    let map = |x: f32, y: f32| {
-        (
-            cx + rx * x * cos_phi - ry * y * sin_phi,
-            cy + rx * x * sin_phi + ry * y * cos_phi,
-        )
-    };
-    let (x1, y1) = map(p1.0, p1.1);
-    let (x2, y2) = map(p2.0, p2.1);
-    let (x, y) = map(p.0, p.1);
-    b.cubic_to(x1, y1, x2, y2, x, y);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4590,7 +4665,17 @@ mod tests {
     }
 
     #[test]
-    fn native_rasterizer_paints_rect_without_resvg() {
+    fn svg_directional_text_reorders_rtl_runs() {
+        let text = "abc אבג";
+        let ltr = svg_directional_text(text, Direction::LTR);
+        let rtl = svg_directional_text(text, Direction::RTL);
+        assert_eq!(ltr.as_ref(), text);
+        assert_ne!(rtl.as_ref(), text);
+        assert_eq!(rtl.chars().count(), text.chars().count());
+    }
+
+    #[test]
+    fn native_rasterizer_paints_rect() {
         let data = rasterize_svg_to_rgba(
             r#"<svg width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#,
             10,
@@ -4692,6 +4777,18 @@ mod tests {
         )
         .unwrap();
         assert!(has_painted_pixel(&data));
+    }
+
+    #[test]
+    fn native_rasterizer_honors_non_scaling_stroke() {
+        let data = rasterize_svg_to_rgba(
+            r#"<svg width="100" height="100" viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5" stroke="black" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>"#,
+            100,
+            100,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 100, 50, 50));
+        assert!(!painted_at(&data, 100, 50, 42));
     }
 
     #[test]
@@ -4919,6 +5016,99 @@ mod tests {
     }
 
     #[test]
+    fn native_rasterizer_switch_paints_first_supported_child() {
+        let data = rasterize_svg_to_rgba(
+            r#"<svg width="20" height="20">
+                <switch>
+                    <rect width="20" height="20" fill="red" requiredExtensions="https://example.invalid/svg-ext"/>
+                    <rect width="20" height="20" fill="rgb(0, 180, 0)"/>
+                    <rect width="20" height="20" fill="blue"/>
+                </switch>
+            </svg>"#,
+            20,
+            20,
+        )
+        .unwrap();
+        let (r, g, b, a) = rgba_at(&data, 20, 10, 10);
+        assert!(
+            r < 60 && g > 120 && b < 80 && a > 200,
+            "switch should skip unsupported child and paint first supported child, got {r},{g},{b},{a}"
+        );
+    }
+
+    #[test]
+    fn native_rasterizer_switch_honors_system_language() {
+        let data = rasterize_svg_to_rgba(
+            r#"<svg width="20" height="20">
+                <switch>
+                    <rect width="20" height="20" fill="red" systemLanguage="fr"/>
+                    <rect width="20" height="20" fill="black" systemLanguage="en-US"/>
+                </switch>
+            </svg>"#,
+            20,
+            20,
+        )
+        .unwrap();
+        let (r, g, b, a) = rgba_at(&data, 20, 10, 10);
+        assert!(
+            r < 30 && g < 30 && b < 30 && a > 200,
+            "switch should choose matching language child, got {r},{g},{b},{a}"
+        );
+    }
+
+    #[test]
+    fn native_rasterizer_does_not_paint_view_elements() {
+        let data = rasterize_svg_to_rgba(
+            r#"<svg width="20" height="20">
+                <view id="detail" viewBox="0 0 10 10">
+                    <rect width="20" height="20" fill="black"/>
+                </view>
+                <cursor id="cursor-resource">
+                    <rect width="20" height="20" fill="black"/>
+                </cursor>
+            </svg>"#,
+            20,
+            20,
+        )
+        .unwrap();
+        assert!(!painted_at(&data, 20, 10, 10));
+    }
+
+    #[test]
+    fn native_rasterizer_paints_foreign_object_html() {
+        let data = rasterize_svg_to_rgba(
+            r#"<svg width="30" height="20">
+                <foreignObject x="5" y="4" width="20" height="10">
+                    <div xmlns="http://www.w3.org/1999/xhtml" style="width:20px;height:10px;background:#000"></div>
+                </foreignObject>
+            </svg>"#,
+            30,
+            20,
+        )
+        .unwrap();
+        assert!(!painted_at(&data, 30, 2, 5));
+        assert!(painted_at(&data, 30, 10, 8));
+        assert!(!painted_at(&data, 30, 27, 8));
+    }
+
+    #[test]
+    fn native_rasterizer_paints_anchor_children_but_not_metadata() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="30" height="10">
+                <title><rect width="10" height="10" fill="red"/></title>
+                <desc><rect width="10" height="10" fill="red"/></desc>
+                <metadata><rect width="10" height="10" fill="red"/></metadata>
+                <a href="#target"><rect x="12" width="10" height="10" fill="black"/></a>
+            </svg>"##,
+            30,
+            10,
+        )
+        .unwrap();
+        assert!(!painted_at(&data, 30, 5, 5));
+        assert!(painted_at(&data, 30, 16, 5));
+    }
+
+    #[test]
     fn native_rasterizer_applies_paint_order_for_fill_and_stroke() {
         let normal = rasterize_svg_to_rgba(
             r#"<svg width="40" height="40"><rect x="10" y="10" width="20" height="20" fill="blue" stroke="red" stroke-width="12"/></svg>"#,
@@ -4960,6 +5150,34 @@ mod tests {
     }
 
     #[test]
+    fn native_rasterizer_applies_text_path_side_right() {
+        let left = rasterize_svg_to_rgba(
+            r##"<svg width="130" height="70">
+                <defs><path id="baseline" d="M10 28 H120"/></defs>
+                <text fill="black" font-size="20"><textPath href="#baseline">I</textPath></text>
+            </svg>"##,
+            130,
+            70,
+        )
+        .unwrap();
+        let right = rasterize_svg_to_rgba(
+            r##"<svg width="130" height="70">
+                <defs><path id="baseline" d="M10 28 H120"/></defs>
+                <text fill="black" font-size="20"><textPath href="#baseline" side="right">I</textPath></text>
+            </svg>"##,
+            130,
+            70,
+        )
+        .unwrap();
+        let left_bounds = painted_bounds(&left, 130).expect("left textPath bounds");
+        let right_bounds = painted_bounds(&right, 130).expect("right textPath bounds");
+        assert!(
+            right_bounds.1 > left_bounds.1 + 12,
+            "side=right should move text to the right side of the path, left={left_bounds:?} right={right_bounds:?}"
+        );
+    }
+
+    #[test]
     fn native_rasterizer_applies_text_path_text_length_spacing() {
         let normal = rasterize_svg_to_rgba(
             r##"<svg width="130" height="40">
@@ -4984,6 +5202,34 @@ mod tests {
         assert!(
             adjusted_bounds.2 > normal_bounds.2 + 30,
             "textPath textLength should widen painted text, normal={normal_bounds:?} adjusted={adjusted_bounds:?}"
+        );
+    }
+
+    #[test]
+    fn native_rasterizer_applies_text_path_method_stretch() {
+        let normal = rasterize_svg_to_rgba(
+            r##"<svg width="130" height="40">
+                <defs><path id="baseline" d="M10 28 H120"/></defs>
+                <text fill="black" font-size="20"><textPath href="#baseline">II</textPath></text>
+            </svg>"##,
+            130,
+            40,
+        )
+        .unwrap();
+        let stretched = rasterize_svg_to_rgba(
+            r##"<svg width="130" height="40">
+                <defs><path id="baseline" d="M10 28 H120"/></defs>
+                <text fill="black" font-size="20"><textPath href="#baseline" method="stretch">II</textPath></text>
+            </svg>"##,
+            130,
+            40,
+        )
+        .unwrap();
+        let normal_bounds = painted_bounds(&normal, 130).expect("normal textPath bounds");
+        let stretched_bounds = painted_bounds(&stretched, 130).expect("stretched textPath bounds");
+        assert!(
+            stretched_bounds.2 > normal_bounds.2 + 50,
+            "method=stretch should distribute text over the path, normal={normal_bounds:?} stretched={stretched_bounds:?}"
         );
     }
 
@@ -5249,6 +5495,43 @@ mod tests {
     }
 
     #[test]
+    fn native_rasterizer_resolves_marker_ref_keyword_positions() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="14" height="8">
+                <defs><marker id="m" markerWidth="6" markerHeight="4" refX="center" refY="center" markerUnits="userSpaceOnUse">
+                    <rect width="6" height="4" fill="black"/>
+                </marker></defs>
+                <line x1="8" y1="4" x2="8" y2="4" stroke="none" marker-end="url(#m)"/>
+            </svg>"##,
+            14,
+            8,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 14, 5, 3));
+        assert!(painted_at(&data, 14, 10, 5));
+        assert!(!painted_at(&data, 14, 11, 6));
+    }
+
+    #[test]
+    fn native_rasterizer_resolves_marker_ref_percentages_against_marker_viewport() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="40" height="20">
+                <defs><marker id="m" markerWidth="10" markerHeight="10" refX="50%" refY="50%" markerUnits="userSpaceOnUse">
+                    <rect width="10" height="10" fill="black"/>
+                </marker></defs>
+                <line x1="20" y1="10" x2="20" y2="10" stroke="none" marker-end="url(#m)"/>
+            </svg>"##,
+            40,
+            20,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 40, 15, 5));
+        assert!(painted_at(&data, 40, 24, 14));
+        assert!(!painted_at(&data, 40, 9, 10));
+        assert!(!painted_at(&data, 40, 31, 10));
+    }
+
+    #[test]
     fn native_rasterizer_resolves_pattern_paint_server() {
         let data = rasterize_svg_to_rgba(
             r##"<svg width="12" height="6"><defs><pattern id="p" patternUnits="userSpaceOnUse" width="4" height="4"><rect width="2" height="4" fill="black"/></pattern></defs><rect width="12" height="6" fill="url(#p)"/></svg>"##,
@@ -5423,6 +5706,59 @@ mod tests {
     }
 
     #[test]
+    fn native_rasterizer_evaluates_svg_tile_filter() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="12" height="8">
+                <defs><filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="12" height="8">
+                    <feTile/>
+                </filter></defs>
+                <rect x="2" y="2" width="3" height="2" fill="black" filter="url(#f)"/>
+            </svg>"##,
+            12,
+            8,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 12, 2, 2));
+        assert!(painted_at(&data, 12, 7, 3));
+        assert!(painted_at(&data, 12, 10, 5));
+    }
+
+    #[test]
+    fn native_rasterizer_evaluates_svg_image_filter() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="14" height="8">
+                <defs><filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="14" height="8">
+                    <feImage x="6" y="3" width="4" height="2" href="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMiIgaGVpZ2h0PSIxIj48cmVjdCB3aWR0aD0iMiIgaGVpZ2h0PSIxIiBmaWxsPSJibGFjayIvPjwvc3ZnPg=="/>
+                </filter></defs>
+                <rect x="1" y="1" width="2" height="2" fill="red" filter="url(#f)"/>
+            </svg>"##,
+            14,
+            8,
+        )
+        .unwrap();
+        assert_eq!(alpha_at(&data, 14, 2, 2), 0);
+        assert!(painted_at(&data, 14, 7, 4));
+    }
+
+    #[test]
+    fn native_rasterizer_evaluates_svg_convolve_matrix_filter() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="9" height="7">
+                <defs><filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="9" height="7">
+                    <feConvolveMatrix order="3" kernelMatrix="1 1 1 1 1 1 1 1 1" divisor="9"/>
+                </filter></defs>
+                <rect x="4" y="3" width="1" height="1" fill="black" filter="url(#f)"/>
+            </svg>"##,
+            9,
+            7,
+        )
+        .unwrap();
+        assert!(alpha_at(&data, 9, 4, 3) > 20);
+        assert!(alpha_at(&data, 9, 3, 3) > 20);
+        assert_eq!(alpha_at(&data, 9, 1, 1), 0);
+    }
+
+    #[test]
     fn native_rasterizer_evaluates_svg_blend_filter() {
         let data = rasterize_svg_to_rgba(
             r##"<svg width="20" height="10">
@@ -5441,6 +5777,24 @@ mod tests {
             r < 80 && g < 80 && b < 80 && a > 200,
             "multiply blend pixel was {r},{g},{b},{a}"
         );
+    }
+
+    #[test]
+    fn native_rasterizer_evaluates_svg_displacement_map_filter() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="10" height="7">
+                <defs><filter id="f" filterUnits="userSpaceOnUse" x="0" y="0" width="10" height="7">
+                    <feFlood flood-color="rgb(255, 128, 128)" result="map"/>
+                    <feDisplacementMap in="SourceGraphic" in2="map" scale="2" xChannelSelector="R" yChannelSelector="G"/>
+                </filter></defs>
+                <rect x="4" y="3" width="2" height="1" fill="black" filter="url(#f)"/>
+            </svg>"##,
+            10,
+            7,
+        )
+        .unwrap();
+        assert!(painted_at(&data, 10, 3, 3));
+        assert!(!painted_at(&data, 10, 5, 3));
     }
 
     #[test]
