@@ -55,6 +55,7 @@ path = "examples/event_playground.rs"
 
 [features]
 accessibility = ["dep:accesskit", "dep:accesskit_winit"]
+audio-symphonia = ["dep:symphonia"]
 
 [dependencies]
 accesskit        = { version = "0.17", optional = true }
@@ -85,3 +86,4 @@ flate2 = "1"
 # encoding, so this only makes the existing dependency direct.
 brotli = "8"
 rayon = "1.10"
+symphonia = { version = "0.5", optional = true, default-features = false, features = ["aac", "flac", "isomp4", "mkv", "mp3", "ogg", "pcm", "vorbis", "wav"] }
