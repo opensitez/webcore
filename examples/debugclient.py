@@ -514,6 +514,7 @@ def _interactive(port):
     print('  style <sel> <p> <v> set style        cls+ <sel> <c> add class')
     print('  cls- <sel> <c>     remove class      cls~ <sel> <c> toggle class')
     print('  force <sel> <state> force hover/focus/active')
+    print('  media <sel> [action] [time/value] inspect/control media elements')
     print('  nav <url>          navigate          r <w> [h]    resize')
     print('  sc <dy>            scroll            vp           viewport info')
     print('  net                network info      perf         load timing')
@@ -624,6 +625,22 @@ def _interactive(port):
                 parts = line[6:].strip().split(None, 1)
                 if len(parts) >= 2:
                     line = json.dumps({"cmd": "force-state", "selector": parts[0], "state": parts[1]})
+            elif line.startswith('media '):
+                parts = line[6:].strip().split()
+                if len(parts) >= 1:
+                    payload = {
+                        "cmd": "media",
+                        "selector": parts[0],
+                        "action": parts[1] if len(parts) > 1 else "state",
+                    }
+                    if len(parts) > 2:
+                        if payload["action"] == "seek":
+                            payload["time"] = float(parts[2])
+                        elif payload["action"] in ("volume", "rate"):
+                            payload["value"] = float(parts[2])
+                        elif payload["action"] == "muted":
+                            payload["value"] = parts[2].lower() in ("1", "true", "yes", "on")
+                    line = json.dumps(payload)
             elif line.startswith('bench'):
                 n = 5
                 parts = line.split()

@@ -20,7 +20,6 @@ use winit::window::Window;
 
 use tiny_skia::{Pixmap, PixmapPaint, Transform};
 
-use webcore::css::apply_cascade_vp;
 use webcore::dom::{self, HtmlEventType};
 use webcore::platform::Platform;
 use webcore::renderer::display_list::{ImageRef, PaintCmd};
@@ -82,33 +81,11 @@ a{color:inherit;text-decoration:none}
 
 // ─── Async resource results ───────────────────────────────────────────────────
 
-/// Freshly-parsed documents have all raw pointer fields set to null, making it
-/// sound to move them across a thread boundary exactly once before any events fire.
-struct FreshDoc(Document);
-// SAFETY: all *const WebCore fields in Document are std::ptr::null() immediately
-// after parse_html_with_hooks returns.  We never send a Document that has had
-// mouse/keyboard events fired on it.
-unsafe impl Send for FreshDoc {}
-
 enum LoadResult {
-    // Fully parsed + styled document, ready to layout on the main thread
     Page {
         tab_id: usize,
         url: String,
-        doc: FreshDoc,
-        css_sheets: Vec<(String, String)>,
-    },
-    Image {
-        tab_id: usize,
-        src: String,
-        decoded: webcore::html::DecodedImage,
-    },
-    BgImage {
-        tab_id: usize,
-        src: String,
-        rgba: Arc<Vec<u8>>,
-        w: u32,
-        h: u32,
+        html: String,
     },
 }
 
@@ -390,75 +367,10 @@ impl BrowserApp {
                 html.len()
             );
 
-            // CSS channel: receives sheets as they finish fetching.
-            let (css_tx, css_rx) = std::sync::mpsc::channel::<(usize, String, String)>();
-            let base = final_url.clone();
-            let css_idx = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-
-            // parse_html_with_hooks fires our callback for every open tag.
-            // When a <link rel="stylesheet"> is seen we immediately spawn a
-            // fetch thread — it races against the rest of the HTML body parse,
-            // so by the time parse returns, most CSS is already in-flight.
-            let css_tx2 = css_tx.clone();
-            let css_idx2 = css_idx.clone();
-            let cache_dir2 = cache_dir.clone();
-            let t1 = std::time::Instant::now();
-            // The DOCUMENT's base is the final URL as well — images, fonts and
-            // anchors resolve against it just as stylesheets do.
-            let doc_base = final_url.clone();
-            let doc = parse_html_with_hooks(&html, &doc_base, move |tag, attrs| {
-                if tag == "link"
-                    && attrs
-                        .get("rel")
-                        .map(|s| s.eq_ignore_ascii_case("stylesheet"))
-                        .unwrap_or(false)
-                    && !attrs.contains_key("disabled")
-                {
-                    if let Some(href) = attrs.get("href") {
-                        let abs = resolve_url(&base, href);
-                        let sender = css_tx2.clone();
-                        let idx = css_idx2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        let cd = cache_dir2.clone();
-                        eprintln!("[browser]   CSS fetch start: {abs}");
-                        std::thread::spawn(move || {
-                            let t = std::time::Instant::now();
-                            let text = if let Some(ref cd) = cd {
-                                cached_fetch_text(&abs, cd).unwrap_or_default()
-                            } else {
-                                fetch_text(&abs).unwrap_or_default()
-                            };
-                            eprintln!(
-                                "[browser]   CSS fetch done:  {abs} ({:.0}ms, {} bytes)",
-                                t.elapsed().as_millis(),
-                                text.len()
-                            );
-                            let _ = sender.send((idx, abs, text));
-                        });
-                    }
-                }
-            });
-            eprintln!("[browser] Parse: {:.0}ms", t1.elapsed().as_millis());
-
-            // Collect in declaration order.
-            drop(css_tx);
-            let t2 = std::time::Instant::now();
-            let mut css_results: Vec<(usize, String, String)> = css_rx.iter().collect();
-            eprintln!(
-                "[browser] CSS wait: {:.0}ms ({} sheets)",
-                t2.elapsed().as_millis(),
-                css_results.len()
-            );
-            css_results.sort_by_key(|(idx, _, _)| *idx);
-            let css_sheets: Vec<(String, String)> = css_results
-                .into_iter()
-                .map(|(_, url, s)| (url, s))
-                .collect();
-
             let _ = tx.send(LoadResult::Page {
                 tab_id,
                 url: final_url,
-                doc: FreshDoc(doc),
-                css_sheets,
+                html,
             });
             let _ = proxy.send_event(());
         });
@@ -477,52 +389,29 @@ impl BrowserApp {
             return;
         }
 
-        // Track which tabs need an image re-layout.
-        let mut tabs_need_relayout: Vec<usize> = Vec::new();
-
         for res in pending {
             match res {
-                LoadResult::Page {
-                    tab_id,
-                    url,
-                    doc: FreshDoc(mut doc),
-                    css_sheets,
-                } => {
+                LoadResult::Page { tab_id, url, html } => {
                     let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
                         continue;
                     };
 
-                    // Apply any stylesheets that arrived (fetched in parallel during parse)
-                    let t_css = std::time::Instant::now();
-                    let mut had_css = false;
-                    for (css_url, css) in &css_sheets {
-                        if !css.is_empty() {
-                            doc.stylesheet.parse_and_add_with_base(css, css_url);
-                            had_css = true;
-                        }
-                    }
-                    eprintln!(
-                        "[browser] CSS parse: {:.0}ms ({} rules)",
-                        t_css.elapsed().as_millis(),
-                        doc.stylesheet.rules.len()
-                    );
-                    if had_css {
-                        let t_casc = std::time::Instant::now();
-                        let w = self.width;
-                        let ch = self.content_h();
-                        doc.stylesheet.rebuild_index();
-                        apply_cascade_vp(
-                            &mut doc.root,
-                            &doc.stylesheet,
-                            None,
-                            16.0,
-                            w,
-                            ch,
-                            0,
-                            false,
-                        );
-                        eprintln!("[browser] Cascade: {:.0}ms", t_casc.elapsed().as_millis());
-                    }
+                    let page_w = self.page_width();
+                    let content_h = self.content_h();
+                    let mut doc = if let Some(cache_dir) = self.cache_dir.clone() {
+                        self.renderer.load_html_with_base_and_stylesheet_loader(
+                            &html,
+                            &url,
+                            page_w,
+                            content_h,
+                            Arc::new(move |css_url| {
+                                cached_fetch_bytes(css_url, &cache_dir).map(decode_body)
+                            }),
+                        )
+                    } else {
+                        self.renderer
+                            .load_html_with_base(&html, &url, page_w, content_h)
+                    };
 
                     // Update URL (may have changed due to redirects)
                     self.tabs[idx].url = url.clone();
@@ -536,73 +425,6 @@ impl BrowserApp {
                         doc.title.clone()
                     };
                     self.tabs[idx].loading = false;
-
-                    let t_layout = std::time::Instant::now();
-                    // Pass 1 — before the cascade: inline `style=` backgrounds
-                    // start downloading straight away.
-                    let bg_sem = Arc::new(Semaphore::new(4));
-                    let mut bg_seen: Vec<String> = Vec::new();
-                    let n_pre = self.spawn_bg_fetches(&doc, &url, tab_id, &mut bg_seen, &bg_sem);
-
-                    self.layout_doc(&mut doc);
-                    eprintln!("[browser] Layout: {:.0}ms", t_layout.elapsed().as_millis());
-
-                    // Pass 2 — after the cascade, which is the first moment a
-                    // stylesheet's `background-image` has a value at all.
-                    // `data:` and local URLs resolve synchronously here.
-                    webcore::html::load_background_images(&mut doc.root, &url);
-                    let n_post = self.spawn_bg_fetches(&doc, &url, tab_id, &mut bg_seen, &bg_sem);
-                    eprintln!(
-                        "[browser] Background images: {} before cascade, {} after",
-                        n_pre, n_post
-                    );
-
-                    // Fetch images asynchronously (non-blocking, arrive later)
-                    let img_semaphore = Arc::new(Semaphore::new(4));
-                    let mut img_srcs: Vec<String> = Vec::new();
-                    Document::walk_all(&doc.root, &mut |b| {
-                        if b.tag == "img" {
-                            if let Some(src) = b.attributes.get("src") {
-                                let abs = resolve_url(&url, src);
-                                if !img_srcs.contains(&abs) {
-                                    img_srcs.push(abs);
-                                }
-                            }
-                        }
-                    });
-                    for src in img_srcs {
-                        let tx = self.tx.clone();
-                        let proxy = self.proxy.clone();
-                        let s2 = src.clone();
-                        let cd = self.cache_dir.clone();
-                        let semaphore = img_semaphore.clone();
-                        std::thread::spawn(move || {
-                            // Limit concurrent image fetches to avoid 429 rate-limiting
-                            let _permit = semaphore.acquire();
-                            let bytes_result = if let Some(ref cd) = cd {
-                                cached_fetch_bytes(&s2, cd)
-                            } else {
-                                fetch_bytes_with_retry(&s2)
-                            };
-                            match bytes_result {
-                                Ok(bytes) => {
-                                    // Preserve SVG markup for layout-sized rasterization,
-                                    // matching the core async image path.
-                                    if let Some(decoded) =
-                                        webcore::html::decode_image_bytes_ex(&bytes)
-                                    {
-                                        let _ = tx.send(LoadResult::Image {
-                                            tab_id,
-                                            src,
-                                            decoded,
-                                        });
-                                        let _ = proxy.send_event(());
-                                    }
-                                }
-                                Err(_) => {}
-                            }
-                        });
-                    }
 
                     // Wire form events — submit navigates, collecting form data
                     let nav = self.pending_navigate.clone();
@@ -628,164 +450,8 @@ impl BrowserApp {
                     }
                     self.rebuild_chrome();
                 }
-                LoadResult::Image {
-                    tab_id,
-                    src,
-                    decoded,
-                } => {
-                    let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
-                        continue;
-                    };
-                    let Some(doc) = self.tabs[idx].doc.as_mut() else {
-                        continue;
-                    };
-                    let base = doc.base_url.clone();
-                    Document::walk_all_mut(&mut doc.root, &mut |b| {
-                        if b.tag == "img" {
-                            if let Some(s) = b.attributes.get("src") {
-                                if resolve_url(&base, s) == src {
-                                    webcore::html::set_decoded_image_on_node(b, decoded.clone());
-                                    b.layout.layout_dirty = true;
-                                    b.layout.cached_intrinsic_w.set(f32::NAN);
-                                    b.layout.intrinsic_dirty = true;
-                                }
-                            }
-                        }
-                    });
-                    if !tabs_need_relayout.contains(&idx) {
-                        tabs_need_relayout.push(idx);
-                    }
-                }
-                LoadResult::BgImage {
-                    tab_id,
-                    src,
-                    rgba,
-                    w,
-                    h,
-                } => {
-                    let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
-                        continue;
-                    };
-                    let Some(doc) = self.tabs[idx].doc.as_mut() else {
-                        continue;
-                    };
-                    let base = doc.base_url.clone();
-                    Document::walk_all_mut(&mut doc.root, &mut |b| {
-                        if b.bg_image_data.is_none()
-                            && !b.style.background_image_url.is_empty()
-                            && resolve_url(&base, &b.style.background_image_url) == src
-                        {
-                            b.bg_image_data = Some(rgba.clone());
-                            b.bg_image_width = w;
-                            b.bg_image_height = h;
-                        }
-                    });
-                    // Background images don't affect layout, just repaint
-                    if idx == self.active {
-                        let _ = self.proxy.send_event(());
-                    }
-                }
             }
         }
-
-        // One batched re-layout per tab instead of one per image.
-        for idx in tabs_need_relayout {
-            let width = self.width;
-            let ch = self.content_h();
-            if let Some(doc) = self.tabs[idx].doc.as_mut() {
-                // Propagate layout_dirty up from dirty images to ancestors
-                // so the subtree pruning in layout_box actually visits them.
-                propagate_dirty(&mut doc.root);
-                let t_img = std::time::Instant::now();
-                let mut eng = self.renderer.layout_engine();
-                eng.viewport_h = ch;
-                eng.layout_no_cascade(doc, width);
-                eprintln!(
-                    "[browser] Image batch re-layout: {:.0}ms",
-                    t_img.elapsed().as_millis()
-                );
-            }
-        }
-    }
-
-    /// Request every CSS background image the document currently knows about.
-    /// `seen` carries across calls so the same URL is never fetched twice.
-    ///
-    /// Called BOTH before and after the cascade: before, so an inline
-    /// `style="background-image:…"` starts downloading immediately; after,
-    /// because `background-image` is a COMPUTED value and anything coming from
-    /// a stylesheet is still an empty string until the cascade has run.
-    fn spawn_bg_fetches(
-        &self,
-        doc: &Document,
-        base: &str,
-        tab_id: usize,
-        seen: &mut Vec<String>,
-        sem: &Arc<Semaphore>,
-    ) -> usize {
-        let mut found: Vec<String> = Vec::new();
-        Document::walk_all(&doc.root, &mut |b| {
-            if b.bg_image_data.is_some() {
-                return;
-            }
-            if b.style.background_image_url.is_empty() {
-                return;
-            }
-            let abs = resolve_url(base, &b.style.background_image_url);
-            if abs.starts_with("data:") {
-                return;
-            }
-            if !seen.contains(&abs) && !found.contains(&abs) {
-                found.push(abs);
-            }
-        });
-        for bg_src in &found {
-            seen.push(bg_src.clone());
-        }
-        let n = found.len();
-        for bg_src in found {
-            let tx = self.tx.clone();
-            let proxy = self.proxy.clone();
-            let cd = self.cache_dir.clone();
-            let semaphore = sem.clone();
-            std::thread::spawn(move || {
-                let _permit = semaphore.acquire();
-                let bytes_result = if let Some(ref cd) = cd {
-                    cached_fetch_bytes(&bg_src, cd)
-                } else {
-                    fetch_bytes_with_retry(&bg_src)
-                };
-                match bytes_result {
-                    Ok(bytes) => match webcore::html::decode_image_bytes(&bytes) {
-                        Some((raw, w, h)) => {
-                            let _ = tx.send(LoadResult::BgImage {
-                                tab_id,
-                                src: bg_src,
-                                rgba: Arc::new(raw),
-                                w,
-                                h,
-                            });
-                            let _ = proxy.send_event(());
-                        }
-                        None => eprintln!(
-                            "[browser]   bg decode FAILED ({} bytes): {}",
-                            bytes.len(),
-                            bg_src
-                        ),
-                    },
-                    Err(e) => eprintln!("[browser]   bg fetch FAILED ({}): {}", e, bg_src),
-                }
-            });
-        }
-        n
-    }
-
-    fn layout_doc(&mut self, doc: &mut Document) {
-        let w = self.width;
-        let ch = self.content_h();
-        let mut eng = self.renderer.layout_engine();
-        eng.viewport_h = ch;
-        eng.layout(doc, w);
     }
 
     fn relayout_active(&mut self) {
@@ -1148,6 +814,24 @@ impl ApplicationHandler<()> for BrowserApp {
         }
         if let Some(w) = &self.window {
             w.request_redraw();
+        }
+    }
+
+    fn about_to_wait(&mut self, el: &winit::event_loop::ActiveEventLoop) {
+        self.process_results();
+
+        let page_w = self.page_width();
+        let content_h = self.content_h();
+        let needs_redraw = self.renderer.drive_document_idle(
+            el,
+            self.tabs[self.active].doc.as_mut(),
+            page_w,
+            content_h,
+        );
+        if needs_redraw {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
         }
     }
 
@@ -2405,24 +2089,6 @@ fn normalize_url(s: String) -> String {
     format!("https://duckduckgo.com/?q={query}")
 }
 
-/// Propagate layout_dirty upward: if any descendant is dirty, mark the parent dirty too.
-/// Returns true if this node or any descendant is dirty.
-fn propagate_dirty(node: &mut webcore::WebCore) -> bool {
-    let mut any_dirty = node.layout.layout_dirty;
-    for child in &mut node.children {
-        if propagate_dirty(child) {
-            any_dirty = true;
-        }
-    }
-    if any_dirty {
-        node.layout.cached_intrinsic_w.set(f32::NAN);
-        node.layout.intrinsic_dirty = true;
-        node.layout.layout_dirty = true;
-        node.has_dirty_layout_descendant = true;
-    }
-    any_dirty
-}
-
 /// Resolve a (possibly relative) `href` against a `base` URL.
 fn resolve_url(base: &str, href: &str) -> String {
     webcore::resolve_url(href, base)
@@ -2471,10 +2137,6 @@ fn fetch_text_with_url(url: &str) -> Result<(String, String), String> {
     }
 }
 
-fn fetch_text(url: &str) -> Result<String, String> {
-    fetch_text_with_url(url).map(|(body, _)| body)
-}
-
 fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     let do_fetch = |client: &reqwest::blocking::Client| -> Result<Vec<u8>, String> {
         let resp = client
@@ -2511,42 +2173,6 @@ fn fetch_bytes_with_retry(url: &str) -> Result<Vec<u8>, String> {
         }
     }
     Err("max retries".to_string())
-}
-
-// ─── Simple counting semaphore ───────────────────────────────────────────────
-
-struct Semaphore {
-    count: std::sync::Mutex<usize>,
-    condvar: std::sync::Condvar,
-    max: usize,
-}
-
-struct SemaphorePermit<'a>(&'a Semaphore);
-
-impl Semaphore {
-    fn new(max: usize) -> Self {
-        Self {
-            count: std::sync::Mutex::new(0),
-            condvar: std::sync::Condvar::new(),
-            max,
-        }
-    }
-    fn acquire(&self) -> SemaphorePermit<'_> {
-        let mut count = self.count.lock().unwrap();
-        while *count >= self.max {
-            count = self.condvar.wait(count).unwrap();
-        }
-        *count += 1;
-        SemaphorePermit(self)
-    }
-}
-
-impl Drop for SemaphorePermit<'_> {
-    fn drop(&mut self) {
-        let mut count = self.0.count.lock().unwrap();
-        *count -= 1;
-        self.0.condvar.notify_one();
-    }
 }
 
 // ─── Cached fetch (shared cache with snapshot example) ───────────────────────
@@ -2627,14 +2253,6 @@ fn decode_body(bytes: Vec<u8>) -> String {
         let (cow, _, _) = encoding_rs::WINDOWS_1252.decode(&bytes);
         cow.into_owned()
     })
-}
-
-fn cached_fetch_text(url: &str, cache_dir: &str) -> Result<String, String> {
-    let bytes = cached_fetch_bytes(url, cache_dir)?;
-    Ok(String::from_utf8(bytes.clone()).unwrap_or_else(|_| {
-        let (cow, _, _) = encoding_rs::WINDOWS_1252.decode(&bytes);
-        cow.into_owned()
-    }))
 }
 
 fn escape_html(s: &str) -> String {
@@ -2748,6 +2366,21 @@ fn dbg_json_num(json: &str, key: &str) -> Option<f32> {
         .find(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
         .unwrap_or(after.len());
     after[..end].parse().ok()
+}
+
+fn dbg_json_bool(json: &str, key: &str) -> Option<bool> {
+    let needle = format!("\"{}\"", key);
+    let pos = json.find(&needle)?;
+    let after = &json[pos + needle.len()..];
+    let after = after.trim_start().strip_prefix(':')?;
+    let after = after.trim_start();
+    if after.starts_with("true") {
+        Some(true)
+    } else if after.starts_with("false") {
+        Some(false)
+    } else {
+        dbg_json_num(json, key).map(|value| value != 0.0)
+    }
 }
 
 /// Node ids matching `query`, resolved with the engine's own selector engine.
@@ -2880,7 +2513,6 @@ fn dbg_inspect_json(node: &webcore::WebCore) -> String {
         .as_ref()
         .map(|doc| doc.root.children.len())
         .unwrap_or(0);
-    let svg_markup_len = node.svg_markup.as_ref().map(|s| s.len()).unwrap_or(0);
     format!(
         concat!(
             r#"{{"tag":{0},"id":{1},"class":{2},"#,
@@ -2892,8 +2524,8 @@ fn dbg_inspect_json(node: &webcore::WebCore) -> String {
             r#""margin_trbl":[{20:.1},{21:.1},{22:.1},{23:.1}],"#,
             r#""padding_trbl":[{24:.1},{25:.1},{26:.1},{27:.1}],"#,
             r#""border_trbl":[{28:.1},{29:.1},{30:.1},{31:.1}],"#,
-            r#""children":{32},"svg_parsed":{33},"svg_children":{34},"svg_markup_len":{35},"#,
-            r#""mask_image":{36},"mask_loaded":{37},"mask_size":[{38},{39}]}}"#
+            r#""children":{32},"svg_parsed":{33},"svg_children":{34},"#,
+            r#""mask_image":{35},"mask_loaded":{36},"mask_size":[{37},{38}]}}"#
         ),
         dbg_json_escape(&node.tag),
         dbg_json_escape(id),
@@ -2930,12 +2562,43 @@ fn dbg_inspect_json(node: &webcore::WebCore) -> String {
         node.children.iter().filter(|c| c.tag != "#text").count(),
         node.svg_document.is_some(),
         svg_child_count,
-        svg_markup_len,
         dbg_json_escape(mask_image),
         node.mask_image_data.is_some(),
         node.mask_image_width,
         node.mask_image_height,
     )
+}
+
+fn dbg_svg_metrics_json(root: &webcore::WebCore) -> String {
+    let mut summary = webcore::svg::SvgUnsupportedSummary::default();
+    Document::walk_all(root, &mut |node| {
+        if let Some(doc) = node.svg_document.as_ref() {
+            summary.merge(webcore::svg::unsupported_summary(doc));
+        }
+    });
+    format!(
+        r#"{{"documents":{},"unsupported_count":{},"clean":{},"unknown_elements":{},"unsupported_elements":{},"unsupported_attributes":{}}}"#,
+        summary.documents,
+        svg_metric_total(&summary),
+        summary.is_empty(),
+        dbg_count_map_json(&summary.unknown_elements),
+        dbg_count_map_json(&summary.unsupported_elements),
+        dbg_count_map_json(&summary.unsupported_attributes),
+    )
+}
+
+fn svg_metric_total(summary: &webcore::svg::SvgUnsupportedSummary) -> usize {
+    summary.unknown_elements.values().sum::<usize>()
+        + summary.unsupported_elements.values().sum::<usize>()
+        + summary.unsupported_attributes.values().sum::<usize>()
+}
+
+fn dbg_count_map_json(map: &std::collections::BTreeMap<String, usize>) -> String {
+    let mut parts = Vec::new();
+    for (key, count) in map {
+        parts.push(format!("{}:{}", dbg_json_escape(key), count));
+    }
+    format!("{{{}}}", parts.join(","))
 }
 
 fn dbg_computed_json(node: &webcore::WebCore) -> String {
@@ -3538,6 +3201,13 @@ impl BrowserApp {
                 }
                 None => r#"{"ok":false,"error":"inspect needs selector"}"#.to_string(),
             },
+            "svg-metrics" => {
+                if let Some(doc) = self.tabs[self.active].doc.as_ref() {
+                    format!(r#"{{"ok":true,"svg":{}}}"#, dbg_svg_metrics_json(&doc.root))
+                } else {
+                    r#"{"ok":false,"error":"no document"}"#.to_string()
+                }
+            }
             "computed" => match dbg_json_str(line, "selector") {
                 Some(sel) => {
                     let mut parts = Vec::new();
@@ -4275,6 +3945,92 @@ impl BrowserApp {
                 format!(
                     r#"{{"ok":true,"stylesheets":{},"images_loaded":{}}}"#,
                     css_count, img_count
+                )
+            }
+            // ── HTML media element control/state ────────────────────────────
+            "media" => {
+                let selector = dbg_json_str(line, "selector").unwrap_or_default();
+                let action = dbg_json_str(line, "action").unwrap_or_else(|| "state".to_string());
+                let Some(doc) = self.tabs[self.active].doc.as_mut() else {
+                    return r#"{"ok":false,"error":"no document"}"#.to_string();
+                };
+                let Some(id) = doc.query_selector(&selector) else {
+                    return format!(
+                        r#"{{"ok":false,"error":"no match: {}"}}"#,
+                        dbg_json_escape(&selector)
+                    );
+                };
+                if !doc.is_media_element(id) {
+                    return format!(
+                        r#"{{"ok":false,"error":"not media: {}"}}"#,
+                        dbg_json_escape(&selector)
+                    );
+                }
+                let changed = match action.as_str() {
+                    "play" => doc.media_play(id),
+                    "pause" => doc.media_pause(id),
+                    "toggle" => doc.media_toggle_playback(id),
+                    "load" => doc.media_load(id),
+                    "seek" => dbg_json_num(line, "time")
+                        .map(|time| doc.media_set_current_time(id, time))
+                        .unwrap_or(false),
+                    "volume" => dbg_json_num(line, "value")
+                        .map(|volume| doc.media_set_volume(id, volume))
+                        .unwrap_or(false),
+                    "muted" => dbg_json_bool(line, "value")
+                        .map(|muted| doc.media_set_muted(id, muted))
+                        .unwrap_or(false),
+                    "rate" => dbg_json_num(line, "value")
+                        .map(|rate| doc.media_set_playback_rate(id, rate))
+                        .unwrap_or(false),
+                    "state" => true,
+                    _ => false,
+                };
+                if changed && action != "state" {
+                    let mut eng = self.renderer.layout_engine();
+                    eng.layout(doc, self.width);
+                }
+                let src = doc.media_current_src(id).unwrap_or_default();
+                let current_time = doc.media_current_time(id).unwrap_or(0.0);
+                let duration = doc
+                    .media_duration(id)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "null".to_string());
+                let ready = doc.media_ready_state(id).unwrap_or(0);
+                let network = doc.media_network_state(id).unwrap_or(0);
+                let paused = doc.media_paused(id).unwrap_or(true);
+                let ended = doc.media_ended(id).unwrap_or(false);
+                let volume = doc.media_volume(id).unwrap_or(1.0);
+                let muted = doc.media_muted(id).unwrap_or(false);
+                let tracks = doc.media_text_tracks(id).unwrap_or_default();
+                let tracks_json = tracks
+                    .iter()
+                    .map(|track| {
+                        format!(
+                            r#"{{"kind":{},"label":{},"language":{},"src":{},"default":{}}}"#,
+                            dbg_json_escape(&track.kind),
+                            dbg_json_escape(&track.label),
+                            dbg_json_escape(&track.language),
+                            dbg_json_escape(&track.src),
+                            track.default
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    r#"{{"ok":true,"changed":{},"node_id":{},"src":{},"currentTime":{:.3},"duration":{},"readyState":{},"networkState":{},"paused":{},"ended":{},"volume":{:.3},"muted":{},"textTracks":[{}]}}"#,
+                    changed,
+                    id,
+                    dbg_json_escape(&src),
+                    current_time,
+                    duration,
+                    ready,
+                    network,
+                    paused,
+                    ended,
+                    volume,
+                    muted,
+                    tracks_json
                 )
             }
             // ── HTML output ────────────────────────────────────────────────
@@ -5389,7 +5145,12 @@ fn run_headless(
         let path = url.trim_start_matches("file://");
         std::fs::read_to_string(path).unwrap_or_default()
     } else if url != "about:blank" {
-        match webcore::fetch_document(&url) {
+        let fetch_result = if let Some(ref cd) = cache_dir {
+            cached_fetch_document(&url, cd)
+        } else {
+            webcore::fetch_document(&url).map_err(|e| e.to_string())
+        };
+        match fetch_result {
             Ok((text, final_url)) => {
                 base = final_url;
                 text
@@ -5411,11 +5172,16 @@ fn run_headless(
             continue;
         }
         let css_url = resolve_url(&url, &href);
-        if let Ok(css) = webcore::http_client()
-            .get(&css_url)
-            .send()
-            .and_then(|r| r.text())
-        {
+        let css_result = if let Some(ref cd) = cache_dir {
+            cached_fetch_bytes(&css_url, cd).map(decode_body)
+        } else {
+            webcore::http_client()
+                .get(&css_url)
+                .send()
+                .and_then(|r| r.text())
+                .map_err(|e| e.to_string())
+        };
+        if let Ok(css) = css_result {
             // AUTHOR origin, and relative `url()` inside the sheet resolves
             // against the SHEET's location, not the document's.
             doc.stylesheet
@@ -5489,7 +5255,7 @@ fn run_headless(
             }
         }
         // Background images
-        webcore::html::load_background_images(&mut doc.root, &url);
+        webcore::svg::load_background_images(&mut doc.root, &url);
         // ⛔ The viewport height has to be set again. This second layout ran at
         // the engine's default, so every `vh` length was rescaled by the ratio
         // between the real viewport and that default — `5vh` came out 35px on a
@@ -6450,6 +6216,9 @@ fn dispatch_headless_cmd(
                 parts.len(),
                 parts.join(",")
             )
+        }
+        "svg-metrics" => {
+            format!(r#"{{"ok":true,"svg":{}}}"#, dbg_svg_metrics_json(&doc.root))
         }
         // ── Computed styles ──────────────────────────────────────────────
         "computed" => {

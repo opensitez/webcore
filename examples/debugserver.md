@@ -64,7 +64,7 @@ cargo run --release --example browser -- [OPTIONS] [URL]
   --chrome-port <n>  Chrome CDP port (default: 9223)
   --width <px>       Viewport width (default: 1280)
   --height <px>      Viewport height (default: 900)
-  --cached           Cache fetched resources to snapshot_cache/
+  --cached           Use snapshot_cache/ for fetched resources (default)
   --cache-dir <dir>  Custom cache directory
   --no-images        Skip image loading
 ```
@@ -105,6 +105,7 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 | `inspect-mode` | `{"cmd":"inspect-mode","on":"true"}` — recascade with matched-rule capture enabled for scripted `rules` inspection; GUI mode preserves the pre-panel page viewport so responsive media queries do not change while the inspector opens |
 | `rule-search` | `{"cmd":"rule-search","query":"lg\\:flex","limit":10}` — search loaded stylesheet selectors while debugging cascade misses |
 | `paint-dump` | `{"cmd":"paint-dump","x":0,"y":0,"w":400,"h":200,"limit":80}` — display-list commands in a viewport rectangle; text entries include font metrics and decoration flags, fill rectangles include color/radius, and CSS mask entries include mask image dimensions |
+| `svg-metrics` | `{"cmd":"svg-metrics"}` — counts parsed SVG documents plus unsupported native SVG elements/attributes seen on the current page |
 | `box-model` | `{"cmd":"box-model","selector":"div"}` — Chrome-style |
 | `highlight` | `{"cmd":"highlight","selector":"h1","out":"/tmp/hl.png"}`; accepts `"scale":2` for HiDPI output |
 | `dom-tree` | `{"cmd":"dom-tree","depth":2}` — structured JSON tree |
@@ -118,6 +119,7 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 | `type` | `{"cmd":"type","text":"hello"}` |
 | `key` | `{"cmd":"key","key":"Enter"}` |
 | `force-state` | `{"cmd":"force-state","selector":".item","state":"hover"}` |
+| `media` | `{"cmd":"media","selector":"video","action":"state"}`; actions: `play`, `pause`, `toggle`, `load`, `seek` with `"time":12.5`, `volume`/`muted`/`rate` with `"value"` |
 
 ### Mutation
 | Command | Example |
@@ -183,6 +185,7 @@ dbg> cls+ body dark      add class
 dbg> cls- body dark      remove class
 dbg> cls~ body dark      toggle class
 dbg> force .item hover   force state
+dbg> media video toggle  inspect/control media; seek with `media video seek 12.5`; set state with `media video volume 0.5`, `media video muted true`, `media video rate 1.25`
 dbg> nav https://...     navigate
 dbg> r 800               resize width
 dbg> sc 200              scroll down
