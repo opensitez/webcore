@@ -66,16 +66,13 @@ impl<'a> Reader<'a> {
         }
         None
     }
-    /// `255UInt16` — a short integer in one to three bytes.
+    /// `255UInt16` — a short integer in one to three bytes (WOFF2 §5.1).
     fn u255(&mut self) -> Option<u16> {
-        const ONE_MORE: u8 = 255;
-        const WORD: u8 = 253;
-        const LOWEST: u8 = 254;
-        let b = self.u8()?;
-        match b {
-            WORD => self.u16(),
-            ONE_MORE => Some(self.u8()? as u16 + LOWEST as u16),
-            LOWEST => Some(self.u8()? as u16 + LOWEST as u16 * 2),
+        let code = self.u8()?;
+        match code {
+            253 => self.u16(),
+            255 => Some(self.u8()? as u16 + 253),
+            254 => Some(self.u8()? as u16 + 506),
             v => Some(v as u16),
         }
     }
@@ -110,8 +107,8 @@ pub fn decode(data: &[u8]) -> Option<Vec<u8>> {
     let flavor = r.u32()?;
     let length = r.u32()? as usize;
     let num_tables = r.u16()? as usize;
-    let reserved = r.u16()?;
-    let total_sfnt_size = r.u32()? as usize;
+    let _reserved = r.u16()?;
+    let _total_sfnt_size = r.u32()? as usize;
     let total_compressed = r.u32()? as usize;
     let _major = r.u16()?;
     let _minor = r.u16()?;
@@ -120,7 +117,7 @@ pub fn decode(data: &[u8]) -> Option<Vec<u8>> {
     let meta_orig = r.u32()?;
     let priv_off = r.u32()?;
     let priv_len = r.u32()?;
-    if length != data.len() || reserved != 0 || num_tables == 0 || num_tables > 4096 {
+    if length != data.len() || num_tables == 0 || num_tables > 4096 {
         return None;
     }
 
@@ -147,6 +144,70 @@ pub fn decode(data: &[u8]) -> Option<Vec<u8>> {
         });
     }
 
+    // ── Collection directory (if flavor == ttcf, WOFF2 §4.2) ─────────────────
+    let collection_dir = if flavor == 0x74746366 {
+        let version = r.u32()?;
+        let num_fonts = r.u255()? as usize;
+        if num_fonts == 0 {
+            return None;
+        }
+        let mut fonts = Vec::with_capacity(num_fonts);
+        for _ in 0..num_fonts {
+            let num_font_tables = r.u255()? as usize;
+            let font_flavor = r.u32()?;
+            let mut indices = Vec::with_capacity(num_font_tables);
+            for _ in 0..num_font_tables {
+                let idx = r.u255()? as usize;
+                if idx >= dir.len() {
+                    return None;
+                }
+                indices.push(idx);
+            }
+            fonts.push(CollectionFontEntry {
+                flavor: font_flavor,
+                table_indices: indices,
+            });
+        }
+        // Table ordering constraints for font collections (WOFF2 §4.2, §5.5)
+        for (i, entry) in dir.iter().enumerate() {
+            if &entry.tag == b"glyf" {
+                match dir.get(i + 1) {
+                    Some(next) if &next.tag == b"loca" => {}
+                    _ => return None,
+                }
+            }
+        }
+        for font in &fonts {
+            let mut font_glyf = None;
+            let mut font_loca = None;
+            for &idx in &font.table_indices {
+                if &dir[idx].tag == b"glyf" {
+                    if font_glyf.is_some() {
+                        return None;
+                    }
+                    font_glyf = Some(idx);
+                } else if &dir[idx].tag == b"loca" {
+                    if font_loca.is_some() {
+                        return None;
+                    }
+                    font_loca = Some(idx);
+                }
+            }
+            match (font_glyf, font_loca) {
+                (Some(g), Some(l)) => {
+                    if l != g + 1 {
+                        return None;
+                    }
+                }
+                (None, None) => {}
+                _ => return None,
+            }
+        }
+        Some(CollectionDirectory { _version: version, fonts })
+    } else {
+        None
+    };
+
     // ── One Brotli stream holding every table ────────────────────────────────
     let compressed_start = r.p;
     let compressed_end = compressed_start.checked_add(total_compressed)?;
@@ -154,8 +215,7 @@ pub fn decode(data: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     validate_side_blocks(
-        data.len(),
-        compressed_start,
+        data,
         compressed_end,
         meta_off,
         meta_len,
@@ -186,72 +246,219 @@ pub fn decode(data: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    // ── Undo the transforms ──────────────────────────────────────────────────
-    let mut out_tables: Vec<([u8; 4], Vec<u8>)> = Vec::with_capacity(dir.len());
-    let mut rebuilt_loca: Option<Vec<u8>> = None;
-    let mut pending_hmtx: Option<(u32, &[u8])> = None;
+    // ── Validate loca tables (WOFF2 §5.3 conform-mustRejectLoca, §5.5 conform-tableOrdering) ─────
     for (i, e) in dir.iter().enumerate() {
-        if &e.tag == b"glyf" && e.transformed {
-            let index_to_loc = find_index_to_loc(&dir, &blobs);
-            let (glyf, loca) = rebuild_glyf(blobs[i], index_to_loc)?;
-            rebuilt_loca = Some(loca);
-            out_tables.push((e.tag, glyf));
-        } else if &e.tag == b"loca" && e.transformed {
-            // Rebuilt alongside glyf; filled in below.
-            if e.xform_len != 0 {
+        if &e.tag == b"glyf" {
+            let loca_idx = if collection_dir.is_some() {
+                i + 1
+            } else {
+                dir.iter().position(|t| &t.tag == b"loca")?
+            };
+            if loca_idx <= i {
                 return None;
             }
-            out_tables.push((e.tag, Vec::new()));
+            let loca_entry = dir.get(loca_idx)?;
+            if loca_entry.tag != *b"loca" {
+                return None;
+            }
+            if e.transformed != loca_entry.transformed {
+                return None;
+            }
+            if loca_entry.transformed {
+                if loca_entry.xform_len != 0 {
+                    return None;
+                }
+                let glyf_blob = blobs.get(i)?;
+                if glyf_blob.len() < 8 {
+                    return None;
+                }
+                let num_glyphs = u16_at(glyf_blob, 4)? as u32;
+                let index_format = u16_at(glyf_blob, 6)?;
+                if index_format > 1 {
+                    return None;
+                }
+                let expected_loca_orig_len =
+                    (num_glyphs + 1) * if index_format == 0 { 2 } else { 4 };
+                if loca_entry.orig_len != expected_loca_orig_len {
+                    return None;
+                }
+            }
+        } else if &e.tag == b"loca" {
+            let has_preceding_glyf = dir[..i].iter().any(|t| &t.tag == b"glyf");
+            if !has_preceding_glyf {
+                return None;
+            }
+        }
+    }
+
+    // ── Undo the transforms ──────────────────────────────────────────────────
+    let mut out_tables: Vec<([u8; 4], Vec<u8>)> = dir.iter().map(|e| (e.tag, Vec::new())).collect();
+    for (i, e) in dir.iter().enumerate() {
+        if &e.tag == b"glyf" && e.transformed {
+            let loca_idx = if collection_dir.is_some() {
+                i + 1
+            } else {
+                dir.iter().position(|t| &t.tag == b"loca")?
+            };
+            let index_to_loc = find_index_to_loc(&dir, &blobs);
+            let (glyf, loca) = rebuild_glyf(blobs[i], index_to_loc)?;
+            out_tables[i].1 = glyf;
+            out_tables[loca_idx].1 = loca;
+        } else if &e.tag == b"loca" && e.transformed {
+            // Already reconstructed alongside glyf.
         } else if &e.tag == b"hmtx" && e.transformed {
-            pending_hmtx = Some((e.orig_len, blobs[i]));
+            // Reconstructed below after prerequisite tables are populated.
         } else {
             let mut v = blobs[i].to_vec();
             v.truncate(e.orig_len as usize);
-            out_tables.push((e.tag, v));
+            out_tables[i].1 = v;
         }
-    }
-    if let Some(loca) = rebuilt_loca {
-        for (tag, data) in out_tables.iter_mut() {
-            if tag == b"loca" {
-                *data = loca;
-                break;
-            }
-        }
-    }
-    if dir.iter().any(|e| &e.tag == b"loca" && e.transformed)
-        && out_tables
-            .iter()
-            .any(|(tag, data)| tag == b"loca" && data.is_empty())
-    {
-        return None;
-    }
-    if let Some((orig_len, data)) = pending_hmtx {
-        let glyf = find_out_table(&out_tables, b"glyf")?;
-        let loca = find_out_table(&out_tables, b"loca")?;
-        let head = find_out_table(&out_tables, b"head")?;
-        let hhea = find_out_table(&out_tables, b"hhea")?;
-        let maxp = find_out_table(&out_tables, b"maxp")?;
-        let num_glyphs = num_glyphs_from_maxp(maxp)?;
-        let num_hmetrics = num_hmetrics_from_hhea(hhea)?;
-        let xmins = glyf_x_mins(glyf, loca, index_to_loc_from_head(head), num_glyphs)?;
-        let hmtx = rebuild_hmtx(data, num_hmetrics, num_glyphs, &xmins)?;
-        if hmtx.len() != orig_len as usize {
-            return None;
-        }
-        out_tables.push((*b"hmtx", hmtx));
     }
 
-    let sfnt = build_sfnt(flavor, out_tables)?;
-    if sfnt.len() != total_sfnt_size {
-        return None;
+    // Reconstruct transformed hmtx tables
+    for (i, e) in dir.iter().enumerate() {
+        if &e.tag == b"hmtx" && e.transformed {
+            let (glyf, loca, head, hhea, maxp) = if let Some(coll) = &collection_dir {
+                let font = coll.fonts.iter().find(|f| f.table_indices.contains(&i))?;
+                let glyf_idx = font.table_indices.iter().find(|&&idx| &dir[idx].tag == b"glyf").copied()?;
+                let loca_idx = font.table_indices.iter().find(|&&idx| &dir[idx].tag == b"loca").copied()?;
+                let head_idx = font.table_indices.iter().find(|&&idx| &dir[idx].tag == b"head").copied()?;
+                let hhea_idx = font.table_indices.iter().find(|&&idx| &dir[idx].tag == b"hhea").copied()?;
+                let maxp_idx = font.table_indices.iter().find(|&&idx| &dir[idx].tag == b"maxp").copied()?;
+                (
+                    &out_tables[glyf_idx].1[..],
+                    &out_tables[loca_idx].1[..],
+                    &out_tables[head_idx].1[..],
+                    &out_tables[hhea_idx].1[..],
+                    &out_tables[maxp_idx].1[..],
+                )
+            } else {
+                (
+                    find_out_table(&out_tables, b"glyf")?,
+                    find_out_table(&out_tables, b"loca")?,
+                    find_out_table(&out_tables, b"head")?,
+                    find_out_table(&out_tables, b"hhea")?,
+                    find_out_table(&out_tables, b"maxp")?,
+                )
+            };
+            let num_glyphs = num_glyphs_from_maxp(maxp)?;
+            let num_hmetrics = num_hmetrics_from_hhea(hhea)?;
+            let xmins = glyf_x_mins(glyf, loca, index_to_loc_from_head(head), num_glyphs)?;
+            let hmtx = rebuild_hmtx(blobs[i], num_hmetrics, num_glyphs, &xmins)?;
+            out_tables[i].1 = hmtx;
+        }
     }
-    validate_sfnt(&sfnt)?;
-    Some(sfnt)
+
+    // Ensure every table has non-empty reconstructed data
+    for (i, e) in dir.iter().enumerate() {
+        if out_tables[i].1.is_empty() && e.orig_len != 0 {
+            return None;
+        }
+    }
+
+    if let Some(coll) = collection_dir {
+        build_ttc(&coll, out_tables)
+    } else {
+        let sfnt = build_sfnt(flavor, out_tables)?;
+        validate_sfnt(&sfnt)?;
+        Some(sfnt)
+    }
+}
+
+struct CollectionFontEntry {
+    flavor: u32,
+    table_indices: Vec<usize>,
+}
+
+struct CollectionDirectory {
+    _version: u32,
+    fonts: Vec<CollectionFontEntry>,
+}
+
+fn build_ttc(coll: &CollectionDirectory, out_tables: Vec<([u8; 4], Vec<u8>)>) -> Option<Vec<u8>> {
+    let num_fonts = coll.fonts.len();
+    let ttc_header_len = 12 + num_fonts * 4;
+
+    let mut font_offsets = Vec::with_capacity(num_fonts);
+    let mut curr_offset = ttc_header_len;
+    for f in &coll.fonts {
+        font_offsets.push(curr_offset as u32);
+        curr_offset += 12 + f.table_indices.len() * 16;
+    }
+
+    let table_data_start = (curr_offset + 3) & !3;
+    let mut table_offsets = Vec::with_capacity(out_tables.len());
+    let mut table_checksums = Vec::with_capacity(out_tables.len());
+    let mut data_offset = table_data_start;
+    for (_, data) in &out_tables {
+        table_offsets.push(data_offset as u32);
+        table_checksums.push(checksum(data));
+        data_offset = data_offset.checked_add((data.len().checked_add(3)?) & !3)?;
+    }
+
+    let mut out = Vec::with_capacity(data_offset);
+    out.extend_from_slice(b"ttcf");
+    out.extend_from_slice(&1u16.to_be_bytes()); // major
+    out.extend_from_slice(&0u16.to_be_bytes()); // minor
+    out.extend_from_slice(&(num_fonts as u32).to_be_bytes());
+    for &off in &font_offsets {
+        out.extend_from_slice(&off.to_be_bytes());
+    }
+
+    for f in &coll.fonts {
+        let num_tables = f.table_indices.len();
+        let (search_range, entry_selector, range_shift) = search_range_params(num_tables);
+        out.extend_from_slice(&f.flavor.to_be_bytes());
+        out.extend_from_slice(&(num_tables as u16).to_be_bytes());
+        out.extend_from_slice(&search_range.to_be_bytes());
+        out.extend_from_slice(&entry_selector.to_be_bytes());
+        out.extend_from_slice(&range_shift.to_be_bytes());
+
+        let mut sorted_indices = f.table_indices.clone();
+        sorted_indices.sort_by_key(|&idx| out_tables[idx].0);
+
+        for &idx in &sorted_indices {
+            let (tag, ref data) = out_tables[idx];
+            let offset = table_offsets[idx];
+            let length = data.len() as u32;
+            let csum = table_checksums[idx];
+            out.extend_from_slice(&tag);
+            out.extend_from_slice(&csum.to_be_bytes());
+            out.extend_from_slice(&offset.to_be_bytes());
+            out.extend_from_slice(&length.to_be_bytes());
+        }
+    }
+
+    while out.len() < table_data_start {
+        out.push(0);
+    }
+
+    for (i, (_, data)) in out_tables.iter().enumerate() {
+        if out.len() != table_offsets[i] as usize {
+            return None;
+        }
+        out.extend_from_slice(data);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+    }
+
+    Some(out)
+}
+
+fn search_range_params(num_tables: usize) -> (u16, u16, u16) {
+    let n = num_tables as u16;
+    let mut entry_selector = 0u16;
+    while (1u32 << (entry_selector + 1)) <= n as u32 {
+        entry_selector += 1;
+    }
+    let search_range = (1u16 << entry_selector) * 16;
+    let range_shift = n * 16 - search_range;
+    (search_range, entry_selector, range_shift)
 }
 
 fn validate_side_blocks(
-    file_len: usize,
-    compressed_start: usize,
+    data: &[u8],
     compressed_end: usize,
     meta_off: u32,
     meta_len: u32,
@@ -259,20 +466,44 @@ fn validate_side_blocks(
     priv_off: u32,
     priv_len: u32,
 ) -> Option<()> {
+    let file_len = data.len();
     let meta = validate_optional_block(file_len, meta_off, meta_len, meta_orig, true)?;
     let private = validate_optional_block(file_len, priv_off, priv_len, 0, false)?;
-    for block in [meta, private].into_iter().flatten() {
-        if block.0 < compressed_end
-            || ranges_overlap(block.0, block.1, compressed_start, compressed_end)
-        {
+
+    // Extraneous data and alignment checks between blocks (WOFF2 §3)
+    let mut current_end = compressed_end;
+
+    if let Some((meta_start, meta_end)) = meta {
+        let max_pad = (current_end + 3) & !3;
+        if meta_start < current_end || meta_start > max_pad {
             return None;
         }
-    }
-    if let (Some(a), Some(b)) = (meta, private) {
-        if ranges_overlap(a.0, a.1, b.0, b.1) {
+        if data[current_end..meta_start].iter().any(|&b| b != 0) {
             return None;
         }
+        current_end = meta_end;
     }
+
+    if let Some((priv_start, priv_end)) = private {
+        let max_pad = (current_end + 3) & !3;
+        if priv_start < current_end || priv_start > max_pad {
+            return None;
+        }
+        if data[current_end..priv_start].iter().any(|&b| b != 0) {
+            return None;
+        }
+        current_end = priv_end;
+    }
+
+    // Trailing padding beyond the last block: at most 3 null bytes for 4-byte alignment (WOFF2 §3)
+    let max_file_len = (current_end + 3) & !3;
+    if file_len < current_end || file_len > max_file_len {
+        return None;
+    }
+    if data[current_end..file_len].iter().any(|&b| b != 0) {
+        return None;
+    }
+
     Some(())
 }
 
@@ -300,9 +531,6 @@ fn validate_optional_block(
     Some(Some((start, end)))
 }
 
-fn ranges_overlap(a0: usize, a1: usize, b0: usize, b1: usize) -> bool {
-    a0 < b1 && b0 < a1
-}
 
 fn table_is_transformed(tag: &[u8; 4], version: u8) -> Option<bool> {
     match (tag, version) {
@@ -494,9 +722,9 @@ fn rebuild_glyf(data: &[u8], index_to_loc: i16) -> Option<(Vec<u8>, Vec<u8>)> {
     let composite_size = h.u32()? as usize;
     let bbox_size = h.u32()? as usize;
     let instr_size = h.u32()? as usize;
-    // An optional stream marks simple glyphs whose contours may overlap.
+    // An optional stream marks simple glyphs whose contours may overlap (WOFF2 §5.1)
     let overlap_size = if option_flags & 1 != 0 {
-        h.u32()? as usize
+        (num_glyphs + 7) / 8
     } else {
         0
     };
@@ -515,11 +743,10 @@ fn rebuild_glyf(data: &[u8], index_to_loc: i16) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut composite = Reader::new(slice(composite_size)?);
     let bbox_all = slice(bbox_size)?;
     let instr_all = slice(instr_size)?;
-    let _overlap = slice(overlap_size);
+    let overlap_all = if overlap_size > 0 { Some(slice(overlap_size)?) } else { None };
 
-    // The bbox stream opens with one bit per glyph saying whether an explicit
-    // box follows; composites always set it, simple glyphs usually do not.
-    let bitmap_len = (num_glyphs + 7) / 8;
+    // The total number of bytes in bboxBitmap is equal to 4 * floor((numGlyphs + 31) / 32) (WOFF2 §5.1)
+    let bitmap_len = ((num_glyphs + 31) / 32) * 4;
     let bbox_bitmap = bbox_all.get(..bitmap_len)?;
     let mut bbox_vals = Reader::new(bbox_all.get(bitmap_len..)?);
 
@@ -534,9 +761,9 @@ fn rebuild_glyf(data: &[u8], index_to_loc: i16) -> Option<(Vec<u8>, Vec<u8>)> {
         let has_bbox = bbox_bitmap[gid / 8] & (0x80 >> (gid % 8)) != 0;
 
         if n == 0 {
-            // An empty glyph occupies no bytes at all.
+            // An empty glyph occupies no bytes at all and must not have an explicit bbox.
             if has_bbox {
-                let _ = bbox_vals.take(8);
+                return None;
             }
             continue;
         }
@@ -601,7 +828,8 @@ fn rebuild_glyf(data: &[u8], index_to_loc: i16) -> Option<(Vec<u8>, Vec<u8>)> {
         let mut end_pts: Vec<u16> = Vec::with_capacity(n_contours);
         let mut total = 0usize;
         for _ in 0..n_contours {
-            total += n_points.u255()? as usize;
+            let pts = n_points.u255()? as usize;
+            total += pts;
             if total == 0 || total > 0xffff {
                 return None;
             }
@@ -617,7 +845,7 @@ fn rebuild_glyf(data: &[u8], index_to_loc: i16) -> Option<(Vec<u8>, Vec<u8>)> {
         for _ in 0..total {
             let f = *flags_all.get(flags_at)?;
             flags_at += 1;
-            on_curve.push(f & 0x80 != 0);
+            on_curve.push(f & 0x80 == 0);
             let (dx, dy) = triplet(&mut glyph_str, f & 0x7f)?;
             x += dx;
             y += dy;
@@ -654,7 +882,12 @@ fn rebuild_glyf(data: &[u8], index_to_loc: i16) -> Option<(Vec<u8>, Vec<u8>)> {
         }
         glyf.extend_from_slice(&(instr_len as u16).to_be_bytes());
         glyf.extend_from_slice(instructions);
-        write_simple_outline(&mut glyf, &xs, &ys, &on_curve);
+        let has_overlap_bit = if let Some(bitmap) = overlap_all {
+            bitmap.get(gid / 8).map(|b| b & (0x80 >> (gid % 8)) != 0).unwrap_or(false)
+        } else {
+            false
+        };
+        write_simple_outline(&mut glyf, &xs, &ys, &on_curve, has_overlap_bit);
         pad4(&mut glyf, start);
     }
     loca.push(glyf.len() as u32);
@@ -683,56 +916,53 @@ fn pad4(buf: &mut Vec<u8>, start: usize) {
     }
 }
 
-/// One point's (dx, dy) from the triplet encoding (WOFF2 §5.2).
 fn triplet(r: &mut Reader<'_>, code: u8) -> Option<(i32, i32)> {
-    let c = code as usize;
-    if c < 10 {
+    let flag = code as usize;
+    if flag < 10 {
         // dx is zero; dy is one byte with the sign in the code.
         let b = r.u8()? as i32;
-        let dy = ((c & 0x0e) << 7) as i32 + b;
-        Some((0, if c & 1 != 0 { dy } else { -dy }))
-    } else if c < 20 {
+        let dy = ((flag & 14) << 7) as i32 + b;
+        Some((0, with_sign(flag, dy)))
+    } else if flag < 20 {
         let b = r.u8()? as i32;
-        let dx = (((c - 10) & 0x0e) << 7) as i32 + b;
-        Some((if c & 1 != 0 { dx } else { -dx }, 0))
-    } else if c < 84 {
-        let b = r.u8()? as i32;
-        let n = c - 20;
-        let dx = 1 + ((n & 0x30) << 2) as i32 + (b >> 4);
-        let dy = 1 + (((n & 0x0c) << 4) as i32) + (b & 0x0f);
-        Some((sign(dx, n & 0x01 == 0), sign(dy, n & 0x02 == 0)))
-    } else if c < 120 {
-        let b0 = r.u8()? as i32;
+        let dx = (((flag - 10) & 14) << 7) as i32 + b;
+        Some((with_sign(flag, dx), 0))
+    } else if flag < 84 {
+        let b0 = (flag - 20) as i32;
         let b1 = r.u8()? as i32;
-        let n = c - 84;
-        let dx = 1 + ((n / 12) << 8) as i32 + b0;
-        let dy = 1 + (((n % 12) >> 2) << 8) as i32 + b1;
-        Some((sign(dx, n & 0x01 == 0), sign(dy, n & 0x02 == 0)))
-    } else if c < 124 {
+        let dx = 1 + (b0 & 0x30) + (b1 >> 4);
+        let dy = 1 + ((b0 & 0x0c) << 2) + (b1 & 0x0f);
+        Some((with_sign(flag, dx), with_sign(flag >> 1, dy)))
+    } else if flag < 120 {
+        let b0 = (flag - 84) as i32;
+        let b1 = r.u8()? as i32;
+        let b2 = r.u8()? as i32;
+        let dx = 1 + ((b0 / 12) << 8) + b1;
+        let dy = 1 + (((b0 % 12) >> 2) << 8) + b2;
+        Some((with_sign(flag, dx), with_sign(flag >> 1, dy)))
+    } else if flag < 124 {
         let b0 = r.u8()? as i32;
         let b1 = r.u8()? as i32;
         let b2 = r.u8()? as i32;
-        let n = c - 120;
-        let dx = 1 + ((b0 << 4) | (b1 >> 4));
-        let dy = 1 + (((b1 & 0x0f) << 8) | b2);
-        Some((sign(dx, n & 0x01 == 0), sign(dy, n & 0x02 == 0)))
+        let dx = (b0 << 4) + (b1 >> 4);
+        let dy = ((b1 & 0x0f) << 8) + b2;
+        Some((with_sign(flag, dx), with_sign(flag >> 1, dy)))
     } else {
         let b0 = r.u8()? as i32;
         let b1 = r.u8()? as i32;
         let b2 = r.u8()? as i32;
         let b3 = r.u8()? as i32;
-        let n = c - 124;
-        let dx = 1 + ((b0 << 8) | b1);
-        let dy = 1 + ((b2 << 8) | b3);
-        Some((sign(dx, n & 0x01 == 0), sign(dy, n & 0x02 == 0)))
+        let dx = (b0 << 8) + b1;
+        let dy = (b2 << 8) + b3;
+        Some((with_sign(flag, dx), with_sign(flag >> 1, dy)))
     }
 }
 
-fn sign(v: i32, negative: bool) -> i32 {
-    if negative {
-        -v
+fn with_sign(flag: usize, baseval: i32) -> i32 {
+    if flag & 1 != 0 {
+        baseval
     } else {
-        v
+        -baseval
     }
 }
 
@@ -742,12 +972,19 @@ fn sign(v: i32, negative: bool) -> i32 {
 /// using a short form and a repeat flag. Emitting the long form for everything
 /// is valid and keeps the reconstruction honest — no encoder cleverness where a
 /// mistake would silently distort outlines.
-fn write_simple_outline(buf: &mut Vec<u8>, xs: &[i16], ys: &[i16], on_curve: &[bool]) {
+fn write_simple_outline(
+    buf: &mut Vec<u8>,
+    xs: &[i16],
+    ys: &[i16],
+    on_curve: &[bool],
+    has_overlap_bit: bool,
+) {
     const ON_CURVE: u8 = 0x01;
     const X_SHORT: u8 = 0x02;
     const Y_SHORT: u8 = 0x04;
     const X_SAME_OR_POSITIVE: u8 = 0x10;
     const Y_SAME_OR_POSITIVE: u8 = 0x20;
+    const OVERLAP_SIMPLE: u8 = 0x40;
 
     // Deltas between consecutive points, which is what the format stores.
     let n = xs.len();
@@ -763,6 +1000,9 @@ fn write_simple_outline(buf: &mut Vec<u8>, xs: &[i16], ys: &[i16], on_curve: &[b
 
     for i in 0..n {
         let mut f = if on_curve[i] { ON_CURVE } else { 0 };
+        if has_overlap_bit && i == 0 {
+            f |= OVERLAP_SIMPLE;
+        }
         let dx = dxs[i];
         let dy = dys[i];
         if dx == 0 {
@@ -1106,7 +1346,10 @@ mod tests {
     }
 
     #[test]
-    fn woff2_reconstructed_sfnt_size_must_match_header() {
+    fn woff2_reconstructed_sfnt_size_does_not_reject_mismatched_totalsfntsize() {
+        // WOFF2 §3.2 conform-mustNotRejectIncorrectTotalSize:
+        // "User agents MUST NOT reject correctly decoded font file if the resulting
+        // font file size doesn't match the totalSfntSize value encoded as part of the WOFF2 header."
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../data/wpt/fonts/kinter.woff2");
         let Ok(mut data) = std::fs::read(&path) else {
@@ -1115,7 +1358,7 @@ mod tests {
         let bad_size = u32::from_be_bytes([data[16], data[17], data[18], data[19]]).wrapping_add(4);
         patch_u32(&mut data, 16, bad_size);
 
-        assert!(decode(&data).is_none());
+        assert!(decode(&data).is_some());
     }
 
     #[test]
@@ -1134,12 +1377,16 @@ mod tests {
 
     #[test]
     fn side_block_validation_rejects_overlap_and_inconsistent_absence() {
-        assert!(validate_side_blocks(100, 40, 60, 0, 0, 0, 0, 0).is_some());
-        assert!(validate_side_blocks(100, 40, 60, 42, 8, 8, 0, 0).is_none());
-        assert!(validate_side_blocks(100, 40, 60, 20, 8, 8, 0, 0).is_none());
-        assert!(validate_side_blocks(100, 40, 60, 0, 4, 4, 0, 0).is_none());
-        assert!(validate_side_blocks(100, 40, 60, 70, 8, 8, 74, 8).is_none());
-        assert!(validate_side_blocks(100, 40, 60, 70, 8, 8, 82, 8).is_some());
+        let b60 = vec![0; 60];
+        let b90 = vec![0; 90];
+        let b100 = vec![0; 100];
+        assert!(validate_side_blocks(&b60, 60, 0, 0, 0, 0, 0).is_some());
+        assert!(validate_side_blocks(&b100, 60, 0, 0, 0, 0, 0).is_none());
+        assert!(validate_side_blocks(&b100, 60, 42, 8, 8, 0, 0).is_none());
+        assert!(validate_side_blocks(&b100, 60, 20, 8, 8, 0, 0).is_none());
+        assert!(validate_side_blocks(&b100, 60, 0, 4, 4, 0, 0).is_none());
+        assert!(validate_side_blocks(&b100, 60, 70, 8, 8, 74, 8).is_none());
+        assert!(validate_side_blocks(&b90, 60, 60, 10, 10, 72, 18).is_some());
     }
 
     #[test]
