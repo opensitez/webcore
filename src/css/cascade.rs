@@ -2575,7 +2575,7 @@ fn apply_form_sizing_hints_after_ua(
                 if let Some(size) = root.attributes.get("size") {
                     if let Ok(chars) = size.trim().parse::<f32>() {
                         if chars > 0.0 {
-                            apply_property(style, "width", &format!("{}ch", chars));
+                            apply_property(style, "width", &format!("{}em", chars * 0.6 + 0.5));
                         }
                     }
                 }

@@ -14,6 +14,7 @@ pub(crate) struct HtmlParser {
     pub(crate) title: String,
     pub(crate) base_url: String,
     pub(crate) linked_stylesheets: Vec<(String, String)>, // (href, media)
+    pub(crate) document_stylesheets: Vec<DocumentStylesheet>,
     /// Monotonically increasing counter for assigning stable node_ids.
     pub(crate) next_node_id: u32,
     /// Arena-based DOM being built in parallel with the WebCore tree.
@@ -136,6 +137,7 @@ impl HtmlParser {
             title: String::new(),
             base_url: String::new(),
             linked_stylesheets: Vec::new(),
+            document_stylesheets: Vec::new(),
             next_node_id: 1, // 0 = NodeId::NONE (reserved)
             arena: crate::dom::arena::DomArena::new(),
             on_open_tag: None,
@@ -658,7 +660,11 @@ impl HtmlParser {
                         {
                             let media = attrs.get("media").cloned().unwrap_or_default();
                             if !self.linked_stylesheets.iter().any(|(h, _)| *h == href) {
-                                self.linked_stylesheets.push((href, media));
+                                self.linked_stylesheets.push((href.clone(), media.clone()));
+                                self.document_stylesheets.push(DocumentStylesheet::Linked {
+                                    href,
+                                    media,
+                                });
                             }
                         }
                     }
@@ -697,6 +703,8 @@ impl HtmlParser {
                             .unwrap_or(parent_tag);
                         if cur_parent != "template" {
                             self.stylesheet.parse_and_add(&normalize_css_text(&css));
+                            self.document_stylesheets
+                                .push(DocumentStylesheet::Inline { css: css.clone() });
                         }
                         let mut style_node = self.new_box("style");
                         style_node.text = css;
@@ -966,7 +974,11 @@ impl HtmlParser {
                 if !media.eq_ignore_ascii_case("print") {
                     self.fire_hook(&tag, &attrs);
                 }
-                self.linked_stylesheets.push((href, media.to_string()));
+                self.linked_stylesheets.push((href.clone(), media.to_string()));
+                self.document_stylesheets.push(DocumentStylesheet::Linked {
+                    href,
+                    media: media.to_string(),
+                });
             }
             if !self_closing {
                 self.skip_until_close(&tag);
@@ -982,6 +994,8 @@ impl HtmlParser {
         if tag == "style" {
             let css = self.collect_raw_text_until("style");
             self.stylesheet.parse_and_add(&normalize_css_text(&css));
+            self.document_stylesheets
+                .push(DocumentStylesheet::Inline { css: css.clone() });
             // The element stays in the tree — see the sibling arm in
             // `parse_children_into`.
             let mut style_node = self.new_box("style");

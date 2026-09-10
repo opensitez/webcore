@@ -370,6 +370,7 @@ fn parse_html_full(
         layout_store: crate::layout::layout_box::LayoutStore::new(),
         pending_nodes: std::collections::HashMap::new(),
         linked_stylesheets,
+        document_stylesheets: parser.document_stylesheets,
         editor: crate::dom::Editor::new(),
         canvas_surfaces: crate::canvas::CanvasSurfaces::default(),
         media_states: crate::types::MediaStateMap::new(),

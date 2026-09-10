@@ -1296,11 +1296,23 @@ fn replay_inner(
                     }
                     ("select", _) => {
                         if !*appearance_none {
-                            // Use Select widget for the arrow
-                            let mut sel = crate::widgets::Select::new(vec![]);
-                            sel.width = rect.w;
-                            sel.height = rect.h;
-                            sel.paint(target, rect.x, rect.y, scale);
+                            // Draw dropdown chevron arrow using the element's text color
+                            let arrow_x = rect.x + rect.w - 14.0;
+                            let arrow_y = rect.y + rect.h / 2.0;
+                            let ts = Transform::from_scale(scale, scale);
+                            let c = apply_opacity(color, a2);
+                            let mut paint = Paint::default();
+                            paint.anti_alias = true;
+                            paint.set_color_rgba8(c.r, c.g, c.b, c.a);
+                            let mut stroke = tiny_skia::Stroke::default();
+                            stroke.width = 1.5;
+                            let mut pb = PathBuilder::new();
+                            pb.move_to(arrow_x - 4.0, arrow_y - 2.0);
+                            pb.line_to(arrow_x, arrow_y + 2.0);
+                            pb.line_to(arrow_x + 4.0, arrow_y - 2.0);
+                            if let Some(path) = pb.finish() {
+                                target.stroke_path(&path, &paint, &stroke, ts, None);
+                            }
                         }
                         // Draw selected value text
                         let display_text = if value.is_empty() { placeholder } else { value };
@@ -1309,19 +1321,20 @@ fn replay_inner(
                                 let c = apply_opacity(color, a2);
                                 let line_h = *font_size * 1.2;
                                 let text_y = rect.y + (rect.h - line_h).max(0.0) / 2.0;
+                                let text_max_w = (rect.w - 20.0).max(0.0);
                                 draw_text_cmd(
                                     target,
                                     *fs,
                                     *sc,
                                     scale,
-                                    rect.x + 2.0,
+                                    rect.x + 4.0,
                                     text_y,
                                     display_text,
                                     font_family,
                                     *font_size,
                                     *font_weight,
                                     0,
-                                    100.0,
+                                    text_max_w,
                                     line_h,
                                     &c,
                                     &super::display_list::TextDecoration::default(),
@@ -1680,6 +1693,7 @@ fn replay_inner(
                                 // Vertically center the text in the element
                                 let line_h = *font_size * 1.2;
                                 let text_y = rect.y + (rect.h - line_h).max(0.0) / 2.0;
+                                let text_max_w = (rect.w - 4.0).max(0.0);
                                 draw_text_cmd(
                                     target,
                                     *fs,
@@ -1692,7 +1706,7 @@ fn replay_inner(
                                     *font_size,
                                     *font_weight,
                                     0,
-                                    100.0,
+                                    text_max_w,
                                     line_h,
                                     &c,
                                     &super::display_list::TextDecoration::default(),

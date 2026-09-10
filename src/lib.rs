@@ -90,7 +90,7 @@ pub use types::{
     apply_autofocus, build_form_submit_url, collect_form_data, encode_form_urlencoded,
     find_parent_form_action, input_value, is_text_input, process_form_input_key, reset_form,
     AnimDirection, AnimState, Announcement, CSSCursor, CanvasContext, Color, Component,
-    ComponentEvent, ComponentRegistry, ComputedStyle, Document, EasingFn, FillMode, FormEvent,
+    ComponentEvent, ComponentRegistry, ComputedStyle, Document, DocumentStylesheet, EasingFn, FillMode, FormEvent,
     FormEventCallback, FormEventKind, KeyframeStop, LivePoliteness, MatchedRule, ParsedAnimation,
     ParsedTransition, Rect, ShadowMode, ShadowRoot, TransitionState, WebCore,
 };
@@ -243,11 +243,36 @@ pub fn load_html_reusing_with_stylesheet_loader(
         css_results.len(),
         expected_count
     );
-    css_results.sort_by_key(|(idx, _, _, _)| *idx);
-    for (_, css_url, sheet, media) in &css_results {
-        if !sheet.is_empty() {
-            doc.stylesheet
-                .parse_and_add_with_base_media(sheet, css_url, media);
+    if !doc.document_stylesheets.is_empty() {
+        let mut fetched_map: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for (_, css_url, sheet, _) in css_results {
+            if !sheet.is_empty() {
+                fetched_map.insert(css_url, sheet);
+            }
+        }
+        doc.stylesheet = crate::css::ua_stylesheet();
+        for ds in &doc.document_stylesheets {
+            match ds {
+                crate::types::DocumentStylesheet::Inline { css } => {
+                    doc.stylesheet.parse_and_add_with_base(css, &doc.base_url);
+                }
+                crate::types::DocumentStylesheet::Linked { href, media } => {
+                    let abs = resolve_css_url(base_url, href);
+                    if let Some(css) = fetched_map.get(&abs) {
+                        doc.stylesheet
+                            .parse_and_add_with_base_media(css, &abs, media);
+                    }
+                }
+            }
+        }
+    } else {
+        css_results.sort_by_key(|(idx, _, _, _)| *idx);
+        for (_, css_url, sheet, media) in &css_results {
+            if !sheet.is_empty() {
+                doc.stylesheet
+                    .parse_and_add_with_base_media(sheet, css_url, media);
+            }
         }
     }
 

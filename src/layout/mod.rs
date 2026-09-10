@@ -2311,7 +2311,7 @@ impl LayoutEngine {
                     let sender = tx.clone();
                     let counter = in_flight.clone();
                     std::thread::spawn(move || {
-                        let result = crate::http_client()
+                        let result = crate::http_client_lenient()
                             .get(&url)
                             .send()
                             .ok()
@@ -2335,6 +2335,15 @@ impl LayoutEngine {
                 self.pending_fonts = Some(rx);
             }
         }
+    }
+
+    /// Load font face bytes directly into this engine's font system.
+    pub fn load_font_face_bytes(&mut self, face: &crate::css::FontFaceDecl, bytes: Vec<u8>) -> bool {
+        let fs = match self.font_system {
+            Some(ptr) => unsafe { &mut *ptr },
+            None => return false,
+        };
+        load_font_face_bytes(fs, face, bytes)
     }
 
     /// Poll for fonts that have arrived from background threads.

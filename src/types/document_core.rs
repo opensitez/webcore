@@ -23,6 +23,7 @@ impl Document {
             pending_nodes: HashMap::new(),
             base_url: String::new(),
             linked_stylesheets: Vec::new(),
+            document_stylesheets: Vec::new(),
             editor: Editor::new(),
             canvas_surfaces: crate::canvas::CanvasSurfaces::default(),
             media_states: crate::types::MediaStateMap::new(),

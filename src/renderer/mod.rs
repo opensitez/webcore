@@ -540,8 +540,12 @@ impl Renderer {
         let view_w = w / zoom;
         let view_h = h / zoom;
         self.viewport_h = view_h;
-        if doc.poll_pending_images() {
+        let font_loaded = self.layout_engine().poll_pending_fonts();
+        if doc.poll_pending_images() || font_loaded {
             let engine = self.layout_engine();
+            if font_loaded {
+                engine.invalidate_cascade();
+            }
             engine.viewport_h = view_h;
             engine.layout(doc, view_w);
             self.invalidate_display_list();

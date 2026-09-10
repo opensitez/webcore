@@ -73,6 +73,9 @@ pub(crate) fn handle_head_tag(
             parser.fire_hook(tag, &attrs);
             let css = parser.collect_raw_text_until("style");
             parser.stylesheet.parse_and_add(&normalize_css_text(&css));
+            parser
+                .document_stylesheets
+                .push(DocumentStylesheet::Inline { css: css.clone() });
             parser.push_head_node("style", attrs, css);
         }
         "title" => {
@@ -98,7 +101,11 @@ pub(crate) fn handle_head_tag(
                 rel.eq_ignore_ascii_case("stylesheet") && !disabled && !href.is_empty();
             parser.push_head_node("link", attrs, String::new());
             if want_sheet {
-                parser.linked_stylesheets.push((href, media_owned));
+                parser.linked_stylesheets.push((href.clone(), media_owned.clone()));
+                parser.document_stylesheets.push(DocumentStylesheet::Linked {
+                    href,
+                    media: media_owned,
+                });
             }
         }
         "meta" | "base" => {

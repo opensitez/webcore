@@ -36,6 +36,12 @@ pub enum PendingImageTarget {
 
 pub type PendingImageResult = (Vec<usize>, PendingImageTarget, crate::html::DecodedImage);
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum DocumentStylesheet {
+    Inline { css: String },
+    Linked { href: String, media: String },
+}
+
 pub struct Document {
     pub root: WebCore,
     pub stylesheet: Stylesheet,
@@ -87,6 +93,8 @@ pub struct Document {
     /// print-only sheets can be skipped for screen rendering but kept for future
     /// print support.
     pub linked_stylesheets: Vec<(String, String)>,
+    /// All author stylesheets in document order (both `<link>` and `<style>`).
+    pub document_stylesheets: Vec<DocumentStylesheet>,
     pub editor: Editor,
     /// Drawing state for the document's `<canvas>` elements, keyed by node id.
     /// The pixels stay on the element in `WebCore::image_data`; this is what
@@ -706,6 +714,7 @@ impl Clone for Document {
             layout_store: crate::layout::layout_box::LayoutStore::new(),
             pending_nodes: HashMap::new(),
             linked_stylesheets: self.linked_stylesheets.clone(),
+            document_stylesheets: self.document_stylesheets.clone(),
             editor: self.editor.clone(),
             // The canvas BITMAPS come along inside `root.clone()`, because
             // they live on the elements. The drawing STATE does not: a copy of
