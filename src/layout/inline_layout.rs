@@ -1023,8 +1023,9 @@ pub fn layout_inline_block(
         {
             let mut cur_x = line_x;
             let mut prefix_w = 0.0f32;
+            let mut seen_atomic_before_text = false;
             for item in line_items {
-                let item_x = if is_rtl {
+                let atomic_x = if is_rtl {
                     line_x + (line_w_total - prefix_w - item.advance).max(0.0)
                 } else {
                     cur_x
@@ -1056,8 +1057,8 @@ pub fn layout_inline_block(
                                 ay.max(cursor_y)
                             }
                         };
-                        atomic_pos.push((path.clone(), item_x, ay));
-                        let ar = Rect::new(item_x, ay, box_w, box_h);
+                        atomic_pos.push((path.clone(), atomic_x, ay));
+                        let ar = Rect::new(atomic_x, ay, box_w, box_h);
                         for len in 1..path.len() {
                             let p = path[..len].to_vec();
                             inline_fragment_rects
@@ -1065,9 +1066,15 @@ pub fn layout_inline_block(
                                 .and_modify(|existing| union_rect(existing, &ar))
                                 .or_insert(ar);
                         }
+                        seen_atomic_before_text = true;
                     }
                     InlineItemKind::Text { path, .. } => {
-                        let r = Rect::new(item_x, cursor_y, item.advance, line_h);
+                        let text_x = if is_rtl && seen_atomic_before_text {
+                            atomic_x
+                        } else {
+                            cur_x
+                        };
+                        let r = Rect::new(text_x, cursor_y, item.advance, line_h);
                         for len in 1..=path.len() {
                             let p = path[..len].to_vec();
                             inline_fragment_rects
@@ -1091,6 +1098,7 @@ pub fn layout_inline_block(
         let flat_text = collect_flat_text(node);
         let mut text_x_off = 0.0f32;
         let mut prefix_w = 0.0f32;
+        let mut seen_atomic_before_text = false;
         for item in line_items.iter() {
             match &item.kind {
                 InlineItemKind::Text {
@@ -1108,10 +1116,17 @@ pub fn layout_inline_block(
                         prefix_w += item.advance;
                         continue;
                     }
-                    if is_rtl {
+                    if is_rtl && seen_atomic_before_text {
                         text_x_off = (line_w_total - prefix_w - item.advance).max(0.0);
                     }
                     break;
+                }
+                InlineItemKind::Atomic { .. } => {
+                    if !is_rtl {
+                        text_x_off += item.advance;
+                    }
+                    prefix_w += item.advance;
+                    seen_atomic_before_text = true;
                 }
                 _ => {
                     if !is_rtl {
