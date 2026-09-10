@@ -2325,17 +2325,19 @@ fn layout_abs_children(engine: &LayoutEngine, node: &mut WebCore, font_px: f32, 
     } else {
         engine.pos_cb.get()
     };
-    let indices: Vec<usize> = node
-        .children
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| matches!(c.style.position, Position::Absolute | Position::Fixed))
-        .map(|(i, _)| i)
+    let child_paths = collect_grid_children(node);
+    let abs_paths: Vec<Vec<usize>> = child_paths
+        .into_iter()
+        .filter(|p| {
+            let c = grid_child_ref(node, p);
+            matches!(c.style.position, Position::Absolute | Position::Fixed)
+        })
         .collect();
-    for i in indices {
+    for path in abs_paths {
+        let child = grid_child_mut(node, &path);
         layout_positioned(
             engine,
-            &mut node.children[i],
+            child,
             containing_rect,
             font_px,
             root_font_px,

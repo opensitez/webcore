@@ -2961,27 +2961,34 @@ impl LayoutEngine {
         // This is handled by the layout functions (block, flex, grid) that
         // create child Constraints with available_height set.
 
-        // Auto-margin centering (CSS 2.1 §10.3.3) — applies to any element with an
-        // explicit width and at least one auto horizontal margin.  Block layout has
-        // its own copy of this logic; here we handle flex/grid/table/custom.
-        if let Some(content_w) = rbox.content_width {
-            let left_auto = node.style.margin_left.is_auto();
-            let right_auto = node.style.margin_right.is_auto();
-            if left_auto || right_auto {
-                let non_margin = rbox.border_left
-                    + rbox.padding_left
-                    + content_w
-                    + rbox.padding_right
-                    + rbox.border_right;
-                let available = (containing_w - non_margin).max(0.0);
-                if left_auto && right_auto {
-                    let ml = (available / 2.0).floor();
-                    rbox.margin_left = ml;
-                    rbox.margin_right = available - ml;
-                } else if left_auto {
-                    rbox.margin_left = available - rbox.margin_right;
-                } else {
-                    rbox.margin_right = available - rbox.margin_left;
+        // Auto-margin centering (CSS 2.1 §10.3.3) — applies to block-level elements
+        // in normal flow. For inline-level elements (inline-block, inline-flex, etc.),
+        // auto margins evaluate to 0 (CSS 2.1 §10.3.10).
+        let is_block_level = node.style.is_block_level()
+            && !matches!(
+                node.style.display,
+                Display::InlineBlock | Display::Inline | Display::InlineFlex | Display::InlineGrid
+            );
+        if is_block_level {
+            if let Some(content_w) = rbox.content_width {
+                let left_auto = node.style.margin_left.is_auto();
+                let right_auto = node.style.margin_right.is_auto();
+                if left_auto || right_auto {
+                    let non_margin = rbox.border_left
+                        + rbox.padding_left
+                        + content_w
+                        + rbox.padding_right
+                        + rbox.border_right;
+                    let available = (containing_w - non_margin).max(0.0);
+                    if left_auto && right_auto {
+                        let ml = (available / 2.0).floor();
+                        rbox.margin_left = ml;
+                        rbox.margin_right = available - ml;
+                    } else if left_auto {
+                        rbox.margin_left = available - rbox.margin_right;
+                    } else {
+                        rbox.margin_right = available - rbox.margin_left;
+                    }
                 }
             }
         }

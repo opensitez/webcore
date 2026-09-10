@@ -969,15 +969,19 @@ impl HtmlParser {
                 && !attrs.contains_key("disabled")
                 && !href.is_empty()
             {
+                let onload = attrs.get("onload").map(|s| s.as_str()).unwrap_or("");
+                let is_async_screen = onload.contains("media") && (onload.contains("all") || onload.contains("screen"));
+                let is_print_only = media.eq_ignore_ascii_case("print") && !is_async_screen;
+                let effective_media = if is_async_screen { "all" } else { media };
                 // Print-only sheets are not fetched for screen rendering, the
                 // same rule the head path applies.
-                if !media.eq_ignore_ascii_case("print") {
+                if !is_print_only {
                     self.fire_hook(&tag, &attrs);
                 }
-                self.linked_stylesheets.push((href.clone(), media.to_string()));
+                self.linked_stylesheets.push((href.clone(), effective_media.to_string()));
                 self.document_stylesheets.push(DocumentStylesheet::Linked {
                     href,
-                    media: media.to_string(),
+                    media: effective_media.to_string(),
                 });
             }
             if !self_closing {

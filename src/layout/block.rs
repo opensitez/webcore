@@ -730,9 +730,16 @@ pub fn layout_block_with_fc(
     // Auto margin centering (CSS 2.1 §10.3.3 / css-sizing): resolve after
     // min/max-width clamping so `width:auto; max-width:...; margin:0 auto`
     // centers the clamped box instead of sticking to inline-start.
+    // CSS 2.1 §10.3.3 applies only to block-level non-replaced elements in normal flow.
+    // For inline-level elements (inline-block, inline-flex, etc.), auto margins evaluate to 0 (CSS 2.1 §10.3.10).
     let left_is_auto = node.style.margin_left.is_auto();
     let right_is_auto = node.style.margin_right.is_auto();
-    let (margin_left, margin_right) = if left_is_auto || right_is_auto {
+    let is_block_box = node.style.is_block_level()
+        && !matches!(
+            node.style.display,
+            Display::InlineBlock | Display::Inline | Display::InlineFlex | Display::InlineGrid
+        );
+    let (margin_left, margin_right) = if is_block_box && (left_is_auto || right_is_auto) {
         let non_margin_space = rbox.border_left
             + rbox.padding_left
             + content_w

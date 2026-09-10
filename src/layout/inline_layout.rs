@@ -99,11 +99,18 @@ pub fn layout_inline_block(
     let content_w = raw_w.max(min_w).min(max_w);
 
     // Auto margin centering (CSS 2.1 §10.3.3)
+    // Applies only to block-level non-replaced elements in normal flow.
+    // For inline-block and inline elements, auto margins evaluate to 0 (CSS 2.1 §10.3.10).
     let margin_left;
     let margin_right;
     let left_is_auto = node.style.margin_left.is_auto();
     let right_is_auto = node.style.margin_right.is_auto();
-    if !node.style.width.is_auto() && (left_is_auto || right_is_auto) {
+    let is_block_box = node.style.is_block_level()
+        && !matches!(
+            node.style.display,
+            Display::InlineBlock | Display::Inline | Display::InlineFlex | Display::InlineGrid
+        );
+    if is_block_box && !node.style.width.is_auto() && (left_is_auto || right_is_auto) {
         let non_margin_space = rbox.border_left
             + rbox.padding_left
             + content_w

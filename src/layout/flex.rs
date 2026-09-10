@@ -1796,17 +1796,21 @@ fn layout_abs_children(engine: &LayoutEngine, node: &mut WebCore, font_px: f32, 
     } else {
         engine.pos_cb.get()
     };
-    let indices: Vec<usize> = node
-        .children
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| matches!(c.style.position, Position::Absolute | Position::Fixed))
-        .map(|(i, _)| i)
+    let justify_content = node.style.justify_content;
+    let align_items = node.style.align_items;
+    let child_paths = collect_flex_children(node);
+    let abs_paths: Vec<Vec<usize>> = child_paths
+        .into_iter()
+        .filter(|p| {
+            let c = child_ref(node, p);
+            matches!(c.style.position, Position::Absolute | Position::Fixed)
+        })
         .collect();
-    for i in indices {
+    for path in abs_paths {
+        let child = child_mut(node, &path);
         layout_positioned(
             engine,
-            &mut node.children[i],
+            child,
             containing_rect,
             font_px,
             root_font_px,
@@ -1816,7 +1820,6 @@ fn layout_abs_children(engine: &LayoutEngine, node: &mut WebCore, font_px: f32, 
         // "static position" AFTER layout_positioned: where the item would go if it
         // were a normal flex item.  abs children are skipped by the flex pass so
         // layout_positioned leaves them at (0,0); we correct that here.
-        let child = &mut node.children[i];
         let all_auto = child.style.left.is_auto()
             && child.style.right.is_auto()
             && child.style.top.is_auto()
@@ -1825,7 +1828,7 @@ fn layout_abs_children(engine: &LayoutEngine, node: &mut WebCore, font_px: f32, 
             let cw = child.layout.border_rect.w;
             let ch = child.layout.border_rect.h;
             // X: driven by justify-content of the flex container.
-            let target_x = match node.style.justify_content {
+            let target_x = match justify_content {
                 JustifyContent::Center => containing_rect.x + (containing_rect.w - cw) / 2.0,
                 JustifyContent::FlexEnd => containing_rect.x + containing_rect.w - cw,
                 _ => containing_rect.x,
@@ -1834,7 +1837,7 @@ fn layout_abs_children(engine: &LayoutEngine, node: &mut WebCore, font_px: f32, 
             // own `align-self` overrides exactly as it does for an in-flow item
             // (Flexbox §4.1). Only the container's value was read, so
             // `align-self` on an abs-positioned child did nothing.
-            let target_y = match effective_align_self_inner(child, node.style.align_items) {
+            let target_y = match effective_align_self_inner(child, align_items) {
                 AlignItems::Center => containing_rect.y + (containing_rect.h - ch) / 2.0,
                 AlignItems::FlexEnd => containing_rect.y + containing_rect.h - ch,
                 _ => containing_rect.y,
