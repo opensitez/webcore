@@ -1536,7 +1536,8 @@ fn is_empty_line_neutral_inline(node: &WebCore) -> bool {
     if !node.text.is_empty()
         || !node.style.before_content.is_empty()
         || !node.style.after_content.is_empty()
-        || !node.style.rare().content.is_empty()
+        || (matches!(node.tag.as_str(), "::before" | "::after" | "::marker")
+            && !node.style.rare().content.is_empty())
     {
         return false;
     }

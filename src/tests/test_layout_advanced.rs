@@ -23,6 +23,70 @@ fn layoutadv_max_height_parsed() {
 }
 
 #[test]
+fn block_before_pseudo_on_flex_item_consumes_flow_height() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        .bar { display: flex; width: 300px; }
+        a { font: 16px/16px sans-serif; width: 200px; height: 40px; overflow: hidden; }
+        a::before { content: attr(data-label); display: block; font: 10px/20px sans-serif; }
+        </style>
+        <div class="bar"><a id="promo" data-label="USA TODAY SPORTS">Draft. Trade. Win.</a></div>
+        "#,
+        320.0,
+    );
+    let promo = find_box(&doc.root, &|b| {
+        b.attributes.get("id") == Some(&"promo".to_string())
+    })
+    .unwrap();
+    let before = promo
+        .children
+        .iter()
+        .find(|child| child.tag == "::before")
+        .expect("block ::before on a flex item should materialize as a layout child");
+    let text = promo
+        .children
+        .iter()
+        .find(|child| child.tag == "#text")
+        .expect("authored link text should remain after generated label");
+    assert!(
+        text.layout.content_rect.y
+            >= before.layout.content_rect.y + before.layout.content_rect.h - 0.5,
+        "block ::before should occupy the first line before text; before={:?} text={:?}",
+        before.layout.content_rect,
+        text.layout.content_rect
+    );
+}
+
+#[test]
+fn negative_calc_padding_clamps_to_zero_used_value() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        #logo { position: absolute; left: 0; top: 0; width: 100px; height: 20px;
+                padding-left: calc(50% - 683px); }
+        </style>
+        <div id="logo">USA</div>
+        "#,
+        1365.0,
+    );
+    let logo = find_box(&doc.root, &|b| {
+        b.attributes.get("id") == Some(&"logo".to_string())
+    })
+    .unwrap();
+    assert_eq!(logo.layout.resolved_pad_left, 0.0);
+    assert!(
+        logo.layout.content_rect.x >= 0.0,
+        "negative used padding must not pull content before the containing block: {:?}",
+        logo.layout.content_rect
+    );
+}
+
+#[test]
 fn margin_trim_block_start_removes_first_child_margin() {
     let mut renderer = crate::Renderer::new();
     let doc = renderer.load_html(

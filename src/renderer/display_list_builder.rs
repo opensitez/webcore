@@ -7,7 +7,7 @@ use super::display_list::{DisplayList, ImageRef, PaintCmd, TextDecoration};
 use crate::types::{
     BackgroundClip, BackgroundSize, ClipPathKind, Color, ComputedStyle, ContentVisibility,
     Direction, Display, FontStyle, GradientRadialShape, GradientRadialSize, GradientType,
-    ListStylePosition, ListStyleType, MixBlendMode, Overflow, Position, Resize,
+    ListStylePosition, ListStyleType, MixBlendMode, Overflow, Position, Resize, TextAlign,
     TextDecorationStyle, TextOverflow, TextTransform, WhiteSpace,
 };
 use crate::types::{Rect, WebCore};
@@ -1084,6 +1084,15 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 ps_font_px,
                 line_h,
             );
+        } else if !node.style.before_content.is_empty() {
+            emit_generated_pseudo_content(
+                list,
+                node,
+                &node.style.before_content,
+                node.style.before_style.as_deref().unwrap_or(&node.style),
+                eff_sx,
+                eff_sy,
+            );
         }
 
         // ── (k) Inline text content (line_cache) ─────────────────────────────
@@ -1119,6 +1128,15 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 ps,
                 ps_font_px,
                 line_h,
+            );
+        } else if !node.style.after_content.is_empty() {
+            emit_generated_pseudo_content(
+                list,
+                node,
+                &node.style.after_content,
+                node.style.after_style.as_deref().unwrap_or(&node.style),
+                eff_sx,
+                eff_sy,
             );
         }
 
@@ -1285,9 +1303,10 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 !matches!(c.style.display, Display::None)
                     && (c.tag != "#text"
                         || (!c.text.trim().is_empty()
-                            && !matches!(c.style.display, Display::Inline)))
-                    && (c.tag != "::before" || c.style.is_positioned())
-                    && (c.tag != "::after" || c.style.is_positioned())
+                            && (!matches!(c.style.display, Display::Inline)
+                                || node.layout.line_cache.is_empty())))
+                    && (c.tag != "::before" || c.style.is_positioned() || c.style.is_block_level())
+                    && (c.tag != "::after" || c.style.is_positioned() || c.style.is_block_level())
                     && c.style.position != Position::Fixed
             };
 
@@ -2444,6 +2463,11 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32) 
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn build_laid_out_text_node(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32) {
+    if !node.layout.line_cache.is_empty() {
+        build_inline_text(node, &node.style, list, sx, sy, false, false);
+        return;
+    }
+
     let text = if matches!(
         node.style.white_space,
         WhiteSpace::Normal | WhiteSpace::Nowrap
@@ -2468,6 +2492,47 @@ fn build_laid_out_text_node(node: &WebCore, list: &mut DisplayList, sx: f32, sy:
         node.layout.content_rect.y - sy,
         &apply_text_transform(&text, node.style.text_transform),
         &node.style,
+        font_px,
+        line_h,
+    );
+}
+
+fn emit_generated_pseudo_content(
+    list: &mut DisplayList,
+    node: &WebCore,
+    text: &str,
+    style: &ComputedStyle,
+    sx: f32,
+    sy: f32,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let font_px = style.font_size_px(16.0, 16.0).max(1.0);
+    let line_h = style
+        .line_height
+        .resolve(font_px, 0.0, 16.0)
+        .max(font_px * 1.2);
+    let mut x = node.layout.content_rect.x - sx;
+    let text_w = text.chars().count() as f32 * font_px * 0.55;
+    match style.text_align {
+        TextAlign::Center => {
+            x += ((node.layout.content_rect.w - text_w) * 0.5).max(0.0);
+        }
+        TextAlign::Right | TextAlign::End if !matches!(style.direction, Direction::RTL) => {
+            x += (node.layout.content_rect.w - text_w).max(0.0);
+        }
+        TextAlign::Left | TextAlign::Start if matches!(style.direction, Direction::RTL) => {
+            x += (node.layout.content_rect.w - text_w).max(0.0);
+        }
+        _ => {}
+    }
+    emit_text(
+        list,
+        x,
+        node.layout.content_rect.y - sy,
+        text,
+        style,
         font_px,
         line_h,
     );

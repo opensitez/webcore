@@ -944,10 +944,10 @@ pub fn resolve_box_vp(
     };
     let _font_px = style.font_size_px(parent_font_px, root_font_px);
 
-    let pad_left = res(&style.padding_left);
-    let pad_right = res(&style.padding_right);
-    let pad_top = res(&style.padding_top);
-    let pad_bottom = res(&style.padding_bottom);
+    let pad_left = res(&style.padding_left).max(0.0);
+    let pad_right = res(&style.padding_right).max(0.0);
+    let pad_top = res(&style.padding_top).max(0.0);
+    let pad_bottom = res(&style.padding_bottom).max(0.0);
 
     let border_left = if style.border_left_style != BorderStyle::None {
         res(&style.border_left_width)

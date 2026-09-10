@@ -836,7 +836,7 @@ pub(crate) fn build_pseudo_style_shared(
     matched: &mut Vec<(u32, usize, Option<u32>)>,
     base: &ComputedStyle,
     vars: &HashMap<String, String>,
-    attrs: &crate::dom::attrs::AttrMap,
+    _attrs: &crate::dom::attrs::AttrMap,
     rules: &[CssRule],
 ) -> Option<(Option<String>, Box<ComputedStyle>)> {
     if matched.is_empty() {
@@ -934,10 +934,7 @@ pub(crate) fn build_pseudo_style_shared(
             }
         }
     }
-    let content = content_value.as_deref().map(|value| {
-        resolve_content_value_with_context(value, Some(attrs), Some(&ps.rare().quotes))
-    });
-    Some((content, Box::new(ps)))
+    Some((content_value, Box::new(ps)))
 }
 
 /// Create or update the `::before` / `::after` child boxes.
@@ -1488,15 +1485,10 @@ pub(crate) fn apply_cascade_inner(
         return;
     }
 
-    // Synthetic ::before/::after children already have their style set.
-    // Skip the cascade for them — just recurse into their children (if any) and return.
+    // Synthetic ::before/::after children already have their computed pseudo
+    // style set from the originating element. Recascading them as normal
+    // children would overwrite pseudo-specific font/color/content rules.
     if root.tag == "::before" || root.tag == "::after" {
-        // Still inherit inheritable properties from parent
-        if let Some(p) = parent_style {
-            let saved_display = root.style.display;
-            std::sync::Arc::make_mut(&mut root.style).inherit_from(p);
-            std::sync::Arc::make_mut(&mut root.style).display = saved_display; // preserve blockified display
-        }
         return;
     }
 
@@ -2013,6 +2005,14 @@ pub(crate) fn apply_cascade_inner(
             .any(|(k, _)| k == "display")
     });
     finalize_display(&mut style, &root.tag, has_explicit_display);
+    if parent_style.is_some_and(|parent| {
+        matches!(
+            parent.display,
+            Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid
+        )
+    }) {
+        blockify_flex_or_grid_item(&mut style);
+    }
     // `currentColor` resolves against this element's own `color`, which is only
     // final now — css-color-4 §6.2.
     crate::css::finalize_current_color(&mut style);
@@ -2166,8 +2166,13 @@ pub(crate) fn apply_cascade_inner(
         for (name, val) in &ps.counter_set {
             set_counter(counters, &mut counters_pushed, name, *val);
         }
+        let resolved_content = resolve_content_value_with_context(
+            &txt,
+            Some(&root.attributes),
+            Some(&root.style.rare().quotes),
+        );
         std::sync::Arc::make_mut(&mut root.style).before_content =
-            resolve_counters_in_content(&txt, counters);
+            resolve_counters_in_content(&resolved_content, counters);
         std::sync::Arc::make_mut(&mut root.style).before_style = Some(ps);
     }
     if let Some((Some(txt), ps)) = build_pseudo_style_shared(
@@ -2190,8 +2195,13 @@ pub(crate) fn apply_cascade_inner(
         for (name, val) in &ps.counter_set {
             set_counter(counters, &mut counters_pushed, name, *val);
         }
+        let resolved_content = resolve_content_value_with_context(
+            &txt,
+            Some(&root.attributes),
+            Some(&root.style.rare().quotes),
+        );
         std::sync::Arc::make_mut(&mut root.style).after_content =
-            resolve_counters_in_content(&txt, counters);
+            resolve_counters_in_content(&resolved_content, counters);
         std::sync::Arc::make_mut(&mut root.style).after_style = Some(ps);
     }
     if let Some((_, ps)) = build_pseudo_style_shared(
@@ -2220,8 +2230,13 @@ pub(crate) fn apply_cascade_inner(
         &stylesheet.rules,
     ) {
         if let Some(txt) = txt {
+            let resolved_content = resolve_content_value_with_context(
+                &txt,
+                Some(&root.attributes),
+                Some(&root.style.rare().quotes),
+            );
             std::sync::Arc::make_mut(&mut root.style).marker_content =
-                resolve_counters_in_content(&txt, counters);
+                resolve_counters_in_content(&resolved_content, counters);
         }
         std::sync::Arc::make_mut(&mut root.style).marker_style = Some(ps);
     }
@@ -2336,6 +2351,17 @@ pub(crate) fn apply_cascade_inner(
         // siblings, which measured 2.9% on demo.html.
         let parent_id = std::sync::Arc::as_ptr(parent_style) as usize;
         for (i, child) in children.iter_mut().enumerate() {
+            if matches!(child.tag.as_str(), "::before" | "::after") {
+                if matches!(
+                    parent_style.display,
+                    Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid
+                ) {
+                    blockify_flex_or_grid_item(std::sync::Arc::make_mut(&mut child.style));
+                }
+                child.layout.layout_dirty = true;
+                continue;
+            }
+
             let (ci, ns) = if !child.is_element() {
                 (i, n_children)
             } else {

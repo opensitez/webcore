@@ -289,45 +289,27 @@ pub fn layout_inline_block(
     } else {
         None
     };
-    let generated_content = node.style.rare().content.as_str();
-    if !generated_content.is_empty() {
-        let mut tmp_node = WebCore::new("#text");
-        tmp_node.text = generated_content.to_string();
-        tmp_node.style = node.style.clone();
-        collect_items(
+    let mut previous_collapsible_space = false;
+    for (i, child) in node.children.iter().enumerate() {
+        if matches!(child.style.display, Display::None) {
+            continue;
+        }
+        collect_items_inner(
             engine,
-            &tmp_node,
+            child,
             font_px,
             root_font_px,
             &mut items,
             &mut runs,
             &mut text_offset,
-            0,
-            false,
+            i,
+            true,
             &[],
+            container_deco,
+            &mut previous_collapsible_space,
         );
-    } else {
-        let mut previous_collapsible_space = false;
-        for (i, child) in node.children.iter().enumerate() {
-            if matches!(child.style.display, Display::None) {
-                continue;
-            }
-            collect_items_inner(
-                engine,
-                child,
-                font_px,
-                root_font_px,
-                &mut items,
-                &mut runs,
-                &mut text_offset,
-                i,
-                true,
-                &[],
-                container_deco,
-                &mut previous_collapsible_space,
-            );
-        }
     }
+    let generated_content = generated_content_for_layout(node);
     // Also collect from own text (text directly inside element)
     if generated_content.is_empty() && !node.text.is_empty() {
         if node.is_text_node() {
@@ -1812,7 +1794,7 @@ fn collect_items_inner(
     if matches!(node.style.display, Display::None) {
         return;
     }
-    let generated_content = node.style.rare().content.as_str();
+    let generated_content = generated_content_for_layout(node);
     let mut current_path = ancestor_path.to_vec();
     current_path.push(box_idx);
 
@@ -3722,7 +3704,7 @@ pub fn collect_flat_text(node: &WebCore) -> String {
 }
 
 fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {
-    let generated_content = node.style.rare().content.as_str();
+    let generated_content = generated_content_for_layout(node);
     if !is_root
         && matches!(
             node.style.display,
@@ -3735,12 +3717,7 @@ fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {
         push_flat_rendered_text(out, &node.style.before_content, &node.style);
     }
     if node.is_text_node() {
-        let rendered_text = if generated_content.is_empty() {
-            node.text.as_str()
-        } else {
-            generated_content
-        };
-        push_flat_rendered_text(out, rendered_text, &node.style);
+        push_flat_rendered_text(out, node.text.as_str(), &node.style);
         return;
     }
     if matches!(node.style.display, Display::None) {
@@ -3780,6 +3757,14 @@ fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {
     }
     if !is_root && !node.style.after_content.is_empty() {
         push_flat_rendered_text(out, &node.style.after_content, &node.style);
+    }
+}
+
+fn generated_content_for_layout(node: &WebCore) -> &str {
+    if matches!(node.tag.as_str(), "::before" | "::after" | "::marker") {
+        node.style.rare().content.as_str()
+    } else {
+        ""
     }
 }
 

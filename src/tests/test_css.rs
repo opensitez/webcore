@@ -2797,7 +2797,7 @@ fn content_attr_reads_originating_element_attribute() {
 }
 
 #[test]
-fn content_on_element_replaces_rendered_inline_text() {
+fn content_on_normal_element_does_not_replace_rendered_inline_text() {
     let html = r#"<style>
               p { content: "Generated " attr(data-label); }
             </style>
@@ -2824,13 +2824,13 @@ fn content_on_element_replaces_rendered_inline_text() {
         .collect();
 
     assert!(
-        texts.iter().any(|text| text.contains("Generated label")),
-        "content on a normal element should paint generated text; painted texts were {texts:?}"
+        !texts.iter().any(|text| text.contains("Generated label")),
+        "content on a normal element should not paint as generated text; painted texts were {texts:?}"
     );
     assert!(
-        !texts.iter().any(|text| text.contains("Original"))
-            && !texts.iter().any(|text| text.contains("child")),
-        "content on a normal element should replace descendant inline text; painted texts were {texts:?}"
+        texts.iter().any(|text| text.contains("Original"))
+            || texts.iter().any(|text| text.contains("child")),
+        "normal element descendants should still paint; painted texts were {texts:?}"
     );
 }
 

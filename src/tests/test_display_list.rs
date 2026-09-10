@@ -35,6 +35,76 @@ fn build_full(html: &str) -> (EngineFrame, DisplayList) {
 }
 
 #[test]
+fn block_pseudo_child_and_following_text_are_painted() {
+    let (frame, list) = build_full(
+        r#"<body style="margin:0">
+             <style>
+             .card { display:flex; flex-direction:column; width:220px; font:16px/20px sans-serif; color:#202020; }
+             .card::before { content:"LIVE"; display:block; width:39px; height:20px; background:#d0021b; color:white; }
+             .card::after { content:attr(data-deck); display:block; font:12px/14px serif; }
+             </style>
+             <a class="card" data-deck="Deck text">Headline after generated label</a>
+           </body>"#,
+    );
+    let card = find_node_by_tag(&frame.doc.root, "a").expect("card");
+    let after = card
+        .children
+        .iter()
+        .find(|child| child.tag == "::after")
+        .expect("materialized ::after");
+    assert_eq!(after.text, "Deck text");
+    assert!(
+        (after.style.font_size_px(16.0, 16.0) - 12.0).abs() < 0.5,
+        "pseudo style should keep ::after font-size"
+    );
+
+    assert!(
+        list.commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::FillRect { color, .. } if color.r == 208 && color.g == 2 && color.b == 27)),
+        "block-level generated pseudo-elements should paint their own box"
+    );
+    let headline_lines: Vec<&str> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Text { text, .. }
+                if text.contains("Headline") || text.contains("generated") =>
+            {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !headline_lines.is_empty(),
+        "standalone inline #text children should paint from their wrapped line cache"
+    );
+    assert!(
+        !headline_lines
+            .iter()
+            .any(|text| text.contains("Headline after generated label")),
+        "standalone text fallback must not paint the whole wrapped text node as one unwrapped run"
+    );
+    let text_dump: Vec<String> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Text {
+                text, font_size, ..
+            } => Some(format!("{text:?}@{font_size}")),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        list.commands.iter().any(
+            |cmd| matches!(cmd, PaintCmd::Text { text, font_size, .. } if text.contains("Deck text") && (*font_size - 12.0).abs() < 0.5)
+        ),
+        "block-level generated ::after text should keep its pseudo-element font; text={text_dump:?}"
+    );
+}
+
+#[test]
 fn rtl_mixed_inline_text_commands_stay_inside_line_box() {
     let (_frame, list) = build_full(
         r##"<html dir="rtl"><body style="margin:0">
@@ -240,6 +310,35 @@ fn count_opaque_pixels(pixmap: &tiny_skia::Pixmap, x0: u32, y0: u32, x1: u32, y1
         }
     }
     count
+}
+
+#[test]
+fn inline_after_content_on_empty_block_paints_at_content_box() {
+    let (_frame, list) = build_full(
+        r#"<body style="margin:0">
+             <style>
+             a { display:block; width:74px; height:28px; padding:0 8px; background:#1665cf;
+                 color:white; font:700 12px/28px sans-serif; text-align:center; }
+             a::after { content:"Subscribe"; }
+             </style>
+             <a href="/subscribe"></a>
+           </body>"#,
+    );
+    assert!(
+        list.commands.iter().any(|cmd| {
+            matches!(
+                cmd,
+                PaintCmd::Text {
+                    text,
+                    color,
+                    font_size,
+                    ..
+                } if text == "Subscribe" && color.r == 255 && color.g == 255 && color.b == 255 && (*font_size - 12.0).abs() < 0.5
+            )
+        }),
+        "empty block with generated ::after text should paint; commands were {:?}",
+        list.commands
+    );
 }
 
 fn find_node_by_tag<'a>(node: &'a crate::WebCore, tag: &str) -> Option<&'a crate::WebCore> {
