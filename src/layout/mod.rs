@@ -480,6 +480,20 @@ impl FloatContext {
         y
     }
 
+    pub fn next_clear_y(&self, y: f32) -> Option<f32> {
+        let next_y = self
+            .floats
+            .iter()
+            .filter(|f| f.clear > y + 0.001)
+            .map(|f| f.clear)
+            .fold(f32::MAX, f32::min);
+        if next_y < f32::MAX {
+            Some(next_y)
+        } else {
+            None
+        }
+    }
+
     pub fn place_float(
         &mut self,
         current_y: f32,
@@ -3126,29 +3140,33 @@ impl LayoutEngine {
             Display::Flex | Display::InlineFlex => flex::layout_flex(self, node, &rbox, &child_c),
             Display::Grid | Display::InlineGrid => grid::layout_grid(self, node, &rbox, &child_c),
             Display::Table => {
+                let mut table_rbox = rbox;
+                // In CSS 2.1 §17.5, padding does not apply to tables.
+                table_rbox.padding_top = 0.0;
+                table_rbox.padding_right = 0.0;
+                table_rbox.padding_bottom = 0.0;
+                table_rbox.padding_left = 0.0;
                 // Handle margin:auto centering for tables
                 let table_c = if !node.style.width.is_auto()
                     && (node.style.margin_left.is_auto() || node.style.margin_right.is_auto())
                 {
                     let tw = self.res_len(&node.style.width, font_px, containing_w, root_font_px);
-                    let non_margin = rbox.border_left
-                        + rbox.padding_left
+                    let non_margin = table_rbox.border_left
                         + tw
-                        + rbox.padding_right
-                        + rbox.border_right;
+                        + table_rbox.border_right;
                     let available = (containing_w - non_margin).max(0.0);
                     let (ml, _mr) =
                         if node.style.margin_left.is_auto() && node.style.margin_right.is_auto() {
                             let ml = (available / 2.0).floor();
                             (ml, available - ml)
                         } else if node.style.margin_left.is_auto() {
-                            (available - rbox.margin_right, rbox.margin_right)
+                            (available - table_rbox.margin_right, table_rbox.margin_right)
                         } else {
-                            (rbox.margin_left, available - rbox.margin_left)
+                            (table_rbox.margin_left, available - table_rbox.margin_left)
                         };
                     Constraints::new(
                         containing_w,
-                        x + ml - rbox.margin_left,
+                        x + ml - table_rbox.margin_left,
                         y,
                         font_px,
                         root_font_px,
@@ -3156,7 +3174,7 @@ impl LayoutEngine {
                 } else {
                     child_c
                 };
-                table::layout_table(self, node, &rbox, &table_c)
+                table::layout_table(self, node, &table_rbox, &table_c)
             }
             _ => {
                 // Determine if children are block-level or inline-level.

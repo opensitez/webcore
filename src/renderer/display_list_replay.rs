@@ -2417,7 +2417,7 @@ fn draw_text_cmd(
         h.finish()
     };
 
-    let line_w = SHAPED.with(|cell| {
+    let (line_w, run_line_y) = SHAPED.with(|cell| {
         let mut map = cell.borrow_mut();
         // A font load changes what any string shapes to, so the whole cache
         // goes when the face count moves.
@@ -2451,7 +2451,7 @@ fn draw_text_cmd(
             word_spacing * sc,
             ct_color,
         );
-        buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0)
+        buf.layout_runs().next().map(|r| (r.line_w, Some(r.line_y))).unwrap_or((0.0, None))
     });
 
     // Draw text decorations (underline, overline, strikethrough)
@@ -2537,21 +2537,24 @@ fn draw_text_cmd(
         }
     };
 
+    let baseline_y = run_line_y
+        .map(|ly| phys_y + ly)
+        .unwrap_or(phys_y + phys_px * 0.82);
+
     if decoration.underline {
         // Position underline below the baseline by default. `under` is lower,
         // on the under side of the em box, matching the authored intent for
         // scripts where baseline underlines cut through glyphs.
-        let baseline_y = phys_y + phys_px * 0.82;
         let offset = if decoration.underline_offset > 0.0 {
             decoration.underline_offset * sc
         } else {
-            thickness * 2.0
+            thickness * 1.5
         };
         let uy = if matches!(
             decoration.underline_position,
             crate::types::TextUnderlinePosition::Under
         ) {
-            phys_y + phys_px + offset
+            baseline_y + phys_px * 0.18 + offset
         } else {
             baseline_y + offset
         };
@@ -2564,11 +2567,15 @@ fn draw_text_cmd(
         }
     }
     if decoration.overline {
-        let oy = phys_y - thickness;
+        let oy = run_line_y
+            .map(|ly| phys_y + ly - phys_px)
+            .unwrap_or(phys_y) - thickness;
         draw_deco_line(pixmap, phys_x, line_w, oy, decoration.style);
     }
     if decoration.strikethrough {
-        let sy = phys_y + phys_px * 0.4;
+        let sy = run_line_y
+            .map(|ly| phys_y + ly - phys_px * 0.3)
+            .unwrap_or(phys_y + phys_px * 0.4);
         draw_deco_line(pixmap, phys_x, line_w, sy, decoration.style);
     }
 }

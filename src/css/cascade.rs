@@ -947,7 +947,7 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
     );
     let has_pseudo_containing_box = !matches!(root.style.display, Display::Inline);
     let before_is_positioned = root.style.before_style.as_ref().map_or(false, |ps| {
-        has_pseudo_containing_box && matches!(ps.position, Position::Absolute | Position::Fixed)
+        matches!(ps.position, Position::Absolute | Position::Fixed)
     });
     let before_is_block = root
         .style
@@ -987,7 +987,7 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         }
     }
     let after_is_positioned = root.style.after_style.as_ref().map_or(false, |ps| {
-        has_pseudo_containing_box && matches!(ps.position, Position::Absolute | Position::Fixed)
+        matches!(ps.position, Position::Absolute | Position::Fixed)
     });
     let after_is_block = root
         .style
@@ -2668,17 +2668,25 @@ fn apply_presentational_hints(
                 }
             }
             "width" => {
-                if val.ends_with('%') {
-                    apply_property(style, "width", val);
-                } else if val.parse::<f32>().is_ok() {
-                    apply_property(style, "width", &format!("{}px", val));
+                let clean = val.trim().trim_end_matches(';').trim();
+                if clean.ends_with('%') {
+                    apply_property(style, "width", clean);
+                } else {
+                    let num = clean.strip_suffix("px").unwrap_or(clean).trim();
+                    if let Ok(n) = num.parse::<f32>() {
+                        apply_property(style, "width", &format!("{}px", n));
+                    }
                 }
             }
             "height" => {
-                if val.ends_with('%') {
-                    apply_property(style, "height", val);
-                } else if val.parse::<f32>().is_ok() {
-                    apply_property(style, "height", &format!("{}px", val));
+                let clean = val.trim().trim_end_matches(';').trim();
+                if clean.ends_with('%') {
+                    apply_property(style, "height", clean);
+                } else {
+                    let num = clean.strip_suffix("px").unwrap_or(clean).trim();
+                    if let Ok(n) = num.parse::<f32>() {
+                        apply_property(style, "height", &format!("{}px", n));
+                    }
                 }
             }
             "border" if root.tag == "table" => {

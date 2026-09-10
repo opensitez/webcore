@@ -525,6 +525,17 @@ pub fn layout_inline_block(
                 }
             }
         }
+        for child in &mut node.children {
+            if matches!(child.style.display, Display::Inline) {
+                let child_font_px = child.style.font_size_px(font_px, root_font_px);
+                let child_cb = if crate::layout::establishes_positioned_containing_block(&child.style) {
+                    child.layout.padding_rect
+                } else {
+                    containing_rect
+                };
+                layout_positioned_descendants(engine, child, child_cb, child_font_px, root_font_px);
+            }
+        }
         return node.layout.margin_rect.h;
     }
 
@@ -672,6 +683,33 @@ pub fn layout_inline_block(
                 &mut fc_left,
                 &mut fc_right,
             );
+
+            // If there are floats constricting the width and the first non-space item
+            // cannot fit in the available width, move the line box down past floats
+            // until it fits or no more floats constrict the width (CSS 2.1 §9.5).
+            let first_item = items[item_idx..]
+                .iter()
+                .find(|it| !it.is_space && !matches!(it.kind, InlineItemKind::Float { .. }));
+            if let Some(item) = first_item {
+                let check_h = est_line_h.max(item.height);
+                let mut avail = (fc_right - fc_left).max(0.0);
+                while item.advance > avail && (fc_left > 0.0 || fc_right < content_w) {
+                    if let Some(next_clear) = fc.next_clear_y(cursor_y - fc.origin_y) {
+                        cursor_y = fc.origin_y + next_clear;
+                        fc.available_width_in(
+                            local_x,
+                            cursor_y - fc.origin_y,
+                            check_h,
+                            content_w,
+                            &mut fc_left,
+                            &mut fc_right,
+                        );
+                        avail = (fc_right - fc_left).max(0.0);
+                    } else {
+                        break;
+                    }
+                }
+            }
         }
 
         // Apply text-indent on first line
@@ -1422,6 +1460,19 @@ pub fn layout_inline_block(
         }
     }
 
+    // Lay out positioned descendants of inline children (e.g. ::after pseudo-elements on inline <i>)
+    for child in &mut node.children {
+        if matches!(child.style.display, Display::Inline) {
+            let child_font_px = child.style.font_size_px(font_px, root_font_px);
+            let child_cb = if crate::layout::establishes_positioned_containing_block(&child.style) {
+                child.layout.padding_rect
+            } else {
+                containing_rect
+            };
+            layout_positioned_descendants(engine, child, child_cb, child_font_px, root_font_px);
+        }
+    }
+
     node.layout.layout_dirty = false;
     node.layout.last_containing_width = content_w;
     node.layout.margin_rect.h
@@ -1512,10 +1563,31 @@ fn set_box_rects(
         && rbox.content_height.is_none();
     if is_empty && node.style.min_height.is_auto() {
         node.layout.collapsed_margin_top = collapse_two(rbox.margin_top, rbox.margin_bottom);
-        node.layout.collapsed_margin_bottom = 0.0;
     } else {
         node.layout.collapsed_margin_top = rbox.margin_top;
         node.layout.collapsed_margin_bottom = rbox.margin_bottom;
+    }
+}
+
+fn layout_positioned_descendants(
+    engine: &LayoutEngine,
+    node: &mut WebCore,
+    cb: Rect,
+    font_px: f32,
+    root_font_px: f32,
+) {
+    for child in &mut node.children {
+        if matches!(child.style.position, Position::Absolute | Position::Fixed) {
+            layout_positioned(engine, child, cb, font_px, root_font_px);
+        } else if matches!(child.style.display, Display::Inline) {
+            let child_font_px = child.style.font_size_px(font_px, root_font_px);
+            let child_cb = if crate::layout::establishes_positioned_containing_block(&child.style) {
+                child.layout.padding_rect
+            } else {
+                cb
+            };
+            layout_positioned_descendants(engine, child, child_cb, child_font_px, root_font_px);
+        }
     }
 }
 

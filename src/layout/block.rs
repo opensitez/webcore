@@ -606,6 +606,8 @@ pub fn layout_block_with_fc(
     let font_px = c.parent_font_px;
     let root_font_px = c.root_font_px;
     let decorating_style = text_decoration_source(&node.style);
+    node.layout.line_cache.clear();
+    node.layout.inline_runs.clear();
     // **This block IS its children's containing block, height included.**
     //
     // CSS 2.1 §10.5: a percentage height resolves against the containing
@@ -765,6 +767,9 @@ pub fn layout_block_with_fc(
     // ─── CSS margin collapsing setup ──────────────────────────────────────────
     let can_collapse_top = can_collapse_top_with_first_child(node, rbox);
     let can_collapse_bottom = can_collapse_bottom_with_last_child(node, rbox);
+
+    // ─── Wrap mixed inline/block children in anonymous blocks (CSS 2.1 §9.2.1.1)
+    wrap_mixed_children_in_anonymous_blocks(node);
 
     // ─── Flatten display:contents and collect effective children ────────────
     let eff_children = collect_grid_children(node);
@@ -1860,4 +1865,111 @@ pub fn layout_columns(
         cur.layout.margin_rect = span;
     }
     total_h
+}
+
+fn is_in_flow_block(c: &WebCore) -> bool {
+    !matches!(c.style.display, Display::None)
+        && matches!(c.style.float, Float::None)
+        && matches!(c.style.position, Position::Static | Position::Relative | Position::Sticky)
+        && c.style.is_block_level()
+}
+
+fn is_in_flow_inline(c: &WebCore) -> bool {
+    !matches!(c.style.display, Display::None)
+        && matches!(c.style.float, Float::None)
+        && matches!(c.style.position, Position::Static | Position::Relative | Position::Sticky)
+        && (c.style.is_inline_level() || c.is_text_node())
+}
+
+fn has_renderable_content(anon: &WebCore) -> bool {
+    anon.children.iter().any(|c| {
+        !c.is_text_node() || !c.text.chars().all(|ch| ch.is_ascii_whitespace())
+    })
+}
+
+fn make_anonymous_block(parent: &WebCore) -> WebCore {
+    let mut anon = WebCore::new("anonymous-block");
+    let mut style = (*parent.style).clone();
+    style.display = Display::Block;
+    style.margin_top = CssLength::Px(0.0);
+    style.margin_bottom = CssLength::Px(0.0);
+    style.margin_left = CssLength::Px(0.0);
+    style.margin_right = CssLength::Px(0.0);
+    style.padding_top = CssLength::Px(0.0);
+    style.padding_bottom = CssLength::Px(0.0);
+    style.padding_left = CssLength::Px(0.0);
+    style.padding_right = CssLength::Px(0.0);
+    style.border_top_width = CssLength::Px(0.0);
+    style.border_bottom_width = CssLength::Px(0.0);
+    style.border_left_width = CssLength::Px(0.0);
+    style.border_right_width = CssLength::Px(0.0);
+    style.background_color = Color::TRANSPARENT;
+    style.box_shadow = Vec::new();
+    style.position = Position::Static;
+    style.float = Float::None;
+    style.clear = Clear::None;
+    style.width = CssLength::Auto;
+    style.height = CssLength::Auto;
+    style.min_width = CssLength::Auto;
+    style.min_height = CssLength::Auto;
+    style.max_width = CssLength::None;
+    style.max_height = CssLength::None;
+    anon.style = std::sync::Arc::new(style);
+    anon.node_id = 0;
+    anon.layout.layout_dirty = true;
+    anon
+}
+
+pub fn wrap_mixed_children_in_anonymous_blocks(node: &mut WebCore) {
+    if !node.children.iter().any(is_in_flow_block) {
+        return;
+    }
+
+    let has_non_whitespace_inline = node.children.iter().any(|c| {
+        is_in_flow_inline(c) && !(c.is_text_node() && c.text.chars().all(|ch| ch.is_ascii_whitespace()))
+    });
+
+    if !has_non_whitespace_inline {
+        return;
+    }
+
+    node.layout.line_cache.clear();
+    node.layout.inline_runs.clear();
+
+    let old_children = std::mem::take(&mut node.children);
+    let mut new_children: Vec<WebCore> = Vec::with_capacity(old_children.len());
+    let mut current_anon: Option<WebCore> = None;
+
+    for child in old_children {
+        if is_in_flow_block(&child) {
+            if let Some(anon) = current_anon.take() {
+                if has_renderable_content(&anon) {
+                    new_children.push(anon);
+                }
+            }
+            new_children.push(child);
+        } else if is_in_flow_inline(&child) {
+            let is_ws = child.is_text_node() && child.text.chars().all(|ch| ch.is_ascii_whitespace());
+            if is_ws && current_anon.is_none() {
+                // Inter-block whitespace text node, leave as is
+                new_children.push(child);
+            } else {
+                let anon = current_anon.get_or_insert_with(|| make_anonymous_block(node));
+                anon.children.push(child);
+            }
+        } else {
+            // Out of flow (e.g. float or absolute)
+            if let Some(ref mut anon) = current_anon {
+                anon.children.push(child);
+            } else {
+                new_children.push(child);
+            }
+        }
+    }
+    if let Some(anon) = current_anon {
+        if has_renderable_content(&anon) {
+            new_children.push(anon);
+        }
+    }
+    node.children = new_children;
 }

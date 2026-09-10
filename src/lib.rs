@@ -318,7 +318,7 @@ fn start_async_image_fetches(doc: &mut types::Document) {
         let sender = tx.clone();
         let counter = in_flight.clone();
         std::thread::spawn(move || {
-            let result = http_client()
+            let result = http_client_lenient()
                 .get(&url)
                 .header("Sec-Fetch-Dest", "image")
                 .send()

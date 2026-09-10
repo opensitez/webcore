@@ -120,4 +120,31 @@ mod tests {
             pic.layout.border_rect.x
         );
     }
+
+    #[test]
+    fn inline_block_clears_floats_when_wider_than_gap() {
+        let html = r#"
+            <style>
+                body { margin: 0; }
+                .container { width: 500px; }
+                .fleft { float: left; width: 200px; height: 50px; }
+                .fright { float: right; width: 200px; height: 40px; }
+                .wide-ib { display: inline-block; width: 300px; height: 30px; }
+            </style>
+            <div class="container">
+                <div class="fleft"></div>
+                <div class="fright"></div>
+                <div>
+                    <span id="ib" class="wide-ib">Hello</span>
+                </div>
+            </div>
+        "#;
+        let doc = parse_and_layout(html, 500.0);
+        let ib = crate::tests::test_grid::find_by_id(&doc.root, "ib").expect("ib not found");
+        assert!(
+            ib.layout.margin_rect.y >= 40.0,
+            "wide inline block must drop down below constricting floats, got y={}",
+            ib.layout.margin_rect.y
+        );
+    }
 }

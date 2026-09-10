@@ -601,9 +601,13 @@ pub fn layout_table(
             }
         }
     } else {
-        // Auto layout: two-pass — measure content, then distribute
-        // Pass 1: Collect explicit widths AND measure content for auto columns
-        let mut col_content_widths: Vec<f32> = vec![0.0; num_cols];
+        // Auto layout: three-pass — measure content, reserve min-content, then distribute.
+        // CSS table spec: each auto column must receive at least its min-content width;
+        // remaining space is then distributed proportionally by max-content.
+
+        // Pass 1: Collect explicit widths AND measure min/max content for auto columns.
+        let mut col_content_widths: Vec<f32> = vec![0.0; num_cols]; // max-content per col
+        let mut col_min_widths: Vec<f32> = vec![0.0; num_cols]; // min-content per col
         for r in 0..num_rows {
             for c in 0..num_cols {
                 let slot = &grid[r][c];
@@ -638,13 +642,16 @@ pub fn layout_table(
                             }
                         }
                     } else {
-                        // Measure content width for auto columns
-                        let cw = engine
-                            .intrinsic_sizes(cell, font_px, root_font_px)
-                            .max_content;
+                        // Measure both min-content and max-content for auto columns.
+                        let isz = engine.intrinsic_sizes(cell, font_px, root_font_px);
+                        let cw = isz.max_content;
+                        let mn = isz.min_content;
                         if slot.colspan == 1 {
                             if cw > col_content_widths[c] {
                                 col_content_widths[c] = cw;
+                            }
+                            if mn > col_min_widths[c] {
+                                col_min_widths[c] = mn;
                             }
                         } else {
                             distribute_spanned_width(
@@ -654,49 +661,95 @@ pub fn layout_table(
                                 cw,
                                 spacing_h,
                             );
+                            distribute_spanned_width(
+                                &mut col_min_widths,
+                                c,
+                                slot.colspan,
+                                mn,
+                                spacing_h,
+                            );
                         }
                     }
                 }
             }
         }
-        // Pass 2: Distribute remaining space proportionally to content widths
-        let used: f32 = col_widths.iter().sum();
-        let remaining = cell_area - used;
-        let flex_cols = num_cols - explicit_count;
-        if remaining > 0.0 && flex_cols > 0 {
-            let total_content: f32 = col_content_widths
-                .iter()
-                .enumerate()
-                .filter(|(c, _)| !col_has_explicit[*c])
-                .map(|(_, w)| *w)
-                .sum();
-            if total_content > 0.0 {
-                // Distribute proportionally to content width
-                for c in 0..num_cols {
-                    if !col_has_explicit[c] {
-                        col_widths[c] =
-                            (remaining * col_content_widths[c] / total_content).max(1.0);
-                    }
-                }
-            } else {
-                // No content measured — equal distribution
-                let per = remaining / flex_cols as f32;
-                for c in 0..num_cols {
-                    if !col_has_explicit[c] {
-                        col_widths[c] = per;
-                    }
+
+        // Pass 2: Reserve min-content widths for auto columns.
+        // Explicit columns already have col_widths[c] set; only flex (auto) columns get min-content.
+        {
+            let used_explicit: f32 = col_widths.iter().sum();
+            let mut flex_min_total: f32 = 0.0;
+            for c in 0..num_cols {
+                if !col_has_explicit[c] {
+                    flex_min_total += col_min_widths[c];
                 }
             }
-        } else if remaining > 0.0 {
-            let extra = remaining / num_cols as f32;
-            for c in 0..num_cols {
-                col_widths[c] += extra;
-            }
-        } else if remaining < 0.0 && used > 0.0 {
-            for c in 0..num_cols {
-                col_widths[c] = (col_widths[c] * cell_area / used).max(1.0);
+            let available_for_flex = (cell_area - used_explicit).max(0.0);
+            if flex_min_total > 0.0 {
+                if flex_min_total <= available_for_flex {
+                    // Enough room: give each auto column its min-content.
+                    for c in 0..num_cols {
+                        if !col_has_explicit[c] {
+                            col_widths[c] = col_min_widths[c];
+                        }
+                    }
+                } else {
+                    // Not enough room even for minimums: distribute proportionally.
+                    for c in 0..num_cols {
+                        if !col_has_explicit[c] {
+                            col_widths[c] = (available_for_flex * col_min_widths[c]
+                                / flex_min_total)
+                                .max(1.0);
+                        }
+                    }
+                }
             }
         }
+
+        // Pass 3: Distribute any remaining space proportionally by max-content surplus.
+        {
+            let used: f32 = col_widths.iter().sum();
+            let remaining = cell_area - used;
+            let flex_cols = num_cols - explicit_count;
+            if remaining > 0.0 && flex_cols > 0 {
+                // Surplus above min-content drives proportional distribution.
+                let surplus: Vec<f32> = (0..num_cols)
+                    .map(|c| {
+                        if col_has_explicit[c] {
+                            0.0
+                        } else {
+                            (col_content_widths[c] - col_min_widths[c]).max(0.0)
+                        }
+                    })
+                    .collect();
+                let total_surplus: f32 = surplus.iter().sum();
+                if total_surplus > 0.0 {
+                    for c in 0..num_cols {
+                        if !col_has_explicit[c] {
+                            col_widths[c] += remaining * surplus[c] / total_surplus;
+                        }
+                    }
+                } else {
+                    // All columns are at max-content already; split remainder equally.
+                    let per = remaining / flex_cols as f32;
+                    for c in 0..num_cols {
+                        if !col_has_explicit[c] {
+                            col_widths[c] += per;
+                        }
+                    }
+                }
+            } else if remaining > 0.0 {
+                let extra = remaining / num_cols as f32;
+                for c in 0..num_cols {
+                    col_widths[c] += extra;
+                }
+            } else if remaining < 0.0 && used > 0.0 {
+                for c in 0..num_cols {
+                    col_widths[c] = (col_widths[c] * cell_area / used).max(1.0);
+                }
+            }
+        }
+
         // Fallback: all zero → equal distribution
         if col_widths.iter().all(|&w| w == 0.0) {
             let per = cell_area / num_cols as f32;

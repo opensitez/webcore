@@ -122,25 +122,33 @@ pub(crate) fn apply_presentational_attrs(node: &mut WebCore) {
                 // handled above by translating to `color` attribute
             }
             "width" => {
-                if val.ends_with('%') {
-                    apply_property(std::sync::Arc::make_mut(&mut node.style), "width", val);
-                } else if let Some(n) = crate::html::forms::parse_non_negative_integer(val) {
-                    apply_property(
-                        std::sync::Arc::make_mut(&mut node.style),
-                        "width",
-                        &format!("{}px", n),
-                    );
+                let clean = val.trim().trim_end_matches(';').trim();
+                if clean.ends_with('%') {
+                    apply_property(std::sync::Arc::make_mut(&mut node.style), "width", clean);
+                } else {
+                    let num = clean.strip_suffix("px").unwrap_or(clean).trim();
+                    if let Some(n) = crate::html::forms::parse_non_negative_integer(num) {
+                        apply_property(
+                            std::sync::Arc::make_mut(&mut node.style),
+                            "width",
+                            &format!("{}px", n),
+                        );
+                    }
                 }
             }
             "height" => {
-                if val.ends_with('%') {
-                    apply_property(std::sync::Arc::make_mut(&mut node.style), "height", val);
-                } else if let Some(n) = crate::html::forms::parse_non_negative_integer(val) {
-                    apply_property(
-                        std::sync::Arc::make_mut(&mut node.style),
-                        "height",
-                        &format!("{}px", n),
-                    );
+                let clean = val.trim().trim_end_matches(';').trim();
+                if clean.ends_with('%') {
+                    apply_property(std::sync::Arc::make_mut(&mut node.style), "height", clean);
+                } else {
+                    let num = clean.strip_suffix("px").unwrap_or(clean).trim();
+                    if let Some(n) = crate::html::forms::parse_non_negative_integer(num) {
+                        apply_property(
+                            std::sync::Arc::make_mut(&mut node.style),
+                            "height",
+                            &format!("{}px", n),
+                        );
+                    }
                 }
             }
             "border" if tag == "table" => {

@@ -1751,10 +1751,14 @@ fn build_inline_text(
                 continue;
             }
 
-            let run_line_h = style_ref
-                .line_height
-                .resolve(run_font_px, 0.0, 16.0)
-                .max(run_font_px * 1.2);
+            let run_line_h = if line.height > 0.0 {
+                line.height
+            } else {
+                style_ref
+                    .line_height
+                    .resolve(run_font_px, 0.0, 16.0)
+                    .max(run_font_px * 1.2)
+            };
 
             // Use char_x for exact x position if available.
             // For RTL chunks, char_x byte offsets don't correspond to visual
@@ -3338,6 +3342,9 @@ fn format_list_marker(lst: ListStyleType, index: i32) -> String {
 }
 
 fn collect_fixed_elements(node: &WebCore, out: &mut Vec<u32>) {
+    if matches!(node.style.display, Display::None) {
+        return;
+    }
     if node.style.position == Position::Fixed && node.node_id != 0 {
         out.push(node.node_id);
     }
