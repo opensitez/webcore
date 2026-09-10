@@ -479,7 +479,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
 
     // ── Stacking context ─────────────────────────────────────────────────────
     let blend = blend_mode_to_u8(eff_style.mix_blend_mode);
-    let stacking = is_explicit_z_positioned(node)
+    let stacking = (eff_style.is_positioned() && !eff_style.z_index_is_auto)
         || eff_style.opacity < 1.0
         || !eff_style.css_transform.ops.is_empty()
         || !eff_style.css_filter.ops.is_empty()
@@ -1048,7 +1048,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             for child in eff_children {
                 collect_explicit_z_descendants(child, &mut negative_z);
             }
-            negative_z.retain(|c| c.style.z_index < 0);
+            negative_z.retain(|c| c.style.z_index < 0 && !c.style.z_index_is_auto);
             negative_z.sort_by_key(|c| c.style.z_index);
             let mut z_ctx = child_ctx;
             z_ctx.suppress_deferred_z_descendants = false;
@@ -1057,34 +1057,11 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             }
         }
 
-        // ── (j) ::before pseudo-element (inline text content) ────────────────
-        if !node.style.before_content.is_empty() && !node.layout.line_cache.is_empty() {
-            let first = &node.layout.line_cache[0];
-            let tx = first.x - eff_sx;
-            let ty = first.y - eff_sy;
-            let ps = node.style.before_style.as_deref().unwrap_or(&node.style);
-            let ps_font_px = {
-                let f = ps.font_size.resolve(font_px, 0.0, 16.0);
-                if f > 0.0 {
-                    f
-                } else {
-                    font_px
-                }
-            };
-            let line_h = ps
-                .line_height
-                .resolve(ps_font_px, 0.0, 16.0)
-                .max(ps_font_px * 1.2);
-            emit_text(
-                list,
-                tx,
-                ty,
-                &node.style.before_content,
-                ps,
-                ps_font_px,
-                line_h,
-            );
-        } else if !node.style.before_content.is_empty() {
+        // ── (j) ::before pseudo-element (fallback when line_cache is empty) ────
+        if !node.style.before_content.is_empty()
+            && node.layout.line_cache.is_empty()
+            && !matches!(node.style.display, Display::Inline)
+        {
             emit_generated_pseudo_content(
                 list,
                 node,
@@ -1102,41 +1079,25 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             );
         }
 
-        // ── (l) ::after pseudo-element ───────────────────────────────────────
-        if !node.style.after_content.is_empty() && !node.layout.line_cache.is_empty() {
-            let last = &node.layout.line_cache[node.layout.line_cache.len() - 1];
-            let tx = last.x - eff_sx + last.width;
-            let ty = last.y - eff_sy;
-            let ps = node.style.after_style.as_deref().unwrap_or(&node.style);
-            let ps_font_px = {
-                let f = ps.font_size.resolve(font_px, 0.0, 16.0);
-                if f > 0.0 {
-                    f
-                } else {
-                    font_px
-                }
-            };
-            let line_h = ps
-                .line_height
-                .resolve(ps_font_px, 0.0, 16.0)
-                .max(ps_font_px * 1.2);
-            emit_text(
-                list,
-                tx,
-                ty,
-                &node.style.after_content,
-                ps,
-                ps_font_px,
-                line_h,
-            );
-        } else if !node.style.after_content.is_empty() {
-            emit_generated_pseudo_content(
+        // ── (l) ::after pseudo-element (fallback when line_cache is empty) ─────
+        if !node.style.after_content.is_empty()
+            && node.layout.line_cache.is_empty()
+            && !matches!(node.style.display, Display::Inline)
+        {
+            let mut after_offset = 0.0f32;
+            if !node.style.before_content.is_empty() {
+                let ps = node.style.before_style.as_deref().unwrap_or(&node.style);
+                let fpx = ps.font_size_px(16.0, 16.0).max(1.0);
+                after_offset = node.style.before_content.chars().count() as f32 * fpx * 0.55 + 6.0;
+            }
+            emit_generated_pseudo_content_offset(
                 list,
                 node,
                 &node.style.after_content,
                 node.style.after_style.as_deref().unwrap_or(&node.style),
                 eff_sx,
                 eff_sy,
+                after_offset,
             );
         }
 
@@ -1303,8 +1264,11 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 !matches!(c.style.display, Display::None)
                     && (c.tag != "#text"
                         || (!c.text.trim().is_empty()
-                            && (!matches!(c.style.display, Display::Inline)
-                                || node.layout.line_cache.is_empty())))
+                            && !matches!(node.style.display, Display::Inline)
+                            && (matches!(
+                                node.style.display,
+                                Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid
+                            ) || node.layout.line_cache.is_empty())))
                     && (c.tag != "::before" || c.style.is_positioned() || c.style.is_block_level())
                     && (c.tag != "::after" || c.style.is_positioned() || c.style.is_block_level())
                     && c.style.position != Position::Fixed
@@ -1327,8 +1291,8 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 }
             }
 
-            deferred_z.retain(|c| is_renderable(c) && c.style.z_index >= 0);
-            deferred_z.sort_by_key(|c| c.style.z_index);
+            deferred_z.retain(|c| is_renderable(c) && (c.style.z_index_is_auto || c.style.z_index >= 0));
+            deferred_z.sort_by_key(|c| if c.style.z_index_is_auto { 0 } else { c.style.z_index });
             let mut z_ctx = child_ctx;
             z_ctx.suppress_deferred_z_descendants = false;
             for child in deferred_z {
@@ -2505,6 +2469,18 @@ fn emit_generated_pseudo_content(
     sx: f32,
     sy: f32,
 ) {
+    emit_generated_pseudo_content_offset(list, node, text, style, sx, sy, 0.0);
+}
+
+fn emit_generated_pseudo_content_offset(
+    list: &mut DisplayList,
+    node: &WebCore,
+    text: &str,
+    style: &ComputedStyle,
+    sx: f32,
+    sy: f32,
+    offset_x: f32,
+) {
     if text.is_empty() {
         return;
     }
@@ -2513,7 +2489,7 @@ fn emit_generated_pseudo_content(
         .line_height
         .resolve(font_px, 0.0, 16.0)
         .max(font_px * 1.2);
-    let mut x = node.layout.content_rect.x - sx;
+    let mut x = node.layout.content_rect.x - sx + offset_x;
     let text_w = text.chars().count() as f32 * font_px * 0.55;
     match style.text_align {
         TextAlign::Center => {
@@ -3370,10 +3346,23 @@ fn collect_fixed_elements(node: &WebCore, out: &mut Vec<u32>) {
     }
 }
 
+fn creates_stacking_context(node: &WebCore) -> bool {
+    let eff_style = &node.style;
+    (eff_style.is_positioned() && !eff_style.z_index_is_auto)
+        || eff_style.opacity < 1.0
+        || !eff_style.css_transform.ops.is_empty()
+        || !eff_style.css_filter.ops.is_empty()
+        || !eff_style.rare().backdrop_filter.is_empty()
+        || eff_style.will_change_transform
+        || eff_style.isolation
+        || blend_mode_to_u8(eff_style.mix_blend_mode) != 0
+        || matches!(eff_style.position, Position::Fixed | Position::Sticky)
+}
+
 fn is_explicit_z_positioned(node: &WebCore) -> bool {
-    node.style.is_positioned()
-        && !node.style.z_index_is_auto
-        && node.style.position != Position::Fixed
+    node.style.position != Position::Fixed
+        && (node.style.position == Position::Absolute
+            || (node.style.is_positioned() && !node.style.z_index_is_auto))
 }
 
 fn collect_explicit_z_descendants<'a>(node: &'a WebCore, out: &mut Vec<&'a WebCore>) {
@@ -3382,6 +3371,9 @@ fn collect_explicit_z_descendants<'a>(node: &'a WebCore, out: &mut Vec<&'a WebCo
     }
     if is_explicit_z_positioned(node) {
         out.push(node);
+        return;
+    }
+    if creates_stacking_context(node) {
         return;
     }
     if node.tag == "::before" || node.tag == "::after" {

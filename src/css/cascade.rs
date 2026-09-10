@@ -846,25 +846,21 @@ pub(crate) fn build_pseudo_style_shared(
     // specificity/scope proximity/source order. Keeping origin first prevents a UA unlayered
     // rule from beating a layered author rule.
     matched.sort_by(|&a, &b| normal_cascade_cmp(rules, a, b));
-    let mut ps = base.clone();
-    // Reset non-inherited properties that should not leak from the originating element.
-    ps.display = Display::Inline;
-    ps.width = CssLength::Auto;
-    ps.height = CssLength::Auto;
-    ps.min_width = CssLength::Zero;
-    ps.min_height = CssLength::Zero;
-    ps.max_width = CssLength::None;
-    ps.max_height = CssLength::None;
-    ps.counter_reset.clear();
-    ps.counter_increment.clear();
-    ps.counter_set.clear();
-    ps.before_style = None; // pseudo-elements don't nest
-    ps.after_style = None;
-    ps.placeholder_style = None;
-    ps.backdrop_style = None;
-    ps.before_content = String::new();
-    ps.after_content = String::new();
-    ps.marker_content = String::new();
+    let mut ps = ComputedStyle::default();
+    ps.inherit_from(base);
+    ps.relative_font_weight_base = Some(base.font_weight);
+    if ps.href.is_empty() && !base.href.is_empty() {
+        ps.href = base.href.clone();
+    }
+    if base.text_decoration.underline {
+        ps.text_decoration.underline = true;
+    }
+    if ps.text_decoration_color.is_none() {
+        ps.text_decoration_color = base.text_decoration_color;
+    }
+    if ps.text_decoration_thickness.is_auto() {
+        ps.text_decoration_thickness = base.text_decoration_thickness.clone();
+    }
     // **`content` decides whether the pseudo-element exists at all**
     // (css-pseudo-4 §2.1): `none` — which is what `normal` computes to here,
     // and what an absent declaration leaves — generates nothing. `""` is a

@@ -247,33 +247,6 @@ pub fn layout_inline_block(
         }
     }
 
-    // ── 1. Measure ::before / ::after pseudo-element widths ───────────────────
-    let pseudo_font_px = |ps: Option<&ComputedStyle>| -> f32 {
-        ps.and_then(|s| {
-            let f = s.font_size.resolve(font_px, 0.0, root_font_px);
-            if f > 0.0 {
-                Some(f)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(font_px)
-    };
-    let scale = engine.scale;
-    let font_system = unsafe { engine.font_system.map(|fs| &mut *fs) };
-    let before_w = if !node.style.before_content.is_empty() {
-        let bfpx = pseudo_font_px(node.style.before_style.as_deref());
-        measure_text_width_scaled(&node.style.before_content, bfpx, font_system, scale)
-    } else {
-        0.0
-    };
-    let font_system = unsafe { engine.font_system.map(|fs| &mut *fs) };
-    let after_w = if !node.style.after_content.is_empty() {
-        let afpx = pseudo_font_px(node.style.after_style.as_deref());
-        measure_text_width_scaled(&node.style.after_content, afpx, font_system, scale)
-    } else {
-        0.0
-    };
 
     // ── 2. Collect flat inline items from all inline children ─────────────────
     let mut text_offset = 0usize;
@@ -290,6 +263,25 @@ pub fn layout_inline_block(
         None
     };
     let mut previous_collapsible_space = false;
+    if !node.style.before_content.is_empty() {
+        let pseudo_style = node
+            .style
+            .before_style
+            .as_deref()
+            .unwrap_or_else(|| node.style.as_ref());
+        emit_generated_inline_content(
+            engine,
+            &node.style.before_content,
+            pseudo_style,
+            font_px,
+            root_font_px,
+            &mut items,
+            &mut runs,
+            &mut text_offset,
+            &[],
+            &mut previous_collapsible_space,
+        );
+    }
     for (i, child) in node.children.iter().enumerate() {
         if matches!(child.style.display, Display::None) {
             continue;
@@ -374,6 +366,25 @@ pub fn layout_inline_block(
             );
         }
     }
+    if !node.style.after_content.is_empty() {
+        let pseudo_style = node
+            .style
+            .after_style
+            .as_deref()
+            .unwrap_or_else(|| node.style.as_ref());
+        emit_generated_inline_content(
+            engine,
+            &node.style.after_content,
+            pseudo_style,
+            font_px,
+            root_font_px,
+            &mut items,
+            &mut runs,
+            &mut text_offset,
+            &[],
+            &mut previous_collapsible_space,
+        );
+    }
 
     // ── 3. Save old lines for early-stop optimization ─────────────────────────
     let old_lines: Vec<LayoutLine> = std::mem::take(&mut node.layout.line_cache);
@@ -412,34 +423,21 @@ pub fn layout_inline_block(
             .get("contenteditable")
             .map(|v| v == "true")
             .unwrap_or(false);
-        let has_pseudo_content = before_w > 0.0 || after_w > 0.0;
         let add_placeholder = !is_void
             && node.children.is_empty()
             && rbox.content_height.is_none()
-            && (is_prose_tag || is_contenteditable || has_pseudo_content);
+            && (is_prose_tag || is_contenteditable);
         if add_placeholder {
-            let pseudo_w = before_w + after_w;
-            let ps_font = if has_pseudo_content {
-                pseudo_font_px(
-                    node.style
-                        .before_style
-                        .as_deref()
-                        .or(node.style.after_style.as_deref()),
-                )
-            } else {
-                font_px
-            };
-            let eff_fpx = if has_pseudo_content { ps_font } else { font_px };
-            let line_h = eff_fpx * 1.2;
+            let line_h = font_px * 1.2;
             node.layout.line_cache = vec![LayoutLine {
                 text_start: text_offset,
                 text_length: 0,
                 x: content_x,
                 y: content_y,
-                width: pseudo_w,
+                width: 0.0,
                 height: line_h,
-                ascent: eff_fpx,
-                descent: eff_fpx * 0.2,
+                ascent: font_px,
+                descent: font_px * 0.2,
                 extra_space_per_word: 0.0,
                 text_x_offset: 0.0,
                 visual_segments: Vec::new(),
@@ -452,16 +450,7 @@ pub fn layout_inline_block(
         // must still produce a line-height of vertical space, just like it would
         // inside a paragraph.
         let br_h = if node.tag == "br" { font_px * 1.2 } else { 0.0 };
-        let eff_placeholder_fpx = if has_pseudo_content {
-            pseudo_font_px(
-                node.style
-                    .before_style
-                    .as_deref()
-                    .or(node.style.after_style.as_deref()),
-            )
-        } else {
-            font_px
-        };
+        let eff_placeholder_fpx = font_px;
         let placeholder_h = if add_placeholder {
             eff_placeholder_fpx * 1.2
         } else {
@@ -599,8 +588,6 @@ pub fn layout_inline_block(
     let balance_inline_width = if matches!(node.style.text_wrap.as_str(), "balance" | "pretty")
         && !matches!(node.style.white_space, WhiteSpace::Pre | WhiteSpace::Nowrap)
         && text_indent.abs() < 0.01
-        && before_w <= 0.01
-        && after_w <= 0.01
         && floats_before == float_ctx.as_ref().map_or(0, |fc| fc.floats.len())
     {
         Some(if node.style.text_wrap == "pretty" {
@@ -687,10 +674,9 @@ pub fn layout_inline_block(
             );
         }
 
-        // Apply text-indent and ::before on first line
+        // Apply text-indent on first line
         if is_first_line {
             fc_left += text_indent;
-            fc_left += before_w;
         }
 
         // white-space:pre and nowrap never wrap at word boundaries.
@@ -763,7 +749,7 @@ pub fn layout_inline_block(
                         &mut fc_right,
                     );
                     let temp_fc_left = if is_first_line {
-                        fc_left + text_indent + before_w
+                        fc_left + text_indent
                     } else {
                         fc_left
                     };
@@ -872,17 +858,7 @@ pub fn layout_inline_block(
             line_x = content_x;
         }
 
-        // Account for ::before on first line, ::after on last line
-        let is_last_line = next_start >= items.len();
-        if is_first_line && before_w > 0.0 {
-            line_x -= before_w;
-            if text_indent >= 0.0 && line_x < content_x {
-                line_x = content_x;
-            }
-        }
-        let line_w_total = content_line_w
-            + if is_first_line { before_w } else { 0.0 }
-            + if is_last_line { after_w } else { 0.0 };
+        let line_w_total = content_line_w;
 
         // Compute text range for this line, stripping leading/trailing collapsible
         // whitespace per CSS §16.6.1. Use first_content/last_content from above.
@@ -3704,6 +3680,9 @@ pub fn collect_flat_text(node: &WebCore) -> String {
 }
 
 fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {
+    if matches!(node.style.display, Display::None) {
+        return;
+    }
     let generated_content = generated_content_for_layout(node);
     if !is_root
         && matches!(
@@ -3713,14 +3692,12 @@ fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {
     {
         return;
     }
-    if !is_root && !node.style.before_content.is_empty() {
-        push_flat_rendered_text(out, &node.style.before_content, &node.style);
+    if !node.style.before_content.is_empty() {
+        let ps = node.style.before_style.as_deref().unwrap_or(&node.style);
+        push_flat_rendered_text(out, &node.style.before_content, ps);
     }
     if node.is_text_node() {
         push_flat_rendered_text(out, node.text.as_str(), &node.style);
-        return;
-    }
-    if matches!(node.style.display, Display::None) {
         return;
     }
     if node.tag == "br" {
@@ -3755,8 +3732,9 @@ fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {
         }
         collect_flat_text_inner(child, out, false);
     }
-    if !is_root && !node.style.after_content.is_empty() {
-        push_flat_rendered_text(out, &node.style.after_content, &node.style);
+    if !node.style.after_content.is_empty() {
+        let ps = node.style.after_style.as_deref().unwrap_or(&node.style);
+        push_flat_rendered_text(out, &node.style.after_content, ps);
     }
 }
 

@@ -486,6 +486,32 @@ pub fn apply_relative_offset(
     }
 }
 
+fn find_last_in_flow_baseline(node: &WebCore) -> Option<f32> {
+    if !matches!(node.style.overflow_x, Overflow::Visible)
+        || !matches!(node.style.overflow_y, Overflow::Visible)
+    {
+        return None;
+    }
+    if let Some(last_line) = node.layout.line_cache.last() {
+        if last_line.height > 0.0 {
+            return Some(last_line.y + last_line.ascent);
+        }
+    }
+    for child in node.children.iter().rev() {
+        if child.style.position == Position::Absolute
+            || child.style.position == Position::Fixed
+            || matches!(child.style.display, Display::None)
+            || !matches!(child.style.float, Float::None)
+        {
+            continue;
+        }
+        if let Some(b) = find_last_in_flow_baseline(child) {
+            return Some(b);
+        }
+    }
+    None
+}
+
 // ─── Build box rects and cache resolved values ────────────────────────────────
 
 /// Set node rects from rbox and geometry.
@@ -524,7 +550,7 @@ pub fn build_box_rects(
         mr_w,
         node.layout.border_rect.h + rbox.margin_top + rbox.margin_bottom,
     );
-    node.layout.baseline = content_y + content_h;
+    node.layout.baseline = find_last_in_flow_baseline(node).unwrap_or(content_y + content_h);
 
     // Cache resolved values
     node.layout.resolved_margin_top = rbox.margin_top;
