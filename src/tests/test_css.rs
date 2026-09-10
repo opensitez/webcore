@@ -159,7 +159,10 @@ fn root_dir_and_inherited_box_sizing_reach_descendants() {
     assert_eq!(d.computed_style_property(html, "direction"), "rtl");
     assert_eq!(d.computed_style_property(body, "direction"), "rtl");
     assert_eq!(d.computed_style_property(box_id, "direction"), "rtl");
-    assert_eq!(d.computed_style_property(box_id, "box-sizing"), "border-box");
+    assert_eq!(
+        d.computed_style_property(box_id, "box-sizing"),
+        "border-box"
+    );
 
     let rect = d.get_bounding_client_rect(box_id).unwrap();
     assert!(
@@ -746,10 +749,26 @@ fn scope_nested_intersection_and_limits() {
     })
     .unwrap();
 
-    assert_eq!(in_both.style.color, Color::rgb(10, 20, 30), "in both scopes matches");
-    assert_eq!(outside_outer.style.color, Color::rgb(1, 1, 1), "outside outer scope does not match");
-    assert_eq!(outer_stopped.style.color, Color::rgb(1, 1, 1), "blocked by outer limit does not match");
-    assert_eq!(inner_stopped.style.color, Color::rgb(1, 1, 1), "blocked by inner limit does not match");
+    assert_eq!(
+        in_both.style.color,
+        Color::rgb(10, 20, 30),
+        "in both scopes matches"
+    );
+    assert_eq!(
+        outside_outer.style.color,
+        Color::rgb(1, 1, 1),
+        "outside outer scope does not match"
+    );
+    assert_eq!(
+        outer_stopped.style.color,
+        Color::rgb(1, 1, 1),
+        "blocked by outer limit does not match"
+    );
+    assert_eq!(
+        inner_stopped.style.color,
+        Color::rgb(1, 1, 1),
+        "blocked by inner limit does not match"
+    );
 }
 
 #[test]
@@ -877,10 +896,26 @@ fn supports_full_conditional_feature_grammar() {
     );
     let p = find_box(&doc.root, &|b| b.tag == "p").unwrap();
 
-    assert_eq!(p.style.color, Color::rgb(10, 20, 30), "!important inside declaration matched, bare declaration rejected");
-    assert_eq!(p.style.background_color, Color::rgb(40, 50, 60), "mixed and/or without parens rejected, grouped accepted");
-    assert_eq!(p.style.border_top_color, Color::rgb(70, 80, 90), "general-enclosed feature parsed and inverted by not");
-    assert_eq!(p.style.border_bottom_color, Color::rgb(11, 22, 33), "comments inside condition ignored");
+    assert_eq!(
+        p.style.color,
+        Color::rgb(10, 20, 30),
+        "!important inside declaration matched, bare declaration rejected"
+    );
+    assert_eq!(
+        p.style.background_color,
+        Color::rgb(40, 50, 60),
+        "mixed and/or without parens rejected, grouped accepted"
+    );
+    assert_eq!(
+        p.style.border_top_color,
+        Color::rgb(70, 80, 90),
+        "general-enclosed feature parsed and inverted by not"
+    );
+    assert_eq!(
+        p.style.border_bottom_color,
+        Color::rgb(11, 22, 33),
+        "comments inside condition ignored"
+    );
 }
 
 #[test]
@@ -9531,16 +9566,29 @@ fn text_transform_full_size_kana_and_math_auto() {
     use crate::types::TextTransform;
 
     // Full-size-kana: small kana characters convert to normal-size kana
-    let transformed_kana = apply_text_transform("ぁぃぅぇぉっァィゥェォッ", TextTransform::FullSizeKana);
+    let transformed_kana =
+        apply_text_transform("ぁぃぅぇぉっァィゥェォッ", TextTransform::FullSizeKana);
     assert_eq!(transformed_kana, "あいうえおつアイウエオツ");
 
     // Math-auto: single Latin and Greek letters become italic math symbols,
     // while multi-letter words (functions/operators) remain upright.
     let math_expr = apply_text_transform("x + sin(y) + a = 0", TextTransform::MathAuto);
-    assert!(math_expr.contains('𝑥'), "single letter x should become italic mathematical x: {math_expr}");
-    assert!(math_expr.contains('𝑦'), "single letter y should become italic mathematical y: {math_expr}");
-    assert!(math_expr.contains('𝑎'), "single letter a should become italic mathematical a: {math_expr}");
-    assert!(math_expr.contains("sin"), "multi-letter word 'sin' should stay upright: {math_expr}");
+    assert!(
+        math_expr.contains('𝑥'),
+        "single letter x should become italic mathematical x: {math_expr}"
+    );
+    assert!(
+        math_expr.contains('𝑦'),
+        "single letter y should become italic mathematical y: {math_expr}"
+    );
+    assert!(
+        math_expr.contains('𝑎'),
+        "single letter a should become italic mathematical a: {math_expr}"
+    );
+    assert!(
+        math_expr.contains("sin"),
+        "multi-letter word 'sin' should stay upright: {math_expr}"
+    );
 }
 
 #[test]
@@ -9566,7 +9614,10 @@ fn inline_fragment_geometry_and_pseudo_elements() {
     assert!(r1.w > 20.0, "s1 width should be positive: {r1:?}");
     assert!(r1.h > 10.0, "s1 height should be positive: {r1:?}");
 
-    assert!(r2.w > 40.0, "s2 width should include ::before content: {r2:?}");
+    assert!(
+        r2.w > 40.0,
+        "s2 width should include ::before content: {r2:?}"
+    );
     assert!(r2.h > 10.0, "s2 height should be positive: {r2:?}");
 }
 

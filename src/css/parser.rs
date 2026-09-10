@@ -370,9 +370,8 @@ fn scan_supports_operators_outside_parens(s: &str) -> Result<SupportsLogicalOp<'
                 b')' | b']' | b'}' => depth = depth.saturating_sub(1),
                 _ if depth == 0 => {
                     if starts_with_ci(&bytes[i..], b"and") {
-                        let prev_ok = i == 0
-                            || bytes[i - 1].is_ascii_whitespace()
-                            || bytes[i - 1] == b')';
+                        let prev_ok =
+                            i == 0 || bytes[i - 1].is_ascii_whitespace() || bytes[i - 1] == b')';
                         let next_pos = i + 3;
                         let next_ok = next_pos == bytes.len()
                             || bytes[next_pos].is_ascii_whitespace()
@@ -385,9 +384,8 @@ fn scan_supports_operators_outside_parens(s: &str) -> Result<SupportsLogicalOp<'
                         }
                     }
                     if starts_with_ci(&bytes[i..], b"or") {
-                        let prev_ok = i == 0
-                            || bytes[i - 1].is_ascii_whitespace()
-                            || bytes[i - 1] == b')';
+                        let prev_ok =
+                            i == 0 || bytes[i - 1].is_ascii_whitespace() || bytes[i - 1] == b')';
                         let next_pos = i + 2;
                         let next_ok = next_pos == bytes.len()
                             || bytes[next_pos].is_ascii_whitespace()
@@ -546,7 +544,6 @@ fn outer_parens_enclose(s: &str) -> bool {
     }
     depth == 0 && quote.is_none()
 }
-
 
 fn supports_declaration_matches(prop: &str, value: &str) -> bool {
     use crate::types::CssValue;

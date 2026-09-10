@@ -18,9 +18,7 @@ use crate::css::{
 };
 use crate::svg::animation::{WEBCORE_ANIMATED_ATTR_NS, WEBCORE_ANIMATED_ATTR_PREFIX};
 use crate::svg::condition;
-use crate::types::{
-    Color, Direction, Overflow, WebCore, SPECIFIED_SVG_FILL, SPECIFIED_SVG_STROKE,
-};
+use crate::types::{Color, Direction, Overflow, WebCore, SPECIFIED_SVG_FILL, SPECIFIED_SVG_STROKE};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use tiny_skia::{

@@ -1671,15 +1671,15 @@ impl LayoutEngine {
                 if matches!(ch.style.display, Display::None) {
                     continue;
                 }
-            if matches!(ch.style.position, Position::Absolute | Position::Fixed) {
-                continue;
-            }
-            if ch.is_pseudo_element() && ch.text.is_empty() {
-                continue;
-            }
-            if ch.tag == "#text" && ch.text.chars().all(|c| c.is_ascii_whitespace()) {
-                continue;
-            }
+                if matches!(ch.style.position, Position::Absolute | Position::Fixed) {
+                    continue;
+                }
+                if ch.is_pseudo_element() && ch.text.is_empty() {
+                    continue;
+                }
+                if ch.tag == "#text" && ch.text.chars().all(|c| c.is_ascii_whitespace()) {
+                    continue;
+                }
                 let child_font = ch.style.font_size_px(font_px, root_font_px);
                 let child_rbox = self.res_box(&ch.style, child_font, 0.0, root_font_px);
                 let child_outer = child_rbox.padding_left
@@ -1901,15 +1901,15 @@ impl LayoutEngine {
                 if matches!(ch.style.display, Display::None) {
                     continue;
                 }
-            if matches!(ch.style.position, Position::Absolute | Position::Fixed) {
-                continue;
-            }
-            if ch.is_pseudo_element() && ch.text.is_empty() {
-                continue;
-            }
-            if ch.tag == "#text" && ch.text.chars().all(|c| c.is_ascii_whitespace()) {
-                continue;
-            }
+                if matches!(ch.style.position, Position::Absolute | Position::Fixed) {
+                    continue;
+                }
+                if ch.is_pseudo_element() && ch.text.is_empty() {
+                    continue;
+                }
+                if ch.tag == "#text" && ch.text.chars().all(|c| c.is_ascii_whitespace()) {
+                    continue;
+                }
                 let child_font = ch.style.font_size_px(font_px, root_font_px);
                 let child_rbox = self.res_box(&ch.style, child_font, 0.0, root_font_px);
                 let child_outer = child_rbox.padding_left

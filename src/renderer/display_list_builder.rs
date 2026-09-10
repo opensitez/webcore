@@ -3312,9 +3312,7 @@ fn is_explicit_z_positioned(node: &WebCore) -> bool {
 }
 
 fn collect_explicit_z_descendants<'a>(node: &'a WebCore, out: &mut Vec<&'a WebCore>) {
-    if matches!(node.style.display, Display::None)
-        || node.style.position == Position::Fixed
-    {
+    if matches!(node.style.display, Display::None) || node.style.position == Position::Fixed {
         return;
     }
     if is_explicit_z_positioned(node) {

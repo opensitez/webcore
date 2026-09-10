@@ -19,6 +19,9 @@ const PAGE: &str = r##"<img id=i1 src="p.png" alt="A" usemap="#m" ismap decoding
       crossorigin=anonymous referrerpolicy=no-referrer sizes="1px">
 <img id=i3 src="p.png" srcset="p2.png">
 <img id=i2>
+<picture><source id=so1 src="media.mp4" srcset="wide.webp 1000w" sizes="50vw"
+          media="(min-width: 600px)" type="image/webp" width=640 height=360>
+         <source id=so2><img src="fallback.jpg"></picture>
 <a id=a1 href="x.html" rel="noopener" hreflang="en" type="text/html" target=_blank download="f">L</a>
 <a id=a2>bare</a>
 <form id=f1 method="POST" enctype="text/plain" novalidate accept-charset="utf-8" target=_self name=nm autocomplete=off rel=noopener></form>
@@ -105,6 +108,14 @@ fn a_string_attribute_is_verbatim_and_empty_when_absent() {
         ("i2", "useMap", ""),
         ("i3", "srcset", "p2.png"),
         ("i2", "srcset", ""),
+        ("so1", "type", "image/webp"),
+        ("so2", "type", ""),
+        ("so1", "srcset", "wide.webp 1000w"),
+        ("so2", "srcset", ""),
+        ("so1", "sizes", "50vw"),
+        ("so2", "sizes", ""),
+        ("so1", "media", "(min-width: 600px)"),
+        ("so2", "media", ""),
         ("a1", "rel", "noopener"),
         ("a2", "rel", ""),
         ("a1", "hreflang", "en"),
@@ -143,6 +154,8 @@ fn a_url_attribute_resolves_against_the_base_and_is_empty_when_absent() {
         "http://example.com/dir/p2.png",
         "srcset selects the current image candidate separately"
     );
+    assert_eq!(s(&d, "so1", "src"), "http://example.com/dir/media.mp4");
+    assert_eq!(s(&d, "so2", "src"), "");
     assert_eq!(s(&d, "a1", "href"), "http://example.com/dir/x.html");
     assert_eq!(s(&d, "l1", "href"), "http://example.com/dir/s.css");
     assert_eq!(s(&d, "s1", "src"), "http://example.com/dir/j.js");
@@ -197,6 +210,10 @@ fn a_long_attribute_carries_its_own_missing_value_default() {
     assert_eq!(n(&d, "n2", "minLength"), -1);
     assert_eq!(n(&d, "n1", "size"), 10);
     assert_eq!(n(&d, "n2", "size"), 20, "not 0 and not -1");
+    assert_eq!(n(&d, "so1", "width"), 640);
+    assert_eq!(n(&d, "so1", "height"), 360);
+    assert_eq!(n(&d, "so2", "width"), 0);
+    assert_eq!(n(&d, "so2", "height"), 0);
     // A value that is not a number falls back to the default too.
     let mut d = page();
     let n2 = el(&d, "n2");

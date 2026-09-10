@@ -468,6 +468,10 @@ fn parse_html_full(
     // Post-cascade fixes
     apply_details_summary_post_cascade(&mut doc.root);
     number_lists(&mut doc.root);
+    // Standalone parse_html has no layout viewport. Use the same deterministic
+    // default viewport the old parser path used for DOM current-source state;
+    // browser loading re-resolves with the real viewport before fetching.
+    resolve_picture_elements(&mut doc.root, &doc.base_url, 800.0, 600.0);
     doc.initialize_media_elements();
 
     doc

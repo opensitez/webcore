@@ -134,6 +134,14 @@ pub const REFLECTED: &[(&str, &str, &str, Kind)] = &[
         "referrerpolicy",
         Kind::Enum(REFERRER_POLICY, "", ""),
     ),
+    // ── HTMLSourceElement ──
+    ("source", "src", "src", Kind::Url),
+    ("source", "type", "type", Kind::Str),
+    ("source", "srcset", "srcset", Kind::Str),
+    ("source", "sizes", "sizes", Kind::Str),
+    ("source", "media", "media", Kind::Str),
+    ("source", "width", "width", Kind::Long(0)),
+    ("source", "height", "height", Kind::Long(0)),
     // ── HTMLAnchorElement ──
     ("a", "href", "href", Kind::Url),
     ("a", "rel", "rel", Kind::Str),

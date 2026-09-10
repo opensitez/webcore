@@ -1531,11 +1531,13 @@ fn positioned_negative_z_before_background_paints() {
     let red_generated_backgrounds = list
         .commands
         .iter()
-        .filter(|cmd| matches!(
-            cmd,
-            PaintCmd::FillRect { rect, color, .. }
-                if color.r == 184 && color.g == 0 && color.b == 0 && rect.w >= 790.0
-        ))
+        .filter(|cmd| {
+            matches!(
+                cmd,
+                PaintCmd::FillRect { rect, color, .. }
+                    if color.r == 184 && color.g == 0 && color.b == 0 && rect.w >= 790.0
+            )
+        })
         .count();
     assert!(
         red_generated_backgrounds >= 1,
@@ -1570,9 +1572,7 @@ fn positioned_after_with_inset_and_bottom_border_paints() {
             widths,
             colors,
             ..
-        } if widths[2] > 0.0 && colors[2].r == 230 && colors[2].g == 232 => {
-            Some((*rect, *widths))
-        }
+        } if widths[2] > 0.0 && colors[2].r == 230 && colors[2].g == 232 => Some((*rect, *widths)),
         _ => None,
     });
     let (rect, widths) = border.expect("absolute ::after bottom border should paint");

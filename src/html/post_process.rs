@@ -32,10 +32,6 @@ pub(crate) fn collapse_whitespace(s: &str) -> String {
     out
 }
 
-pub(crate) fn parse_srcset_url(srcset: &str) -> Option<String> {
-    parse_srcset_url_for(srcset, None, 800.0, 600.0, 1.0)
-}
-
 pub(crate) fn parse_srcset_url_for(
     srcset: &str,
     sizes: Option<&str>,
@@ -92,7 +88,7 @@ struct SrcsetCandidate {
 
 fn parse_srcset_candidates(srcset: &str) -> Vec<SrcsetCandidate> {
     let mut candidates = Vec::new();
-    for entry in split_comma_list(srcset) {
+    for entry in split_srcset_entries(srcset) {
         let entry = entry.trim();
         if entry.is_empty() {
             continue;
@@ -102,18 +98,41 @@ fn parse_srcset_candidates(srcset: &str) -> Vec<SrcsetCandidate> {
             Some(u) if !u.is_empty() => u,
             _ => continue,
         };
-        let mut width = None;
-        let mut density = None;
-        if let Some(descriptor) = parts.next() {
+        let mut width: Option<f32> = None;
+        let mut density: Option<f32> = None;
+        let mut invalid = false;
+        for descriptor in parts {
             if let Some(w_str) = descriptor.strip_suffix('w') {
-                if let Ok(w) = w_str.parse::<f32>() {
-                    width = Some(w.max(0.0));
+                if width.is_some() || density.is_some() {
+                    invalid = true;
+                    break;
+                }
+                match w_str.parse::<u32>() {
+                    Ok(w) if w > 0 => width = Some(w as f32),
+                    _ => {
+                        invalid = true;
+                        break;
+                    }
                 }
             } else if let Some(x_str) = descriptor.strip_suffix('x') {
-                if let Ok(x) = x_str.parse::<f32>() {
-                    density = Some(x.max(0.0));
+                if density.is_some() || width.is_some() {
+                    invalid = true;
+                    break;
                 }
+                match x_str.parse::<f32>() {
+                    Ok(x) if x.is_finite() && x > 0.0 => density = Some(x),
+                    _ => {
+                        invalid = true;
+                        break;
+                    }
+                }
+            } else {
+                invalid = true;
+                break;
             }
+        }
+        if invalid {
+            continue;
         }
         candidates.push(SrcsetCandidate {
             url: url.to_string(),
@@ -122,6 +141,26 @@ fn parse_srcset_candidates(srcset: &str) -> Vec<SrcsetCandidate> {
         });
     }
     candidates
+}
+
+fn split_srcset_entries(input: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut current_is_data = input.trim_start().starts_with("data:");
+    for (idx, ch) in input.char_indices() {
+        if ch != ',' {
+            continue;
+        }
+        let after = input[idx + ch.len_utf8()..].chars().next();
+        if current_is_data && !after.is_none_or(|c| c.is_ascii_whitespace()) {
+            continue;
+        }
+        out.push(&input[start..idx]);
+        start = idx + ch.len_utf8();
+        current_is_data = input[start..].trim_start().starts_with("data:");
+    }
+    out.push(&input[start..]);
+    out
 }
 
 fn parse_sizes_width(sizes: Option<&str>, viewport_w: f32, viewport_h: f32) -> f32 {
@@ -184,11 +223,18 @@ fn split_comma_list(input: &str) -> Vec<&str> {
 }
 
 /// Resolve the best `<source>` for a `<picture>` element and set it on the child `<img>`.
-pub(crate) fn resolve_picture_source(picture: &mut WebCore, base_url: &str, vw: f32, vh: f32) {
-    // Find the best matching <source>
+pub(crate) fn resolve_picture_source(
+    picture: &mut WebCore,
+    base_url: &str,
+    vw: f32,
+    vh: f32,
+) -> bool {
+    // Find the first matching <source>. In a <picture> context only `srcset`
+    // participates in image candidate selection; `source[src]` is for media
+    // elements and must not replace the fallback <img>.
     let mut best_url: Option<String> = None;
-    let mut best_width: Option<String> = None;
-    let mut best_height: Option<String> = None;
+    let mut best_width: Option<u32> = None;
+    let mut best_height: Option<u32> = None;
     for child in &picture.children {
         if child.tag != "source" {
             continue;
@@ -226,8 +272,14 @@ pub(crate) fn resolve_picture_source(picture: &mut WebCore, base_url: &str, vw: 
                 });
             if let Some(url) = parse_srcset_url_for(srcset, sizes, vw, vh, 1.0) {
                 best_url = Some(url);
-                best_width = child.attributes.get("width").cloned();
-                best_height = child.attributes.get("height").cloned();
+                best_width = child
+                    .attributes
+                    .get("width")
+                    .and_then(|value| parse_nonzero_dimension(value));
+                best_height = child
+                    .attributes
+                    .get("height")
+                    .and_then(|value| parse_nonzero_dimension(value));
                 break; // First matching source wins
             }
         }
@@ -242,29 +294,16 @@ pub(crate) fn resolve_picture_source(picture: &mut WebCore, base_url: &str, vw: 
                 // `img.src` still reads back what the markup said, and the
                 // chosen candidate is what `currentSrc` reports. Overwriting
                 // the attribute made `<picture>` mutate the document.
-                child.resolved_src = resolve_url(&url, base_url);
-                // Transfer width/height from the matched <source> so the image
-                // is sized correctly (the <source> often has larger dimensions
-                // than the fallback <img>). Applied to the STYLE, not to the
-                // width/height content attributes, for the same reason.
-                if let Some(ref w) = best_width {
-                    crate::css::apply_property(
-                        std::sync::Arc::make_mut(&mut child.style),
-                        "width",
-                        &format!("{}px", w),
-                    );
-                }
-                if let Some(ref h) = best_height {
-                    crate::css::apply_property(
-                        std::sync::Arc::make_mut(&mut child.style),
-                        "height",
-                        &format!("{}px", h),
-                    );
-                }
-                break;
+                apply_resolved_image_source(child, &url, base_url, best_width.zip(best_height));
+                // `<source width height>` are intrinsic dimension hints for the
+                // selected image candidate. They are not CSS width/height and
+                // must not override responsive rules such as `img{width:100%;
+                // height:auto}`.
+                return true;
             }
         }
     }
+    false
 }
 
 fn supported_image_type(typ: &str) -> bool {
@@ -280,12 +319,31 @@ fn supported_image_type(typ: &str) -> bool {
     )
 }
 
+fn parse_nonzero_dimension(value: &str) -> Option<u32> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let mut end = 0usize;
+    for (idx, ch) in value.char_indices() {
+        if ch.is_ascii_digit() {
+            end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if end == 0 {
+        return None;
+    }
+    value[..end].parse::<u32>().ok().filter(|v| *v > 0)
+}
+
 /// Post-pass: re-resolve `<picture>` elements with real viewport dimensions.
 pub fn resolve_picture_elements(node: &mut WebCore, base_url: &str, vw: f32, vh: f32) {
     if node.tag == "picture" {
-        resolve_picture_source(node, base_url, vw, vh);
+        let source_matched = resolve_picture_source(node, base_url, vw, vh);
         for child in &mut node.children {
-            if child.tag != "img" {
+            if child.tag != "img" || !source_matched {
                 resolve_picture_elements(child, base_url, vw, vh);
             }
         }
@@ -302,12 +360,55 @@ fn resolve_img_source(node: &mut WebCore, base_url: &str, vw: f32, vh: f32) {
     if let Some(srcset) = node.attributes.get("srcset") {
         let sizes = node.attributes.get("sizes").map(|s| s.as_str());
         if let Some(best) = parse_srcset_url_for(srcset, sizes, vw, vh, 1.0) {
-            node.resolved_src = resolve_url(&best, base_url);
+            apply_resolved_image_source(node, &best, base_url, None);
             return;
         }
     }
     if let Some(src) = node.attributes.get("src") {
-        node.resolved_src = resolve_url(src, base_url);
+        let src = src.clone();
+        apply_resolved_image_source(node, &src, base_url, None);
+    }
+}
+
+fn apply_resolved_image_source(
+    node: &mut WebCore,
+    raw_url: &str,
+    base_url: &str,
+    intrinsic_hint: Option<(u32, u32)>,
+) {
+    let resolved = resolve_url(raw_url, base_url);
+    let changed = node.resolved_src != resolved;
+    node.resolved_src = resolved.clone();
+
+    if let Some((w, h)) = intrinsic_hint {
+        node.image_width = w;
+        node.image_height = h;
+    }
+
+    let is_remote = resolved.starts_with("http://") || resolved.starts_with("https://");
+    if is_remote {
+        if changed {
+            node.image_data = None;
+            node.animated_image = None;
+            node.animated_image_frame = 0;
+            if intrinsic_hint.is_none() {
+                node.image_width = 0;
+                node.image_height = 0;
+            }
+        }
+        return;
+    }
+
+    if let Some(decoded) = load_decoded_image_from_src(raw_url, base_url) {
+        set_decoded_image_on_node(node, decoded);
+    } else if changed {
+        node.image_data = None;
+        node.animated_image = None;
+        node.animated_image_frame = 0;
+        if intrinsic_hint.is_none() {
+            node.image_width = 0;
+            node.image_height = 0;
+        }
     }
 }
 
@@ -389,9 +490,6 @@ impl crate::html::parser::HtmlParser {
             }
         }
 
-        if node.tag == "picture" {
-            resolve_picture_source(node, base_url, 0.0, 0.0);
-        }
         // <form> inside <table>: browsers treat form as transparent (display:contents)
         // so it doesn't break table row structure.
         if matches!(node.tag.as_str(), "table" | "thead" | "tbody" | "tfoot") {

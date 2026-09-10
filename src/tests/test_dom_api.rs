@@ -55,6 +55,42 @@ fn srcset_density_descriptors_select_for_device_pixel_ratio() {
 }
 
 #[test]
+fn srcset_drops_invalid_descriptors_instead_of_treating_them_as_1x() {
+    assert_eq!(
+        crate::html::parse_srcset_url_for(
+            "bad.webp 0w, good.webp 400w",
+            Some("200px"),
+            800.0,
+            600.0,
+            1.0
+        )
+        .as_deref(),
+        Some("good.webp")
+    );
+    assert_eq!(
+        crate::html::parse_srcset_url_for("bad.webp 2x 400w, one.webp 1x", None, 800.0, 600.0, 1.0)
+            .as_deref(),
+        Some("one.webp")
+    );
+}
+
+#[test]
+fn srcset_keeps_data_url_commas_inside_the_candidate_url() {
+    let data = "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
+    assert_eq!(
+        crate::html::parse_srcset_url_for(
+            &format!("{data} 1x, high.webp 2x"),
+            None,
+            800.0,
+            600.0,
+            1.0,
+        )
+        .as_deref(),
+        Some(data)
+    );
+}
+
+#[test]
 fn img_srcset_current_source_is_resolved_with_viewport_without_mutating_src() {
     let mut renderer = crate::Renderer::new();
     let doc = renderer.load_html_with_base(
@@ -94,6 +130,90 @@ fn picture_accepts_webp_source_and_skips_unsupported_image_types() {
         doc.find_webcore(img).unwrap().resolved_src,
         "https://example.test/hero-large.webp"
     );
+}
+
+#[test]
+fn picture_uses_fallback_img_srcset_when_no_source_matches() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html_with_base(
+        r#"<picture>
+             <source type="image/avif" srcset="hero.avif">
+             <img id="hero" src="fallback.jpg"
+                  srcset="small.webp 320w, medium.webp 640w, large.webp 1280w"
+                  sizes="50vw">
+           </picture>"#,
+        "https://example.test/news/",
+        1200.0,
+        800.0,
+    );
+    let img = doc.get_element_by_id("hero").unwrap();
+    assert_eq!(
+        doc.find_webcore(img).unwrap().resolved_src,
+        "https://example.test/news/medium.webp"
+    );
+}
+
+#[test]
+fn picture_continues_past_matching_source_with_invalid_srcset() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html_with_base(
+        r#"<picture>
+             <source type="image/webp" srcset="bad.webp 0w">
+             <source type="image/webp" srcset="good.webp">
+             <img id="hero" src="fallback.jpg">
+           </picture>"#,
+        "https://example.test/",
+        1000.0,
+        800.0,
+    );
+    let img = doc.get_element_by_id("hero").unwrap();
+    assert_eq!(
+        doc.find_webcore(img).unwrap().resolved_src,
+        "https://example.test/good.webp"
+    );
+}
+
+#[test]
+fn picture_ignores_source_src_without_srcset() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html_with_base(
+        r#"<picture>
+             <source type="image/webp" src="wrong.webp">
+             <img id="hero" src="fallback.jpg">
+           </picture>"#,
+        "https://example.test/",
+        1000.0,
+        800.0,
+    );
+    let img = doc.get_element_by_id("hero").unwrap();
+    assert_eq!(
+        doc.find_webcore(img).unwrap().resolved_src,
+        "https://example.test/fallback.jpg"
+    );
+}
+
+#[test]
+fn picture_source_dimensions_are_intrinsic_not_css() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html_with_base(
+        r#"<picture>
+             <source type="image/webp" srcset="hero.webp" width="640" height="360">
+             <img id="hero" src="fallback.jpg" style="width:100%;height:auto">
+           </picture>"#,
+        "https://example.test/",
+        1000.0,
+        800.0,
+    );
+    let img = doc.get_element_by_id("hero").unwrap();
+    let node = doc.find_webcore(img).unwrap();
+    assert_eq!(node.resolved_src, "https://example.test/hero.webp");
+    assert_eq!((node.image_width, node.image_height), (640, 360));
+    assert_eq!(
+        doc.get_attribute(img, "style").as_deref(),
+        Some("width:100%;height:auto")
+    );
+    assert_eq!(doc.get_attribute(img, "width"), None);
+    assert_eq!(doc.get_attribute(img, "height"), None);
 }
 
 #[test]

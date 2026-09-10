@@ -1171,13 +1171,16 @@ pub(crate) fn match_rules(
                     &match_ctx,
                 ) {
                     if has_hover {
-                        sets.hover_matched.push((rule.specificity, rule_idx, scope_proximity));
+                        sets.hover_matched
+                            .push((rule.specificity, rule_idx, scope_proximity));
                     }
                     if has_active {
-                        sets.active_matched.push((rule.specificity, rule_idx, scope_proximity));
+                        sets.active_matched
+                            .push((rule.specificity, rule_idx, scope_proximity));
                     }
                     if has_visited {
-                        sets.visited_matched.push((rule.specificity, rule_idx, scope_proximity));
+                        sets.visited_matched
+                            .push((rule.specificity, rule_idx, scope_proximity));
                     }
                     // With a hover chain live, the FULL selector is tested too:
                     // a `:hover` rule that matches now applies as a normal rule,
@@ -1192,7 +1195,8 @@ pub(crate) fn match_rules(
                             &match_ctx,
                         )
                     {
-                        sets.matched.push((rule.specificity, rule_idx, scope_proximity));
+                        sets.matched
+                            .push((rule.specificity, rule_idx, scope_proximity));
                     }
                     break;
                 }
@@ -1206,19 +1210,34 @@ pub(crate) fn match_rules(
                 &match_ctx,
             ) {
                 match rule.pseudo_element {
-                    PseudoElement::Before => sets.before_matched.push((rule.specificity, rule_idx, scope_proximity)),
-                    PseudoElement::After => sets.after_matched.push((rule.specificity, rule_idx, scope_proximity)),
+                    PseudoElement::Before => {
+                        sets.before_matched
+                            .push((rule.specificity, rule_idx, scope_proximity))
+                    }
+                    PseudoElement::After => {
+                        sets.after_matched
+                            .push((rule.specificity, rule_idx, scope_proximity))
+                    }
                     PseudoElement::Selection => {
-                        sets.selection_matched.push((rule.specificity, rule_idx, scope_proximity))
+                        sets.selection_matched
+                            .push((rule.specificity, rule_idx, scope_proximity))
                     }
                     PseudoElement::Placeholder => {
-                        sets.placeholder_matched.push((rule.specificity, rule_idx, scope_proximity))
+                        sets.placeholder_matched
+                            .push((rule.specificity, rule_idx, scope_proximity))
                     }
-                    PseudoElement::Marker => sets.marker_matched.push((rule.specificity, rule_idx, scope_proximity)),
+                    PseudoElement::Marker => {
+                        sets.marker_matched
+                            .push((rule.specificity, rule_idx, scope_proximity))
+                    }
                     PseudoElement::Backdrop => {
-                        sets.backdrop_matched.push((rule.specificity, rule_idx, scope_proximity))
+                        sets.backdrop_matched
+                            .push((rule.specificity, rule_idx, scope_proximity))
                     }
-                    PseudoElement::None => sets.matched.push((rule.specificity, rule_idx, scope_proximity)),
+                    PseudoElement::None => {
+                        sets.matched
+                            .push((rule.specificity, rule_idx, scope_proximity))
+                    }
                     PseudoElement::Ignored => {}
                 }
                 break;
@@ -1260,7 +1279,13 @@ fn limit_matches_between(
         }
     }
     if to_node {
-        if limit_sel.matches_with_ancestors_ctx(node, child_index, sibling_count, ancestors, match_ctx) {
+        if limit_sel.matches_with_ancestors_ctx(
+            node,
+            child_index,
+            sibling_count,
+            ancestors,
+            match_ctx,
+        ) {
             return true;
         }
     }
@@ -1725,8 +1750,7 @@ pub(crate) fn apply_cascade_inner(
     // `input[type=hidden] { display: block !important }` and reveal a hidden
     // field — Chrome answers `display: none` there, and now so does this.
     let mut important_matched = matched.clone();
-    important_matched
-        .sort_by(|&a, &b| important_cascade_cmp(&stylesheet.rules, a, b));
+    important_matched.sort_by(|&a, &b| important_cascade_cmp(&stylesheet.rules, a, b));
     for author_pass in [true, false] {
         let mut current_important_layer: Option<(bool, u32)> = None;
         let mut important_layer_start_style = style.clone();
@@ -2518,9 +2542,9 @@ fn apply_form_sizing_hints_after_ua(
     matched: &[(u32, usize, Option<u32>)],
 ) {
     let author_declares = |property: &str| {
-        matched
-            .iter()
-            .any(|(sp, ri, _)| is_author_origin(*sp) && rules[*ri].declarations.contains_key(property))
+        matched.iter().any(|(sp, ri, _)| {
+            is_author_origin(*sp) && rules[*ri].declarations.contains_key(property)
+        })
     };
 
     match root.tag.as_str() {

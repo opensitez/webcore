@@ -732,15 +732,7 @@ impl HtmlParser {
 
                     // <img> handling
                     if tag == "img" {
-                        let mut load_src = node.attributes.get("src").cloned();
-                        // `srcset` selects the current image candidate without
-                        // mutating the authored `src` content attribute.
-                        if let Some(srcset) = node.attributes.get("srcset").cloned() {
-                            if let Some(best) = parse_srcset_url(&srcset) {
-                                load_src = Some(best);
-                            }
-                        }
-                        if let Some(src) = load_src {
+                        if let Some(src) = node.attributes.get("src").cloned() {
                             let resolved = resolve_url(&src, &self.base_url);
                             let is_remote =
                                 resolved.starts_with("http://") || resolved.starts_with("https://");
@@ -1063,15 +1055,7 @@ impl HtmlParser {
         apply_presentational_attrs(&mut node);
 
         if tag == "img" {
-            let mut load_src = node.attributes.get("src").cloned();
-            // `srcset` selects the current image candidate without mutating the
-            // authored `src` content attribute.
-            if let Some(srcset) = node.attributes.get("srcset").cloned() {
-                if let Some(best) = parse_srcset_url(&srcset) {
-                    load_src = Some(best);
-                }
-            }
-            if let Some(src) = load_src {
+            if let Some(src) = node.attributes.get("src").cloned() {
                 let resolved = resolve_url(&src, &self.base_url);
                 let is_remote = resolved.starts_with("http://") || resolved.starts_with("https://");
                 if !is_remote {
