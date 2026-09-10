@@ -1671,12 +1671,15 @@ impl LayoutEngine {
                 if matches!(ch.style.display, Display::None) {
                     continue;
                 }
-                if matches!(ch.style.position, Position::Absolute | Position::Fixed) {
-                    continue;
-                }
-                if ch.tag == "#text" && ch.text.chars().all(|c| c.is_ascii_whitespace()) {
-                    continue;
-                }
+            if matches!(ch.style.position, Position::Absolute | Position::Fixed) {
+                continue;
+            }
+            if ch.is_pseudo_element() && ch.text.is_empty() {
+                continue;
+            }
+            if ch.tag == "#text" && ch.text.chars().all(|c| c.is_ascii_whitespace()) {
+                continue;
+            }
                 let child_font = ch.style.font_size_px(font_px, root_font_px);
                 let child_rbox = self.res_box(&ch.style, child_font, 0.0, root_font_px);
                 let child_outer = child_rbox.padding_left
@@ -1701,6 +1704,9 @@ impl LayoutEngine {
                 continue;
             }
             if matches!(ch.style.position, Position::Absolute | Position::Fixed) {
+                continue;
+            }
+            if ch.is_pseudo_element() && ch.text.is_empty() {
                 continue;
             }
             let child_font = ch.style.font_size_px(font_px, root_font_px);
@@ -1895,12 +1901,15 @@ impl LayoutEngine {
                 if matches!(ch.style.display, Display::None) {
                     continue;
                 }
-                if matches!(ch.style.position, Position::Absolute | Position::Fixed) {
-                    continue;
-                }
-                if ch.tag == "#text" && ch.text.chars().all(|c| c.is_ascii_whitespace()) {
-                    continue;
-                }
+            if matches!(ch.style.position, Position::Absolute | Position::Fixed) {
+                continue;
+            }
+            if ch.is_pseudo_element() && ch.text.is_empty() {
+                continue;
+            }
+            if ch.tag == "#text" && ch.text.chars().all(|c| c.is_ascii_whitespace()) {
+                continue;
+            }
                 let child_font = ch.style.font_size_px(font_px, root_font_px);
                 let child_rbox = self.res_box(&ch.style, child_font, 0.0, root_font_px);
                 let child_outer = child_rbox.padding_left
@@ -1945,7 +1954,12 @@ impl LayoutEngine {
                         child_main = mw;
                     }
                 }
-                total += child_main + child_outer;
+                let contribution = if ch.style.is_inline_level() {
+                    (child_main + child_outer).ceil() + 1.0
+                } else {
+                    child_main + child_outer
+                };
+                total += contribution;
                 if count > 0 {
                     total += gap;
                 }
@@ -1972,6 +1986,9 @@ impl LayoutEngine {
             if matches!(ch.style.position, Position::Absolute | Position::Fixed) {
                 continue;
             }
+            if ch.is_pseudo_element() && ch.text.is_empty() {
+                continue;
+            }
             if ch.tag == "#text" && ch.text.chars().all(|c| c.is_ascii_whitespace()) {
                 if run > 0.0 {
                     pending_collapsed_space = true;
@@ -1987,12 +2004,18 @@ impl LayoutEngine {
                 + child_rbox.margin_left
                 + child_rbox.margin_right;
             let mut cw = self.max_content_width(ch, font_px, root_font_px) + child_outer;
-            if ch.style.is_inline_level() && ch.layout.border_rect.w > 0.0 {
+            if ch.style.is_inline_level()
+                && !ch.is_pseudo_element()
+                && ch.layout.border_rect.w > 0.0
+            {
                 let measured_outer =
                     ch.layout.border_rect.w + child_rbox.margin_left + child_rbox.margin_right;
                 if measured_outer > cw {
                     cw = measured_outer;
                 }
+            }
+            if ch.style.is_inline_level() {
+                cw = cw.ceil() + 1.0;
             }
             if !matches!(ch.style.float, Float::None) {
                 float_sum += cw;
@@ -2155,7 +2178,11 @@ impl LayoutEngine {
         };
         let font_px = style.font_size_px(parent_font_px, root_font_px);
         let rb = self.res_box(style, font_px, 0.0, root_font_px);
-        let content_w = if !style.width.is_auto() && !matches!(style.width, CssLength::Percent(_)) {
+        let inline_width_ignored = matches!(style.display, Display::Inline);
+        let content_w = if !inline_width_ignored
+            && !style.width.is_auto()
+            && !matches!(style.width, CssLength::Percent(_))
+        {
             self.res_len(&style.width, font_px, 0.0, root_font_px)
         } else if content.is_empty() {
             0.0
@@ -3456,7 +3483,11 @@ pub fn layout_positioned_static(
     } else if let Some(abs_sx) = node.layout.abs_static_x {
         abs_sx + rbox.margin_left
     } else {
-        containing_x + rbox.margin_left
+        if node.style.direction == Direction::RTL {
+            (containing_x + containing_w) - node.layout.border_rect.w - rbox.margin_right
+        } else {
+            containing_x + rbox.margin_left
+        }
     };
 
     let y = if !top_auto

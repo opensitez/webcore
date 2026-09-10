@@ -1300,6 +1300,35 @@ fn absolute_static_position_uses_inline_flow_x_when_horizontal_insets_auto() {
 }
 
 #[test]
+fn absolute_all_auto_fallback_uses_rtl_containing_block_end() {
+    use super::harness::find_box;
+
+    let doc = parse_and_layout(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        .wrap { position: relative; direction: rtl; width: 240px; height: 120px; }
+        .abs { position: absolute; bottom: 0; width: 48px; height: 48px; }
+        </style>
+        <div class="wrap"><div class="abs"></div></div>
+    "#,
+        320.0,
+    );
+    let abs = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("class")
+            .is_some_and(|class| class == "abs")
+    })
+    .expect("abs not found");
+
+    assert!(
+        (abs.layout.border_rect.x - 192.0).abs() < 1.0,
+        "absolute all-auto fallback in RTL should use the containing block end, got {}",
+        abs.layout.border_rect.x
+    );
+}
+
+#[test]
 fn absolute_over_constrained_horizontal_insets_follow_direction() {
     use super::harness::find_box;
 

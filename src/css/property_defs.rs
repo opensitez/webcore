@@ -2989,6 +2989,8 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
 /// Collect all inherited property IDs for use in inherit_from.
 pub const INHERITED_IDS: &[PropertyId] = &[
     PropertyId::Color,
+    PropertyId::Fill,
+    PropertyId::Stroke,
     PropertyId::FontSize,
     PropertyId::FontFamily,
     PropertyId::FontWeight,

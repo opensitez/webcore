@@ -67,6 +67,26 @@ fn rtl_mixed_inline_text_commands_stay_inside_line_box() {
 }
 
 #[test]
+fn flex_anchor_direct_text_child_emits_text_command() {
+    let (_frame, list) = build_full(
+        r#"<html dir="rtl"><body style="margin:0">
+             <ul style="margin:0; padding:0; list-style:none">
+               <li style="display:inline-block">
+                 <a style="display:flex; flex-direction:column; justify-content:center; height:44px; padding:0 8px; color:#141414">أخبار</a>
+               </li>
+             </ul>
+           </body></html>"#,
+    );
+
+    assert!(
+        list.commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == "أخبار")),
+        "blockified direct text children in flex anchors must paint"
+    );
+}
+
+#[test]
 fn rtl_visual_segments_keep_geometry_after_relayout_cache_reuse() {
     let mut doc = parse_html(
         r##"<html dir="rtl"><body style="margin:0">
@@ -89,6 +109,31 @@ fn rtl_visual_segments_keep_geometry_after_relayout_cache_reuse() {
     assert!(
         visual_widths.iter().any(|w| *w > 1.0),
         "cached relayout must preserve RTL visual segment geometry: {visual_widths:?}"
+    );
+}
+
+#[test]
+fn rtl_inline_atomic_box_is_placed_before_following_text_visually() {
+    let mut doc = parse_html(
+        r##"<html dir="rtl"><body style="margin:0">
+             <div id="badge" style="direction:rtl; width:57px; font:12px/29px sans-serif">
+               <svg id="play" style="display:inline-block;width:24px;height:24px" viewBox="0 0 13 13">
+                 <path d="M.5.6h12v12H.5z"/>
+                 <path fill="currentColor" d="M2.144.96v11.28l8.712-5.64z"/>
+               </svg><time id="duration">3:20</time>
+             </div>
+           </body></html>"##,
+    );
+    let mut renderer = Renderer::new();
+    renderer.layout_engine().layout(&mut doc, 800.0);
+
+    let play = crate::dom::query_selector(&doc.root, "#play").expect("play icon");
+    let duration = crate::dom::query_selector(&doc.root, "#duration").expect("duration");
+    assert!(
+        play.layout.border_rect.x > duration.layout.border_rect.x,
+        "RTL inline layout should put the DOM-first icon on the right and the following duration on the left, play={:?} duration={:?}",
+        play.layout.border_rect,
+        duration.layout.border_rect
     );
 }
 
@@ -307,6 +352,8 @@ fn inline_svg_uses_cascaded_fill_color_when_rasterized() {
         svg.svg_document.is_some(),
         "inline SVG should keep its parsed native SVG tree for browser paint"
     );
+    assert_eq!(svg.style.color, Color::rgb(255, 0, 0));
+    assert_eq!(svg.style.svg_fill, Some(Color::rgb(255, 0, 0)));
 
     let image = list.commands.iter().find_map(|cmd| match cmd {
         PaintCmd::Image {
@@ -325,6 +372,76 @@ fn inline_svg_uses_cascaded_fill_color_when_rasterized() {
         data[idx + 1],
         data[idx + 2],
         data[idx + 3]
+    );
+}
+
+#[test]
+fn inline_svg_uses_black_current_color_when_rasterized() {
+    let (_, list) = build(
+        r#"<style>svg { color: rgb(0, 0, 0); fill: currentColor; }</style>
+           <svg style="width:20px;height:20px" viewBox="0 0 20 20">
+             <rect x="0" y="0" width="20" height="20"/>
+           </svg>"#,
+    );
+
+    let image = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Image {
+            data: ImageRef::Owned(data, w, h),
+            ..
+        } => Some((data, *w, *h)),
+        _ => None,
+    });
+    let (data, w, h) = image.expect("inline SVG should rasterize to an image command");
+    assert_eq!((w, h), (20, 20));
+    let idx = ((10 * w + 10) * 4) as usize;
+    assert!(
+        data[idx] < 20 && data[idx + 1] < 20 && data[idx + 2] < 20 && data[idx + 3] > 200,
+        "center pixel should be black from cascaded currentColor fill, got rgba({}, {}, {}, {})",
+        data[idx],
+        data[idx + 1],
+        data[idx + 2],
+        data[idx + 3]
+    );
+}
+
+#[test]
+fn inline_svg_preserves_current_color_path_over_default_fill() {
+    let (_, list) = build(
+        r#"<style>svg.play { color: rgb(255, 255, 255); }</style>
+           <svg class="play" style="width:13px;height:13px" viewBox="0 0 13 13">
+             <path d="M.5.6h12v12H.5z"/>
+             <path fill="currentColor" d="M2.144.96v11.28l8.712-5.64z"/>
+           </svg>"#,
+    );
+
+    let image = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Image {
+            data: ImageRef::Owned(data, w, h),
+            ..
+        } => Some((data, *w, *h)),
+        _ => None,
+    });
+    let (data, w, h) = image.expect("inline SVG should rasterize to an image command");
+    assert_eq!((w, h), (13, 13));
+
+    let corner = ((1 * w + 1) * 4) as usize;
+    assert!(
+        data[corner] < 30 && data[corner + 1] < 30 && data[corner + 2] < 30,
+        "square background should keep default black fill, got rgba({}, {}, {}, {})",
+        data[corner],
+        data[corner + 1],
+        data[corner + 2],
+        data[corner + 3]
+    );
+
+    let center = ((6 * w + 6) * 4) as usize;
+    assert!(
+        data[center] > 220 && data[center + 1] > 220 && data[center + 2] > 220,
+        "triangle should use currentColor white, got rgba({}, {}, {}, {})",
+        data[center],
+        data[center + 1],
+        data[center + 2],
+        data[center + 3]
     );
 }
 
@@ -1388,6 +1505,102 @@ fn before_after_pseudo_elements() {
     assert!(
         text_cmds.iter().any(|text| text.contains(">>")),
         "::before should paint generated text, got {text_cmds:?}"
+    );
+}
+
+#[test]
+fn positioned_negative_z_before_background_paints() {
+    let (_, list) = build_full(
+        r#"<html><head><style>
+          html, body { margin: 0; padding: 0; }
+          #bar { position: relative; z-index: 0; width: 400px; height: 40px; margin-left: 200px; }
+          #bar::before {
+            content: "";
+            position: absolute;
+            z-index: -1;
+            top: 0;
+            height: 40px;
+            left: 50%;
+            width: 100vw;
+            transform: translateX(-50%);
+            background: rgb(184, 0, 0);
+          }
+        </style></head><body><div id="bar"></div></body></html>"#,
+    );
+
+    let red_generated_backgrounds = list
+        .commands
+        .iter()
+        .filter(|cmd| matches!(
+            cmd,
+            PaintCmd::FillRect { rect, color, .. }
+                if color.r == 184 && color.g == 0 && color.b == 0 && rect.w >= 790.0
+        ))
+        .count();
+    assert!(
+        red_generated_backgrounds >= 1,
+        "positioned generated backgrounds with negative z-index must be painted"
+    );
+    assert_eq!(
+        red_generated_backgrounds, 1,
+        "positioned generated backgrounds must not be replayed by every ancestor"
+    );
+}
+
+#[test]
+fn positioned_after_with_inset_and_bottom_border_paints() {
+    let (_, list) = build_full(
+        r#"<html><head><style>
+          html, body { margin: 0; padding: 0; }
+          #bar { position: relative; width: 240px; height: 44px; }
+          #bar::after {
+            content: "";
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            border-bottom: 0.0625rem solid #E6E8EA;
+          }
+        </style></head><body><nav id="bar"></nav></body></html>"#,
+    );
+
+    let border = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Border {
+            rect,
+            widths,
+            colors,
+            ..
+        } if widths[2] > 0.0 && colors[2].r == 230 && colors[2].g == 232 => {
+            Some((*rect, *widths))
+        }
+        _ => None,
+    });
+    let (rect, widths) = border.expect("absolute ::after bottom border should paint");
+    assert!(
+        rect.w >= 239.0 && rect.h >= 1.0 && widths[2] >= 1.0,
+        "absolute ::after border should span the parent width, got rect={rect:?} widths={widths:?}"
+    );
+}
+
+#[test]
+fn rtl_flex_nav_intrinsic_width_keeps_inline_block_items_on_one_line() {
+    let doc = parse_html(
+        r#"<html dir="rtl"><body style="margin:0"><header style="direction:rtl"><div style="display:flex;justify-content:space-between;align-items:stretch;width:1280px;background:#b80000"><div id="left" style="width:900px;height:44px"></div><div id="menu"><ul id="nav" style="list-style:none;margin:0;padding:0;position:relative;overflow:hidden"><li style="display:inline-block;position:relative;margin-inline-end:0"><a style="display:flex;flex-direction:column;justify-content:center;height:44px;padding:0 8px;font-size:16px;line-height:24px">الرئيسية</a></li><li style="display:inline-block;position:relative;margin-inline-end:0"><a style="display:flex;flex-direction:column;justify-content:center;height:44px;padding:0 8px;font-size:16px;line-height:24px">أخبار</a></li><li style="display:inline-block;position:relative;margin-inline-end:0"><a style="display:flex;flex-direction:column;justify-content:center;height:44px;padding:0 8px;font-size:16px;line-height:24px">رياضة</a></li></ul></div></div></header></body></html>"#,
+    );
+    let mut frame = EngineFrame::new(doc, 1280.0, 900.0);
+    frame.update_frame();
+    let nav = crate::dom::query_selector(&frame.doc.root, "#nav").expect("nav should exist");
+
+    assert_eq!(
+        nav.layout.line_cache.len(),
+        1,
+        "RTL inline-block menu items should fit on one line, got lines={:?}",
+        nav.layout.line_cache
+    );
+    assert!(
+        nav.layout.border_rect.h <= 50.0,
+        "single-row nav should stay around 44px high, got {:?}",
+        nav.layout.border_rect
     );
 }
 

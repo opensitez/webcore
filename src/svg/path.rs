@@ -507,30 +507,40 @@ impl<'a> PathDataParser<'a> {
         self.skip_separators();
         let start = self.pos;
         let mut saw_digit = false;
+        let mut saw_dot = false;
         let mut saw_exp = false;
+        let mut exp_needs_digit = false;
         while let Some(c) = self.peek() {
             let ok = if c.is_ascii_digit() {
                 saw_digit = true;
+                exp_needs_digit = false;
                 true
             } else if matches!(c, '+' | '-') {
-                self.pos == start || saw_exp
+                self.pos == start || exp_needs_digit
             } else if c == '.' {
-                true
+                if saw_dot || saw_exp {
+                    false
+                } else {
+                    saw_dot = true;
+                    true
+                }
             } else if matches!(c, 'e' | 'E') {
-                saw_exp = true;
-                true
+                if saw_exp || !saw_digit {
+                    false
+                } else {
+                    saw_exp = true;
+                    exp_needs_digit = true;
+                    true
+                }
             } else {
                 false
             };
             if !ok {
                 break;
             }
-            if saw_exp && !matches!(c, 'e' | 'E') {
-                saw_exp = false;
-            }
             self.pos += c.len_utf8();
         }
-        if !saw_digit || self.pos == start {
+        if !saw_digit || exp_needs_digit || self.pos == start {
             return None;
         }
         self.data[start..self.pos].parse::<f32>().ok()

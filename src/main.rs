@@ -335,7 +335,9 @@ impl ApplicationHandler for App {
             }
             if self.renderer.layout_engine().poll_pending_fonts() {
                 self.renderer.layout_engine().invalidate_cascade();
+                doc.style_dirty = true;
                 needs_relayout = true;
+                self.renderer.invalidate_display_list();
             }
             if needs_relayout {
                 self.renderer.layout_engine().layout(doc, self.width);

@@ -342,7 +342,7 @@ pub(crate) fn pre_parse_value(id: properties::PropertyId, val: &str) -> crate::t
 
         // ── Color properties ──
         Color | BackgroundColor | BorderTopColor | BorderRightColor | BorderBottomColor
-        | BorderLeftColor | OutlineColor | CaretColor => {
+        | BorderLeftColor | OutlineColor | CaretColor | Fill | Stroke => {
             if let Some(c) = try_parse_color(v) {
                 return CssValue::Color(c);
             }

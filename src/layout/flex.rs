@@ -1626,7 +1626,9 @@ fn justify_spacing(
             if n > 1 {
                 (0.0, base_gap + free / (n - 1) as f32)
             } else {
-                (0.0, base_gap)
+                // Box Alignment: with one item, space-between falls back to
+                // flex-start. In a reversed main axis, flex-start is the far edge.
+                (if reversed { free } else { 0.0 }, base_gap)
             }
         }
         JustifyContent::SpaceAround => {

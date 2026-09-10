@@ -135,6 +135,40 @@ fn text_nodes_inside_inline_block_controls_remain_inline() {
 }
 
 #[test]
+fn root_dir_and_inherited_box_sizing_reach_descendants() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        r#"<html dir="rtl">
+             <head>
+               <style>
+                 html { box-sizing: border-box; }
+                 *, *::before, *::after { box-sizing: inherit; }
+                 body { margin: 0; }
+               </style>
+             </head>
+             <body>
+               <div id="box" style="width:100%; padding-inline:16px"></div>
+             </body>
+           </html>"#,
+        320.0,
+    );
+    let html = d.get_elements_by_tag_name("html")[0];
+    let body = d.get_elements_by_tag_name("body")[0];
+    let box_id = d.get_element_by_id("box").unwrap();
+
+    assert_eq!(d.computed_style_property(html, "direction"), "rtl");
+    assert_eq!(d.computed_style_property(body, "direction"), "rtl");
+    assert_eq!(d.computed_style_property(box_id, "direction"), "rtl");
+    assert_eq!(d.computed_style_property(box_id, "box-sizing"), "border-box");
+
+    let rect = d.get_bounding_client_rect(box_id).unwrap();
+    assert!(
+        (rect.w - 320.0).abs() < 0.5,
+        "border-box 100% with padding should not overflow viewport: {rect:?}"
+    );
+}
+
+#[test]
 fn absolute_dropdown_wrapper_does_not_raise_flex_nav_item() {
     let doc = parse_and_layout(
         r#"<style>

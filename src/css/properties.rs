@@ -618,9 +618,9 @@ pub fn resolve(name: &str) -> PropertyId {
         "justify-items" => PropertyId::JustifyItems,
         "justify-self" => PropertyId::JustifySelf,
         "order" => PropertyId::Order,
-        "gap" => PropertyId::Gap,
-        "row-gap" => PropertyId::RowGap,
-        "column-gap" => PropertyId::ColumnGap,
+        "gap" | "grid-gap" => PropertyId::Gap,
+        "row-gap" | "grid-row-gap" => PropertyId::RowGap,
+        "column-gap" | "grid-column-gap" => PropertyId::ColumnGap,
 
         // Grid
         "grid-template-columns" => PropertyId::GridTemplateColumns,

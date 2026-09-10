@@ -699,17 +699,19 @@ pub fn layout_block_with_fc(
         content_w
     };
 
-    // Auto margin centering (CSS 2.1 §10.3.3)
+    // Auto margin centering (CSS 2.1 §10.3.3 / css-sizing): resolve after
+    // min/max-width clamping so `width:auto; max-width:...; margin:0 auto`
+    // centers the clamped box instead of sticking to inline-start.
     let left_is_auto = node.style.margin_left.is_auto();
     let right_is_auto = node.style.margin_right.is_auto();
-    let (margin_left, margin_right) =
-        if !node.style.width.is_auto() && (left_is_auto || right_is_auto) {
-            let non_margin_space = rbox.border_left
-                + rbox.padding_left
-                + content_w
-                + rbox.padding_right
-                + rbox.border_right;
-            let available = (containing_w - non_margin_space).max(0.0);
+    let (margin_left, margin_right) = if left_is_auto || right_is_auto {
+        let non_margin_space = rbox.border_left
+            + rbox.padding_left
+            + content_w
+            + rbox.padding_right
+            + rbox.border_right;
+        let available = (containing_w - non_margin_space).max(0.0);
+        if !node.style.width.is_auto() || available > 0.0 {
             if left_is_auto && right_is_auto {
                 let ml = (available / 2.0).floor();
                 (ml, available - ml)
@@ -720,7 +722,10 @@ pub fn layout_block_with_fc(
             }
         } else {
             (rbox.margin_left, rbox.margin_right)
-        };
+        }
+    } else {
+        (rbox.margin_left, rbox.margin_right)
+    };
 
     let is_bfc = establishes_bfc(&node.style);
 
@@ -857,14 +862,20 @@ pub fn layout_block_with_fc(
             // Record absolute document-space static position for this abs child.
             // content_x/content_y are already in document space; inline_x/child_y
             // are relative to that content origin.
-            let sx = content_x + inline_x.max(inline_line_start_x);
             let sy = content_y + child_y;
-            abs_static_x.insert(eff_idx, sx);
+            let sx = if node.style.direction == Direction::RTL {
+                None
+            } else {
+                Some(content_x + inline_x.max(inline_line_start_x))
+            };
+            if let Some(sx) = sx {
+                abs_static_x.insert(eff_idx, sx);
+            }
             abs_static_y.insert(eff_idx, sy);
             // Also store on the node itself for deeply nested abs elements whose
             // containing block is an ancestor further up the tree.
             let child = grid_child_mut(node, path);
-            child.layout.abs_static_x = Some(sx);
+            child.layout.abs_static_x = sx;
             child.layout.abs_static_y = Some(sy);
             continue;
         }

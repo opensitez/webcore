@@ -18,7 +18,9 @@ use crate::css::{
 };
 use crate::svg::animation::{WEBCORE_ANIMATED_ATTR_NS, WEBCORE_ANIMATED_ATTR_PREFIX};
 use crate::svg::condition;
-use crate::types::{Color, Direction, Overflow, WebCore};
+use crate::types::{
+    Color, Direction, Overflow, WebCore, SPECIFIED_SVG_FILL, SPECIFIED_SVG_STROKE,
+};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use tiny_skia::{
@@ -2032,25 +2034,28 @@ fn state_for_node(
     state
 }
 
-fn apply_dom_computed_style(state: &mut PaintState, svg: &SvgNode, node: &WebCore, is_root: bool) {
+fn apply_dom_computed_style(state: &mut PaintState, _svg: &SvgNode, node: &WebCore, is_root: bool) {
     let style = node.style.as_ref();
     let font_px = style.font_size_px(state.font_size, 16.0);
+    let specified_svg_paint = style.rare().specified_svg_paint_props;
     state.visible = state.visible && style.visibility;
     state.current_color = style.color;
-    if let Some(fill) = style.svg_fill {
-        if fill != Color::BLACK || svg_has_resolved_paint_attr(svg, "fill") {
+    if specified_svg_paint & SPECIFIED_SVG_FILL != 0 {
+        if let Some(fill) = style.svg_fill {
             state.fill = Some(PaintSource::Color(fill));
-        } else if is_root {
+        } else {
             state.fill = None;
         }
-    } else if is_root {
+    } else if is_root && style.svg_fill.is_none() {
         state.fill = None;
     }
-    if let Some(stroke) = style.svg_stroke {
-        if stroke != Color::BLACK || svg_has_resolved_paint_attr(svg, "stroke") {
+    if specified_svg_paint & SPECIFIED_SVG_STROKE != 0 {
+        if let Some(stroke) = style.svg_stroke {
             state.stroke = Some(PaintSource::Color(stroke));
+        } else {
+            state.stroke = None;
         }
-    } else if is_root {
+    } else if is_root && style.svg_stroke.is_none() {
         state.stroke = None;
     }
     state.custom_props = style.custom_props.clone();
@@ -2078,25 +2083,6 @@ fn apply_dom_computed_style(state: &mut PaintState, svg: &SvgNode, node: &WebCor
     state.opacity *= style.opacity.clamp(0.0, 1.0);
     state.overflow_visible = matches!(style.overflow_x, Overflow::Visible)
         && matches!(style.overflow_y, Overflow::Visible);
-}
-
-fn svg_has_resolved_paint_attr(node: &SvgNode, name: &str) -> bool {
-    node.attr(name).is_some_and(|value| {
-        let value = value.trim();
-        !value.eq_ignore_ascii_case("currentColor")
-            && !value.contains("var(")
-            && !value.starts_with("url(")
-    }) || node.attr("style").is_some_and(|style| {
-        style.split(';').any(|decl| {
-            let Some((prop, value)) = decl.split_once(':') else {
-                return false;
-            };
-            prop.trim().eq_ignore_ascii_case(name)
-                && !value.trim().eq_ignore_ascii_case("currentColor")
-                && !value.contains("var(")
-                && !value.trim().starts_with("url(")
-        })
-    })
 }
 
 fn apply_animated_paint_attrs(state: &mut PaintState, node: &SvgNode) {
@@ -5176,6 +5162,24 @@ mod tests {
             ob > 150 && or < 120 && og < 120,
             "ordered pixel was {or},{og},{ob}"
         );
+    }
+
+    #[test]
+    fn native_rasterizer_paints_path_without_viewbox_using_default_fill() {
+        let data = rasterize_svg_to_rgba(
+            r#"<svg width="24" height="24">
+                <path d="M9.021 1.811l-.525.525c.938.938 1.5 2.25 1.5 3.675s-.563 2.738-1.5 3.675l.525.525c1.05-1.087 1.725-2.55 1.725-4.2s-.675-3.112-1.725-4.2z"/>
+                <path d="M10.596.199l-.525.562c1.35 1.35 2.175 3.225 2.175 5.25s-.825 3.9-2.175 5.25l.525.525c1.5-1.462 2.4-3.525 2.4-5.775s-.9-4.312-2.4-5.812zM6.996 1.511l-2.25 2.25H.996v4.5h3.75l2.25 2.25z"/>
+              </svg>"#,
+            24,
+            24,
+        )
+        .expect("speaker SVG should rasterize");
+        let painted = data
+            .chunks_exact(4)
+            .filter(|px| px[3] > 0 && px[0] < 80 && px[1] < 80 && px[2] < 80)
+            .count();
+        assert!(painted > 20, "speaker path should produce dark pixels");
     }
 
     #[test]

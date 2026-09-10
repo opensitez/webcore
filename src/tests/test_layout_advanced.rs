@@ -922,6 +922,118 @@ fn inline_block_image_wrapper_obeys_max_width_percent() {
 }
 
 #[test]
+fn display_contents_picture_does_not_collapse_percent_image() {
+    let mut doc = parse(
+        "<style>
+           #card { width: 504px; }
+           #ratio { height: 0; padding-bottom: 56.25%; overflow: hidden; }
+           picture { display: contents; }
+           img { display: inline-block; width: 100%; height: auto; }
+         </style>
+         <div id=card><div id=ratio><picture><img id=pic src=x.webp></picture></div></div>",
+    );
+    assert_eq!(set_natural_size(&mut doc.root, 240, 135), 1);
+
+    let mut engine = LayoutEngine::new();
+    engine.layout(&mut doc, 1280.0);
+
+    let pic = find_box(&doc.root, &|n: &WebCore| {
+        n.attributes.get("id").map(String::as_str) == Some("pic")
+    })
+    .expect("pic");
+    assert!(
+        (pic.layout.content_rect.w - 504.0).abs() < 1.0,
+        "display:contents picture must not leave percent-width image at zero; got {}",
+        pic.layout.content_rect.w
+    );
+    assert!(
+        (pic.layout.content_rect.h - 284.0).abs() < 2.0,
+        "percent-width image should preserve intrinsic ratio; got {}",
+        pic.layout.content_rect.h
+    );
+}
+
+#[test]
+fn inline_block_nav_item_shrinks_around_flex_link() {
+    let mut renderer = crate::renderer::Renderer::new();
+    let doc = renderer.load_html(
+        "<style>
+           ul { margin:0; padding:0; list-style:none; width:1000px; }
+           li { display:inline-block; position:relative; }
+           li a { display:flex; flex-direction:column; justify-content:center; height:44px; padding:0 8px; }
+           li::after { content:\"\"; display:inline; width:80rem; height:0; }
+         </style>
+         <ul><li id=item><a>Home</a></li></ul>",
+        1280.0,
+    );
+    let item = find_box(&doc.root, &|n: &WebCore| {
+        n.attributes.get("id").map(String::as_str) == Some("item")
+    })
+    .expect("item");
+    assert!(
+        item.layout.content_rect.w > 20.0 && item.layout.content_rect.w < 120.0,
+        "auto inline-block should shrink around flex child text, got {}",
+        item.layout.content_rect.w
+    );
+}
+
+#[test]
+fn auto_width_max_width_block_with_auto_margins_centers() {
+    let mut renderer = crate::renderer::Renderer::new();
+    let doc = renderer.load_html(
+        "<style>
+           body { margin:0; }
+           #wrap { max-width:1008px; margin-left:auto; margin-right:auto; }
+         </style>
+         <div id=wrap><p>content</p></div>",
+        1280.0,
+    );
+    let wrap = find_box(&doc.root, &|n: &WebCore| {
+        n.attributes.get("id").map(String::as_str) == Some("wrap")
+    })
+    .expect("wrap");
+    assert!(
+        (wrap.layout.content_rect.x - 136.0).abs() < 1.0,
+        "auto-width max-width block with auto margins should center; got x={}",
+        wrap.layout.content_rect.x
+    );
+    assert!(
+        (wrap.layout.content_rect.w - 1008.0).abs() < 1.0,
+        "max-width should clamp content width; got {}",
+        wrap.layout.content_rect.w
+    );
+}
+
+#[test]
+fn rtl_flex_row_starts_on_inline_end_edge() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        r#"<style>
+             body { margin: 0; }
+             #row { display: flex; direction: rtl; width: 200px; height: 20px; }
+             #between { display: flex; justify-content: space-between; direction: rtl; width: 200px; height: 20px; }
+             #item { width: 50px; height: 20px; }
+             #single { width: 50px; height: 20px; }
+           </style>
+           <div id="row"><div id="item"></div></div>
+           <div id="between"><div id="single"></div></div>"#,
+        300.0,
+    );
+    let item = d.get_element_by_id("item").unwrap();
+    let rect = d.get_bounding_client_rect(item).unwrap();
+    assert!(
+        (rect.x - 150.0).abs() < 0.5,
+        "rtl row flex-start should place first item at the right edge: {rect:?}"
+    );
+    let single = d.get_element_by_id("single").unwrap();
+    let single_rect = d.get_bounding_client_rect(single).unwrap();
+    assert!(
+        (single_rect.x - 150.0).abs() < 0.5,
+        "rtl space-between fallback should use flex-start for one item: {single_rect:?}"
+    );
+}
+
+#[test]
 fn dirty_loaded_image_reflows_fit_content_wrapper() {
     let mut doc = parse(
         "<style>
@@ -1574,4 +1686,3 @@ fn a_tall_block_does_not_exceed_the_column_height_budget() {
         tall.layout.border_rect.h
     );
 }
-

@@ -213,6 +213,11 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         return;
     }
 
+    if node.tag == "#text" {
+        build_laid_out_text_node(node, list, ctx.scroll_x, ctx.scroll_y);
+        return;
+    }
+
     // Display::Contents — skip the box itself, render children only
     if matches!(node.style.display, Display::Contents) {
         for child in node.effective_children() {
@@ -1037,7 +1042,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     let contents_visible = !matches!(eff_style.content_visibility, ContentVisibility::Hidden);
     if contents_visible {
         // ── (i) Negative z-index children (paint behind text) ────────────────
-        {
+        if !ctx.suppress_deferred_z_descendants {
             let eff_children = node.effective_children();
             let mut negative_z = Vec::new();
             for child in eff_children {
@@ -1045,8 +1050,10 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             }
             negative_z.retain(|c| c.style.z_index < 0);
             negative_z.sort_by_key(|c| c.style.z_index);
+            let mut z_ctx = child_ctx;
+            z_ctx.suppress_deferred_z_descendants = false;
             for child in negative_z {
-                build_for_box(child, list, &child_ctx);
+                build_for_box(child, list, &z_ctx);
             }
         }
 
@@ -1276,19 +1283,24 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             let eff_children = node.effective_children();
             let is_renderable = |c: &WebCore| -> bool {
                 !matches!(c.style.display, Display::None)
-                    && c.tag != "#text"
-                    && c.tag != "::before"
-                    && c.tag != "::after"
+                    && (c.tag != "#text"
+                        || (!c.text.trim().is_empty()
+                            && !matches!(c.style.display, Display::Inline)))
+                    && (c.tag != "::before" || c.style.is_positioned())
+                    && (c.tag != "::after" || c.style.is_positioned())
                     && c.style.position != Position::Fixed
             };
 
             let mut deferred_z: Vec<&WebCore> = Vec::new();
-            for child in eff_children {
-                collect_explicit_z_descendants(child, &mut deferred_z);
+            if !ctx.suppress_deferred_z_descendants {
+                for child in eff_children {
+                    collect_explicit_z_descendants(child, &mut deferred_z);
+                }
             }
 
             let mut normal_ctx = child_ctx;
-            normal_ctx.suppress_deferred_z_descendants = !deferred_z.is_empty();
+            normal_ctx.suppress_deferred_z_descendants =
+                ctx.suppress_deferred_z_descendants || !deferred_z.is_empty();
 
             for child in eff_children {
                 if is_renderable(child) {
@@ -1298,8 +1310,10 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
 
             deferred_z.retain(|c| is_renderable(c) && c.style.z_index >= 0);
             deferred_z.sort_by_key(|c| c.style.z_index);
+            let mut z_ctx = child_ctx;
+            z_ctx.suppress_deferred_z_descendants = false;
             for child in deferred_z {
-                build_for_box(child, list, &child_ctx);
+                build_for_box(child, list, &z_ctx);
             }
         }
     }
@@ -2429,6 +2443,36 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32) 
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════════
 
+fn build_laid_out_text_node(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32) {
+    let text = if matches!(
+        node.style.white_space,
+        WhiteSpace::Normal | WhiteSpace::Nowrap
+    ) {
+        node.text.split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        node.text.clone()
+    };
+    if text.trim().is_empty() {
+        return;
+    }
+
+    let font_px = node.style.font_size_px(16.0, 16.0).max(1.0);
+    let line_h = node
+        .style
+        .line_height
+        .resolve(font_px, 0.0, 16.0)
+        .max(font_px * 1.2);
+    emit_text(
+        list,
+        node.layout.content_rect.x - sx,
+        node.layout.content_rect.y - sy,
+        &apply_text_transform(&text, node.style.text_transform),
+        &node.style,
+        font_px,
+        line_h,
+    );
+}
+
 fn emit_text(
     list: &mut DisplayList,
     x: f32,
@@ -3269,14 +3313,15 @@ fn is_explicit_z_positioned(node: &WebCore) -> bool {
 
 fn collect_explicit_z_descendants<'a>(node: &'a WebCore, out: &mut Vec<&'a WebCore>) {
     if matches!(node.style.display, Display::None)
-        || node.tag == "::before"
-        || node.tag == "::after"
         || node.style.position == Position::Fixed
     {
         return;
     }
     if is_explicit_z_positioned(node) {
         out.push(node);
+        return;
+    }
+    if node.tag == "::before" || node.tag == "::after" {
         return;
     }
     for child in node.effective_children() {

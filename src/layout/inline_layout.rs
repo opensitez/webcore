@@ -143,6 +143,17 @@ pub fn layout_inline_block(
     prelayout_nested_inline_blocks(engine, node, content_w, font_px, root_font_px);
 
     for ci in 0..node.children.len() {
+        if matches!(node.children[ci].style.display, Display::Contents) {
+            let child_font_px = node.children[ci].style.font_size_px(font_px, root_font_px);
+            prelayout_nested_inline_blocks(
+                engine,
+                &mut node.children[ci],
+                content_w,
+                child_font_px,
+                root_font_px,
+            );
+            continue;
+        }
         if matches!(
             node.children[ci].style.display,
             Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
@@ -164,12 +175,14 @@ pub fn layout_inline_block(
                     .iter()
                     .map(|l| l.width)
                     .fold(0.0_f32, f32::max);
-                // The first pass may already have wrapped under a temporary
-                // constraint. Floor it with max-content so shrink-to-fit never
-                // bakes in that wrapped width.
+                // The first pass may have expanded fluid descendants (for
+                // example a flex link inside a nav item) to the temporary
+                // containing width. Prefer max-content when available; fall
+                // back to the laid-out line width only for boxes whose
+                // intrinsic walk has no useful answer.
                 let max_content_w =
                     engine.max_content_width(&node.children[ci], font_px, root_font_px);
-                let intrinsic_w = max_line_w.max(max_content_w);
+                let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
                 {
                     let irb = &node.children[ci];
                     let shrink_w = intrinsic_w.ceil()
@@ -214,7 +227,7 @@ pub fn layout_inline_block(
                     .fold(0.0_f32, f32::max);
                 let max_content_w =
                     engine.max_content_width(&node.children[ci], font_px, root_font_px);
-                let intrinsic_w = max_line_w.max(max_content_w);
+                let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
                 if intrinsic_w > 0.0 && intrinsic_w < content_w {
                     let irb = &node.children[ci];
                     let shrink_w = intrinsic_w.ceil()
@@ -1009,7 +1022,13 @@ pub fn layout_inline_block(
         // Collect atomic positions and inline fragment rects on this line
         {
             let mut cur_x = line_x;
+            let mut prefix_w = 0.0f32;
             for item in line_items {
+                let item_x = if is_rtl {
+                    line_x + (line_w_total - prefix_w - item.advance).max(0.0)
+                } else {
+                    cur_x
+                };
                 match &item.kind {
                     InlineItemKind::Atomic { path, .. } => {
                         let child_node = resolve_path(node, path);
@@ -1037,8 +1056,8 @@ pub fn layout_inline_block(
                                 ay.max(cursor_y)
                             }
                         };
-                        atomic_pos.push((path.clone(), cur_x, ay));
-                        let ar = Rect::new(cur_x, ay, box_w, box_h);
+                        atomic_pos.push((path.clone(), item_x, ay));
+                        let ar = Rect::new(item_x, ay, box_w, box_h);
                         for len in 1..path.len() {
                             let p = path[..len].to_vec();
                             inline_fragment_rects
@@ -1048,7 +1067,7 @@ pub fn layout_inline_block(
                         }
                     }
                     InlineItemKind::Text { path, .. } => {
-                        let r = Rect::new(cur_x, cursor_y, item.advance, line_h);
+                        let r = Rect::new(item_x, cursor_y, item.advance, line_h);
                         for len in 1..=path.len() {
                             let p = path[..len].to_vec();
                             inline_fragment_rects
@@ -1060,6 +1079,7 @@ pub fn layout_inline_block(
                     _ => {}
                 }
                 cur_x += item.advance;
+                prefix_w += item.advance;
             }
         }
 
@@ -1070,6 +1090,7 @@ pub fn layout_inline_block(
         // visible text under the atomic child.
         let flat_text = collect_flat_text(node);
         let mut text_x_off = 0.0f32;
+        let mut prefix_w = 0.0f32;
         for item in line_items.iter() {
             match &item.kind {
                 InlineItemKind::Text {
@@ -1081,12 +1102,23 @@ pub fn layout_inline_block(
                     let seg_end =
                         floor_cb(&flat_text, (*text_start + *text_len).min(flat_text.len()));
                     if seg_start < seg_end && flat_text[seg_start..seg_end].trim().is_empty() {
-                        text_x_off += item.advance;
+                        if !is_rtl {
+                            text_x_off += item.advance;
+                        }
+                        prefix_w += item.advance;
                         continue;
+                    }
+                    if is_rtl {
+                        text_x_off = (line_w_total - prefix_w - item.advance).max(0.0);
                     }
                     break;
                 }
-                _ => text_x_off += item.advance,
+                _ => {
+                    if !is_rtl {
+                        text_x_off += item.advance;
+                    }
+                    prefix_w += item.advance;
+                }
             }
         }
 
@@ -1379,11 +1411,19 @@ pub fn layout_inline_block(
         })
         .collect();
     for path in &abs_paths2 {
+        let fallback_static_x = node.layout.line_cache.last().map(|line| {
+            if node.style.direction == Direction::RTL {
+                line.x
+            } else {
+                line.x + line.width
+            }
+        });
         let child = crate::layout::grid::grid_child_mut(node, path);
         // Record static position: where this element would sit in normal flow
-        // (content origin of the inline container).
+        // at the inline cursor after laid-out in-flow content.
         if child.layout.abs_static_x.is_none() {
-            child.layout.abs_static_x = Some(content_x);
+            let static_x = fallback_static_x.unwrap_or(content_x);
+            child.layout.abs_static_x = Some(static_x);
         }
         if child.layout.abs_static_y.is_none() {
             child.layout.abs_static_y = Some(content_y);
@@ -3766,6 +3806,14 @@ fn shrink_to_fit_slop(node: &WebCore) -> f32 {
     }
 }
 
+fn shrink_to_fit_intrinsic_width(line_w: f32, max_content_w: f32) -> f32 {
+    if max_content_w > 0.0 {
+        max_content_w
+    } else {
+        line_w.max(0.0)
+    }
+}
+
 fn is_atomic_inline_replaced(node: &WebCore) -> bool {
     node.is_image_element() || matches!(node.tag.as_str(), "svg" | "canvas" | "video" | "iframe")
 }
@@ -3805,7 +3853,7 @@ fn prelayout_nested_inline_blocks(
                     .fold(0.0_f32, f32::max);
                 let max_content_w =
                     engine.max_content_width(&node.children[ci], font_px, root_font_px);
-                let intrinsic_w = max_line_w.max(max_content_w);
+                let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
                 let fc = &node.children[ci];
                 let shrink_w = intrinsic_w.ceil()
                     + shrink_to_fit_slop(fc)
@@ -3833,7 +3881,7 @@ fn prelayout_nested_inline_blocks(
             // children are already handled by the step 0 loop in layout_inline_block().
             // Only lay out here in the recursive case (node is an inline wrapper,
             // e.g. span > a > img where this function was called on the <a>).
-            if matches!(node.style.display, Display::Inline) {
+            if matches!(node.style.display, Display::Inline | Display::Contents) {
                 engine.layout_box(
                     &mut node.children[ci],
                     &Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
@@ -3847,7 +3895,7 @@ fn prelayout_nested_inline_blocks(
                         .fold(0.0_f32, f32::max);
                     let max_content_w =
                         engine.max_content_width(&node.children[ci], font_px, root_font_px);
-                    let intrinsic_w = max_line_w.max(max_content_w);
+                    let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
                     let gc = &node.children[ci];
                     let shrink_w = intrinsic_w.ceil()
                         + shrink_to_fit_slop(gc)
@@ -3868,7 +3916,10 @@ fn prelayout_nested_inline_blocks(
             continue;
         }
         // Inline children: recurse to find nested inline-blocks.
-        if matches!(node.children[ci].style.display, Display::Inline) {
+        if matches!(
+            node.children[ci].style.display,
+            Display::Inline | Display::Contents
+        ) {
             let child_font_px = node.children[ci].style.font_size_px(font_px, root_font_px);
             // Pre-layout any inline-block grandchildren inside this inline child.
             for gci in 0..node.children[ci].children.len() {
@@ -3893,7 +3944,7 @@ fn prelayout_nested_inline_blocks(
                             font_px,
                             root_font_px,
                         );
-                        let intrinsic_w = max_line_w.max(max_content_w);
+                        let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
                         let gc = &node.children[ci].children[gci];
                         let shrink_w = intrinsic_w.ceil()
                             + shrink_to_fit_slop(gc)
@@ -3932,7 +3983,7 @@ fn prelayout_nested_inline_blocks(
                             font_px,
                             root_font_px,
                         );
-                        let intrinsic_w = max_line_w.max(max_content_w);
+                        let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
                         let gc = &node.children[ci].children[gci];
                         let shrink_w = intrinsic_w.ceil()
                             + shrink_to_fit_slop(gc)

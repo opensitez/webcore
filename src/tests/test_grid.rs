@@ -75,6 +75,108 @@ fn test_grid_fr_with_auto() {
     assert_eq!(c2.layout.border_rect.w, 300.0);
 }
 
+#[test]
+fn grid_gap_single_length_shorthand_applies_to_columns() {
+    let html = r#"
+        <style>
+            body { margin: 0; }
+            .g {
+                display: grid;
+                grid-template-columns: repeat(4, 1fr);
+                gap: 16px;
+                width: 1008px;
+            }
+            .g > div { height: 20px; }
+        </style>
+        <div class="g">
+            <div id="a"></div>
+            <div id="b"></div>
+            <div id="c"></div>
+            <div id="d"></div>
+        </div>
+    "#;
+    let doc = parse_and_layout(html, 1200.0);
+    let a = find_by_id(&doc.root, "a").unwrap();
+    let b = find_by_id(&doc.root, "b").unwrap();
+    let c = find_by_id(&doc.root, "c").unwrap();
+    let d = find_by_id(&doc.root, "d").unwrap();
+
+    assert!(
+        (a.layout.border_rect.w - 240.0).abs() < 0.5,
+        "four 1fr tracks in 1008px with three 16px gaps should be 240px, got {}",
+        a.layout.border_rect.w
+    );
+    assert!((b.layout.border_rect.x - 256.0).abs() < 0.5);
+    assert!((c.layout.border_rect.x - 512.0).abs() < 0.5);
+    assert!((d.layout.border_rect.x - 768.0).abs() < 0.5);
+}
+
+#[test]
+fn grid_gap_legacy_alias_applies_to_grid_tracks() {
+    let html = r#"
+        <style>
+            body { margin: 0; }
+            .g {
+                display: grid;
+                grid-template-columns: repeat(4, 1fr);
+                grid-gap: 1rem;
+                width: 1008px;
+            }
+            .g > div { height: 20px; }
+        </style>
+        <div class="g">
+            <div id="a"></div>
+            <div id="b"></div>
+            <div id="c"></div>
+            <div id="d"></div>
+        </div>
+    "#;
+    let doc = parse_and_layout(html, 1200.0);
+    let a = find_by_id(&doc.root, "a").unwrap();
+    let b = find_by_id(&doc.root, "b").unwrap();
+    let c = find_by_id(&doc.root, "c").unwrap();
+    let d = find_by_id(&doc.root, "d").unwrap();
+
+    assert!((a.layout.border_rect.w - 240.0).abs() < 0.5);
+    assert!((b.layout.border_rect.x - 256.0).abs() < 0.5);
+    assert!((c.layout.border_rect.x - 512.0).abs() < 0.5);
+    assert!((d.layout.border_rect.x - 768.0).abs() < 0.5);
+}
+
+#[test]
+fn rtl_grid_auto_placement_uses_inline_start_order_and_column_gaps() {
+    let html = r#"
+        <style>
+            body { margin: 0; }
+            .g {
+                direction: rtl;
+                display: grid;
+                grid-template-columns: repeat(4, 1fr);
+                column-gap: 16px;
+                width: 1008px;
+            }
+            .g > div { height: 20px; }
+        </style>
+        <div class="g">
+            <div id="a"></div>
+            <div id="b"></div>
+            <div id="c"></div>
+            <div id="d"></div>
+        </div>
+    "#;
+    let doc = parse_and_layout(html, 1200.0);
+    let a = find_by_id(&doc.root, "a").unwrap();
+    let b = find_by_id(&doc.root, "b").unwrap();
+    let c = find_by_id(&doc.root, "c").unwrap();
+    let d = find_by_id(&doc.root, "d").unwrap();
+
+    assert!((a.layout.border_rect.w - 240.0).abs() < 0.5);
+    assert!((a.layout.border_rect.x - 768.0).abs() < 0.5);
+    assert!((b.layout.border_rect.x - 512.0).abs() < 0.5);
+    assert!((c.layout.border_rect.x - 256.0).abs() < 0.5);
+    assert!((d.layout.border_rect.x - 0.0).abs() < 0.5);
+}
+
 // ── Subgrid tests ─────────────────────────────────────────────────────────────
 
 #[test]

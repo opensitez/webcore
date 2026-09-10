@@ -788,24 +788,28 @@ pub(crate) fn finalize_display(style: &mut ComputedStyle, tag: &str, has_explici
     let out_of_flow = !matches!(style.float, Float::None)
         || matches!(style.position, Position::Absolute | Position::Fixed);
     if out_of_flow {
-        style.display = match style.display {
-            Display::Inline | Display::InlineBlock => Display::Block,
-            Display::InlineFlex => Display::Flex,
-            Display::InlineGrid => Display::Grid,
-            Display::TableRow
-            | Display::TableCell
-            | Display::TableHeaderCell
-            | Display::TableRowGroup
-            | Display::TableHeaderGroup
-            | Display::TableFooterGroup
-            | Display::TableColumn
-            | Display::TableColumnGroup
-            | Display::TableCaption
-            | Display::Ruby
-            | Display::RubyText => Display::Block,
-            other => other,
-        };
+        blockify_out_of_flow(style);
     }
+}
+
+fn blockify_out_of_flow(style: &mut ComputedStyle) {
+    style.display = match style.display {
+        Display::Inline | Display::InlineBlock => Display::Block,
+        Display::InlineFlex => Display::Flex,
+        Display::InlineGrid => Display::Grid,
+        Display::TableRow
+        | Display::TableCell
+        | Display::TableHeaderCell
+        | Display::TableRowGroup
+        | Display::TableHeaderGroup
+        | Display::TableFooterGroup
+        | Display::TableColumn
+        | Display::TableColumnGroup
+        | Display::TableCaption
+        | Display::Ruby
+        | Display::RubyText => Display::Block,
+        other => other,
+    };
 }
 
 fn blockify_flex_or_grid_item(style: &mut ComputedStyle) {
@@ -969,6 +973,9 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         if let Some(ref ps) = root.style.before_style {
             pseudo_box.style = std::sync::Arc::new(*ps.clone());
         }
+        if pseudo_box.style.is_positioned() {
+            blockify_out_of_flow(std::sync::Arc::make_mut(&mut pseudo_box.style));
+        }
         if is_grid_or_flex
             && !pseudo_box.style.is_positioned()
             && matches!(pseudo_box.style.display, Display::Inline)
@@ -1002,6 +1009,9 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         pseudo_box.tag = "::after".to_string();
         if let Some(ref ps) = root.style.after_style {
             pseudo_box.style = std::sync::Arc::new(*ps.clone());
+        }
+        if pseudo_box.style.is_positioned() {
+            blockify_out_of_flow(std::sync::Arc::make_mut(&mut pseudo_box.style));
         }
         if is_grid_or_flex
             && !pseudo_box.style.is_positioned()

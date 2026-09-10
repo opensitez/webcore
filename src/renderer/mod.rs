@@ -109,7 +109,9 @@ impl Renderer {
         }
         if self.layout_engine().poll_pending_fonts() {
             self.layout_engine().invalidate_cascade();
+            doc.style_dirty = true;
             needs_relayout = true;
+            self.invalidate_display_list();
         }
         if needs_relayout {
             let engine = self.layout_engine();

@@ -173,6 +173,7 @@ pub(crate) fn copy_property_from_style(
         "overflow-y" => style.overflow_y = parent.overflow_y,
         "position" => style.position = parent.position,
         "float" => style.float = parent.float,
+        "box-sizing" => style.box_sizing = parent.box_sizing,
         "text-indent" => style.text_indent = parent.text_indent.clone(),
         "list-style-type" => {
             style.list_style_type = parent.list_style_type;

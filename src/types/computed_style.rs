@@ -24,6 +24,8 @@ pub const CURRENT_COLOR_TEXT_DECOR: u16 = 1 << 6;
 pub const CURRENT_COLOR_CARET: u16 = 1 << 7;
 pub const CURRENT_COLOR_SVG_FILL: u16 = 1 << 8;
 pub const CURRENT_COLOR_SVG_STROKE: u16 = 1 << 9;
+pub const SPECIFIED_SVG_FILL: u16 = 1 << 0;
+pub const SPECIFIED_SVG_STROKE: u16 = 1 << 1;
 
 #[derive(Clone, Debug, Default)]
 pub struct RareStyle {
@@ -36,6 +38,11 @@ pub struct RareStyle {
     /// the declaration is applied reads a stale value. The cascade resolves the
     /// mask once, at the end, in `finalize_current_color`.
     pub current_color_props: u16,
+    /// Which SVG paint properties were specified on this element by the
+    /// cascade, not merely inherited from an ancestor. The native SVG bridge
+    /// needs this to avoid overwriting presentation attributes with inherited
+    /// DOM computed paint.
+    pub specified_svg_paint_props: u16,
     pub grid_template_columns: Vec<GridTrackSize>,
     pub grid_template_rows: Vec<GridTrackSize>,
     pub grid_template_areas: Vec<Vec<String>>,
@@ -106,6 +113,7 @@ pub struct BackgroundLayer {
 impl RareStyle {
     pub const EMPTY: RareStyle = RareStyle {
         current_color_props: 0,
+        specified_svg_paint_props: 0,
         logical_box: Vec::new(),
         logical_borders: Vec::new(),
         transform_origin: None,

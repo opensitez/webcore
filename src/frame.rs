@@ -191,7 +191,12 @@ impl EngineFrame {
             self.needs_layout = true;
             self.needs_paint = true;
         }
-        self.engine.poll_pending_fonts();
+        if self.engine.poll_pending_fonts() {
+            self.doc.style_dirty = true;
+            self.needs_style = true;
+            self.needs_layout = true;
+            self.needs_paint = true;
+        }
 
         if self.doc.tick_animated_images(std::time::Instant::now()) {
             self.needs_paint = true;

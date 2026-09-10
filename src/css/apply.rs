@@ -55,6 +55,14 @@ pub fn apply_css_value(
         }
         // These need cascade origin/layer context; handled by the cascade.
         CssValue::Revert | CssValue::RevertLayer => return,
+        _ => note_specified_svg_paint(style, id),
+    }
+    match value {
+        CssValue::Inherit
+        | CssValue::Unset
+        | CssValue::Initial
+        | CssValue::Revert
+        | CssValue::RevertLayer => {}
         CssValue::Length(l) => {
             if apply_length_value(style, id, l) {
                 return;
@@ -504,6 +512,7 @@ pub fn apply_property_by_id_str(
     if v == "inherit" {
         return;
     }
+    note_specified_svg_paint(style, id);
     note_current_color(style, id, v);
     // Same rule as the typed path above — see `apply_css_value`.
     if v == "unset" && properties::is_inherited(id) {
@@ -533,6 +542,15 @@ fn reset_to_initial(style: &mut ComputedStyle, id: properties::PropertyId) {
     }
     let default_style = ComputedStyle::default();
     (def.copy)(style, &default_style);
+}
+
+fn note_specified_svg_paint(style: &mut ComputedStyle, id: properties::PropertyId) {
+    use properties::PropertyId::*;
+    match id {
+        Fill => style.rare_mut().specified_svg_paint_props |= SPECIFIED_SVG_FILL,
+        Stroke => style.rare_mut().specified_svg_paint_props |= SPECIFIED_SVG_STROKE,
+        _ => {}
+    }
 }
 
 /// Backward-compat wrapper — accepts &str directly.
@@ -577,7 +595,15 @@ fn apply_length_value(
         LetterSpacing => style.letter_spacing = l.clone(),
         WordSpacing => style.word_spacing = l.clone(),
         TextIndent => style.text_indent = l.clone(),
-        Gap | RowGap => style.row_gap = l.clone(),
+        Gap => {
+            style.row_gap = l.clone();
+            style.column_gap = l.clone();
+            style.gap = l.clone();
+        }
+        RowGap => {
+            style.row_gap = l.clone();
+            style.gap = l.clone();
+        }
         ColumnGap => style.column_gap = l.clone(),
         OutlineWidth => {
             if let crate::types::CssLength::Px(px) = l {

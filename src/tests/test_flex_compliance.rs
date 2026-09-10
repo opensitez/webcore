@@ -773,6 +773,45 @@ fn flex_compliance_corpus_matches_a_browser() {
     );
 }
 
+#[test]
+fn rtl_wrapping_flex_row_keeps_physical_margin_gutters() {
+    let html = r#"
+        <style>
+            body { margin: 0; }
+            .row {
+                direction: rtl;
+                display: flex;
+                flex-wrap: wrap;
+                width: 1008px;
+            }
+            .row > div {
+                width: 240px;
+                height: 20px;
+                flex: 0 0 auto;
+                margin-left: 16px;
+            }
+            .row > div:last-child { margin-left: 0; }
+        </style>
+        <div class="row">
+            <div id="a"></div>
+            <div id="b"></div>
+            <div id="c"></div>
+            <div id="d"></div>
+        </div>
+    "#;
+    let mut r = Renderer::new();
+    let mut doc = r.load_html_vp(html, VIEWPORT_W, VIEWPORT_H);
+    let a = doc.query_selector("#a").unwrap();
+    let b = doc.query_selector("#b").unwrap();
+    let c = doc.query_selector("#c").unwrap();
+    let d = doc.query_selector("#d").unwrap();
+
+    assert!((doc.offset_left(a) - 768.0).abs() < 0.5);
+    assert!((doc.offset_left(b) - 512.0).abs() < 0.5);
+    assert!((doc.offset_left(c) - 256.0).abs() < 0.5);
+    assert!((doc.offset_left(d) - 0.0).abs() < 0.5);
+}
+
 // TEMPORARY DIAGNOSTIC — remove before finishing.
 #[test]
 fn zz_probe_one_wpt() {
