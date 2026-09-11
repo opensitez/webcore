@@ -174,6 +174,19 @@ fn parse_font_face_metric_percent(raw: Option<&str>) -> Option<f32> {
     }
 }
 
+pub(crate) fn is_latin_font_face(face: &crate::css::FontFaceDecl) -> bool {
+    if let Some(ref range) = face.unicode_range {
+        let r = range.to_ascii_uppercase();
+        r.contains("U+0000")
+            || r.contains("U+0020")
+            || r.contains("U+0041")
+            || r.contains("U+00-")
+            || r.contains("U+0-")
+    } else {
+        true
+    }
+}
+
 fn font_face_metric_override(
     face: &crate::css::FontFaceDecl,
 ) -> crate::layout::inline_layout::FontMetricOverride {
@@ -2227,8 +2240,10 @@ impl LayoutEngine {
 
             // ── Phase 1: Resolve each @font-face to its best fetchable URL ──────
             let mut remote: Vec<(crate::css::FontFaceDecl, String)> = Vec::new();
+            let mut sorted_faces = faces.to_vec();
+            sorted_faces.sort_by_key(|f| if is_latin_font_face(f) { 0 } else { 1 });
 
-            for face in faces {
+            for face in &sorted_faces {
                 let mut found = false;
                 let parsed_sources;
                 let sources = if face.sources.is_empty() {

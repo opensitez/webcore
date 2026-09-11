@@ -348,31 +348,30 @@ fn replay_inner(
                 small_caps,
                 decoration,
             } => {
-                // Skip text that's entirely outside the current clip region
-                // (handles text-indent:-9999px with overflow:hidden)
-                if let Some(clip) = clip_stack.last() {
-                    if *x + 1000.0 < clip.x
-                        || *x > clip.right()
-                        || *y + *line_height < clip.y
-                        || *y > clip.bottom()
-                    {
-                        continue;
-                    }
+                // Apply the current transform to text position and scale.
+                // Extract effective scale factor from the transform matrix.
+                let eff_sx = (ts.sx * ts.sx + ts.ky * ts.ky).sqrt();
+                let eff_sy = (ts.kx * ts.kx + ts.sy * ts.sy).sqrt();
+                let eff_scale = eff_sx.max(eff_sy);
+                // Transform the text origin
+                let phys_x = ts.sx * *x + ts.ky * *y + ts.tx;
+                let phys_y = ts.kx * *x + ts.sy * *y + ts.ty;
+
+                // Skip text that is wildly off-screen (handles text-indent:-9999px)
+                if phys_x < -20000.0
+                    || phys_x > (pw as f32 + 20000.0)
+                    || phys_y < -20000.0
+                    || phys_y > (ph as f32 + 20000.0)
+                {
+                    continue;
                 }
+
                 let alpha = 1.0;
                 if let Some((ref mut fs, ref mut sc)) = text_ctx {
                     let target = layer_stack
                         .last_mut()
                         .map(|l| &mut l.pixmap)
                         .unwrap_or(pixmap);
-                    // Apply the current transform to text position and scale.
-                    // Extract effective scale factor from the transform matrix.
-                    let eff_sx = (ts.sx * ts.sx + ts.ky * ts.ky).sqrt();
-                    let eff_sy = (ts.kx * ts.kx + ts.sy * ts.sy).sqrt();
-                    let eff_scale = eff_sx.max(eff_sy);
-                    // Transform the text origin
-                    let phys_x = ts.sx * *x + ts.ky * *y + ts.tx;
-                    let phys_y = ts.kx * *x + ts.sy * *y + ts.ty;
                     // draw_text_cmd expects logical coords that it will multiply by scale.
                     // We pass pre-transformed coords divided by eff_scale so the multiplication
                     // brings them back to the correct physical position.
@@ -397,6 +396,7 @@ fn replay_inner(
                         *letter_spacing,
                         *word_spacing,
                         *small_caps,
+                        clip_mask,
                     );
                 }
             }
@@ -408,14 +408,24 @@ fn replay_inner(
             } => {
                 clip_stack.push(*rect);
                 // Build a clip mask from the clip rect
-                let mask =
+                let mut mask =
                     build_clip_mask(rect, radius, radius_y, pw, ph, scale, scroll_x, scroll_y);
+                if let (Some(m), Some(prev)) = (&mut mask, clip_mask_stack.last().and_then(|x| x.as_ref())) {
+                    for (dst, src) in m.data_mut().iter_mut().zip(prev.data().iter()) {
+                        *dst = (*dst as u16 * *src as u16 / 255) as u8;
+                    }
+                }
                 clip_mask_stack.push(mask);
             }
             PaintCmd::PushClipPath { points } => {
                 let bounds = polygon_bounds(points).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
                 clip_stack.push(bounds);
-                let mask = build_polygon_clip_mask(points, pw, ph, scale, scroll_x, scroll_y);
+                let mut mask = build_polygon_clip_mask(points, pw, ph, scale, scroll_x, scroll_y);
+                if let (Some(m), Some(prev)) = (&mut mask, clip_mask_stack.last().and_then(|x| x.as_ref())) {
+                    for (dst, src) in m.data_mut().iter_mut().zip(prev.data().iter()) {
+                        *dst = (*dst as u16 * *src as u16 / 255) as u8;
+                    }
+                }
                 clip_mask_stack.push(mask);
             }
             PaintCmd::PopClip => {
@@ -1046,6 +1056,7 @@ fn replay_inner(
                                 0.0,
                                 0.0,
                                 false,
+                                clip_mask,
                             );
                         }
                     }
@@ -1290,6 +1301,7 @@ fn replay_inner(
                                     0.0,
                                     0.0,
                                     false,
+                                    clip_mask,
                                 );
                             }
                         }
@@ -1341,6 +1353,7 @@ fn replay_inner(
                                     0.0,
                                     0.0,
                                     false,
+                                    clip_mask,
                                 );
                             }
                         }
@@ -1389,6 +1402,7 @@ fn replay_inner(
                                     0.0,
                                     0.0,
                                     false,
+                                    clip_mask,
                                 );
                             }
                         }
@@ -1431,6 +1445,7 @@ fn replay_inner(
                                 0.0,
                                 0.0,
                                 false,
+                                clip_mask,
                             );
                             // ⛔ The empty case is a LABEL, not the value: a
                             // file control with nothing chosen has `value ==
@@ -1460,6 +1475,7 @@ fn replay_inner(
                                 0.0,
                                 0.0,
                                 false,
+                                clip_mask,
                             );
                         }
                     }
@@ -1509,6 +1525,7 @@ fn replay_inner(
                                 0.0,
                                 0.0,
                                 false,
+                                clip_mask,
                             );
                         }
                     }
@@ -1581,6 +1598,7 @@ fn replay_inner(
                                     0.0,
                                     0.0,
                                     false,
+                                    clip_mask,
                                 );
                             }
                         }
@@ -1680,6 +1698,7 @@ fn replay_inner(
                                     0.0,
                                     0.0,
                                     false,
+                                    clip_mask,
                                 );
                             }
                         }
@@ -1713,6 +1732,7 @@ fn replay_inner(
                                     0.0,
                                     0.0,
                                     false,
+                                    clip_mask,
                                 );
                             }
                         }
@@ -1757,6 +1777,7 @@ fn replay_inner(
                                 0.0,
                                 0.0,
                                 false,
+                                None,
                             );
                             crate::canvas::blur_pixmap(&mut layer, *blur);
                             let target = layer_stack
@@ -1796,6 +1817,7 @@ fn replay_inner(
                             0.0,
                             0.0,
                             false,
+                            clip_mask,
                         );
                     }
                 }
@@ -2137,6 +2159,7 @@ pub(crate) fn blit_shaped_buffer(
     _letter_spacing: f32,
     _word_spacing: f32,
     color: CTextColor,
+    clip_mask: Option<&tiny_skia::Mask>,
 ) {
     struct PixmapTextRenderer<'a> {
         pixmap: &'a mut Pixmap,
@@ -2148,6 +2171,7 @@ pub(crate) fn blit_shaped_buffer(
         tracking: f32,
         word_offsets: Vec<f32>,
         glyph_index: usize,
+        clip_mask: Option<&'a tiny_skia::Mask>,
     }
 
     impl cosmic_text::Renderer for PixmapTextRenderer<'_> {
@@ -2160,6 +2184,7 @@ pub(crate) fn blit_shaped_buffer(
                 h,
                 color,
                 self.color_alpha,
+                self.clip_mask,
             );
         }
 
@@ -2175,6 +2200,7 @@ pub(crate) fn blit_shaped_buffer(
             let origin_x = self.origin_x;
             let origin_y = self.origin_y;
             let color_alpha = self.color_alpha;
+            let clip_mask = self.clip_mask;
             self.swash_cache.with_pixels(
                 self.font_system,
                 physical_glyph.cache_key,
@@ -2188,6 +2214,7 @@ pub(crate) fn blit_shaped_buffer(
                         1,
                         pixel_color,
                         color_alpha,
+                        clip_mask,
                     );
                 },
             );
@@ -2216,6 +2243,7 @@ pub(crate) fn blit_shaped_buffer(
         tracking: _letter_spacing,
         word_offsets,
         glyph_index: 0,
+        clip_mask,
     };
     buf.render(&mut renderer, color);
 }
@@ -2228,6 +2256,7 @@ fn blit_text_pixel_rect(
     gh: u32,
     gc: CTextColor,
     color_a: u32,
+    clip_mask: Option<&tiny_skia::Mask>,
 ) {
     let ga = gc.a();
     if ga == 0 {
@@ -2241,11 +2270,7 @@ fn blit_text_pixel_rect(
     let pix_h = pixmap.height() as i32;
     let stride = pix_w as usize;
     let pixels = pixmap.pixels_mut();
-    let sa = eff_a;
-    let ia = 255 - sa;
-    let pr = gc.r() as u32 * sa / 255;
-    let pg = gc.g() as u32 * sa / 255;
-    let pb = gc.b() as u32 * sa / 255;
+    let mask_data = clip_mask.map(|m| m.data());
     for dy in 0..gh as i32 {
         let py = by + dy;
         if py < 0 || py >= pix_h {
@@ -2257,7 +2282,25 @@ fn blit_text_pixel_rect(
             if px_x < 0 || px_x >= pix_w {
                 continue;
             }
-            let dst = &mut pixels[row + px_x as usize];
+            let idx = row + px_x as usize;
+            let final_a = if let Some(m) = mask_data {
+                let mask_val = m.get(idx).copied().unwrap_or(0);
+                if mask_val == 0 {
+                    continue;
+                }
+                (eff_a * mask_val as u32) / 255
+            } else {
+                eff_a
+            };
+            if final_a == 0 {
+                continue;
+            }
+            let sa = final_a;
+            let ia = 255 - sa;
+            let pr = gc.r() as u32 * sa / 255;
+            let pg = gc.g() as u32 * sa / 255;
+            let pb = gc.b() as u32 * sa / 255;
+            let dst = &mut pixels[idx];
             let r = (pr + dst.red() as u32 * ia / 255) as u8;
             let g = (pg + dst.green() as u32 * ia / 255) as u8;
             let b = (pb + dst.blue() as u32 * ia / 255) as u8;
@@ -2288,6 +2331,7 @@ fn draw_text_cmd(
     _letter_spacing: f32,
     word_spacing: f32,
     _small_caps: bool,
+    clip_mask: Option<&tiny_skia::Mask>,
 ) {
     if text.is_empty() {
         return;
@@ -2335,6 +2379,7 @@ fn draw_text_cmd(
                 _letter_spacing,
                 0.0,
                 _small_caps,
+                clip_mask,
             );
             *cursor_x += advance;
             segment.clear();
@@ -2464,6 +2509,7 @@ fn draw_text_cmd(
             _letter_spacing * sc,
             word_spacing * sc,
             ct_color,
+            clip_mask,
         );
         buf.layout_runs().next().map(|r| (r.line_w, Some(r.line_y))).unwrap_or((0.0, None))
     });
@@ -2484,18 +2530,18 @@ fn draw_text_cmd(
             0 => {
                 // solid
                 if let Some(r) = SkRect::from_xywh(x, y, w, thickness) {
-                    pixmap.fill_rect(r, &paint, Transform::identity(), None);
+                    pixmap.fill_rect(r, &paint, Transform::identity(), clip_mask);
                 }
             }
             1 => {
                 // double
                 if let Some(r) = SkRect::from_xywh(x, y, w, 1.0f32.max(thickness * 0.4)) {
-                    pixmap.fill_rect(r, &paint, Transform::identity(), None);
+                    pixmap.fill_rect(r, &paint, Transform::identity(), clip_mask);
                 }
                 if let Some(r) =
                     SkRect::from_xywh(x, y + thickness * 1.5, w, 1.0f32.max(thickness * 0.4))
                 {
-                    pixmap.fill_rect(r, &paint, Transform::identity(), None);
+                    pixmap.fill_rect(r, &paint, Transform::identity(), clip_mask);
                 }
             }
             2 => {
@@ -2508,7 +2554,7 @@ fn draw_text_cmd(
                 pb.move_to(x, y + thickness / 2.0);
                 pb.line_to(x + w, y + thickness / 2.0);
                 if let Some(path) = pb.finish() {
-                    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), clip_mask);
                 }
             }
             3 => {
@@ -2521,7 +2567,7 @@ fn draw_text_cmd(
                 pb.move_to(x, y + thickness / 2.0);
                 pb.line_to(x + w, y + thickness / 2.0);
                 if let Some(path) = pb.finish() {
-                    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), clip_mask);
                 }
             }
             4 => {
@@ -2539,13 +2585,13 @@ fn draw_text_cmd(
                 let mut stroke = tiny_skia::Stroke::default();
                 stroke.width = thickness;
                 if let Some(path) = pb.finish() {
-                    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), clip_mask);
                 }
             }
             _ => {
                 // fallback to solid
                 if let Some(r) = SkRect::from_xywh(x, y, w, thickness) {
-                    pixmap.fill_rect(r, &paint, Transform::identity(), None);
+                    pixmap.fill_rect(r, &paint, Transform::identity(), clip_mask);
                 }
             }
         }

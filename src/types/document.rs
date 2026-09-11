@@ -343,6 +343,13 @@ impl Document {
         Some((br.x, br.y + br.h, w, h))
     }
 
+    /// True if any CSS animation or transition is active or requesting animation frames.
+    pub fn has_active_animations(&self) -> bool {
+        self.needs_animation_frame
+            || !self.active_animations.is_empty()
+            || !self.transition_states.is_empty()
+    }
+
     /// Which picker an element opens, if any — the one place that decides, so
     /// the geometry, the paint and the hit test cannot disagree.
     pub(crate) fn picker_kind(&self, id: u32) -> Option<PickerKind> {

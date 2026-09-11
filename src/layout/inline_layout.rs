@@ -200,7 +200,13 @@ pub fn layout_inline_block(
                         + irb.layout.resolved_border_right
                         + irb.layout.resolved_margin_left
                         + irb.layout.resolved_margin_right;
-                    if shrink_w < content_w {
+                    if shrink_w > 0.0
+                        && (shrink_w < content_w
+                            || matches!(
+                                node.children[ci].style.white_space,
+                                WhiteSpace::Nowrap | WhiteSpace::Pre
+                            ))
+                    {
                         engine.layout_box(
                             &mut node.children[ci],
                             &Constraints::new(shrink_w, 0.0, 0.0, font_px, root_font_px),
@@ -740,13 +746,13 @@ pub fn layout_inline_block(
         let align_w = finite_w;
 
         // Break items for this line
-        let (mut line_end, mut next_start, mut was_break) =
+        let (line_start, mut line_end, mut next_start, mut was_break) =
             break_one_line(&items, item_idx, avail_w);
 
         // Greedily pull in and place floats that were included in the line slice
         // If a float placement narrows the width such that items no longer fit,
         // we must re-break the line.
-        let mut i = item_idx;
+        let mut i = line_start;
         while i < line_end {
             if let InlineItemKind::Float { path } = &items[i].kind {
                 if let Some(ref mut fc) = float_ctx {
@@ -801,7 +807,8 @@ pub fn layout_inline_block(
                     avail_w = (fc_right - temp_fc_left).max(0.0);
 
                     // Re-evaluate line break from THIS point forward
-                    let (new_end, new_next, new_break) = break_one_line(&items, i + 1, avail_w);
+                    let (_new_start, new_end, new_next, new_break) =
+                        break_one_line(&items, i + 1, avail_w);
                     line_end = new_end;
                     next_start = new_next;
                     was_break = new_break;
@@ -812,18 +819,18 @@ pub fn layout_inline_block(
 
         ends_with_break = was_break;
 
-        if line_end == item_idx && !was_break {
+        if line_end == line_start && !was_break {
             // Safety: avoid infinite loop if no progress made
-            if item_idx < items.len()
-                && matches!(items[item_idx].kind, InlineItemKind::Float { .. })
+            if line_start < items.len()
+                && matches!(items[line_start].kind, InlineItemKind::Float { .. })
             {
-                item_idx += 1;
+                item_idx = line_start + 1;
                 continue;
             }
             break;
         }
 
-        let line_items = &items[item_idx..line_end];
+        let line_items = &items[line_start..line_end];
 
         // Compute line metrics from the items and the STRUT.
         //
@@ -2663,11 +2670,15 @@ fn tokenize_text(
 
 /// Break one line from `items[start_idx..]` fitting in `avail_w`.
 ///
-/// Returns `(line_end, next_start, was_forced_break)`:
-/// - `items[start_idx..line_end]` are on the current line.
+/// Returns `(line_start, line_end, next_start, was_forced_break)`:
+/// - `items[line_start..line_end]` are on the current line.
 /// - `items[next_start..]` remain for subsequent lines.
 /// - `was_forced_break` is true if a `<br>` item terminated the line.
-fn break_one_line(items: &[InlineItem], start_idx: usize, avail_w: f32) -> (usize, usize, bool) {
+fn break_one_line(
+    items: &[InlineItem],
+    start_idx: usize,
+    avail_w: f32,
+) -> (usize, usize, usize, bool) {
     const LINE_BREAK_EPSILON: f32 = 0.5;
     // Skip leading spaces
     let mut i = start_idx;
@@ -2684,7 +2695,15 @@ fn break_one_line(items: &[InlineItem], start_idx: usize, avail_w: f32) -> (usiz
 
         // Forced break: terminate line here, consume the break item
         if matches!(item.kind, InlineItemKind::Break) {
-            return (i, i + 1, true);
+            let mut line_end = i;
+            while line_end > line_start && items[line_end - 1].is_space {
+                line_end -= 1;
+            }
+            let mut next = i + 1;
+            while next < items.len() && items[next].is_space {
+                next += 1;
+            }
+            return (line_start, line_end, next, true);
         }
 
         // Text items mark a break opportunity before the item. Atomic
@@ -2708,7 +2727,7 @@ fn break_one_line(items: &[InlineItem], start_idx: usize, avail_w: f32) -> (usiz
                 while next < items.len() && items[next].is_space {
                     next += 1;
                 }
-                return (line_end, next, false);
+                return (line_start, line_end, next, false);
             } else {
                 // No valid break point: this is one unbreakable run. Let it
                 // overflow the line instead of splitting generated box-model
@@ -2726,8 +2745,12 @@ fn break_one_line(items: &[InlineItem], start_idx: usize, avail_w: f32) -> (usiz
         i += 1;
     }
 
-    // Consumed all items
-    (i, i, false)
+    // Consumed all items: trim trailing spaces from line_end
+    let mut line_end = i;
+    while line_end > line_start && items[line_end - 1].is_space {
+        line_end -= 1;
+    }
+    (line_start, line_end, i, false)
 }
 
 fn balanced_wrap_width(items: &[InlineItem], max_w: f32) -> f32 {
@@ -2792,9 +2815,9 @@ fn line_stats_for_width(items: &[InlineItem], width: f32) -> LineStats {
         if guard > items.len() + 4 {
             break;
         }
-        let (line_end, next, was_break) = break_one_line(items, idx, width);
-        if line_end > idx {
-            let line_items = &items[idx..line_end];
+        let (line_start, line_end, next, was_break) = break_one_line(items, idx, width);
+        if line_end > line_start {
+            let line_items = &items[line_start..line_end];
             let line_w = trimmed_line_width(line_items);
             stats.max_width = stats.max_width.max(line_w);
             stats.last_line_is_single_word = trimmed_line_word_count(line_items) == 1;
@@ -2805,7 +2828,7 @@ fn line_stats_for_width(items: &[InlineItem], width: f32) -> LineStats {
             stats.count += 1;
             idx = next;
         } else {
-            idx += 1;
+            idx = next.max(idx + 1);
         }
     }
     stats
@@ -2857,12 +2880,12 @@ pub fn break_lines(items: &[InlineItem], max_w: f32) -> Vec<LineBuild> {
     let mut lines: Vec<LineBuild> = Vec::new();
     let mut idx = 0;
     while idx < items.len() {
-        let (line_end, next, was_break) = break_one_line(items, idx, max_w);
-        if line_end > idx {
-            push_line_from_slice(&mut lines, &items[idx..line_end]);
-        } else if !was_break && line_end == idx {
+        let (line_start, line_end, next, was_break) = break_one_line(items, idx, max_w);
+        if line_end > line_start {
+            push_line_from_slice(&mut lines, &items[line_start..line_end]);
+        } else if !was_break && line_end == line_start {
             // No progress and no break — guard against infinite loop
-            idx += 1;
+            idx = next.max(idx + 1);
             continue;
         }
         if was_break {
@@ -3920,7 +3943,13 @@ fn prelayout_nested_inline_blocks(
                     + fc.layout.resolved_border_right
                     + fc.layout.resolved_margin_left
                     + fc.layout.resolved_margin_right;
-                if shrink_w > 0.0 && shrink_w < content_w {
+                if shrink_w > 0.0
+                    && (shrink_w < content_w
+                        || matches!(
+                            node.children[ci].style.white_space,
+                            WhiteSpace::Nowrap | WhiteSpace::Pre
+                        ))
+                {
                     engine.layout_box(
                         &mut node.children[ci],
                         &Constraints::new(shrink_w, 0.0, 0.0, font_px, root_font_px),
@@ -3962,7 +3991,13 @@ fn prelayout_nested_inline_blocks(
                         + gc.layout.resolved_border_right
                         + gc.layout.resolved_margin_left
                         + gc.layout.resolved_margin_right;
-                    if shrink_w < content_w {
+                    if shrink_w > 0.0
+                        && (shrink_w < content_w
+                            || matches!(
+                                node.children[ci].style.white_space,
+                                WhiteSpace::Nowrap | WhiteSpace::Pre
+                            ))
+                    {
                         engine.layout_box(
                             &mut node.children[ci],
                             &Constraints::new(shrink_w, 0.0, 0.0, font_px, root_font_px),

@@ -1814,6 +1814,52 @@ fn render_display_list_text_produces_dark_pixels() {
 }
 
 #[test]
+fn render_display_list_text_clipped_by_overflow_hidden() {
+    let doc = parse_html(
+        r#"<body style="margin: 0; background: white"><div style="position: absolute; left: 100px; top: 20px; width: 100px; height: 40px; overflow: hidden;"><div style="transform: translateX(-60px); white-space: nowrap; font-size: 20px; color: black;">Long scrolling text across the container</div></div></body>"#,
+    );
+    let mut f = EngineFrame::new(doc, 400.0, 300.0);
+    f.update_frame();
+
+    let mut pixmap = tiny_skia::Pixmap::new(400, 300).unwrap();
+    pixmap.fill(tiny_skia::Color::WHITE);
+    let mut renderer = crate::Renderer::new();
+    renderer.render(&mut f.doc, &mut pixmap, 1.0);
+
+    let data = pixmap.data();
+    // Pixels to the left of x = 100 must NOT contain text pixels (must stay white: 255, 255, 255)
+    for y in 20..50 {
+        for x in 0..95 {
+            let idx = (y * 400 + x) as usize * 4;
+            let (r, g, b) = (data[idx], data[idx + 1], data[idx + 2]);
+            assert!(
+                r > 250 && g > 250 && b > 250,
+                "pixel at ({x}, {y}) was ({r}, {g}, {b}), text leaked outside overflow:hidden clip!"
+            );
+        }
+    }
+
+    // Pixels inside the clip (x in 100..200) MUST contain text pixels
+    let mut has_dark_inside = false;
+    for y in 20..50 {
+        for x in 100..200 {
+            let idx = (y * 400 + x) as usize * 4;
+            if data[idx] < 100 && data[idx + 1] < 100 && data[idx + 2] < 100 {
+                has_dark_inside = true;
+                break;
+            }
+        }
+        if has_dark_inside {
+            break;
+        }
+    }
+    assert!(
+        has_dark_inside,
+        "text inside overflow:hidden clip should be visible"
+    );
+}
+
+#[test]
 fn render_display_list_border_visible() {
     let doc = parse_html(
         r#"<div style="border: 3px solid green; width: 100px; height: 50px; position: absolute; left: 50px; top: 50px">x</div>"#,
@@ -3390,3 +3436,64 @@ fn close6(got: [f32; 6], want: [f32; 6], eps: f32) -> bool {
         .zip(want.iter())
         .all(|(a, b)| (a - b).abs() <= eps)
 }
+
+#[test]
+fn test_inline_element_background_does_not_paint_over_text() {
+    let html = r##"<!DOCTYPE html>
+    <html>
+    <head>
+    <style>
+    :root {
+        --tertiary-bg-color: #811818;
+        --tertiary-text-color: #ffffff;
+    }
+    .gallery-item-title, .gallery-item-title a {
+        font-size: 1.2em;
+        color: var(--tertiary-text-color);
+        background-color: var(--tertiary-bg-color);
+        text-decoration: none;
+    }
+    </style>
+    </head>
+    <body>
+    <div class="gallery-item-title"><a href="#">Poet</a></div>
+    </body>
+    </html>"##;
+    let doc = parse_html(html);
+    let mut f = EngineFrame::new(doc, 400.0, 300.0);
+    f.update_frame();
+    let list = build_display_list(&f.doc.root, 400.0, 300.0);
+    let fill_rect_count = list
+        .commands
+        .iter()
+        .filter(|cmd| matches!(cmd, PaintCmd::FillRect { .. }))
+        .count();
+    assert_eq!(
+        fill_rect_count, 2,
+        "only parent block and inline run backgrounds should be painted"
+    );
+
+    let mut pm = tiny_skia::Pixmap::new(400, 300).unwrap();
+    let mut renderer = crate::Renderer::new();
+    renderer.render(&mut f.doc, &mut pm, 1.0);
+
+    // Verify there are white text pixels (Poet) inside the red box at (8..60, 8..36)
+    let mut found_white_pixel = false;
+    for y in 8..36 {
+        for x in 8..60 {
+            let p = pm.pixel(x, y).unwrap();
+            if p.red() > 200 && p.green() > 200 && p.blue() > 200 {
+                found_white_pixel = true;
+                break;
+            }
+        }
+        if found_white_pixel {
+            break;
+        }
+    }
+    assert!(
+        found_white_pixel,
+        "Expected white text pixels for 'Poet' inside the red box, but found none!"
+    );
+}
+

@@ -113,6 +113,13 @@ impl Renderer {
             needs_relayout = true;
             self.invalidate_display_list();
         }
+        if doc.needs_animation_frame
+            || !doc.active_animations.is_empty()
+            || !doc.transition_states.is_empty()
+        {
+            needs_relayout = true;
+            self.invalidate_display_list();
+        }
         if needs_relayout {
             let engine = self.layout_engine();
             engine.viewport_h = viewport_h;

@@ -194,9 +194,17 @@ fn encode_filter_ops(filters: &crate::types::CssFilters) -> Vec<(u8, f32, f32, f
         .collect()
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Main entry: build_for_box — mirrors render_box in mod.rs exactly
-// ═══════════════════════════════════════════════════════════════════════════════
+fn inline_has_non_empty_text(node: &WebCore) -> bool {
+    if node.tag == "#text" && !node.text.trim().is_empty() {
+        return true;
+    }
+    for c in &node.children {
+        if inline_has_non_empty_text(c) {
+            return true;
+        }
+    }
+    false
+}
 
 fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     // ── Early exits (same as render_box) ─────────────────────────────────────
@@ -649,9 +657,12 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
 
     // ── (b) Background color (opacity applied to alpha) ──────────────────────
     {
+        let is_inline_with_text = matches!(node.style.display, Display::Inline)
+            && !node.is_image_element()
+            && inline_has_non_empty_text(node);
         let raw_bg = eff_style.background_color;
         let opacity = eff_style.opacity;
-        if raw_bg.a > 0 {
+        if raw_bg.a > 0 && !is_inline_with_text {
             let alpha = ((raw_bg.a as f32) * opacity) as u8;
             let bg = Color::rgba(raw_bg.r, raw_bg.g, raw_bg.b, alpha);
             list.push(PaintCmd::FillRect {

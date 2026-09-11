@@ -631,7 +631,21 @@ pub fn layout_block_with_fc(
     // Content width: respect box-sizing (already resolved in rbox via resolve_box).
     let raw_w = match rbox.content_width {
         Some(w) => w,
-        None => (containing_w - rbox.h_space()).max(0.0),
+        None => {
+            if matches!(
+                node.style.display,
+                Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+            ) {
+                let mc = engine.max_content_width(node, font_px, root_font_px);
+                if matches!(node.style.white_space, WhiteSpace::Nowrap | WhiteSpace::Pre) {
+                    mc
+                } else {
+                    (containing_w - rbox.h_space()).max(0.0).min(mc)
+                }
+            } else {
+                (containing_w - rbox.h_space()).max(0.0)
+            }
+        }
     };
 
     // CSS Sizing §5: an intrinsic keyword sizes the box from its own content.

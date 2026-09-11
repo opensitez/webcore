@@ -680,7 +680,7 @@ impl<'a> Canvas for TinySkiaCanvas<'a> {
         // `filter` reach text and not only shapes. The closure borrows the
         // local font resources rather than `self`, which is what the `take`
         // above was for.
-        self.with_effects(|target, _state, _clip| {
+        self.with_effects(|target, _state, clip| {
             crate::renderer::display_list_replay::blit_shaped_buffer(
                 target,
                 owned_tc.font_system,
@@ -692,6 +692,7 @@ impl<'a> Canvas for TinySkiaCanvas<'a> {
                 0.0,
                 0.0,
                 cosmic_color,
+                clip,
             );
         });
         self.text_ctx = Some(owned_tc);
