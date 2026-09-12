@@ -75,6 +75,32 @@ pub fn intrinsic_size(doc: &SvgDocument) -> Option<(f32, f32)> {
     }
 }
 
+/// Returns true if the SVG has a viewBox (an intrinsic aspect ratio) but no explicit
+/// width and height attributes.
+pub fn has_ratio_only(doc: &SvgDocument) -> bool {
+    let root = &doc.root;
+    let width = root
+        .attr_ascii_case_insensitive("width")
+        .and_then(parse_svg_length)
+        .and_then(definite_intrinsic_length);
+    let height = root
+        .attr_ascii_case_insensitive("height")
+        .and_then(parse_svg_length)
+        .and_then(definite_intrinsic_length);
+    let has_explicit_dims = width.is_some() && height.is_some();
+    let has_viewbox = parse_view_box(root.attr_ascii_case_insensitive("viewBox"))
+        .map(|vb| vb.width > 0.0 && vb.height > 0.0)
+        .unwrap_or(false);
+    !has_explicit_dims && has_viewbox
+}
+
+pub fn has_ratio_only_from_markup(svg: &str) -> bool {
+    parse_svg_document(svg)
+        .ok()
+        .map(|doc| has_ratio_only(&doc))
+        .unwrap_or(false)
+}
+
 pub fn parse_svg_length(input: &str) -> Option<SvgLength> {
     let token = input
         .trim()

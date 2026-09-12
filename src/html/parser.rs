@@ -757,10 +757,8 @@ impl HtmlParser {
                     // Background image
                     if !node.style.background_image_url.is_empty() {
                         let url = node.style.background_image_url.clone();
-                        if let Some((data, w, h)) = load_image_from_src(&url, &self.base_url) {
-                            node.bg_image_data = Some(std::sync::Arc::new(data));
-                            node.bg_image_width = w;
-                            node.bg_image_height = h;
+                        if let Some(decoded) = load_decoded_image_from_src(&url, &self.base_url) {
+                            set_decoded_bg_image_on_node(&mut node, decoded);
                         }
                     }
 
@@ -1127,10 +1125,8 @@ impl HtmlParser {
         }
         if !node.style.background_image_url.is_empty() {
             let url = node.style.background_image_url.clone();
-            if let Some((data, w, h)) = load_image_from_src(&url, &self.base_url) {
-                node.bg_image_data = Some(std::sync::Arc::new(data));
-                node.bg_image_width = w;
-                node.bg_image_height = h;
+            if let Some(decoded) = load_decoded_image_from_src(&url, &self.base_url) {
+                set_decoded_bg_image_on_node(&mut node, decoded);
             }
         }
         if tag == "ol" {

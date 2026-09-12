@@ -147,7 +147,8 @@ pub fn layout_inline_block(
     //    Mirrors C++ LayoutInlines(): LayoutBox(*run.atomicBox, …) before line-breaking
     //    Also recurse into inline children to pre-layout nested inline-blocks (e.g.
     //    <input type="radio"> inside a <label>).
-    prelayout_nested_inline_blocks(engine, node, content_w, font_px, root_font_px);
+    let avail_h = rbox.content_height;
+    prelayout_nested_inline_blocks(engine, node, content_w, avail_h, font_px, root_font_px);
 
     for ci in 0..node.children.len() {
         if matches!(node.children[ci].style.display, Display::Contents) {
@@ -156,6 +157,7 @@ pub fn layout_inline_block(
                 engine,
                 &mut node.children[ci],
                 content_w,
+                avail_h,
                 child_font_px,
                 root_font_px,
             );
@@ -166,9 +168,15 @@ pub fn layout_inline_block(
             Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
         ) || is_atomic_inline_replaced(&node.children[ci])
         {
+            let child_constraints = match avail_h {
+                Some(h) => {
+                    Constraints::with_height(content_w, h, 0.0, 0.0, font_px, root_font_px)
+                }
+                None => Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
+            };
             engine.layout_box(
                 &mut node.children[ci],
-                &Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
+                &child_constraints,
             );
             // Shrink-to-fit for auto-width inline-block (CSS §10.3.9):
             // InlineBlock with width:auto should size to content, not expand to fill container.
@@ -207,9 +215,15 @@ pub fn layout_inline_block(
                                 WhiteSpace::Nowrap | WhiteSpace::Pre
                             ))
                     {
+                        let shrink_constraints = match avail_h {
+                            Some(h) => {
+                                Constraints::with_height(shrink_w, h, 0.0, 0.0, font_px, root_font_px)
+                            }
+                            None => Constraints::new(shrink_w, 0.0, 0.0, font_px, root_font_px),
+                        };
                         engine.layout_box(
                             &mut node.children[ci],
-                            &Constraints::new(shrink_w, 0.0, 0.0, font_px, root_font_px),
+                            &shrink_constraints,
                         );
                     }
                 }
@@ -3906,6 +3920,7 @@ fn prelayout_nested_inline_blocks(
     engine: &LayoutEngine,
     node: &mut WebCore,
     content_w: f32,
+    avail_h: Option<f32>,
     font_px: f32,
     root_font_px: f32,
 ) {
@@ -3920,9 +3935,13 @@ fn prelayout_nested_inline_blocks(
             continue;
         }
         if !matches!(node.children[ci].style.float, crate::types::Float::None) {
+            let child_constraints = match avail_h {
+                Some(h) => Constraints::with_height(content_w, h, 0.0, 0.0, font_px, root_font_px),
+                None => Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
+            };
             engine.layout_box(
                 &mut node.children[ci],
-                &Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
+                &child_constraints,
             );
             if node.children[ci].style.width.is_auto() {
                 let max_line_w = node.children[ci]
@@ -3950,9 +3969,13 @@ fn prelayout_nested_inline_blocks(
                             WhiteSpace::Nowrap | WhiteSpace::Pre
                         ))
                 {
+                    let shrink_constraints = match avail_h {
+                        Some(h) => Constraints::with_height(shrink_w, h, 0.0, 0.0, font_px, root_font_px),
+                        None => Constraints::new(shrink_w, 0.0, 0.0, font_px, root_font_px),
+                    };
                     engine.layout_box(
                         &mut node.children[ci],
-                        &Constraints::new(shrink_w, 0.0, 0.0, font_px, root_font_px),
+                        &shrink_constraints,
                     );
                 }
             }
@@ -3968,9 +3991,13 @@ fn prelayout_nested_inline_blocks(
             // Only lay out here in the recursive case (node is an inline wrapper,
             // e.g. span > a > img where this function was called on the <a>).
             if matches!(node.style.display, Display::Inline | Display::Contents) {
+                let child_constraints = match avail_h {
+                    Some(h) => Constraints::with_height(content_w, h, 0.0, 0.0, font_px, root_font_px),
+                    None => Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
+                };
                 engine.layout_box(
                     &mut node.children[ci],
-                    &Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
+                    &child_constraints,
                 );
                 if node.children[ci].style.width.is_auto() {
                     let max_line_w = node.children[ci]
@@ -3998,9 +4025,13 @@ fn prelayout_nested_inline_blocks(
                                 WhiteSpace::Nowrap | WhiteSpace::Pre
                             ))
                     {
+                        let shrink_constraints = match avail_h {
+                            Some(h) => Constraints::with_height(shrink_w, h, 0.0, 0.0, font_px, root_font_px),
+                            None => Constraints::new(shrink_w, 0.0, 0.0, font_px, root_font_px),
+                        };
                         engine.layout_box(
                             &mut node.children[ci],
-                            &Constraints::new(shrink_w, 0.0, 0.0, font_px, root_font_px),
+                            &shrink_constraints,
                         );
                     }
                 }
@@ -4020,9 +4051,13 @@ fn prelayout_nested_inline_blocks(
                     node.children[ci].children[gci].style.float,
                     crate::types::Float::None
                 ) {
+                    let child_constraints = match avail_h {
+                        Some(h) => Constraints::with_height(content_w, h, 0.0, 0.0, child_font_px, root_font_px),
+                        None => Constraints::new(content_w, 0.0, 0.0, child_font_px, root_font_px),
+                    };
                     engine.layout_box(
                         &mut node.children[ci].children[gci],
-                        &Constraints::new(content_w, 0.0, 0.0, child_font_px, root_font_px),
+                        &child_constraints,
                     );
                     if node.children[ci].children[gci].style.width.is_auto() {
                         let max_line_w = node.children[ci].children[gci]
@@ -4047,9 +4082,13 @@ fn prelayout_nested_inline_blocks(
                             + gc.layout.resolved_margin_left
                             + gc.layout.resolved_margin_right;
                         if shrink_w > 0.0 && shrink_w < content_w {
+                            let shrink_constraints = match avail_h {
+                                Some(h) => Constraints::with_height(shrink_w, h, 0.0, 0.0, child_font_px, root_font_px),
+                                None => Constraints::new(shrink_w, 0.0, 0.0, child_font_px, root_font_px),
+                            };
                             engine.layout_box(
                                 &mut node.children[ci].children[gci],
-                                &Constraints::new(shrink_w, 0.0, 0.0, child_font_px, root_font_px),
+                                &shrink_constraints,
                             );
                         }
                     }
@@ -4058,9 +4097,13 @@ fn prelayout_nested_inline_blocks(
                     Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
                 ) || is_atomic_inline_replaced(&node.children[ci].children[gci])
                 {
+                    let child_constraints = match avail_h {
+                        Some(h) => Constraints::with_height(content_w, h, 0.0, 0.0, child_font_px, root_font_px),
+                        None => Constraints::new(content_w, 0.0, 0.0, child_font_px, root_font_px),
+                    };
                     engine.layout_box(
                         &mut node.children[ci].children[gci],
-                        &Constraints::new(content_w, 0.0, 0.0, child_font_px, root_font_px),
+                        &child_constraints,
                     );
                     // Shrink-to-fit for auto-width nested inline-blocks
                     if node.children[ci].children[gci].style.width.is_auto() {
@@ -4086,9 +4129,13 @@ fn prelayout_nested_inline_blocks(
                             + gc.layout.resolved_margin_left
                             + gc.layout.resolved_margin_right;
                         if shrink_w < content_w {
+                            let shrink_constraints = match avail_h {
+                                Some(h) => Constraints::with_height(shrink_w, h, 0.0, 0.0, child_font_px, root_font_px),
+                                None => Constraints::new(shrink_w, 0.0, 0.0, child_font_px, root_font_px),
+                            };
                             engine.layout_box(
                                 &mut node.children[ci].children[gci],
-                                &Constraints::new(shrink_w, 0.0, 0.0, child_font_px, root_font_px),
+                                &shrink_constraints,
                             );
                         }
                     }
@@ -4098,6 +4145,7 @@ fn prelayout_nested_inline_blocks(
                         engine,
                         &mut node.children[ci].children[gci],
                         content_w,
+                        avail_h,
                         child_font_px,
                         root_font_px,
                     );

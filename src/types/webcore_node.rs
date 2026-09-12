@@ -70,6 +70,7 @@ pub struct WebCore {
     pub bg_image_data: Option<std::sync::Arc<Vec<u8>>>,
     pub bg_image_width: u32,
     pub bg_image_height: u32,
+    pub bg_image_ratio_only: bool,
 
     // CSS mask-image data (SVG rasterized to alpha mask)
     pub mask_image_data: Option<std::sync::Arc<Vec<u8>>>,

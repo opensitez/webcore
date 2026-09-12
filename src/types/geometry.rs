@@ -18,6 +18,9 @@ pub struct Rect {
 }
 
 impl Rect {
+    pub fn zero() -> Self {
+        Self::default()
+    }
     pub fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self { x, y, w, h }
     }

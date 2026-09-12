@@ -19,7 +19,10 @@ pub use animation::{
     SvgAnimationElement, SvgAnimationFillMode, SvgAnimationKind, SvgAnimationTime, SvgCalcMode,
     SvgRepeatCount,
 };
-pub use geometry::{intrinsic_size_from_markup, PreserveAspectRatio, SvgLength, SvgViewBox};
+pub use geometry::{
+    has_ratio_only, has_ratio_only_from_markup, intrinsic_size_from_markup, PreserveAspectRatio,
+    SvgLength, SvgViewBox,
+};
 pub(crate) use paint::rasterize_svg_document_to_rgba_with_dom;
 pub use paint::{rasterize_svg_document_to_rgba, rasterize_svg_intrinsic, rasterize_svg_to_rgba};
 pub use parser::{parse_svg_document, SvgParseError};

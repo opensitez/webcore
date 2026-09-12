@@ -102,10 +102,7 @@ impl Document {
                         loaded_target = true;
                     }
                     PendingImageTarget::Background => {
-                        if let Some((data, w, h)) = crate::html::decoded_image_pixels(decoded) {
-                            node.bg_image_data = Some(std::sync::Arc::new(data));
-                            node.bg_image_width = w;
-                            node.bg_image_height = h;
+                        if crate::html::set_decoded_bg_image_on_node(node, decoded) {
                             loaded_target = true;
                         }
                     }

@@ -332,6 +332,7 @@ impl WebCore {
             mask_image_height: 0,
             bg_image_width: 0,
             bg_image_height: 0,
+            bg_image_ratio_only: false,
 
             svg_document: None,
             svg_tree_path: None,

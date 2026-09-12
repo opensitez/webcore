@@ -123,6 +123,22 @@ pub fn set_decoded_image_on_node(node: &mut WebCore, decoded: DecodedImage) {
     }
 }
 
+pub fn set_decoded_bg_image_on_node(node: &mut WebCore, decoded: DecodedImage) -> bool {
+    let is_ratio_only = match &decoded {
+        DecodedImage::Svg(svg, _, _) => crate::svg::has_ratio_only_from_markup(svg),
+        _ => false,
+    };
+    if let Some((data, w, h)) = decoded_image_pixels(decoded) {
+        node.bg_image_data = Some(std::sync::Arc::new(data));
+        node.bg_image_width = w;
+        node.bg_image_height = h;
+        node.bg_image_ratio_only = is_ratio_only;
+        true
+    } else {
+        false
+    }
+}
+
 /// Try to load an image from a file path or data URL.
 /// Returns (rgba_bytes, width, height) or None on failure.
 pub(crate) fn load_image_from_src(src: &str, base_url: &str) -> Option<(Vec<u8>, u32, u32)> {

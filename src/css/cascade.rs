@@ -746,7 +746,8 @@ pub(crate) fn finalize_display(style: &mut ComputedStyle, tag: &str, has_explici
     if matches!(style.display, Display::Inline) && !has_explicit_display {
         let should_be_block = matches!(
             tag,
-            "div"
+            "anonymous-block"
+                | "div"
                 | "p"
                 | "h1"
                 | "h2"

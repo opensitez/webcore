@@ -1941,7 +1941,43 @@ fn make_anonymous_block(parent: &WebCore) -> WebCore {
     anon
 }
 
+/// Recursively unwraps any synthetic `anonymous-block` elements in the tree
+/// so that cascading and re-layout operate on clean, idempotent DOM structures.
+pub fn unwrap_all_anonymous_blocks(node: &mut WebCore) {
+    if let Some(ref mut shadow) = node.shadow_root {
+        for child in &mut shadow.children {
+            unwrap_all_anonymous_blocks(child);
+        }
+    }
+    for child in &mut node.children {
+        unwrap_all_anonymous_blocks(child);
+    }
+    if node.children.iter().any(|c| c.tag == "anonymous-block") {
+        let old_children = std::mem::take(&mut node.children);
+        for child in old_children {
+            if child.tag == "anonymous-block" {
+                node.children.extend(child.children);
+            } else {
+                node.children.push(child);
+            }
+        }
+    }
+}
+
 pub fn wrap_mixed_children_in_anonymous_blocks(node: &mut WebCore) {
+    // First, unwrap any anonymous blocks from a previous layout pass so that
+    // re-layout is idempotent and doesn't create nested anonymous blocks.
+    if node.children.iter().any(|c| c.tag == "anonymous-block") {
+        let old_children = std::mem::take(&mut node.children);
+        for child in old_children {
+            if child.tag == "anonymous-block" {
+                node.children.extend(child.children);
+            } else {
+                node.children.push(child);
+            }
+        }
+    }
+
     if !node.children.iter().any(is_in_flow_block) {
         return;
     }

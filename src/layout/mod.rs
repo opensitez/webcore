@@ -3347,6 +3347,14 @@ pub fn layout_positioned_static(
     static_x: Option<f32>,
     static_y: Option<f32>,
 ) {
+    if matches!(node.style.display, Display::None) {
+        node.layout.content_rect = Rect::zero();
+        node.layout.padding_rect = Rect::zero();
+        node.layout.border_rect = Rect::zero();
+        node.layout.margin_rect = Rect::zero();
+        return;
+    }
+
     let font_px = node.style.font_size_px(parent_font_px, root_font_px);
     // By default the containing block is the passed containing_rect. For `fixed`
     // positioned elements, use the fixed-position containing block stack: the
@@ -3600,6 +3608,9 @@ pub fn layout_positioned_static(
 }
 
 pub fn shift_rects(node: &mut WebCore, dx: f32, dy: f32) {
+    if matches!(node.style.display, Display::None) {
+        return;
+    }
     node.layout.content_rect.x += dx;
     node.layout.content_rect.y += dy;
     node.layout.padding_rect.x += dx;

@@ -832,7 +832,14 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                     };
                     (w, h)
                 }
-                BackgroundSize::Auto => (iw, ih),
+                BackgroundSize::Auto => {
+                    if node.bg_image_ratio_only && ow > 0.0 && oh > 0.0 {
+                        let scale = (ow / iw).min(oh / ih);
+                        (iw * scale, ih * scale)
+                    } else {
+                        (iw, ih)
+                    }
+                }
             };
 
             let pos_x = bg_origin_rect.x
@@ -1034,6 +1041,8 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         ctx.sticky_containing_block
     };
 
+    let suppress_z = ctx.suppress_deferred_z_descendants && !stacking;
+
     let child_ctx = BuildContext {
         scroll_x: child_sx,
         scroll_y: child_sy,
@@ -1046,14 +1055,14 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         visited_hrefs: ctx.visited_hrefs,
         base_url: ctx.base_url,
         clip: child_clip,
-        suppress_deferred_z_descendants: ctx.suppress_deferred_z_descendants,
+        suppress_deferred_z_descendants: suppress_z,
         transform_ctx: ctx.transform_ctx,
     };
 
     let contents_visible = !matches!(eff_style.content_visibility, ContentVisibility::Hidden);
     if contents_visible {
         // ── (i) Negative z-index children (paint behind text) ────────────────
-        if !ctx.suppress_deferred_z_descendants {
+        if !suppress_z {
             let eff_children = node.effective_children();
             let mut negative_z = Vec::new();
             for child in eff_children {
@@ -1286,7 +1295,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             };
 
             let mut deferred_z: Vec<&WebCore> = Vec::new();
-            if !ctx.suppress_deferred_z_descendants {
+            if !suppress_z {
                 for child in eff_children {
                     collect_explicit_z_descendants(child, &mut deferred_z);
                 }
@@ -1294,7 +1303,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
 
             let mut normal_ctx = child_ctx;
             normal_ctx.suppress_deferred_z_descendants =
-                ctx.suppress_deferred_z_descendants || !deferred_z.is_empty();
+                suppress_z || !deferred_z.is_empty();
 
             for child in eff_children {
                 if is_renderable(child) {
