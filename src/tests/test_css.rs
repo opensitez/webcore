@@ -8918,9 +8918,16 @@ fn a_woff2_font_decodes_and_measures() {
 fn test_bootstrap_icons_woff2_decodes() {
     let data = std::fs::read("/tmp/bootstrap-icons.woff2").expect("downloaded above");
     let decoded = crate::woff::decode(&data);
-    assert!(decoded.is_some(), "bootstrap-icons.woff2 MUST decode with our woff2 parser!");
+    assert!(
+        decoded.is_some(),
+        "bootstrap-icons.woff2 MUST decode with our woff2 parser!"
+    );
     let sfnt = decoded.unwrap();
-    eprintln!("Bootstrap-icons decoded: {} bytes -> {} sfnt bytes", data.len(), sfnt.len());
+    eprintln!(
+        "Bootstrap-icons decoded: {} bytes -> {} sfnt bytes",
+        data.len(),
+        sfnt.len()
+    );
     let mut db = fontdb::Database::new();
     let ids = db.load_font_source(fontdb::Source::Binary(std::sync::Arc::new(sfnt)));
     for id in &ids {
@@ -8946,34 +8953,77 @@ fn test_bootstrap_icons_glyph_shaping() {
         let mut hhea_offset = 0;
         for i in 0..num_tables {
             let p = 12 + i * 16;
-            let tag = &sfnt[p..p+4];
-            let offset = u32::from_be_bytes([sfnt[p+8], sfnt[p+9], sfnt[p+10], sfnt[p+11]]) as usize;
-            if tag == b"glyf" { glyf_offset = offset; }
-            if tag == b"loca" { loca_offset = offset; }
-            if tag == b"head" { head_offset = offset; }
-            if tag == b"hmtx" { hmtx_offset = offset; }
-            if tag == b"hhea" { hhea_offset = offset; }
+            let tag = &sfnt[p..p + 4];
+            let offset =
+                u32::from_be_bytes([sfnt[p + 8], sfnt[p + 9], sfnt[p + 10], sfnt[p + 11]]) as usize;
+            if tag == b"glyf" {
+                glyf_offset = offset;
+            }
+            if tag == b"loca" {
+                loca_offset = offset;
+            }
+            if tag == b"head" {
+                head_offset = offset;
+            }
+            if tag == b"hmtx" {
+                hmtx_offset = offset;
+            }
+            if tag == b"hhea" {
+                hhea_offset = offset;
+            }
         }
-        let index_to_loc_format = i16::from_be_bytes([sfnt[head_offset + 50], sfnt[head_offset + 51]]);
-        let num_hmetrics = u16::from_be_bytes([sfnt[hhea_offset + 34], sfnt[hhea_offset + 35]]) as usize;
+        let index_to_loc_format =
+            i16::from_be_bytes([sfnt[head_offset + 50], sfnt[head_offset + 51]]);
+        let num_hmetrics =
+            u16::from_be_bytes([sfnt[hhea_offset + 34], sfnt[hhea_offset + 35]]) as usize;
         let (g_start, g_end) = if index_to_loc_format == 0 {
-            let s = u16::from_be_bytes([sfnt[loca_offset + 1084 * 2], sfnt[loca_offset + 1084 * 2 + 1]]) as usize * 2;
-            let e = u16::from_be_bytes([sfnt[loca_offset + 1085 * 2], sfnt[loca_offset + 1085 * 2 + 1]]) as usize * 2;
+            let s = u16::from_be_bytes([
+                sfnt[loca_offset + 1084 * 2],
+                sfnt[loca_offset + 1084 * 2 + 1],
+            ]) as usize
+                * 2;
+            let e = u16::from_be_bytes([
+                sfnt[loca_offset + 1085 * 2],
+                sfnt[loca_offset + 1085 * 2 + 1],
+            ]) as usize
+                * 2;
             (s, e)
         } else {
-            let s = u32::from_be_bytes([sfnt[loca_offset + 1084 * 4], sfnt[loca_offset + 1084 * 4 + 1], sfnt[loca_offset + 1084 * 4 + 2], sfnt[loca_offset + 1084 * 4 + 3]]) as usize;
-            let e = u32::from_be_bytes([sfnt[loca_offset + 1085 * 4], sfnt[loca_offset + 1085 * 4 + 1], sfnt[loca_offset + 1085 * 4 + 2], sfnt[loca_offset + 1085 * 4 + 3]]) as usize;
+            let s = u32::from_be_bytes([
+                sfnt[loca_offset + 1084 * 4],
+                sfnt[loca_offset + 1084 * 4 + 1],
+                sfnt[loca_offset + 1084 * 4 + 2],
+                sfnt[loca_offset + 1084 * 4 + 3],
+            ]) as usize;
+            let e = u32::from_be_bytes([
+                sfnt[loca_offset + 1085 * 4],
+                sfnt[loca_offset + 1085 * 4 + 1],
+                sfnt[loca_offset + 1085 * 4 + 2],
+                sfnt[loca_offset + 1085 * 4 + 3],
+            ]) as usize;
             (s, e)
         };
         let lsb = if 1084 < num_hmetrics {
-            i16::from_be_bytes([sfnt[hmtx_offset + 1084 * 4 + 2], sfnt[hmtx_offset + 1084 * 4 + 3]])
+            i16::from_be_bytes([
+                sfnt[hmtx_offset + 1084 * 4 + 2],
+                sfnt[hmtx_offset + 1084 * 4 + 3],
+            ])
         } else {
-            i16::from_be_bytes([sfnt[hmtx_offset + num_hmetrics * 4 + (1084 - num_hmetrics) * 2], sfnt[hmtx_offset + num_hmetrics * 4 + (1084 - num_hmetrics) * 2 + 1]])
+            i16::from_be_bytes([
+                sfnt[hmtx_offset + num_hmetrics * 4 + (1084 - num_hmetrics) * 2],
+                sfnt[hmtx_offset + num_hmetrics * 4 + (1084 - num_hmetrics) * 2 + 1],
+            ])
         };
         let adv = if 1084 < num_hmetrics {
-            u16::from_be_bytes([sfnt[hmtx_offset + 1084 * 4], sfnt[hmtx_offset + 1084 * 4 + 1]])
+            u16::from_be_bytes([
+                sfnt[hmtx_offset + 1084 * 4],
+                sfnt[hmtx_offset + 1084 * 4 + 1],
+            ])
         } else {
-            u16::from_be_bytes([sfnt[hmtx_offset + (num_hmetrics - 1) * 4], sfnt[hmtx_offset + (num_hmetrics - 1) * 4 + 1]])
+            u16::from_be_bytes([
+                sfnt[hmtx_offset + (num_hmetrics - 1) * 4],
+                sfnt[hmtx_offset + (num_hmetrics - 1) * 4 + 1],
+            ])
         };
         let gdata = &sfnt[glyf_offset + g_start..glyf_offset + g_end];
         let n_contours = i16::from_be_bytes([gdata[0], gdata[1]]);
@@ -8981,11 +9031,14 @@ fn test_bootstrap_icons_glyph_shaping() {
         let y_min = i16::from_be_bytes([gdata[4], gdata[5]]);
         let x_max = i16::from_be_bytes([gdata[6], gdata[7]]);
         let y_max = i16::from_be_bytes([gdata[8], gdata[9]]);
-        eprintln!("GLYPH 1084: n_contours={} bbox=[{}, {}, {}, {}] lsb={} adv={}",
-            n_contours, x_min, y_min, x_max, y_max, lsb, adv);
+        eprintln!(
+            "GLYPH 1084: n_contours={} bbox=[{}, {}, {}, {}] lsb={} adv={}",
+            n_contours, x_min, y_min, x_max, y_max, lsb, adv
+        );
     }
     let mut fs = FontSystem::new();
-    fs.db_mut().load_font_source(fontdb::Source::Binary(std::sync::Arc::new(sfnt)));
+    fs.db_mut()
+        .load_font_source(fontdb::Source::Binary(std::sync::Arc::new(sfnt)));
     let metrics = Metrics::new(17.6, 22.0);
     let mut buf = Buffer::new(&mut fs, metrics);
     let attrs = Attrs::new().family(cosmic_text::Family::Name("bootstrap-icons"));
@@ -8999,7 +9052,10 @@ fn test_bootstrap_icons_glyph_shaping() {
     impl cosmic_text::Renderer for R<'_> {
         fn rectangle(&mut self, _x: i32, _y: i32, _w: u32, _h: u32, _c: cosmic_text::Color) {}
         fn glyph(&mut self, pg: cosmic_text::PhysicalGlyph, c: cosmic_text::Color) {
-            eprintln!("PhysicalGlyph: x={} y={} cache_key={:?}", pg.x, pg.y, pg.cache_key);
+            eprintln!(
+                "PhysicalGlyph: x={} y={} cache_key={:?}",
+                pg.x, pg.y, pg.cache_key
+            );
             let mut min_x = i32::MAX;
             let mut max_x = i32::MIN;
             self.sc.with_pixels(self.fs, pg.cache_key, c, |x, y, _| {
@@ -9007,10 +9063,18 @@ fn test_bootstrap_icons_glyph_shaping() {
                 max_x = max_x.max(pg.x + x);
             });
             eprintln!("Pixel bounds: x in [{}, {}]", min_x, max_x);
-            assert!(min_x >= 0 && max_x <= 20, "glyph pixel bounds must be within [0, 20], got [{}, {}]", min_x, max_x);
+            assert!(
+                min_x >= 0 && max_x <= 20,
+                "glyph pixel bounds must be within [0, 20], got [{}, {}]",
+                min_x,
+                max_x
+            );
         }
     }
-    let mut r = R { fs: &mut fs, sc: &mut sc };
+    let mut r = R {
+        fs: &mut fs,
+        sc: &mut sc,
+    };
     buf.render(&mut r, cosmic_text::Color::rgb(0, 0, 0));
 }
 
@@ -9031,7 +9095,11 @@ fn test_wpt_woff2_suite() {
 
     // Parse each testCase block from testcaseindex.xht
     for section in html.split(r#"<div class="testCase""#).skip(1) {
-        let id = match section.split(r#"id=""#).nth(1).and_then(|s| s.split('"').next()) {
+        let id = match section
+            .split(r#"id=""#)
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+        {
             Some(id) => id,
             None => continue,
         };
@@ -9055,7 +9123,8 @@ fn test_wpt_woff2_suite() {
                 match crate::woff::decode(&data) {
                     Some(sfnt) => {
                         let mut db = fontdb::Database::new();
-                        let ids = db.load_font_source(fontdb::Source::Binary(std::sync::Arc::new(sfnt)));
+                        let ids =
+                            db.load_font_source(fontdb::Source::Binary(std::sync::Arc::new(sfnt)));
                         if !ids.is_empty() {
                             display_passed += 1;
                         } else {
@@ -9074,7 +9143,8 @@ fn test_wpt_woff2_suite() {
                     None => true,
                     Some(sfnt) => {
                         let mut db = fontdb::Database::new();
-                        db.load_font_source(fontdb::Source::Binary(std::sync::Arc::new(sfnt))).is_empty()
+                        db.load_font_source(fontdb::Source::Binary(std::sync::Arc::new(sfnt)))
+                            .is_empty()
                     }
                 };
                 if rejected {
@@ -9091,8 +9161,14 @@ fn test_wpt_woff2_suite() {
         "[WPT WOFF2] Display: {}/{} passed, Reject: {}/{} passed",
         display_passed, display_total, reject_passed, reject_total
     );
-    assert_eq!(display_passed, display_total, "all Display WPT WOFF2 test fonts must decode");
-    assert_eq!(reject_passed, reject_total, "all Reject WPT WOFF2 test fonts must be rejected");
+    assert_eq!(
+        display_passed, display_total,
+        "all Display WPT WOFF2 test fonts must decode"
+    );
+    assert_eq!(
+        reject_passed, reject_total,
+        "all Reject WPT WOFF2 test fonts must be rejected"
+    );
 }
 
 #[test]

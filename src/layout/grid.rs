@@ -2335,13 +2335,7 @@ fn layout_abs_children(engine: &LayoutEngine, node: &mut WebCore, font_px: f32, 
         .collect();
     for path in abs_paths {
         let child = grid_child_mut(node, &path);
-        layout_positioned(
-            engine,
-            child,
-            containing_rect,
-            font_px,
-            root_font_px,
-        );
+        layout_positioned(engine, child, containing_rect, font_px, root_font_px);
     }
 }
 

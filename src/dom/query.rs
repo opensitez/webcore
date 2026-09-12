@@ -91,6 +91,7 @@ pub fn matching_ids_from_with_state(
                 document_url,
                 prev_siblings: &[],
                 next_siblings: &[],
+                next_sibling_nodes: &[],
             };
             for sel in &selectors {
                 if crate::css::matches_selector_with_ancestors(
@@ -239,6 +240,8 @@ fn query_walk(
         })
         .collect();
 
+    let child_refs: Vec<&WebCore> = node.children.iter().collect();
+
     for (i, child) in node.children.iter().enumerate() {
         if !child.is_element() || child.node_id == 0 {
             continue;
@@ -257,6 +260,7 @@ fn query_walk(
             document_url,
             prev_siblings: &prev_siblings,
             next_siblings: &sibling_records[pos.elem_index[i].saturating_add(1)..],
+            next_sibling_nodes: &child_refs[i + 1..],
         };
 
         for sel in selectors {

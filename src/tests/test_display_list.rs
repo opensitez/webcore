@@ -3496,4 +3496,3 @@ fn test_inline_element_background_does_not_paint_over_text() {
         "Expected white text pixels for 'Poet' inside the red box, but found none!"
     );
 }
-

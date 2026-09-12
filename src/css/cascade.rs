@@ -403,6 +403,7 @@ pub fn apply_cascade_vp_hover_target_url(
         hover_chain,
         &[],
         &[],
+        &[],
         &mut share_cache,
         None,
     );
@@ -1092,6 +1093,7 @@ pub(crate) fn match_rules(
     document_url: &str,
     prev_siblings: &[(String, String, String)],
     next_siblings: &[(String, String, String)],
+    next_sibling_nodes: &[&crate::types::WebCore],
     candidates_buf: &mut Vec<usize>,
 ) -> MatchSets {
     // ⛔ `html_box` is the element itself, always. `:has()`, `:empty`, `:focus`,
@@ -1111,6 +1113,7 @@ pub(crate) fn match_rules(
         document_url,
         prev_siblings,
         next_siblings,
+        next_sibling_nodes,
     };
 
     let mut sets = MatchSets::default();
@@ -1415,6 +1418,7 @@ fn selector_matches_ancestor(
         document_url: match_ctx.document_url,
         prev_siblings: &[],
         next_siblings: &[],
+        next_sibling_nodes: &[],
     };
     matches_selector_with_ancestors(
         &selector.parts,
@@ -1451,6 +1455,7 @@ pub(crate) fn apply_cascade_inner(
     hover_chain: &std::collections::HashSet<u32>,
     prev_siblings: &[(String, String, String)],
     next_siblings: &[(String, String, String)],
+    next_sibling_nodes: &[&crate::types::WebCore],
     share_cache: &mut ShareCache,
     // Selector matches computed off-thread by the parallel pass, keyed by
     // `node_id`. `None`, or a miss, means match inline — never "no rules".
@@ -1530,6 +1535,7 @@ pub(crate) fn apply_cascade_inner(
             document_url,
             prev_siblings,
             next_siblings,
+            next_sibling_nodes,
             candidates_buf,
         ),
     };
@@ -2347,7 +2353,10 @@ pub(crate) fn apply_cascade_inner(
         // see `ShareCache`. A per-parent one could only ever share between
         // siblings, which measured 2.9% on demo.html.
         let parent_id = std::sync::Arc::as_ptr(parent_style) as usize;
-        for (i, child) in children.iter_mut().enumerate() {
+        for i in 0..n_children {
+            let (_before, rest) = children.split_at_mut(i);
+            let (child, after) = rest.split_first_mut().unwrap();
+            let after_nodes: Vec<&crate::types::WebCore> = after.iter().collect();
             if matches!(child.tag.as_str(), "::before" | "::after") {
                 if matches!(
                     parent_style.display,
@@ -2446,6 +2455,7 @@ pub(crate) fn apply_cascade_inner(
                 hover_chain,
                 prev_for_child,
                 next_for_child,
+                &after_nodes,
                 share_cache,
                 precomputed,
             );

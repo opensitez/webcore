@@ -365,7 +365,7 @@ fn compute_intrinsic_width_inner(node: &WebCore) -> f32 {
         // real intrinsic content width. Percentage widths resolve to the container
         // width during layout, which doesn't reflect intrinsic content width.
         let is_fluid_width_container = (ch.style.width.is_auto()
-            || matches!(ch.style.width, CssLength::Percent(_)))
+            || ch.style.width.has_percentage())
             && matches!(
                 ch.style.display,
                 Display::Block
@@ -1891,21 +1891,27 @@ pub fn layout_columns(
 fn is_in_flow_block(c: &WebCore) -> bool {
     !matches!(c.style.display, Display::None)
         && matches!(c.style.float, Float::None)
-        && matches!(c.style.position, Position::Static | Position::Relative | Position::Sticky)
+        && matches!(
+            c.style.position,
+            Position::Static | Position::Relative | Position::Sticky
+        )
         && c.style.is_block_level()
 }
 
 fn is_in_flow_inline(c: &WebCore) -> bool {
     !matches!(c.style.display, Display::None)
         && matches!(c.style.float, Float::None)
-        && matches!(c.style.position, Position::Static | Position::Relative | Position::Sticky)
+        && matches!(
+            c.style.position,
+            Position::Static | Position::Relative | Position::Sticky
+        )
         && (c.style.is_inline_level() || c.is_text_node())
 }
 
 fn has_renderable_content(anon: &WebCore) -> bool {
-    anon.children.iter().any(|c| {
-        !c.is_text_node() || !c.text.chars().all(|ch| ch.is_ascii_whitespace())
-    })
+    anon.children
+        .iter()
+        .any(|c| !c.is_text_node() || !c.text.chars().all(|ch| ch.is_ascii_whitespace()))
 }
 
 fn make_anonymous_block(parent: &WebCore) -> WebCore {
@@ -1983,7 +1989,8 @@ pub fn wrap_mixed_children_in_anonymous_blocks(node: &mut WebCore) {
     }
 
     let has_non_whitespace_inline = node.children.iter().any(|c| {
-        is_in_flow_inline(c) && !(c.is_text_node() && c.text.chars().all(|ch| ch.is_ascii_whitespace()))
+        is_in_flow_inline(c)
+            && !(c.is_text_node() && c.text.chars().all(|ch| ch.is_ascii_whitespace()))
     });
 
     if !has_non_whitespace_inline {
@@ -2006,7 +2013,8 @@ pub fn wrap_mixed_children_in_anonymous_blocks(node: &mut WebCore) {
             }
             new_children.push(child);
         } else if is_in_flow_inline(&child) {
-            let is_ws = child.is_text_node() && child.text.chars().all(|ch| ch.is_ascii_whitespace());
+            let is_ws =
+                child.is_text_node() && child.text.chars().all(|ch| ch.is_ascii_whitespace());
             if is_ws && current_anon.is_none() {
                 // Inter-block whitespace text node, leave as is
                 new_children.push(child);

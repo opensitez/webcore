@@ -504,11 +504,11 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     }
 
     // ── Opacity ──────────────────────────────────────────────────────────────
-    if eff_style.opacity < 1.0 {
-        list.push(PaintCmd::PushOpacity {
-            alpha: eff_style.opacity,
-        });
-    }
+    //
+    // Paint commands below already fold `eff_style.opacity` into their color
+    // alpha. Emitting an additional full-viewport opacity layer here made every
+    // semi-transparent element allocate and composite a whole pixmap during
+    // replay, and also applied opacity twice.
 
     // ── Blend mode ───────────────────────────────────────────────────────────
     if blend != 0 {
@@ -1287,7 +1287,10 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                             && !matches!(node.style.display, Display::Inline)
                             && (matches!(
                                 node.style.display,
-                                Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid
+                                Display::Flex
+                                    | Display::InlineFlex
+                                    | Display::Grid
+                                    | Display::InlineGrid
                             ) || node.layout.line_cache.is_empty())))
                     && (c.tag != "::before" || c.style.is_positioned() || c.style.is_block_level())
                     && (c.tag != "::after" || c.style.is_positioned() || c.style.is_block_level())
@@ -1302,8 +1305,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             }
 
             let mut normal_ctx = child_ctx;
-            normal_ctx.suppress_deferred_z_descendants =
-                suppress_z || !deferred_z.is_empty();
+            normal_ctx.suppress_deferred_z_descendants = suppress_z || !deferred_z.is_empty();
 
             for child in eff_children {
                 if is_renderable(child) {
@@ -1311,8 +1313,15 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 }
             }
 
-            deferred_z.retain(|c| is_renderable(c) && (c.style.z_index_is_auto || c.style.z_index >= 0));
-            deferred_z.sort_by_key(|c| if c.style.z_index_is_auto { 0 } else { c.style.z_index });
+            deferred_z
+                .retain(|c| is_renderable(c) && (c.style.z_index_is_auto || c.style.z_index >= 0));
+            deferred_z.sort_by_key(|c| {
+                if c.style.z_index_is_auto {
+                    0
+                } else {
+                    c.style.z_index
+                }
+            });
             let mut z_ctx = child_ctx;
             z_ctx.suppress_deferred_z_descendants = false;
             for child in deferred_z {
@@ -1360,9 +1369,6 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     }
     if blend != 0 {
         list.push(PaintCmd::PopBlendMode);
-    }
-    if eff_style.opacity < 1.0 {
-        list.push(PaintCmd::PopOpacity);
     }
     if stacking {
         list.push(PaintCmd::EndStackingContext);

@@ -697,9 +697,8 @@ pub fn layout_table(
                     // Not enough room even for minimums: distribute proportionally.
                     for c in 0..num_cols {
                         if !col_has_explicit[c] {
-                            col_widths[c] = (available_for_flex * col_min_widths[c]
-                                / flex_min_total)
-                                .max(1.0);
+                            col_widths[c] =
+                                (available_for_flex * col_min_widths[c] / flex_min_total).max(1.0);
                         }
                     }
                 }

@@ -351,6 +351,7 @@ fn matches_bare(
         document_url: "",
         prev_siblings: &[],
         next_siblings: &[],
+        next_sibling_nodes: &[],
     };
     parsed
         .parts

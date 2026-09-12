@@ -1407,7 +1407,7 @@ impl LayoutEngine {
         // A percentage has no containing block to resolve against while
         // measuring intrinsics, so it counts as indefinite.
         let definite = |len: &CssLength| -> f32 {
-            if len.is_auto() || matches!(len, CssLength::Percent(_)) {
+            if len.is_auto() || len.has_percentage() {
                 return 0.0;
             }
             len.resolve_vp(font_px, 0.0, root_font_px, self.viewport_w, self.viewport_h)
@@ -1453,7 +1453,7 @@ impl LayoutEngine {
         let ratio = node.style.aspect_ratio.filter(|r| *r > 0.0)?;
         // A percentage height is not definite during intrinsic measurement:
         // there is no containing height to resolve it against here.
-        if node.style.height.is_auto() || matches!(node.style.height, CssLength::Percent(_)) {
+        if node.style.height.is_auto() || node.style.height.has_percentage() {
             return None;
         }
         let mut h = self.res_len(&node.style.height, font_px, 0.0, root_font_px);
@@ -1593,10 +1593,7 @@ impl LayoutEngine {
         let font_px = node.style.font_size_px(parent_font_px, root_font_px);
 
         // Explicit width → use that directly
-        if honor_width
-            && !node.style.width.is_auto()
-            && !matches!(node.style.width, CssLength::Percent(_))
-        {
+        if honor_width && !node.style.width.is_auto() && !node.style.width.has_percentage() {
             let w = self.res_len(&node.style.width, font_px, 0.0, root_font_px);
             // ⛔ A `border-box` width ALREADY contains the padding and border,
             // and every caller adds those again on top of what we return — the
@@ -1782,10 +1779,7 @@ impl LayoutEngine {
         // Explicit width → use that directly (but skip percentages — they can't
         // resolve without a known containing width during intrinsic measurement).
         let font_px = node.style.font_size_px(parent_font_px, root_font_px);
-        if honor_width
-            && !node.style.width.is_auto()
-            && !matches!(node.style.width, CssLength::Percent(_))
-        {
+        if honor_width && !node.style.width.is_auto() && !node.style.width.has_percentage() {
             let w = self.res_len(&node.style.width, font_px, 0.0, root_font_px);
             // ⛔ A `border-box` width ALREADY contains the padding and border,
             // and every caller adds those again on top of what we return — the
@@ -1950,10 +1944,8 @@ impl LayoutEngine {
                 // resolve against during intrinsic measurement, so both fall
                 // through to the content measurement rather than reading 0.
                 let basis_is_definite = !ch.style.flex_basis.is_auto()
-                    && !matches!(
-                        ch.style.flex_basis,
-                        CssLength::Content | CssLength::Percent(_)
-                    );
+                    && !matches!(ch.style.flex_basis, CssLength::Content)
+                    && !ch.style.flex_basis.has_percentage();
                 let mut child_main = if basis_is_definite {
                     self.res_len(&ch.style.flex_basis, child_font, 0.0, root_font_px)
                         .max(0.0)
@@ -2206,22 +2198,20 @@ impl LayoutEngine {
         let font_px = style.font_size_px(parent_font_px, root_font_px);
         let rb = self.res_box(style, font_px, 0.0, root_font_px);
         let inline_width_ignored = matches!(style.display, Display::Inline);
-        let content_w = if !inline_width_ignored
-            && !style.width.is_auto()
-            && !matches!(style.width, CssLength::Percent(_))
-        {
-            self.res_len(&style.width, font_px, 0.0, root_font_px)
-        } else if content.is_empty() {
-            0.0
-        } else {
-            self.measure_text_cached(
-                content,
-                font_px,
-                style.font_weight,
-                style.font_style,
-                &style.font_family,
-            )
-        };
+        let content_w =
+            if !inline_width_ignored && !style.width.is_auto() && !style.width.has_percentage() {
+                self.res_len(&style.width, font_px, 0.0, root_font_px)
+            } else if content.is_empty() {
+                0.0
+            } else {
+                self.measure_text_cached(
+                    content,
+                    font_px,
+                    style.font_weight,
+                    style.font_style,
+                    &style.font_family,
+                )
+            };
         content_w.max(0.0)
             + rb.margin_left
             + rb.border_left
@@ -2353,7 +2343,11 @@ impl LayoutEngine {
     }
 
     /// Load font face bytes directly into this engine's font system.
-    pub fn load_font_face_bytes(&mut self, face: &crate::css::FontFaceDecl, bytes: Vec<u8>) -> bool {
+    pub fn load_font_face_bytes(
+        &mut self,
+        face: &crate::css::FontFaceDecl,
+        bytes: Vec<u8>,
+    ) -> bool {
         let fs = match self.font_system {
             Some(ptr) => unsafe { &mut *ptr },
             None => return false,
@@ -2837,15 +2831,22 @@ impl LayoutEngine {
         // The resolved values are applied to rbox after resolve_box_vp.
         let (intrinsic_w_override, intrinsic_h_override) = if has_intrinsic {
             if node.style.width.is_auto() && !node.style.height.is_auto() {
-                let h = node.style.height.resolve_vp(
+                let containing_h = c.forced_height.or(c.available_height).unwrap_or(0.0);
+                let mut h = node.style.height.resolve_vp(
                     font_px,
-                    0.0,
+                    containing_h,
                     root_font_px,
                     self.viewport_w,
                     self.viewport_h,
                 );
-                let w = (h * iw / ih).round();
-                (Some(w), None)
+                let h_override = if h <= 0.0 && node.style.height.has_percentage() && ih > 0.0 {
+                    h = ih;
+                    Some(ih)
+                } else {
+                    None
+                };
+                let w = if ih > 0.0 { (h * iw / ih).round() } else { iw };
+                (Some(w), h_override)
             } else if node.style.height.is_auto() && !node.style.width.is_auto() {
                 let mut w = node.style.width.resolve_vp(
                     font_px,
@@ -3182,9 +3183,7 @@ impl LayoutEngine {
                     && (node.style.margin_left.is_auto() || node.style.margin_right.is_auto())
                 {
                     let tw = self.res_len(&node.style.width, font_px, containing_w, root_font_px);
-                    let non_margin = table_rbox.border_left
-                        + tw
-                        + table_rbox.border_right;
+                    let non_margin = table_rbox.border_left + tw + table_rbox.border_right;
                     let available = (containing_w - non_margin).max(0.0);
                     let (ml, _mr) =
                         if node.style.margin_left.is_auto() && node.style.margin_right.is_auto() {

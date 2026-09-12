@@ -251,6 +251,7 @@ impl CssSelector {
             document_url: "",
             prev_siblings: &[],
             next_siblings: &[],
+            next_sibling_nodes: &[],
         };
         matches_selector_with_ancestors(&self.parts, &b.tag, &b.attributes, 0, 1, &[], &ctx)
     }
@@ -277,6 +278,7 @@ impl CssSelector {
             document_url: "",
             prev_siblings: &[],
             next_siblings: &[],
+            next_sibling_nodes: &[],
         };
         matches_selector_with_ancestors(
             &self.parts,

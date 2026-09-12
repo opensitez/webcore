@@ -123,6 +123,9 @@ pub struct MatchContext<'a> {
     /// Following non-text sibling info for right-to-left selectors such as
     /// `:nth-last-child(An+B of S)`.
     pub next_siblings: &'a [(String, String, String)],
+    /// Following sibling DOM element nodes for forward-looking relative selectors
+    /// such as `:has(+ S)` and `:has(~ S)`.
+    pub next_sibling_nodes: &'a [&'a crate::types::WebCore],
 }
 
 /// Recursively match a selector (parts slice) against a subject element + its ancestor chain.
@@ -185,6 +188,7 @@ pub fn matches_selector_with_ancestors(
                             document_url: ctx.document_url,
                             prev_siblings: &[],
                             next_siblings: &[],
+                            next_sibling_nodes: &[],
                         };
                         if matches_selector_with_ancestors(
                             left_parts,
@@ -217,6 +221,7 @@ pub fn matches_selector_with_ancestors(
                             document_url: ctx.document_url,
                             prev_siblings: &[],
                             next_siblings: &[],
+                            next_sibling_nodes: &[],
                         };
                         matches_selector_with_ancestors(
                             left_parts,
@@ -307,6 +312,7 @@ fn matches_sibling(
         document_url: ctx.document_url,
         prev_siblings: sib_prev,
         next_siblings: &[],
+        next_sibling_nodes: &[],
     };
     matches_selector_with_ancestors(
         left_parts,
@@ -418,11 +424,8 @@ pub(crate) fn matches_part_with_context(
             )
         }),
         SelectorPart::Has(inner) => {
-            // Check if any descendant of the current element matches inner
             if let Some(b) = ctx.html_box {
-                inner
-                    .iter()
-                    .any(|sel| has_descendant_matching(b, sel, ctx.focused_box))
+                inner.iter().any(|sel| has_relative_matching(b, sel, ctx))
             } else {
                 false
             }
@@ -807,6 +810,7 @@ pub(crate) fn matches_part_with_context(
                                 document_url: ctx.document_url,
                                 prev_siblings: &[],
                                 next_siblings: &[],
+                                next_sibling_nodes: &[],
                             };
                             parsed.matches_with_ancestors_ctx_raw(
                                 &anc.tag,
@@ -1114,6 +1118,7 @@ fn has_descendant_matching(
                             document_url: "",
                             prev_siblings: &[],
                             next_siblings: &[],
+                            next_sibling_nodes: &[],
                         };
                         matches_selector_with_ancestors(
                             rest,
@@ -1154,6 +1159,7 @@ fn has_descendant_matching(
             document_url: "",
             prev_siblings: &[],
             next_siblings: &[],
+            next_sibling_nodes: &[],
         };
         if matches_selector_with_ancestors(
             &sel.parts,
@@ -1171,6 +1177,129 @@ fn has_descendant_matching(
         }
     }
     false
+}
+
+fn matches_element_or_descendant(
+    elem: &crate::types::WebCore,
+    parts: &[SelectorPart],
+    ancestors: &mut Vec<AncestorInfo>,
+    ctx: &MatchContext,
+) -> bool {
+    let empty_hover = std::collections::HashSet::new();
+    let elem_ctx = MatchContext {
+        focused_box: ctx.focused_box,
+        keyboard_focus: false,
+        type_child_index: 0,
+        type_sibling_count: 1,
+        html_box: Some(elem),
+        hover_chain: &empty_hover,
+        element_id: elem.node_id,
+        scope_root_id: 0,
+        target_id: 0,
+        document_url: "",
+        prev_siblings: &[],
+        next_siblings: &[],
+        next_sibling_nodes: &[],
+    };
+    if matches_selector_with_ancestors(
+        parts,
+        &elem.tag,
+        &elem.attributes,
+        0,
+        1,
+        ancestors,
+        &elem_ctx,
+    ) {
+        return true;
+    }
+    ancestors.push(AncestorInfo {
+        tag: elem.tag.clone(),
+        attributes: elem.attributes.clone(),
+        child_index: 0,
+        sibling_count: 1,
+        type_child_index: 0,
+        type_sibling_count: 1,
+        node_id: elem.node_id,
+    });
+    for child in elem.children.iter().filter(|c| c.is_element()) {
+        if matches_element_or_descendant(child, parts, ancestors, ctx) {
+            ancestors.pop();
+            return true;
+        }
+    }
+    ancestors.pop();
+    false
+}
+
+fn has_relative_matching(
+    node: &crate::types::WebCore,
+    sel: &CssSelector,
+    ctx: &MatchContext,
+) -> bool {
+    if let Some(SelectorPart::Combinator(c)) = sel.parts.first() {
+        match c {
+            Combinator::AdjacentSibling => {
+                let rest = &sel.parts[1..];
+                if let Some(sibling) = ctx.next_sibling_nodes.iter().find(|s| s.is_element()) {
+                    let mut ancestors = Vec::new();
+                    return matches_element_or_descendant(sibling, rest, &mut ancestors, ctx);
+                }
+                return false;
+            }
+            Combinator::GeneralSibling => {
+                let rest = &sel.parts[1..];
+                return ctx
+                    .next_sibling_nodes
+                    .iter()
+                    .filter(|s| s.is_element())
+                    .any(|sibling| {
+                        let mut ancestors = Vec::new();
+                        matches_element_or_descendant(sibling, rest, &mut ancestors, ctx)
+                    });
+            }
+            Combinator::Child => {
+                let rest = &sel.parts[1..];
+                let empty_hover = std::collections::HashSet::new();
+                return node
+                    .children
+                    .iter()
+                    .filter(|c| c.is_element())
+                    .any(|child| {
+                        let sub_ctx = MatchContext {
+                            focused_box: ctx.focused_box,
+                            keyboard_focus: false,
+                            type_child_index: 0,
+                            type_sibling_count: 1,
+                            html_box: Some(child),
+                            hover_chain: &empty_hover,
+                            element_id: child.node_id,
+                            scope_root_id: 0,
+                            target_id: 0,
+                            document_url: "",
+                            prev_siblings: &[],
+                            next_siblings: &[],
+                            next_sibling_nodes: &[],
+                        };
+                        matches_selector_with_ancestors(
+                            rest,
+                            &child.tag,
+                            &child.attributes,
+                            0,
+                            1,
+                            &[],
+                            &sub_ctx,
+                        )
+                    });
+            }
+            Combinator::Column => return false,
+            Combinator::Descendant => {
+                let mut stripped = sel.clone();
+                stripped.parts.remove(0);
+                return has_descendant_matching(node, &stripped, ctx.focused_box);
+            }
+        }
+    }
+    has_descendant_matching(node, sel, ctx.focused_box)
 }
 
 /// Evaluate CSS An+B formula against a 1-based position.

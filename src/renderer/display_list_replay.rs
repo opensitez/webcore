@@ -138,19 +138,35 @@ fn replay_inner(
     // commands must all run or the clip and layer stacks desync.
     let vis_top = scroll_y - CULL_MARGIN;
     let vis_bot = scroll_y + (ph as f32) / scale.max(0.001) + CULL_MARGIN;
+    let vis_left = scroll_x - CULL_MARGIN;
+    let vis_right = scroll_x + (pw as f32) / scale.max(0.001) + CULL_MARGIN;
     let mut transform_depth = 0i32;
+    let mut skip_clip_depth = 0u32;
 
     for cmd in &list.commands {
+        if skip_clip_depth > 0 {
+            match cmd {
+                PaintCmd::PushClip { .. } | PaintCmd::PushClipPath { .. } => {
+                    skip_clip_depth += 1;
+                }
+                PaintCmd::PopClip => {
+                    skip_clip_depth -= 1;
+                }
+                _ => {}
+            }
+            continue;
+        }
+
         match cmd {
             PaintCmd::PushTransform { .. } => transform_depth += 1,
             PaintCmd::PopTransform => transform_depth -= 1,
             _ => {}
         }
-        // ⛔ Also never while a LAYER is active. `PushOpacity`, `PushFilter`
-        // and `PushBlendMode` redirect drawing into an offscreen pixmap that is
-        // composited later, so a command inside one cannot be judged against
-        // the document band the way an ordinary command can.
-        if transform_depth == 0 && layer_stack.is_empty() {
+        // Layer-backed commands paint into an offscreen pixmap with the same
+        // document-to-viewport transform, so drawing commands outside the
+        // visible band can still be skipped. Stack commands themselves keep
+        // returning `None` from `cmd_y_range`, preserving layer/clip balance.
+        if transform_depth == 0 {
             if let Some((top, bot)) = cmd_y_range(cmd) {
                 if bot < vis_top || top > vis_bot {
                     continue;
@@ -406,11 +422,27 @@ fn replay_inner(
                 radius,
                 radius_y,
             } => {
+                if transform_depth == 0
+                    && (rect.right() < vis_left
+                        || rect.x > vis_right
+                        || rect.bottom() < vis_top
+                        || rect.y > vis_bot)
+                {
+                    skip_clip_depth = 1;
+                    continue;
+                }
                 clip_stack.push(*rect);
                 // Build a clip mask from the clip rect
-                let mut mask =
-                    build_clip_mask(rect, radius, radius_y, pw, ph, scale, scroll_x, scroll_y);
-                if let (Some(m), Some(prev)) = (&mut mask, clip_mask_stack.last().and_then(|x| x.as_ref())) {
+                let mut mask = if simple_clip_contains_viewport(
+                    rect, radius, radius_y, pw, ph, scale, scroll_x, scroll_y,
+                ) {
+                    None
+                } else {
+                    build_clip_mask(rect, radius, radius_y, pw, ph, scale, scroll_x, scroll_y)
+                };
+                if let (Some(m), Some(prev)) =
+                    (&mut mask, clip_mask_stack.last().and_then(|x| x.as_ref()))
+                {
                     for (dst, src) in m.data_mut().iter_mut().zip(prev.data().iter()) {
                         *dst = (*dst as u16 * *src as u16 / 255) as u8;
                     }
@@ -419,9 +451,20 @@ fn replay_inner(
             }
             PaintCmd::PushClipPath { points } => {
                 let bounds = polygon_bounds(points).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
+                if transform_depth == 0
+                    && (bounds.right() < vis_left
+                        || bounds.x > vis_right
+                        || bounds.bottom() < vis_top
+                        || bounds.y > vis_bot)
+                {
+                    skip_clip_depth = 1;
+                    continue;
+                }
                 clip_stack.push(bounds);
                 let mut mask = build_polygon_clip_mask(points, pw, ph, scale, scroll_x, scroll_y);
-                if let (Some(m), Some(prev)) = (&mut mask, clip_mask_stack.last().and_then(|x| x.as_ref())) {
+                if let (Some(m), Some(prev)) =
+                    (&mut mask, clip_mask_stack.last().and_then(|x| x.as_ref()))
+                {
                     for (dst, src) in m.data_mut().iter_mut().zip(prev.data().iter()) {
                         *dst = (*dst as u16 * *src as u16 / 255) as u8;
                     }
@@ -2511,7 +2554,10 @@ fn draw_text_cmd(
             ct_color,
             clip_mask,
         );
-        buf.layout_runs().next().map(|r| (r.line_w, Some(r.line_y))).unwrap_or((0.0, None))
+        buf.layout_runs()
+            .next()
+            .map(|r| (r.line_w, Some(r.line_y)))
+            .unwrap_or((0.0, None))
     });
 
     // Draw text decorations (underline, overline, strikethrough)
@@ -2627,9 +2673,7 @@ fn draw_text_cmd(
         }
     }
     if decoration.overline {
-        let oy = run_line_y
-            .map(|ly| phys_y + ly - phys_px)
-            .unwrap_or(phys_y) - thickness;
+        let oy = run_line_y.map(|ly| phys_y + ly - phys_px).unwrap_or(phys_y) - thickness;
         draw_deco_line(pixmap, phys_x, line_w, oy, decoration.style);
     }
     if decoration.strikethrough {
@@ -3011,6 +3055,28 @@ fn build_clip_mask(
         }
     }
     Some(mask)
+}
+
+fn simple_clip_contains_viewport(
+    rect: &Rect,
+    radius: &[f32; 4],
+    radius_y: &[f32; 4],
+    pw: u32,
+    ph: u32,
+    scale: f32,
+    scroll_x: f32,
+    scroll_y: f32,
+) -> bool {
+    if radius.iter().any(|r| *r > 0.5) || radius_y.iter().any(|r| *r > 0.5) {
+        return false;
+    }
+    let inv_scale = 1.0 / scale.max(0.001);
+    let view_w = pw as f32 * inv_scale;
+    let view_h = ph as f32 * inv_scale;
+    rect.x <= scroll_x
+        && rect.y <= scroll_y
+        && rect.right() >= scroll_x + view_w
+        && rect.bottom() >= scroll_y + view_h
 }
 
 fn build_polygon_clip_mask(

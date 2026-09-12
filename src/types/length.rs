@@ -109,6 +109,14 @@ impl CalcNode {
             }
         }
     }
+
+    pub fn has_percentage(&self) -> bool {
+        match self {
+            CalcNode::Value(v) => v.has_percentage(),
+            CalcNode::Add(a, b) | CalcNode::Sub(a, b) => a.has_percentage() || b.has_percentage(),
+            CalcNode::Mul(a, _) | CalcNode::Div(a, _) => a.has_percentage(),
+        }
+    }
 }
 
 impl Default for CssLength {
@@ -244,5 +252,18 @@ impl CssLength {
     }
     pub fn is_none(&self) -> bool {
         matches!(self, CssLength::None)
+    }
+
+    /// Reports `true` if this length directly contains or resolves against a percentage of the containing block.
+    pub fn has_percentage(&self) -> bool {
+        match self {
+            CssLength::Percent(_) => true,
+            CssLength::Calc(c) => c[0] != 0.0,
+            CssLength::CalcExpr(node) => node.has_percentage(),
+            CssLength::Min(vals) | CssLength::Max(vals) => vals.iter().any(|v| v.has_percentage()),
+            CssLength::Clamp(parts) => parts.iter().any(|v| v.has_percentage()),
+            CssLength::FitContentArg(arg) => arg.has_percentage(),
+            _ => false,
+        }
     }
 }

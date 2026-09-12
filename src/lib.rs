@@ -90,9 +90,10 @@ pub use types::{
     apply_autofocus, build_form_submit_url, collect_form_data, encode_form_urlencoded,
     find_parent_form_action, input_value, is_text_input, process_form_input_key, reset_form,
     AnimDirection, AnimState, Announcement, CSSCursor, CanvasContext, Color, Component,
-    ComponentEvent, ComponentRegistry, ComputedStyle, Document, DocumentStylesheet, EasingFn, FillMode, FormEvent,
-    FormEventCallback, FormEventKind, KeyframeStop, LivePoliteness, MatchedRule, ParsedAnimation,
-    ParsedTransition, Rect, ShadowMode, ShadowRoot, TransitionState, WebCore,
+    ComponentEvent, ComponentRegistry, ComputedStyle, Document, DocumentStylesheet, EasingFn,
+    FillMode, FormEvent, FormEventCallback, FormEventKind, KeyframeStop, LivePoliteness,
+    MatchedRule, ParsedAnimation, ParsedTransition, Rect, ShadowMode, ShadowRoot, TransitionState,
+    WebCore,
 };
 
 /// High-level convenience: parse HTML, layout, ready to render.

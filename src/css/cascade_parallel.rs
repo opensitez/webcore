@@ -35,6 +35,7 @@ use std::collections::{HashMap, HashSet};
 /// The wrapper is around the BORROW, not the work item: a future field that is
 /// genuinely not `Sync` then fails to compile instead of being blessed by this.
 struct MatchNode<'a>(&'a crate::types::WebCore);
+unsafe impl Send for MatchNode<'_> {}
 unsafe impl Sync for MatchNode<'_> {}
 
 /// One element to match, with everything the matcher needs about its position.
@@ -55,6 +56,8 @@ struct CascadeWorkItem<'a> {
     /// is what `+` and `~` look at.
     siblings: std::sync::Arc<Vec<(String, String, String)>>,
     sibling_pos: usize,
+    sibling_nodes: std::sync::Arc<Vec<MatchNode<'a>>>,
+    raw_child_index: usize,
 }
 
 /// Pass 1: flatten the DOM tree into a work list.
@@ -68,6 +71,8 @@ fn flatten_tree_for_cascade<'a>(
     type_sibling_count: usize,
     siblings: &std::sync::Arc<Vec<(String, String, String)>>,
     sibling_pos: usize,
+    sibling_nodes: &std::sync::Arc<Vec<MatchNode<'a>>>,
+    raw_child_index: usize,
     out: &mut Vec<CascadeWorkItem<'a>>,
 ) {
     if ancestors.len() >= MAX_CASCADE_DEPTH {
@@ -89,6 +94,8 @@ fn flatten_tree_for_cascade<'a>(
             type_sibling_count,
             siblings: siblings.clone(),
             sibling_pos,
+            sibling_nodes: sibling_nodes.clone(),
+            raw_child_index,
         });
     }
 
@@ -153,6 +160,8 @@ fn flatten_tree_for_cascade<'a>(
                 })
                 .collect::<Vec<_>>(),
         );
+        let child_nodes =
+            std::sync::Arc::new(node.children.iter().map(MatchNode).collect::<Vec<_>>());
         for (i, child) in node.children.iter().enumerate() {
             let (ci, ns) = if !child.is_element() {
                 (i, n_children)
@@ -168,6 +177,8 @@ fn flatten_tree_for_cascade<'a>(
                 type_totals[i],
                 &child_siblings,
                 elem_indices[i],
+                &child_nodes,
+                i,
                 out,
             );
         }
@@ -201,6 +212,7 @@ pub fn apply_cascade_parallel(
         let mut work_items: Vec<CascadeWorkItem> = Vec::new();
         let mut ancestors: Vec<AncestorInfo> = Vec::new();
         let no_siblings = std::sync::Arc::new(Vec::new());
+        let no_sibling_nodes = std::sync::Arc::new(Vec::new());
         flatten_tree_for_cascade(
             root,
             &mut ancestors,
@@ -210,6 +222,8 @@ pub fn apply_cascade_parallel(
             1,
             &no_siblings,
             0,
+            &no_sibling_nodes,
+            0,
             &mut work_items,
         );
 
@@ -217,6 +231,15 @@ pub fn apply_cascade_parallel(
             .par_iter()
             .map(|item| {
                 let mut candidates_buf: Vec<usize> = Vec::new();
+                let next_nodes: Vec<&crate::types::WebCore> =
+                    if item.raw_child_index + 1 < item.sibling_nodes.len() {
+                        item.sibling_nodes[item.raw_child_index + 1..]
+                            .iter()
+                            .map(|m| m.0)
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                 let sets = match_rules(
                     item.node.0,
                     stylesheet,
@@ -234,6 +257,7 @@ pub fn apply_cascade_parallel(
                     document_url,
                     &item.siblings[..item.sibling_pos],
                     &item.siblings[item.sibling_pos.saturating_add(1).min(item.siblings.len())..],
+                    &next_nodes,
                     &mut candidates_buf,
                 );
                 (item.node.0.node_id, sets)
@@ -265,6 +289,7 @@ pub fn apply_cascade_parallel(
         &mut candidates_buf,
         &mut counters,
         hover_chain,
+        &[],
         &[],
         &[],
         &mut share_cache,

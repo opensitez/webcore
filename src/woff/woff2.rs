@@ -203,7 +203,10 @@ pub fn decode(data: &[u8]) -> Option<Vec<u8>> {
                 _ => return None,
             }
         }
-        Some(CollectionDirectory { _version: version, fonts })
+        Some(CollectionDirectory {
+            _version: version,
+            fonts,
+        })
     } else {
         None
     };
@@ -320,11 +323,31 @@ pub fn decode(data: &[u8]) -> Option<Vec<u8>> {
         if &e.tag == b"hmtx" && e.transformed {
             let (glyf, loca, head, hhea, maxp) = if let Some(coll) = &collection_dir {
                 let font = coll.fonts.iter().find(|f| f.table_indices.contains(&i))?;
-                let glyf_idx = font.table_indices.iter().find(|&&idx| &dir[idx].tag == b"glyf").copied()?;
-                let loca_idx = font.table_indices.iter().find(|&&idx| &dir[idx].tag == b"loca").copied()?;
-                let head_idx = font.table_indices.iter().find(|&&idx| &dir[idx].tag == b"head").copied()?;
-                let hhea_idx = font.table_indices.iter().find(|&&idx| &dir[idx].tag == b"hhea").copied()?;
-                let maxp_idx = font.table_indices.iter().find(|&&idx| &dir[idx].tag == b"maxp").copied()?;
+                let glyf_idx = font
+                    .table_indices
+                    .iter()
+                    .find(|&&idx| &dir[idx].tag == b"glyf")
+                    .copied()?;
+                let loca_idx = font
+                    .table_indices
+                    .iter()
+                    .find(|&&idx| &dir[idx].tag == b"loca")
+                    .copied()?;
+                let head_idx = font
+                    .table_indices
+                    .iter()
+                    .find(|&&idx| &dir[idx].tag == b"head")
+                    .copied()?;
+                let hhea_idx = font
+                    .table_indices
+                    .iter()
+                    .find(|&&idx| &dir[idx].tag == b"hhea")
+                    .copied()?;
+                let maxp_idx = font
+                    .table_indices
+                    .iter()
+                    .find(|&&idx| &dir[idx].tag == b"maxp")
+                    .copied()?;
                 (
                     &out_tables[glyf_idx].1[..],
                     &out_tables[loca_idx].1[..],
@@ -530,7 +553,6 @@ fn validate_optional_block(
     }
     Some(Some((start, end)))
 }
-
 
 fn table_is_transformed(tag: &[u8; 4], version: u8) -> Option<bool> {
     match (tag, version) {
@@ -743,7 +765,11 @@ fn rebuild_glyf(data: &[u8], index_to_loc: i16) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut composite = Reader::new(slice(composite_size)?);
     let bbox_all = slice(bbox_size)?;
     let instr_all = slice(instr_size)?;
-    let overlap_all = if overlap_size > 0 { Some(slice(overlap_size)?) } else { None };
+    let overlap_all = if overlap_size > 0 {
+        Some(slice(overlap_size)?)
+    } else {
+        None
+    };
 
     // The total number of bytes in bboxBitmap is equal to 4 * floor((numGlyphs + 31) / 32) (WOFF2 §5.1)
     let bitmap_len = ((num_glyphs + 31) / 32) * 4;
@@ -883,7 +909,10 @@ fn rebuild_glyf(data: &[u8], index_to_loc: i16) -> Option<(Vec<u8>, Vec<u8>)> {
         glyf.extend_from_slice(&(instr_len as u16).to_be_bytes());
         glyf.extend_from_slice(instructions);
         let has_overlap_bit = if let Some(bitmap) = overlap_all {
-            bitmap.get(gid / 8).map(|b| b & (0x80 >> (gid % 8)) != 0).unwrap_or(false)
+            bitmap
+                .get(gid / 8)
+                .map(|b| b & (0x80 >> (gid % 8)) != 0)
+                .unwrap_or(false)
         } else {
             false
         };

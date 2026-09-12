@@ -416,9 +416,8 @@ pub fn layout_flex(
             _ => None,
         };
 
-        let basis_is_percent_auto = !is_row
-            && matches!(child.style.flex_basis, CssLength::Percent(_))
-            && rbox.content_height.is_none();
+        let basis_is_percent_auto =
+            !is_row && child.style.flex_basis.has_percentage() && rbox.content_height.is_none();
         // `flex-basis: content` sizes from the content and IGNORES the item's
         // own `width`/`height` (Flexbox §7.2.3), so it skips straight to the
         // content-based branch rather than falling back to the specified size.
@@ -636,9 +635,7 @@ pub fn layout_flex(
             // definite, so it is no suggestion at all.
             let definite = !len.is_auto()
                 && len.intrinsic().is_none()
-                && !(matches!(len, CssLength::Percent(_))
-                    && !is_row
-                    && rbox.content_height.is_none());
+                && !(len.has_percentage() && !is_row && rbox.content_height.is_none());
             if definite {
                 let basis = if is_row {
                     content_w
@@ -753,6 +750,32 @@ pub fn layout_flex(
         definite_main = Some(content_w);
     }
 
+    let bb_h = if node.style.box_sizing == crate::types::BoxSizing::BorderBox {
+        rbox.padding_top + rbox.padding_bottom + rbox.border_top + rbox.border_bottom
+    } else {
+        0.0
+    };
+    let flex_min_h = (node.style.min_height.resolve_vp(
+        font_px,
+        0.0,
+        root_font_px,
+        engine.viewport_w,
+        engine.viewport_h,
+    ) - bb_h)
+        .max(0.0);
+    let flex_max_h = if node.style.max_height.is_none() || node.style.max_height.is_auto() {
+        f32::MAX
+    } else {
+        (node.style.max_height.resolve_vp(
+            font_px,
+            0.0,
+            root_font_px,
+            engine.viewport_w,
+            engine.viewport_h,
+        ) - bb_h)
+            .max(0.0)
+    };
+
     if items.is_empty() {
         let ch = if let Some(h) = rbox.content_height {
             h
@@ -765,6 +788,7 @@ pub fn layout_flex(
         } else {
             0.0
         };
+        let ch = ch.max(flex_min_h).min(flex_max_h).max(0.0);
         finish_flex(node, rbox, content_x, content_y, content_w, ch);
         node.layout.collapsed_margin_top = rbox.margin_top;
         node.layout.collapsed_margin_bottom = rbox.margin_bottom;
@@ -1544,6 +1568,7 @@ pub fn layout_flex(
         max_main.max(0.0)
     };
 
+    let content_h = content_h.max(flex_min_h).min(flex_max_h).max(0.0);
     finish_flex(node, rbox, content_x, content_y, content_w, content_h);
 
     node.layout.collapsed_margin_top = rbox.margin_top;
@@ -1807,14 +1832,10 @@ fn layout_abs_children(engine: &LayoutEngine, node: &mut WebCore, font_px: f32, 
         })
         .collect();
     for path in abs_paths {
+        let parent_flex_direction = node.style.flex_direction;
+        let parent_direction = node.style.direction;
         let child = child_mut(node, &path);
-        layout_positioned(
-            engine,
-            child,
-            containing_rect,
-            font_px,
-            root_font_px,
-        );
+        layout_positioned(engine, child, containing_rect, font_px, root_font_px);
 
         // For absolutely-positioned children with all insets auto, apply the CSS
         // "static position" AFTER layout_positioned: where the item would go if it
@@ -1827,20 +1848,73 @@ fn layout_abs_children(engine: &LayoutEngine, node: &mut WebCore, font_px: f32, 
         if all_auto && matches!(child.style.position, Position::Absolute) {
             let cw = child.layout.border_rect.w;
             let ch = child.layout.border_rect.h;
-            // X: driven by justify-content of the flex container.
-            let target_x = match justify_content {
-                JustifyContent::Center => containing_rect.x + (containing_rect.w - cw) / 2.0,
-                JustifyContent::FlexEnd => containing_rect.x + containing_rect.w - cw,
-                _ => containing_rect.x,
-            };
-            // Y: driven by align-items of the flex container, which the item's
-            // own `align-self` overrides exactly as it does for an in-flow item
-            // (Flexbox §4.1). Only the container's value was read, so
-            // `align-self` on an abs-positioned child did nothing.
-            let target_y = match effective_align_self_inner(child, align_items) {
-                AlignItems::Center => containing_rect.y + (containing_rect.h - ch) / 2.0,
-                AlignItems::FlexEnd => containing_rect.y + containing_rect.h - ch,
-                _ => containing_rect.y,
+            let is_row = matches!(
+                parent_flex_direction,
+                FlexDirection::Row | FlexDirection::RowReverse
+            );
+            let is_rtl = parent_direction == crate::types::Direction::RTL;
+            let is_reversed = matches!(
+                parent_flex_direction,
+                FlexDirection::RowReverse | FlexDirection::ColumnReverse
+            ) ^ (is_row && is_rtl);
+
+            let (target_x, target_y) = if is_row {
+                let start_x = if is_reversed {
+                    containing_rect.x + containing_rect.w - cw
+                } else {
+                    containing_rect.x
+                };
+                let end_x = if is_reversed {
+                    containing_rect.x
+                } else {
+                    containing_rect.x + containing_rect.w - cw
+                };
+                let tx = match justify_content {
+                    JustifyContent::Center => containing_rect.x + (containing_rect.w - cw) / 2.0,
+                    JustifyContent::FlexEnd => end_x,
+                    _ => start_x,
+                };
+                let ty = match effective_align_self_inner(child, align_items) {
+                    AlignItems::Center => containing_rect.y + (containing_rect.h - ch) / 2.0,
+                    AlignItems::FlexEnd => containing_rect.y + containing_rect.h - ch,
+                    _ => containing_rect.y,
+                };
+                (tx, ty)
+            } else {
+                let start_y = if is_reversed {
+                    containing_rect.y + containing_rect.h - ch
+                } else {
+                    containing_rect.y
+                };
+                let end_y = if is_reversed {
+                    containing_rect.y
+                } else {
+                    containing_rect.y + containing_rect.h - ch
+                };
+                let ty = match justify_content {
+                    JustifyContent::Center => containing_rect.y + (containing_rect.h - ch) / 2.0,
+                    JustifyContent::FlexEnd => end_y,
+                    _ => start_y,
+                };
+                let cross_align = effective_align_self_inner(child, align_items);
+                let tx = match cross_align {
+                    AlignItems::Center => containing_rect.x + (containing_rect.w - cw) / 2.0,
+                    AlignItems::FlexEnd => {
+                        if is_rtl {
+                            containing_rect.x
+                        } else {
+                            containing_rect.x + containing_rect.w - cw
+                        }
+                    }
+                    _ => {
+                        if is_rtl {
+                            containing_rect.x + containing_rect.w - cw
+                        } else {
+                            containing_rect.x
+                        }
+                    }
+                };
+                (tx, ty)
             };
             let dx = target_x - child.layout.border_rect.x;
             let dy = target_y - child.layout.border_rect.y;

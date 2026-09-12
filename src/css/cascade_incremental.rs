@@ -202,6 +202,7 @@ fn apply_cascade_incremental_walk(
             hover_chain,
             &[],
             &[],
+            &[],
             // A cache local to this call: an incremental re-cascade
             // touches one subtree, so nothing outside it can be shared into.
             &mut crate::css::cascade::ShareCache::new(),

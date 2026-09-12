@@ -97,6 +97,7 @@ fn apply_container_cascade_inner(
             document_url: "",
             prev_siblings: &[],
             next_siblings: &[],
+            next_sibling_nodes: &[],
         };
         let mut cont_matched: Vec<(u32, Declarations)> = Vec::new();
         for rule in &stylesheet.rules {

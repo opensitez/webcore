@@ -90,7 +90,8 @@ pub(crate) fn handle_head_tag(
             let media = attrs.get("media").map(|s| s.as_str()).unwrap_or("");
             let disabled = attrs.contains_key("disabled");
             let onload = attrs.get("onload").map(|s| s.as_str()).unwrap_or("");
-            let is_async_screen = onload.contains("media") && (onload.contains("all") || onload.contains("screen"));
+            let is_async_screen =
+                onload.contains("media") && (onload.contains("all") || onload.contains("screen"));
             let is_print_only = media.eq_ignore_ascii_case("print") && !is_async_screen;
             // Don't fire hook for print-only stylesheets — they
             // shouldn't be fetched/applied in screen rendering.
@@ -104,11 +105,15 @@ pub(crate) fn handle_head_tag(
                 rel.eq_ignore_ascii_case("stylesheet") && !disabled && !href.is_empty();
             parser.push_head_node("link", attrs, String::new());
             if want_sheet {
-                parser.linked_stylesheets.push((href.clone(), media_owned.clone()));
-                parser.document_stylesheets.push(DocumentStylesheet::Linked {
-                    href,
-                    media: media_owned,
-                });
+                parser
+                    .linked_stylesheets
+                    .push((href.clone(), media_owned.clone()));
+                parser
+                    .document_stylesheets
+                    .push(DocumentStylesheet::Linked {
+                        href,
+                        media: media_owned,
+                    });
             }
         }
         "meta" | "base" => {
