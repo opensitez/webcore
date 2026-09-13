@@ -5270,6 +5270,19 @@ fn apply_background(s: &mut ComputedStyle, v: &str) {
 
 fn reset_background_fields(s: &mut ComputedStyle) {
     s.background_color = Color::TRANSPARENT;
+    reset_background_image_fields(s);
+    s.background_position_x = CssLength::Zero;
+    s.background_position_y = CssLength::Zero;
+    s.background_size = BackgroundSize::Auto;
+    s.background_size_w = CssLength::Auto;
+    s.background_size_h = CssLength::Auto;
+    s.background_repeat = BackgroundRepeat::Repeat;
+    s.background_attachment = BackgroundAttachment::Scroll;
+    s.background_origin = BackgroundClip::PaddingBox;
+    s.background_clip = BackgroundClip::BorderBox;
+}
+
+fn reset_background_image_fields(s: &mut ComputedStyle) {
     s.background_image_url.clear();
     s.gradient_type = GradientType::None;
     s.gradient_angle = 180.0;
@@ -5282,15 +5295,6 @@ fn reset_background_fields(s: &mut ComputedStyle) {
     s.gradient_radial_position_y = CssLength::Percent(50.0);
     s.rare_mut().gradient_stops.clear();
     s.rare_mut().additional_background_layers.clear();
-    s.background_position_x = CssLength::Zero;
-    s.background_position_y = CssLength::Zero;
-    s.background_size = BackgroundSize::Auto;
-    s.background_size_w = CssLength::Auto;
-    s.background_size_h = CssLength::Auto;
-    s.background_repeat = BackgroundRepeat::Repeat;
-    s.background_attachment = BackgroundAttachment::Scroll;
-    s.background_origin = BackgroundClip::PaddingBox;
-    s.background_clip = BackgroundClip::BorderBox;
 }
 
 fn layer_has_background_image(s: &ComputedStyle) -> bool {
@@ -5591,10 +5595,7 @@ fn apply_background_misc_tokens(s: &mut ComputedStyle, tokens: &[&str]) {
 fn apply_background_image(s: &mut ComputedStyle, v: &str) {
     let layers = crate::css::value_parse::split_top_level_commas(v);
     if layers.len() > 1 {
-        s.background_image_url.clear();
-        s.gradient_type = GradientType::None;
-        s.rare_mut().gradient_stops.clear();
-        s.rare_mut().additional_background_layers.clear();
+        reset_background_image_fields(s);
         let mut all_image_layers: Vec<ComputedStyle> = Vec::new();
         for layer in &layers {
             let mut parsed = ComputedStyle::default();
@@ -5639,12 +5640,15 @@ fn apply_background_image(s: &mut ComputedStyle, v: &str) {
 fn apply_single_background_image(s: &mut ComputedStyle, v: &str) {
     let lower = v.to_ascii_lowercase();
     if lower.contains("gradient") {
+        reset_background_image_fields(s);
         super::apply_gradient(s, v);
     } else if lower.trim() == "none" {
-        s.background_image_url.clear();
+        reset_background_image_fields(s);
     } else if let Some(url) = extract_image_set_url(v) {
+        reset_background_image_fields(s);
         s.background_image_url = url;
     } else if let Some(url) = super::extract_url(v) {
+        reset_background_image_fields(s);
         s.background_image_url = url;
     }
 }

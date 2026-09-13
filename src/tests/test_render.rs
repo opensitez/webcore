@@ -1418,6 +1418,18 @@ fn render_border_radius_top_only_renders_top_arc() {
         top_has_border,
         "top center of spinner should have a white border arc pixel"
     );
+    let upper_left_arc = (10u32..20).any(|y| {
+        let (r, g, b, a) = pixel(&pm, 14, y);
+        a > 30 && r > 100 && g > 100 && b > 100
+    });
+    let upper_right_arc = (10u32..20).any(|y| {
+        let (r, g, b, a) = pixel(&pm, 66, y);
+        a > 30 && r > 100 && g > 100 && b > 100
+    });
+    assert!(
+        upper_left_arc && upper_right_arc,
+        "spinner border-top should paint a circular arc, not just a straight top line"
+    );
 
     // Bottom center (x=40, y≈76) should have NO border (transparent → black background)
     let bottom_has_border = (70u32..80).any(|y| {
@@ -1427,6 +1439,32 @@ fn render_border_radius_top_only_renders_top_arc() {
     assert!(
         !bottom_has_border,
         "bottom center of spinner should be black (no border-bottom), but found border pixels"
+    );
+}
+
+#[test]
+fn render_border_opacity_applies_to_rounded_rings() {
+    let pm = render_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; }
+        .ring {
+          width: 48px; height: 48px; border-radius: 50%;
+          border: 4px solid rgb(0, 255, 0);
+          opacity: 0.25;
+        }
+        </style>
+        <div class="ring"></div>
+    "#,
+        80,
+        80,
+    );
+
+    let (_r, g, _b, _a) = pixel(&pm, 24, 2);
+    assert!(
+        (30..=120).contains(&g),
+        "rounded border should include element opacity; got green={g}"
     );
 }
 

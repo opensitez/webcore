@@ -9,21 +9,23 @@ static CSS_RESOURCE_POOL: std::sync::LazyLock<rayon::ThreadPool> = std::sync::La
         .expect("webcore CSS resource pool")
 });
 
-static IMAGE_RESOURCE_POOL: std::sync::LazyLock<rayon::ThreadPool> = std::sync::LazyLock::new(|| {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(resource_pool_threads(4, 8))
-        .thread_name(|i| format!("webcore-image-{i}"))
-        .build()
-        .expect("webcore image resource pool")
-});
+static IMAGE_RESOURCE_POOL: std::sync::LazyLock<rayon::ThreadPool> =
+    std::sync::LazyLock::new(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(resource_pool_threads(4, 8))
+            .thread_name(|i| format!("webcore-image-{i}"))
+            .build()
+            .expect("webcore image resource pool")
+    });
 
-static FONT_RESOURCE_POOL: std::sync::LazyLock<rayon::ThreadPool> = std::sync::LazyLock::new(|| {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(resource_pool_threads(2, 4))
-        .thread_name(|i| format!("webcore-font-{i}"))
-        .build()
-        .expect("webcore font resource pool")
-});
+static FONT_RESOURCE_POOL: std::sync::LazyLock<rayon::ThreadPool> =
+    std::sync::LazyLock::new(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(resource_pool_threads(2, 4))
+            .thread_name(|i| format!("webcore-font-{i}"))
+            .build()
+            .expect("webcore font resource pool")
+    });
 
 static PARSED_CSS_CACHE: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<css::Stylesheet>>>,
@@ -354,8 +356,9 @@ pub const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Ap
 
 pub type StylesheetLoader =
     std::sync::Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync + 'static>;
-pub type StreamingStylesheetLoader =
-    std::sync::Arc<dyn Fn(&str, &mut dyn FnMut(&str)) -> Result<(), String> + Send + Sync + 'static>;
+pub type StreamingStylesheetLoader = std::sync::Arc<
+    dyn Fn(&str, &mut dyn FnMut(&str)) -> Result<(), String> + Send + Sync + 'static,
+>;
 pub type ImageLoader =
     std::sync::Arc<dyn Fn(&str) -> Option<html::DecodedImage> + Send + Sync + 'static>;
 
@@ -379,9 +382,9 @@ where
 {
     if cache_parsed
         && let Some(sheet) = PARSED_CSS_CACHE
-        .lock()
-        .ok()
-        .and_then(|cache| cache.get(&cache_key).cloned())
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&cache_key).cloned())
     {
         return CachedStylesheetLoad {
             sheet: (*sheet).clone(),
@@ -475,7 +478,10 @@ where
         cache.insert(cache_key.clone(), std::sync::Arc::new(combined.clone()));
     }
     if let Some(parse_state) = parse_state {
-        let mut guard = parse_state.result.lock().expect("CSS parse result poisoned");
+        let mut guard = parse_state
+            .result
+            .lock()
+            .expect("CSS parse result poisoned");
         *guard = Some(std::sync::Arc::new(combined.clone()));
         parse_state.done.notify_all();
         if let Ok(mut in_flight) = CSS_PARSE_IN_FLIGHT.lock() {
@@ -494,6 +500,7 @@ pub mod types;
 
 #[cfg(feature = "accessibility")]
 pub mod accessibility;
+pub mod browser_view;
 /// HTML §4.12.5 — the `<canvas>` element's 2D rendering context.
 ///
 /// The engine owns its own rasteriser, the way a browser engine does. It is a
@@ -519,6 +526,7 @@ pub mod woff;
 #[cfg(test)]
 pub mod tests;
 
+pub use browser_view::BrowserView;
 pub use dom::HtmlEventType;
 pub use frame::{EngineCallbacks, EngineFrame};
 pub use html::streaming::{DomMutation, ResourceKind, StreamingParser};
@@ -687,8 +695,7 @@ pub fn load_html_reusing_with_resource_loaders_and_wait(
     };
 
     // Channel for CSS results — fetches start during parsing via the hook.
-    let (css_tx, css_rx) =
-        mpsc::channel::<(usize, String, crate::css::Stylesheet, String)>(); // idx, url, parsed css, media
+    let (css_tx, css_rx) = mpsc::channel::<(usize, String, crate::css::Stylesheet, String)>(); // idx, url, parsed css, media
     let css_tx2 = css_tx.clone();
     let css_idx = Arc::new(AtomicUsize::new(0));
     let css_idx2 = css_idx.clone();
@@ -884,7 +891,9 @@ pub fn restart_async_image_fetches_with_loader(
 
 fn start_async_image_fetches_with_loader(
     doc: &mut types::Document,
-    loader: Option<std::sync::Arc<dyn Fn(&str) -> Option<html::DecodedImage> + Send + Sync + 'static>>,
+    loader: Option<
+        std::sync::Arc<dyn Fn(&str) -> Option<html::DecodedImage> + Send + Sync + 'static>,
+    >,
 ) {
     let mut pending: Vec<(Vec<usize>, types::PendingImageTarget, String)> = Vec::new();
     collect_remote_images(&doc.root, &doc.base_url, &mut Vec::new(), &mut pending);

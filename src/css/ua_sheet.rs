@@ -188,7 +188,7 @@ input[type=hidden i] { display: none !important; }
 input[type=image] { display: inline-block; width: auto; height: auto; border: none; padding: 0; background-color: transparent; }
 input[type=radio], input[type=checkbox] { display: inline-block; width: 16px; height: 16px; vertical-align: middle; margin: 0 6px 0 2px; border: none; padding: 0; background: transparent; flex-shrink: 0; }
 label { display: inline-block; }
-input { display: inline-block; width: 200px; height: 2.2em; padding: 0 6px; border: 1px solid #ababab; border-radius: 3px; box-sizing: border-box; vertical-align: middle; background-color: #ffffff; color: #000000; }
+input { display: inline-block; width: 200px; min-height: 2.2em; padding: 0 6px; border: 1px solid #ababab; border-radius: 3px; box-sizing: border-box; vertical-align: middle; background-color: #ffffff; color: #000000; }
 /* A button input's height is its LABEL's line box plus the padding and border
    — it has no children to give it one, so `height: auto` collapsed it to a
    sliver with the word sitting outside. `calc` rather than a fixed px so it

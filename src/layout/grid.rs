@@ -1,7 +1,7 @@
 use super::Constraints;
 #[allow(unused_imports)]
 use crate::css::parse_single_track;
-use crate::layout::block::apply_relative_offset;
+use crate::layout::block::{apply_relative_offset, unwrap_all_anonymous_blocks};
 use crate::layout::{LayoutEngine, ResolvedBox, layout_positioned, shift_rects};
 use crate::types::*;
 
@@ -467,6 +467,8 @@ pub fn layout_grid(
     rbox: &ResolvedBox,
     c: &Constraints,
 ) -> f32 {
+    unwrap_all_anonymous_blocks(node);
+
     let containing_w = c.available_width;
     let x = c.x;
     let y = c.y;

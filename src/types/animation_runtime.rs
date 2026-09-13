@@ -351,7 +351,8 @@ impl Document {
 
             let total_progress = delayed_ms / duration;
             let iteration = total_progress.floor();
-            let t_frac = total_progress.fract();
+            let mut sample_iteration = iteration;
+            let mut t_frac = total_progress.fract();
             let iteration_count = state.animation.iteration_count;
             let completed_iterations = iteration as u32;
 
@@ -415,18 +416,27 @@ impl Document {
                 state.last_iteration_event = completed_iterations;
             }
 
+            // At an exact active-duration boundary, CSS samples the end of the
+            // just-completed iteration before starting the next one. Without
+            // this, sparse frames make infinite marquees and loaders visibly
+            // snap to their 0% keyframe and can leave a blank gap at restart.
+            if total_progress > 0.0 && t_frac <= 0.0001 {
+                t_frac = 1.0;
+                sample_iteration = (iteration - 1.0).max(0.0);
+            }
+
             let effective_t = match state.animation.direction {
                 AnimDirection::Normal => t_frac,
                 AnimDirection::Reverse => 1.0 - t_frac,
                 AnimDirection::Alternate => {
-                    if (iteration as u32) % 2 == 0 {
+                    if (sample_iteration as u32) % 2 == 0 {
                         t_frac
                     } else {
                         1.0 - t_frac
                     }
                 }
                 AnimDirection::AlternateReverse => {
-                    if (iteration as u32) % 2 == 0 {
+                    if (sample_iteration as u32) % 2 == 0 {
                         1.0 - t_frac
                     } else {
                         t_frac

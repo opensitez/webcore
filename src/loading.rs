@@ -7,6 +7,76 @@
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
+static RAW_RESOURCE_CACHE: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<String, Arc<Vec<u8>>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+enum CacheWrite {
+    Bytes {
+        path: std::path::PathBuf,
+        data: Arc<Vec<u8>>,
+    },
+    Text {
+        path: std::path::PathBuf,
+        text: Arc<String>,
+    },
+}
+
+static CACHE_WRITE_TX: std::sync::LazyLock<std::sync::mpsc::Sender<CacheWrite>> =
+    std::sync::LazyLock::new(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<CacheWrite>();
+        std::thread::Builder::new()
+            .name("webcore-cache-writer".to_string())
+            .spawn(move || {
+                while let Ok(write) = rx.recv() {
+                    match write {
+                        CacheWrite::Bytes { path, data } => {
+                            if let Some(parent) = path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let _ = std::fs::write(path, data.as_slice());
+                        }
+                        CacheWrite::Text { path, text } => {
+                            if let Some(parent) = path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let _ = std::fs::write(path, text.as_bytes());
+                        }
+                    }
+                }
+            })
+            .expect("webcore cache writer");
+        tx
+    });
+
+fn raw_cache_key(cache_dir: &str, url: &str) -> String {
+    format!("{cache_dir}\n{url}")
+}
+
+fn raw_cache_get(key: &str) -> Option<Arc<Vec<u8>>> {
+    RAW_RESOURCE_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(key).cloned())
+}
+
+fn raw_cache_put(key: String, data: Arc<Vec<u8>>) {
+    if let Ok(mut cache) = RAW_RESOURCE_CACHE.lock() {
+        if cache.len() > 512 {
+            cache.clear();
+        }
+        cache.insert(key, data);
+    }
+}
+
+fn enqueue_cache_bytes(path: std::path::PathBuf, data: Arc<Vec<u8>>) {
+    let _ = CACHE_WRITE_TX.send(CacheWrite::Bytes { path, data });
+}
+
+fn enqueue_cache_text(path: std::path::PathBuf, text: Arc<String>) {
+    let _ = CACHE_WRITE_TX.send(CacheWrite::Text { path, text });
+}
+
 struct ByteFetchState {
     result: Mutex<Option<Result<Arc<Vec<u8>>, String>>>,
     done: std::sync::Condvar,
@@ -16,8 +86,7 @@ static BYTE_FETCH_IN_FLIGHT: std::sync::LazyLock<
     Mutex<std::collections::HashMap<String, Arc<ByteFetchState>>>,
 > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
-pub const DEFAULT_NEW_TAB_HTML: &str =
-    "<!doctype html><title>New Tab</title><body></body>";
+pub const DEFAULT_NEW_TAB_HTML: &str = "<!doctype html><title>New Tab</title><body></body>";
 
 #[derive(Clone, Debug)]
 pub struct PageLoadOptions {
@@ -62,13 +131,8 @@ impl PageSession {
         Self { options }
     }
 
-    pub fn navigate<F>(
-        &self,
-        url: String,
-        viewport_w: f32,
-        viewport_h: f32,
-        mut on_event: F,
-    ) where
+    pub fn navigate<F>(&self, url: String, viewport_w: f32, viewport_h: f32, mut on_event: F)
+    where
         F: FnMut(PageSessionEvent) + Send + 'static,
     {
         let options = self.options.clone();
@@ -92,8 +156,7 @@ impl PageSession {
                 return;
             }
 
-            let loading_html =
-                "<!doctype html><title>Loading</title><body></body>";
+            let loading_html = "<!doctype html><title>Loading</title><body></body>";
             let loading_doc = build_page_document(
                 &mut renderer,
                 loading_html,
@@ -117,9 +180,10 @@ impl PageSession {
             let fetch_url = url.clone();
             let fetch_options = options.clone();
             std::thread::spawn(move || {
-                let result = load_document_progressive(&fetch_url, &fetch_options, |event_url, html| {
-                    let _ = tx.send((event_url, html, true));
-                });
+                let result =
+                    load_document_progressive(&fetch_url, &fetch_options, |event_url, html| {
+                        let _ = tx.send((event_url, html, true));
+                    });
                 match result {
                     Ok((html, final_url)) => {
                         let _ = tx.send((final_url, html, false));
@@ -153,9 +217,7 @@ impl PageSession {
                 }
                 let (event_url, html, preview) = event;
                 if preview {
-                    if last_preview
-                        .is_some_and(|instant| instant.elapsed() < min_preview_gap)
-                    {
+                    if last_preview.is_some_and(|instant| instant.elapsed() < min_preview_gap) {
                         continue;
                     }
                     last_preview = Some(std::time::Instant::now());
@@ -315,8 +377,8 @@ where
         ));
     }
     if let Some(path) = url.strip_prefix("file://") {
-        let mut file = std::fs::File::open(path)
-            .map_err(|e| format!("failed to read file {path}: {e}"))?;
+        let mut file =
+            std::fs::File::open(path).map_err(|e| format!("failed to read file {path}: {e}"))?;
         let mut parser = crate::StreamingParser::new(url);
         let state = Arc::new(Mutex::new(PreloadState::default()));
         let mut decoder = encoding_rs::UTF_8.new_decoder();
@@ -361,13 +423,20 @@ where
 
 pub fn fetch_text_resource(url: &str, cache_dir: Option<&str>) -> Result<String, String> {
     if let Some(cache_dir) = cache_dir {
+        let key = raw_cache_key(cache_dir, url);
+        if let Some(data) = raw_cache_get(&key) {
+            return Ok(decode_body(&data));
+        }
         let path = url_cache_path(url, cache_dir);
         if let Ok(data) = std::fs::read(&path) {
+            let data = Arc::new(data);
+            raw_cache_put(key, data.clone());
             return Ok(decode_body(&data));
         }
         let text = fetch_text_resource_uncached(url)?;
-        let _ = std::fs::create_dir_all(cache_dir);
-        let _ = std::fs::write(&path, text.as_bytes());
+        let data = Arc::new(text.as_bytes().to_vec());
+        raw_cache_put(key, data.clone());
+        enqueue_cache_bytes(path, data);
         return Ok(text);
     }
     fetch_text_resource_uncached(url)
@@ -383,9 +452,40 @@ where
 {
     let mut decoder = encoding_rs::UTF_8.new_decoder();
     if let Some(cache_dir) = cache_dir {
+        let key = raw_cache_key(cache_dir, url);
+        if let Some(data) = raw_cache_get(&key) {
+            for chunk in data.chunks(16 * 1024) {
+                let text = decode_streaming_utf8(&mut decoder, chunk, false);
+                if !text.is_empty() {
+                    on_chunk(&text);
+                }
+            }
+            let tail = decode_streaming_utf8(&mut decoder, &[], true);
+            if !tail.is_empty() {
+                on_chunk(&tail);
+            }
+            return Ok(());
+        }
         let path = url_cache_path(url, cache_dir);
         if let Ok(mut file) = std::fs::File::open(&path) {
-            stream_file_text(&mut file, &mut decoder, &mut on_chunk)?;
+            let mut body = Vec::new();
+            let mut buf = [0u8; 16 * 1024];
+            loop {
+                let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+                if n == 0 {
+                    break;
+                }
+                body.extend_from_slice(&buf[..n]);
+                let text = decode_streaming_utf8(&mut decoder, &buf[..n], false);
+                if !text.is_empty() {
+                    on_chunk(&text);
+                }
+            }
+            let tail = decode_streaming_utf8(&mut decoder, &[], true);
+            if !tail.is_empty() {
+                on_chunk(&tail);
+            }
+            raw_cache_put(key, Arc::new(body));
             return Ok(());
         }
         let mut body = Vec::new();
@@ -400,8 +500,9 @@ where
         if !tail.is_empty() {
             on_chunk(&tail);
         }
-        let _ = std::fs::create_dir_all(cache_dir);
-        let _ = std::fs::write(&path, &body);
+        let body = Arc::new(body);
+        raw_cache_put(key, body.clone());
+        enqueue_cache_bytes(path, body);
         return Ok(());
     }
 
@@ -468,9 +569,15 @@ pub fn cached_fetch_bytes(url: &str, cache_dir: &str) -> Result<Vec<u8>, String>
 }
 
 fn cached_fetch_bytes_uncached(url: &str, cache_dir: &str) -> Result<Vec<u8>, String> {
+    let key = raw_cache_key(cache_dir, url);
+    if let Some(data) = raw_cache_get(&key) {
+        return Ok((*data).clone());
+    }
     let path = url_cache_path(url, cache_dir);
     if let Ok(data) = std::fs::read(&path) {
-        return Ok(data);
+        let data = Arc::new(data);
+        raw_cache_put(key, data.clone());
+        return Ok((*data).clone());
     }
     if let Some(scheme_end) = url.find("://") {
         let after = &url[scheme_end + 3..];
@@ -478,15 +585,18 @@ fn cached_fetch_bytes_uncached(url: &str, cache_dir: &str) -> Result<Vec<u8>, St
             let old_url = format!("{}/.{}", &url[..scheme_end + 3], &after[slash..]);
             let old_path = url_cache_path(&old_url, cache_dir);
             if let Ok(data) = std::fs::read(&old_path) {
-                let _ = std::fs::write(&path, &data);
-                return Ok(data);
+                let data = Arc::new(data);
+                raw_cache_put(key, data.clone());
+                enqueue_cache_bytes(path, data.clone());
+                return Ok((*data).clone());
             }
         }
     }
     let data = fetch_bytes(url)?;
-    let _ = std::fs::create_dir_all(cache_dir);
-    let _ = std::fs::write(&path, &data);
-    Ok(data)
+    let data = Arc::new(data);
+    raw_cache_put(key, data.clone());
+    enqueue_cache_bytes(path, data.clone());
+    Ok((*data).clone())
 }
 
 pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
@@ -588,37 +698,7 @@ where
     }
 }
 
-fn stream_file_text<F>(
-    file: &mut std::fs::File,
-    decoder: &mut encoding_rs::Decoder,
-    on_chunk: &mut F,
-) -> Result<(), String>
-where
-    F: FnMut(&str),
-{
-    let mut buf = [0u8; 16 * 1024];
-    loop {
-        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        let text = decode_streaming_utf8(decoder, &buf[..n], false);
-        if !text.is_empty() {
-            on_chunk(&text);
-        }
-    }
-    let tail = decode_streaming_utf8(decoder, &[], true);
-    if !tail.is_empty() {
-        on_chunk(&tail);
-    }
-    Ok(())
-}
-
-fn decode_streaming_utf8(
-    decoder: &mut encoding_rs::Decoder,
-    bytes: &[u8],
-    last: bool,
-) -> String {
+fn decode_streaming_utf8(decoder: &mut encoding_rs::Decoder, bytes: &[u8], last: bool) -> String {
     let mut out = String::with_capacity(bytes.len().saturating_add(16));
     let mut input = bytes;
     loop {
@@ -686,12 +766,7 @@ where
                     break;
                 }
                 saw_streamed_bytes = true;
-                scan_html_chunk_for_resources(
-                    &mut parser,
-                    &buf[..n],
-                    options,
-                    &preload_state,
-                );
+                scan_html_chunk_for_resources(&mut parser, &buf[..n], options, &preload_state);
                 bytes_read += n;
                 let text = decode_streaming_utf8(&mut decoder, &buf[..n], false);
                 html.push_str(&text);
@@ -737,8 +812,21 @@ fn cached_fetch_document<F>(
 where
     F: FnMut(String, String),
 {
+    let key = raw_cache_key(cache_dir, url);
     let path = url_cache_path(url, cache_dir);
     let url_path = format!("{}.url", path.display());
+    if let Some(data) = raw_cache_get(&key) {
+        let final_url = std::fs::read_to_string(&url_path)
+            .map(|s| s.trim().to_string())
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| url.to_string());
+        let html = decode_body(&data);
+        if options.emit_preview && !html.is_empty() {
+            preview(final_url.clone(), html.clone());
+        }
+        return Ok((html, final_url));
+    }
     if let Ok(mut file) = std::fs::File::open(&path) {
         let final_url = std::fs::read_to_string(&url_path)
             .map(|s| s.trim().to_string())
@@ -776,6 +864,7 @@ where
         if options.emit_preview && !sent_preview && !html.is_empty() {
             preview(final_url.clone(), html.clone());
         }
+        raw_cache_put(key, Arc::new(html.as_bytes().to_vec()));
         return Ok((html, final_url));
     }
     let (body, final_url) = fetch_document_streaming(
@@ -789,12 +878,16 @@ where
         },
         preview,
     )?;
-    let _ = std::fs::create_dir_all(cache_dir);
-    let _ = std::fs::write(&path, body.as_bytes());
+    let body = Arc::new(body);
+    raw_cache_put(key, Arc::new(body.as_bytes().to_vec()));
+    enqueue_cache_text(path, body.clone());
     if final_url != url {
-        let _ = std::fs::write(&url_path, final_url.as_bytes());
+        enqueue_cache_text(
+            std::path::PathBuf::from(url_path),
+            Arc::new(final_url.clone()),
+        );
     }
-    Ok((body, final_url))
+    Ok(((*body).clone(), final_url))
 }
 
 fn url_cache_path(url: &str, cache_dir: &str) -> std::path::PathBuf {
@@ -885,6 +978,28 @@ mod tests {
         assert_eq!(final_url, url);
         assert!(final_html.contains("hello"));
         assert_eq!(previews, 1, "file loading should emit one early preview");
+    }
+
+    #[test]
+    fn cached_text_resource_reuses_process_memory_before_disk() {
+        let cache_dir =
+            std::env::temp_dir().join(format!("webcore-resource-cache-{}", std::process::id()));
+        let source = cache_dir.join("source.css");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(&source, "body { color: red; }").unwrap();
+        let url = source.to_string_lossy().to_string();
+        let cache_dir_str = cache_dir.to_string_lossy().to_string();
+
+        let first = fetch_text_resource(&url, Some(&cache_dir_str)).unwrap();
+        std::fs::write(&source, "body { color: blue; }").unwrap();
+        let second = fetch_text_resource(&url, Some(&cache_dir_str)).unwrap();
+
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        assert_eq!(first, "body { color: red; }");
+        assert_eq!(
+            second, first,
+            "hot process cache should avoid immediate refetch/reparse work for the same resource"
+        );
     }
 }
 

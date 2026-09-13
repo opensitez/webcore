@@ -35,6 +35,90 @@ pub fn apply_animation_overrides(
     }
 }
 
+pub type AnimationStyleRestore = Vec<(u32, std::sync::Arc<ComputedStyle>)>;
+
+/// Temporarily apply animation samples on top of computed style.
+///
+/// CSS animations are not part of the canonical cascade result: the renderer
+/// samples them for one frame, then the next frame samples again from the same
+/// base style. Permanently writing samples into `node.style` makes animations
+/// drift and can make repeating animations appear to stop after a couple of
+/// iterations.
+pub fn apply_animation_overrides_scoped(
+    node: &mut WebCore,
+    overrides: &HashMap<u32, Vec<(String, String)>>,
+) -> AnimationStyleRestore {
+    fn remember(node: &WebCore, saved: &mut AnimationStyleRestore, seen: &mut HashSet<u32>) {
+        if seen.insert(node.node_id) {
+            saved.push((node.node_id, node.style.clone()));
+        }
+    }
+
+    fn propagate_scoped(
+        children: &mut Vec<WebCore>,
+        props: &[(&str, &str)],
+        saved: &mut AnimationStyleRestore,
+        seen: &mut HashSet<u32>,
+    ) {
+        for child in children {
+            if child.is_text_node() {
+                remember(child, saved, seen);
+                for &(prop, val) in props {
+                    apply_property(std::sync::Arc::make_mut(&mut child.style), prop, val);
+                }
+            } else {
+                propagate_scoped(&mut child.children, props, saved, seen);
+            }
+        }
+    }
+
+    fn walk(
+        node: &mut WebCore,
+        overrides: &HashMap<u32, Vec<(String, String)>>,
+        saved: &mut AnimationStyleRestore,
+        seen: &mut HashSet<u32>,
+    ) {
+        if let Some(props) = overrides.get(&node.node_id) {
+            remember(node, saved, seen);
+            for (prop, val) in props {
+                apply_property(std::sync::Arc::make_mut(&mut node.style), prop, val);
+            }
+            let inherited: Vec<(&str, &str)> = props
+                .iter()
+                .filter(|(p, _)| is_inherited_css_prop(p))
+                .map(|(p, v)| (p.as_str(), v.as_str()))
+                .collect();
+            if !inherited.is_empty() {
+                propagate_scoped(&mut node.children, &inherited, saved, seen);
+            }
+        }
+        for child in &mut node.children {
+            walk(child, overrides, saved, seen);
+        }
+    }
+
+    let mut saved = Vec::new();
+    let mut seen = HashSet::new();
+    walk(node, overrides, &mut saved, &mut seen);
+    saved
+}
+
+pub fn restore_animation_overrides(node: &mut WebCore, restore: AnimationStyleRestore) {
+    if restore.is_empty() {
+        return;
+    }
+    let styles: HashMap<u32, std::sync::Arc<ComputedStyle>> = restore.into_iter().collect();
+    fn walk(node: &mut WebCore, styles: &HashMap<u32, std::sync::Arc<ComputedStyle>>) {
+        if let Some(style) = styles.get(&node.node_id) {
+            node.style = style.clone();
+        }
+        for child in &mut node.children {
+            walk(child, styles);
+        }
+    }
+    walk(node, &styles);
+}
+
 /// CSS properties that are inherited and must be propagated to text-node descendants.
 fn is_inherited_css_prop(prop: &str) -> bool {
     matches!(

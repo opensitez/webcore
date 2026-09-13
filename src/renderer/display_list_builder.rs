@@ -629,7 +629,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     // not the scroll-adjusted position (px, py). The scroll offset is applied
     // separately by the replay's global transform. This prevents transforms from
     // shifting when the user scrolls.
-    let has_transform = !eff_style.css_transform.ops.is_empty();
+    let has_transform = !eff_style.css_transform.ops.is_empty() || eff_style.will_change_transform;
     if has_transform {
         let source_rect = match eff_style.transform_box.as_str() {
             "content-box" => node.layout.content_rect,
@@ -1066,6 +1066,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                     ],
                     radii: radii_arr,
                     radii_y: radii_y_arr,
+                    opacity: eff_style.opacity,
                 });
             }
         }

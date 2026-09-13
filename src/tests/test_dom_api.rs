@@ -3088,7 +3088,10 @@ fn animated_image_tick_reports_the_image_paint_rect() {
 
     let tick = doc.tick_animated_images_in_viewport_detailed(now, 0.0, 200.0);
     assert!(tick.changed_any);
-    assert_eq!(tick.paint_rects, vec![crate::types::Rect::new(12.0, 34.0, 56.0, 78.0)]);
+    assert_eq!(
+        tick.paint_rects,
+        vec![crate::types::Rect::new(12.0, 34.0, 56.0, 78.0)]
+    );
 }
 
 #[test]

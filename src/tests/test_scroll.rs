@@ -3,7 +3,9 @@
 
 use crate::html::parse_html;
 use crate::layout::LayoutEngine;
-use crate::types::{Document, OverscrollBehavior, ScrollSnapAlign, ScrollSnapAxis};
+use crate::types::{
+    Display, Document, OverscrollBehavior, Rect, ScrollSnapAlign, ScrollSnapAxis, WebCore,
+};
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -153,6 +155,73 @@ fn nested_scroll_container_contents_do_not_inflate_document_scroll_height() {
     assert!(
         scroll_height < 1000.0,
         "document scroll height should count the nested scroller box, not its internal 5000px content; got {scroll_height}"
+    );
+}
+
+#[test]
+fn contents_wrappers_and_blank_text_do_not_inflate_document_scroll_height() {
+    let mut doc = Document::new();
+    doc.root.layout.margin_rect = Rect::new(0.0, 0.0, 400.0, 300.0);
+
+    let mut normal = WebCore::new("div");
+    normal.layout.margin_rect = Rect::new(0.0, 0.0, 400.0, 500.0);
+
+    let mut contents = WebCore::new("span");
+    std::sync::Arc::make_mut(&mut contents.style).display = Display::Contents;
+    contents.layout.margin_rect = Rect::new(0.0, 40_000.0, 200.0, 24.0);
+
+    let mut blank_text = WebCore::new("#text");
+    blank_text.text = "   ".to_string();
+    blank_text.layout.margin_rect = Rect::new(0.0, 39_000.0, 0.0, 23.0);
+
+    let mut zero_height = WebCore::new("div");
+    zero_height.layout.margin_rect = Rect::new(0.0, 38_000.0, 300.0, 0.0);
+
+    doc.root.children.push(normal);
+    doc.root.children.push(contents);
+    doc.root.children.push(blank_text);
+    doc.root.children.push(zero_height);
+
+    let scroll_height = Document::scroll_height(&doc.root);
+    assert!(
+        scroll_height < 1000.0,
+        "display:contents boxes and blank text artifacts must not stretch the page; got {scroll_height}"
+    );
+}
+
+#[test]
+fn stale_anonymous_blocks_can_be_unwrapped_before_flex_or_grid_layout() {
+    let mut container = WebCore::new("div");
+    std::sync::Arc::make_mut(&mut container.style).display = Display::Flex;
+    std::sync::Arc::make_mut(&mut container.style).flex_direction =
+        crate::types::FlexDirection::Column;
+
+    let mut heading = WebCore::new("h2");
+    heading.text = "About".to_string();
+
+    let mut anon = WebCore::new("anonymous-block");
+    let mut link_a = WebCore::new("a");
+    link_a.text = "Sitemap   ".to_string();
+    let mut link_b = WebCore::new("a");
+    link_b.text = "Licensing".to_string();
+    anon.children.push(link_a);
+    anon.children.push(link_b);
+
+    container.children.push(heading);
+    container.children.push(anon);
+
+    crate::layout::block::unwrap_all_anonymous_blocks(&mut container);
+
+    assert!(
+        !container
+            .children
+            .iter()
+            .any(|c| c.tag == "anonymous-block"),
+        "flex layout must not keep stale anonymous block wrappers after a display change"
+    );
+    assert!(
+        container.children.iter().filter(|c| c.tag == "a").count() >= 2,
+        "inline links should become direct flex items"
     );
 }
 

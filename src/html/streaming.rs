@@ -374,7 +374,10 @@ impl StreamingParser {
                     .get("rel")
                     .map(|s| s.to_ascii_lowercase())
                     .unwrap_or_default();
-                if rel.split_ascii_whitespace().any(|part| part == "stylesheet") {
+                if rel
+                    .split_ascii_whitespace()
+                    .any(|part| part == "stylesheet")
+                {
                     if let Some(href) = attrs.get("href") {
                         let url = crate::html::resolve_url(href, &self.base_url);
                         // Stylesheets in <head> are render-blocking
@@ -417,7 +420,10 @@ impl StreamingParser {
                             });
                         }
                     }
-                } else if rel.split_ascii_whitespace().any(|part| part == "preconnect") {
+                } else if rel
+                    .split_ascii_whitespace()
+                    .any(|part| part == "preconnect")
+                {
                     if let Some(href) = attrs.get("href") {
                         self.discovered_resources
                             .push((ResourceKind::Preconnect, href.clone()));

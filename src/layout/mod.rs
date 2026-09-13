@@ -18,7 +18,9 @@ use std::cell::Cell;
 
 #[inline]
 pub(crate) fn is_projected_svg_descendant(node: &WebCore) -> bool {
-    node.svg_tree_path.as_ref().is_some_and(|path| !path.is_empty())
+    node.svg_tree_path
+        .as_ref()
+        .is_some_and(|path| !path.is_empty())
 }
 
 #[inline]
@@ -156,8 +158,7 @@ pub(crate) fn update_scroll_extents_from_children(
             .children
             .iter()
             .filter(|child| {
-                !matches!(child.style.display, Display::None)
-                    && !is_layout_inert_svg_node(child)
+                !matches!(child.style.display, Display::None) && !is_layout_inert_svg_node(child)
             })
             .map(|child| child.layout.margin_rect.x + child.layout.margin_rect.w - content_x)
             .fold(content_w, f32::max);
@@ -165,8 +166,7 @@ pub(crate) fn update_scroll_extents_from_children(
             .children
             .iter()
             .filter(|child| {
-                !matches!(child.style.display, Display::None)
-                    && !is_layout_inert_svg_node(child)
+                !matches!(child.style.display, Display::None) && !is_layout_inert_svg_node(child)
             })
             .map(|child| child.layout.margin_rect.y + child.layout.margin_rect.h - content_y)
             .fold(content_h, f32::max);
@@ -185,6 +185,93 @@ pub(crate) fn update_scroll_extents_from_children(
 }
 
 // ─── Font loading helpers ──────────────────────────────────────────────────────
+
+struct RemoteFontFetchState {
+    result: std::sync::Mutex<Option<Option<std::sync::Arc<Vec<u8>>>>>,
+    done: std::sync::Condvar,
+}
+
+static REMOTE_FONT_BYTES_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<Vec<u8>>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+static REMOTE_FONT_BYTES_IN_FLIGHT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<RemoteFontFetchState>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn cached_remote_font_bytes(url: &str) -> Option<Vec<u8>> {
+    if let Some(bytes) = REMOTE_FONT_BYTES_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(url).cloned())
+    {
+        return Some((*bytes).clone());
+    }
+
+    let (state, owns_fetch) = {
+        let mut in_flight = REMOTE_FONT_BYTES_IN_FLIGHT
+            .lock()
+            .expect("remote font in-flight cache poisoned");
+        if let Some(state) = in_flight.get(url) {
+            (state.clone(), false)
+        } else {
+            let state = std::sync::Arc::new(RemoteFontFetchState {
+                result: std::sync::Mutex::new(None),
+                done: std::sync::Condvar::new(),
+            });
+            in_flight.insert(url.to_string(), state.clone());
+            (state, true)
+        }
+    };
+
+    if !owns_fetch {
+        let mut guard = state.result.lock().expect("remote font result poisoned");
+        while guard.is_none() {
+            guard = state.done.wait(guard).expect("remote font result poisoned");
+        }
+        return guard
+            .as_ref()
+            .and_then(|bytes| bytes.as_ref().map(|b| (**b).clone()));
+    }
+
+    let result = fetch_remote_font_bytes(url).map(std::sync::Arc::new);
+    if let Some(bytes) = result.as_ref()
+        && let Ok(mut cache) = REMOTE_FONT_BYTES_CACHE.lock()
+    {
+        if cache.len() > 256 {
+            cache.clear();
+        }
+        cache.insert(url.to_string(), bytes.clone());
+    }
+    {
+        let mut guard = state.result.lock().expect("remote font result poisoned");
+        *guard = Some(result.clone());
+        state.done.notify_all();
+    }
+    if let Ok(mut in_flight) = REMOTE_FONT_BYTES_IN_FLIGHT.lock() {
+        in_flight.remove(url);
+    }
+    result.map(|bytes| (*bytes).clone())
+}
+
+fn fetch_remote_font_bytes(url: &str) -> Option<Vec<u8>> {
+    let fetch = |client: &reqwest::blocking::Client| {
+        client
+            .get(url)
+            .header(
+                "Accept",
+                "font/woff2,font/woff,application/font-woff,*/*;q=0.5",
+            )
+            .header("Sec-Fetch-Dest", "font")
+            .header("Sec-Fetch-Mode", "cors")
+            .send()
+            .ok()
+            .and_then(|r| r.bytes().ok())
+            .map(|b| b.to_vec())
+            .filter(|b| !b.is_empty())
+    };
+    fetch(&crate::http_client()).or_else(|| fetch(&crate::http_client_lenient()))
+}
 
 /// Load raw font bytes into the font system, with format detection.
 fn load_font_bytes(fs: &mut cosmic_text::FontSystem, data: Vec<u8>) -> Vec<fontdb::ID> {
@@ -2431,13 +2518,7 @@ impl LayoutEngine {
                     let sender = tx.clone();
                     let counter = in_flight.clone();
                     crate::spawn_font_resource_task(move || {
-                        let result = crate::http_client_lenient()
-                            .get(&url)
-                            .send()
-                            .ok()
-                            .and_then(|r| r.bytes().ok())
-                            .map(|b| b.to_vec())
-                            .filter(|b| !b.is_empty());
+                        let result = cached_remote_font_bytes(&url);
                         if let Some(bytes) = result {
                             eprintln!(
                                 "  Font loaded: {} ({} bytes) from {}",
@@ -2679,9 +2760,11 @@ impl LayoutEngine {
         }
         doc.tick_media(now);
         doc.tick_smooth_scrolls(now);
+        let mut animation_restore = Vec::new();
         if !doc.animation_overrides.is_empty() {
             let overrides = doc.animation_overrides.clone();
-            crate::css::apply_animation_overrides(&mut doc.root, &overrides);
+            animation_restore =
+                crate::css::apply_animation_overrides_scoped(&mut doc.root, &overrides);
         }
         // ──────────────────────────────────────────────────────────────────
 
@@ -2718,12 +2801,22 @@ impl LayoutEngine {
                 }
                 // Re-apply animation overrides after container-query cascade.
                 if !doc.animation_overrides.is_empty() {
+                    if !animation_restore.is_empty() {
+                        crate::css::restore_animation_overrides(
+                            &mut doc.root,
+                            std::mem::take(&mut animation_restore),
+                        );
+                    }
                     let overrides = doc.animation_overrides.clone();
-                    crate::css::apply_animation_overrides(&mut doc.root, &overrides);
+                    animation_restore =
+                        crate::css::apply_animation_overrides_scoped(&mut doc.root, &overrides);
                 }
                 self.layout_geometry(doc, viewport_width, root_font_px);
                 self.last_geometry_viewport_h = self.viewport_h;
             }
+        }
+        if !animation_restore.is_empty() {
+            crate::css::restore_animation_overrides(&mut doc.root, animation_restore);
         }
 
         // Detect aria-live region changes and queue announcements.
@@ -2844,8 +2937,7 @@ impl LayoutEngine {
         // commonly have positioned or late-sized descendants that extend past
         // the root's normal-flow height; browser-visible document height must
         // reflect the scrollable content, not only the root block's own box.
-        let h = crate::types::Document::scroll_height(&doc.root)
-            .max(self.viewport_h);
+        let h = crate::types::Document::scroll_height(&doc.root).max(self.viewport_h);
         doc.root.layout.content_rect.h = h;
         doc.root.layout.padding_rect.h = h;
         doc.root.layout.border_rect.h = h;
@@ -3593,14 +3685,23 @@ pub fn layout_positioned_static(
         None
     };
 
-    // Pass containing_h through Constraints so layout_box can resolve
-    // percentage heights without mutating style.
+    // Pass abspos stretch constraints into layout itself. If `top` and
+    // `bottom` establish a definite used height for an auto-height element,
+    // descendants need that height during flex/grid/block layout; patching the
+    // parent rect afterward leaves children aligned against the pre-stretch box.
     let layout_w = constrained_w.unwrap_or(containing_w);
-    let layout_c = if containing_h > 0.0 {
-        Constraints::with_height(layout_w, containing_h, 0.0, 0.0, font_px, root_font_px)
-    } else {
-        Constraints::new(layout_w, 0.0, 0.0, font_px, root_font_px)
-    };
+    let mut layout_c = Constraints::with_forced(
+        layout_w,
+        0.0,
+        0.0,
+        font_px,
+        root_font_px,
+        constrained_w,
+        constrained_h,
+    );
+    if containing_h > 0.0 {
+        layout_c.available_height = Some(containing_h);
+    }
     engine.layout_box(node, &layout_c);
 
     // Shrink-to-fit: width:auto absolutely-positioned elements wrap their content
@@ -3618,7 +3719,15 @@ pub fn layout_positioned_static(
                 + node.layout.resolved_margin_right;
             engine.layout_box(
                 node,
-                &Constraints::new(shrink_w, 0.0, 0.0, font_px, root_font_px),
+                &Constraints::with_forced(
+                    shrink_w,
+                    0.0,
+                    0.0,
+                    font_px,
+                    root_font_px,
+                    None,
+                    constrained_h,
+                ),
             );
         }
     }
@@ -3738,7 +3847,15 @@ pub fn layout_positioned_static(
         if node.layout.content_rect.w != cw {
             engine.layout_box(
                 node,
-                &Constraints::new(layout_w, x, y, font_px, root_font_px),
+                &Constraints::with_forced(
+                    layout_w,
+                    x,
+                    y,
+                    font_px,
+                    root_font_px,
+                    constrained_w,
+                    constrained_h,
+                ),
             );
         }
     }

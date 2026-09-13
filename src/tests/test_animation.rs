@@ -482,6 +482,12 @@ fn interpolate_value_at_one() {
 }
 
 #[test]
+fn interpolate_transform_keeps_fractional_angles() {
+    let result = interpolate_value("rotate(0deg)", "rotate(360deg)", 0.016);
+    assert_eq!(result, "rotate(5.7600deg)");
+}
+
+#[test]
 fn interpolate_value_rgba_color() {
     // Fully transparent → fully opaque red
     let from = "rgba(255,0,0,0.0000)";
@@ -1012,6 +1018,86 @@ fn tick_animations_needs_more_frames_while_running() {
     let mut doc = doc_with_animation("animation: spin 1s linear infinite;");
     let now = doc.active_animations[0].start_time + Duration::from_millis(100);
     doc.tick_animations(now);
+    assert!(doc.needs_animation_frame);
+}
+
+#[test]
+fn ticker_transform_animation_stays_running_across_cycles() {
+    let html = r#"<html><head><style>
+        @keyframes ticker-scroll {
+            0% { transform: translateX(0); }
+            100% { transform: translateX(-50%); }
+        }
+        .ticker {
+            display: inline-block;
+            width: 2000px;
+            will-change: transform;
+            animation: ticker-scroll 25s linear infinite;
+        }
+    </style></head><body><ul class="ticker"><li>one two three four five six</li></ul></body></html>"#;
+    let mut doc = parse_html(html);
+    let mut engine = LayoutEngine::new();
+    engine.layout(&mut doc, 800.0);
+    assert_eq!(doc.active_animations.len(), 1);
+    assert!(
+        doc.active_animations[0]
+            .animation
+            .iteration_count
+            .is_infinite()
+    );
+    let id = doc.active_animations[0].element_id;
+    let start = doc.active_animations[0].start_time;
+
+    for elapsed in [
+        500, 5_000, 12_500, 24_000, 25_000, 25_500, 50_500, 75_500, 100_500,
+    ] {
+        doc.tick_animations(start + Duration::from_millis(elapsed));
+        let transform = doc
+            .animation_overrides
+            .get(&id)
+            .and_then(|props| props.iter().find(|(name, _)| name == "transform"))
+            .map(|(_, value)| value.as_str())
+            .expect("ticker transform override");
+        assert!(
+            !transform.is_empty(),
+            "ticker should produce a transform override at {elapsed}ms"
+        );
+        assert!(
+            doc.needs_animation_frame,
+            "infinite ticker should still request frames at {elapsed}ms"
+        );
+        if matches!(elapsed, 500 | 25_500 | 50_500 | 75_500 | 100_500) {
+            assert!(
+                transform == "translateX(-1%)" || transform.starts_with("translateX(-1."),
+                "same phase in later cycles should sample the same ongoing transform, got {transform}"
+            );
+        }
+    }
+    assert_eq!(
+        doc.active_animations.len(),
+        1,
+        "infinite ticker should not be removed from active animations"
+    );
+}
+
+#[test]
+fn infinite_animation_samples_completed_iteration_at_repeat_boundary() {
+    let mut doc = doc_with_animation("animation: fade 1s linear infinite;");
+    let id = doc.active_animations[0].element_id;
+    let start = doc.active_animations[0].start_time;
+
+    doc.tick_animations(start + Duration::from_millis(1000));
+
+    let opacity = doc
+        .animation_overrides
+        .get(&id)
+        .and_then(|props| props.iter().find(|(name, _)| name == "opacity"))
+        .and_then(|(_, value)| value.parse::<f32>().ok())
+        .expect("opacity override at repeat boundary");
+    assert!(
+        opacity > 0.95,
+        "repeat boundary should sample the completed iteration, got {opacity}"
+    );
     assert!(doc.needs_animation_frame);
 }
 

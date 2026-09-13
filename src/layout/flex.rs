@@ -1,4 +1,5 @@
 use super::Constraints;
+use crate::layout::block::unwrap_all_anonymous_blocks;
 use crate::layout::{LayoutEngine, ResolvedBox, layout_positioned, shift_rects};
 use crate::types::*;
 
@@ -78,6 +79,8 @@ fn measure_content_height(
         std::sync::Arc::make_mut(&mut child.style).height = CssLength::Auto;
         Some(h)
     };
+    child.layout.layout_dirty = true;
+    child.has_dirty_layout_descendant = true;
     engine.layout_box(
         child,
         &Constraints::new(content_w, content_x, content_y, font_px, root_font_px),
@@ -98,6 +101,8 @@ pub fn layout_flex(
     rbox: &ResolvedBox,
     c: &Constraints,
 ) -> f32 {
+    unwrap_all_anonymous_blocks(node);
+
     let containing_w = c.available_width;
     let x = c.x;
     let y = c.y;
@@ -1435,11 +1440,15 @@ pub fn layout_flex(
                             .max_content_width(child, font_px, root_font_px)
                             .min(content_w);
                         if intrinsic_w < items[item_idx].cross_size - 0.5 {
-                            // ⛔ Keep the flex-resolved MAIN size. Shrinking the
-                            // item to its intrinsic width re-lays it out, and
-                            // without the forced height that re-layout fell back
-                            // to the item's own content height — so `flex: 1` in
-                            // a 90px column produced 20px items, not 45px ones.
+                            // Keep a flex-resolved MAIN size, but let a
+                            // content-sized auto-height item grow if the
+                            // narrower cross size makes its text wrap. Yahoo's
+                            // right dock hit exactly this: the privacy text was
+                            // measured wide, then `align-items:center`
+                            // shrink-wrapped it narrow enough to need another
+                            // line while the old 43px height was still forced.
+                            let keep_resolved_main = !child.style.height.is_auto()
+                                || (items[item_idx].main_used - items[item_idx].hyp).abs() > 0.5;
                             engine.layout_box(
                                 child,
                                 &item_constraints(
@@ -1450,10 +1459,15 @@ pub fn layout_flex(
                                     font_px,
                                     root_font_px,
                                     None,
-                                    Some(items[item_idx].main_used),
+                                    keep_resolved_main.then_some(items[item_idx].main_used),
                                 ),
                             );
                             items[item_idx].cross_size = child.layout.margin_rect.w;
+                            if !keep_resolved_main
+                                && child.layout.content_rect.h > items[item_idx].main_used
+                            {
+                                items[item_idx].main_used = child.layout.content_rect.h;
+                            }
                         }
                     }
                 }

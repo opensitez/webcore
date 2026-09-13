@@ -1053,9 +1053,52 @@ fn background_image_none_and_gradient_are_case_insensitive() {
 
     apply_property(&mut style, "background-image", "NONE");
     assert!(style.background_image_url.is_empty());
+    assert_eq!(style.gradient_type, GradientType::None);
+    assert!(style.rare().gradient_stops.is_empty());
 
     apply_property(&mut style, "background-image", "Linear-Gradient(red, blue)");
     assert_eq!(style.gradient_type, GradientType::Linear);
+
+    apply_property(&mut style, "background-image", "none");
+    assert_eq!(style.gradient_type, GradientType::None);
+    assert!(style.rare().gradient_stops.is_empty());
+}
+
+#[test]
+fn desktop_media_background_image_none_clears_responsive_gradient() {
+    let mut r = crate::Renderer::new();
+    let d = r.load_html(
+        r#"<style>
+             #popular {
+               width: 300px;
+               height: 120px;
+             }
+             @media only screen and (min-width: 768px) {
+               #popular {
+                 background-image: linear-gradient(to bottom, #dde0e4, #dde0e4);
+               }
+             }
+             @media only screen and (min-width: 1280px) {
+               #popular {
+                 background-image: none;
+               }
+             }
+           </style>
+           <div id="popular"></div>"#,
+        1366.0,
+    );
+    let popular = find_box(&d.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "popular")
+            .unwrap_or(false)
+    })
+    .expect("popular element");
+    assert_eq!(popular.style.gradient_type, GradientType::None);
+    assert!(
+        popular.style.rare().gradient_stops.is_empty(),
+        "desktop background-image:none must clear the tablet gradient stops"
+    );
 }
 
 #[test]
@@ -7241,6 +7284,69 @@ fn align_self_moves_an_absolutely_positioned_flex_child() {
     assert!(
         (off - 20.0).abs() < 0.5,
         "a 20px child centres in 60px at 20, got {off}"
+    );
+}
+
+#[test]
+fn absolute_stretch_lays_out_flex_children_against_used_height() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>\
+         body{margin:0}\
+         #host{position:relative;width:120px;height:40px}\
+         #icon{position:absolute;left:12px;top:0;bottom:0;display:flex;align-items:center}\
+         #svg{display:block;width:20px;height:20px}\
+         </style>\
+         <div id=host><div id=icon><svg id=svg></svg></div></div>",
+        800.0,
+    );
+    let get = |d: &mut crate::types::Document, id: &str| {
+        let e = d.get_element_by_id(id).unwrap();
+        d.get_bounding_client_rect(e).unwrap()
+    };
+    let icon = get(&mut d, "icon");
+    let svg = get(&mut d, "svg");
+    assert!(
+        (icon.h - 40.0).abs() < 0.5,
+        "abspos top/bottom should stretch icon to 40px, got {}",
+        icon.h
+    );
+    assert!(
+        (svg.y - 10.0).abs() < 0.5,
+        "20px svg should center vertically inside stretched 40px flex icon, got y={}",
+        svg.y
+    );
+}
+
+#[test]
+fn column_flex_auto_min_height_counts_block_followed_by_flex_child() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>\
+         body{margin:0}\
+         #outer{display:flex;flex-direction:column;width:180px}\
+         #item{display:block;margin-bottom:12px}\
+         #top{display:block;height:42px}\
+         #bottom{display:flex;height:18px;margin:4px 0}\
+         </style>\
+         <div id=outer><section id=item><div id=top></div><div id=bottom></div></section></div>",
+        800.0,
+    );
+    let get = |d: &mut crate::types::Document, id: &str| {
+        let e = d.get_element_by_id(id).unwrap();
+        d.get_bounding_client_rect(e).unwrap()
+    };
+    let item = get(&mut d, "item");
+    let outer = get(&mut d, "outer");
+    assert!(
+        item.h >= 64.0 - 0.5,
+        "auto-height flex item must include block + flex child, got {}",
+        item.h
+    );
+    assert!(
+        outer.h >= 76.0 - 0.5,
+        "column flex container must include item margin too, got {}",
+        outer.h
     );
 }
 

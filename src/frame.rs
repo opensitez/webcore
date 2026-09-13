@@ -200,7 +200,10 @@ impl EngineFrame {
     /// - Only scrolled → returns true (repaint only, no layout).
     pub fn update_frame(&mut self) -> bool {
         // 1. Poll for async stylesheets/images/fonts
-        if self.doc.poll_pending_stylesheets() {
+        if self
+            .doc
+            .poll_pending_stylesheets_budgeted(32, std::time::Duration::from_millis(6))
+        {
             self.needs_style = true;
             self.needs_layout = true;
             self.needs_paint = true;
@@ -248,10 +251,6 @@ impl EngineFrame {
                 self.needs_layout = true;
                 self.needs_paint = true;
             } else if !self.doc.animation_overrides.is_empty() {
-                crate::css::apply_animation_overrides(
-                    &mut self.doc.root,
-                    &self.doc.animation_overrides.clone(),
-                );
                 self.doc.layout_generation = self.doc.layout_generation.wrapping_add(1);
                 self.needs_paint = true;
             }
@@ -914,9 +913,9 @@ impl EngineFrame {
     ) -> Vec<(String, crate::html::streaming::ResourceKind)> {
         use crate::html::streaming::DomMutation;
 
-        let parser = self
-            .streaming_parser
-            .get_or_insert_with(|| crate::html::streaming::StreamingParser::new(&self.doc.base_url));
+        let parser = self.streaming_parser.get_or_insert_with(|| {
+            crate::html::streaming::StreamingParser::new(&self.doc.base_url)
+        });
         let mutations = parser.feed(chunk);
 
         let mut resource_hints = Vec::new();
@@ -1089,15 +1088,30 @@ mod tests {
 
         assert_eq!(frame.doc.root.tag, "html");
         assert!(
-            frame.doc.root.children.iter().any(|child| child.tag == "head"),
+            frame
+                .doc
+                .root
+                .children
+                .iter()
+                .any(|child| child.tag == "head"),
             "streamed head should be a child of the document root"
         );
         assert!(
-            frame.doc.root.children.iter().any(|child| child.tag == "body"),
+            frame
+                .doc
+                .root
+                .children
+                .iter()
+                .any(|child| child.tag == "body"),
             "streamed body should be a child of the document root"
         );
         assert!(
-            !frame.doc.root.children.iter().any(|child| child.tag == "html"),
+            !frame
+                .doc
+                .root
+                .children
+                .iter()
+                .any(|child| child.tag == "html"),
             "streaming must not nest a second html element"
         );
     }

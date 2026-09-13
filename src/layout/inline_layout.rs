@@ -2,8 +2,7 @@ use super::Constraints;
 use crate::layout::block::collapse_two;
 use crate::layout::text::resolve_bidi_line;
 use crate::layout::{
-    FloatContext, FloatSide, LayoutEngine, ResolvedBox, is_layout_inert_svg_node,
-    layout_positioned,
+    FloatContext, FloatSide, LayoutEngine, ResolvedBox, is_layout_inert_svg_node, layout_positioned,
 };
 use crate::types::*;
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Stretch, Style as CTextStyle, Weight};
@@ -11,6 +10,36 @@ use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Stretch, Style as CTe
 thread_local! {
     static MEASURED_TEXT_WIDTHS: std::cell::RefCell<(usize, std::collections::HashMap<u64, f32>)> =
         std::cell::RefCell::new((usize::MAX, std::collections::HashMap::new()));
+}
+
+fn content_box_height_clamps(
+    engine: &LayoutEngine,
+    style: &ComputedStyle,
+    rbox: &ResolvedBox,
+    font_px: f32,
+    root_font_px: f32,
+) -> (f32, f32) {
+    let bb_extra = if style.box_sizing == BoxSizing::BorderBox {
+        rbox.padding_top + rbox.padding_bottom + rbox.border_top + rbox.border_bottom
+    } else {
+        0.0
+    };
+    let min_h = if style.min_height.is_auto() {
+        0.0
+    } else {
+        (engine.res_len(&style.min_height, font_px, 0.0, root_font_px) - bb_extra).max(0.0)
+    };
+    let max_h = if style.max_height.is_none() || style.max_height.is_auto() {
+        f32::MAX
+    } else {
+        let v = engine.res_len(&style.max_height, font_px, 0.0, root_font_px);
+        if v == 0.0 && matches!(style.max_height, CssLength::Percent(_)) {
+            f32::MAX
+        } else {
+            (v - bb_extra).max(0.0)
+        }
+    };
+    (min_h, max_h)
 }
 
 /// Lay out a box whose children are inline-level (text runs, inline-block).
@@ -490,18 +519,8 @@ pub fn layout_inline_block(
         } else {
             br_h
         };
-        let min_h = engine.res_len(&node.style.min_height, font_px, 0.0, root_font_px);
-        let max_h = if node.style.max_height.is_none() || node.style.max_height.is_auto() {
-            f32::MAX
-        } else {
-            let v = engine.res_len(&node.style.max_height, font_px, 0.0, root_font_px);
-            // Percentage max-height against unknown (0) containing height → treat as none
-            if v == 0.0 && matches!(node.style.max_height, CssLength::Percent(_)) {
-                f32::MAX
-            } else {
-                v
-            }
-        };
+        let (min_h, max_h) =
+            content_box_height_clamps(engine, &node.style, rbox, font_px, root_font_px);
         let content_h = if let Some(h) = rbox.content_height {
             h
         } else if let Some(ratio) = node.style.aspect_ratio {
@@ -601,12 +620,8 @@ pub fn layout_inline_block(
             Some(h) => h,
             None => raw_h,
         };
-        let min_h = engine.res_len(&node.style.min_height, font_px, 0.0, root_font_px);
-        let max_h = if node.style.max_height.is_none() || node.style.max_height.is_auto() {
-            f32::MAX
-        } else {
-            engine.res_len(&node.style.max_height, font_px, 0.0, root_font_px)
-        };
+        let (min_h, max_h) =
+            content_box_height_clamps(engine, &node.style, rbox, font_px, root_font_px);
         let content_h = content_h.max(min_h).min(max_h).max(0.0);
         crate::layout::block::build_box_rects(
             node,
@@ -1025,17 +1040,8 @@ pub fn layout_inline_block(
                     Some(h) => h,
                     None => raw_h,
                 };
-                let min_h = engine.res_len(&node.style.min_height, font_px, 0.0, root_font_px);
-                let max_h = if node.style.max_height.is_none() || node.style.max_height.is_auto() {
-                    f32::MAX
-                } else {
-                    let v = engine.res_len(&node.style.max_height, font_px, 0.0, root_font_px);
-                    if v == 0.0 && matches!(node.style.max_height, CssLength::Percent(_)) {
-                        f32::MAX
-                    } else {
-                        v
-                    }
-                };
+                let (min_h, max_h) =
+                    content_box_height_clamps(engine, &node.style, rbox, font_px, root_font_px);
                 let content_h = content_h.max(min_h).min(max_h);
                 set_box_rects(
                     node,
@@ -1315,17 +1321,8 @@ pub fn layout_inline_block(
         0.0
     };
     let raw_h = inline_h.max(float_bottom);
-    let min_h = engine.res_len(&node.style.min_height, font_px, 0.0, root_font_px);
-    let max_h = if node.style.max_height.is_none() || node.style.max_height.is_auto() {
-        f32::MAX
-    } else {
-        let v = engine.res_len(&node.style.max_height, font_px, 0.0, root_font_px);
-        if v == 0.0 && matches!(node.style.max_height, CssLength::Percent(_)) {
-            f32::MAX
-        } else {
-            v
-        }
-    };
+    let (min_h, max_h) =
+        content_box_height_clamps(engine, &node.style, rbox, font_px, root_font_px);
     let content_h = match rbox.content_height {
         Some(h) => h,
         None => raw_h,

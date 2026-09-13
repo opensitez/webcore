@@ -33,6 +33,7 @@ pub enum PaintCmd {
         styles: [u8; 4], // 0=none, 1=solid, 2=dashed, 3=dotted, 4=double, etc.
         radii: [f32; 4], // top-left, top-right, bottom-right, bottom-left
         radii_y: [f32; 4],
+        opacity: f32,
     },
 
     /// Draw a decoded CSS border-image source clipped to the border ring.
@@ -79,10 +80,7 @@ pub enum PaintCmd {
     PopClip,
 
     /// Push a CSS transform.
-    PushTransform {
-        node_id: u32,
-        transform: [f32; 6],
-    }, // 2D affine: [a, b, c, d, e, f]
+    PushTransform { node_id: u32, transform: [f32; 6] }, // 2D affine: [a, b, c, d, e, f]
 
     /// Pop the current transform.
     PopTransform,

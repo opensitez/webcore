@@ -10,13 +10,14 @@ use cosmic_text::{
     Attrs, Buffer, Color as CTextColor, FontSystem, Metrics, Shaping, Style as CTextStyle,
     SwashCache, Weight as CTextWeight,
 };
+use std::collections::HashMap;
 use tiny_skia::{
     Color as SkColor, FillRule, Paint, PathBuilder, Pixmap, Rect as SkRect, Transform,
 };
 
 /// Replay a display list onto a pixmap (no text — use replay_with_text for full rendering).
 pub fn replay(list: &DisplayList, pixmap: &mut Pixmap, scale: f32) {
-    replay_inner(list, pixmap, scale, None, 0.0, 0.0, None);
+    replay_inner(list, pixmap, scale, None, 0.0, 0.0, None, None);
 }
 
 /// Replay with text rendering via cosmic_text.
@@ -24,6 +25,7 @@ pub fn replay(list: &DisplayList, pixmap: &mut Pixmap, scale: f32) {
 /// a command's own bounds do not account for shadows, outlines or decoration
 /// that spill beyond them.
 const CULL_MARGIN: f32 = 512.0;
+const DIRTY_CULL_MARGIN: f32 = 64.0;
 
 thread_local! {
     /// (font-DB face count, shaped buffers by text+attrs). See the note at the
@@ -116,6 +118,35 @@ fn rect_outside_view(rect: Rect, left: f32, top: f32, right: f32, bottom: f32) -
     rect.right() < left || rect.x > right || rect.bottom() < top || rect.y > bottom
 }
 
+fn transformed_bounds_to_viewport(ts: Transform, rect: Rect, scale: f32) -> Option<Rect> {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return None;
+    }
+    let points = [
+        (rect.x, rect.y),
+        (rect.x + rect.w, rect.y),
+        (rect.x, rect.y + rect.h),
+        (rect.x + rect.w, rect.y + rect.h),
+    ];
+    let inv_scale = 1.0 / scale.max(0.001);
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for (x, y) in points {
+        let px = (ts.sx * x + ts.ky * y + ts.tx) * inv_scale;
+        let py = (ts.kx * x + ts.sy * y + ts.ty) * inv_scale;
+        min_x = min_x.min(px);
+        min_y = min_y.min(py);
+        max_x = max_x.max(px);
+        max_y = max_y.max(py);
+    }
+    if !min_x.is_finite() || !min_y.is_finite() || !max_x.is_finite() || !max_y.is_finite() {
+        return None;
+    }
+    Some(Rect::new(min_x, min_y, max_x - min_x, max_y - min_y))
+}
+
 pub fn replay_with_text(
     list: &DisplayList,
     pixmap: &mut Pixmap,
@@ -130,6 +161,7 @@ pub fn replay_with_text(
         Some((font_system, swash_cache)),
         0.0,
         0.0,
+        None,
         None,
     );
 }
@@ -153,6 +185,32 @@ pub fn replay_with_scroll(
         scroll_x,
         scroll_y,
         None,
+        None,
+    );
+}
+
+/// Replay with scroll plus per-node animated transform matrices. The display
+/// list remains cached; transform animation updates are applied while replaying
+/// `PushTransform` commands instead of rebuilding the list every frame.
+pub fn replay_with_scroll_and_transform_overrides(
+    list: &DisplayList,
+    pixmap: &mut Pixmap,
+    scale: f32,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    scroll_x: f32,
+    scroll_y: f32,
+    transform_overrides: &HashMap<u32, [f32; 6]>,
+) {
+    replay_inner(
+        list,
+        pixmap,
+        scale,
+        Some((font_system, swash_cache)),
+        scroll_x,
+        scroll_y,
+        None,
+        Some(transform_overrides),
     );
 }
 
@@ -176,6 +234,30 @@ pub fn replay_with_scroll_clip(
         scroll_x,
         scroll_y,
         Some(clip),
+        None,
+    );
+}
+
+pub fn replay_with_scroll_clip_and_transform_overrides(
+    list: &DisplayList,
+    pixmap: &mut Pixmap,
+    scale: f32,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    scroll_x: f32,
+    scroll_y: f32,
+    clip: Rect,
+    transform_overrides: &HashMap<u32, [f32; 6]>,
+) {
+    replay_inner(
+        list,
+        pixmap,
+        scale,
+        Some((font_system, swash_cache)),
+        scroll_x,
+        scroll_y,
+        Some(clip),
+        Some(transform_overrides),
     );
 }
 
@@ -194,6 +276,7 @@ fn replay_inner(
     scroll_x: f32,
     scroll_y: f32,
     dirty_clip: Option<Rect>,
+    transform_overrides: Option<&HashMap<u32, [f32; 6]>>,
 ) {
     // Start with scale + scroll translation. Display list is in document
     // coordinates; the scroll offset maps to screen coordinates.
@@ -224,12 +307,29 @@ fn replay_inner(
     let inv_scale = 1.0 / scale.max(0.001);
     let view_w = (pw as f32) * inv_scale;
     let view_h = (ph as f32) * inv_scale;
-    let (vis_left, vis_top, vis_right, vis_bot) = if let Some(clip) = dirty_clip {
+    let (clip_left, clip_top, clip_right, clip_bottom) = if let Some(clip) = dirty_clip {
+        let margin = DIRTY_CULL_MARGIN;
         (
-            scroll_x + clip.x - CULL_MARGIN,
-            scroll_y + clip.y - CULL_MARGIN,
-            scroll_x + clip.right() + CULL_MARGIN,
-            scroll_y + clip.bottom() + CULL_MARGIN,
+            clip.x - margin,
+            clip.y - margin,
+            clip.right() + margin,
+            clip.bottom() + margin,
+        )
+    } else {
+        (
+            -CULL_MARGIN,
+            -CULL_MARGIN,
+            view_w + CULL_MARGIN,
+            view_h + CULL_MARGIN,
+        )
+    };
+    let (vis_left, vis_top, vis_right, vis_bot) = if let Some(clip) = dirty_clip {
+        let margin = DIRTY_CULL_MARGIN;
+        (
+            scroll_x + clip.x - margin,
+            scroll_y + clip.y - margin,
+            scroll_x + clip.right() + margin,
+            scroll_y + clip.bottom() + margin,
         )
     } else {
         (
@@ -265,9 +365,13 @@ fn replay_inner(
         // document-to-viewport transform, so drawing commands outside the
         // visible band can still be skipped. Stack commands themselves keep
         // returning `None` from `cmd_y_range`, preserving layer/clip balance.
-        if transform_depth == 0 {
-            if let Some(bounds) = cmd_bounds(cmd) {
+        if let Some(bounds) = cmd_bounds(cmd) {
+            if transform_depth == 0 {
                 if rect_outside_view(bounds, vis_left, vis_top, vis_right, vis_bot) {
+                    continue;
+                }
+            } else if let Some(bounds) = transformed_bounds_to_viewport(ts, bounds, scale) {
+                if rect_outside_view(bounds, clip_left, clip_top, clip_right, clip_bottom) {
                     continue;
                 }
             }
@@ -309,8 +413,9 @@ fn replay_inner(
                 styles: _,
                 radii,
                 radii_y,
+                opacity,
             } => {
-                let alpha = 1.0;
+                let alpha = *opacity;
                 let target = layer_stack
                     .last_mut()
                     .map(|l| &mut l.pixmap)
@@ -347,6 +452,41 @@ fn replay_inner(
                         let mut stroke = tiny_skia::Stroke::default();
                         stroke.width = bw;
                         target.stroke_path(&path, &paint, &stroke, ts, clip_mask);
+                    }
+                } else if max_r > 0.5 && widths.iter().any(|w| *w > 0.0) {
+                    for side in 0..4 {
+                        let bw = widths[side];
+                        let color = colors[side];
+                        if bw <= 0.0 || color.a == 0 {
+                            continue;
+                        }
+                        let half = bw / 2.0;
+                        if let Some(path) = rounded_rect_side_path(
+                            side,
+                            rect.x + half,
+                            rect.y + half,
+                            rect.w - bw,
+                            rect.h - bw,
+                            [
+                                (radii[0] - half).max(0.0),
+                                (radii[1] - half).max(0.0),
+                                (radii[2] - half).max(0.0),
+                                (radii[3] - half).max(0.0),
+                            ],
+                            [
+                                (radii_y[0] - half).max(0.0),
+                                (radii_y[1] - half).max(0.0),
+                                (radii_y[2] - half).max(0.0),
+                                (radii_y[3] - half).max(0.0),
+                            ],
+                        ) {
+                            let mut paint = Paint::default();
+                            paint.set_color(to_sk_color(&apply_opacity(&color, alpha)));
+                            paint.anti_alias = true;
+                            let mut stroke = tiny_skia::Stroke::default();
+                            stroke.width = bw;
+                            target.stroke_path(&path, &paint, &stroke, ts, clip_mask);
+                        }
                     }
                 } else {
                     // Fallback: draw borders as filled rectangles (no rounding)
@@ -521,14 +661,20 @@ fn replay_inner(
                 radius,
                 radius_y,
             } => {
-                if transform_depth == 0
-                    && (rect.right() < vis_left
+                if transform_depth == 0 {
+                    if rect.right() < vis_left
                         || rect.x > vis_right
                         || rect.bottom() < vis_top
-                        || rect.y > vis_bot)
-                {
-                    skip_clip_depth = 1;
-                    continue;
+                        || rect.y > vis_bot
+                    {
+                        skip_clip_depth = 1;
+                        continue;
+                    }
+                } else if let Some(bounds) = transformed_bounds_to_viewport(ts, *rect, scale) {
+                    if rect_outside_view(bounds, clip_left, clip_top, clip_right, clip_bottom) {
+                        skip_clip_depth = 1;
+                        continue;
+                    }
                 }
                 clip_stack.push(*rect);
                 // Build a clip mask from the clip rect
@@ -550,14 +696,20 @@ fn replay_inner(
             }
             PaintCmd::PushClipPath { points } => {
                 let bounds = polygon_bounds(points).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
-                if transform_depth == 0
-                    && (bounds.right() < vis_left
+                if transform_depth == 0 {
+                    if bounds.right() < vis_left
                         || bounds.x > vis_right
                         || bounds.bottom() < vis_top
-                        || bounds.y > vis_bot)
-                {
-                    skip_clip_depth = 1;
-                    continue;
+                        || bounds.y > vis_bot
+                    {
+                        skip_clip_depth = 1;
+                        continue;
+                    }
+                } else if let Some(bounds) = transformed_bounds_to_viewport(ts, bounds, scale) {
+                    if rect_outside_view(bounds, clip_left, clip_top, clip_right, clip_bottom) {
+                        skip_clip_depth = 1;
+                        continue;
+                    }
                 }
                 clip_stack.push(bounds);
                 let mut mask = build_polygon_clip_mask(points, pw, ph, scale, scroll_x, scroll_y);
@@ -606,10 +758,16 @@ fn replay_inner(
                 }
             }
 
-            PaintCmd::PushTransform { transform: m, .. } => {
+            PaintCmd::PushTransform {
+                node_id,
+                transform: m,
+            } => {
                 // Apply CSS transform by modifying the global transform matrix.
                 // The transform matrix m = [a,b,c,d,e,f] is a 2D affine transform
                 // that already includes translate-to-origin and translate-back.
+                let m = transform_overrides
+                    .and_then(|overrides| overrides.get(node_id))
+                    .unwrap_or(m);
                 let css_t = Transform::from_row(m[0], m[1], m[2], m[3], m[4], m[5]);
                 let new_ts = ts.pre_concat(css_t);
                 // Push old ts onto a stack so we can restore it
@@ -770,20 +928,20 @@ fn replay_inner(
                         let can_use_local_shadow = transform_depth == 0 && clip_mask.is_none();
                         if can_use_local_shadow {
                             let shadow_pad = (*blur * 4.0 + 4.0).ceil();
-                            let dev_left = ((sr.x - scroll_x) * scale - shadow_pad)
-                                .floor()
-                                .max(0.0) as u32;
-                            let dev_top = ((sr.y - scroll_y) * scale - shadow_pad)
-                                .floor()
-                                .max(0.0) as u32;
+                            let dev_left =
+                                ((sr.x - scroll_x) * scale - shadow_pad).floor().max(0.0) as u32;
+                            let dev_top =
+                                ((sr.y - scroll_y) * scale - shadow_pad).floor().max(0.0) as u32;
                             let dev_right = ((sr.x + sr.w - scroll_x) * scale + shadow_pad)
                                 .ceil()
                                 .min(pw as f32)
-                                .max(dev_left as f32) as u32;
+                                .max(dev_left as f32)
+                                as u32;
                             let dev_bottom = ((sr.y + sr.h - scroll_y) * scale + shadow_pad)
                                 .ceil()
                                 .min(ph as f32)
-                                .max(dev_top as f32) as u32;
+                                .max(dev_top as f32)
+                                as u32;
                             let local_w = dev_right.saturating_sub(dev_left);
                             let local_h = dev_bottom.saturating_sub(dev_top);
                             if local_w > 0
@@ -1993,22 +2151,20 @@ fn replay_inner(
                             );
                             let text_h = (*line_height).max(*font_size).max(1.0);
                             let shadow_pad = (*blur * 4.0 + 4.0).ceil();
-                            let dev_left = (text_x * text_scale - shadow_pad).floor().max(0.0)
-                                as u32;
+                            let dev_left =
+                                (text_x * text_scale - shadow_pad).floor().max(0.0) as u32;
                             let dev_top =
                                 (text_y * text_scale - shadow_pad).floor().max(0.0) as u32;
-                            let dev_right =
-                                ((text_x + text_w.max(1.0)) * text_scale + shadow_pad)
-                                    .ceil()
-                                    .min(pw as f32)
-                                    .max(dev_left as f32)
-                                    as u32;
-                            let dev_bottom =
-                                ((text_y + text_h) * text_scale + shadow_pad)
-                                    .ceil()
-                                    .min(ph as f32)
-                                    .max(dev_top as f32)
-                                    as u32;
+                            let dev_right = ((text_x + text_w.max(1.0)) * text_scale + shadow_pad)
+                                .ceil()
+                                .min(pw as f32)
+                                .max(dev_left as f32)
+                                as u32;
+                            let dev_bottom = ((text_y + text_h) * text_scale + shadow_pad)
+                                .ceil()
+                                .min(ph as f32)
+                                .max(dev_top as f32)
+                                as u32;
                             let local_w = dev_right.saturating_sub(dev_left);
                             let local_h = dev_bottom.saturating_sub(dev_top);
                             if local_w > 0
@@ -3405,6 +3561,109 @@ fn rounded_rect_path_corners(
     )
 }
 
+fn rounded_rect_side_path(
+    side: usize,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radii_x: [f32; 4],
+    radii_y: [f32; 4],
+) -> Option<tiny_skia::Path> {
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let ([tl_x, tr_x, br_x, bl_x], [tl_y, tr_y, br_y, bl_y]) =
+        reduce_corner_radii_xy(w, h, radii_x, radii_y);
+    const K: f32 = 0.552_284_8;
+    let mut pb = PathBuilder::new();
+    match side {
+        0 => {
+            pb.move_to(x, y + tl_y);
+            if tl_x > 0.0 || tl_y > 0.0 {
+                pb.cubic_to(x, y + tl_y - tl_y * K, x + tl_x - tl_x * K, y, x + tl_x, y);
+            }
+            pb.line_to(x + w - tr_x, y);
+            if tr_x > 0.0 || tr_y > 0.0 {
+                pb.cubic_to(
+                    x + w - tr_x + tr_x * K,
+                    y,
+                    x + w,
+                    y + tr_y - tr_y * K,
+                    x + w,
+                    y + tr_y,
+                );
+            }
+        }
+        1 => {
+            pb.move_to(x + w - tr_x, y);
+            if tr_x > 0.0 || tr_y > 0.0 {
+                pb.cubic_to(
+                    x + w - tr_x + tr_x * K,
+                    y,
+                    x + w,
+                    y + tr_y - tr_y * K,
+                    x + w,
+                    y + tr_y,
+                );
+            }
+            pb.line_to(x + w, y + h - br_y);
+            if br_x > 0.0 || br_y > 0.0 {
+                pb.cubic_to(
+                    x + w,
+                    y + h - br_y + br_y * K,
+                    x + w - br_x + br_x * K,
+                    y + h,
+                    x + w - br_x,
+                    y + h,
+                );
+            }
+        }
+        2 => {
+            pb.move_to(x + w, y + h - br_y);
+            if br_x > 0.0 || br_y > 0.0 {
+                pb.cubic_to(
+                    x + w,
+                    y + h - br_y + br_y * K,
+                    x + w - br_x + br_x * K,
+                    y + h,
+                    x + w - br_x,
+                    y + h,
+                );
+            }
+            pb.line_to(x + bl_x, y + h);
+            if bl_x > 0.0 || bl_y > 0.0 {
+                pb.cubic_to(
+                    x + bl_x - bl_x * K,
+                    y + h,
+                    x,
+                    y + h - bl_y + bl_y * K,
+                    x,
+                    y + h - bl_y,
+                );
+            }
+        }
+        _ => {
+            pb.move_to(x + bl_x, y + h);
+            if bl_x > 0.0 || bl_y > 0.0 {
+                pb.cubic_to(
+                    x + bl_x - bl_x * K,
+                    y + h,
+                    x,
+                    y + h - bl_y + bl_y * K,
+                    x,
+                    y + h - bl_y,
+                );
+            }
+            pb.line_to(x, y + tl_y);
+            if tl_x > 0.0 || tl_y > 0.0 {
+                pb.cubic_to(x, y + tl_y - tl_y * K, x + tl_x - tl_x * K, y, x + tl_x, y);
+            }
+        }
+    }
+    pb.finish()
+}
+
 fn rounded_rect_path_corners_xy(
     x: f32,
     y: f32,
@@ -3418,16 +3677,49 @@ fn rounded_rect_path_corners_xy(
     }
     let ([tl_x, tr_x, br_x, bl_x], [tl_y, tr_y, br_y, bl_y]) =
         reduce_corner_radii_xy(w, h, radii_x, radii_y);
+    // Approximate each quarter ellipse with a cubic Bézier. A single
+    // quadratic-to-corner makes `border-radius: 50%` visibly squarish, which is
+    // especially obvious on animated dots/spinners.
+    const K: f32 = 0.552_284_8;
     let mut pb = PathBuilder::new();
     pb.move_to(x + tl_x, y);
     pb.line_to(x + w - tr_x, y);
-    pb.quad_to(x + w, y, x + w, y + tr_y);
+    if tr_x > 0.0 || tr_y > 0.0 {
+        pb.cubic_to(
+            x + w - tr_x + tr_x * K,
+            y,
+            x + w,
+            y + tr_y - tr_y * K,
+            x + w,
+            y + tr_y,
+        );
+    }
     pb.line_to(x + w, y + h - br_y);
-    pb.quad_to(x + w, y + h, x + w - br_x, y + h);
+    if br_x > 0.0 || br_y > 0.0 {
+        pb.cubic_to(
+            x + w,
+            y + h - br_y + br_y * K,
+            x + w - br_x + br_x * K,
+            y + h,
+            x + w - br_x,
+            y + h,
+        );
+    }
     pb.line_to(x + bl_x, y + h);
-    pb.quad_to(x, y + h, x, y + h - bl_y);
+    if bl_x > 0.0 || bl_y > 0.0 {
+        pb.cubic_to(
+            x + bl_x - bl_x * K,
+            y + h,
+            x,
+            y + h - bl_y + bl_y * K,
+            x,
+            y + h - bl_y,
+        );
+    }
     pb.line_to(x, y + tl_y);
-    pb.quad_to(x, y, x + tl_x, y);
+    if tl_x > 0.0 || tl_y > 0.0 {
+        pb.cubic_to(x, y + tl_y - tl_y * K, x + tl_x - tl_x * K, y, x + tl_x, y);
+    }
     pb.close();
     pb.finish()
 }

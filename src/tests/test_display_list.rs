@@ -5,7 +5,9 @@ use crate::frame::EngineFrame;
 use crate::html::{parse_html, parse_html_with_base};
 use crate::renderer::display_list::{DisplayList, ImageRef, PaintCmd};
 use crate::renderer::display_list_builder::{build_display_list, build_display_list_full};
-use crate::renderer::display_list_replay::{reduce_corner_radii, replay, replay_with_scroll};
+use crate::renderer::display_list_replay::{
+    reduce_corner_radii, replay, replay_with_scroll, replay_with_scroll_and_transform_overrides,
+};
 use crate::types::{Color, Rect};
 
 fn build(html: &str) -> (EngineFrame, DisplayList) {
@@ -1075,6 +1077,24 @@ fn filter_will_change_isolation_and_blend_create_stacking_contexts() {
     }
 }
 
+#[test]
+fn will_change_transform_creates_replay_transform_slot() {
+    let (_, list) =
+        build(r#"<div style="will-change: transform; width: 100px; height: 50px">ticker</div>"#);
+    assert!(
+        list.commands.iter().any(|cmd| {
+            matches!(
+                cmd,
+                PaintCmd::PushTransform {
+                    transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                    ..
+                }
+            )
+        }),
+        "will-change: transform should reserve a replay-time transform slot"
+    );
+}
+
 // ── Inline content with line_cache ──────────────────────────────────────────
 
 #[test]
@@ -1295,6 +1315,52 @@ fn replay_scrolls_background_image_clips_with_the_image() {
         (white.red(), white.green(), white.blue(), white.alpha()),
         (255, 255, 255, 255),
         "background-image must remain clipped after scroll"
+    );
+}
+
+#[test]
+fn replay_can_apply_transform_animation_without_rebuilding_display_list() {
+    let mut list = DisplayList::new();
+    list.push(PaintCmd::PushTransform {
+        node_id: 7,
+        transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+    });
+    list.push(PaintCmd::FillRect {
+        rect: Rect::new(10.0, 10.0, 20.0, 20.0),
+        color: Color::rgb(255, 0, 0),
+        radius: [0.0; 4],
+        radius_y: [0.0; 4],
+    });
+    list.push(PaintCmd::PopTransform);
+
+    let mut pixmap = tiny_skia::Pixmap::new(80, 50).unwrap();
+    pixmap.fill(tiny_skia::Color::WHITE);
+    let mut font_system = cosmic_text::FontSystem::new();
+    let mut swash_cache = cosmic_text::SwashCache::new();
+    let overrides = std::collections::HashMap::from([(7, [1.0, 0.0, 0.0, 1.0, 30.0, 0.0])]);
+
+    replay_with_scroll_and_transform_overrides(
+        &list,
+        &mut pixmap,
+        1.0,
+        &mut font_system,
+        &mut swash_cache,
+        0.0,
+        0.0,
+        &overrides,
+    );
+
+    let moved = pixmap.pixel(45, 15).expect("sample moved box");
+    assert_eq!(
+        (moved.red(), moved.green(), moved.blue(), moved.alpha()),
+        (255, 0, 0, 255),
+        "animated transform override should move cached display-list content"
+    );
+    let old = pixmap.pixel(15, 15).expect("sample old box position");
+    assert_eq!(
+        (old.red(), old.green(), old.blue(), old.alpha()),
+        (255, 255, 255, 255),
+        "old position should not repaint when transform override is applied"
     );
 }
 
@@ -2702,6 +2768,32 @@ fn border_radius_slash_keeps_elliptical_corner_radii() {
     assert_eq!(ry, [40.0, 40.0, 40.0, 40.0], "got {ry:?}");
 }
 
+#[test]
+fn border_radius_fifty_percent_paints_as_circle() {
+    let (_f, list) = build(
+        "<style>* { margin:0; padding:0 }\
+         div { width:48px; height:48px; background:red; border-radius:50% }</style><div></div>",
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(60, 60).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+
+    let alpha_at = |x: u32, y: u32| pixmap.pixel(x, y).map(|p| p.alpha()).unwrap_or(0);
+    assert!(
+        alpha_at(24, 24) > 200,
+        "center of circular background should be filled"
+    );
+    assert_eq!(
+        alpha_at(0, 0),
+        0,
+        "corner outside circular background should stay transparent"
+    );
+    let outside_arc_alpha = alpha_at(4, 8);
+    assert!(
+        outside_arc_alpha < 32,
+        "50% border-radius should follow a circular arc, not a quadratic squircle; alpha={outside_arc_alpha}"
+    );
+}
+
 /// identity `[1, 0, 0, 1, 0, 0]` — the percentage translation is exactly zero.
 #[test]
 fn translate_percentages_resolve_against_the_reference_box() {
@@ -2822,7 +2914,7 @@ fn transform_box_selects_border_or_content_reference_box() {
         list.commands
             .iter()
             .find_map(|cmd| match cmd {
-                PaintCmd::PushTransform { transform } => Some(*transform),
+                PaintCmd::PushTransform { transform, .. } => Some(*transform),
                 _ => None,
             })
             .expect("transform command")

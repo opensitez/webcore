@@ -170,6 +170,22 @@ fn text_input_has_height() {
 }
 
 #[test]
+fn text_input_in_flex_row_stretches_past_ua_default_height() {
+    let doc = layout_html(
+        r#"<form style="display:flex;align-items:stretch;height:40px;width:300px">
+             <input id="q" type="search" style="width:100%;padding:0;border:0;box-sizing:border-box">
+           </form>"#,
+        400.0,
+    );
+    let input = find_by_tag(&doc.root, "input").unwrap();
+    assert!(
+        (input.layout.border_rect.h - 40.0).abs() < 0.5,
+        "search input should stretch to the 40px flex row, got {}",
+        input.layout.border_rect.h
+    );
+}
+
+#[test]
 fn text_input_preserves_value() {
     let doc = layout_html(r#"<input type="text" value="test123">"#, 400.0);
     let input = find_by_tag(&doc.root, "input").unwrap();

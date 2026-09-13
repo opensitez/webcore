@@ -278,8 +278,8 @@ impl Document {
         }
         if queue_drained
             && self
-            .images_in_flight
-            .load(std::sync::atomic::Ordering::SeqCst)
+                .images_in_flight
+                .load(std::sync::atomic::Ordering::SeqCst)
                 == 0
         {
             self.pending_images = None;
@@ -298,10 +298,7 @@ impl Document {
         self.tick_animated_images_detailed(now).changed_any
     }
 
-    pub fn tick_animated_images_detailed(
-        &mut self,
-        now: std::time::Instant,
-    ) -> AnimatedImageTick {
+    pub fn tick_animated_images_detailed(&mut self, now: std::time::Instant) -> AnimatedImageTick {
         self.tick_animated_images_in_viewport_detailed(now, 0.0, f32::INFINITY)
     }
 
@@ -553,10 +550,28 @@ impl Document {
             }
             // Absolute elements contribute only if they're within the document flow area
             // (some abs elements are positioned far off-screen as accessibility hacks)
+            let contributes_own_scroll_extent = !matches!(node.style.display, Display::Contents)
+                && !(node.is_text_node() && node.text.trim().is_empty());
+
             if matches!(node.style.position, Position::Absolute) {
+                if !contributes_own_scroll_extent {
+                    for child in &node.children {
+                        walk_scroll(
+                            child,
+                            max_bottom,
+                            false,
+                            node.tag == "svg"
+                                && crate::layout::is_svg_foreign_content_tag(&child.tag),
+                        );
+                    }
+                    return;
+                }
                 // Only count if within a reasonable range (2x the current max)
                 let bottom = node.layout.margin_rect.y + node.layout.margin_rect.h;
-                if bottom > 0.0 && bottom < *max_bottom * 3.0 + 2000.0 {
+                if node.layout.margin_rect.h > 0.0
+                    && bottom > 0.0
+                    && bottom < *max_bottom * 3.0 + 2000.0
+                {
                     if bottom > *max_bottom {
                         *max_bottom = bottom;
                     }
@@ -568,8 +583,8 @@ impl Document {
             // extent after layout, so counting it here creates a ratchet:
             // pages can grow but never shrink when display/content collapses.
             // Use descendants to compute the natural document extent instead.
-            if !is_root {
-                if node.layout.margin_rect.w <= 0.0 && node.layout.margin_rect.h <= 0.0 {
+            if !is_root && contributes_own_scroll_extent {
+                if node.layout.margin_rect.h <= 0.0 {
                     return;
                 }
                 let bottom = node.layout.margin_rect.y + node.layout.margin_rect.h;
@@ -837,10 +852,11 @@ mod tests {
     fn pending_stylesheet_poll_respects_the_document_order_budget() {
         let mut doc = Document::new();
         doc.preserve_stylesheet_document_order = true;
-        doc.document_stylesheets.push(crate::types::DocumentStylesheet::Linked {
-            href: "https://example.test/0.css".to_string(),
-            media: String::new(),
-        });
+        doc.document_stylesheets
+            .push(crate::types::DocumentStylesheet::Linked {
+                href: "https://example.test/0.css".to_string(),
+                media: String::new(),
+            });
         let (tx, rx) = std::sync::mpsc::channel();
         for i in 0..3 {
             tx.send((
@@ -911,10 +927,7 @@ mod tests {
         }
         doc.pending_stylesheets = Some(rx);
 
-        assert!(doc.poll_pending_stylesheets_budgeted(
-            512,
-            std::time::Duration::from_secs(1)
-        ));
+        assert!(doc.poll_pending_stylesheets_budgeted(512, std::time::Duration::from_secs(1)));
         assert!(
             doc.stylesheet.rules.len() >= ua_rules + 512,
             "all live fragments should append directly to the active stylesheet"
@@ -928,11 +941,8 @@ mod tests {
         for _ in 0..3 {
             doc.root.children.push(WebCore::new("img"));
         }
-        let decoded = crate::html::DecodedImage::Raster(
-            std::sync::Arc::new(vec![255, 0, 0, 255]),
-            1,
-            1,
-        );
+        let decoded =
+            crate::html::DecodedImage::Raster(std::sync::Arc::new(vec![255, 0, 0, 255]), 1, 1);
         let (tx, rx) = std::sync::mpsc::channel();
         for i in 0..3 {
             tx.send((vec![i], PendingImageTarget::Element, decoded.clone()))
