@@ -1,6 +1,6 @@
 //! Tests for the PropertyId system — resolution, inheritance, shorthand detection.
 
-use crate::css::properties::{is_inherited, is_shorthand, resolve, PropertyId};
+use crate::css::properties::{PropertyId, is_inherited, is_shorthand, resolve};
 
 #[test]
 fn resolve_basic_properties() {

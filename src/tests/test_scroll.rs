@@ -113,7 +113,7 @@ fn wheel_falls_through_to_viewport_when_no_inner_scroll() {
 
     let old = doc.scroll_y;
     doc.process_wheel_event((100.0, 100.0), -40.0); // negative = scroll down
-                                                    // Viewport scroll is unclamped here; renderer clamps it.
+    // Viewport scroll is unclamped here; renderer clamps it.
     assert!(
         doc.scroll_y != old || 40.0 > 0.0,
         "viewport scroll_y must change when no inner container handled it"
@@ -446,9 +446,9 @@ fn overscroll_auto_chains_to_viewport() {
 
     let vp_before = doc.scroll_y;
     doc.process_wheel_event((50.0, 50.0), -30.0); // up at top boundary
-                                                  // scroll_y is unclamped; renderer clamps it. We just check it changed.
+    // scroll_y is unclamped; renderer clamps it. We just check it changed.
     let _ = vp_before; // OK for chain to change it
-                       // The test passes as long as no panic; the real check is the contain test above.
+    // The test passes as long as no panic; the real check is the contain test above.
 }
 
 // ── 4. scroll-snap-type parsing ────────────────────────────────────────────────

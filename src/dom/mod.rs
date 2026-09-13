@@ -41,7 +41,7 @@ pub mod xml;
 // `webcore::dom::new_document` and `vybe_widgets::dom::new_document` are the
 // same call under a different browser.
 pub use registry::{
-    close_document, is_open, new_document, new_xml_document, with_document, DocumentId,
+    DocumentId, close_document, is_open, new_document, new_xml_document, with_document,
 };
 
 use crate::css::apply_property;

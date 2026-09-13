@@ -1,7 +1,8 @@
 use super::Constraints;
 use crate::layout::grid::{collect_grid_children, grid_child_mut, grid_child_ref};
 use crate::layout::{
-    layout_positioned, shift_rects, FloatContext, FloatSide, LayoutEngine, ResolvedBox,
+    FloatContext, FloatSide, LayoutEngine, ResolvedBox, is_layout_inert_svg_node,
+    layout_positioned, shift_rects,
 };
 use crate::types::*;
 use std::collections::HashMap;
@@ -441,11 +442,7 @@ fn compute_intrinsic_width_inner(node: &WebCore) -> f32 {
     }
     // Add 1px epsilon to prevent floating-point rounding from causing spurious wraps
     // when the layout re-runs at exactly the measured width.
-    if w > 0.0 {
-        w + 1.0
-    } else {
-        w
-    }
+    if w > 0.0 { w + 1.0 } else { w }
 }
 
 // ─── Apply relative offset ────────────────────────────────────────────────────
@@ -908,6 +905,9 @@ pub fn layout_block_with_fc(
         let child_position = ch.style.position;
 
         if matches!(child_display, Display::None) {
+            continue;
+        }
+        if is_layout_inert_svg_node(ch) {
             continue;
         }
         if matches!(child_position, Position::Absolute | Position::Fixed) {
@@ -1760,7 +1760,7 @@ pub fn layout_columns(
 
     // 5. Distribute children into columns
     let balance = node.style.column_fill; // true = balance
-                                          // Exclude column-span:all children from balance total (they don't occupy a column)
+    // Exclude column-span:all children from balance total (they don't occupy a column)
     let total_content_h: f32 = child_heights
         .iter()
         .filter(|(_, span)| !span)

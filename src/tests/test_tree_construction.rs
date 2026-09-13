@@ -138,17 +138,20 @@ fn inline_svg_script_uses_script_hook() {
 
 /// (markup, expected canonical tree) — cases webcore matches a browser on.
 const CASES: &[(&str, &str)] = &[
-    ("<table><tr><td>a</td></tr></table>",
-     "html
+    (
+        "<table><tr><td>a</td></tr></table>",
+        "html
   head
   body
     table
       tbody
         tr
           td
-            \"a\""),
-    ("<table><caption>c</caption><tr><td>a</td></tr></table>",
-     "html
+            \"a\"",
+    ),
+    (
+        "<table><caption>c</caption><tr><td>a</td></tr></table>",
+        "html
   head
   body
     table
@@ -157,9 +160,11 @@ const CASES: &[(&str, &str)] = &[
       tbody
         tr
           td
-            \"a\""),
-    ("<table><thead><tr><td>h</td></tr></thead><tr><td>b</td></tr></table>",
-     "html
+            \"a\"",
+    ),
+    (
+        "<table><thead><tr><td>h</td></tr></thead><tr><td>b</td></tr></table>",
+        "html
   head
   body
     table
@@ -170,9 +175,11 @@ const CASES: &[(&str, &str)] = &[
       tbody
         tr
           td
-            \"b\""),
-    ("<div><table>stray<tr><td>c</td></tr></table></div>",
-     "html
+            \"b\"",
+    ),
+    (
+        "<div><table>stray<tr><td>c</td></tr></table></div>",
+        "html
   head
   body
     div
@@ -181,9 +188,11 @@ const CASES: &[(&str, &str)] = &[
         tbody
           tr
             td
-              \"c\""),
-    ("<table><tr><td>a</td></tr><tr><td>b</td></tr></table>",
-     "html
+              \"c\"",
+    ),
+    (
+        "<table><tr><td>a</td></tr><tr><td>b</td></tr></table>",
+        "html
   head
   body
     table
@@ -193,9 +202,11 @@ const CASES: &[(&str, &str)] = &[
             \"a\"
         tr
           td
-            \"b\""),
-    ("<p><b>1<i>2</b>3</i></p>",
-     "html
+            \"b\"",
+    ),
+    (
+        "<p><b>1<i>2</b>3</i></p>",
+        "html
   head
   body
     p
@@ -204,9 +215,11 @@ const CASES: &[(&str, &str)] = &[
         i
           \"2\"
       i
-        \"3\""),
-    ("<div><b>1<p>2</b>3</p></div>",
-     "html
+        \"3\"",
+    ),
+    (
+        "<div><b>1<p>2</b>3</p></div>",
+        "html
   head
   body
     div
@@ -215,9 +228,11 @@ const CASES: &[(&str, &str)] = &[
       p
         b
           \"2\"
-        \"3\""),
-    ("<div><b><i><u>x</b>y</i>z</u></div>",
-     "html
+        \"3\"",
+    ),
+    (
+        "<div><b><i><u>x</b>y</i>z</u></div>",
+        "html
   head
   body
     div
@@ -229,9 +244,11 @@ const CASES: &[(&str, &str)] = &[
         u
           \"y\"
       u
-        \"z\""),
-    ("<div><a href=\"1\">1<a href=\"2\">2</a>3</div>",
-     "html
+        \"z\"",
+    ),
+    (
+        "<div><a href=\"1\">1<a href=\"2\">2</a>3</div>",
+        "html
   head
   body
     div
@@ -239,156 +256,196 @@ const CASES: &[(&str, &str)] = &[
         \"1\"
       a[href=2]
         \"2\"
-      \"3\""),
-    ("<div><nobr>1<nobr>2</nobr></div>",
-     "html
+      \"3\"",
+    ),
+    (
+        "<div><nobr>1<nobr>2</nobr></div>",
+        "html
   head
   body
     div
       nobr
         \"1\"
       nobr
-        \"2\""),
-    ("<section><b>x</section>y",
-     "html
+        \"2\"",
+    ),
+    (
+        "<section><b>x</section>y",
+        "html
   head
   body
     section
       b
         \"x\"
     b
-      \"y\""),
-    ("<section><span>x</section>y",
-     "html
+      \"y\"",
+    ),
+    (
+        "<section><span>x</section>y",
+        "html
   head
   body
     section
       span
         \"x\"
-    \"y\""),
-    ("<b><section>x</section></b>",
-     "html
+    \"y\"",
+    ),
+    (
+        "<b><section>x</section></b>",
+        "html
   head
   body
     b
       section
-        \"x\""),
-    ("<em>1<div>2</div>3</em>",
-     "html
+        \"x\"",
+    ),
+    (
+        "<em>1<div>2</div>3</em>",
+        "html
   head
   body
     em
       \"1\"
       div
         \"2\"
-      \"3\""),
-    ("<p>a<div>b</div>",
-     "html
+      \"3\"",
+    ),
+    (
+        "<p>a<div>b</div>",
+        "html
   head
   body
     p
       \"a\"
     div
-      \"b\""),
-    ("<p>a<p>b",
-     "html
+      \"b\"",
+    ),
+    (
+        "<p>a<p>b",
+        "html
   head
   body
     p
       \"a\"
     p
-      \"b\""),
-    ("<ul><li>a<li>b</ul>",
-     "html
+      \"b\"",
+    ),
+    (
+        "<ul><li>a<li>b</ul>",
+        "html
   head
   body
     ul
       li
         \"a\"
       li
-        \"b\""),
-    ("<dl><dt>a<dd>b</dl>",
-     "html
+        \"b\"",
+    ),
+    (
+        "<dl><dt>a<dd>b</dl>",
+        "html
   head
   body
     dl
       dt
         \"a\"
       dd
-        \"b\""),
-    ("<div CLASS=x class=y>t</div>",
-     "html
+        \"b\"",
+    ),
+    (
+        "<div CLASS=x class=y>t</div>",
+        "html
   head
   body
     div[class=x]
-      \"t\""),
-    ("<div><!bogus><p>x</p></div>",
-     "html
+      \"t\"",
+    ),
+    (
+        "<div><!bogus><p>x</p></div>",
+        "html
   head
   body
     div
       <!--bogus-->
       p
-        \"x\""),
-    ("<div>a<!--c-->b</div>",
-     "html
+        \"x\"",
+    ),
+    (
+        "<div>a<!--c-->b</div>",
+        "html
   head
   body
     div
       \"a\"
       <!--c-->
-      \"b\""),
-    ("<style>a > b { color: red }</style><p>x</p>",
-     "html
+      \"b\"",
+    ),
+    (
+        "<style>a > b { color: red }</style><p>x</p>",
+        "html
   head
     style
       \"a > b { color: red }\"
   body
     p
-      \"x\""),
-    ("<title>T</title><p>x</p>",
-     "html
+      \"x\"",
+    ),
+    (
+        "<title>T</title><p>x</p>",
+        "html
   head
     title
       \"T\"
   body
     p
-      \"x\""),
-    ("<select><option>A</option><option selected>B</option></select>",
-     "html
+      \"x\"",
+    ),
+    (
+        "<select><option>A</option><option selected>B</option></select>",
+        "html
   head
   body
     select
       option
         \"A\"
       option[selected=]
-        \"B\""),
-    ("<div>&amp;&copy;&notin;&#128;&#x1F600;&notit;</div>",
-     "html
+        \"B\"",
+    ),
+    (
+        "<div>&amp;&copy;&notin;&#128;&#x1F600;&notit;</div>",
+        "html
   head
   body
     div
-      \"&©∉€😀¬it;\""),
-    ("<p title=\"a&copy=1\">x</p>",
-     "html
+      \"&©∉€😀¬it;\"",
+    ),
+    (
+        "<p title=\"a&copy=1\">x</p>",
+        "html
   head
   body
     p[title=a&copy=1]
-      \"x\""),
-    ("<div hidden>h</div>",
-     "html
+      \"x\"",
+    ),
+    (
+        "<div hidden>h</div>",
+        "html
   head
   body
     div[hidden=]
-      \"h\""),
-    ("<input type=hidden><input type=checkbox checked>",
-     "html
+      \"h\"",
+    ),
+    (
+        "<input type=hidden><input type=checkbox checked>",
+        "html
   head
   body
     input[type=hidden]
-    input[checked=,type=checkbox]"),
-    ("<table><form><tr><td>x</td></tr></form></table>",
-     "html
+    input[checked=,type=checkbox]",
+    ),
+    (
+        "<table><form><tr><td>x</td></tr></form></table>",
+        "html
   head
   body
     table
@@ -396,38 +453,48 @@ const CASES: &[(&str, &str)] = &[
       tbody
         tr
           td
-            \"x\""),
-    ("<div><td>orphan</td></div>",
-     "html
+            \"x\"",
+    ),
+    (
+        "<div><td>orphan</td></div>",
+        "html
   head
   body
     div
-      \"orphan\""),
-    ("<li>orphan li",
-     "html
+      \"orphan\"",
+    ),
+    (
+        "<li>orphan li",
+        "html
   head
   body
     li
-      \"orphan li\""),
-    ("<dialog>closed</dialog><dialog open>open</dialog>",
-     "html
+      \"orphan li\"",
+    ),
+    (
+        "<dialog>closed</dialog><dialog open>open</dialog>",
+        "html
   head
   body
     dialog
       \"closed\"
     dialog[open=]
-      \"open\""),
-    ("<div><span>a</span><span>b</span></div>",
-     "html
+      \"open\"",
+    ),
+    (
+        "<div><span>a</span><span>b</span></div>",
+        "html
   head
   body
     div
       span
         \"a\"
       span
-        \"b\""),
-    ("<p>x<b>y</b><i>z</i></p>",
-     "html
+        \"b\"",
+    ),
+    (
+        "<p>x<b>y</b><i>z</i></p>",
+        "html
   head
   body
     p
@@ -435,27 +502,33 @@ const CASES: &[(&str, &str)] = &[
       b
         \"y\"
       i
-        \"z\""),
-    ("<table><tbody><tr><td>explicit</td></tr></tbody></table>",
-     "html
+        \"z\"",
+    ),
+    (
+        "<table><tbody><tr><td>explicit</td></tr></tbody></table>",
+        "html
   head
   body
     table
       tbody
         tr
           td
-            \"explicit\""),
-    ("<div><p>a<p>b</div>",
-     "html
+            \"explicit\"",
+    ),
+    (
+        "<div><p>a<p>b</div>",
+        "html
   head
   body
     div
       p
         \"a\"
       p
-        \"b\""),
-    ("<div><p>a<ul><li>x</li></ul></div>",
-     "html
+        \"b\"",
+    ),
+    (
+        "<div><p>a<ul><li>x</li></ul></div>",
+        "html
   head
   body
     div
@@ -463,9 +536,11 @@ const CASES: &[(&str, &str)] = &[
         \"a\"
       ul
         li
-          \"x\""),
-    ("<ol><li>a<li>b<li>c</ol>",
-     "html
+          \"x\"",
+    ),
+    (
+        "<ol><li>a<li>b<li>c</ol>",
+        "html
   head
   body
     ol
@@ -474,9 +549,11 @@ const CASES: &[(&str, &str)] = &[
       li
         \"b\"
       li
-        \"c\""),
-    ("<dl><dt>a<dt>b<dd>c</dl>",
-     "html
+        \"c\"",
+    ),
+    (
+        "<dl><dt>a<dt>b<dd>c</dl>",
+        "html
   head
   body
     dl
@@ -485,18 +562,22 @@ const CASES: &[(&str, &str)] = &[
       dt
         \"b\"
       dd
-        \"c\""),
-    ("<select><option>A<option>B</select>",
-     "html
+        \"c\"",
+    ),
+    (
+        "<select><option>A<option>B</select>",
+        "html
   head
   body
     select
       option
         \"A\"
       option
-        \"B\""),
-    ("<select><optgroup label=\"g\"><option>A<optgroup label=\"h\"><option>B</select>",
-     "html
+        \"B\"",
+    ),
+    (
+        "<select><optgroup label=\"g\"><option>A<optgroup label=\"h\"><option>B</select>",
+        "html
   head
   body
     select
@@ -505,9 +586,11 @@ const CASES: &[(&str, &str)] = &[
           \"A\"
       optgroup[label=h]
         option
-          \"B\""),
-    ("<table><colgroup><col><col></colgroup><tr><td>x</td></tr></table>",
-     "html
+          \"B\"",
+    ),
+    (
+        "<table><colgroup><col><col></colgroup><tr><td>x</td></tr></table>",
+        "html
   head
   body
     table
@@ -517,9 +600,11 @@ const CASES: &[(&str, &str)] = &[
       tbody
         tr
           td
-            \"x\""),
-    ("<table><tr><td>a<td>b</table>",
-     "html
+            \"x\"",
+    ),
+    (
+        "<table><tr><td>a<td>b</table>",
+        "html
   head
   body
     table
@@ -528,18 +613,22 @@ const CASES: &[(&str, &str)] = &[
           td
             \"a\"
           td
-            \"b\""),
-    ("<table><thead><tr><th>h</table>",
-     "html
+            \"b\"",
+    ),
+    (
+        "<table><thead><tr><th>h</table>",
+        "html
   head
   body
     table
       thead
         tr
           th
-            \"h\""),
-    ("<table><tr><td>a</table><p>after</p>",
-     "html
+            \"h\"",
+    ),
+    (
+        "<table><tr><td>a</table><p>after</p>",
+        "html
   head
   body
     table
@@ -548,9 +637,11 @@ const CASES: &[(&str, &str)] = &[
           td
             \"a\"
     p
-      \"after\""),
-    ("<table><tr><td><table><tr><td>deep</td></tr></table></td></tr></table>",
-     "html
+      \"after\"",
+    ),
+    (
+        "<table><tr><td><table><tr><td>deep</td></tr></table></td></tr></table>",
+        "html
   head
   body
     table
@@ -561,34 +652,42 @@ const CASES: &[(&str, &str)] = &[
               tbody
                 tr
                   td
-                    \"deep\""),
-    ("<div><button>a<button>b</div>",
-     "html
+                    \"deep\"",
+    ),
+    (
+        "<div><button>a<button>b</div>",
+        "html
   head
   body
     div
       button
         \"a\"
       button
-        \"b\""),
-    ("<div><a><div>block in a</div></a></div>",
-     "html
+        \"b\"",
+    ),
+    (
+        "<div><a><div>block in a</div></a></div>",
+        "html
   head
   body
     div
       a
         div
-          \"block in a\""),
-    ("<div><b><b>double</b></b></div>",
-     "html
+          \"block in a\"",
+    ),
+    (
+        "<div><b><b>double</b></b></div>",
+        "html
   head
   body
     div
       b
         b
-          \"double\""),
-    ("<div><i>a<b>b</i>c</b></div>",
-     "html
+          \"double\"",
+    ),
+    (
+        "<div><i>a<b>b</i>c</b></div>",
+        "html
   head
   body
     div
@@ -597,77 +696,99 @@ const CASES: &[(&str, &str)] = &[
         b
           \"b\"
       b
-        \"c\""),
-    ("<p><em>x</p>y",
-     "html
+        \"c\"",
+    ),
+    (
+        "<p><em>x</p>y",
+        "html
   head
   body
     p
       em
         \"x\"
     em
-      \"y\""),
-    ("<div>a<br>b</div>",
-     "html
+      \"y\"",
+    ),
+    (
+        "<div>a<br>b</div>",
+        "html
   head
   body
     div
       \"a\"
       br
-      \"b\""),
-    ("<div><img src=\"x.png\" alt=\"a\"></div>",
-     "html
+      \"b\"",
+    ),
+    (
+        "<div><img src=\"x.png\" alt=\"a\"></div>",
+        "html
   head
   body
     div
-      img[alt=a,src=x.png]"),
-    ("<div><input value=\"v\" disabled></div>",
-     "html
+      img[alt=a,src=x.png]",
+    ),
+    (
+        "<div><input value=\"v\" disabled></div>",
+        "html
   head
   body
     div
-      input[disabled=,value=v]"),
-    ("<template><p>t</p></template>",
-     "html
+      input[disabled=,value=v]",
+    ),
+    (
+        "<template><p>t</p></template>",
+        "html
   head
     template
       p
         \"t\"
-  body"),
-    ("<div><template><td>x</td></template></div>",
-     "html
+  body",
+    ),
+    (
+        "<div><template><td>x</td></template></div>",
+        "html
   head
   body
     div
       template
         td
-          \"x\""),
-    ("<div>&lt;&gt;&quot;&apos;&nbsp;</div>",
-     "html
+          \"x\"",
+    ),
+    (
+        "<div>&lt;&gt;&quot;&apos;&nbsp;</div>",
+        "html
   head
   body
     div
-      \"<>\"'\""),
-    ("<div>&#38;&#x26;&unknownref;</div>",
-     "html
+      \"<>\"'\"",
+    ),
+    (
+        "<div>&#38;&#x26;&unknownref;</div>",
+        "html
   head
   body
     div
-      \"&&&unknownref;\""),
-    ("<div class=\"a b\" id=\"i\" data-x=\"1\">t</div>",
-     "html
+      \"&&&unknownref;\"",
+    ),
+    (
+        "<div class=\"a b\" id=\"i\" data-x=\"1\">t</div>",
+        "html
   head
   body
     div[class=a b,data-x=1,id=i]
-      \"t\""),
-    ("<div>&#x0;&#xD800;&#x110000;</div>",
-     "html
+      \"t\"",
+    ),
+    (
+        "<div>&#x0;&#xD800;&#x110000;</div>",
+        "html
   head
   body
     div
-      \"���\""),
-    ("<p>a<span>b<em>c</em>d</span>e</p>",
-     "html
+      \"���\"",
+    ),
+    (
+        "<p>a<span>b<em>c</em>d</span>e</p>",
+        "html
   head
   body
     p
@@ -677,153 +798,195 @@ const CASES: &[(&str, &str)] = &[
         em
           \"c\"
         \"d\"
-      \"e\""),
-    ("<h1>a</h1><h2>b</h2>",
-     "html
+      \"e\"",
+    ),
+    (
+        "<h1>a</h1><h2>b</h2>",
+        "html
   head
   body
     h1
       \"a\"
     h2
-      \"b\""),
-    ("<blockquote><p>q</p></blockquote>",
-     "html
+      \"b\"",
+    ),
+    (
+        "<blockquote><p>q</p></blockquote>",
+        "html
   head
   body
     blockquote
       p
-        \"q\""),
-    ("<figure><figcaption>c</figcaption><img src=\"i.png\"></figure>",
-     "html
+        \"q\"",
+    ),
+    (
+        "<figure><figcaption>c</figcaption><img src=\"i.png\"></figure>",
+        "html
   head
   body
     figure
       figcaption
         \"c\"
-      img[src=i.png]"),
-    ("<details><summary>s</summary><p>d</p></details>",
-     "html
+      img[src=i.png]",
+    ),
+    (
+        "<details><summary>s</summary><p>d</p></details>",
+        "html
   head
   body
     details
       summary
         \"s\"
       p
-        \"d\""),
-    ("<div><span></span></div>",
-     "html
+        \"d\"",
+    ),
+    (
+        "<div><span></span></div>",
+        "html
   head
   body
     div
-      span"),
-    ("<div></div>",
-     "html
+      span",
+    ),
+    (
+        "<div></div>",
+        "html
   head
   body
-    div"),
-    ("<p>",
-     "html
+    div",
+    ),
+    (
+        "<p>",
+        "html
   head
   body
-    p"),
-    ("<div><p></p></div>",
-     "html
+    p",
+    ),
+    (
+        "<div><p></p></div>",
+        "html
   head
   body
     div
-      p"),
-    ("<span><div>block in span</div></span>",
-     "html
+      p",
+    ),
+    (
+        "<span><div>block in span</div></span>",
+        "html
   head
   body
     span
       div
-        \"block in span\""),
-    ("<div><label for=\"x\">L</label><input id=\"x\"></div>",
-     "html
+        \"block in span\"",
+    ),
+    (
+        "<div><label for=\"x\">L</label><input id=\"x\"></div>",
+        "html
   head
   body
     div
       label[for=x]
         \"L\"
-      input[id=x]"),
-    ("<fieldset><legend>l</legend><input></fieldset>",
-     "html
+      input[id=x]",
+    ),
+    (
+        "<fieldset><legend>l</legend><input></fieldset>",
+        "html
   head
   body
     fieldset
       legend
         \"l\"
-      input"),
-    ("<video controls><source src=\"a.mp4\"><track kind=\"subtitles\"></video>",
-     "html
+      input",
+    ),
+    (
+        "<video controls><source src=\"a.mp4\"><track kind=\"subtitles\"></video>",
+        "html
   head
   body
     video[controls=]
       source[src=a.mp4]
-      track[kind=subtitles]"),
-    ("<picture><source srcset=\"a.webp\"><img src=\"a.png\"></picture>",
-     "html
+      track[kind=subtitles]",
+    ),
+    (
+        "<picture><source srcset=\"a.webp\"><img src=\"a.png\"></picture>",
+        "html
   head
   body
     picture
       source[srcset=a.webp]
-      img[src=a.png]"),
-    ("<map name=\"m\"><area shape=\"rect\"></map>",
-     "html
+      img[src=a.png]",
+    ),
+    (
+        "<map name=\"m\"><area shape=\"rect\"></map>",
+        "html
   head
   body
     map[name=m]
-      area[shape=rect]"),
-    ("<ruby>base<rt>ann</rt></ruby>",
-     "html
+      area[shape=rect]",
+    ),
+    (
+        "<ruby>base<rt>ann</rt></ruby>",
+        "html
   head
   body
     ruby
       \"base\"
       rt
-        \"ann\""),
-    ("<div><wbr>x</div>",
-     "html
+        \"ann\"",
+    ),
+    (
+        "<div><wbr>x</div>",
+        "html
   head
   body
     div
       wbr
-      \"x\""),
-    ("<div><bdi>a</bdi><bdo dir=\"rtl\">b</bdo></div>",
-     "html
+      \"x\"",
+    ),
+    (
+        "<div><bdi>a</bdi><bdo dir=\"rtl\">b</bdo></div>",
+        "html
   head
   body
     div
       bdi
         \"a\"
       bdo[dir=rtl]
-        \"b\""),
-    ("<progress value=\"1\" max=\"2\"></progress><meter value=\"1\"></meter>",
-     "html
+        \"b\"",
+    ),
+    (
+        "<progress value=\"1\" max=\"2\"></progress><meter value=\"1\"></meter>",
+        "html
   head
   body
     progress[max=2,value=1]
-    meter[value=1]"),
-    ("<output>o</output><datalist><option value=\"a\"></datalist>",
-     "html
+    meter[value=1]",
+    ),
+    (
+        "<output>o</output><datalist><option value=\"a\"></datalist>",
+        "html
   head
   body
     output
       \"o\"
     datalist
-      option[value=a]"),
-    ("<div><ins>i</ins><del>d</del></div>",
-     "html
+      option[value=a]",
+    ),
+    (
+        "<div><ins>i</ins><del>d</del></div>",
+        "html
   head
   body
     div
       ins
         \"i\"
       del
-        \"d\""),
-    ("<div><code>c</code><kbd>k</kbd><samp>s</samp><var>v</var></div>",
-     "html
+        \"d\"",
+    ),
+    (
+        "<div><code>c</code><kbd>k</kbd><samp>s</samp><var>v</var></div>",
+        "html
   head
   body
     div
@@ -834,163 +997,209 @@ const CASES: &[(&str, &str)] = &[
       samp
         \"s\"
       var
-        \"v\""),
-    ("<div><sub>a</sub><sup>b</sup></div>",
-     "html
+        \"v\"",
+    ),
+    (
+        "<div><sub>a</sub><sup>b</sup></div>",
+        "html
   head
   body
     div
       sub
         \"a\"
       sup
-        \"b\""),
-    ("<div><small>s</small><mark>m</mark></div>",
-     "html
+        \"b\"",
+    ),
+    (
+        "<div><small>s</small><mark>m</mark></div>",
+        "html
   head
   body
     div
       small
         \"s\"
       mark
-        \"m\""),
-    ("<address>a</address><hr><main>m</main>",
-     "html
+        \"m\"",
+    ),
+    (
+        "<address>a</address><hr><main>m</main>",
+        "html
   head
   body
     address
       \"a\"
     hr
     main
-      \"m\""),
-    ("<title>a<b>c</title><p>x</p>",
-     "html
+      \"m\"",
+    ),
+    (
+        "<title>a<b>c</title><p>x</p>",
+        "html
   head
     title
       \"a<b>c\"
   body
     p
-      \"x\""),
-    ("<textarea><p>x</p></textarea>",
-     "html
+      \"x\"",
+    ),
+    (
+        "<textarea><p>x</p></textarea>",
+        "html
   head
   body
     textarea
-      \"<p>x</p>\""),
-    ("<textarea>
+      \"<p>x</p>\"",
+    ),
+    (
+        "<textarea>
 first</textarea>",
-     "html
+        "html
   head
   body
     textarea
-      \"first\""),
-    ("<style><!--a{}--></style><p>x</p>",
-     "html
+      \"first\"",
+    ),
+    (
+        "<style><!--a{}--></style><p>x</p>",
+        "html
   head
     style
       \"<!--a{}-->\"
   body
     p
-      \"x\""),
-    ("<xmp><b>x</b></xmp>",
-     "html
+      \"x\"",
+    ),
+    (
+        "<xmp><b>x</b></xmp>",
+        "html
   head
   body
     xmp
       b
-        \"x\""),
-    ("<listing><b>x</b></listing>",
-     "html
+        \"x\"",
+    ),
+    (
+        "<listing><b>x</b></listing>",
+        "html
   head
   body
     listing
       b
-        \"x\""),
-    ("<plaintext><b>x</b>",
-     "html
+        \"x\"",
+    ),
+    (
+        "<plaintext><b>x</b>",
+        "html
   head
   body
     plaintext
       b
-        \"x\""),
-    ("<div>a</br>b</div>",
-     "html
+        \"x\"",
+    ),
+    (
+        "<div>a</br>b</div>",
+        "html
   head
   body
     div
       \"a\"
       br
-      \"b\""),
-    ("<div><div/>x</div>",
-     "html
+      \"b\"",
+    ),
+    (
+        "<div><div/>x</div>",
+        "html
   head
   body
     div
       div
-        \"x\""),
-    ("<div a=1 b c=\"3\">t</div>",
-     "html
+        \"x\"",
+    ),
+    (
+        "<div a=1 b c=\"3\">t</div>",
+        "html
   head
   body
     div[a=1,b=,c=3]
-      \"t\""),
-    ("<div a = 1>t</div>",
-     "html
+      \"t\"",
+    ),
+    (
+        "<div a = 1>t</div>",
+        "html
   head
   body
     div[a=1]
-      \"t\""),
-    ("<div a='q'>t</div>",
-     "html
+      \"t\"",
+    ),
+    (
+        "<div a='q'>t</div>",
+        "html
   head
   body
     div[a=q]
-      \"t\""),
-    ("<!DOCTYPE html><p>x</p>",
-     "html
+      \"t\"",
+    ),
+    (
+        "<!DOCTYPE html><p>x</p>",
+        "html
   head
   body
     p
-      \"x\""),
-    ("<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01//EN\"><p>x</p>",
-     "html
+      \"x\"",
+    ),
+    (
+        "<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01//EN\"><p>x</p>",
+        "html
   head
   body
     p
-      \"x\""),
-    ("<p>x</p><!--after-->",
-     "html
+      \"x\"",
+    ),
+    (
+        "<p>x</p><!--after-->",
+        "html
   head
   body
     p
       \"x\"
-    <!--after-->"),
-    ("<!--before--><p>x</p>",
-     "html
+    <!--after-->",
+    ),
+    (
+        "<!--before--><p>x</p>",
+        "html
   head
   body
     p
-      \"x\""),
-    ("<body class=\"a\"><p>x</p><body class=\"b\">",
-     "html
+      \"x\"",
+    ),
+    (
+        "<body class=\"a\"><p>x</p><body class=\"b\">",
+        "html
   head
   body[class=a]
     p
-      \"x\""),
-    ("<html lang=\"en\"><body><p>x</p>",
-     "html[lang=en]
+      \"x\"",
+    ),
+    (
+        "<html lang=\"en\"><body><p>x</p>",
+        "html[lang=en]
   head
   body
     p
-      \"x\""),
-    ("<div><form><form><input></form></div>",
-     "html
+      \"x\"",
+    ),
+    (
+        "<div><form><form><input></form></div>",
+        "html
   head
   body
     div
       form
-        input"),
-    ("<table><tr><td>a</td></tr><caption>late</caption></table>",
-     "html
+        input",
+    ),
+    (
+        "<table><tr><td>a</td></tr><caption>late</caption></table>",
+        "html
   head
   body
     table
@@ -999,73 +1208,93 @@ first</textarea>",
           td
             \"a\"
       caption
-        \"late\""),
-    ("<a><table><a>x</a></table></a>",
-     "html
+        \"late\"",
+    ),
+    (
+        "<a><table><a>x</a></table></a>",
+        "html
   head
   body
     a
       a
         \"x\"
-      table"),
-    ("<div><p><div>x</div></p></div>",
-     "html
+      table",
+    ),
+    (
+        "<div><p><div>x</div></p></div>",
+        "html
   head
   body
     div
       p
       div
         \"x\"
-      p"),
-    ("<b>unclosed",
-     "html
+      p",
+    ),
+    (
+        "<b>unclosed",
+        "html
   head
   body
     b
-      \"unclosed\""),
-    ("<div><span><b>deep unclosed",
-     "html
+      \"unclosed\"",
+    ),
+    (
+        "<div><span><b>deep unclosed",
+        "html
   head
   body
     div
       span
         b
-          \"deep unclosed\""),
-    ("<ul><li><ul><li>nested</ul></ul>",
-     "html
+          \"deep unclosed\"",
+    ),
+    (
+        "<ul><li><ul><li>nested</ul></ul>",
+        "html
   head
   body
     ul
       li
         ul
           li
-            \"nested\""),
-    ("<div>&#x41;&#65;&#X41;</div>",
-     "html
+            \"nested\"",
+    ),
+    (
+        "<div>&#x41;&#65;&#X41;</div>",
+        "html
   head
   body
     div
-      \"AAA\""),
-    ("<div>a&#65b</div>",
-     "html
+      \"AAA\"",
+    ),
+    (
+        "<div>a&#65b</div>",
+        "html
   head
   body
     div
-      \"aAb\""),
-    ("<div title=\"&#65;&amp;\">t</div>",
-     "html
+      \"aAb\"",
+    ),
+    (
+        "<div title=\"&#65;&amp;\">t</div>",
+        "html
   head
   body
     div[title=A&]
-      \"t\""),
-    ("<div>&AMP;&Amp;</div>",
-     "html
+      \"t\"",
+    ),
+    (
+        "<div>&AMP;&Amp;</div>",
+        "html
   head
   body
     div
-      \"&&Amp;\""),
-    ("<p>a<b>b<i>c</b>d</i>e</p>",
-     "html
+      \"&&Amp;\"",
+    ),
+    (
+        "<p>a<b>b<i>c</b>d</i>e</p>",
+        "html
   head
   body
     p
@@ -1076,129 +1305,165 @@ first</textarea>",
           \"c\"
       i
         \"d\"
-      \"e\""),
-    ("<span><p>block in span</p></span>",
-     "html
+      \"e\"",
+    ),
+    (
+        "<span><p>block in span</p></span>",
+        "html
   head
   body
     span
       p
-        \"block in span\""),
-    ("<div><h1>a<h2>b</div>",
-     "html
+        \"block in span\"",
+    ),
+    (
+        "<div><h1>a<h2>b</div>",
+        "html
   head
   body
     div
       h1
         \"a\"
       h2
-        \"b\""),
-    ("<label><input type=checkbox>x</label>",
-     "html
+        \"b\"",
+    ),
+    (
+        "<label><input type=checkbox>x</label>",
+        "html
   head
   body
     label
       input[type=checkbox]
-      \"x\""),
-    ("<div hidden=\"until-found\">x</div>",
-     "html
+      \"x\"",
+    ),
+    (
+        "<div hidden=\"until-found\">x</div>",
+        "html
   head
   body
     div[hidden=until-found]
-      \"x\""),
-    ("<div><script>var a = \"<p>not markup</p>\";</script><p>real</p></div>",
-     "html
+      \"x\"",
+    ),
+    (
+        "<div><script>var a = \"<p>not markup</p>\";</script><p>real</p></div>",
+        "html
   head
   body
     div
       script
         \"var a = \"<p>not markup</p>\";\"
       p
-        \"real\""),
-    ("<div><noscript><p>fallback</p></noscript></div>",
-     "html
+        \"real\"",
+    ),
+    (
+        "<div><noscript><p>fallback</p></noscript></div>",
+        "html
   head
   body
     div
       noscript
-        \"<p>fallback</p>\""),
-    ("<iframe><p>x</p></iframe>",
-     "html
+        \"<p>fallback</p>\"",
+    ),
+    (
+        "<iframe><p>x</p></iframe>",
+        "html
   head
   body
     iframe
       p
-        \"x\""),
-    ("<div><object><param name=a value=b></object></div>",
-     "html
+        \"x\"",
+    ),
+    (
+        "<div><object><param name=a value=b></object></div>",
+        "html
   head
   body
     div
       object
-        param[name=a,value=b]"),
-    ("<audio><source src=a.mp3></audio>",
-     "html
+        param[name=a,value=b]",
+    ),
+    (
+        "<audio><source src=a.mp3></audio>",
+        "html
   head
   body
     audio
-      source[src=a.mp3]"),
-    ("<div contenteditable spellcheck=\"false\">t</div>",
-     "html
+      source[src=a.mp3]",
+    ),
+    (
+        "<div contenteditable spellcheck=\"false\">t</div>",
+        "html
   head
   body
     div[contenteditable=,spellcheck=false]
-      \"t\""),
-    ("<select><div>x</div><option>A</option></select>",
-     "html
+      \"t\"",
+    ),
+    (
+        "<select><div>x</div><option>A</option></select>",
+        "html
   head
   body
     select
       div
         \"x\"
       option
-        \"A\""),
-    ("<select><input><option>A</option></select>",
-     "html
+        \"A\"",
+    ),
+    (
+        "<select><input><option>A</option></select>",
+        "html
   head
   body
     select
     input
     option
-      \"A\""),
-    ("<table><select><option>A</option></select></table>",
-     "html
+      \"A\"",
+    ),
+    (
+        "<table><select><option>A</option></select></table>",
+        "html
   head
   body
     select
       option
         \"A\"
-    table"),
-    ("<div><image src=\"i.png\"></div>",
-     "html
+    table",
+    ),
+    (
+        "<div><image src=\"i.png\"></div>",
+        "html
   head
   body
     div
-      img[src=i.png]"),
-    ("<div><isindex></div>",
-     "html
+      img[src=i.png]",
+    ),
+    (
+        "<div><isindex></div>",
+        "html
   head
   body
     div
-      isindex"),
-    ("<frameset><frame src=a></frameset>",
-     "html
+      isindex",
+    ),
+    (
+        "<frameset><frame src=a></frameset>",
+        "html
   head
   frameset
-    frame[src=a]"),
-    ("<div><marquee>x</marquee></div>",
-     "html
+    frame[src=a]",
+    ),
+    (
+        "<div><marquee>x</marquee></div>",
+        "html
   head
   body
     div
       marquee
-        \"x\""),
-    ("<table><tr><td>a</td></tr></table><tr><td>stray</td></tr>",
-     "html
+        \"x\"",
+    ),
+    (
+        "<table><tr><td>a</td></tr></table><tr><td>stray</td></tr>",
+        "html
   head
   body
     table
@@ -1206,9 +1471,11 @@ first</textarea>",
         tr
           td
             \"a\"
-    \"stray\""),
-    ("<table><tbody><tr><td>a</td></tr></tbody><tbody><tr><td>b</td></tr></tbody></table>",
-     "html
+    \"stray\"",
+    ),
+    (
+        "<table><tbody><tr><td>a</td></tr></tbody><tbody><tr><td>b</td></tr></tbody></table>",
+        "html
   head
   body
     table
@@ -1219,9 +1486,11 @@ first</textarea>",
       tbody
         tr
           td
-            \"b\""),
-    ("<table><tr></tr><tr><td>x</td></tr></table>",
-     "html
+            \"b\"",
+    ),
+    (
+        "<table><tr></tr><tr><td>x</td></tr></table>",
+        "html
   head
   body
     table
@@ -1229,18 +1498,22 @@ first</textarea>",
         tr
         tr
           td
-            \"x\""),
-    ("<table><td>no tr</td></table>",
-     "html
+            \"x\"",
+    ),
+    (
+        "<table><td>no tr</td></table>",
+        "html
   head
   body
     table
       tbody
         tr
           td
-            \"no tr\""),
-    ("<table><caption><p>c</p></caption><tr><td>x</td></tr></table>",
-     "html
+            \"no tr\"",
+    ),
+    (
+        "<table><caption><p>c</p></caption><tr><td>x</td></tr></table>",
+        "html
   head
   body
     table
@@ -1250,83 +1523,105 @@ first</textarea>",
       tbody
         tr
           td
-            \"x\""),
-    ("<ul><li>a<div>b</div></ul>",
-     "html
+            \"x\"",
+    ),
+    (
+        "<ul><li>a<div>b</div></ul>",
+        "html
   head
   body
     ul
       li
         \"a\"
         div
-          \"b\""),
-    ("<div><dt>a<dd>b</div>",
-     "html
+          \"b\"",
+    ),
+    (
+        "<div><dt>a<dd>b</div>",
+        "html
   head
   body
     div
       dt
         \"a\"
       dd
-        \"b\""),
-    ("<div a=\"&amp;&lt;&gt;\">t</div>",
-     "html
+        \"b\"",
+    ),
+    (
+        "<div a=\"&amp;&lt;&gt;\">t</div>",
+        "html
   head
   body
     div[a=&<>]
-      \"t\""),
-    ("<div a=\"x&#38;y\">t</div>",
-     "html
+      \"t\"",
+    ),
+    (
+        "<div a=\"x&#38;y\">t</div>",
+        "html
   head
   body
     div[a=x&y]
-      \"t\""),
-    ("<div>&notin</div>",
-     "html
+      \"t\"",
+    ),
+    (
+        "<div>&notin</div>",
+        "html
   head
   body
     div
-      \"¬in\""),
-    ("<div>&ampere;</div>",
-     "html
+      \"¬in\"",
+    ),
+    (
+        "<div>&ampere;</div>",
+        "html
   head
   body
     div
-      \"&ere;\""),
-    ("<div>a&#38;#38;b</div>",
-     "html
+      \"&ere;\"",
+    ),
+    (
+        "<div>a&#38;#38;b</div>",
+        "html
   head
   body
     div
-      \"a&#38;b\""),
-    ("<p>a<wbr>b</p>",
-     "html
+      \"a&#38;b\"",
+    ),
+    (
+        "<p>a<wbr>b</p>",
+        "html
   head
   body
     p
       \"a\"
       wbr
-      \"b\""),
-    ("<div><rb>x</rb><rtc>y</rtc></div>",
-     "html
+      \"b\"",
+    ),
+    (
+        "<div><rb>x</rb><rtc>y</rtc></div>",
+        "html
   head
   body
     div
       rb
         \"x\"
       rtc
-        \"y\""),
-    ("<div><data value=\"1\">d</data><time datetime=\"2020\">t</time></div>",
-     "html
+        \"y\"",
+    ),
+    (
+        "<div><data value=\"1\">d</data><time datetime=\"2020\">t</time></div>",
+        "html
   head
   body
     div
       data[value=1]
         \"d\"
       time[datetime=2020]
-        \"t\""),
-    ("<div><abbr title=\"a\">A</abbr><dfn>d</dfn><q>q</q><cite>c</cite></div>",
-     "html
+        \"t\"",
+    ),
+    (
+        "<div><abbr title=\"a\">A</abbr><dfn>d</dfn><q>q</q><cite>c</cite></div>",
+        "html
   head
   body
     div
@@ -1337,9 +1632,11 @@ first</textarea>",
       q
         \"q\"
       cite
-        \"c\""),
-    ("<div><s>s</s><u>u</u><strike>k</strike><big>b</big><tt>t</tt></div>",
-     "html
+        \"c\"",
+    ),
+    (
+        "<div><s>s</s><u>u</u><strike>k</strike><big>b</big><tt>t</tt></div>",
+        "html
   head
   body
     div
@@ -1352,27 +1649,33 @@ first</textarea>",
       big
         \"b\"
       tt
-        \"t\""),
-    ("<div><center>c</center><font size=\"3\">f</font></div>",
-     "html
+        \"t\"",
+    ),
+    (
+        "<div><center>c</center><font size=\"3\">f</font></div>",
+        "html
   head
   body
     div
       center
         \"c\"
       font[size=3]
-        \"f\""),
-    ("<div><nobr>a</nobr><nobr>b</nobr></div>",
-     "html
+        \"f\"",
+    ),
+    (
+        "<div><nobr>a</nobr><nobr>b</nobr></div>",
+        "html
   head
   body
     div
       nobr
         \"a\"
       nobr
-        \"b\""),
-    ("<div><menu><li>m</li></menu><dir><li>d</li></dir></div>",
-     "html
+        \"b\"",
+    ),
+    (
+        "<div><menu><li>m</li></menu><dir><li>d</li></dir></div>",
+        "html
   head
   body
     div
@@ -1381,9 +1684,11 @@ first</textarea>",
           \"m\"
       dir
         li
-          \"d\""),
-    ("<div><hgroup><h1>a</h1><p>b</p></hgroup></div>",
-     "html
+          \"d\"",
+    ),
+    (
+        "<div><hgroup><h1>a</h1><p>b</p></hgroup></div>",
+        "html
   head
   body
     div
@@ -1391,83 +1696,105 @@ first</textarea>",
         h1
           \"a\"
         p
-          \"b\""),
-    ("<div><search>s</search><aside>a</aside></div>",
-     "html
+          \"b\"",
+    ),
+    (
+        "<div><search>s</search><aside>a</aside></div>",
+        "html
   head
   body
     div
       search
         \"s\"
       aside
-        \"a\""),
-    ("<div><slot name=\"x\">fallback</slot></div>",
-     "html
+        \"a\"",
+    ),
+    (
+        "<div><slot name=\"x\">fallback</slot></div>",
+        "html
   head
   body
     div
       slot[name=x]
-        \"fallback\""),
-    ("<div><dialog open><p>d</p></dialog></div>",
-     "html
+        \"fallback\"",
+    ),
+    (
+        "<div><dialog open><p>d</p></dialog></div>",
+        "html
   head
   body
     div
       dialog[open=]
         p
-          \"d\""),
-    ("<div><optgroup><option>A</option></optgroup></div>",
-     "html
+          \"d\"",
+    ),
+    (
+        "<div><optgroup><option>A</option></optgroup></div>",
+        "html
   head
   body
     div
       optgroup
         option
-          \"A\""),
-    ("<div><colgroup><col span=\"2\"></colgroup></div>",
-     "html
+          \"A\"",
+    ),
+    (
+        "<div><colgroup><col span=\"2\"></colgroup></div>",
+        "html
   head
   body
-    div"),
-    ("<p>a</p></p><p>b</p>",
-     "html
+    div",
+    ),
+    (
+        "<p>a</p></p><p>b</p>",
+        "html
   head
   body
     p
       \"a\"
     p
     p
-      \"b\""),
-    ("</div><p>x</p>",
-     "html
+      \"b\"",
+    ),
+    (
+        "</div><p>x</p>",
+        "html
   head
   body
     p
-      \"x\""),
-    ("<div><b></b></div>",
-     "html
+      \"x\"",
+    ),
+    (
+        "<div><b></b></div>",
+        "html
   head
   body
     div
-      b"),
-    ("<a href=\"#\"><b>bold link</b></a>",
-     "html
+      b",
+    ),
+    (
+        "<a href=\"#\"><b>bold link</b></a>",
+        "html
   head
   body
     a[href=#]
       b
-        \"bold link\""),
-    ("<div>text<div>nested</div>tail</div>",
-     "html
+        \"bold link\"",
+    ),
+    (
+        "<div>text<div>nested</div>tail</div>",
+        "html
   head
   body
     div
       \"text\"
       div
         \"nested\"
-      \"tail\""),
-    ("<div><table><tr><td><p>cell</p></td></tr></table></div>",
-     "html
+      \"tail\"",
+    ),
+    (
+        "<div><table><tr><td><p>cell</p></td></tr></table></div>",
+        "html
   head
   body
     div
@@ -1476,105 +1803,137 @@ first</textarea>",
           tr
             td
               p
-                \"cell\""),
-    ("<div><!--></div>",
-     "html
+                \"cell\"",
+    ),
+    (
+        "<div><!--></div>",
+        "html
   head
   body
     div
-      <!---->"),
-    ("<div><!---></div>",
-     "html
+      <!---->",
+    ),
+    (
+        "<div><!---></div>",
+        "html
   head
   body
     div
-      <!---->"),
-    ("<div><!-- a -- b --></div>",
-     "html
+      <!---->",
+    ),
+    (
+        "<div><!-- a -- b --></div>",
+        "html
   head
   body
     div
-      <!--a -- b-->"),
-    ("<div a=\"1\"b=\"2\">t</div>",
-     "html
+      <!--a -- b-->",
+    ),
+    (
+        "<div a=\"1\"b=\"2\">t</div>",
+        "html
   head
   body
     div[a=1,b=2]
-      \"t\""),
-    ("<div a>t</div>",
-     "html
+      \"t\"",
+    ),
+    (
+        "<div a>t</div>",
+        "html
   head
   body
     div[a=]
-      \"t\""),
-    ("<DIV CLASS=\"X\">t</DIV>",
-     "html
+      \"t\"",
+    ),
+    (
+        "<DIV CLASS=\"X\">t</DIV>",
+        "html
   head
   body
     div[class=X]
-      \"t\""),
-    ("<div
+      \"t\"",
+    ),
+    (
+        "<div
  a=\"1\"
  b=\"2\">t</div>",
-     "html
+        "html
   head
   body
     div[a=1,b=2]
-      \"t\""),
-    ("<div a=\"multi
+      \"t\"",
+    ),
+    (
+        "<div a=\"multi
 line\">t</div>",
-     "html
+        "html
   head
   body
     div[a=multi
 line]
-      \"t\""),
-    ("<p>a<!--c-->b</p>",
-     "html
+      \"t\"",
+    ),
+    (
+        "<p>a<!--c-->b</p>",
+        "html
   head
   body
     p
       \"a\"
       <!--c-->
-      \"b\""),
-    ("<div>&#x;&#;</div>",
-     "html
+      \"b\"",
+    ),
+    (
+        "<div>&#x;&#;</div>",
+        "html
   head
   body
     div
-      \"&#x;&#;\""),
-    ("<div>&#xZZ;</div>",
-     "html
+      \"&#x;&#;\"",
+    ),
+    (
+        "<div>&#xZZ;</div>",
+        "html
   head
   body
     div
-      \"&#xZZ;\""),
-    ("<div title=\"a&#38;b&#38\">t</div>",
-     "html
+      \"&#xZZ;\"",
+    ),
+    (
+        "<div title=\"a&#38;b&#38\">t</div>",
+        "html
   head
   body
     div[title=a&b&]
-      \"t\""),
-    ("<div>&lt;div&gt;</div>",
-     "html
+      \"t\"",
+    ),
+    (
+        "<div>&lt;div&gt;</div>",
+        "html
   head
   body
     div
-      \"<div>\""),
-    ("<div>&Tab;&NewLine;x</div>",
-     "html
+      \"<div>\"",
+    ),
+    (
+        "<div>&Tab;&NewLine;x</div>",
+        "html
   head
   body
     div
-      \"x\""),
-    ("<div>&#9;&#10;x</div>",
-     "html
+      \"x\"",
+    ),
+    (
+        "<div>&#9;&#10;x</div>",
+        "html
   head
   body
     div
-      \"x\""),
-    ("<ul><li>a<p>b</p><li>c</ul>",
-     "html
+      \"x\"",
+    ),
+    (
+        "<ul><li>a<p>b</p><li>c</ul>",
+        "html
   head
   body
     ul
@@ -1583,16 +1942,20 @@ line]
         p
           \"b\"
       li
-        \"c\""),
-    ("<ol start=\"3\"><li>a</li></ol>",
-     "html
+        \"c\"",
+    ),
+    (
+        "<ol start=\"3\"><li>a</li></ol>",
+        "html
   head
   body
     ol[start=3]
       li
-        \"a\""),
-    ("<table><tr><th>h</th><td>d</td></tr></table>",
-     "html
+        \"a\"",
+    ),
+    (
+        "<table><tr><th>h</th><td>d</td></tr></table>",
+        "html
   head
   body
     table
@@ -1601,9 +1964,11 @@ line]
           th
             \"h\"
           td
-            \"d\""),
-    ("<table><tfoot><tr><td>f</td></tr></tfoot><tbody><tr><td>b</td></tr></tbody></table>",
-     "html
+            \"d\"",
+    ),
+    (
+        "<table><tfoot><tr><td>f</td></tr></tfoot><tbody><tr><td>b</td></tr></tbody></table>",
+        "html
   head
   body
     table
@@ -1614,35 +1979,43 @@ line]
       tbody
         tr
           td
-            \"b\""),
-    ("<div><span><span><span>deep</span></span></span></div>",
-     "html
+            \"b\"",
+    ),
+    (
+        "<div><span><span><span>deep</span></span></span></div>",
+        "html
   head
   body
     div
       span
         span
           span
-            \"deep\""),
-    ("<div><em><strong>both</strong></em></div>",
-     "html
+            \"deep\"",
+    ),
+    (
+        "<div><em><strong>both</strong></em></div>",
+        "html
   head
   body
     div
       em
         strong
-          \"both\""),
-    ("<a href=\"x\">a<div>d</div>b</a>",
-     "html
+          \"both\"",
+    ),
+    (
+        "<a href=\"x\">a<div>d</div>b</a>",
+        "html
   head
   body
     a[href=x]
       \"a\"
       div
         \"d\"
-      \"b\""),
-    ("<div><p>a<span>b</p>c</span></div>",
-     "html
+      \"b\"",
+    ),
+    (
+        "<div><p>a<span>b</p>c</span></div>",
+        "html
   head
   body
     div
@@ -1650,55 +2023,69 @@ line]
         \"a\"
         span
           \"b\"
-      \"c\""),
-    ("<button><span>x</span></button>",
-     "html
+      \"c\"",
+    ),
+    (
+        "<button><span>x</span></button>",
+        "html
   head
   body
     button
       span
-        \"x\""),
-    ("<label>a<input>b</label>",
-     "html
+        \"x\"",
+    ),
+    (
+        "<label>a<input>b</label>",
+        "html
   head
   body
     label
       \"a\"
       input
-      \"b\""),
-    ("<div><input type=\"radio\" name=\"r\" checked><input type=\"radio\" name=\"r\"></div>",
-     "html
+      \"b\"",
+    ),
+    (
+        "<div><input type=\"radio\" name=\"r\" checked><input type=\"radio\" name=\"r\"></div>",
+        "html
   head
   body
     div
       input[checked=,name=r,type=radio]
-      input[name=r,type=radio]"),
-    ("<form action=\"/x\"><input name=\"a\"><button type=\"submit\">go</button></form>",
-     "html
+      input[name=r,type=radio]",
+    ),
+    (
+        "<form action=\"/x\"><input name=\"a\"><button type=\"submit\">go</button></form>",
+        "html
   head
   body
     form[action=/x]
       input[name=a]
       button[type=submit]
-        \"go\""),
-    ("<div><output for=\"a\">o</output></div>",
-     "html
+        \"go\"",
+    ),
+    (
+        "<div><output for=\"a\">o</output></div>",
+        "html
   head
   body
     div
       output[for=a]
-        \"o\""),
-    ("<div><fieldset disabled><legend>l</legend><input></fieldset></div>",
-     "html
+        \"o\"",
+    ),
+    (
+        "<div><fieldset disabled><legend>l</legend><input></fieldset></div>",
+        "html
   head
   body
     div
       fieldset[disabled=]
         legend
           \"l\"
-        input"),
-    ("<div><table><caption>c</caption><colgroup><col></colgroup><thead><tr><th>h</th></tr></thead><tbody><tr><td>d</td></tr></tbody><tfoot><tr><td>f</td></tr></tfoot></table></div>",
-     "html
+        input",
+    ),
+    (
+        "<div><table><caption>c</caption><colgroup><col></colgroup><thead><tr><th>h</th></tr></thead><tbody><tr><td>d</td></tr></tbody><tfoot><tr><td>f</td></tr></tfoot></table></div>",
+        "html
   head
   body
     div
@@ -1718,23 +2105,29 @@ line]
         tfoot
           tr
             td
-              \"f\""),
-    ("<div><br><br></div>",
-     "html
+              \"f\"",
+    ),
+    (
+        "<div><br><br></div>",
+        "html
   head
   body
     div
       br
-      br"),
-    ("<div><hr><hr></div>",
-     "html
+      br",
+    ),
+    (
+        "<div><hr><hr></div>",
+        "html
   head
   body
     div
       hr
-      hr"),
-    ("<div>a<b>b</b><b>c</b>d</div>",
-     "html
+      hr",
+    ),
+    (
+        "<div>a<b>b</b><b>c</b>d</div>",
+        "html
   head
   body
     div
@@ -1743,57 +2136,72 @@ line]
         \"b\"
       b
         \"c\"
-      \"d\""),
-    ("<div><p></p><p></p></div>",
-     "html
+      \"d\"",
+    ),
+    (
+        "<div><p></p><p></p></div>",
+        "html
   head
   body
     div
       p
-      p"),
-    ("<span>a<div>b</div>c</span>",
-     "html
+      p",
+    ),
+    (
+        "<span>a<div>b</div>c</span>",
+        "html
   head
   body
     span
       \"a\"
       div
         \"b\"
-      \"c\""),
-    ("<div><li>bare li</li></div>",
-     "html
+      \"c\"",
+    ),
+    (
+        "<div><li>bare li</li></div>",
+        "html
   head
   body
     div
       li
-        \"bare li\""),
-    ("<div><dd>bare dd</dd></div>",
-     "html
+        \"bare li\"",
+    ),
+    (
+        "<div><dd>bare dd</dd></div>",
+        "html
   head
   body
     div
       dd
-        \"bare dd\""),
-    ("<div><option>bare option</option></div>",
-     "html
+        \"bare dd\"",
+    ),
+    (
+        "<div><option>bare option</option></div>",
+        "html
   head
   body
     div
       option
-        \"bare option\""),
-    ("<div><caption>bare caption</caption></div>",
-     "html
+        \"bare option\"",
+    ),
+    (
+        "<div><caption>bare caption</caption></div>",
+        "html
   head
   body
     div
-      \"bare caption\""),
-    ("<div><summary>bare summary</summary></div>",
-     "html
+      \"bare caption\"",
+    ),
+    (
+        "<div><summary>bare summary</summary></div>",
+        "html
   head
   body
     div
       summary
-        \"bare summary\""),
+        \"bare summary\"",
+    ),
 ];
 
 /// Cases a browser and webcore still disagree on, with the browser's answer and
@@ -1801,8 +2209,9 @@ line]
 /// differs, so fixing a gap turns this suite red until the case is promoted to
 /// `CASES`. A conformance list that quietly absorbs fixes stops measuring.
 const KNOWN_GAPS: &[(&str, &str, &str)] = &[
-    ("<table><table><tr><td>inner</td></tr></table></table>",
-     "html
+    (
+        "<table><table><tr><td>inner</td></tr></table></table>",
+        "html
   head
   body
     table
@@ -1811,9 +2220,11 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
         tr
           td
             \"inner\"",
-     "a nested `<table>` start tag closes the open table (`in table` pops to it and REPROCESSES the token). We close it only when the open table is not the element the current parse call was started for; the mid-stack handback needs a token re-dispatch this parser does not model"),
-    ("<div><p>a<table><tr><td>b</td></tr></table></div>",
-     "html
+        "a nested `<table>` start tag closes the open table (`in table` pops to it and REPROCESSES the token). We close it only when the open table is not the element the current parse call was started for; the mid-stack handback needs a token re-dispatch this parser does not model",
+    ),
+    (
+        "<div><p>a<table><tr><td>b</td></tr></table></div>",
+        "html
   head
   body
     div
@@ -1824,7 +2235,8 @@ const KNOWN_GAPS: &[(&str, &str, &str)] = &[
             tr
               td
                 \"b\"",
-     "no quirks mode: with no DOCTYPE the document is in QUIRKS mode, where a `<table>` start tag does NOT close an open `<p>`. We always close it. Needs DOCTYPE-driven quirks tracking (which `document.compatMode` also reports)"),
+        "no quirks mode: with no DOCTYPE the document is in QUIRKS mode, where a `<table>` start tag does NOT close an open `<p>`. We always close it. Needs DOCTYPE-driven quirks tracking (which `document.compatMode` also reports)",
+    ),
 ];
 
 #[test]

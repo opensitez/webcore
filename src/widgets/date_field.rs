@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn the_month_grid_is_arithmetic_not_a_guess() {
-        use super::{days_in_month, first_weekday, parse_date, to_date_value, Calendar};
+        use super::{Calendar, days_in_month, first_weekday, parse_date, to_date_value};
         // Known anchors: 2026-08-01 is a Saturday, 2000-02-01 a Tuesday.
         assert_eq!(first_weekday(2026, 8), 5, "Saturday, counting from Monday");
         assert_eq!(first_weekday(2000, 2), 1, "Tuesday");

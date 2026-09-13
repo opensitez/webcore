@@ -1,7 +1,7 @@
 use crate::css::apply_cascade_vp;
 use crate::layout::LayoutEngine;
 use crate::types::*;
-use crate::{parse_html, Document, Renderer};
+use crate::{Document, Renderer, parse_html};
 
 fn layout_html(html: &str, width: f32) -> Document {
     let mut doc = parse_html(html);
@@ -1378,11 +1378,13 @@ fn placeholder_shown_matches_empty_input() {
     );
     let input = find_by_tag(&doc.root, "input").unwrap();
     // Empty value + placeholder → :placeholder-shown should match
-    assert!(input
-        .attributes
-        .get("value")
-        .map(|v| v.is_empty())
-        .unwrap_or(true));
+    assert!(
+        input
+            .attributes
+            .get("value")
+            .map(|v| v.is_empty())
+            .unwrap_or(true)
+    );
 }
 
 // ── CSS override tests ──────────────────────────────────────────────────────
@@ -2194,9 +2196,11 @@ fn collect_form_data_textarea() {
     );
     let form = find_by_id(&doc.root, "f").unwrap();
     let data = crate::types::collect_form_data(form);
-    assert!(submitted_one(&data, "bio")
-        .map(|s| s.contains("Hello"))
-        .unwrap_or(false));
+    assert!(
+        submitted_one(&data, "bio")
+            .map(|s| s.contains("Hello"))
+            .unwrap_or(false)
+    );
 }
 
 #[test]

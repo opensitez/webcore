@@ -6,7 +6,7 @@
 //! subset is how a parser ends up passing while getting the special-scheme,
 //! opaque-scheme and empty-URL cases wrong.
 
-use crate::dom::url::{parse, Url};
+use crate::dom::url::{Url, parse};
 use crate::html::parse_html_with_base;
 use crate::types::Document;
 

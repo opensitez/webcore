@@ -340,11 +340,7 @@ fn serialize_block(b: &WebCore, out: &mut String, indent: usize, needs_blank_lin
 
             // Task list prefix
             let task_prefix = if let Some(task) = child.data.get("md-task") {
-                if task == "checked" {
-                    "[x] "
-                } else {
-                    "[ ] "
-                }
+                if task == "checked" { "[x] " } else { "[ ] " }
             } else {
                 ""
             };

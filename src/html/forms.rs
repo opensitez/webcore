@@ -94,11 +94,7 @@ pub fn parse_floating_point(input: &str) -> Option<f64> {
         }
     }
     let n: f64 = s[..end].parse().ok()?;
-    if n.is_finite() {
-        Some(n)
-    } else {
-        None
-    }
+    if n.is_finite() { Some(n) } else { None }
 }
 
 /// A **valid floating-point number** (HTML §2.3.4.3) — the AUTHORING grammar,

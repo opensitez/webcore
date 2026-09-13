@@ -20,15 +20,15 @@ pub use animation::{
     SvgRepeatCount,
 };
 pub use geometry::{
-    has_ratio_only, has_ratio_only_from_markup, intrinsic_size_from_markup, PreserveAspectRatio,
-    SvgLength, SvgViewBox,
+    PreserveAspectRatio, SvgLength, SvgViewBox, has_ratio_only, has_ratio_only_from_markup,
+    intrinsic_size_from_markup,
 };
 pub(crate) use paint::rasterize_svg_document_to_rgba_with_dom;
 pub use paint::{rasterize_svg_document_to_rgba, rasterize_svg_intrinsic, rasterize_svg_to_rgba};
-pub use parser::{parse_svg_document, SvgParseError};
+pub use parser::{SvgParseError, parse_svg_document};
 pub use resources::load_background_images;
 pub use tree::{SvgAttribute, SvgDocument, SvgElementKind, SvgNode};
-pub use unsupported::{unsupported_summary, SvgUnsupportedSummary};
+pub use unsupported::{SvgUnsupportedSummary, unsupported_summary};
 
 pub(crate) use animation::{svg_document_with_animation_overrides, tick_svg_animations};
 pub(crate) use source::build_inline_svg_source;

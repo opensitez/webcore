@@ -2,8 +2,8 @@
 
 use super::harness::*;
 use crate::css::{
-    extract_keyframes, parse_animation_shorthand, parse_easing, parse_transition_shorthand,
-    Stylesheet,
+    Stylesheet, extract_keyframes, parse_animation_shorthand, parse_easing,
+    parse_transition_shorthand,
 };
 use crate::html::parse_html;
 use crate::layout::LayoutEngine;
@@ -425,10 +425,11 @@ fn keyframe_declarations_ignore_important_properties() {
         .expect("from stop");
 
     assert!(!from.properties.iter().any(|(name, _)| name == "opacity"));
-    assert!(from
-        .properties
-        .iter()
-        .any(|(name, value)| { name == "transform" && value == "translateX(0px)" }));
+    assert!(
+        from.properties
+            .iter()
+            .any(|(name, value)| { name == "transform" && value == "translateX(0px)" })
+    );
 }
 
 #[test]
@@ -447,14 +448,16 @@ fn keyframe_timing_function_is_not_an_animated_property() {
         .find(|stop| stop.offset == 0.0)
         .expect("from stop");
 
-    assert!(from
-        .properties
-        .iter()
-        .all(|(name, _)| name != "animation-timing-function"));
-    assert!(from
-        .properties
-        .iter()
-        .any(|(name, value)| name == "top" && value == "0px"));
+    assert!(
+        from.properties
+            .iter()
+            .all(|(name, _)| name != "animation-timing-function")
+    );
+    assert!(
+        from.properties
+            .iter()
+            .any(|(name, value)| name == "top" && value == "0px")
+    );
 }
 
 // ── Value interpolation ───────────────────────────────────────────────────────
@@ -1138,7 +1141,7 @@ fn fractional_iteration_count_ends_partway_through_cycle() {
 #[test]
 fn tick_animations_delay_phase() {
     let mut doc = doc_with_animation("animation: spin 1s linear 0.5s;"); // 500ms delay
-                                                                         // Only 100ms in — still in delay.
+    // Only 100ms in — still in delay.
     let now = doc.active_animations[0].start_time + Duration::from_millis(100);
     doc.tick_animations(now);
     // Still running (in delay phase).

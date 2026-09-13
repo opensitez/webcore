@@ -988,11 +988,7 @@ fn triplet(r: &mut Reader<'_>, code: u8) -> Option<(i32, i32)> {
 }
 
 fn with_sign(flag: usize, baseval: i32) -> i32 {
-    if flag & 1 != 0 {
-        baseval
-    } else {
-        -baseval
-    }
+    if flag & 1 != 0 { baseval } else { -baseval }
 }
 
 /// Write a simple glyph's flags and coordinates in the sfnt encoding.

@@ -824,7 +824,7 @@ pub(crate) fn resolve_var_pass(val: &str, variables: &HashMap<String, String>) -
         if let Some(start) = rest.find("var(") {
             out.push_str(&rest[..start]);
             rest = &rest[start + 4..]; // skip "var("
-                                       // find matching closing paren
+            // find matching closing paren
             let mut depth = 1usize;
             let mut end = 0;
             let bytes = rest.as_bytes();
@@ -1246,11 +1246,7 @@ fn additive_counter(value: i32, table: &[(i32, &str)]) -> String {
             n -= *amount;
         }
     }
-    if n == 0 {
-        out
-    } else {
-        value.to_string()
-    }
+    if n == 0 { out } else { value.to_string() }
 }
 
 fn armenian_counter(value: i32) -> String {

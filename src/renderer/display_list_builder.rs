@@ -30,6 +30,7 @@ pub fn build_display_list(root: &WebCore, viewport_w: f32, viewport_h: f32) -> D
         visited_hrefs: &visited,
         base_url: "",
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
+        paint_clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         suppress_deferred_z_descendants: false,
         transform_ctx: crate::types::TransformCtx {
             // The root box's font size IS the root font size — `rem`.
@@ -72,6 +73,7 @@ pub fn build_display_list_full(
         visited_hrefs,
         base_url,
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
+        paint_clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         suppress_deferred_z_descendants: false,
         transform_ctx: crate::types::TransformCtx {
             // The root box's font size IS the root font size — `rem`.
@@ -97,6 +99,7 @@ pub fn build_display_list_full(
         visited_hrefs,
         base_url,
         clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
+        paint_clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
         suppress_deferred_z_descendants: false,
         transform_ctx: ctx.transform_ctx,
     };
@@ -116,6 +119,97 @@ pub fn build_display_list_full(
         }
         if let Some(node) = find_node(root, fid) {
             // Into a list of its own — see `DisplayList::fixed_commands`.
+            let mut fixed = DisplayList::new();
+            build_for_box(node, &mut fixed, &fixed_ctx);
+            list.fixed_commands.extend(fixed.commands);
+        }
+    }
+
+    list
+}
+
+/// Build a display list for a scroll-local paint band.
+///
+/// Commands remain in document coordinates so replay still scroll-translates the
+/// list. The band only limits which boxes emit paint commands; child traversal is
+/// preserved for overflow-visible and positioned descendants.
+pub fn build_display_list_viewport(
+    root: &WebCore,
+    viewport_w: f32,
+    viewport_h: f32,
+    scroll_x: f32,
+    scroll_y: f32,
+    paint_top: f32,
+    paint_bottom: f32,
+    hovered_id: u32,
+    active_id: u32,
+    visited_hrefs: &std::collections::HashSet<String>,
+    base_url: &str,
+) -> DisplayList {
+    let doc_h = crate::types::Document::scroll_height(root).max(viewport_h);
+    let paint_top = paint_top.max(0.0);
+    let paint_bottom = paint_bottom.max(paint_top).min(doc_h.max(viewport_h));
+    let paint_clip = Rect::new(
+        0.0,
+        paint_top,
+        viewport_w,
+        (paint_bottom - paint_top).max(0.0),
+    );
+    let ctx = BuildContext {
+        scroll_x: 0.0,
+        scroll_y: 0.0,
+        sticky_scroll_x: scroll_x,
+        sticky_scroll_y: scroll_y,
+        sticky_scroll_container: None,
+        sticky_containing_block: None,
+        hovered_id,
+        active_id,
+        visited_hrefs,
+        base_url,
+        clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
+        paint_clip,
+        suppress_deferred_z_descendants: false,
+        transform_ctx: crate::types::TransformCtx {
+            font_px: root.style.font_size_px(16.0, 16.0),
+            root_font_px: root.style.font_size_px(16.0, 16.0),
+            viewport_w,
+            viewport_h,
+        },
+    };
+    let mut list = DisplayList::new();
+    build_for_box(root, &mut list, &ctx);
+
+    let fixed_ctx = BuildContext {
+        scroll_x: 0.0,
+        scroll_y: 0.0,
+        sticky_scroll_x: 0.0,
+        sticky_scroll_y: 0.0,
+        sticky_scroll_container: None,
+        sticky_containing_block: None,
+        hovered_id,
+        active_id,
+        visited_hrefs,
+        base_url,
+        clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
+        paint_clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
+        suppress_deferred_z_descendants: false,
+        transform_ctx: ctx.transform_ctx,
+    };
+    let mut fixed_ids = Vec::new();
+    collect_fixed_elements(root, &mut fixed_ids);
+    for fid in fixed_ids {
+        fn find_node(node: &WebCore, id: u32) -> Option<&WebCore> {
+            if node.node_id == id {
+                return Some(node);
+            }
+            for child in &node.children {
+                if let Some(found) = find_node(child, id) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        if let Some(node) = find_node(root, fid) {
             let mut fixed = DisplayList::new();
             build_for_box(node, &mut fixed, &fixed_ctx);
             list.fixed_commands.extend(fixed.commands);
@@ -162,6 +256,7 @@ struct BuildContext<'a> {
     visited_hrefs: &'a std::collections::HashSet<String>,
     base_url: &'a str,
     clip: Rect,
+    paint_clip: Rect,
     suppress_deferred_z_descendants: bool,
     /// What a `transform` needs to resolve `vw`/`vh` and `rem`. Carried on the
     /// context because the element's own box is not enough: a transform length
@@ -206,6 +301,11 @@ fn inline_has_non_empty_text(node: &WebCore) -> bool {
     false
 }
 
+#[inline]
+fn rect_intersects(a: Rect, b: Rect) -> bool {
+    a.right() >= b.x && a.x <= b.right() && a.bottom() >= b.y && a.y <= b.bottom()
+}
+
 fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     // ── Early exits (same as render_box) ─────────────────────────────────────
     if matches!(node.style.display, Display::None) {
@@ -222,7 +322,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     }
 
     if node.tag == "#text" {
-        build_laid_out_text_node(node, list, ctx.scroll_x, ctx.scroll_y);
+        build_laid_out_text_node(node, list, ctx.scroll_x, ctx.scroll_y, ctx.paint_clip);
         return;
     }
 
@@ -258,8 +358,8 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         let by = br.y - sy;
         if bx + br.w < ctx.clip.x
             || by + br.h < ctx.clip.y
-            || bx > ctx.clip.right()
-            || by > ctx.clip.bottom()
+            || bx > ctx.paint_clip.right()
+            || by > ctx.paint_clip.bottom()
         {
             return;
         }
@@ -271,6 +371,15 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     let pw = pr.w;
     let ph = pr.h;
     let font_px = node.style.font_size_px(16.0, 16.0);
+    let paint_self = rect_intersects(
+        Rect::new(
+            br.x - sx - 256.0,
+            br.y - sy - 256.0,
+            br.w + 512.0,
+            br.h + 512.0,
+        ),
+        ctx.paint_clip,
+    );
 
     // ── Border radii, per corner ─────────────────────────────────────────────
     //
@@ -534,6 +643,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             source_rect.h,
         );
         list.push(PaintCmd::PushTransform {
+            node_id: node.node_id,
             transform: compute_transform_matrix(
                 eff_style,
                 &tr_rect,
@@ -561,10 +671,12 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         eff_style.color,
     );
     if !backdrop_filters.ops.is_empty() {
-        list.push(PaintCmd::BackdropFilter {
-            rect: Rect::new(px, py, pw, ph),
-            filters: encode_filter_ops(&backdrop_filters),
-        });
+        if paint_self {
+            list.push(PaintCmd::BackdropFilter {
+                rect: Rect::new(px, py, pw, ph),
+                filters: encode_filter_ops(&backdrop_filters),
+            });
+        }
     }
 
     // ── CSS filters ───────────────────────────────────────────────────────────
@@ -591,7 +703,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
 
     // ── (a) Outer box-shadow ─────────────────────────────────────────────────
     for bs in &eff_style.box_shadow {
-        if !bs.inset {
+        if paint_self && !bs.inset {
             list.push(PaintCmd::BoxShadow {
                 rect: Rect::new(px, py, pw, ph),
                 color: bs.color,
@@ -665,19 +777,23 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         if raw_bg.a > 0 && !is_inline_with_text {
             let alpha = ((raw_bg.a as f32) * opacity) as u8;
             let bg = Color::rgba(raw_bg.r, raw_bg.g, raw_bg.b, alpha);
-            list.push(PaintCmd::FillRect {
-                // A colour has no image to position, so `background-origin`
-                // does not apply to it — only the painting area does.
-                rect: bg_clip_rect,
-                color: bg,
-                radius: radii_arr,
-                radius_y: radii_y_arr,
-            });
+            if paint_self {
+                list.push(PaintCmd::FillRect {
+                    // A colour has no image to position, so `background-origin`
+                    // does not apply to it — only the painting area does.
+                    rect: bg_clip_rect,
+                    color: bg,
+                    radius: radii_arr,
+                    radius_y: radii_y_arr,
+                });
+            }
         }
     }
 
     // ── (c) Gradient background ──────────────────────────────────────────────
-    if node.style.gradient_type != GradientType::None && node.style.rare().gradient_stops.len() >= 2
+    if paint_self
+        && node.style.gradient_type != GradientType::None
+        && node.style.rare().gradient_stops.len() >= 2
     {
         let opacity = eff_style.opacity;
         let grad_type_u8 = match node.style.gradient_type {
@@ -735,70 +851,72 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     }
 
     // ── (b2) Additional background gradient layers ───────────────────────────
-    for layer in &eff_style.rare().additional_background_layers {
-        if layer.gradient_type != GradientType::None && layer.gradient_stops.len() >= 2 {
-            let opacity = eff_style.opacity;
-            let grad_type_u8 = match layer.gradient_type {
-                GradientType::Linear => 1u8,
-                GradientType::Radial => 2u8,
-                GradientType::None => 0u8,
-            };
-            let stops: Vec<(Color, f32)> = layer
-                .gradient_stops
-                .iter()
-                .map(|s| {
-                    let a = ((s.color.a as f32) * opacity) as u8;
-                    (Color::rgba(s.color.r, s.color.g, s.color.b, a), s.position)
-                })
-                .collect();
-            let radial_center_x = layer.gradient_radial_position_x.resolve(
-                font_px,
-                bg_origin_rect.w,
-                ctx.transform_ctx.root_font_px,
-            );
-            let radial_center_y = layer.gradient_radial_position_y.resolve(
-                font_px,
-                bg_origin_rect.h,
-                ctx.transform_ctx.root_font_px,
-            );
-            let mut temp_style = ComputedStyle::default();
-            temp_style.gradient_radial_shape = layer.gradient_radial_shape;
-            temp_style.gradient_radial_size = layer.gradient_radial_size;
-            temp_style.gradient_radial_radius_x = layer.gradient_radial_radius_x.clone();
-            temp_style.gradient_radial_radius_y = layer.gradient_radial_radius_y.clone();
-            let (radial_radius_x, radial_radius_y) = radial_gradient_used_radii(
-                &temp_style,
-                bg_origin_rect.w,
-                bg_origin_rect.h,
-                radial_center_x,
-                radial_center_y,
-                font_px,
-                ctx.transform_ctx.root_font_px,
-            );
-            let (layer_repeat_x_mode, layer_repeat_y_mode) = layer.repeat.axis_modes();
-            list.push(PaintCmd::Gradient {
-                rect: bg_origin_rect,
-                clip: bg_clip_rect,
-                repeat_x_mode: layer_repeat_x_mode,
-                repeat_y_mode: layer_repeat_y_mode,
-                gradient_type: grad_type_u8,
-                angle: layer.gradient_angle,
-                direction: layer.gradient_direction,
-                radial_center_x,
-                radial_center_y,
-                radial_radius_x,
-                radial_radius_y,
-                stops,
-                radii: radii_arr,
-                radii_y: radii_y_arr,
-                opacity,
-                blend_mode: background_blend_mode_to_u8(&eff_style.background_blend_mode),
-            });
+    if paint_self {
+        for layer in &eff_style.rare().additional_background_layers {
+            if layer.gradient_type != GradientType::None && layer.gradient_stops.len() >= 2 {
+                let opacity = eff_style.opacity;
+                let grad_type_u8 = match layer.gradient_type {
+                    GradientType::Linear => 1u8,
+                    GradientType::Radial => 2u8,
+                    GradientType::None => 0u8,
+                };
+                let stops: Vec<(Color, f32)> = layer
+                    .gradient_stops
+                    .iter()
+                    .map(|s| {
+                        let a = ((s.color.a as f32) * opacity) as u8;
+                        (Color::rgba(s.color.r, s.color.g, s.color.b, a), s.position)
+                    })
+                    .collect();
+                let radial_center_x = layer.gradient_radial_position_x.resolve(
+                    font_px,
+                    bg_origin_rect.w,
+                    ctx.transform_ctx.root_font_px,
+                );
+                let radial_center_y = layer.gradient_radial_position_y.resolve(
+                    font_px,
+                    bg_origin_rect.h,
+                    ctx.transform_ctx.root_font_px,
+                );
+                let mut temp_style = ComputedStyle::default();
+                temp_style.gradient_radial_shape = layer.gradient_radial_shape;
+                temp_style.gradient_radial_size = layer.gradient_radial_size;
+                temp_style.gradient_radial_radius_x = layer.gradient_radial_radius_x.clone();
+                temp_style.gradient_radial_radius_y = layer.gradient_radial_radius_y.clone();
+                let (radial_radius_x, radial_radius_y) = radial_gradient_used_radii(
+                    &temp_style,
+                    bg_origin_rect.w,
+                    bg_origin_rect.h,
+                    radial_center_x,
+                    radial_center_y,
+                    font_px,
+                    ctx.transform_ctx.root_font_px,
+                );
+                let (layer_repeat_x_mode, layer_repeat_y_mode) = layer.repeat.axis_modes();
+                list.push(PaintCmd::Gradient {
+                    rect: bg_origin_rect,
+                    clip: bg_clip_rect,
+                    repeat_x_mode: layer_repeat_x_mode,
+                    repeat_y_mode: layer_repeat_y_mode,
+                    gradient_type: grad_type_u8,
+                    angle: layer.gradient_angle,
+                    direction: layer.gradient_direction,
+                    radial_center_x,
+                    radial_center_y,
+                    radial_radius_x,
+                    radial_radius_y,
+                    stops,
+                    radii: radii_arr,
+                    radii_y: radii_y_arr,
+                    opacity,
+                    blend_mode: background_blend_mode_to_u8(&eff_style.background_blend_mode),
+                });
+            }
         }
     }
 
     // ── (d) Background image ─────────────────────────────────────────────────
-    if let Some(ref bg_data) = node.bg_image_data {
+    if paint_self && let Some(ref bg_data) = node.bg_image_data {
         if node.bg_image_width > 0 && node.bg_image_height > 0 {
             let iw = node.bg_image_width as f32;
             let ih = node.bg_image_height as f32;
@@ -880,7 +998,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
 
     // ── (e) Inset box-shadow ─────────────────────────────────────────────────
     for bs in &eff_style.box_shadow {
-        if bs.inset {
+        if paint_self && bs.inset {
             list.push(PaintCmd::BoxShadow {
                 rect: Rect::new(px, py, pw, ph),
                 color: bs.color,
@@ -904,7 +1022,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             node.layout.resolved_border_bottom,
             node.layout.resolved_border_left,
         ];
-        if bw.iter().any(|&w| w > 0.0) {
+        if paint_self && bw.iter().any(|&w| w > 0.0) {
             let bx = br.x - eff_sx;
             let by = br.y - eff_sy;
             let border_rect = Rect::new(bx, by, br.w, br.h);
@@ -954,19 +1072,27 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     }
 
     // ── (g) Outline ──────────────────────────────────────────────────────────
-    if eff_style.outline_width > 0.0 && eff_style.outline_style != crate::types::BorderStyle::None {
+    if paint_self
+        && eff_style.outline_width > 0.0
+        && eff_style.outline_style != crate::types::BorderStyle::None
+    {
         let ofs = eff_style.outline_offset;
         let ow = eff_style.outline_width;
+        let radius_delta = ofs + ow;
         let rx = br.x - eff_sx - ofs - ow;
         let ry = br.y - eff_sy - ofs - ow;
         let rw = br.w + 2.0 * (ofs + ow);
         let rh = br.h + 2.0 * (ofs + ow);
+        let outline_radii = radii_arr.map(|r| (r + radius_delta).max(0.0));
+        let outline_radii_y = radii_y_arr.map(|r| (r + radius_delta).max(0.0));
         list.push(PaintCmd::Outline {
             rect: Rect::new(rx, ry, rw, rh),
             width: ow,
             color: eff_style.outline_color,
             style: bstyle(eff_style.outline_style),
             offset: ofs,
+            radii: outline_radii,
+            radii_y: outline_radii_y,
         });
     }
 
@@ -1055,6 +1181,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         visited_hrefs: ctx.visited_hrefs,
         base_url: ctx.base_url,
         clip: child_clip,
+        paint_clip: ctx.paint_clip,
         suppress_deferred_z_descendants: suppress_z,
         transform_ctx: ctx.transform_ctx,
     };
@@ -1093,9 +1220,16 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         }
 
         // ── (k) Inline text content (line_cache) ─────────────────────────────
-        if !node.layout.line_cache.is_empty() {
+        if paint_self && !node.layout.line_cache.is_empty() {
             build_inline_text(
-                node, eff_style, list, child_sx, child_sy, is_hovered, is_active,
+                node,
+                eff_style,
+                list,
+                child_sx,
+                child_sy,
+                is_hovered,
+                is_active,
+                ctx.paint_clip,
             );
         }
 
@@ -1122,12 +1256,15 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         }
 
         // ── (m) List markers ─────────────────────────────────────────────────
-        if node.style.display == Display::ListItem && !node.layout.line_cache.is_empty() {
+        if paint_self
+            && node.style.display == Display::ListItem
+            && !node.layout.line_cache.is_empty()
+        {
             build_list_marker(node, list, ctx, eff_sx, eff_sy);
         }
 
         // ── (n) HR ───────────────────────────────────────────────────────────
-        if node.tag == "hr" {
+        if paint_self && node.tag == "hr" {
             let cr = node.layout.border_rect;
             let y_hr = cr.y + cr.h / 2.0 - eff_sy;
             list.push(PaintCmd::HorizontalRule {
@@ -1138,7 +1275,9 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         }
 
         // ── (o) Form elements (content only — box decoration handled by CSS steps above)
-        build_form_element(node, list, eff_sx, eff_sy);
+        if paint_self {
+            build_form_element(node, list, eff_sx, eff_sy);
+        }
 
         // ── (p) Image / SVG / Canvas / Media ────────────────────────────────
         //
@@ -1148,11 +1287,11 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         // replay reads. Everything the 2D context drew is already in those bytes,
         // so painting a canvas is painting its bitmap and nothing else — which is
         // also what the spec says a canvas is.
-        if node.tag == "video" || node.tag == "audio" {
+        if paint_self && (node.tag == "video" || node.tag == "audio") {
             crate::video::build_media_element(node, list, eff_sx, eff_sy);
         }
 
-        if node.is_image_element() || node.tag == "svg" || node.tag == "canvas" {
+        if paint_self && (node.is_image_element() || node.tag == "svg" || node.tag == "canvas") {
             if let Some(ref data) = node.image_data {
                 if node.image_width > 0 && node.image_height > 0 {
                     let cr = node.layout.content_rect;
@@ -1565,6 +1704,7 @@ fn build_inline_text(
     sy: f32,
     is_hovered: bool,
     is_active: bool,
+    paint_clip: Rect,
 ) {
     let flat = crate::layout::inline_layout::collect_flat_text(node);
     if flat.is_empty() {
@@ -1612,6 +1752,9 @@ fn build_inline_text(
         // EXACT positions from layout
         let lx = line.x - sx;
         let ly = line.y - sy;
+        if ly + line.height < paint_clip.y || ly > paint_clip.bottom() {
+            continue;
+        }
 
         // ── Build chunks from inline_runs / visual_segments ──────────────
         struct Chunk {
@@ -2456,9 +2599,15 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32) 
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn build_laid_out_text_node(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32) {
+fn build_laid_out_text_node(
+    node: &WebCore,
+    list: &mut DisplayList,
+    sx: f32,
+    sy: f32,
+    paint_clip: Rect,
+) {
     if !node.layout.line_cache.is_empty() {
-        build_inline_text(node, &node.style, list, sx, sy, false, false);
+        build_inline_text(node, &node.style, list, sx, sy, false, false, paint_clip);
         return;
     }
 
@@ -2480,10 +2629,14 @@ fn build_laid_out_text_node(node: &WebCore, list: &mut DisplayList, sx: f32, sy:
         .line_height
         .resolve(font_px, 0.0, 16.0)
         .max(font_px * 1.2);
+    let y = node.layout.content_rect.y - sy;
+    if y + line_h < paint_clip.y || y > paint_clip.bottom() {
+        return;
+    }
     emit_text(
         list,
         node.layout.content_rect.x - sx,
-        node.layout.content_rect.y - sy,
+        y,
         &apply_text_transform(&text, node.style.text_transform),
         &node.style,
         font_px,
@@ -3246,11 +3399,7 @@ fn text_emphasis_mark(style: &str) -> Option<String> {
         .split_whitespace()
         .any(|tok| tok.eq_ignore_ascii_case("sesame"))
     {
-        if open {
-            0xfe46
-        } else {
-            0xfe45
-        }
+        if open { 0xfe46 } else { 0xfe45 }
     } else if value
         .split_whitespace()
         .any(|tok| tok.eq_ignore_ascii_case("double-circle"))
@@ -3260,20 +3409,12 @@ fn text_emphasis_mark(style: &str) -> Option<String> {
         .split_whitespace()
         .any(|tok| tok.eq_ignore_ascii_case("triangle"))
     {
-        if open {
-            0x25b3
-        } else {
-            0x25b2
-        }
+        if open { 0x25b3 } else { 0x25b2 }
     } else if value
         .split_whitespace()
         .any(|tok| tok.eq_ignore_ascii_case("circle"))
     {
-        if open {
-            0x25cb
-        } else {
-            0x25cf
-        }
+        if open { 0x25cb } else { 0x25cf }
     } else if open {
         0x25e6
     } else {

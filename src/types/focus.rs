@@ -44,17 +44,9 @@ impl Document {
             }
             Some(i) => {
                 if reverse {
-                    if i == 0 {
-                        focusable.len() - 1
-                    } else {
-                        i - 1
-                    }
+                    if i == 0 { focusable.len() - 1 } else { i - 1 }
                 } else {
-                    if i + 1 >= focusable.len() {
-                        0
-                    } else {
-                        i + 1
-                    }
+                    if i + 1 >= focusable.len() { 0 } else { i + 1 }
                 }
             }
         };

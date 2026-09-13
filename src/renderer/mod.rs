@@ -34,9 +34,27 @@ pub struct Renderer {
     cached_display_list: Option<display_list::DisplayList>,
     cached_scroll_x: f32,
     cached_scroll_y: f32,
+    cached_paint_top: f32,
+    cached_paint_bottom: f32,
     cached_hovered_id: u32,
     display_list_dirty: bool,
     cached_layout_generation: u64,
+    cached_surface: Option<Pixmap>,
+    cached_surface_w: u32,
+    cached_surface_h: u32,
+    cached_surface_scale: f32,
+    cached_surface_zoom: f32,
+    cached_surface_scroll_x: f32,
+    cached_surface_scroll_y: f32,
+    cached_surface_layout_generation: u64,
+    cached_surface_hovered_id: u32,
+    cached_surface_active_id: u32,
+    cached_surface_caret_visible: bool,
+    pending_resource_relayout: bool,
+    last_resource_relayout: Option<std::time::Instant>,
+    last_idle_scroll_x: f32,
+    last_idle_scroll_y: f32,
+    dirty_paint_rects: Vec<Rect>,
     dropdown_hover_idx: i32,
     pub content_offset_y: f32,
     /// Compositor layer tree — built after layout, used for scroll/transform/opacity.
@@ -45,6 +63,184 @@ pub struct Renderer {
     pub tile_manager: tiles::TileManager,
     /// Whether to use tiled rendering (can be disabled for debugging).
     pub use_tiles: bool,
+}
+
+fn copy_surface_shifted_y(src: &[u8], dst: &mut [u8], width: u32, height: u32, dy_px: i32) {
+    let row_bytes = width as usize * 4;
+    let height = height as i32;
+    if row_bytes == 0 || height <= 0 {
+        return;
+    }
+    if dy_px > 0 {
+        let dy = dy_px.min(height) as usize;
+        let rows = height as usize - dy;
+        for row in 0..rows {
+            let src_off = (row + dy) * row_bytes;
+            let dst_off = row * row_bytes;
+            if src_off + row_bytes <= src.len() && dst_off + row_bytes <= dst.len() {
+                dst[dst_off..dst_off + row_bytes]
+                    .copy_from_slice(&src[src_off..src_off + row_bytes]);
+            }
+        }
+    } else if dy_px < 0 {
+        let dy = (-dy_px).min(height) as usize;
+        let rows = height as usize - dy;
+        for row in (0..rows).rev() {
+            let src_off = row * row_bytes;
+            let dst_off = (row + dy) * row_bytes;
+            if src_off + row_bytes <= src.len() && dst_off + row_bytes <= dst.len() {
+                dst[dst_off..dst_off + row_bytes]
+                    .copy_from_slice(&src[src_off..src_off + row_bytes]);
+            }
+        }
+    }
+}
+
+fn fill_physical_rect(
+    pixmap: &mut Pixmap,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    color: tiny_skia::Color,
+) {
+    if w == 0 || h == 0 {
+        return;
+    }
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    if let Some(rect) = SkRect::from_xywh(x as f32, y as f32, w as f32, h as f32) {
+        pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+    }
+}
+
+fn fill_viewport_clip(pixmap: &mut Pixmap, clip: Rect, scale: f32, color: tiny_skia::Color) {
+    let x = (clip.x * scale).floor().max(0.0) as u32;
+    let y = (clip.y * scale).floor().max(0.0) as u32;
+    let right = (clip.right() * scale)
+        .ceil()
+        .min(pixmap.width() as f32)
+        .max(x as f32) as u32;
+    let bottom = (clip.bottom() * scale)
+        .ceil()
+        .min(pixmap.height() as f32)
+        .max(y as f32) as u32;
+    fill_physical_rect(
+        pixmap,
+        x,
+        y,
+        right.saturating_sub(x),
+        bottom.saturating_sub(y),
+        color,
+    );
+}
+
+fn viewport_clip_from_doc_rect(
+    rect: Rect,
+    scroll_x: f32,
+    scroll_y: f32,
+    view_w: f32,
+    view_h: f32,
+) -> Option<Rect> {
+    let x0 = (rect.x - scroll_x).max(0.0);
+    let y0 = (rect.y - scroll_y).max(0.0);
+    let x1 = (rect.right() - scroll_x).min(view_w);
+    let y1 = (rect.bottom() - scroll_y).min(view_h);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some(Rect::new(x0, y0, x1 - x0, y1 - y0))
+}
+
+fn inflate_rect(rect: Rect, amount: f32) -> Rect {
+    Rect::new(
+        rect.x - amount,
+        rect.y - amount,
+        rect.w + amount * 2.0,
+        rect.h + amount * 2.0,
+    )
+}
+
+fn rect_union(a: Rect, b: Rect) -> Rect {
+    let left = a.x.min(b.x);
+    let top = a.y.min(b.y);
+    let right = a.right().max(b.right());
+    let bottom = a.bottom().max(b.bottom());
+    Rect::new(left, top, right - left, bottom - top)
+}
+
+fn rect_intersects(a: Rect, b: Rect) -> bool {
+    a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
+}
+
+fn rect_area(rect: Rect) -> f32 {
+    rect.w.max(0.0) * rect.h.max(0.0)
+}
+
+fn coalesce_dirty_rects(mut rects: Vec<Rect>, viewport: Rect) -> Vec<Rect> {
+    const MAX_RECTS: usize = 16;
+    const MERGE_PAD: f32 = 24.0;
+    if rects.is_empty() {
+        return rects;
+    }
+    let mut merged: Vec<Rect> = Vec::new();
+    for mut rect in rects.drain(..) {
+        let x0 = rect.x.max(viewport.x);
+        let y0 = rect.y.max(viewport.y);
+        let x1 = rect.right().min(viewport.right());
+        let y1 = rect.bottom().min(viewport.bottom());
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+        rect = Rect::new(x0, y0, x1 - x0, y1 - y0);
+        let padded = inflate_rect(rect, MERGE_PAD);
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|existing| rect_intersects(inflate_rect(**existing, MERGE_PAD), padded))
+        {
+            *existing = rect_union(*existing, rect);
+        } else {
+            merged.push(rect);
+        }
+    }
+    if merged.len() > MAX_RECTS {
+        let total_area: f32 = merged.iter().copied().map(rect_area).sum();
+        let union = merged.into_iter().reduce(rect_union).unwrap_or(viewport);
+        if rect_area(union) <= total_area * 2.5 {
+            return vec![union];
+        }
+        return vec![viewport];
+    }
+    merged
+}
+
+fn animation_override_rects(
+    root: &WebCore,
+    overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
+) -> Vec<Rect> {
+    fn walk(
+        node: &WebCore,
+        overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
+        out: &mut Vec<Rect>,
+    ) {
+        if let Some(props) = overrides.get(&node.node_id) {
+            let mut rect = node.layout.border_rect;
+            if rect.w <= 0.0 || rect.h <= 0.0 {
+                rect = node.layout.margin_rect;
+            }
+            if props.iter().any(|(prop, _)| prop == "transform") {
+                let pad = rect.w.max(rect.h).max(32.0);
+                rect = inflate_rect(rect, pad);
+            }
+            out.push(rect);
+        }
+        for child in &node.children {
+            walk(child, overrides, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, overrides, &mut out);
+    out
 }
 
 impl Renderer {
@@ -67,19 +263,76 @@ impl Renderer {
             cached_display_list: None,
             cached_scroll_x: 0.0,
             cached_scroll_y: 0.0,
+            cached_paint_top: 0.0,
+            cached_paint_bottom: 0.0,
             cached_hovered_id: 0,
             display_list_dirty: true,
             cached_layout_generation: 0,
+            cached_surface: None,
+            cached_surface_w: 0,
+            cached_surface_h: 0,
+            cached_surface_scale: 0.0,
+            cached_surface_zoom: 0.0,
+            cached_surface_scroll_x: f32::NAN,
+            cached_surface_scroll_y: f32::NAN,
+            cached_surface_layout_generation: 0,
+            cached_surface_hovered_id: 0,
+            cached_surface_active_id: 0,
+            cached_surface_caret_visible: false,
+            pending_resource_relayout: false,
+            last_resource_relayout: None,
+            last_idle_scroll_x: f32::NAN,
+            last_idle_scroll_y: f32::NAN,
+            dirty_paint_rects: Vec::new(),
             dropdown_hover_idx: -1,
             content_offset_y: 0.0,
             compositor: compositor::Compositor::new(),
             tile_manager: tiles::TileManager::new(),
-            use_tiles: false, // disabled by default until stable
+            use_tiles: false,
         }
     }
 
     pub fn invalidate_display_list(&mut self) {
         self.display_list_dirty = true;
+        self.cached_paint_top = 0.0;
+        self.cached_paint_bottom = 0.0;
+        self.cached_surface = None;
+        self.dirty_paint_rects.clear();
+    }
+
+    fn invalidate_display_list_for_paint_rects<I>(&mut self, rects: I)
+    where
+        I: IntoIterator<Item = Rect>,
+    {
+        self.display_list_dirty = true;
+        self.invalidate_paint_rects(rects);
+    }
+
+    pub fn invalidate_paint_rects<I>(&mut self, rects: I)
+    where
+        I: IntoIterator<Item = Rect>,
+    {
+        for rect in rects {
+            if rect.w > 0.0 && rect.h > 0.0 {
+                self.dirty_paint_rects.push(inflate_rect(rect, 8.0));
+            }
+        }
+        if self.dirty_paint_rects.is_empty() {
+            return;
+        }
+        if !self.dirty_paint_rects.is_empty() {
+            let viewport = Rect::new(
+                self.cached_scroll_x,
+                self.cached_scroll_y,
+                self.cached_surface_w as f32 / self.cached_surface_scale.max(0.001),
+                self.cached_surface_h as f32 / self.cached_surface_scale.max(0.001),
+            );
+            self.dirty_paint_rects =
+                coalesce_dirty_rects(std::mem::take(&mut self.dirty_paint_rects), viewport);
+        }
+        if self.dirty_paint_rects.is_empty() {
+            return;
+        }
     }
 
     /// Run browser-owned idle work for a document and configure the next event
@@ -97,50 +350,194 @@ impl Renderer {
             return false;
         };
 
+        let trace_idle = std::env::var_os("WEBCORE_TRACE_IDLE").is_some();
+        let mut trace_reasons: Vec<&'static str> = Vec::new();
         let mut needs_redraw = false;
         let mut needs_relayout = false;
+        let now = std::time::Instant::now();
+        let mut resource_requested_relayout = false;
+        let scroll_changed = (doc.scroll_x - self.last_idle_scroll_x).abs() >= 0.5
+            || (doc.scroll_y - self.last_idle_scroll_y).abs() >= 0.5;
 
         if doc.editor.has_focus && doc.editor.blink_update() {
             needs_redraw = true;
+            if trace_idle {
+                trace_reasons.push("editor-blink");
+            }
         }
-        if doc.poll_pending_images() {
-            needs_relayout = true;
-            self.invalidate_display_list();
+        if scroll_changed && trace_idle {
+            trace_reasons.push("scroll-priority");
         }
-        if self.layout_engine().poll_pending_fonts() {
+        if doc.poll_pending_stylesheets() {
+            self.layout_engine().invalidate_cascade();
+            resource_requested_relayout = true;
+            if trace_idle {
+                trace_reasons.push("stylesheet");
+            }
+        }
+        let image_poll = doc.poll_pending_images_budgeted(32, std::time::Duration::from_millis(8));
+        if image_poll.loaded_any {
+            resource_requested_relayout |= image_poll.needs_relayout;
+            if image_poll.needs_relayout {
+                // Intrinsic size changes are folded into the coalesced
+                // resource relayout below. Do not throw away the display
+                // list here for every arriving image.
+            } else {
+                self.invalidate_paint_rects(image_poll.paint_rects.clone());
+            }
+            needs_redraw = true;
+            if trace_idle {
+                trace_reasons.push(if image_poll.needs_relayout {
+                    "image-layout"
+                } else {
+                    "image-paint"
+                });
+            }
+        }
+        if self
+            .layout_engine()
+            .poll_pending_fonts_budgeted(8, std::time::Duration::from_millis(8))
+        {
             self.layout_engine().invalidate_cascade();
             doc.style_dirty = true;
-            needs_relayout = true;
-            self.invalidate_display_list();
+            resource_requested_relayout = true;
+            if trace_idle {
+                trace_reasons.push("font");
+            }
         }
-        if doc.needs_animation_frame
-            || !doc.active_animations.is_empty()
-            || !doc.transition_states.is_empty()
-        {
-            needs_relayout = true;
+        if resource_requested_relayout {
+            self.pending_resource_relayout = true;
+        }
+        let pending_resources = doc.pending_images.is_some()
+            || doc.pending_stylesheets.is_some()
+            || self.layout_engine().has_pending_fonts();
+        if self.pending_resource_relayout {
+            let elapsed = self
+                .last_resource_relayout
+                .map(|last| now.saturating_duration_since(last))
+                .unwrap_or(std::time::Duration::from_millis(100));
+            if !pending_resources || elapsed >= std::time::Duration::from_millis(80) {
+                needs_relayout = true;
+                self.pending_resource_relayout = false;
+                self.last_resource_relayout = Some(now);
+                if trace_idle {
+                    trace_reasons.push("resource-layout");
+                }
+            }
+        }
+        if !scroll_changed && doc.needs_animation_frame && !needs_relayout {
+            doc.tick_animations(now);
+            let css_animations_running = doc.needs_animation_frame;
+            let svg_animations_running = crate::svg::tick_svg_animations(&mut doc.root, now);
+            if svg_animations_running {
+                doc.needs_animation_frame = true;
+            }
+            let animation_needs_layout = doc.animation_overrides.values().any(|props| {
+                crate::types::animation_runtime::animation_properties_affect_layout(props)
+            });
+            if animation_needs_layout && !doc.animation_overrides.is_empty() {
+                let overrides = doc.animation_overrides.clone();
+                crate::css::apply_animation_overrides(&mut doc.root, &overrides);
+                self.invalidate_display_list();
+                needs_redraw = true;
+                if trace_idle {
+                    trace_reasons.push("css-animation-layout");
+                }
+            } else if !doc.animation_overrides.is_empty() {
+                // Paint-only animations do not affect geometry, but they still
+                // must present a new frame. Skeleton loaders commonly animate
+                // `background-position` over a gradient. Rebuild the viewport
+                // display list with the new sampled style, but keep the old
+                // surface and repaint only the animated boxes.
+                let viewport = Rect::new(doc.scroll_x, doc.scroll_y, viewport_w, viewport_h);
+                let paint_rects = animation_override_rects(&doc.root, &doc.animation_overrides)
+                    .into_iter()
+                    .filter(|rect| rect_intersects(*rect, viewport))
+                    .collect::<Vec<_>>();
+                let overrides = doc.animation_overrides.clone();
+                crate::css::apply_animation_overrides(&mut doc.root, &overrides);
+                if !paint_rects.is_empty() {
+                    self.invalidate_display_list_for_paint_rects(paint_rects);
+                    needs_redraw = true;
+                }
+                doc.needs_animation_frame = css_animations_running || svg_animations_running;
+                if trace_idle {
+                    trace_reasons.push("css-animation-paint");
+                }
+            }
+            if animation_needs_layout {
+                needs_relayout = true;
+                self.invalidate_display_list();
+            }
+        } else if !scroll_changed && doc.needs_animation_frame {
             self.invalidate_display_list();
+            if trace_idle {
+                trace_reasons.push("animation-deferred");
+            }
+        }
+        if !scroll_changed && doc.hover_changed {
+            let hover_needs_style = doc.hover_sensitive_nodes.contains(&doc.hovered_box)
+                || doc.hover_sensitive_nodes.contains(&doc.prev_hovered_box);
+            if hover_needs_style {
+                needs_relayout = true;
+                self.invalidate_display_list();
+                if trace_idle {
+                    trace_reasons.push("hover");
+                }
+            } else {
+                doc.hover_changed = false;
+                doc.prev_hovered_box = doc.hovered_box;
+            }
         }
         if needs_relayout {
+            self.invalidate_display_list();
             let engine = self.layout_engine();
             engine.viewport_h = viewport_h;
             engine.layout(doc, viewport_w);
             needs_redraw = true;
+            if trace_idle {
+                trace_reasons.push("layout");
+            }
         }
-        if doc.tick_animated_images(std::time::Instant::now()) {
-            self.invalidate_display_list();
-            needs_redraw = true;
+        if !scroll_changed {
+            let image_tick =
+                doc.tick_animated_images_in_viewport_detailed(now, doc.scroll_y, viewport_h);
+            if image_tick.changed_any {
+                if image_tick.paint_rects.is_empty() {
+                    self.invalidate_display_list();
+                } else {
+                    self.invalidate_paint_rects(image_tick.paint_rects);
+                }
+                needs_redraw = true;
+                if trace_idle {
+                    trace_reasons.push("animated-image");
+                }
+            }
         }
 
+        let next_animated_image_deadline =
+            doc.next_visible_animated_image_deadline(now, doc.scroll_y, viewport_h);
+        let has_visible_animated_images = next_animated_image_deadline.is_some();
         let has_timed_work = doc.editor.has_focus
             || doc.needs_animation_frame
-            || !doc.active_animations.is_empty()
-            || !doc.transition_states.is_empty()
-            || doc.has_animated_images()
+            || has_visible_animated_images
             || doc.pending_images.is_some()
-            || self.layout_engine().has_pending_fonts();
+            || doc.pending_stylesheets.is_some()
+            || self.layout_engine().has_pending_fonts()
+            || self.pending_resource_relayout;
 
         if has_timed_work {
-            let mut deadline = std::time::Instant::now() + std::time::Duration::from_millis(16);
+            let mut deadline = if doc.needs_animation_frame {
+                now + std::time::Duration::from_millis(16)
+            } else {
+                now + std::time::Duration::from_millis(250)
+            };
+            if let Some(image_deadline) = next_animated_image_deadline {
+                deadline = deadline.min(image_deadline.max(now));
+            }
+            if self.pending_resource_relayout {
+                deadline = deadline.min(now + std::time::Duration::from_millis(50));
+            }
             if doc.editor.has_focus {
                 deadline = deadline.min(doc.editor.next_blink_deadline());
             }
@@ -149,6 +546,25 @@ impl Renderer {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
 
+        if trace_idle && (!trace_reasons.is_empty() || has_timed_work) {
+            eprintln!(
+                "[webcore idle] redraw={} timed={} reasons={} pending_images={} pending_css={} pending_fonts={} anim_frame={}",
+                needs_redraw,
+                has_timed_work,
+                if trace_reasons.is_empty() {
+                    "none".to_string()
+                } else {
+                    trace_reasons.join(",")
+                },
+                doc.pending_images.is_some(),
+                doc.pending_stylesheets.is_some(),
+                self.layout_engine().has_pending_fonts(),
+                doc.needs_animation_frame,
+            );
+        }
+
+        self.last_idle_scroll_x = doc.scroll_x;
+        self.last_idle_scroll_y = doc.scroll_y;
         needs_redraw
     }
 
@@ -539,7 +955,76 @@ impl Renderer {
         doc
     }
 
+    pub fn load_html_with_base_and_stylesheet_loader_css_wait(
+        &mut self,
+        html: &str,
+        base_url: &str,
+        viewport_width: f32,
+        viewport_height: f32,
+        stylesheet_loader: std::sync::Arc<
+            dyn Fn(&str) -> Result<String, String> + Send + Sync + 'static,
+        >,
+        css_wait: std::time::Duration,
+    ) -> crate::Document {
+        let registry = self.component_registry.clone();
+        let doc = crate::load_html_reusing_with_stylesheet_loader_and_wait(
+            html,
+            base_url,
+            viewport_width,
+            viewport_height,
+            registry,
+            Some(self),
+            Some(stylesheet_loader),
+            css_wait,
+        );
+        let engine = self.layout_engine();
+        engine.viewport_h = viewport_height;
+        doc
+    }
+
+    pub fn load_html_with_base_and_resource_loaders_css_wait(
+        &mut self,
+        html: &str,
+        base_url: &str,
+        viewport_width: f32,
+        viewport_height: f32,
+        stylesheet_loader: std::sync::Arc<
+            dyn Fn(&str) -> Result<String, String> + Send + Sync + 'static,
+        >,
+        streaming_stylesheet_loader: Option<crate::StreamingStylesheetLoader>,
+        image_loader: Option<
+            std::sync::Arc<
+                dyn Fn(&str) -> Option<crate::html::DecodedImage> + Send + Sync + 'static,
+            >,
+        >,
+        load_images: bool,
+        css_wait: std::time::Duration,
+    ) -> crate::Document {
+        let registry = self.component_registry.clone();
+        let doc = crate::load_html_reusing_with_resource_loaders_and_wait(
+            html,
+            base_url,
+            viewport_width,
+            viewport_height,
+            registry,
+            Some(self),
+            Some(stylesheet_loader),
+            streaming_stylesheet_loader,
+            image_loader,
+            load_images,
+            css_wait,
+        );
+        let engine = self.layout_engine();
+        engine.viewport_h = viewport_height;
+        doc
+    }
+
     pub fn render(&mut self, doc: &mut Document, pixmap: &mut Pixmap, scale: f32) {
+        let trace_render = std::env::var_os("WEBCORE_TRACE_RENDER").is_some();
+        let render_start = std::time::Instant::now();
+        let mut build_ms = 0u128;
+        let mut replay_ms = 0u128;
+        let mut rebuilt_display_list = false;
         self.scale = scale;
         let zoom = self.zoom.clamp(0.1, 8.0);
         let w = pixmap.width() as f32 / scale;
@@ -547,21 +1032,42 @@ impl Renderer {
         let view_w = w / zoom;
         let view_h = h / zoom;
         self.viewport_h = view_h;
-        let font_loaded = self.layout_engine().poll_pending_fonts();
-        if doc.poll_pending_images() || font_loaded {
-            let engine = self.layout_engine();
-            if font_loaded {
-                engine.invalidate_cascade();
-            }
-            engine.viewport_h = view_h;
-            engine.layout(doc, view_w);
-            self.invalidate_display_list();
-        }
-        let doc_h =
-            crate::types::Document::scroll_height(&doc.root).max(doc.root.layout.margin_rect.h);
+        let doc_h = crate::types::Document::scroll_height(&doc.root);
         let doc_w = doc.root.layout.margin_rect.w;
         doc.scroll_y = doc.scroll_y.max(0.0).min((doc_h - view_h).max(0.0));
         doc.scroll_x = doc.scroll_x.max(0.0).min((doc_w - view_w).max(0.0));
+        let surface_hover_changed = self.cached_surface_hovered_id != doc.hovered_box
+            && (doc.hover_sensitive_nodes.contains(&doc.hovered_box)
+                || doc
+                    .hover_sensitive_nodes
+                    .contains(&self.cached_surface_hovered_id));
+        let can_reuse_surface = self.cached_surface.as_ref().is_some_and(|surface| {
+            surface.width() == pixmap.width()
+                && surface.height() == pixmap.height()
+                && (self.cached_surface_scale - scale).abs() < 0.001
+                && (self.cached_surface_zoom - zoom).abs() < 0.001
+                && (self.cached_surface_scroll_x - doc.scroll_x).abs() < 0.5
+                && (self.cached_surface_scroll_y - doc.scroll_y).abs() < 0.5
+                && self.cached_surface_layout_generation == doc.layout_generation
+                && !surface_hover_changed
+                && self.cached_surface_active_id == doc.active_box
+                && self.cached_surface_caret_visible == doc.editor.caret_visible
+                && !self.display_list_dirty
+        });
+        if can_reuse_surface {
+            if let Some(surface) = self.cached_surface.as_ref() {
+                pixmap.data_mut().copy_from_slice(surface.data());
+                if trace_render {
+                    eprintln!(
+                        "[webcore render] total={}ms cached-surface=true scroll=({:.1},{:.1})",
+                        render_start.elapsed().as_millis(),
+                        doc.scroll_x,
+                        doc.scroll_y,
+                    );
+                }
+                return;
+            }
+        }
         let canvas_color = doc
             .root
             .children
@@ -571,86 +1077,305 @@ impl Renderer {
             .filter(|c| c.a > 0)
             .or_else(|| {
                 let c = doc.root.style.background_color;
-                if c.a > 0 {
-                    Some(c)
-                } else {
-                    None
-                }
+                if c.a > 0 { Some(c) } else { None }
             })
             .map(|c| c.to_tiny_skia())
             .unwrap_or(tiny_skia::Color::WHITE);
-        pixmap.fill(canvas_color);
+
+        // Keep a deep retained paint band around the viewport. A shallow band
+        // made ordinary wheel/scrollbar movement fall out of the cached display
+        // list almost immediately, so scrolling paid a full record/replay pass
+        // instead of shifting the existing backing surface and painting only
+        // the newly exposed strip.
+        let paint_overscan = (view_h * 8.0).max(6000.0);
+        let paint_top = (doc.scroll_y - paint_overscan).max(0.0);
+        let paint_bottom = (doc.scroll_y + view_h + paint_overscan).min(doc_h.max(view_h));
 
         // Check what changed since last render
         let layout_changed = doc.layout_generation != self.cached_layout_generation;
-        let hover_changed = doc.hovered_box != self.cached_hovered_id;
+        let hover_changed = doc.hovered_box != self.cached_hovered_id
+            && (doc.hover_sensitive_nodes.contains(&doc.hovered_box)
+                || doc.hover_sensitive_nodes.contains(&self.cached_hovered_id));
+        let scroll_outside_cached_band = self.cached_display_list.is_none()
+            || doc.scroll_y < self.cached_paint_top
+            || doc.scroll_y + view_h > self.cached_paint_bottom;
         let _scroll_only = !layout_changed
             && !hover_changed
             && !self.display_list_dirty
+            && !scroll_outside_cached_band
             && self.cached_display_list.is_some();
 
-        // Only rebuild display list when layout/hover changed — NOT on scroll.
-        // Scroll is handled by replaying the cached list with a different offset.
-        // ⛔ `position: sticky` is the ONE scheme whose painted position depends
-        // on the scroll offset, so a page containing one cannot reuse a list
-        // across scroll positions. Everything else — static, relative, float,
-        // absolute — is positioned in the document and translates cleanly, and
-        // `fixed` lives in its own untranslated list.
-        let scroll_moved =
-            doc.scroll_x != self.cached_scroll_x || doc.scroll_y != self.cached_scroll_y;
-        let has_sticky = scroll_moved && has_sticky_box(&doc.root);
+        let dirty_paint_rects = self.dirty_paint_rects.clone();
+        let dirty_paint_only = !dirty_paint_rects.is_empty()
+            && !layout_changed
+            && !hover_changed
+            && !scroll_outside_cached_band
+            && self.cached_display_list.is_some()
+            && self.cached_surface.as_ref().is_some_and(|surface| {
+                surface.width() == pixmap.width()
+                    && surface.height() == pixmap.height()
+                    && (self.cached_surface_scale - scale).abs() < 0.001
+                    && (self.cached_surface_zoom - zoom).abs() < 0.001
+                    && (self.cached_surface_scroll_x - doc.scroll_x).abs() < 0.5
+                    && (self.cached_surface_scroll_y - doc.scroll_y).abs() < 0.5
+                    && self.cached_surface_layout_generation == doc.layout_generation
+            });
+
+        // Only rebuild display list when layout/hover changed — NOT on scroll
+        // and NOT for paint-only dirty rects. Paint-only invalidation reuses
+        // the existing list and cached surface below; rebuilding here made
+        // every small animation/image update pay the full page recording cost.
         let needs_rebuild = self.display_list_dirty
             || self.cached_display_list.is_none()
             || layout_changed
             || hover_changed
-            || has_sticky;
+            || scroll_outside_cached_band;
+        let scroll_band_rebuild_only = scroll_outside_cached_band
+            && !self.display_list_dirty
+            && !layout_changed
+            && !hover_changed
+            && self.cached_display_list.is_some()
+            && self.cached_surface.is_some();
 
         if needs_rebuild {
-            // Build display list with full document extent (not scroll-clipped)
-            // so it can be reused across scroll positions.
-            // ⛔ Built at scroll 0,0 — in DOCUMENT coordinates. This passed
-            // `doc.scroll_x/y`, which baked the scroll position into the list,
-            // so the cached list was only valid at the offset it was built for
-            // and every scroll needed a full rebuild of the whole document's
-            // display list. The comment above has always claimed the list is
-            // reused across scroll positions; now it is.
-            let list = display_list_builder::build_display_list_full(
+            let build_start = std::time::Instant::now();
+            // Build only a generous viewport band, still in document
+            // coordinates. Scrolling inside the band reuses the same list; when
+            // the viewport leaves the band we rebuild a new slice instead of
+            // traversing and recording the whole page.
+            let list = display_list_builder::build_display_list_viewport(
                 &doc.root,
                 view_w,
-                doc.root.layout.margin_rect.h.max(view_h),
+                view_h,
                 doc.scroll_x,
                 doc.scroll_y,
+                paint_top,
+                paint_bottom,
                 doc.hovered_box,
                 doc.active_box,
                 &doc.visited_urls,
                 &doc.base_url,
             );
             self.cached_display_list = Some(list);
+            self.cached_paint_top = paint_top;
+            self.cached_paint_bottom = paint_bottom;
             self.cached_hovered_id = doc.hovered_box;
             self.cached_layout_generation = doc.layout_generation;
             self.display_list_dirty = false;
+            self.tile_manager.invalidate_all();
 
             // Rebuild compositor layer tree on layout change
             if layout_changed {
                 self.compositor.build_layers(&doc.root, view_w, view_h);
             }
+            build_ms = build_start.elapsed().as_millis();
+            rebuilt_display_list = true;
         }
         self.cached_scroll_x = doc.scroll_x;
         self.cached_scroll_y = doc.scroll_y;
 
         // Replay display list (cached — only rebuilt on layout/hover change)
-        if let Some(ref list) = self.cached_display_list {
-            // The scroll offset is applied HERE, at replay, which is what makes
-            // one cached list serve every scroll position.
-            display_list_replay::replay_with_scroll(
-                list,
-                pixmap,
-                scale * zoom,
-                &mut self.font_system,
-                &mut self.swash_cache,
-                doc.scroll_x,
-                doc.scroll_y,
-            );
+        let mut used_scroll_surface = false;
+        let mut used_dirty_surface = false;
+        if dirty_paint_only {
+            if let (Some(surface), Some(list)) = (
+                self.cached_surface.as_ref(),
+                self.cached_display_list.as_ref(),
+            ) {
+                let tile_scale = scale * zoom;
+                let can_repaint_dirty = surface.width() == pixmap.width()
+                    && surface.height() == pixmap.height()
+                    && (self.cached_surface_scale - scale).abs() < 0.001
+                    && (self.cached_surface_zoom - zoom).abs() < 0.001
+                    && (self.cached_surface_scroll_x - doc.scroll_x).abs() < 0.5
+                    && (self.cached_surface_scroll_y - doc.scroll_y).abs() < 0.5
+                    && self.cached_surface_layout_generation == doc.layout_generation;
+                if can_repaint_dirty {
+                    let replay_start = std::time::Instant::now();
+                    pixmap.data_mut().copy_from_slice(surface.data());
+                    for rect in &dirty_paint_rects {
+                        if let Some(clip) = viewport_clip_from_doc_rect(
+                            *rect,
+                            doc.scroll_x,
+                            doc.scroll_y,
+                            view_w,
+                            view_h,
+                        ) {
+                            fill_viewport_clip(pixmap, clip, tile_scale, canvas_color);
+                            display_list_replay::replay_with_scroll_clip(
+                                list,
+                                pixmap,
+                                tile_scale,
+                                &mut self.font_system,
+                                &mut self.swash_cache,
+                                doc.scroll_x,
+                                doc.scroll_y,
+                                clip,
+                            );
+                        }
+                    }
+                    replay_ms = replay_start.elapsed().as_millis();
+                    used_dirty_surface = true;
+                    self.display_list_dirty = false;
+                    self.dirty_paint_rects.clear();
+                }
+            }
+        }
+        if !used_dirty_surface && (!needs_rebuild || scroll_band_rebuild_only) {
+            if let (Some(surface), Some(list)) = (
+                self.cached_surface.as_ref(),
+                self.cached_display_list.as_ref(),
+            ) {
+                let tile_scale = scale * zoom;
+                let dx_px = ((doc.scroll_x - self.cached_surface_scroll_x) * tile_scale).round();
+                let dy_px = ((doc.scroll_y - self.cached_surface_scroll_y) * tile_scale).round();
+                let scroll_surface_reject =
+                    if surface.width() != pixmap.width() || surface.height() != pixmap.height() {
+                        Some("surface-size")
+                    } else if (self.cached_surface_scale - scale).abs() >= 0.001
+                        || (self.cached_surface_zoom - zoom).abs() >= 0.001
+                    {
+                        Some("scale")
+                    } else if dx_px.abs() >= 0.5 {
+                        Some("horizontal-scroll")
+                    } else if dy_px.abs() < 1.0 {
+                        Some("no-scroll-delta")
+                    } else if dy_px.abs() >= pixmap.height() as f32 {
+                        Some("large-scroll-delta")
+                    } else if self.cached_surface_layout_generation != doc.layout_generation {
+                        Some("layout-generation")
+                    } else if surface_hover_changed {
+                        Some("hover")
+                    } else if self.cached_surface_active_id != doc.active_box {
+                        Some("active")
+                    } else if self.cached_surface_caret_visible != doc.editor.caret_visible {
+                        Some("caret-visibility")
+                    } else if !self.component_registry.map.is_empty()
+                        || !self.component_registry.components.is_empty()
+                    {
+                        Some("custom-components")
+                    } else if doc.open_select != 0 || doc.open_picker != 0 {
+                        Some("popup")
+                    } else if doc.editor.has_selection() || doc.editor.caret_visible {
+                        Some("editing-overlay")
+                    } else {
+                        None
+                    };
+                let can_shift_surface = scroll_surface_reject.is_none();
+                if can_shift_surface {
+                    let replay_start = std::time::Instant::now();
+                    let dy_px = dy_px as i32;
+                    let pm_w = pixmap.width();
+                    let pm_h = pixmap.height();
+                    copy_surface_shifted_y(surface.data(), pixmap.data_mut(), pm_w, pm_h, dy_px);
+                    let abs_dy = dy_px.unsigned_abs().min(pixmap.height());
+                    let dirty_clip = if dy_px > 0 {
+                        let y_px = pixmap.height().saturating_sub(abs_dy);
+                        fill_physical_rect(pixmap, 0, y_px, pixmap.width(), abs_dy, canvas_color);
+                        Rect::new(
+                            0.0,
+                            y_px as f32 / tile_scale.max(0.001),
+                            view_w,
+                            abs_dy as f32 / tile_scale.max(0.001) + 2.0,
+                        )
+                    } else {
+                        fill_physical_rect(pixmap, 0, 0, pixmap.width(), abs_dy, canvas_color);
+                        Rect::new(
+                            0.0,
+                            0.0,
+                            view_w,
+                            abs_dy as f32 / tile_scale.max(0.001) + 2.0,
+                        )
+                    };
+                    display_list_replay::replay_with_scroll_clip(
+                        list,
+                        pixmap,
+                        tile_scale,
+                        &mut self.font_system,
+                        &mut self.swash_cache,
+                        doc.scroll_x,
+                        doc.scroll_y,
+                        dirty_clip,
+                    );
+                    let scrollbar_w = doc.root.style.scrollbar_width_px();
+                    if scrollbar_w > 0.0 {
+                        let x = pixmap
+                            .width()
+                            .saturating_sub((scrollbar_w * scale).ceil() as u32);
+                        fill_physical_rect(
+                            pixmap,
+                            x,
+                            0,
+                            pixmap.width().saturating_sub(x),
+                            pixmap.height(),
+                            canvas_color,
+                        );
+                    }
+                    replay_ms = replay_start.elapsed().as_millis();
+                    used_scroll_surface = true;
+                } else if trace_render && dy_px.abs() >= 1.0 {
+                    eprintln!(
+                        "[webcore render] scroll_surface_reject={} dx_px={:.0} dy_px={:.0}",
+                        scroll_surface_reject.unwrap_or("unknown"),
+                        dx_px,
+                        dy_px,
+                    );
+                }
+            }
+        }
+
+        if !used_dirty_surface && !used_scroll_surface {
+            pixmap.fill(canvas_color);
+        }
+        if !used_dirty_surface
+            && !used_scroll_surface
+            && let Some(ref list) = self.cached_display_list
+        {
+            let replay_start = std::time::Instant::now();
+            if self.use_tiles {
+                self.tile_manager.doc_width = doc_w.max(view_w);
+                self.tile_manager.doc_height = doc_h.max(view_h);
+                let tile_scale = scale * zoom;
+                let needed_tiles = self.tile_manager.update_viewport(
+                    Rect::new(doc.scroll_x, doc.scroll_y, view_w, view_h),
+                    tile_scale,
+                );
+                for (tx, ty) in needed_tiles {
+                    let needs_tile = self.tile_manager.ensure_tile(tx, ty);
+                    if needs_tile {
+                        if let Some(tile) = self.tile_manager.tiles.get_mut(&(tx, ty)) {
+                            tile.pixmap.fill(canvas_color);
+                            let tile_scroll_x = tx as f32 * tiles::TILE_SIZE;
+                            let tile_scroll_y = ty as f32 * tiles::TILE_SIZE;
+                            display_list_replay::replay_with_scroll(
+                                list,
+                                &mut tile.pixmap,
+                                tile_scale,
+                                &mut self.font_system,
+                                &mut self.swash_cache,
+                                tile_scroll_x,
+                                tile_scroll_y,
+                            );
+                            tile.dirty = false;
+                        }
+                    }
+                }
+                self.tile_manager.evict_distant();
+                self.tile_manager
+                    .composite_to(pixmap, doc.scroll_x, doc.scroll_y, tile_scale);
+            } else {
+                // The scroll offset is applied HERE, at replay, which is what makes
+                // one cached list serve every scroll position.
+                display_list_replay::replay_with_scroll(
+                    list,
+                    pixmap,
+                    scale * zoom,
+                    &mut self.font_system,
+                    &mut self.swash_cache,
+                    doc.scroll_x,
+                    doc.scroll_y,
+                );
+            }
             // `position: fixed` content, at scroll 0 — it does not move.
             if !list.fixed_commands.is_empty() {
                 let fixed = crate::renderer::display_list::DisplayList {
@@ -667,6 +1392,7 @@ impl Renderer {
                     0.0,
                 );
             }
+            replay_ms = replay_start.elapsed().as_millis();
         }
         // Paint custom components on top of the display list
         if !self.component_registry.map.is_empty() || !self.component_registry.components.is_empty()
@@ -761,6 +1487,47 @@ impl Renderer {
             ) {
                 pixmap.fill_path(&path, &paint, FillRule::Winding, ts, None);
             }
+        }
+        if trace_render {
+            let commands = self
+                .cached_display_list
+                .as_ref()
+                .map(|list| list.commands.len() + list.fixed_commands.len())
+                .unwrap_or(0);
+            eprintln!(
+                "[webcore render] total={}ms build={}ms replay={}ms rebuilt={} scroll_surface={} dirty_surface={} commands={} layout_changed={} hover_changed={} dirty={} scroll_band={} scroll=({:.1},{:.1})",
+                render_start.elapsed().as_millis(),
+                build_ms,
+                replay_ms,
+                rebuilt_display_list,
+                used_scroll_surface,
+                used_dirty_surface,
+                commands,
+                layout_changed,
+                hover_changed,
+                self.display_list_dirty,
+                scroll_outside_cached_band,
+                doc.scroll_x,
+                doc.scroll_y,
+            );
+        }
+        if self.cached_surface.as_ref().is_none_or(|surface| {
+            surface.width() != pixmap.width() || surface.height() != pixmap.height()
+        }) {
+            self.cached_surface = Pixmap::new(pixmap.width(), pixmap.height());
+        }
+        if let Some(surface) = self.cached_surface.as_mut() {
+            surface.data_mut().copy_from_slice(pixmap.data());
+            self.cached_surface_w = pixmap.width();
+            self.cached_surface_h = pixmap.height();
+            self.cached_surface_scale = scale;
+            self.cached_surface_zoom = zoom;
+            self.cached_surface_scroll_x = doc.scroll_x;
+            self.cached_surface_scroll_y = doc.scroll_y;
+            self.cached_surface_layout_generation = doc.layout_generation;
+            self.cached_surface_hovered_id = doc.hovered_box;
+            self.cached_surface_active_id = doc.active_box;
+            self.cached_surface_caret_visible = doc.editor.caret_visible;
         }
     }
 
@@ -1713,16 +2480,4 @@ pub fn draw_inspect_overlay(
         80,
     );
     fill_rect(pixmap, c.x - sx, c.y - sy, c.w, c.h, 100, 150, 255, 60);
-}
-
-/// Does any box in the tree use `position: sticky`?
-///
-/// Asked only when the scroll has actually moved, and only to decide whether
-/// the display list can be reused — sticky is the one positioning scheme whose
-/// painted position is a function of the scroll offset.
-fn has_sticky_box(node: &crate::types::WebCore) -> bool {
-    if node.style.position == crate::types::Position::Sticky {
-        return true;
-    }
-    node.children.iter().any(has_sticky_box)
 }

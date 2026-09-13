@@ -77,7 +77,9 @@ fn shadow_host_walks_back_out() {
 
 #[test]
 fn shadow_children_lists_the_tree_top_level() {
-    let d = doc("<div id=host><template shadowrootmode=open><span id=a>1</span><b id=b>2</b></template></div>");
+    let d = doc(
+        "<div id=host><template shadowrootmode=open><span id=a>1</span><b id=b>2</b></template></div>",
+    );
     let host = d.query_selector("#host").unwrap();
     let kids = d.shadow_children(host);
     assert_eq!(kids.len(), 2);

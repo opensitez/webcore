@@ -66,9 +66,5 @@ fn can_play_type_for_kind(kind: MediaKind, media_type: &str) -> &'static str {
                 | "application/ogg"
         ),
     };
-    if playable {
-        "maybe"
-    } else {
-        ""
-    }
+    if playable { "maybe" } else { "" }
 }

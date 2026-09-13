@@ -1277,11 +1277,12 @@ fn attribute_mutation_sets_dirty_flag() {
     doc.set_attribute(div, "class", "active");
 
     // Should be style-dirty now
-    assert!(doc
-        .arena
-        .get(NodeId(div))
-        .dirty
-        .contains(crate::dom::arena::DirtyFlags::STYLE));
+    assert!(
+        doc.arena
+            .get(NodeId(div))
+            .dirty
+            .contains(crate::dom::arena::DirtyFlags::STYLE)
+    );
 }
 
 // ─── WHATWG conformance ─────────────────────────────────────────────────────
@@ -2711,10 +2712,11 @@ fn html_media_autoplay_initializes_playback_state_after_parse() {
         doc.media_ready_state(video),
         Some(crate::types::MEDIA_HAVE_ENOUGH_DATA)
     );
-    assert!(doc
-        .media_states
-        .get(&video)
-        .is_some_and(|s| s.metadata_loaded));
+    assert!(
+        doc.media_states
+            .get(&video)
+            .is_some_and(|s| s.metadata_loaded)
+    );
 }
 
 #[test]
@@ -3068,6 +3070,25 @@ fn animated_image_tick_advances_rendered_pixels_without_layout() {
     assert_eq!(&next_pixels[..4], &[0, 0, 255, 255]);
     assert!(doc.has_animated_images());
     assert!(!doc.needs_animation_frame);
+}
+
+#[test]
+fn animated_image_tick_reports_the_image_paint_rect() {
+    let decoded = crate::html::decode_image_bytes_ex(&tiny_animated_gif()).unwrap();
+    let mut node = crate::types::WebCore::new("img");
+    crate::html::set_decoded_image_on_node(&mut node, decoded);
+    node.layout.border_rect = crate::types::Rect::new(12.0, 34.0, 56.0, 78.0);
+    node.layout.margin_rect = node.layout.border_rect;
+    node.animated_image_last_tick = Some(std::time::Instant::now());
+
+    let mut doc = crate::types::Document::new();
+    doc.root.children.push(node);
+    let now = doc.root.children[0].animated_image_last_tick.unwrap()
+        + std::time::Duration::from_millis(25);
+
+    let tick = doc.tick_animated_images_in_viewport_detailed(now, 0.0, 200.0);
+    assert!(tick.changed_any);
+    assert_eq!(tick.paint_rects, vec![crate::types::Rect::new(12.0, 34.0, 56.0, 78.0)]);
 }
 
 #[test]

@@ -430,10 +430,10 @@ mod tests {
     fn compositor_builds_layers() {
         let doc = load_html(
             concat!(
-            "<div style='position:fixed;top:0;left:0;width:100px;height:50px'>Fixed</div>",
-            "<div style='overflow:auto;height:200px'><div style='height:1000px'>Scroll</div></div>",
-            "<div style='opacity:0.5'>Semi</div>",
-        ),
+                "<div style='position:fixed;top:0;left:0;width:100px;height:50px'>Fixed</div>",
+                "<div style='overflow:auto;height:200px'><div style='height:1000px'>Scroll</div></div>",
+                "<div style='opacity:0.5'>Semi</div>",
+            ),
             800.0,
         );
         let mut comp = Compositor::new();

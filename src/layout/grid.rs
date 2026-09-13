@@ -2,7 +2,7 @@ use super::Constraints;
 #[allow(unused_imports)]
 use crate::css::parse_single_track;
 use crate::layout::block::apply_relative_offset;
-use crate::layout::{layout_positioned, shift_rects, LayoutEngine, ResolvedBox};
+use crate::layout::{LayoutEngine, ResolvedBox, layout_positioned, shift_rects};
 use crate::types::*;
 
 /// Resolve a child by path through `display: contents` wrappers.
@@ -710,7 +710,7 @@ pub fn layout_grid(
             if rs_has_name {
                 continue;
             } // row-locked via name, handled in step 2
-              // Check if column IS explicitly set (via number or named line)
+            // Check if column IS explicitly set (via number or named line)
             let (cs_is_span, cs_val) = decode_grid_line(child.style.grid_column_start);
             let cs_has_name = !child.style.grid_column_start_name.is_empty()
                 && lookup_named_line(&child.style.grid_column_start_name, &col_line_names)
@@ -1870,11 +1870,7 @@ fn resolve_track_sizes_with_gap(
                         }
                         _ => {
                             let px = track_to_px(rt, container, font_px, root_font_px);
-                            if px > 0.0 {
-                                px
-                            } else {
-                                50.0
-                            }
+                            if px > 0.0 { px } else { 50.0 }
                         }
                     };
                     total_min += px;
@@ -1917,11 +1913,7 @@ fn resolve_track_sizes_with_gap(
                 }
                 _ => {
                     let px = track_to_px(rt, container, font_px, root_font_px);
-                    if px > 0.0 {
-                        px
-                    } else {
-                        50.0
-                    }
+                    if px > 0.0 { px } else { 50.0 }
                 }
             };
             total_min += px;
@@ -2507,11 +2499,7 @@ fn expand_repeat(template: &str, container: f32) -> String {
         } else {
             // Handle calc() in repeat count, e.g. repeat(calc(5 - 1), ...)
             let resolved = crate::css::parse_length(count_str).resolve(16.0, container, 16.0);
-            if resolved > 0.0 {
-                resolved as usize
-            } else {
-                1
-            }
+            if resolved > 0.0 { resolved as usize } else { 1 }
         };
 
         for i in 0..count {

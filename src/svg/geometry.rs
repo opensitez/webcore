@@ -1,6 +1,6 @@
 //! SVG geometry and intrinsic sizing helpers.
 
-use super::{parse_svg_document, SvgDocument};
+use super::{SvgDocument, parse_svg_document};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SvgLength {

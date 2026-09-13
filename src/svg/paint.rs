@@ -1,24 +1,24 @@
 //! Native SVG rasterization.
 
 use super::geometry::{
-    intrinsic_size_from_markup, parse_preserve_aspect_ratio, parse_svg_length, parse_view_box,
-    AlignX, AlignY, PreserveAspectRatio, SvgLength, SvgViewBox,
+    AlignX, AlignY, PreserveAspectRatio, SvgLength, SvgViewBox, intrinsic_size_from_markup,
+    parse_preserve_aspect_ratio, parse_svg_length, parse_view_box,
 };
 use super::path::{
     flatten_path_points, number, number_list, parse_path_data, parse_transform_list,
     path_marker_subpaths, path_polyline_length, point_at_path_distance,
 };
-use super::{parse_svg_document, SvgDocument, SvgElementKind, SvgNode};
+use super::{SvgDocument, SvgElementKind, SvgNode, parse_svg_document};
 use crate::canvas::{
     Canvas, Font, FontStyle, FontWeight, Matrix, TextAlign, TextBaseline, TinySkiaCanvas,
 };
 use crate::css::{
-    parse_color, parse_stylesheet, resolve_var_references, AttrOp, Combinator, CssRule,
-    CssSelector, Declarations, SelectorPart,
+    AttrOp, Combinator, CssRule, CssSelector, Declarations, SelectorPart, parse_color,
+    parse_stylesheet, resolve_var_references,
 };
 use crate::svg::animation::{WEBCORE_ANIMATED_ATTR_NS, WEBCORE_ANIMATED_ATTR_PREFIX};
 use crate::svg::condition;
-use crate::types::{Color, Direction, Overflow, WebCore, SPECIFIED_SVG_FILL, SPECIFIED_SVG_STROKE};
+use crate::types::{Color, Direction, Overflow, SPECIFIED_SVG_FILL, SPECIFIED_SVG_STROKE, WebCore};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use tiny_skia::{
@@ -4266,11 +4266,7 @@ fn gradient_length(
         .as_deref()
         .and_then(percent_or_number)
         .unwrap_or(default);
-    if user_space {
-        value
-    } else {
-        value * span
-    }
+    if user_space { value } else { value * span }
 }
 
 fn percent_or_number(value: &str) -> Option<f32> {

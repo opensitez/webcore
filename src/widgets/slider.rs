@@ -1,6 +1,6 @@
 //! Range slider widget — standalone tiny-skia rendered slider.
 
-use super::{circle_path, rounded_rect_path, WidgetColors};
+use super::{WidgetColors, circle_path, rounded_rect_path};
 use tiny_skia::*;
 
 pub struct Slider {

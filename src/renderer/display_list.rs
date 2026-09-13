@@ -79,7 +79,10 @@ pub enum PaintCmd {
     PopClip,
 
     /// Push a CSS transform.
-    PushTransform { transform: [f32; 6] }, // 2D affine: [a, b, c, d, e, f]
+    PushTransform {
+        node_id: u32,
+        transform: [f32; 6],
+    }, // 2D affine: [a, b, c, d, e, f]
 
     /// Pop the current transform.
     PopTransform,
@@ -166,6 +169,8 @@ pub enum PaintCmd {
         color: Color,
         style: u8, // same encoding as border styles
         offset: f32,
+        radii: [f32; 4],
+        radii_y: [f32; 4],
     },
 
     /// Draw the native resize affordance for CSS `resize`.

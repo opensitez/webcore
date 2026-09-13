@@ -1434,6 +1434,22 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             copy: copy_background_position,
             longhands: &[],
         },
+        BackgroundPositionX => &PropertyDef {
+            id: BackgroundPositionX,
+            name: "background-position-x",
+            inherited: false,
+            apply: apply_background_position_x,
+            copy: copy_background_position,
+            longhands: &[],
+        },
+        BackgroundPositionY => &PropertyDef {
+            id: BackgroundPositionY,
+            name: "background-position-y",
+            inherited: false,
+            apply: apply_background_position_y,
+            copy: copy_background_position,
+            longhands: &[],
+        },
         BackgroundRepeat => &PropertyDef {
             id: BackgroundRepeat,
             name: "background-repeat",
@@ -4537,6 +4553,17 @@ fn apply_text_wrap(s: &mut ComputedStyle, v: &str) {
         v,
         &["wrap", "nowrap", "balance", "pretty", "stable"],
     );
+    // CSS Text 4 split wrapping out from the older `white-space` shorthand.
+    // Layout still models the effective wrap mode through `white_space`, so
+    // bridge the modern property here. This keeps Tailwind's `text-nowrap`
+    // from measuring as min-content and then painting over adjacent items.
+    match v {
+        "nowrap" => s.white_space = WhiteSpace::Nowrap,
+        "wrap" | "balance" | "pretty" | "stable" if s.white_space == WhiteSpace::Nowrap => {
+            s.white_space = WhiteSpace::Normal;
+        }
+        _ => {}
+    }
 }
 fn apply_text_shadow(s: &mut ComputedStyle, v: &str) {
     if v == "none" {
@@ -5771,6 +5798,22 @@ fn apply_background_position(s: &mut ComputedStyle, v: &str) {
         "center" => CssLength::Percent(50.0),
         "bottom" => CssLength::Percent(100.0),
         _ => parse_length(y_str),
+    };
+}
+fn apply_background_position_x(s: &mut ComputedStyle, v: &str) {
+    s.background_position_x = match v.trim().to_ascii_lowercase().as_str() {
+        "left" => CssLength::Percent(0.0),
+        "center" => CssLength::Percent(50.0),
+        "right" => CssLength::Percent(100.0),
+        other => parse_length(other),
+    };
+}
+fn apply_background_position_y(s: &mut ComputedStyle, v: &str) {
+    s.background_position_y = match v.trim().to_ascii_lowercase().as_str() {
+        "top" => CssLength::Percent(0.0),
+        "center" => CssLength::Percent(50.0),
+        "bottom" => CssLength::Percent(100.0),
+        other => parse_length(other),
     };
 }
 fn apply_background_repeat(s: &mut ComputedStyle, v: &str) {

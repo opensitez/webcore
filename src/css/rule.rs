@@ -414,11 +414,11 @@ pub(crate) fn pre_parse_value(id: properties::PropertyId, val: &str) -> crate::t
             "uppercase" => return CssValue::TextTransform(crate::types::TextTransform::Uppercase),
             "lowercase" => return CssValue::TextTransform(crate::types::TextTransform::Lowercase),
             "capitalize" => {
-                return CssValue::TextTransform(crate::types::TextTransform::Capitalize)
+                return CssValue::TextTransform(crate::types::TextTransform::Capitalize);
             }
             "full-width" => return CssValue::TextTransform(crate::types::TextTransform::FullWidth),
             "full-size-kana" => {
-                return CssValue::TextTransform(crate::types::TextTransform::FullSizeKana)
+                return CssValue::TextTransform(crate::types::TextTransform::FullSizeKana);
             }
             "math-auto" => return CssValue::TextTransform(crate::types::TextTransform::MathAuto),
             _ => {}
@@ -442,11 +442,11 @@ pub(crate) fn pre_parse_value(id: properties::PropertyId, val: &str) -> crate::t
         FlexDirection => match v {
             "row" => return CssValue::FlexDirection(crate::types::FlexDirection::Row),
             "row-reverse" => {
-                return CssValue::FlexDirection(crate::types::FlexDirection::RowReverse)
+                return CssValue::FlexDirection(crate::types::FlexDirection::RowReverse);
             }
             "column" => return CssValue::FlexDirection(crate::types::FlexDirection::Column),
             "column-reverse" => {
-                return CssValue::FlexDirection(crate::types::FlexDirection::ColumnReverse)
+                return CssValue::FlexDirection(crate::types::FlexDirection::ColumnReverse);
             }
             _ => {}
         },
@@ -699,11 +699,7 @@ fn try_parse_length(v: &str) -> Option<crate::types::CssLength> {
     match l {
         crate::types::CssLength::Auto => {
             // Only return Auto if the input was actually "auto"
-            if v == "auto" {
-                Some(l)
-            } else {
-                None
-            }
+            if v == "auto" { Some(l) } else { None }
         }
         _ => Some(l),
     }
@@ -745,7 +741,7 @@ fn try_parse_color(v: &str) -> Option<crate::types::Color> {
         | "orchid" | "thistle" | "lavender" | "steelblue" | "royalblue" | "cornflowerblue"
         | "midnightblue" | "slateblue" | "darkslateblue" | "mediumslateblue" | "darkgray"
         | "darkgrey" | "dimgray" | "dimgrey" | "lightslategray" | "slategray" | "slategrey" => {
-            return Some(c)
+            return Some(c);
         }
         _ => {}
     }

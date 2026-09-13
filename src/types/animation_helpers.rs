@@ -80,6 +80,22 @@ pub(crate) fn extract_transitionable_style(s: &ComputedStyle) -> HashMap<String,
     );
     m.insert("color".into(), color_to_rgba(s.color));
     m.insert("background-color".into(), color_to_rgba(s.background_color));
+    m.insert(
+        "background-position".into(),
+        format!(
+            "{} {}",
+            transition_length(&s.background_position_x),
+            transition_length(&s.background_position_y)
+        ),
+    );
+    m.insert(
+        "background-position-x".into(),
+        transition_length(&s.background_position_x),
+    );
+    m.insert(
+        "background-position-y".into(),
+        transition_length(&s.background_position_y),
+    );
     if let Some(fill) = s.svg_fill {
         m.insert("fill".into(), color_to_rgba(fill));
     }

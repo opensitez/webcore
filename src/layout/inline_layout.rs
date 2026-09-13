@@ -1,9 +1,17 @@
 use super::Constraints;
 use crate::layout::block::collapse_two;
 use crate::layout::text::resolve_bidi_line;
-use crate::layout::{layout_positioned, FloatContext, FloatSide, LayoutEngine, ResolvedBox};
+use crate::layout::{
+    FloatContext, FloatSide, LayoutEngine, ResolvedBox, is_layout_inert_svg_node,
+    layout_positioned,
+};
 use crate::types::*;
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Stretch, Style as CTextStyle, Weight};
+
+thread_local! {
+    static MEASURED_TEXT_WIDTHS: std::cell::RefCell<(usize, std::collections::HashMap<u64, f32>)> =
+        std::cell::RefCell::new((usize::MAX, std::collections::HashMap::new()));
+}
 
 /// Lay out a box whose children are inline-level (text runs, inline-block).
 /// Returns total outer height of the box.
@@ -307,6 +315,9 @@ pub fn layout_inline_block(
     }
     for (i, child) in node.children.iter().enumerate() {
         if matches!(child.style.display, Display::None) {
+            continue;
+        }
+        if is_layout_inert_svg_node(child) {
             continue;
         }
         collect_items_inner(
@@ -3246,11 +3257,7 @@ pub fn measure_text_width_weighted(
         measure_text_width_fs_attrs(fs, text, font_px, ct_weight, ct_style, scale, font_family)
     } else {
         let w = measure_text_width_ts(text, font_px, 8);
-        if weight.is_bold() {
-            w * 1.15
-        } else {
-            w
-        }
+        if weight.is_bold() { w * 1.15 } else { w }
     }
 }
 
@@ -3288,6 +3295,29 @@ pub fn measure_text_width_fs_attrs(
         return 0.0;
     }
     let size_adjust = font_size_adjust_scale(fs, font_family);
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut h);
+        font_px.to_bits().hash(&mut h);
+        weight.0.hash(&mut h);
+        (style as u8).hash(&mut h);
+        scale.to_bits().hash(&mut h);
+        font_family.hash(&mut h);
+        size_adjust.to_bits().hash(&mut h);
+        h.finish()
+    };
+    let faces = fs.db().len();
+    if let Some(width) = MEASURED_TEXT_WIDTHS.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if cache.0 != faces {
+            cache.1.clear();
+            cache.0 = faces;
+        }
+        cache.1.get(&key).copied()
+    }) {
+        return width;
+    }
     let phys_px = font_px * size_adjust * scale.max(1.0);
     let inv = if scale > 1.0 { 1.0 / scale } else { 1.0 };
     let metrics = Metrics::new(phys_px, phys_px * 1.2);
@@ -3308,7 +3338,15 @@ pub fn measure_text_width_fs_attrs(
             max_w = run.line_w;
         }
     }
-    max_w * inv
+    let width = max_w * inv;
+    MEASURED_TEXT_WIDTHS.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        if cache.1.len() > 16384 {
+            cache.1.clear();
+        }
+        cache.1.insert(key, width);
+    });
+    width
 }
 
 /// Map a CSS font-family string to a cosmic_text Family.
@@ -3568,11 +3606,7 @@ fn char_x_fingerprint(
         r.style.font_family.hash(&mut h);
     }
     let v = h.finish();
-    if v == 0 {
-        1
-    } else {
-        v
-    }
+    if v == 0 { 1 } else { v }
 }
 
 // ─── Accurate per-character x positions using cosmic_text ────────────────────

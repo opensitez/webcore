@@ -145,6 +145,27 @@ impl Stylesheet {
         }
     }
 
+    /// Append an already-parsed stylesheet fragment. Resource workers use this
+    /// to hand the document a parsed CSS handle instead of forcing the UI frame
+    /// to parse a full external stylesheet synchronously.
+    pub fn append_fragment(&mut self, mut fragment: Stylesheet) {
+        let before = self.rules.len();
+        self.raw_sources.append(&mut fragment.raw_sources);
+        self.font_faces.append(&mut fragment.font_faces);
+        self.page_rules.append(&mut fragment.page_rules);
+        self.counter_styles.append(&mut fragment.counter_styles);
+        self.keyframes.extend(fragment.keyframes);
+        for name in fragment.layer_order {
+            if !self.layer_order.iter().any(|n| *n == name) {
+                self.layer_order.push(name);
+            }
+        }
+        self.rules.append(&mut fragment.rules);
+        if self.rules.len() != before {
+            self.idx_dirty = true;
+        }
+    }
+
     /// Parse an EXTERNAL stylesheet — a `<link rel=stylesheet>`.
     ///
     /// ⛔ Author origin, like every other author sheet. This routed to

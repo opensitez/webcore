@@ -739,24 +739,7 @@ impl HtmlParser {
                     // <img> handling
                     if tag == "img" {
                         if let Some(src) = node.attributes.get("src").cloned() {
-                            let resolved = resolve_url(&src, &self.base_url);
-                            let is_remote =
-                                resolved.starts_with("http://") || resolved.starts_with("https://");
-                            if !is_remote {
-                                if let Some(decoded) =
-                                    load_decoded_image_from_src(&src, &self.base_url)
-                                {
-                                    set_decoded_image_on_node(&mut node, decoded);
-                                }
-                            }
-                            node.resolved_src = resolved;
-                        }
-                    }
-                    // Background image
-                    if !node.style.background_image_url.is_empty() {
-                        let url = node.style.background_image_url.clone();
-                        if let Some(decoded) = load_decoded_image_from_src(&url, &self.base_url) {
-                            set_decoded_bg_image_on_node(&mut node, decoded);
+                            node.resolved_src = resolve_url(&src, &self.base_url);
                         }
                     }
 
@@ -1072,26 +1055,12 @@ impl HtmlParser {
 
         if tag == "img" {
             if let Some(src) = node.attributes.get("src").cloned() {
-                let resolved = resolve_url(&src, &self.base_url);
-                let is_remote = resolved.starts_with("http://") || resolved.starts_with("https://");
-                if !is_remote {
-                    if let Some(decoded) = load_decoded_image_from_src(&src, &self.base_url) {
-                        set_decoded_image_on_node(&mut node, decoded);
-                    }
-                }
-                node.resolved_src = resolved;
+                node.resolved_src = resolve_url(&src, &self.base_url);
             }
         }
         if tag == "video" {
             if let Some(poster) = node.attributes.get("poster").cloned() {
-                let resolved = resolve_url(&poster, &self.base_url);
-                let is_remote = resolved.starts_with("http://") || resolved.starts_with("https://");
-                if !is_remote {
-                    if let Some(decoded) = load_decoded_image_from_src(&poster, &self.base_url) {
-                        set_decoded_image_on_node(&mut node, decoded);
-                    }
-                }
-                node.resolved_src = resolved;
+                node.resolved_src = resolve_url(&poster, &self.base_url);
             }
         }
         // Canvas/video/audio: set default dimensions from width/height attributes
@@ -1121,12 +1090,6 @@ impl HtmlParser {
                 node.image_height = h;
                 // Transparent pixel buffer — ready for drawing
                 node.image_data = Some(std::sync::Arc::new(vec![0u8; (w * h * 4) as usize]));
-            }
-        }
-        if !node.style.background_image_url.is_empty() {
-            let url = node.style.background_image_url.clone();
-            if let Some(decoded) = load_decoded_image_from_src(&url, &self.base_url) {
-                set_decoded_bg_image_on_node(&mut node, decoded);
             }
         }
         if tag == "ol" {

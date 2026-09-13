@@ -1,6 +1,6 @@
 //! Radio button widget — standalone tiny-skia rendered radio button.
 
-use super::{circle_path, WidgetColors};
+use super::{WidgetColors, circle_path};
 use tiny_skia::*;
 
 pub struct Radio {

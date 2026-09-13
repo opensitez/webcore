@@ -467,7 +467,7 @@ impl RecordingCanvas {
             match command {
                 DrawCmd::MoveTo(x, y) | DrawCmd::LineTo(x, y) => return Some((*x, *y)),
                 DrawCmd::QuadraticCurveTo { x, y, .. } | DrawCmd::BezierCurveTo { x, y, .. } => {
-                    return Some((*x, *y))
+                    return Some((*x, *y));
                 }
                 // An arc ends where its sweep does.
                 DrawCmd::Arc { x, y, r, end, .. } => {
@@ -1040,10 +1040,11 @@ mod tests {
         let mut c = RecordingCanvas::new();
         c.move_to(0.0, 0.0);
         c.arc_to(10.0, 0.0, 20.0, 0.0, 5.0);
-        assert!(!c
-            .commands
-            .iter()
-            .any(|cmd| matches!(cmd, DrawCmd::Arc { .. })));
+        assert!(
+            !c.commands
+                .iter()
+                .any(|cmd| matches!(cmd, DrawCmd::Arc { .. }))
+        );
         // With no subpath at all, the spec says start one at (x1, y1).
         let mut c = RecordingCanvas::new();
         c.arc_to(7.0, 8.0, 20.0, 20.0, 5.0);
@@ -1111,10 +1112,11 @@ mod tests {
                 .any(|cmd| matches!(cmd, DrawCmd::Arc { .. })),
             "no corner to round"
         );
-        assert!(c
-            .commands
-            .iter()
-            .any(|cmd| matches!(cmd, DrawCmd::ClosePath)));
+        assert!(
+            c.commands
+                .iter()
+                .any(|cmd| matches!(cmd, DrawCmd::ClosePath))
+        );
     }
 
     #[test]

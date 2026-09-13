@@ -670,7 +670,7 @@ fn first_style_difference(
         _ => {
             return Some(format!(
                 "{here}: one tree has a shadow root and the other does not"
-            ))
+            ));
         }
     }
     None

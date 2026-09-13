@@ -172,11 +172,7 @@ fn reject_prunes_a_subtree_for_the_walker_and_skip_does_not() {
         SHOW_ELEMENT,
         Some(Box::new(
             move |_: &Document, n: u32| {
-                if n == p1 {
-                    FILTER_SKIP
-                } else {
-                    FILTER_ACCEPT
-                }
+                if n == p1 { FILTER_SKIP } else { FILTER_ACCEPT }
             },
         )),
     );
@@ -303,11 +299,7 @@ fn first_child_descends_through_a_skip_and_steps_over_a_reject() {
         SHOW_ELEMENT,
         Some(Box::new(
             move |_: &Document, n: u32| {
-                if n == p1 {
-                    FILTER_SKIP
-                } else {
-                    FILTER_ACCEPT
-                }
+                if n == p1 { FILTER_SKIP } else { FILTER_ACCEPT }
             },
         )),
     );

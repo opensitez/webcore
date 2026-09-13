@@ -691,7 +691,7 @@ fn atx_content(line: &str) -> &str {
         return line;
     }
     let content = &line[level as usize + 1..]; // skip "# "
-                                               // Strip trailing hashes
+    // Strip trailing hashes
     let trimmed = content.trim_end();
     let stripped = trimmed.trim_end_matches('#').trim_end();
     stripped
@@ -715,11 +715,7 @@ fn fence_level(line: &str) -> (usize, char) {
         count += 1;
         i += 1;
     }
-    if count < 3 {
-        (0, ' ')
-    } else {
-        (count, fc)
-    }
+    if count < 3 { (0, ' ') } else { (count, fc) }
 }
 
 fn fence_info(line: &str) -> &str {

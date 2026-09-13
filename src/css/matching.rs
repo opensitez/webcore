@@ -1135,7 +1135,7 @@ fn has_descendant_matching(
             // not reachable from here — this function only sees the subtree.
             // Not supported; it answers false rather than pretending.
             Combinator::AdjacentSibling | Combinator::GeneralSibling | Combinator::Column => {
-                return false
+                return false;
             }
             Combinator::Descendant => {
                 let mut stripped = sel.clone();

@@ -28,12 +28,12 @@ pub mod textfield;
 
 pub use button::Button;
 pub use checkbox::Checkbox;
-pub use color_swatch::{to_simple_colour, ColorSwatch, PALETTE, PALETTE_CELL, PALETTE_COLUMNS};
+pub use color_swatch::{ColorSwatch, PALETTE, PALETTE_CELL, PALETTE_COLUMNS, to_simple_colour};
 pub use date_field::{
-    days_in_month, first_weekday, parse_date, to_date_value, Calendar, DateField, Kind as DateKind,
+    Calendar, DateField, Kind as DateKind, days_in_month, first_weekday, parse_date, to_date_value,
 };
-pub use file_button::{FileButton, CHOOSE, NOTHING_CHOSEN};
-pub use progress::{meter_band, Band, Gauge};
+pub use file_button::{CHOOSE, FileButton, NOTHING_CHOSEN};
+pub use progress::{Band, Gauge, meter_band};
 pub use radio::Radio;
 pub use select::Select;
 pub use slider::Slider;

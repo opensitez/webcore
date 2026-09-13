@@ -1,5 +1,5 @@
 use super::Constraints;
-use crate::layout::{layout_positioned, shift_rects, LayoutEngine, ResolvedBox};
+use crate::layout::{LayoutEngine, ResolvedBox, layout_positioned, shift_rects};
 use crate::types::*;
 
 /// Resolve a child by path through `display: contents` wrappers.
@@ -1019,6 +1019,13 @@ pub fn layout_flex(
             (content_w, None, Some(item.main_used))
         };
 
+        let saved_white_space = if is_row && !can_wrap && child.tag == "#text" {
+            let saved = child.style.white_space;
+            std::sync::Arc::make_mut(&mut child.style).white_space = WhiteSpace::Nowrap;
+            Some(saved)
+        } else {
+            None
+        };
         engine.layout_box(
             child,
             &item_constraints(
@@ -1032,6 +1039,9 @@ pub fn layout_flex(
                 forced_h,
             ),
         );
+        if let Some(saved) = saved_white_space {
+            std::sync::Arc::make_mut(&mut child.style).white_space = saved;
+        }
 
         item.cross_size = if is_row {
             child.layout.margin_rect.h
@@ -1711,11 +1721,7 @@ fn item_constraints(
 /// The line's cross-START edge for an item, which `wrap-reverse` moves to the
 /// far side (Flexbox §5.2).
 fn return_cross_start(wrap_reverse: bool, lc: f32, cross_extra: f32) -> f32 {
-    if wrap_reverse {
-        lc - cross_extra
-    } else {
-        0.0
-    }
+    if wrap_reverse { lc - cross_extra } else { 0.0 }
 }
 
 fn first_baseline_offset(node: &WebCore) -> Option<f32> {

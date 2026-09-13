@@ -1,4 +1,4 @@
-use crate::css::{ua_stylesheet, Combinator, CssRule, CssSelector, SelectorPart};
+use crate::css::{Combinator, CssRule, CssSelector, SelectorPart, ua_stylesheet};
 use crate::types::{
     AlignItems, BorderStyle, Color, ComputedStyle, CssLength, Display, Document, FlexDirection,
     FlexWrap, Float, FontStyle, FontWeight, JustifyContent, Position, TextAlign, TextTransform,

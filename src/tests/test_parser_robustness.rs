@@ -193,8 +193,8 @@ fn layout_handles_deep_nesting() {
 fn insert_br_in_td_preserves_table_structure() {
     // After pressing Enter in a <td>, the <td> must still exist in the DOM.
     // Previously, split_node_with_br's Case A would remove the <td> from <tr>.
-    use crate::dom::HtmlEventType;
     use crate::Renderer;
+    use crate::dom::HtmlEventType;
 
     let mut renderer = Renderer::new();
     let mut doc = renderer.load_html(
@@ -232,8 +232,8 @@ fn insert_br_in_td_preserves_table_structure() {
 #[test]
 fn insert_br_in_div_preserves_div() {
     // Same test but for <div contenteditable> — div must not be destroyed.
-    use crate::dom::HtmlEventType;
     use crate::Renderer;
+    use crate::dom::HtmlEventType;
 
     let mut renderer = Renderer::new();
     let mut doc = renderer.load_html(r#"<div contenteditable="true">Hello world</div>"#, 900.0);
@@ -276,8 +276,8 @@ fn insert_br_in_div_preserves_div() {
 
 #[test]
 fn insert_char_marks_layout_dirty() {
-    use crate::dom::HtmlEventType;
     use crate::Renderer;
+    use crate::dom::HtmlEventType;
 
     let mut renderer = Renderer::new();
     let mut doc = renderer.load_html(r#"<p contenteditable="true">Hello</p>"#, 900.0);
@@ -325,6 +325,8 @@ fn tailwind_class_with_ampersand_parsed_correctly() {
             .map(|c| c.contains("[&_.foo]:contents"))
             .unwrap_or(false)
     });
-    assert!(div.is_some(),
-        "class attribute must preserve `[&_.foo]:contents` verbatim (bare & not consumed as entity)");
+    assert!(
+        div.is_some(),
+        "class attribute must preserve `[&_.foo]:contents` verbatim (bare & not consumed as entity)"
+    );
 }

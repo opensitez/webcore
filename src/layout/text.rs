@@ -3,7 +3,7 @@
 // Provides BiDi resolution, text measurement, and line-breaking logic.
 // Uses the `unicode-bidi` crate for UAX#9 algorithm.
 
-use crate::layout::inline_layout::{measure_text_width, InlineItem, InlineItemKind};
+use crate::layout::inline_layout::{InlineItem, InlineItemKind, measure_text_width};
 use crate::types::*;
 use unicode_bidi::{BidiClass, BidiInfo, Level};
 

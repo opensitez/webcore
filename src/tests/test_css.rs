@@ -2,8 +2,8 @@
 
 use super::harness::*;
 use crate::css::{
-    apply_property, parse_declarations, parse_selector, parse_stylesheet, resolve_content_value,
-    resolve_counters_in_content, PseudoElement, Stylesheet,
+    PseudoElement, Stylesheet, apply_property, parse_declarations, parse_selector,
+    parse_stylesheet, resolve_content_value, resolve_counters_in_content,
 };
 use crate::frame::EngineFrame;
 use crate::html::parse_html;
@@ -1284,6 +1284,7 @@ fn font_shorthand_resolves_nested_custom_property_token() {
         &std::collections::HashSet::new(),
         0,
         "",
+        &[],
         &[],
         &[],
         &mut candidates,
@@ -2653,10 +2654,11 @@ fn unicode_bidi_override_reverses_ltr_text_segments() {
         .collect();
 
     assert_eq!(starts, vec![2, 1, 0]);
-    assert!(line
-        .visual_segments
-        .iter()
-        .all(|segment| segment.length == 1 && segment.level == 1));
+    assert!(
+        line.visual_segments
+            .iter()
+            .all(|segment| segment.length == 1 && segment.level == 1)
+    );
 }
 
 #[test]
@@ -3180,24 +3182,27 @@ fn css_selector_with_class() {
     assert!(!sel.parts.is_empty());
     // should have both a tag part and class part
     use crate::css::SelectorPart;
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Tag(t) if t == "div")));
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Class(c) if c == "container")));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Tag(t) if t == "div"))
+    );
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Class(c) if c == "container"))
+    );
 }
 
 #[test]
 fn css_selector_with_id() {
     let sel = parse_selector("#main");
     use crate::css::SelectorPart;
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Id(id) if id == "main")));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Id(id) if id == "main"))
+    );
 }
 
 #[test]
@@ -3223,10 +3228,11 @@ fn css_selector_escaped_utility_class_keeps_punctuation() {
     let sel = parse_selector(".md\\:grid-cols-\\[2fr_1fr\\]");
     use crate::css::SelectorPart;
     assert!(sel.valid);
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Class(c) if c == "md:grid-cols-[2fr_1fr]")));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Class(c) if c == "md:grid-cols-[2fr_1fr]"))
+    );
 }
 
 #[test]
@@ -3234,10 +3240,11 @@ fn css_selector_hex_escape_decodes_identifier_code_points() {
     let sel = parse_selector(".\\32xl\\:grid-cols-12");
     use crate::css::SelectorPart;
     assert!(sel.valid);
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Class(c) if c == "2xl:grid-cols-12")));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Class(c) if c == "2xl:grid-cols-12"))
+    );
 }
 
 #[test]
@@ -3245,10 +3252,11 @@ fn css_selector_hex_escape_consumes_optional_trailing_space() {
     let sel = parse_selector(".bg-\\5b rgba\\28 0\\2c 0\\2c 0\\2c 0\\.3\\29 \\5d");
     use crate::css::SelectorPart;
     assert!(sel.valid);
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Class(c) if c == "bg-[rgba(0,0,0,0.3)]")));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Class(c) if c == "bg-[rgba(0,0,0,0.3)]"))
+    );
 }
 
 #[test]
@@ -3257,10 +3265,12 @@ fn css_escaped_before_class_is_not_stripped_as_pseudo_element() {
     ss.parse_and_add(".before\\:block { display: block; }");
     assert_eq!(ss.rules.len(), 1);
     assert_eq!(ss.rules[0].pseudo_element, PseudoElement::None);
-    assert!(ss.rules[0].selectors[0]
-        .parts
-        .iter()
-        .any(|p| matches!(p, crate::css::SelectorPart::Class(c) if c == "before:block")));
+    assert!(
+        ss.rules[0].selectors[0]
+            .parts
+            .iter()
+            .any(|p| matches!(p, crate::css::SelectorPart::Class(c) if c == "before:block"))
+    );
 }
 
 #[test]
@@ -3269,10 +3279,11 @@ fn css_escaped_before_class_can_still_target_real_before_pseudo() {
     ss.parse_and_add(".before\\:content-\\[\\'\\/\\'\\]::before { content: \"/\"; }");
     assert_eq!(ss.rules.len(), 1);
     assert_eq!(ss.rules[0].pseudo_element, PseudoElement::Before);
-    assert!(ss.rules[0].selectors[0]
-        .parts
-        .iter()
-        .any(|p| matches!(p, crate::css::SelectorPart::Class(c) if c == "before:content-['/']")));
+    assert!(
+        ss.rules[0].selectors[0].parts.iter().any(
+            |p| matches!(p, crate::css::SelectorPart::Class(c) if c == "before:content-['/']")
+        )
+    );
 }
 
 #[test]
@@ -3322,40 +3333,44 @@ fn compound_ancestor_descendant_rule_resolves_inherited_custom_width() {
 fn css_selector_descendant_combinator() {
     let sel = parse_selector("div p");
     use crate::css::{Combinator, SelectorPart};
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Combinator(Combinator::Descendant))));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Combinator(Combinator::Descendant)))
+    );
 }
 
 #[test]
 fn css_selector_child_combinator() {
     let sel = parse_selector("div > p");
     use crate::css::{Combinator, SelectorPart};
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Combinator(Combinator::Child))));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Combinator(Combinator::Child)))
+    );
 }
 
 #[test]
 fn css_selector_adjacent_sibling() {
     let sel = parse_selector("h1 + p");
     use crate::css::{Combinator, SelectorPart};
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Combinator(Combinator::AdjacentSibling))));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Combinator(Combinator::AdjacentSibling)))
+    );
 }
 
 #[test]
 fn css_selector_general_sibling() {
     let sel = parse_selector("h1 ~ p");
     use crate::css::{Combinator, SelectorPart};
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Combinator(Combinator::GeneralSibling))));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Combinator(Combinator::GeneralSibling)))
+    );
 }
 
 #[test]
@@ -3363,10 +3378,11 @@ fn column_combinator_does_not_degrade_to_descendant_selector() {
     let sel = parse_selector("col || td");
     use crate::css::{Combinator, SelectorPart};
     assert!(sel.valid);
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Combinator(Combinator::Column))));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Combinator(Combinator::Column)))
+    );
 
     let mut doc = crate::html::parse_html(
         "<style>col || td { color: rgb(9,8,7) }</style>\
@@ -3655,15 +3671,17 @@ fn standards_known_pseudo_elements_do_not_drop_rules() {
         9,
         "known pseudo-elements should parse even before all paint/layout hooks exist"
     );
-    assert!(ss
-        .rules
-        .iter()
-        .any(|r| r.pseudo_element == PseudoElement::Backdrop));
-    assert!(ss
-        .rules
-        .iter()
-        .filter(|r| r.pseudo_element != PseudoElement::Backdrop)
-        .all(|r| r.pseudo_element == PseudoElement::Ignored));
+    assert!(
+        ss.rules
+            .iter()
+            .any(|r| r.pseudo_element == PseudoElement::Backdrop)
+    );
+    assert!(
+        ss.rules
+            .iter()
+            .filter(|r| r.pseudo_element != PseudoElement::Backdrop)
+            .all(|r| r.pseudo_element == PseudoElement::Ignored)
+    );
 }
 
 // ── Additional property application ───────────────────────────────────────────

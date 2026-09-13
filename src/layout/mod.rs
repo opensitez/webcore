@@ -16,6 +16,97 @@ pub use constraints::{Constraints, FormattingContext, IntrinsicSizes};
 use crate::types::*;
 use std::cell::Cell;
 
+#[inline]
+pub(crate) fn is_projected_svg_descendant(node: &WebCore) -> bool {
+    node.svg_tree_path.as_ref().is_some_and(|path| !path.is_empty())
+}
+
+#[inline]
+pub(crate) fn is_svg_foreign_content_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "g" | "defs"
+            | "symbol"
+            | "use"
+            | "path"
+            | "rect"
+            | "circle"
+            | "ellipse"
+            | "line"
+            | "polyline"
+            | "polygon"
+            | "text"
+            | "tspan"
+            | "textPath"
+            | "title"
+            | "desc"
+            | "metadata"
+            | "foreignObject"
+            | "linearGradient"
+            | "radialGradient"
+            | "clipPath"
+            | "mask"
+            | "filter"
+            | "feGaussianBlur"
+            | "feOffset"
+            | "feDropShadow"
+            | "feFlood"
+            | "feComposite"
+            | "feBlend"
+            | "feColorMatrix"
+            | "feComponentTransfer"
+            | "feFuncR"
+            | "feFuncG"
+            | "feFuncB"
+            | "feFuncA"
+            | "feMorphology"
+            | "feMerge"
+            | "feMergeNode"
+            | "feImage"
+            | "feTile"
+            | "feConvolveMatrix"
+            | "feDisplacementMap"
+            | "pattern"
+            | "marker"
+            | "stop"
+            | "switch"
+            | "view"
+            | "cursor"
+            | "animate"
+            | "animateColor"
+            | "animateTransform"
+            | "animateMotion"
+            | "mpath"
+            | "set"
+    )
+}
+
+#[inline]
+pub(crate) fn is_layout_inert_svg_node(node: &WebCore) -> bool {
+    is_projected_svg_descendant(node) || is_svg_foreign_content_tag(&node.tag)
+}
+
+fn clear_layout_inert_svg_subtrees(node: &mut WebCore, inside_inert_svg: bool) {
+    let inert = inside_inert_svg || is_layout_inert_svg_node(node);
+    if inert {
+        node.layout.content_rect = Rect::default();
+        node.layout.padding_rect = Rect::default();
+        node.layout.border_rect = Rect::default();
+        node.layout.margin_rect = Rect::default();
+        node.layout.line_cache.clear();
+        node.layout.scroll_width = 0.0;
+        node.layout.scroll_height = 0.0;
+    }
+    for child in &mut node.children {
+        clear_layout_inert_svg_subtrees(child, inert);
+    }
+    if let Some(shadow) = node.shadow_root.as_mut() {
+        for child in &mut shadow.children {
+            clear_layout_inert_svg_subtrees(child, inert);
+        }
+    }
+}
+
 pub(crate) fn establishes_positioned_containing_block(style: &ComputedStyle) -> bool {
     let transform = style.transform.trim();
     let has_active_transform = !transform.is_empty() && !transform.eq_ignore_ascii_case("none");
@@ -64,13 +155,19 @@ pub(crate) fn update_scroll_extents_from_children(
         let natural_scroll_w = node
             .children
             .iter()
-            .filter(|child| !matches!(child.style.display, Display::None))
+            .filter(|child| {
+                !matches!(child.style.display, Display::None)
+                    && !is_layout_inert_svg_node(child)
+            })
             .map(|child| child.layout.margin_rect.x + child.layout.margin_rect.w - content_x)
             .fold(content_w, f32::max);
         let natural_scroll_h = node
             .children
             .iter()
-            .filter(|child| !matches!(child.style.display, Display::None))
+            .filter(|child| {
+                !matches!(child.style.display, Display::None)
+                    && !is_layout_inert_svg_node(child)
+            })
             .map(|child| child.layout.margin_rect.y + child.layout.margin_rect.h - content_y)
             .fold(content_h, f32::max);
         node.layout.scroll_width = natural_scroll_w;
@@ -1462,11 +1559,7 @@ impl LayoutEngine {
             h = (h - rb.padding_top - rb.padding_bottom - rb.border_top - rb.border_bottom)
                 .max(0.0);
         }
-        if h > 0.0 {
-            Some(h * ratio)
-        } else {
-            None
-        }
+        if h > 0.0 { Some(h * ratio) } else { None }
     }
 
     /// A sizing length that may be an INTRINSIC KEYWORD rather than a length.
@@ -1654,6 +1747,38 @@ impl LayoutEngine {
             let text = &node.text;
             if text.is_empty() {
                 return 0.0;
+            }
+            if matches!(node.style.white_space, WhiteSpace::Nowrap | WhiteSpace::Pre) {
+                let text = if matches!(node.style.white_space, WhiteSpace::Nowrap) {
+                    text.split_whitespace().collect::<Vec<_>>().join(" ")
+                } else {
+                    text.clone()
+                };
+                if text.is_empty() {
+                    return 0.0;
+                }
+                let letter_spacing = node
+                    .style
+                    .letter_spacing
+                    .resolve(font_px, 0.0, root_font_px);
+                let word_spacing = node.style.word_spacing.resolve(font_px, 0.0, root_font_px);
+                return if letter_spacing != 0.0 || word_spacing != 0.0 {
+                    text::measure_text_with_spacing(
+                        &text,
+                        font_px,
+                        letter_spacing,
+                        word_spacing,
+                        None,
+                    )
+                } else {
+                    self.measure_text_cached(
+                        &text,
+                        font_px,
+                        node.style.font_weight,
+                        node.style.font_style,
+                        &node.style.font_family,
+                    )
+                };
             }
             let mut max_word = 0.0f32;
             for word in text.split(|c: char| c.is_ascii_whitespace()) {
@@ -2023,16 +2148,6 @@ impl LayoutEngine {
                 + child_rbox.margin_left
                 + child_rbox.margin_right;
             let mut cw = self.max_content_width(ch, font_px, root_font_px) + child_outer;
-            if ch.style.is_inline_level()
-                && !ch.is_pseudo_element()
-                && ch.layout.border_rect.w > 0.0
-            {
-                let measured_outer =
-                    ch.layout.border_rect.w + child_rbox.margin_left + child_rbox.margin_right;
-                if measured_outer > cw {
-                    cw = measured_outer;
-                }
-            }
             if ch.style.is_inline_level() {
                 cw = cw.ceil() + 1.0;
             }
@@ -2315,7 +2430,7 @@ impl LayoutEngine {
                 for (face, url) in remote {
                     let sender = tx.clone();
                     let counter = in_flight.clone();
-                    std::thread::spawn(move || {
+                    crate::spawn_font_resource_task(move || {
                         let result = crate::http_client_lenient()
                             .get(&url)
                             .send()
@@ -2358,19 +2473,38 @@ impl LayoutEngine {
     /// Poll for fonts that have arrived from background threads.
     /// Returns `true` if any new fonts were loaded (caller should re-layout).
     pub fn poll_pending_fonts(&mut self) -> bool {
+        self.poll_pending_fonts_budgeted(usize::MAX, std::time::Duration::from_secs(60))
+    }
+
+    /// Poll a bounded amount of remote font work. Browser shells use this path
+    /// so a page with many webfonts cannot monopolize a UI frame the moment
+    /// those fetches complete.
+    pub fn poll_pending_fonts_budgeted(
+        &mut self,
+        max_fonts: usize,
+        max_time: std::time::Duration,
+    ) -> bool {
         let rx = match self.pending_fonts.as_ref() {
             Some(rx) => rx,
             None => return false,
         };
+        if max_fonts == 0 {
+            return false;
+        }
         let fs = match self.font_system {
             Some(ptr) => unsafe { &mut *ptr },
             None => return false,
         };
 
         let mut loaded_any = false;
-        // Drain all available font data without blocking.
+        let start = std::time::Instant::now();
+        let mut processed = 0usize;
         while let Ok((face, bytes)) = rx.try_recv() {
             loaded_any |= load_font_face_bytes(fs, &face, bytes);
+            processed += 1;
+            if processed >= max_fonts || start.elapsed() >= max_time {
+                break;
+            }
         }
 
         // If all fetches are done, drop the receiver.
@@ -2704,12 +2838,18 @@ impl LayoutEngine {
             Constraints::new(content_w, 0.0, 0.0, root_font_px, root_font_px)
         };
         self.layout_box(&mut doc.root, &root_c);
+        clear_layout_inert_svg_subtrees(&mut doc.root, false);
 
-        // Update root geometry with final height
-        let h = doc.root.layout.margin_rect.h;
+        // Update root geometry with the final scroll extent. Modern pages
+        // commonly have positioned or late-sized descendants that extend past
+        // the root's normal-flow height; browser-visible document height must
+        // reflect the scrollable content, not only the root block's own box.
+        let h = crate::types::Document::scroll_height(&doc.root)
+            .max(self.viewport_h);
         doc.root.layout.content_rect.h = h;
         doc.root.layout.padding_rect.h = h;
         doc.root.layout.border_rect.h = h;
+        doc.root.layout.margin_rect.h = h;
 
         perf::end_layout();
         perf::set_counts(
@@ -2771,6 +2911,14 @@ impl LayoutEngine {
         }
         // Don't layout display:none
         if matches!(node.style.display, Display::None) {
+            node.layout.content_rect = Rect::default();
+            node.layout.padding_rect = Rect::default();
+            node.layout.border_rect = Rect::default();
+            node.layout.margin_rect = Rect::default();
+            return 0.0;
+        }
+
+        if is_layout_inert_svg_node(node) {
             node.layout.content_rect = Rect::default();
             node.layout.padding_rect = Rect::default();
             node.layout.border_rect = Rect::default();
@@ -3299,6 +3447,9 @@ fn count_nodes(node: &WebCore) -> usize {
 pub fn has_block_children(node: &WebCore) -> bool {
     node.effective_children().iter().any(|c| {
         if matches!(c.style.display, Display::None) {
+            return false;
+        }
+        if is_layout_inert_svg_node(c) {
             return false;
         }
         if matches!(c.style.display, Display::Contents) {

@@ -644,8 +644,10 @@ fn calc_multiplication_by_a_leading_scalar_is_not_zero() {
         right, 600.0,
         "sanity: the scalar-on-the-right form must still work"
     );
-    assert_eq!(left, right,
-        "calc(2 * min(...)) should equal calc(min(...) * 2) — multiplication commutes; got {left} vs {right}");
+    assert_eq!(
+        left, right,
+        "calc(2 * min(...)) should equal calc(min(...) * 2) — multiplication commutes; got {left} vs {right}"
+    );
 }
 
 /// css-values-4 §6.1.2: `vmin` is "the smaller of vw and vh", the SAME
@@ -697,8 +699,10 @@ fn calc_does_not_silently_treat_an_unknown_unit_as_pixels() {
         crate::css::apply_property(&mut s, "width", "50px");
         crate::css::apply_property(&mut s, "width", bad);
         let px = s.width.resolve(16.0, 0.0, 16.0);
-        assert_eq!(px, 50.0,
-            "a calc() containing an unsupported unit must not silently overwrite a valid `width: 50px` (from {bad:?}); got {px}px");
+        assert_eq!(
+            px, 50.0,
+            "a calc() containing an unsupported unit must not silently overwrite a valid `width: 50px` (from {bad:?}); got {px}px"
+        );
     }
 }
 
@@ -725,7 +729,9 @@ fn cascaded(html: &str) -> std::sync::Arc<crate::types::ComputedStyle> {
 /// utilities, so an RTL page had its whole gutter system mirrored.
 #[test]
 fn logical_inline_margins_and_padding_follow_direction() {
-    let ltr = cascaded("<div id='t' style='direction:ltr; margin-inline-start:12px; padding-inline-end:7px'>x</div>");
+    let ltr = cascaded(
+        "<div id='t' style='direction:ltr; margin-inline-start:12px; padding-inline-end:7px'>x</div>",
+    );
     assert_eq!(
         ltr.margin_left,
         CssLength::Px(12.0),
@@ -742,7 +748,9 @@ fn logical_inline_margins_and_padding_follow_direction() {
         "ltr: inline-end is the right padding"
     );
 
-    let rtl = cascaded("<div id='t' style='direction:rtl; margin-inline-start:12px; padding-inline-end:7px'>x</div>");
+    let rtl = cascaded(
+        "<div id='t' style='direction:rtl; margin-inline-start:12px; padding-inline-end:7px'>x</div>",
+    );
     assert_eq!(
         rtl.margin_right,
         CssLength::Px(12.0),
@@ -790,13 +798,17 @@ fn logical_min_and_max_sizes_map_to_physical_min_and_max() {
 
 #[test]
 fn logical_borders_follow_direction_after_cascade() {
-    let ltr = cascaded("<div id='t' style='direction:ltr; border-inline-start:4px solid red; border-block-end-width:7px'>x</div>");
+    let ltr = cascaded(
+        "<div id='t' style='direction:ltr; border-inline-start:4px solid red; border-block-end-width:7px'>x</div>",
+    );
     assert_eq!(ltr.border_left_width, CssLength::Px(4.0));
     assert_eq!(ltr.border_left_style, BorderStyle::Solid);
     assert_eq!(ltr.border_left_color, Color::rgb(255, 0, 0));
     assert_eq!(ltr.border_bottom_width, CssLength::Px(7.0));
 
-    let rtl = cascaded("<div id='t' style='border-inline-start-width:5px; border-inline-start-style:dashed; border-inline-start-color:blue; direction:rtl'>x</div>");
+    let rtl = cascaded(
+        "<div id='t' style='border-inline-start-width:5px; border-inline-start-style:dashed; border-inline-start-color:blue; direction:rtl'>x</div>",
+    );
     assert_eq!(
         rtl.border_right_width,
         CssLength::Px(5.0),
@@ -842,8 +854,10 @@ fn logical_mapping_does_not_depend_on_declaration_order() {
         CssLength::Px(10.0),
         "rtl: inline-start is the right inset"
     );
-    assert_eq!(after.right, before.right,
+    assert_eq!(
+        after.right, before.right,
         "declaring `direction` after `inset-inline-start` must give the same answer, got {:?} vs {:?}",
-        after.right, before.right);
+        after.right, before.right
+    );
     assert_eq!(after.left, before.left, "and the same left inset");
 }

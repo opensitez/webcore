@@ -155,11 +155,7 @@ pub fn parse_track_list_with_names(
                 } else {
                     // Handle calc() in repeat count, e.g. repeat(calc(5 - 1), ...)
                     let resolved = parse_length(count_str).resolve(16.0, 0.0, 16.0);
-                    if resolved > 0.0 {
-                        resolved as usize
-                    } else {
-                        1
-                    }
+                    if resolved > 0.0 { resolved as usize } else { 1 }
                 };
                 for _ in 0..count {
                     result.push(track.clone());

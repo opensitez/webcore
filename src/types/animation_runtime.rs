@@ -514,11 +514,16 @@ impl Document {
 
         self.needs_animation_frame = still_running;
 
-        // Mark all elements with active overrides as layout_dirty so the
-        // layout cache doesn't return stale geometry for animated elements.
+        // Mark elements with layout-affecting active overrides as layout_dirty.
+        // Paint/compositor-only animations (transform, opacity, stroke, etc.)
+        // still need repaint, but forcing full geometry for every shimmer/spinner
+        // makes large pages repaint continuously.
         if !self.animation_overrides.is_empty() {
             fn mark_dirty(node: &mut WebCore, ids: &HashMap<u32, Vec<(String, String)>>) {
-                if ids.contains_key(&node.node_id) {
+                if ids
+                    .get(&node.node_id)
+                    .is_some_and(|props| animation_properties_affect_layout(props))
+                {
                     node.layout.layout_dirty = true;
                 }
                 for child in &mut node.children {
@@ -533,4 +538,45 @@ impl Document {
             self.dispatch_dom_event(&mut event);
         }
     }
+}
+
+pub(crate) fn animation_properties_affect_layout(props: &[(String, String)]) -> bool {
+    props
+        .iter()
+        .any(|(prop, _)| animation_property_affects_layout(prop))
+}
+
+pub(crate) fn animation_property_affects_layout(prop: &str) -> bool {
+    !matches!(
+        prop,
+        "opacity"
+            | "transform"
+            | "filter"
+            | "backdrop-filter"
+            | "visibility"
+            | "color"
+            | "background"
+            | "background-color"
+            | "background-position"
+            | "background-position-x"
+            | "background-position-y"
+            | "border-color"
+            | "border-top-color"
+            | "border-right-color"
+            | "border-bottom-color"
+            | "border-left-color"
+            | "outline-color"
+            | "text-decoration-color"
+            | "box-shadow"
+            | "text-shadow"
+            | "fill"
+            | "fill-opacity"
+            | "stroke"
+            | "stroke-opacity"
+            | "stroke-width"
+            | "stroke-dasharray"
+            | "stroke-dashoffset"
+            | "stop-color"
+            | "stop-opacity"
+    )
 }

@@ -1,6 +1,6 @@
 //! Checkbox widget — standalone tiny-skia rendered checkbox.
 
-use super::{rounded_rect_path, WidgetColors};
+use super::{WidgetColors, rounded_rect_path};
 use tiny_skia::*;
 
 pub struct Checkbox {

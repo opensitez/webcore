@@ -1,7 +1,7 @@
 use crate::css::apply_cascade_vp;
 use crate::layout::LayoutEngine;
 use crate::types::*;
-use crate::{parse_html, Document};
+use crate::{Document, parse_html};
 
 fn layout_html(html: &str, width: f32) -> Document {
     let mut doc = parse_html(html);

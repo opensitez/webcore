@@ -90,9 +90,10 @@ fn a_handler_slot_holds_exactly_one_listener() {
 fn a_name_that_is_not_a_handler_attribute_is_rejected() {
     let mut doc = doc_with("<div id=a>x</div>");
     let a = doc.query_selector("#a").unwrap();
-    assert!(doc
-        .set_event_handler(a, "onnotathing", Box::new(|_, _d: &mut crate::Document| {}))
-        .is_none());
+    assert!(
+        doc.set_event_handler(a, "onnotathing", Box::new(|_, _d: &mut crate::Document| {}))
+            .is_none()
+    );
     assert!(doc.event_handler_names(a).is_empty());
 }
 

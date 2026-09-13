@@ -40,8 +40,7 @@ impl Document {
                         ScrollbarDragKind::Viewport => {
                             let old_y = self.scroll_y;
                             let new_scroll = (drag.start_scroll + dy * drag.scroll_per_px).max(0.0);
-                            let doc_h = Document::scroll_height(&self.root)
-                                .max(self.root.layout.margin_rect.h);
+                            let doc_h = Document::scroll_height(&self.root);
                             let max_s = (doc_h - viewport_h).max(0.0);
                             self.scroll_y = new_scroll.min(max_s);
                             if (self.scroll_y - old_y).abs() > 0.01 {
@@ -94,7 +93,7 @@ impl Document {
             // ── MouseDown: hit-test scrollbars, start drag ────────────────────
             MouseDown => {
                 // Viewport scrollbar — right edge of window.
-                let doc_h = Document::scroll_height(&self.root).max(self.root.layout.margin_rect.h);
+                let doc_h = Document::scroll_height(&self.root);
                 if doc_h > viewport_h && sbw > 0.0 && screen_x >= viewport_w - sbw {
                     let track_h = viewport_h;
                     let thumb_h = (track_h * track_h / doc_h).max(20.0);
@@ -184,13 +183,17 @@ impl Document {
             self.dispatch_element_scroll_changes(&before);
             return true;
         }
-        // Viewport fallback — renderer will clamp on next render.
         let old_x = self.scroll_x;
         let old_y = self.scroll_y;
         self.scroll_x -= delta_x;
         if !self.viewport_y_scroll_locked() {
             self.scroll_y -= delta_y;
         }
+        let doc_h = Document::scroll_height(&self.root);
+        let viewport_h = self.viewport_h.max(0.0);
+        let max_y = (doc_h - viewport_h).max(0.0);
+        self.scroll_y = self.scroll_y.clamp(0.0, max_y);
+        self.scroll_x = self.scroll_x.max(0.0);
         let changed = self.scroll_x != old_x || self.scroll_y != old_y;
         if changed {
             self.fire_window_event("scroll");

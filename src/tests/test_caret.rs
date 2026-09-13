@@ -1,3 +1,4 @@
+use crate::Renderer;
 /// Tests for caret position accuracy using real cosmic_text glyph metrics.
 ///
 /// Key invariants:
@@ -9,7 +10,6 @@ use crate::dom::HtmlEventType;
 use crate::layout::hit_test::{get_caret_x, get_offset_from_x};
 use crate::layout::inline_layout::collect_flat_text;
 use crate::types::*;
-use crate::Renderer;
 
 fn load_with_fonts(html: &str) -> Document {
     let mut renderer = Renderer::new();

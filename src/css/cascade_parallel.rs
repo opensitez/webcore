@@ -10,7 +10,7 @@
 
 #![allow(unused_imports)]
 use super::*;
-use crate::css::cascade::{match_rules, MatchMap, MatchSets};
+use crate::css::cascade::{MatchMap, MatchSets, match_rules};
 use crate::types::*;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};

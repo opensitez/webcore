@@ -145,8 +145,10 @@ fn render_graph_demo_button_bg_right_padding() {
     let last = last_blue.unwrap();
     let btn_w = (last - first + 1) as f32;
     // Button should be at least content(~35px) + 12 + 12 = ~59px wide
-    assert!(btn_w >= 40.0,
-        "Button blue area should be >= 40px wide (includes both paddings), got {btn_w}px [{first}..{last}]");
+    assert!(
+        btn_w >= 40.0,
+        "Button blue area should be >= 40px wide (includes both paddings), got {btn_w}px [{first}..{last}]"
+    );
     // The rightmost blue pixel should be at least 10px past the text start
     // (i.e., right padding is present). Text starts ~12px from first blue.
     assert!(
@@ -200,13 +202,17 @@ fn render_bold_text_bg_covers_right_padding() {
     // Card has 20px left + text ("8px radius" ~9 chars * ~7px ≈ 63px) + 20px right.
     // Total ≥ 100px. Require ≥ 80px to have headroom for font approximation variance
     // but still catch the bug (pre-fix the background was ~63px with no right padding).
-    assert!(span >= 80,
-        "Bold card background should span ≥ 80px (text + both 20px paddings), got {span}px [{first}..{last}]");
+    assert!(
+        span >= 80,
+        "Bold card background should span ≥ 80px (text + both 20px paddings), got {span}px [{first}..{last}]"
+    );
     // The right padding must be present: at least 10px of blue after the text.
     // We don't know the exact text width, but the blue run must extend well past
     // what the text alone would cover (without right-pad the span would be ~63px).
-    assert!(span >= 90,
-        "Bold card background right padding appears missing: span={span}px, expected ≥ 90px [{first}..{last}]");
+    assert!(
+        span >= 90,
+        "Bold card background right padding appears missing: span={span}px, expected ≥ 90px [{first}..{last}]"
+    );
 }
 
 // Pixel-level render tests for blend modes and gradients.
@@ -654,12 +660,17 @@ fn render_blend_normal_vs_multiply_differ() {
     let (nr, ng, nb, _) = pixel(&normal_pm, 50, 50);
     let (mr, mg, mb, _) = pixel(&multiply_pm, 50, 50);
     // normal shows the blue overlay; multiply: orange*blue = much darker
-    assert_ne!((nr, nb), (mr, mb),
-        "normal and multiply should produce different pixels; normal=({nr},{ng},{nb}) multiply=({mr},{mg},{mb})");
+    assert_ne!(
+        (nr, nb),
+        (mr, mb),
+        "normal and multiply should produce different pixels; normal=({nr},{ng},{nb}) multiply=({mr},{mg},{mb})"
+    );
     let normal_luma = nr as u32 + ng as u32 + nb as u32;
     let multiply_luma = mr as u32 + mg as u32 + mb as u32;
-    assert!(multiply_luma < normal_luma,
-        "multiply should be darker than normal; normal_luma={normal_luma} multiply_luma={multiply_luma}");
+    assert!(
+        multiply_luma < normal_luma,
+        "multiply should be darker than normal; normal_luma={normal_luma} multiply_luma={multiply_luma}"
+    );
 }
 
 #[test]
@@ -860,8 +871,10 @@ fn render_blend_multiply_gradient_overlay() {
     );
     let normal_luma = nr as u32 + ng as u32 + nb as u32;
     let multiply_luma = mr as u32 + mg as u32 + mb as u32;
-    assert!(multiply_luma < normal_luma,
-        "multiply should produce darker result than normal; normal_luma={normal_luma} multiply_luma={multiply_luma}");
+    assert!(
+        multiply_luma < normal_luma,
+        "multiply should produce darker result than normal; normal_luma={normal_luma} multiply_luma={multiply_luma}"
+    );
 }
 
 // ── Sticky positioning inside a scrollable div ────────────────────────────────
@@ -1032,8 +1045,10 @@ fn layout_float_right_appears_on_right() {
     // Float right edge should be near the content right edge
     let stat_right = stat.layout.border_rect.x + stat.layout.border_rect.w;
     let content_right = item.layout.content_rect.x + item.layout.content_rect.w;
-    assert!((stat_right - content_right).abs() < 2.0,
-        "float:right right edge should align with content right; stat_right={stat_right} content_right={content_right}");
+    assert!(
+        (stat_right - content_right).abs() < 2.0,
+        "float:right right edge should align with content right; stat_right={stat_right} content_right={content_right}"
+    );
 }
 
 #[test]
@@ -1485,8 +1500,10 @@ fn render_css_scale_transform_affects_text() {
         normal_red > 0,
         "baseline render should have some red text pixels"
     );
-    assert!(scaled_red > normal_red,
-        "scale(2) text should cover more pixels than scale(1); normal={normal_red} scaled={scaled_red}");
+    assert!(
+        scaled_red > normal_red,
+        "scale(2) text should cover more pixels than scale(1); normal={normal_red} scaled={scaled_red}"
+    );
 }
 
 #[test]
@@ -2075,8 +2092,10 @@ fn letter_spacing_moves_the_wrap_point() {
         tight, 1,
         "without tracking the two words fit on one line, got {tight}"
     );
-    assert_eq!(tracked, 2,
-        "letter-spacing:6px over 11 characters adds 66px and must force a second line, got {tracked}");
+    assert_eq!(
+        tracked, 2,
+        "letter-spacing:6px over 11 characters adds 66px and must force a second line, got {tracked}"
+    );
 }
 
 #[test]

@@ -107,11 +107,7 @@ impl Document {
                             .map(crate::html::forms::selected_index)
                             .unwrap_or(-1);
                         let new_idx = if cur < 0 {
-                            if key_code == 40 {
-                                0
-                            } else {
-                                options.len() - 1
-                            }
+                            if key_code == 40 { 0 } else { options.len() - 1 }
                         } else if key_code == 40 {
                             ((cur as usize) + 1).min(options.len() - 1)
                         } else {

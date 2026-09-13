@@ -1,12 +1,12 @@
 //! Tests for the display list builder and replay.
 
+use crate::Renderer;
 use crate::frame::EngineFrame;
 use crate::html::{parse_html, parse_html_with_base};
 use crate::renderer::display_list::{DisplayList, ImageRef, PaintCmd};
 use crate::renderer::display_list_builder::{build_display_list, build_display_list_full};
 use crate::renderer::display_list_replay::{reduce_corner_radii, replay, replay_with_scroll};
 use crate::types::{Color, Rect};
-use crate::Renderer;
 
 fn build(html: &str) -> (EngineFrame, DisplayList) {
     let doc = parse_html(html);
@@ -2006,7 +2006,9 @@ fn object_fit_cover_preserves_the_aspect_ratio() {
     // 200x100 natural, shown in a 100x100 box.
     let list = build_with_image(
         "<style>*{margin:0;padding:0} img{width:100px;height:100px;object-fit:cover}</style><img src=x>",
-        200, 100);
+        200,
+        100,
+    );
     let r = image_rect(&list).expect("an image was painted");
     // cover → scale = max(100/200, 100/100) = 1 → 200x100, centred horizontally.
     assert_eq!(
@@ -2023,7 +2025,9 @@ fn object_fit_cover_preserves_the_aspect_ratio() {
 fn object_fit_contain_fits_inside_the_box() {
     let list = build_with_image(
         "<style>*{margin:0;padding:0} img{width:100px;height:100px;object-fit:contain}</style><img src=x>",
-        200, 100);
+        200,
+        100,
+    );
     let r = image_rect(&list).expect("an image was painted");
     // contain → scale = min(100/200, 100/100) = 0.5 → 100x50, centred vertically.
     assert_eq!((r.w, r.h), (100.0, 50.0), "got {}x{}", r.w, r.h);
@@ -2034,7 +2038,9 @@ fn object_fit_contain_fits_inside_the_box() {
 fn object_fit_none_uses_the_natural_size() {
     let list = build_with_image(
         "<style>*{margin:0;padding:0} img{width:100px;height:100px;object-fit:none}</style><img src=x>",
-        200, 100);
+        200,
+        100,
+    );
     let r = image_rect(&list).expect("an image was painted");
     assert_eq!((r.w, r.h), (200.0, 100.0), "got {}x{}", r.w, r.h);
 }
@@ -2056,7 +2062,9 @@ fn object_fit_fill_is_the_default_and_stretches() {
 fn object_position_places_the_object() {
     let list = build_with_image(
         "<style>*{margin:0;padding:0} img{width:100px;height:100px;object-fit:contain;object-position:left top}</style><img src=x>",
-        200, 100);
+        200,
+        100,
+    );
     let r = image_rect(&list).expect("an image was painted");
     assert_eq!(
         (r.x, r.y),

@@ -1308,7 +1308,8 @@ fn layoutadv_multicol_distributes_through_a_wrapper() {
            <div class=item>a</div><div class=item>b</div><div class=item>c</div>\
            <div class=item>d</div><div class=item>e</div><div class=item>f</div>\
          </div></div>",
-        800.0);
+        800.0,
+    );
     let mut pm = tiny_skia::Pixmap::new(800, 300).unwrap();
     renderer.render(&mut doc, &mut pm, 1.0);
     let xs = column_xs(&doc.root, "item");
@@ -1334,7 +1335,8 @@ fn layoutadv_multicol_still_distributes_direct_children() {
            <div class=item>a</div><div class=item>b</div><div class=item>c</div>\
            <div class=item>d</div><div class=item>e</div><div class=item>f</div>\
          </div>",
-        800.0);
+        800.0,
+    );
     let mut pm = tiny_skia::Pixmap::new(800, 300).unwrap();
     renderer.render(&mut doc, &mut pm, 1.0);
     let xs = column_xs(&doc.root, "item");
@@ -1595,8 +1597,12 @@ fn column_fill_auto_overflows_a_full_column() {
     let mut xs: Vec<f32> = items.iter().map(|b| b.layout.margin_rect.x).collect();
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
     xs.dedup_by(|a, b| (*a - *b).abs() < 0.5);
-    assert_eq!(xs.len(), 2,
-        "a full first column (height:50, 2×20px items) must overflow into a second column, got {} distinct x positions", xs.len());
+    assert_eq!(
+        xs.len(),
+        2,
+        "a full first column (height:50, 2×20px items) must overflow into a second column, got {} distinct x positions",
+        xs.len()
+    );
 }
 
 /// **css-break-3 §3 — `break-before: column` must force a new column,
@@ -1702,8 +1708,12 @@ fn balance_never_starves_a_column() {
     let mut xs: Vec<f32> = items.iter().map(|b| b.layout.margin_rect.x).collect();
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
     xs.dedup_by(|a, b| (*a - *b).abs() < 0.5);
-    assert_eq!(xs.len(), 2,
-        "with 104px of content over 2 columns, both columns must receive some content, got {} distinct x positions (all content in one column)", xs.len());
+    assert_eq!(
+        xs.len(),
+        2,
+        "with 104px of content over 2 columns, both columns must receive some content, got {} distinct x positions (all content in one column)",
+        xs.len()
+    );
 }
 
 /// **css-multicol-1 §3.4 step 11 — column width is `max(0, …)`, not

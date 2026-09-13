@@ -1,6 +1,6 @@
 // Ported from tests/test_selectors.cpp
 
-use crate::css::{parse_selector, AncestorInfo, AttrOp, Combinator, SelectorPart};
+use crate::css::{AncestorInfo, AttrOp, Combinator, SelectorPart, parse_selector};
 use crate::types::*;
 
 // ── Basic Selector Matching ───────────────────────────────────────────────────
@@ -121,14 +121,16 @@ fn selectors_attr_substring() {
 #[test]
 fn selectors_attr_with_tag() {
     let sel = parse_selector("a[href]");
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Tag(t) if t == "a")));
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Attribute { .. })));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Tag(t) if t == "a"))
+    );
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Attribute { .. }))
+    );
 }
 
 // ── Structural Pseudo-Classes (parsing) ───────────────────────────────────────
@@ -136,46 +138,51 @@ fn selectors_attr_with_tag() {
 #[test]
 fn selectors_first_child_parsing() {
     let sel = parse_selector("p:first-child");
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::PseudoClass(n) if n == "first-child")));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::PseudoClass(n) if n == "first-child"))
+    );
 }
 
 #[test]
 fn selectors_last_child_parsing() {
     let sel = parse_selector("p:last-child");
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::PseudoClass(n) if n == "last-child")));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::PseudoClass(n) if n == "last-child"))
+    );
 }
 
 #[test]
 fn selectors_nth_child_parsing() {
     let sel = parse_selector("li:nth-child(2n+1)");
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::PseudoClass(n) if n.starts_with("nth-child"))));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::PseudoClass(n) if n.starts_with("nth-child")))
+    );
 }
 
 #[test]
 fn selectors_only_child_parsing() {
     let sel = parse_selector("p:only-child");
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::PseudoClass(n) if n == "only-child")));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::PseudoClass(n) if n == "only-child"))
+    );
 }
 
 #[test]
 fn selectors_empty_parsing() {
     let sel = parse_selector("div:empty");
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::PseudoClass(n) if n == "empty")));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::PseudoClass(n) if n == "empty"))
+    );
 }
 
 // ── Combinator Parsing ────────────────────────────────────────────────────────
@@ -183,37 +190,41 @@ fn selectors_empty_parsing() {
 #[test]
 fn selectors_descendant_combinator() {
     let sel = parse_selector("div p");
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Combinator(Combinator::Descendant))));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Combinator(Combinator::Descendant)))
+    );
 }
 
 #[test]
 fn selectors_child_combinator() {
     let sel = parse_selector("div > p");
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Combinator(Combinator::Child))));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Combinator(Combinator::Child)))
+    );
 }
 
 #[test]
 fn selectors_adjacent_sibling() {
     let sel = parse_selector("h1 + p");
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Combinator(Combinator::AdjacentSibling))));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Combinator(Combinator::AdjacentSibling)))
+    );
 }
 
 #[test]
 fn selectors_general_sibling() {
     let sel = parse_selector("h1 ~ p");
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Combinator(Combinator::GeneralSibling))));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Combinator(Combinator::GeneralSibling)))
+    );
 }
 
 // ── Child combinator with surrounding whitespace ──────────────────────────────

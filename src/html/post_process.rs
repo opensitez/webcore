@@ -385,23 +385,7 @@ fn apply_resolved_image_source(
         node.image_height = h;
     }
 
-    let is_remote = resolved.starts_with("http://") || resolved.starts_with("https://");
-    if is_remote {
-        if changed {
-            node.image_data = None;
-            node.animated_image = None;
-            node.animated_image_frame = 0;
-            if intrinsic_hint.is_none() {
-                node.image_width = 0;
-                node.image_height = 0;
-            }
-        }
-        return;
-    }
-
-    if let Some(decoded) = load_decoded_image_from_src(raw_url, base_url) {
-        set_decoded_image_on_node(node, decoded);
-    } else if changed {
+    if changed {
         node.image_data = None;
         node.animated_image = None;
         node.animated_image_frame = 0;

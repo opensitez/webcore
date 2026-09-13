@@ -16,7 +16,7 @@ use tiny_skia::{
 
 /// Replay a display list onto a pixmap (no text — use replay_with_text for full rendering).
 pub fn replay(list: &DisplayList, pixmap: &mut Pixmap, scale: f32) {
-    replay_inner(list, pixmap, scale, None, 0.0, 0.0);
+    replay_inner(list, pixmap, scale, None, 0.0, 0.0, None);
 }
 
 /// Replay with text rendering via cosmic_text.
@@ -33,10 +33,9 @@ thread_local! {
         std::cell::RefCell::new((usize::MAX, std::collections::HashMap::new()));
 }
 
-/// The document-space vertical extent of a DRAWING command, or `None` for a
-/// command that must never be skipped (anything that manipulates a stack, and
-/// anything whose extent is not simply its rect).
-fn cmd_y_range(cmd: &PaintCmd) -> Option<(f32, f32)> {
+/// The conservative document-space extent of a DRAWING command, or `None` for
+/// a command that must never be skipped (anything that manipulates a stack).
+fn cmd_bounds(cmd: &PaintCmd) -> Option<Rect> {
     match cmd {
         PaintCmd::FillRect { rect, .. }
         | PaintCmd::Border { rect, .. }
@@ -45,18 +44,76 @@ fn cmd_y_range(cmd: &PaintCmd) -> Option<(f32, f32)> {
         | PaintCmd::Gradient { rect, .. }
         | PaintCmd::BackdropFilter { rect, .. }
         | PaintCmd::Outline { rect, .. }
-        | PaintCmd::ResizeGrip { rect, .. } => Some((rect.y, rect.y + rect.h)),
-        PaintCmd::Text {
+        | PaintCmd::ResizeGrip { rect, .. }
+        | PaintCmd::FormElement { rect, .. } => Some(*rect),
+        PaintCmd::BackgroundImage { clip, .. } => Some(*clip),
+        PaintCmd::HorizontalRule { x1, y1, x2 } => {
+            let left = x1.min(*x2);
+            let right = x1.max(*x2);
+            Some(Rect::new(left - 4.0, y1 - 4.0, right - left + 8.0, 8.0))
+        }
+        PaintCmd::ListMarker {
+            x,
             y,
+            size,
             font_size,
             line_height,
+            text,
+            ..
+        } => {
+            let pad = size.max(*font_size).max(*line_height) * 2.0;
+            let width = size.max(*font_size * text.chars().count().max(1) as f32);
+            Some(Rect::new(x - pad, y - pad, width + pad * 2.0, pad * 2.0))
+        }
+        PaintCmd::Text {
+            x,
+            y,
+            text,
+            font_size,
+            line_height,
+            letter_spacing,
+            word_spacing,
             ..
         } => {
             let pad = font_size.max(*line_height) * 2.0;
-            Some((y - pad, y + pad))
+            let width = text.chars().count().max(1) as f32
+                * (*font_size * 0.8 + letter_spacing.max(0.0))
+                + text.matches(char::is_whitespace).count() as f32 * word_spacing.max(0.0);
+            Some(Rect::new(x - pad, y - pad, width + pad * 2.0, pad * 2.0))
+        }
+        PaintCmd::TextShadow {
+            x,
+            y,
+            text,
+            font_size,
+            line_height,
+            blur,
+            ..
+        } => {
+            let pad = font_size.max(*line_height) * 2.0 + blur * 4.0 + 8.0;
+            let width = text.chars().count().max(1) as f32 * *font_size * 0.9;
+            Some(Rect::new(x - pad, y - pad, width + pad * 2.0, pad * 2.0))
+        }
+        PaintCmd::BoxShadow {
+            rect,
+            offset_x,
+            offset_y,
+            blur,
+            spread,
+            ..
+        } => {
+            let left = rect.x + offset_x - spread - blur * 4.0 - 8.0;
+            let top = rect.y + offset_y - spread - blur * 4.0 - 8.0;
+            let right = rect.x + rect.w + offset_x + spread + blur * 4.0 + 8.0;
+            let bottom = rect.y + rect.h + offset_y + spread + blur * 4.0 + 8.0;
+            Some(Rect::new(left, top, right - left, bottom - top))
         }
         _ => None,
     }
+}
+
+fn rect_outside_view(rect: Rect, left: f32, top: f32, right: f32, bottom: f32) -> bool {
+    rect.right() < left || rect.x > right || rect.bottom() < top || rect.y > bottom
 }
 
 pub fn replay_with_text(
@@ -73,6 +130,7 @@ pub fn replay_with_text(
         Some((font_system, swash_cache)),
         0.0,
         0.0,
+        None,
     );
 }
 
@@ -94,6 +152,30 @@ pub fn replay_with_scroll(
         Some((font_system, swash_cache)),
         scroll_x,
         scroll_y,
+        None,
+    );
+}
+
+/// Replay only a viewport-local dirty rectangle. The display list remains in
+/// document coordinates; `clip` is in viewport coordinates after scroll.
+pub fn replay_with_scroll_clip(
+    list: &DisplayList,
+    pixmap: &mut Pixmap,
+    scale: f32,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    scroll_x: f32,
+    scroll_y: f32,
+    clip: Rect,
+) {
+    replay_inner(
+        list,
+        pixmap,
+        scale,
+        Some((font_system, swash_cache)),
+        scroll_x,
+        scroll_y,
+        Some(clip),
     );
 }
 
@@ -111,6 +193,7 @@ fn replay_inner(
     mut text_ctx: Option<(&mut FontSystem, &mut SwashCache)>,
     scroll_x: f32,
     scroll_y: f32,
+    dirty_clip: Option<Rect>,
 ) {
     // Start with scale + scroll translation. Display list is in document
     // coordinates; the scroll offset maps to screen coordinates.
@@ -118,12 +201,14 @@ fn replay_inner(
     let mut transform_stack: Vec<Transform> = Vec::new();
     let mut filter_stack: Vec<Vec<(u8, f32, f32, f32, crate::types::Color)>> = Vec::new();
     let mut clip_stack: Vec<Rect> = Vec::new();
-    let mut clip_mask_stack: Vec<Option<tiny_skia::Mask>> = Vec::new();
-    let mut layer_stack: Vec<Layer> = Vec::new();
-    let mut mask_stack: Vec<(Rect, ImageRef)> = Vec::new();
-
     let pw = pixmap.width();
     let ph = pixmap.height();
+    let mut clip_mask_stack: Vec<Option<tiny_skia::Mask>> = dirty_clip
+        .map(|clip| build_viewport_clip_mask(clip, pw, ph, scale))
+        .into_iter()
+        .collect();
+    let mut layer_stack: Vec<Layer> = Vec::new();
+    let mut mask_stack: Vec<(Rect, ImageRef)> = Vec::new();
 
     // ── Viewport culling ────────────────────────────────────────────────────
     //
@@ -136,10 +221,24 @@ fn replay_inner(
     // Only DRAWING commands are skipped, and only while no transform is in
     // effect — a transform can move a command anywhere, and the push/pop
     // commands must all run or the clip and layer stacks desync.
-    let vis_top = scroll_y - CULL_MARGIN;
-    let vis_bot = scroll_y + (ph as f32) / scale.max(0.001) + CULL_MARGIN;
-    let vis_left = scroll_x - CULL_MARGIN;
-    let vis_right = scroll_x + (pw as f32) / scale.max(0.001) + CULL_MARGIN;
+    let inv_scale = 1.0 / scale.max(0.001);
+    let view_w = (pw as f32) * inv_scale;
+    let view_h = (ph as f32) * inv_scale;
+    let (vis_left, vis_top, vis_right, vis_bot) = if let Some(clip) = dirty_clip {
+        (
+            scroll_x + clip.x - CULL_MARGIN,
+            scroll_y + clip.y - CULL_MARGIN,
+            scroll_x + clip.right() + CULL_MARGIN,
+            scroll_y + clip.bottom() + CULL_MARGIN,
+        )
+    } else {
+        (
+            scroll_x - CULL_MARGIN,
+            scroll_y - CULL_MARGIN,
+            scroll_x + view_w + CULL_MARGIN,
+            scroll_y + view_h + CULL_MARGIN,
+        )
+    };
     let mut transform_depth = 0i32;
     let mut skip_clip_depth = 0u32;
 
@@ -167,8 +266,8 @@ fn replay_inner(
         // visible band can still be skipped. Stack commands themselves keep
         // returning `None` from `cmd_y_range`, preserving layer/clip balance.
         if transform_depth == 0 {
-            if let Some((top, bot)) = cmd_y_range(cmd) {
-                if bot < vis_top || top > vis_bot {
+            if let Some(bounds) = cmd_bounds(cmd) {
+                if rect_outside_view(bounds, vis_left, vis_top, vis_right, vis_bot) {
                     continue;
                 }
             }
@@ -507,7 +606,7 @@ fn replay_inner(
                 }
             }
 
-            PaintCmd::PushTransform { transform: m } => {
+            PaintCmd::PushTransform { transform: m, .. } => {
                 // Apply CSS transform by modifying the global transform matrix.
                 // The transform matrix m = [a,b,c,d,e,f] is a 2D affine transform
                 // that already includes translate-to-origin and translate-back.
@@ -668,7 +767,79 @@ fn replay_inner(
                         .map(|l| &mut l.pixmap)
                         .unwrap_or(pixmap);
                     if *blur > 0.0 {
-                        if let Some(mut layer) = Pixmap::new(pw, ph) {
+                        let can_use_local_shadow = transform_depth == 0 && clip_mask.is_none();
+                        if can_use_local_shadow {
+                            let shadow_pad = (*blur * 4.0 + 4.0).ceil();
+                            let dev_left = ((sr.x - scroll_x) * scale - shadow_pad)
+                                .floor()
+                                .max(0.0) as u32;
+                            let dev_top = ((sr.y - scroll_y) * scale - shadow_pad)
+                                .floor()
+                                .max(0.0) as u32;
+                            let dev_right = ((sr.x + sr.w - scroll_x) * scale + shadow_pad)
+                                .ceil()
+                                .min(pw as f32)
+                                .max(dev_left as f32) as u32;
+                            let dev_bottom = ((sr.y + sr.h - scroll_y) * scale + shadow_pad)
+                                .ceil()
+                                .min(ph as f32)
+                                .max(dev_top as f32) as u32;
+                            let local_w = dev_right.saturating_sub(dev_left);
+                            let local_h = dev_bottom.saturating_sub(dev_top);
+                            if local_w > 0
+                                && local_h > 0
+                                && let Some(mut layer) = Pixmap::new(local_w, local_h)
+                            {
+                                let mut paint = Paint::default();
+                                paint.set_color(to_sk_color(&c));
+                                let local_ts = Transform::from_scale(scale, scale).pre_translate(
+                                    -scroll_x - dev_left as f32 / scale.max(0.001),
+                                    -scroll_y - dev_top as f32 / scale.max(0.001),
+                                );
+                                let max_r = radii[0].max(radii[1]).max(radii[2]).max(radii[3]);
+                                if max_r > 0.5 {
+                                    let expanded_radii = [
+                                        (radii[0] + spread).max(0.0),
+                                        (radii[1] + spread).max(0.0),
+                                        (radii[2] + spread).max(0.0),
+                                        (radii[3] + spread).max(0.0),
+                                    ];
+                                    let expanded_radii_y = [
+                                        (radii_y[0] + spread).max(0.0),
+                                        (radii_y[1] + spread).max(0.0),
+                                        (radii_y[2] + spread).max(0.0),
+                                        (radii_y[3] + spread).max(0.0),
+                                    ];
+                                    if let Some(path) = rounded_rect_path_corners_xy(
+                                        sr.x,
+                                        sr.y,
+                                        sr.w,
+                                        sr.h,
+                                        expanded_radii,
+                                        expanded_radii_y,
+                                    ) {
+                                        layer.fill_path(
+                                            &path,
+                                            &paint,
+                                            FillRule::Winding,
+                                            local_ts,
+                                            None,
+                                        );
+                                    }
+                                } else if let Some(r) = SkRect::from_xywh(sr.x, sr.y, sr.w, sr.h) {
+                                    layer.fill_rect(r, &paint, local_ts, None);
+                                }
+                                crate::canvas::blur_pixmap(&mut layer, *blur);
+                                target.draw_pixmap(
+                                    dev_left as i32,
+                                    dev_top as i32,
+                                    layer.as_ref(),
+                                    &tiny_skia::PixmapPaint::default(),
+                                    Transform::identity(),
+                                    None,
+                                );
+                            }
+                        } else if let Some(mut layer) = Pixmap::new(pw, ph) {
                             let mut paint = Paint::default();
                             paint.set_color(to_sk_color(&c));
                             let max_r = radii[0].max(radii[1]).max(radii[2]).max(radii[3]);
@@ -962,6 +1133,8 @@ fn replay_inner(
                 color,
                 style: _,
                 offset: _,
+                radii,
+                radii_y,
             } => {
                 let a2 = 1.0;
                 let mut paint = Paint::default();
@@ -969,7 +1142,10 @@ fn replay_inner(
                 paint.anti_alias = true;
                 let mut stroke = tiny_skia::Stroke::default();
                 stroke.width = *width;
-                if let Some(path) = rounded_rect_path(rect.x, rect.y, rect.w, rect.h, 0.0) {
+                let (rx, ry) = reduce_corner_radii_xy(rect.w, rect.h, *radii, *radii_y);
+                if let Some(path) =
+                    rounded_rect_path_corners_xy(rect.x, rect.y, rect.w, rect.h, rx, ry)
+                {
                     let target = layer_stack
                         .last_mut()
                         .map(|l| &mut l.pixmap)
@@ -1800,7 +1976,81 @@ fn replay_inner(
                     let c = apply_opacity(color, 1.0);
                     let (text_scale, text_x, text_y) = transformed_text_origin(&ts, *x, *y);
                     if *blur > 0.0 {
-                        if let Some(mut layer) = Pixmap::new(pw, ph) {
+                        let can_use_local_shadow = transform_depth == 0 && clip_mask.is_none();
+                        if can_use_local_shadow {
+                            let text_w = crate::layout::inline_layout::measure_text_width_fs_attrs(
+                                fs,
+                                text,
+                                *font_size,
+                                cosmic_text::Weight(*font_weight),
+                                match *font_style {
+                                    1 => CTextStyle::Italic,
+                                    2 => CTextStyle::Oblique,
+                                    _ => CTextStyle::Normal,
+                                },
+                                text_scale,
+                                font_family,
+                            );
+                            let text_h = (*line_height).max(*font_size).max(1.0);
+                            let shadow_pad = (*blur * 4.0 + 4.0).ceil();
+                            let dev_left = (text_x * text_scale - shadow_pad).floor().max(0.0)
+                                as u32;
+                            let dev_top =
+                                (text_y * text_scale - shadow_pad).floor().max(0.0) as u32;
+                            let dev_right =
+                                ((text_x + text_w.max(1.0)) * text_scale + shadow_pad)
+                                    .ceil()
+                                    .min(pw as f32)
+                                    .max(dev_left as f32)
+                                    as u32;
+                            let dev_bottom =
+                                ((text_y + text_h) * text_scale + shadow_pad)
+                                    .ceil()
+                                    .min(ph as f32)
+                                    .max(dev_top as f32)
+                                    as u32;
+                            let local_w = dev_right.saturating_sub(dev_left);
+                            let local_h = dev_bottom.saturating_sub(dev_top);
+                            if local_w > 0
+                                && local_h > 0
+                                && let Some(mut layer) = Pixmap::new(local_w, local_h)
+                            {
+                                draw_text_cmd(
+                                    &mut layer,
+                                    *fs,
+                                    *sc,
+                                    text_scale,
+                                    text_x - dev_left as f32 / text_scale.max(0.001),
+                                    text_y - dev_top as f32 / text_scale.max(0.001),
+                                    text,
+                                    font_family,
+                                    *font_size,
+                                    *font_weight,
+                                    *font_style,
+                                    *font_stretch,
+                                    *line_height,
+                                    &c,
+                                    &super::display_list::TextDecoration::default(),
+                                    0.0,
+                                    0.0,
+                                    false,
+                                    None,
+                                );
+                                crate::canvas::blur_pixmap(&mut layer, *blur);
+                                let target = layer_stack
+                                    .last_mut()
+                                    .map(|l| &mut l.pixmap)
+                                    .unwrap_or(pixmap);
+                                target.draw_pixmap(
+                                    dev_left as i32,
+                                    dev_top as i32,
+                                    layer.as_ref(),
+                                    &tiny_skia::PixmapPaint::default(),
+                                    Transform::identity(),
+                                    None,
+                                );
+                            }
+                        } else if let Some(mut layer) = Pixmap::new(pw, ph) {
                             draw_text_cmd(
                                 &mut layer,
                                 *fs,
@@ -2821,13 +3071,7 @@ fn blend_composite(dst: &mut Pixmap, src: &Pixmap, mode: u8) {
             }
             10 => {
                 // difference
-                let diff = |a: u32, b: u32| -> u32 {
-                    if a > b {
-                        a - b
-                    } else {
-                        b - a
-                    }
-                };
+                let diff = |a: u32, b: u32| -> u32 { if a > b { a - b } else { b - a } };
                 (diff(dr_n, sr_n), diff(dg_n, sg_n), diff(db_n, sb_n))
             }
             11 => {
@@ -3053,6 +3297,25 @@ fn build_clip_mask(
         } {
             mask.fill_path(&path, FillRule::Winding, true, ts);
         }
+    }
+    Some(mask)
+}
+
+fn build_viewport_clip_mask(clip: Rect, pw: u32, ph: u32, scale: f32) -> Option<tiny_skia::Mask> {
+    if clip.w <= 0.0 || clip.h <= 0.0 {
+        return None;
+    }
+    let mut mask = tiny_skia::Mask::new(pw, ph)?;
+    let mut pb = PathBuilder::new();
+    let x = clip.x * scale;
+    let y = clip.y * scale;
+    let w = clip.w * scale;
+    let h = clip.h * scale;
+    if let Some(r) = SkRect::from_xywh(x, y, w, h) {
+        pb.push_rect(r);
+    }
+    if let Some(path) = pb.finish() {
+        mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
     }
     Some(mask)
 }

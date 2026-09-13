@@ -1,6 +1,6 @@
 use super::Constraints;
 use crate::layout::block::apply_relative_offset;
-use crate::layout::{layout_positioned, shift_rects, LayoutEngine, ResolvedBox};
+use crate::layout::{LayoutEngine, ResolvedBox, layout_positioned, shift_rects};
 use crate::types::*;
 
 // ─── Border conflict resolution for border-collapse ───────────────────────────
@@ -305,11 +305,7 @@ pub fn layout_table(
         } else {
             raw
         };
-        if node.style.border_collapse {
-            0.0
-        } else {
-            raw
-        }
+        if node.style.border_collapse { 0.0 } else { raw }
     };
     let spacing_v = {
         let raw = engine.res_len(
@@ -323,11 +319,7 @@ pub fn layout_table(
         } else {
             raw
         };
-        if node.style.border_collapse {
-            0.0
-        } else {
-            raw
-        }
+        if node.style.border_collapse { 0.0 } else { raw }
     };
     let cellpad = node.style.cell_padding.clone();
     let collapse = node.style.border_collapse;

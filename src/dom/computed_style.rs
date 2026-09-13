@@ -669,22 +669,8 @@ impl Document {
             "column-rule-width" => len(&s.column_rule_width),
             "column-rule-style" => serialize_border_style(s.column_rule_style),
             "column-rule-color" => serialize_color(s.column_rule_color),
-            "column-fill" => {
-                if s.column_fill {
-                    "balance"
-                } else {
-                    "auto"
-                }
-            }
-            .to_string(),
-            "column-span" => {
-                if s.column_span_all {
-                    "all"
-                } else {
-                    "none"
-                }
-            }
-            .to_string(),
+            "column-fill" => { if s.column_fill { "balance" } else { "auto" } }.to_string(),
+            "column-span" => { if s.column_span_all { "all" } else { "none" } }.to_string(),
             _ => return None,
         })
     }
@@ -716,11 +702,7 @@ where
 {
     let x = len(x);
     let y = len(y);
-    if x == y {
-        x
-    } else {
-        format!("{x} {y}")
-    }
+    if x == y { x } else { format!("{x} {y}") }
 }
 
 /// `rgb(r, g, b)` when opaque, `rgba(r, g, b, a)` otherwise — CSSOM's own

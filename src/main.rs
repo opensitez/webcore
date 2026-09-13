@@ -8,7 +8,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::Window;
 
 use platform::Platform;
-use webcore::{load_html_with_base, Document, HtmlEventType, Renderer};
+use webcore::{Document, HtmlEventType, Renderer, load_html_with_base};
 
 const DEMO_HTML: &str = r##"<!DOCTYPE html>
 <html>
@@ -135,12 +135,32 @@ impl ApplicationHandler for App {
         self.renderer.set_scale(self.scale);
 
         // Load content on a background thread so the window shows immediately.
+        // If `base` is a URL/file URL and `html` is empty, let webcore own the
+        // progressive fetch path instead of blocking before the event loop.
         let html = std::mem::take(&mut self.initial_html);
         let base = std::mem::take(&mut self.base_url);
         let w = self.width;
         let h = self.height;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            let (html, base) = if html.is_empty() && !base.is_empty() {
+                match webcore::loading::load_document_progressive(
+                    &base,
+                    &webcore::PageLoadOptions {
+                        preview_interval_bytes: usize::MAX / 4,
+                        ..Default::default()
+                    },
+                    |_, _| {},
+                ) {
+                    Ok((html, final_url)) => (html, final_url),
+                    Err(err) => (
+                        format!("<h2>Failed to load {base}</h2><pre>{err}</pre>"),
+                        base,
+                    ),
+                }
+            } else {
+                (html, base)
+            };
             let doc = load_html_with_base(&html, &base, w, h);
             let _ = tx.send(doc);
         });
@@ -330,10 +350,29 @@ impl ApplicationHandler for App {
             }
             // Poll for async resources that arrived from background threads.
             let mut needs_relayout = false;
-            if doc.poll_pending_images() {
+            if doc.poll_pending_stylesheets() {
+                self.renderer.layout_engine().invalidate_cascade();
+                doc.style_dirty = true;
                 needs_relayout = true;
+                needs_redraw = true;
+                self.renderer.invalidate_display_list();
             }
-            if self.renderer.layout_engine().poll_pending_fonts() {
+            let image_poll =
+                doc.poll_pending_images_budgeted(32, std::time::Duration::from_millis(8));
+            if image_poll.loaded_any {
+                needs_relayout |= image_poll.needs_relayout;
+                needs_redraw = true;
+                if image_poll.needs_relayout {
+                    self.renderer.invalidate_display_list();
+                } else {
+                    self.renderer.invalidate_paint_rects(image_poll.paint_rects);
+                }
+            }
+            if self
+                .renderer
+                .layout_engine()
+                .poll_pending_fonts_budgeted(8, std::time::Duration::from_millis(8))
+            {
                 self.renderer.layout_engine().invalidate_cascade();
                 doc.style_dirty = true;
                 needs_relayout = true;
@@ -346,6 +385,7 @@ impl ApplicationHandler for App {
             // Keep polling while resources are still in flight.
             has_pending = has_pending
                 || doc.pending_images.is_some()
+                || doc.pending_stylesheets.is_some()
                 || self.renderer.layout_engine().has_pending_fonts();
         }
         if needs_redraw {
@@ -377,25 +417,13 @@ fn main() {
     let arg = std::env::args().nth(1);
     let (initial_html, base_url) = if let Some(ref path) = arg {
         if path.starts_with("http://") || path.starts_with("https://") {
-            // URL — fetch content, use URL as base
-            let html = webcore::http_client()
-                .get(path)
-                .send()
-                .ok()
-                .and_then(|r| r.bytes().ok())
-                .and_then(|bytes| {
-                    String::from_utf8(bytes.to_vec()).ok().or_else(|| {
-                        let (cow, _, _) = encoding_rs::WINDOWS_1252.decode(&bytes);
-                        Some(cow.into_owned())
-                    })
-                })
-                .unwrap_or_else(|| format!("<h2>Failed to fetch {path}</h2>"));
-            (html, path.clone())
+            (String::new(), path.clone())
         } else {
-            // File path
-            let html = std::fs::read_to_string(path)
-                .unwrap_or_else(|e| format!("<h2>Error reading {path}</h2><p>{e}</p>"));
-            (html, path.clone())
+            let file_url = std::fs::canonicalize(path)
+                .ok()
+                .map(|path| format!("file://{}", path.display()))
+                .unwrap_or_else(|| format!("file://{path}"));
+            (String::new(), file_url)
         }
     } else {
         (DEMO_HTML.to_string(), String::new())

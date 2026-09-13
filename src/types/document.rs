@@ -35,6 +35,20 @@ pub enum PendingImageTarget {
 }
 
 pub type PendingImageResult = (Vec<usize>, PendingImageTarget, crate::html::DecodedImage);
+pub type PendingStylesheetResult = (usize, String, crate::css::Stylesheet, String);
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PendingImagePoll {
+    pub loaded_any: bool,
+    pub needs_relayout: bool,
+    pub paint_rects: Vec<Rect>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AnimatedImageTick {
+    pub changed_any: bool,
+    pub paint_rects: Vec<Rect>,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DocumentStylesheet {
@@ -95,6 +109,16 @@ pub struct Document {
     pub linked_stylesheets: Vec<(String, String)>,
     /// All author stylesheets in document order (both `<link>` and `<style>`).
     pub document_stylesheets: Vec<DocumentStylesheet>,
+    /// Linked author stylesheet fragments that have arrived from background
+    /// fetches, keyed by their resolved URL. Exact/document-order loading
+    /// rebuilds the CSSOM from `document_stylesheets` so late sheets keep
+    /// cascade semantics instead of fetch-completion order.
+    pub loaded_linked_stylesheets: HashMap<String, crate::css::Stylesheet>,
+    /// True while preserving exact document-order stylesheet rebuilds. Live
+    /// browser loading keeps this false so streamed parsed CSS fragments append
+    /// directly to the active cascade instead of cloning/rebuilding the whole
+    /// author stylesheet on every network chunk.
+    pub preserve_stylesheet_document_order: bool,
     pub editor: Editor,
     /// Drawing state for the document's `<canvas>` elements, keyed by node id.
     /// The pixels stay on the element in `WebCore::image_data`; this is what
@@ -271,6 +295,9 @@ pub struct Document {
     pub pending_images: Option<std::sync::mpsc::Receiver<PendingImageResult>>,
     /// Number of image fetches still in flight.
     pub images_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Receiver for linked stylesheets arriving from background fetch threads.
+    /// Each message is (document-order index, stylesheet_url, css_text, media).
+    pub pending_stylesheets: Option<std::sync::mpsc::Receiver<PendingStylesheetResult>>,
 }
 
 impl Document {
@@ -722,6 +749,8 @@ impl Clone for Document {
             pending_nodes: HashMap::new(),
             linked_stylesheets: self.linked_stylesheets.clone(),
             document_stylesheets: self.document_stylesheets.clone(),
+            loaded_linked_stylesheets: self.loaded_linked_stylesheets.clone(),
+            preserve_stylesheet_document_order: self.preserve_stylesheet_document_order,
             editor: self.editor.clone(),
             // The canvas BITMAPS come along inside `root.clone()`, because
             // they live on the elements. The drawing STATE does not: a copy of
@@ -783,6 +812,7 @@ impl Clone for Document {
             // Async image state is not cloned — cloned docs start with no pending fetches.
             pending_images: None,
             images_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            pending_stylesheets: None,
             on_form_event: None,
             on_navigate: None,
             on_title_change: None,

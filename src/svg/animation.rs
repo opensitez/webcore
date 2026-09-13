@@ -7,7 +7,7 @@ use super::{SvgAttribute, SvgDocument, SvgElementKind, SvgNode};
 use crate::css::parse_color;
 use crate::svg::path::{flatten_path_points, parse_path_data};
 use crate::types::WebCore;
-use crate::types::{apply_easing, EasingFn};
+use crate::types::{EasingFn, apply_easing};
 use std::collections::HashMap;
 
 pub(crate) const WEBCORE_ANIMATED_ATTR_NS: &str = "webcore";
@@ -584,12 +584,12 @@ fn tick_svg_animations_in_node(
     now: std::time::Instant,
     still_running: &mut bool,
 ) {
-    if let Some(doc) = node.svg_document.clone() {
+    if let Some(doc) = node.svg_document.as_ref() {
         if document_has_svg_animations(&doc) {
             let start = *node.svg_animation_start_time.get_or_insert(now);
             let elapsed = now.duration_since(start).as_secs_f32();
             let sampled = sample_svg_animation_overrides_with_controls(
-                &doc,
+                doc,
                 elapsed,
                 &node.svg_animation_controls,
                 still_running,
