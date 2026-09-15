@@ -1,4 +1,19 @@
-# current
+# 202609 0.3.1
+- Progressive Rendering
+- rtl fixes
+- svg renderer
+- formatting fixes
+- css animation 60 frames per second
+- start moving browser timer and animation in webcore
+- whatwg compliance 
+
+# 202608 0.3.0
+- woff2 fonts
+- Float/inline bugs
+- rtl fixes 
+- whatwg compliance
+- canvas
+- form elements
 
 # 202508
 - version 0.2
