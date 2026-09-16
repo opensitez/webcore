@@ -12,8 +12,9 @@ use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 
 use crate::dom::HtmlEventType;
+use crate::frame::EngineFrame;
 use crate::html::resolve_url;
-use crate::loading::{PageLoadOptions, PageSession, PageSessionEvent};
+use crate::loading::{PageLoadEvent, PageLoadOptions, spawn_page_load};
 use crate::renderer::Renderer;
 use crate::types::{
     CSSCursor, Document, FormEvent, FormEventKind, WebCore, build_form_submit_url,
@@ -21,11 +22,19 @@ use crate::types::{
 };
 
 enum BrowserViewLoadResult {
-    Page {
+    HtmlChunk {
         load_id: usize,
         url: String,
-        doc: Box<Document>,
-        preview: bool,
+        html: String,
+    },
+    HtmlSnapshot {
+        load_id: usize,
+        url: String,
+        html: String,
+    },
+    Complete {
+        load_id: usize,
+        url: String,
     },
 }
 
@@ -33,11 +42,15 @@ enum BrowserViewLoadResult {
 pub struct BrowserView {
     renderer: Renderer,
     doc: Option<Document>,
+    stream_frame: Option<EngineFrame>,
+    streamed_html_len: usize,
+    stream_paint_ready: bool,
     url: String,
     title: String,
     loading: bool,
     width: f32,
     height: f32,
+    viewport_pixmap: Option<Pixmap>,
     options: PageLoadOptions,
     load_id: usize,
     tx: mpsc::Sender<BrowserViewLoadResult>,
@@ -52,11 +65,15 @@ impl BrowserView {
         Self {
             renderer: Renderer::new(),
             doc: None,
+            stream_frame: None,
+            streamed_html_len: 0,
+            stream_paint_ready: false,
             url: String::new(),
             title: String::new(),
             loading: false,
             width,
             height,
+            viewport_pixmap: None,
             options,
             load_id: 0,
             tx,
@@ -76,6 +93,135 @@ impl BrowserView {
         }
     }
 
+    fn active_doc(&self) -> Option<&Document> {
+        self.stream_frame
+            .as_ref()
+            .map(|frame| &frame.doc)
+            .or(self.doc.as_ref())
+    }
+
+    fn active_doc_mut(&mut self) -> Option<&mut Document> {
+        if let Some(frame) = self.stream_frame.as_mut() {
+            Some(&mut frame.doc)
+        } else {
+            self.doc.as_mut()
+        }
+    }
+
+    fn feed_streaming_preview(&mut self, url: &str, html: &str) {
+        if self.stream_frame.is_none() || html.len() < self.streamed_html_len {
+            let mut frame = EngineFrame::empty(self.width, self.height);
+            frame.set_cache_dir(self.options.cache_dir.clone());
+            frame.start_streaming(url);
+            self.stream_frame = Some(frame);
+            self.streamed_html_len = 0;
+            self.stream_paint_ready = false;
+        }
+        let chunk = html
+            .as_bytes()
+            .get(self.streamed_html_len..)
+            .unwrap_or_default();
+        if !chunk.is_empty() {
+            if let Some(frame) = self.stream_frame.as_mut() {
+                frame.feed_html_chunk(chunk);
+            }
+            self.streamed_html_len = html.len();
+        }
+        if let Some(frame) = self.stream_frame.as_ref() {
+            if !frame.doc.title.is_empty() {
+                self.title = frame.doc.title.clone();
+            }
+            self.stream_paint_ready |= streamed_tree_can_paint(&frame.doc.root);
+        }
+    }
+
+    fn feed_streaming_chunk(&mut self, url: &str, html: &str) {
+        if self.stream_frame.is_none() {
+            let mut frame = EngineFrame::empty(self.width, self.height);
+            frame.set_cache_dir(self.options.cache_dir.clone());
+            frame.start_streaming(url);
+            self.stream_frame = Some(frame);
+            self.streamed_html_len = 0;
+            self.stream_paint_ready = false;
+        }
+        if !html.is_empty() {
+            if let Some(frame) = self.stream_frame.as_mut() {
+                frame.feed_html_chunk(html.as_bytes());
+                if !frame.doc.title.is_empty() {
+                    self.title = frame.doc.title.clone();
+                }
+                self.stream_paint_ready |= streamed_tree_can_paint(&frame.doc.root);
+            }
+            self.streamed_html_len = self.streamed_html_len.saturating_add(html.len());
+        }
+    }
+
+    fn install_form_navigation_handler(&mut self, base_url: &str) {
+        let pending_navigate = self.pending_navigate.clone();
+        let wake = self.wake.clone();
+        let base_url = base_url.to_string();
+        let handler = Box::new(move |event: &FormEvent| {
+            if let FormEventKind::Submit(action) = &event.kind {
+                let target = if action.is_empty() {
+                    base_url.clone()
+                } else {
+                    resolve_url(action, &base_url)
+                };
+                *pending_navigate.lock().unwrap() = Some(target);
+                if let Some(wake) = wake.as_ref() {
+                    wake();
+                }
+            }
+        });
+        if let Some(frame) = self.stream_frame.as_mut() {
+            frame.doc.on_form_event = Some(handler);
+        } else if let Some(doc) = self.doc.as_mut() {
+            doc.on_form_event = Some(handler);
+        }
+    }
+
+    fn layout_active(&mut self) -> bool {
+        if let Some(frame) = self.stream_frame.as_mut() {
+            let engine = self.renderer.layout_engine();
+            engine.viewport_h = self.height;
+            frame.doc.style_dirty = true;
+            engine.layout(&mut frame.doc, self.width);
+            self.renderer.invalidate_display_list();
+            return true;
+        }
+        let Some(doc) = self.doc.as_mut() else {
+            return false;
+        };
+        let engine = self.renderer.layout_engine();
+        engine.viewport_h = self.height;
+        engine.layout(doc, self.width);
+        self.renderer.invalidate_display_list();
+        true
+    }
+
+    fn ensure_streamed_paint_layout(&mut self) {
+        if !self.stream_paint_ready {
+            return;
+        }
+        let Some(frame) = self.stream_frame.as_mut() else {
+            return;
+        };
+        let root = &frame.doc.root.layout;
+        let needs_layout = frame.doc.style_dirty
+            || frame.doc.root.layout.layout_dirty
+            || !root.margin_rect.w.is_finite()
+            || !root.margin_rect.h.is_finite()
+            || root.margin_rect.w <= 0.0
+            || root.margin_rect.h <= 0.0;
+        if !needs_layout {
+            return;
+        }
+        let engine = self.renderer.layout_engine();
+        engine.viewport_h = self.height;
+        engine.layout(&mut frame.doc, self.width);
+        self.renderer.invalidate_display_list();
+    }
+
     pub fn url(&self) -> &str {
         &self.url
     }
@@ -93,20 +239,28 @@ impl BrowserView {
     }
 
     pub fn document(&self) -> Option<&Document> {
-        self.doc.as_ref()
+        self.active_doc()
     }
 
     pub fn document_mut(&mut self) -> Option<&mut Document> {
-        self.doc.as_mut()
+        self.active_doc_mut()
     }
 
     pub fn document_and_renderer_mut(&mut self) -> Option<(&mut Document, &mut Renderer)> {
+        if let Some(frame) = self.stream_frame.as_mut() {
+            return Some((&mut frame.doc, &mut self.renderer));
+        }
         let doc = self.doc.as_mut()?;
         Some((doc, &mut self.renderer))
     }
 
     pub fn handle_window_event(&mut self, event: &WindowEvent) {
-        self.renderer.handle_window_event(event, self.doc.as_mut());
+        if let Some(frame) = self.stream_frame.as_mut() {
+            self.renderer
+                .handle_window_event(event, Some(&mut frame.doc));
+        } else {
+            self.renderer.handle_window_event(event, self.doc.as_mut());
+        }
     }
 
     pub fn is_shift_held(&self) -> bool {
@@ -124,37 +278,35 @@ impl BrowserView {
     }
 
     pub fn set_inspect_mode(&mut self, on: bool) -> bool {
-        let Some(doc) = self.doc.as_mut() else {
+        let Some(doc) = self.active_doc_mut() else {
             return false;
         };
         doc.style_dirty = true;
         doc.stylesheet.inspect_mode = on;
-        let engine = self.renderer.layout_engine();
-        engine.viewport_h = self.height;
-        engine.layout(doc, self.width);
-        self.renderer.invalidate_display_list();
+        let _ = doc;
+        self.layout_active();
         self.invalidate_backing();
         self.wake();
         true
     }
 
     pub fn relayout(&mut self) -> bool {
-        let Some(doc) = self.doc.as_mut() else {
+        if !self.layout_active() {
             return false;
-        };
-        let engine = self.renderer.layout_engine();
-        engine.viewport_h = self.height;
-        engine.layout(doc, self.width);
-        self.renderer.invalidate_display_list();
+        }
         self.invalidate_backing();
         self.wake();
         true
     }
 
     pub fn benchmark_progressive_layout(&mut self) -> Option<(f64, f64)> {
+        if self.stream_frame.is_some() {
+            return None;
+        }
         let Some(doc) = self.doc.as_mut() else {
             return None;
         };
+        let width = self.width;
         fn mark_dirty(node: &mut WebCore) {
             node.layout.layout_dirty = true;
             for child in &mut node.children {
@@ -165,14 +317,14 @@ impl BrowserView {
         let engine = self.renderer.layout_engine();
         mark_dirty(&mut doc.root);
         let t0 = std::time::Instant::now();
-        engine.layout(doc, self.width);
+        engine.layout(doc, width);
         let full_ms = t0.elapsed().as_micros() as f64 / 1000.0;
 
         mark_dirty(&mut doc.root);
         let t1 = std::time::Instant::now();
-        let _more = engine.layout_above_fold(doc, self.width);
+        let _more = engine.layout_above_fold(doc, width);
         let above_ms = t1.elapsed().as_micros() as f64 / 1000.0;
-        engine.layout_remainder(doc, self.width);
+        engine.layout_remainder(doc, width);
         self.renderer.invalidate_display_list();
         self.invalidate_backing();
         self.wake();
@@ -186,12 +338,7 @@ impl BrowserView {
         self.width = width.max(1.0);
         self.height = height.max(1.0);
         self.invalidate_backing();
-        if let Some(doc) = self.doc.as_mut() {
-            let engine = self.renderer.layout_engine();
-            engine.viewport_h = self.height;
-            engine.layout(doc, self.width);
-            self.renderer.invalidate_display_list();
-        }
+        self.layout_active();
         self.wake();
     }
 
@@ -200,25 +347,42 @@ impl BrowserView {
         self.title = "Loading...".to_string();
         self.loading = true;
         self.doc = None;
+        self.stream_frame = Some(EngineFrame::empty(self.width, self.height));
+        if let Some(frame) = self.stream_frame.as_mut() {
+            frame.set_cache_dir(self.options.cache_dir.clone());
+            frame.start_streaming(&url);
+        }
+        self.streamed_html_len = 0;
+        self.stream_paint_ready = false;
         self.invalidate_backing();
         self.load_id = self.load_id.wrapping_add(1);
         let load_id = self.load_id;
         let tx = self.tx.clone();
         let wake = self.wake.clone();
-        let session = PageSession::new(self.options.clone());
-        session.navigate(url, self.width, self.height, move |event| match event {
-            PageSessionEvent::Page { url, doc, preview } => {
-                let _ = tx.send(BrowserViewLoadResult::Page {
-                    load_id,
-                    url,
-                    doc,
-                    preview,
-                });
-                if let Some(wake) = wake.as_ref() {
+        let loader_wake = wake.clone();
+        spawn_page_load(url, self.options.clone(), move |event| match event {
+            PageLoadEvent::Preview { url, html } => {
+                let _ = tx.send(BrowserViewLoadResult::HtmlSnapshot { load_id, url, html });
+                if let Some(wake) = loader_wake.as_ref() {
+                    wake();
+                }
+            }
+            PageLoadEvent::Chunk { url, html } => {
+                let _ = tx.send(BrowserViewLoadResult::HtmlChunk { load_id, url, html });
+                if let Some(wake) = loader_wake.as_ref() {
+                    wake();
+                }
+            }
+            PageLoadEvent::Complete { url } => {
+                let _ = tx.send(BrowserViewLoadResult::Complete { load_id, url });
+                if let Some(wake) = loader_wake.as_ref() {
                     wake();
                 }
             }
         });
+        if let Some(wake) = wake.as_ref() {
+            wake();
+        }
     }
 
     pub fn load_until_ready(&mut self, url: String, timeout: std::time::Duration) -> bool {
@@ -227,7 +391,7 @@ impl BrowserView {
         let mut changed = false;
         loop {
             changed |= self.poll();
-            if self.doc.is_some() && !self.loading {
+            if self.active_doc().is_some() && !self.loading {
                 return true;
             }
             if std::time::Instant::now() >= deadline {
@@ -242,53 +406,75 @@ impl BrowserView {
         while let Ok(result) = self.rx.try_recv() {
             pending.push(result);
         }
-        let mut latest: Option<BrowserViewLoadResult> = None;
+        let mut latest_preview: Option<BrowserViewLoadResult> = None;
+        let mut completed: Option<BrowserViewLoadResult> = None;
+        let mut chunks: Vec<(String, String)> = Vec::new();
         for result in pending {
             match &result {
-                BrowserViewLoadResult::Page { load_id, .. } if *load_id == self.load_id => {
-                    latest = Some(result);
+                BrowserViewLoadResult::Complete { load_id, .. } if *load_id == self.load_id => {
+                    completed = Some(result);
+                }
+                BrowserViewLoadResult::HtmlChunk { load_id, url, html }
+                    if *load_id == self.load_id =>
+                {
+                    chunks.push((url.clone(), html.clone()));
+                }
+                BrowserViewLoadResult::HtmlSnapshot { load_id, .. } if *load_id == self.load_id => {
+                    latest_preview = Some(result);
                 }
                 _ => {}
             }
         }
-        let Some(result) = latest else {
-            return false;
+        let mut changed = false;
+        for (url, html) in chunks {
+            self.url = url.clone();
+            self.feed_streaming_chunk(&url, &html);
+            self.loading = true;
+            changed = true;
+        }
+        let Some(result) = completed.or(latest_preview) else {
+            if changed {
+                self.renderer.invalidate_display_list();
+                self.invalidate_backing();
+                self.wake();
+            }
+            return changed;
         };
         match result {
-            BrowserViewLoadResult::Page {
-                url,
-                mut doc,
-                preview,
-                ..
-            } => {
+            BrowserViewLoadResult::HtmlChunk { .. } => changed,
+            BrowserViewLoadResult::HtmlSnapshot { url, html, .. } => {
                 self.url = url.clone();
-                self.title = if doc.title.is_empty() {
-                    url.split('/')
+                self.feed_streaming_preview(&url, &html);
+                self.loading = true;
+                self.renderer.invalidate_display_list();
+                self.invalidate_backing();
+                self.wake();
+                true
+            }
+            BrowserViewLoadResult::Complete { url, .. } => {
+                self.url = url.clone();
+                if let Some(frame) = self.stream_frame.as_mut() {
+                    frame.finish_loading();
+                    self.stream_paint_ready = true;
+                    self.title = if frame.doc.title.is_empty() {
+                        url.split('/')
+                            .filter(|part| !part.is_empty())
+                            .last()
+                            .unwrap_or("Untitled")
+                            .to_string()
+                    } else {
+                        frame.doc.title.clone()
+                    };
+                } else {
+                    self.title = url
+                        .split('/')
                         .filter(|part| !part.is_empty())
                         .last()
                         .unwrap_or("Untitled")
-                        .to_string()
-                } else {
-                    doc.title.clone()
-                };
-                self.loading = preview;
-                let pending_navigate = self.pending_navigate.clone();
-                let wake = self.wake.clone();
-                let base_url = url.clone();
-                doc.on_form_event = Some(Box::new(move |event: &FormEvent| {
-                    if let FormEventKind::Submit(action) = &event.kind {
-                        let target = if action.is_empty() {
-                            base_url.clone()
-                        } else {
-                            resolve_url(&base_url, action)
-                        };
-                        *pending_navigate.lock().unwrap() = Some(target);
-                        if let Some(wake) = wake.as_ref() {
-                            wake();
-                        }
-                    }
-                }));
-                self.doc = Some(*doc);
+                        .to_string();
+                }
+                self.loading = false;
+                self.install_form_navigation_handler(&url);
                 self.renderer.invalidate_display_list();
                 self.invalidate_backing();
                 self.wake();
@@ -310,12 +496,21 @@ impl BrowserView {
     pub fn drive_idle(&mut self, event_loop: &ActiveEventLoop) -> bool {
         let changed = self.poll();
         let nav_changed = self.drain_pending_navigation();
-        let needs_redraw = self.renderer.drive_document_idle(
-            event_loop,
-            self.doc.as_mut(),
-            self.width,
-            self.height,
-        );
+        let needs_redraw = if let Some(frame) = self.stream_frame.as_mut() {
+            self.renderer.drive_document_idle(
+                event_loop,
+                Some(&mut frame.doc),
+                self.width,
+                self.height,
+            )
+        } else {
+            self.renderer.drive_document_idle(
+                event_loop,
+                self.doc.as_mut(),
+                self.width,
+                self.height,
+            )
+        };
         if needs_redraw {
             self.invalidate_backing();
         }
@@ -323,28 +518,59 @@ impl BrowserView {
     }
 
     pub fn paint_into(&mut self, target: &mut Pixmap, x: i32, y: i32, scale: f32) {
+        self.ensure_streamed_paint_layout();
         let width_px = target.width().max(1);
         let height_px = target.height().max(1);
         let view_w = ((self.width * scale).ceil() as u32).max(1).min(width_px);
         let view_h = ((self.height * scale).ceil() as u32).max(1).min(height_px);
-        let Some(doc) = self.doc.as_mut() else {
-            fill_placeholder(target, x, y, view_w, view_h);
-            return;
-        };
         if x == 0 && y == 0 && target.width() == view_w && target.height() == view_h {
-            self.renderer.render(doc, target, scale);
-        } else if let Some(mut viewport) = Pixmap::new(view_w, view_h) {
-            self.renderer.render(doc, &mut viewport, scale);
-            blit_viewport_from_backing(&viewport, target, x, y, 0, view_w, view_h);
+            if let Some(frame) = self.stream_frame.as_mut() {
+                if self.stream_paint_ready {
+                    self.renderer.render(&mut frame.doc, target, scale);
+                } else {
+                    fill_placeholder(target, x, y, view_w, view_h);
+                }
+            } else if let Some(doc) = self.doc.as_mut() {
+                self.renderer.render(doc, target, scale);
+            } else {
+                fill_placeholder(target, x, y, view_w, view_h);
+            }
+        } else {
+            let needs_pixmap = self
+                .viewport_pixmap
+                .as_ref()
+                .is_none_or(|pm| pm.width() != view_w || pm.height() != view_h);
+            if needs_pixmap {
+                self.viewport_pixmap = Pixmap::new(view_w, view_h);
+            }
+            if let Some(viewport) = self.viewport_pixmap.as_mut() {
+                if let Some(frame) = self.stream_frame.as_mut() {
+                    if self.stream_paint_ready {
+                        self.renderer.render(&mut frame.doc, viewport, scale);
+                        blit_viewport_from_backing(viewport, target, x, y, 0, view_w, view_h);
+                    } else {
+                        fill_placeholder(target, x, y, view_w, view_h);
+                    }
+                } else if let Some(doc) = self.doc.as_mut() {
+                    self.renderer.render(doc, viewport, scale);
+                    blit_viewport_from_backing(viewport, target, x, y, 0, view_w, view_h);
+                } else {
+                    fill_placeholder(target, x, y, view_w, view_h);
+                }
+            } else {
+                fill_placeholder(target, x, y, view_w, view_h);
+            }
         }
     }
 
     pub fn handle_mouse_move(&mut self, x: f32, y: f32) -> bool {
-        let Some(doc) = self.doc.as_mut() else {
+        let width = self.width;
+        let height = self.height;
+        let Some(doc) = self.active_doc_mut() else {
             return false;
         };
         let old_scroll_y = doc.scroll_y;
-        if doc.process_scrollbar_event(HtmlEventType::MouseMove, x, y, self.width, self.height)
+        if doc.process_scrollbar_event(HtmlEventType::MouseMove, x, y, width, height)
             && (doc.scroll_y - old_scroll_y).abs() >= 0.5
         {
             self.wake();
@@ -362,11 +588,13 @@ impl BrowserView {
     }
 
     pub fn handle_mouse_button(&mut self, kind: HtmlEventType, x: f32, y: f32, button: u8) -> bool {
-        let Some(doc) = self.doc.as_mut() else {
+        let width = self.width;
+        let height = self.height;
+        let Some(doc) = self.active_doc_mut() else {
             return false;
         };
         let old_scroll_y = doc.scroll_y;
-        if doc.process_scrollbar_event(kind, x, y, self.width, self.height)
+        if doc.process_scrollbar_event(kind, x, y, width, height)
             && (doc.scroll_y - old_scroll_y).abs() >= 0.5
         {
             self.wake();
@@ -380,10 +608,11 @@ impl BrowserView {
     }
 
     pub fn handle_wheel(&mut self, dx: f32, dy: f32) -> bool {
-        let Some(doc) = self.doc.as_mut() else {
+        let height = self.height;
+        let Some(doc) = self.active_doc_mut() else {
             return false;
         };
-        let max_y = (Document::scroll_height(&doc.root) - self.height).max(0.0);
+        let max_y = (Document::scroll_height(&doc.root) - height).max(0.0);
         let old_y = doc.scroll_y;
         doc.scroll_x = (doc.scroll_x + dx).max(0.0);
         doc.scroll_y = (doc.scroll_y + dy).clamp(0.0, max_y);
@@ -400,10 +629,11 @@ impl BrowserView {
     }
 
     pub fn scroll_to(&mut self, x: f32, y: f32) -> bool {
-        let Some(doc) = self.doc.as_mut() else {
+        let height = self.height;
+        let Some(doc) = self.active_doc_mut() else {
             return false;
         };
-        let max_y = (Document::scroll_height(&doc.root) - self.height).max(0.0);
+        let max_y = (Document::scroll_height(&doc.root) - height).max(0.0);
         let old = (doc.scroll_x, doc.scroll_y);
         doc.scroll_x = x.max(0.0);
         doc.scroll_y = y.clamp(0.0, max_y);
@@ -416,7 +646,7 @@ impl BrowserView {
     }
 
     pub fn scroll_y(&self) -> f32 {
-        self.doc.as_ref().map(|doc| doc.scroll_y).unwrap_or(0.0)
+        self.active_doc().map(|doc| doc.scroll_y).unwrap_or(0.0)
     }
 
     pub fn handle_key(
@@ -431,7 +661,7 @@ impl BrowserView {
     ) -> bool {
         if matches!(event_type, HtmlEventType::KeyDown) {
             if key_code == 9 {
-                let moved = self.doc.as_mut().is_some_and(|doc| {
+                let moved = self.active_doc_mut().is_some_and(|doc| {
                     if shift {
                         doc.focus_prev()
                     } else {
@@ -447,7 +677,7 @@ impl BrowserView {
                 return true;
             }
         }
-        let changed = self.doc.as_mut().is_some_and(|doc| {
+        let changed = self.active_doc_mut().is_some_and(|doc| {
             doc.process_key_event(event_type, key_code, ch, ctrl, shift, alt, meta)
         });
         if changed {
@@ -457,18 +687,18 @@ impl BrowserView {
     }
 
     pub fn cursor_at(&self, x: f32, y: f32) -> CSSCursor {
-        self.doc
-            .as_ref()
+        self.active_doc()
             .and_then(|doc| {
                 crate::layout::hit_test::point_to_hit(&doc.root, (x, y + doc.scroll_y), 0)
             })
-            .and_then(|hit| self.doc.as_ref()?.get_box_by_id(hit.node_id))
+            .and_then(|hit| self.active_doc()?.get_box_by_id(hit.node_id))
             .map(|node| node.style.cursor)
             .unwrap_or(CSSCursor::Auto)
     }
 
     fn handle_activation_at(&mut self, x: f32, y: f32) {
-        let Some(doc) = self.doc.as_mut() else {
+        let current_url = self.url.clone();
+        let Some(doc) = self.active_doc_mut() else {
             return;
         };
         let pt = (x, y + doc.scroll_y);
@@ -489,9 +719,9 @@ impl BrowserView {
                     .unwrap_or_default();
                 if node.tag == "button" || input_type == "submit" {
                     let target = if form_action.is_empty() {
-                        self.url.clone()
+                        current_url.clone()
                     } else {
-                        resolve_url(&self.url, &form_action)
+                        resolve_url(&current_url, &form_action)
                     };
                     let data = find_containing_form(&doc.root, hit.node_id)
                         .map(collect_form_data)
@@ -504,7 +734,7 @@ impl BrowserView {
     }
 
     fn submit_focused_text_control(&mut self) -> bool {
-        let Some(doc) = self.doc.as_ref() else {
+        let Some(doc) = self.active_doc() else {
             return false;
         };
         let focused = doc.focused_box;
@@ -562,6 +792,15 @@ fn find_containing_form(root: &WebCore, target_id: u32) -> Option<&WebCore> {
     None
 }
 
+fn streamed_tree_can_paint(root: &WebCore) -> bool {
+    root.tag.eq_ignore_ascii_case("body")
+        || root.children.iter().any(|child| {
+            child.tag.eq_ignore_ascii_case("body")
+                || child.tag.eq_ignore_ascii_case("main")
+                || streamed_tree_can_paint(child)
+        })
+}
+
 fn fill_placeholder(target: &mut Pixmap, x: i32, y: i32, w: u32, h: u32) {
     let mut paint = tiny_skia::Paint::default();
     paint.set_color(tiny_skia::Color::from_rgba8(26, 26, 29, 255));
@@ -613,5 +852,98 @@ fn blit_viewport_from_backing(
         let src_off = (src_start_y + row) * backing_stride + src_x * 4;
         let dst_off = (dst_start_y + row) * target_stride + dst_x * 4;
         dst[dst_off..dst_off + bytes].copy_from_slice(&src[src_off..src_off + bytes]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn browser_view_feeds_preview_tail_into_streaming_frame() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+
+        let first =
+            "<!doctype html><html><head><style>p{color:red}</style></head><body><p id='hello'>";
+        view.feed_streaming_preview(base, first);
+        assert!(
+            view.document()
+                .unwrap()
+                .get_element_by_id("hello")
+                .is_some()
+        );
+        assert_eq!(view.streamed_html_len, first.len());
+
+        let second = format!("{first}Hello</p>");
+        view.feed_streaming_preview(base, &second);
+        let doc = view.document().unwrap();
+        let node_id = doc.get_element_by_id("hello").unwrap();
+        let node = doc.get_box_by_id(node_id).unwrap();
+        assert_eq!(node.children.len(), 1);
+        assert_eq!(node.children[0].text, "Hello");
+    }
+
+    #[test]
+    fn browser_view_does_not_paint_head_only_stream_as_a_page() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+
+        view.feed_streaming_chunk(
+            base,
+            "<!doctype html><html><head><title>T</title><style>body{margin:0}</style>",
+        );
+        assert!(
+            !view.stream_paint_ready,
+            "head-only streamed chunks should preload resources, not paint as malformed content"
+        );
+
+        view.feed_streaming_chunk(base, "</head><body><p>Ready</p>");
+        assert!(view.stream_paint_ready);
+    }
+
+    #[test]
+    fn browser_view_lays_out_streamed_body_before_first_paint() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+        view.feed_streaming_chunk(
+            base,
+            "<!doctype html><html><head><style>body{margin:0}p{display:block;margin:0;height:24px}</style></head><body><p>Ready</p>",
+        );
+
+        assert!(view.stream_paint_ready);
+        let before = view
+            .stream_frame
+            .as_ref()
+            .unwrap()
+            .doc
+            .root
+            .layout
+            .margin_rect
+            .h;
+        assert!(before <= 0.0 || before.is_nan());
+
+        let mut target = Pixmap::new(480, 320).unwrap();
+        view.paint_into(&mut target, 0, 0, 1.0);
+
+        let after = view
+            .stream_frame
+            .as_ref()
+            .unwrap()
+            .doc
+            .root
+            .layout
+            .margin_rect
+            .h;
+        assert!(
+            after > 0.0,
+            "first streamed paint must consume UA/inline/current CSS through layout before rendering"
+        );
     }
 }

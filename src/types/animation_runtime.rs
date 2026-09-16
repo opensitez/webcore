@@ -86,6 +86,11 @@ impl Document {
             }
         }
         collect(&self.root, &mut current);
+        current.retain(|(_, anim)| {
+            !anim.name.is_empty()
+                && anim.name != "none"
+                && self.stylesheet.keyframes.contains_key(&anim.name)
+        });
 
         // Start animations that aren't tracked yet.
         for (id, anim) in &current {
@@ -93,7 +98,7 @@ impl Document {
                 .active_animations
                 .iter()
                 .any(|s| s.element_id == *id && s.animation.name == anim.name);
-            if !running && !anim.name.is_empty() && anim.name != "none" {
+            if !running {
                 self.active_animations.push(AnimState {
                     element_id: *id,
                     animation: anim.clone(),
@@ -416,11 +421,11 @@ impl Document {
                 state.last_iteration_event = completed_iterations;
             }
 
-            // At an exact active-duration boundary, CSS samples the end of the
-            // just-completed iteration before starting the next one. Without
-            // this, sparse frames make infinite marquees and loaders visibly
-            // snap to their 0% keyframe and can leave a blank gap at restart.
-            if total_progress > 0.0 && t_frac <= 0.0001 {
+            // Finite animations need to expose the completed iteration at an
+            // exact boundary. Infinite animations, however, must remain a
+            // continuous loop: sampling the completed 100% frame can make
+            // marquees dwell at the seam and show an empty tail.
+            if !iteration_count.is_infinite() && total_progress > 0.0 && t_frac <= 0.0001 {
                 t_frac = 1.0;
                 sample_iteration = (iteration - 1.0).max(0.0);
             }

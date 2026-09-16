@@ -310,6 +310,14 @@ pub(crate) fn interpolate_property_value(prop: &str, from: &str, to: &str, t: f3
             return "visible".to_string();
         }
     }
+    if matches!(
+        prop,
+        "opacity" | "fill-opacity" | "stroke-opacity" | "stop-opacity"
+    ) {
+        let from = parse_css_alpha(from).unwrap_or(1.0);
+        let to = parse_css_alpha(to).unwrap_or(from);
+        return format_css_number(lerp(from, to, t).clamp(0.0, 1.0));
+    }
     interpolate_value(from, to, t)
 }
 
@@ -489,11 +497,7 @@ fn interpolate_numeric(from: &str, to: &str, t: f32) -> String {
     // Replace in reverse order so byte offsets remain valid.
     for ((start, end, fv), (_, to_end, tv)) in from_nums.iter().zip(to_nums.iter()).rev() {
         let v = lerp(*fv, *tv, t);
-        let mut s = if v == v.floor() && v.abs() < 1e9 {
-            format!("{}", v as i64)
-        } else {
-            format!("{:.4}", v)
-        };
+        let mut s = format_css_number(v);
         let from_unit = numeric_unit_after(from, *end);
         let to_unit = numeric_unit_after(to, *to_end);
         if from_unit.is_empty() && !to_unit.is_empty() && fv.abs() < 1e-6 {
@@ -502,6 +506,36 @@ fn interpolate_numeric(from: &str, to: &str, t: f32) -> String {
         result.replace_range(start..end, &s);
     }
     result
+}
+
+fn parse_css_alpha(value: &str) -> Option<f32> {
+    let value = value.trim();
+    if let Some(percent) = value.strip_suffix('%') {
+        percent.trim().parse::<f32>().ok().map(|v| v / 100.0)
+    } else {
+        value.parse::<f32>().ok()
+    }
+}
+
+fn format_css_number(value: f32) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    let rounded = (value * 10000.0).round() / 10000.0;
+    if rounded.abs() < 0.00005 {
+        return "0".to_string();
+    }
+    if (rounded - rounded.round()).abs() < 0.00005 && rounded.abs() < 1e9 {
+        return format!("{}", rounded.round() as i64);
+    }
+    let mut out = format!("{rounded:.4}");
+    while out.contains('.') && out.ends_with('0') {
+        out.pop();
+    }
+    if out.ends_with('.') {
+        out.pop();
+    }
+    out
 }
 
 fn numeric_unit_after(s: &str, end: usize) -> &str {
@@ -524,14 +558,27 @@ fn extract_nums(s: &str) -> Vec<(usize, usize, f32)> {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        let neg = bytes[i] == b'-' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit();
-        if bytes[i].is_ascii_digit() || neg {
+        let signed = (bytes[i] == b'-' || bytes[i] == b'+') && i + 1 < bytes.len();
+        let starts_number = bytes[i].is_ascii_digit()
+            || (bytes[i] == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit())
+            || (signed
+                && (bytes[i + 1].is_ascii_digit()
+                    || (bytes[i + 1] == b'.'
+                        && i + 2 < bytes.len()
+                        && bytes[i + 2].is_ascii_digit())));
+        if starts_number {
             let start = i;
-            if neg {
+            if bytes[i] == b'-' || bytes[i] == b'+' {
                 i += 1;
             }
-            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
                 i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'.' {
+                i += 1;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
             }
             if let Ok(v) = s[start..i].parse::<f32>() {
                 result.push((start, i, v));
@@ -644,6 +691,39 @@ fn bcoord(p1: f32, p2: f32, t: f32) -> f32 {
 
 fn bderiv(p1: f32, p2: f32, t: f32) -> f32 {
     3.0 * (1.0 - t) * (1.0 - t) * p1 + 6.0 * (1.0 - t) * t * (p2 - p1) + 3.0 * t * t * (1.0 - p2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{interpolate_property_value, interpolate_value};
+
+    #[test]
+    fn opacity_interpolation_outputs_one_valid_number() {
+        assert_eq!(
+            interpolate_property_value("opacity", "0", ".5", 0.5),
+            "0.25"
+        );
+        assert_eq!(
+            interpolate_property_value("fill-opacity", "0%", "100%", 0.2942414),
+            "0.2942"
+        );
+        assert_eq!(
+            interpolate_property_value("stroke-opacity", "1", "67", 0.5),
+            "1"
+        );
+    }
+
+    #[test]
+    fn numeric_interpolation_accepts_leading_decimal_values() {
+        assert_eq!(
+            interpolate_value("translate(0%)", "translate(.5%)", 0.5),
+            "translate(0.25%)"
+        );
+        assert_eq!(
+            interpolate_value("rotate(-.5deg)", "rotate(.5deg)", 0.5),
+            "rotate(0deg)"
+        );
+    }
 }
 
 impl Document {

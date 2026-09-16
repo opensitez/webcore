@@ -1,7 +1,7 @@
 [package]
 name = "webcore"
-version = "0.3.0"
-edition = "2021"
+version = "0.3.1"
+edition = "2024"
 description = "HTML/CSS editor and renderer in Rust using tiny-skia"
 license = "GPL-3.0-or-later OR LicenseRef-Commercial"
 repository = "https://github.com/opensitez/webcore" 

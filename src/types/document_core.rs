@@ -25,6 +25,7 @@ impl Document {
             linked_stylesheets: Vec::new(),
             document_stylesheets: Vec::new(),
             loaded_linked_stylesheets: HashMap::new(),
+            loaded_stylesheet_slots: HashMap::new(),
             preserve_stylesheet_document_order: true,
             editor: Editor::new(),
             canvas_surfaces: crate::canvas::CanvasSurfaces::default(),
@@ -84,9 +85,14 @@ impl Document {
             live_regions_initialized: false,
             layout_generation: 0,
             pending_images: None,
+            image_load_errors: Vec::new(),
             images_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             pending_stylesheets: None,
         }
+    }
+
+    pub fn animation_overrides_for(&self, element_id: u32) -> Option<&[(String, String)]> {
+        self.animation_overrides.get(&element_id).map(Vec::as_slice)
     }
 
     /// Poll for linked stylesheets that arrived from background fetch threads.
@@ -95,9 +101,10 @@ impl Document {
         self.poll_pending_stylesheets_budgeted(usize::MAX, std::time::Duration::from_secs(60))
     }
 
-    /// Poll a bounded amount of pending stylesheet work. Browser shells should
-    /// use this path so cached pages with many stylesheets progressively style
-    /// the document instead of parsing every arrived sheet in one UI tick.
+    /// Poll pending stylesheet work. A zero `max_time` means "drain everything
+    /// already queued without waiting", which is the browser-frame path: worker
+    /// threads parse/fetch independently, and the UI coalesces all currently
+    /// available changes into a single cascade/layout pass.
     pub fn poll_pending_stylesheets_budgeted(
         &mut self,
         max_sheets: usize,
@@ -113,6 +120,7 @@ impl Document {
         let rebuild_from_document_order =
             self.preserve_stylesheet_document_order && !self.document_stylesheets.is_empty();
         let start = std::time::Instant::now();
+        let time_limited = !max_time.is_zero();
         let mut disconnected = false;
         let mut changed = false;
         if rebuild_from_document_order {
@@ -126,12 +134,20 @@ impl Document {
                         break;
                     }
                 }
-                if results.len() >= max_sheets || start.elapsed() >= max_time {
+                if results.len() >= max_sheets || (time_limited && start.elapsed() >= max_time) {
                     break;
                 }
             }
             results.sort_by_key(|(idx, _, _, _)| *idx);
-            for (_, css_url, sheet, _media) in results {
+            for (idx, css_url, sheet, _media) in results {
+                match self.loaded_stylesheet_slots.entry(idx) {
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        entry.get_mut().append_fragment(sheet.clone());
+                    }
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(sheet.clone());
+                    }
+                }
                 match self.loaded_linked_stylesheets.entry(css_url) {
                     std::collections::hash_map::Entry::Occupied(mut entry) => {
                         entry.get_mut().append_fragment(sheet);
@@ -157,7 +173,7 @@ impl Document {
                         break;
                     }
                 }
-                if processed >= max_sheets || start.elapsed() >= max_time {
+                if processed >= max_sheets || (time_limited && start.elapsed() >= max_time) {
                     break;
                 }
             }
@@ -180,14 +196,18 @@ impl Document {
 
     fn rebuild_author_stylesheet_from_document_order(&mut self) {
         self.stylesheet = crate::css::ua_stylesheet();
-        for ds in &self.document_stylesheets {
+        for (idx, ds) in self.document_stylesheets.iter().enumerate() {
             match ds {
                 DocumentStylesheet::Inline { css } => {
                     self.stylesheet.parse_and_add_with_base(css, &self.base_url);
                 }
                 DocumentStylesheet::Linked { href, .. } => {
                     let abs = crate::html::resolve_url(href, &self.base_url);
-                    if let Some(sheet) = self.loaded_linked_stylesheets.get(&abs) {
+                    if let Some(sheet) = self
+                        .loaded_stylesheet_slots
+                        .get(&idx)
+                        .or_else(|| self.loaded_linked_stylesheets.get(&abs))
+                    {
                         self.stylesheet.append_fragment(sheet.clone());
                     }
                 }
@@ -205,37 +225,72 @@ impl Document {
         self.poll_pending_images_budgeted(usize::MAX, std::time::Duration::from_secs(60))
     }
 
-    /// Poll a bounded amount of image decode/fetch results. Browser shells use
-    /// this from idle work so dozens of arriving images do not monopolize a UI
-    /// frame; pending results remain queued for the next tick.
+    /// Poll image decode/fetch results. A zero `max_time` drains the currently
+    /// queued results without blocking; resource workers keep decoding in the
+    /// background and the next frame picks up whatever arrived meanwhile.
     pub fn poll_pending_images_budgeted(
         &mut self,
         max_images: usize,
         max_time: std::time::Duration,
     ) -> PendingImagePoll {
-        let rx = match self.pending_images.as_ref() {
+        let rx = match self.pending_images.take() {
             Some(rx) => rx,
             None => return PendingImagePoll::default(),
         };
         if max_images == 0 {
+            self.pending_images = Some(rx);
             return PendingImagePoll::default();
         }
         let mut poll = PendingImagePoll::default();
         let start = std::time::Instant::now();
+        let time_limited = !max_time.is_zero();
         let mut processed = 0usize;
         let mut queue_drained = false;
         loop {
-            let Ok((path, target, decoded)) = rx.try_recv() else {
+            let Ok(result) = rx.try_recv() else {
                 queue_drained = true;
                 break;
+            };
+            let (node_id, path, target, decoded) = match result {
+                PendingImageResult::Loaded {
+                    node_id,
+                    path,
+                    target,
+                    decoded,
+                    ..
+                } => (node_id, path, target, decoded),
+                PendingImageResult::Failed {
+                    node_id,
+                    path,
+                    target,
+                    url,
+                    error,
+                } => {
+                    self.image_load_errors.push((path, target, url, error));
+                    let _ = node_id;
+                    processed += 1;
+                    if processed >= max_images || (time_limited && start.elapsed() >= max_time) {
+                        break;
+                    }
+                    continue;
+                }
             };
             let mut loaded_target = false;
             let mut target_needs_relayout = false;
             let mut paint_rect = None;
-            if let Some(node) = find_node_by_path_mut(&mut self.root, &path) {
+            if let Some(node) = if node_id != 0 {
+                self.find_webcore_mut(node_id)
+            } else {
+                find_node_by_path_mut(&mut self.root, &path)
+            } {
                 paint_rect = Some(node.layout.border_rect);
                 match target {
-                    PendingImageTarget::Element => {
+                    PendingImageTarget::Element | PendingImageTarget::ElementFallback => {
+                        if matches!(target, PendingImageTarget::ElementFallback)
+                            && node.image_data.is_some()
+                        {
+                            continue;
+                        }
                         let old_size = (node.image_width, node.image_height);
                         let intrinsic_size_controls_layout =
                             node.style.width.is_auto() || node.style.height.is_auto();
@@ -272,17 +327,17 @@ impl Document {
                 poll.loaded_any = true;
             }
             processed += 1;
-            if processed >= max_images || start.elapsed() >= max_time {
+            if processed >= max_images || (time_limited && start.elapsed() >= max_time) {
                 break;
             }
         }
-        if queue_drained
-            && self
+        if !queue_drained
+            || self
                 .images_in_flight
                 .load(std::sync::atomic::Ordering::SeqCst)
-                == 0
+                != 0
         {
-            self.pending_images = None;
+            self.pending_images = Some(rx);
         }
         poll
     }
@@ -848,6 +903,12 @@ mod tests {
         sheet
     }
 
+    fn stylesheet_with_color(selector: &str, color: &str) -> crate::css::Stylesheet {
+        let mut sheet = crate::css::Stylesheet::default();
+        sheet.parse_and_add_author(&format!("{selector} {{ color: {color} }}"));
+        sheet
+    }
+
     #[test]
     fn pending_stylesheet_poll_respects_the_document_order_budget() {
         let mut doc = Document::new();
@@ -878,6 +939,127 @@ mod tests {
 
         assert!(doc.poll_pending_stylesheets_budgeted(1, std::time::Duration::from_secs(1)));
         assert_eq!(doc.loaded_linked_stylesheets.len(), 2);
+    }
+
+    #[test]
+    fn pending_stylesheet_poll_preserves_document_order_not_arrival_order() {
+        let mut doc = Document::new();
+        doc.preserve_stylesheet_document_order = true;
+        doc.stylesheet = crate::css::ua_stylesheet();
+        doc.base_url = "https://example.test/page/".to_string();
+        doc.document_stylesheets
+            .push(crate::types::DocumentStylesheet::Inline {
+                css: ".target { color: rgb(10, 0, 0) }".to_string(),
+            });
+        doc.document_stylesheets
+            .push(crate::types::DocumentStylesheet::Linked {
+                href: "https://example.test/slow.css".to_string(),
+                media: String::new(),
+            });
+        doc.document_stylesheets
+            .push(crate::types::DocumentStylesheet::Inline {
+                css: ".target { color: rgb(20, 0, 0) }".to_string(),
+            });
+        doc.document_stylesheets
+            .push(crate::types::DocumentStylesheet::Linked {
+                href: "https://example.test/fast.css".to_string(),
+                media: String::new(),
+            });
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send((
+            3,
+            "https://example.test/fast.css".to_string(),
+            stylesheet_with_color(".target", "rgb(40, 0, 0)"),
+            String::new(),
+        ))
+        .unwrap();
+        tx.send((
+            1,
+            "https://example.test/slow.css".to_string(),
+            stylesheet_with_color(".target", "rgb(30, 0, 0)"),
+            String::new(),
+        ))
+        .unwrap();
+        doc.pending_stylesheets = Some(rx);
+
+        assert!(doc.poll_pending_stylesheets_budgeted(8, std::time::Duration::from_secs(1)));
+
+        let target_rules: Vec<_> = doc
+            .stylesheet
+            .rules
+            .iter()
+            .filter(|rule| rule.original_selector == ".target")
+            .collect();
+        assert_eq!(target_rules.len(), 4);
+        let reds: Vec<_> = target_rules
+            .iter()
+            .map(|rule| {
+                rule.declarations
+                    .iter()
+                    .find(|decl| decl.0 == "color")
+                    .map(|decl| decl.1.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            reds,
+            vec![
+                "rgb(10, 0, 0)",
+                "rgb(30, 0, 0)",
+                "rgb(20, 0, 0)",
+                "rgb(40, 0, 0)"
+            ],
+            "parallel stylesheet completion must fill source-order slots"
+        );
+    }
+
+    #[test]
+    fn pending_stylesheet_poll_preserves_repeated_href_slots() {
+        let mut doc = Document::new();
+        doc.preserve_stylesheet_document_order = true;
+        doc.stylesheet = crate::css::ua_stylesheet();
+        doc.base_url = "https://example.test/".to_string();
+        for _ in 0..2 {
+            doc.document_stylesheets
+                .push(crate::types::DocumentStylesheet::Linked {
+                    href: "https://example.test/app.css".to_string(),
+                    media: String::new(),
+                });
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send((
+            1,
+            "https://example.test/app.css".to_string(),
+            stylesheet_with_color(".target", "rgb(20, 0, 0)"),
+            String::new(),
+        ))
+        .unwrap();
+        tx.send((
+            0,
+            "https://example.test/app.css".to_string(),
+            stylesheet_with_color(".target", "rgb(10, 0, 0)"),
+            String::new(),
+        ))
+        .unwrap();
+        doc.pending_stylesheets = Some(rx);
+
+        assert!(doc.poll_pending_stylesheets_budgeted(8, std::time::Duration::from_secs(1)));
+        let reds: Vec<_> = doc
+            .stylesheet
+            .rules
+            .iter()
+            .filter(|rule| rule.original_selector == ".target")
+            .filter_map(|rule| {
+                rule.declarations
+                    .iter()
+                    .find(|decl| decl.0 == "color")
+                    .map(|decl| decl.1.as_str())
+            })
+            .collect();
+        assert_eq!(reds, vec!["rgb(10, 0, 0)", "rgb(20, 0, 0)"]);
     }
 
     #[test]
@@ -945,8 +1127,14 @@ mod tests {
             crate::html::DecodedImage::Raster(std::sync::Arc::new(vec![255, 0, 0, 255]), 1, 1);
         let (tx, rx) = std::sync::mpsc::channel();
         for i in 0..3 {
-            tx.send((vec![i], PendingImageTarget::Element, decoded.clone()))
-                .unwrap();
+            tx.send(PendingImageResult::Loaded {
+                node_id: 0,
+                path: vec![i],
+                target: PendingImageTarget::Element,
+                url: format!("memory:{i}"),
+                decoded: decoded.clone(),
+            })
+            .unwrap();
         }
         doc.pending_images = Some(rx);
 

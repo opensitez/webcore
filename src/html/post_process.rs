@@ -79,6 +79,41 @@ pub(crate) fn parse_srcset_url_for(
         .map(|c| c.url.clone())
 }
 
+pub(crate) fn image_fallback_source(node: &WebCore) -> Option<&str> {
+    [
+        "src",
+        "data-src",
+        "data-lazy-src",
+        "data-original",
+        "data-original-src",
+        "data-hi-res-src",
+    ]
+    .iter()
+    .find_map(|name| {
+        node.attributes
+            .get(*name)
+            .map(String::as_str)
+            .filter(|value| !value.trim().is_empty())
+    })
+}
+
+pub(crate) fn image_srcset_source(node: &WebCore) -> Option<&str> {
+    [
+        "srcset",
+        "data-srcset",
+        "data-lazy-srcset",
+        "data-original-srcset",
+        "data-hi-res-srcset",
+    ]
+    .iter()
+    .find_map(|name| {
+        node.attributes
+            .get(*name)
+            .map(String::as_str)
+            .filter(|value| !value.trim().is_empty())
+    })
+}
+
 #[derive(Debug)]
 struct SrcsetCandidate {
     url: String,
@@ -256,8 +291,9 @@ pub(crate) fn resolve_picture_source(
                 continue;
             }
         }
-        // Extract URL from srcset
-        if let Some(srcset) = child.attributes.get("srcset") {
+        // Extract URL from srcset. Lazy-loading libraries often stash the
+        // same candidate list in data-*srcset until script promotes it.
+        if let Some(srcset) = image_srcset_source(child) {
             let sizes = child
                 .attributes
                 .get("sizes")
@@ -357,15 +393,15 @@ pub fn resolve_picture_elements(node: &mut WebCore, base_url: &str, vw: f32, vh:
 }
 
 fn resolve_img_source(node: &mut WebCore, base_url: &str, vw: f32, vh: f32) {
-    if let Some(srcset) = node.attributes.get("srcset") {
+    if let Some(srcset) = image_srcset_source(node) {
         let sizes = node.attributes.get("sizes").map(|s| s.as_str());
         if let Some(best) = parse_srcset_url_for(srcset, sizes, vw, vh, 1.0) {
             apply_resolved_image_source(node, &best, base_url, None);
             return;
         }
     }
-    if let Some(src) = node.attributes.get("src") {
-        let src = src.clone();
+    if let Some(src) = image_fallback_source(node) {
+        let src = src.to_string();
         apply_resolved_image_source(node, &src, base_url, None);
     }
 }

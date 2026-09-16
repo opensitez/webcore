@@ -484,7 +484,15 @@ fn interpolate_value_at_one() {
 #[test]
 fn interpolate_transform_keeps_fractional_angles() {
     let result = interpolate_value("rotate(0deg)", "rotate(360deg)", 0.016);
-    assert_eq!(result, "rotate(5.7600deg)");
+    let angle = result
+        .strip_prefix("rotate(")
+        .and_then(|s| s.strip_suffix("deg)"))
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(f32::NAN);
+    assert!(
+        (angle - 5.76).abs() < 0.001,
+        "expected rotate(5.76deg), got {result}"
+    );
 }
 
 #[test]
@@ -888,6 +896,15 @@ fn sync_animations_starts_state() {
 }
 
 #[test]
+fn sync_animations_ignores_missing_keyframes() {
+    let doc = doc_with_animation("animation: missing-keyframes 60s linear infinite;");
+    assert!(
+        doc.active_animations.is_empty(),
+        "animation-name without a matching @keyframes block should not create a running animation"
+    );
+}
+
+#[test]
 fn sync_animations_dispatches_animationstart_when_animation_is_created() {
     let html = r#"<html><head><style>
         @keyframes spin {
@@ -1081,7 +1098,7 @@ fn ticker_transform_animation_stays_running_across_cycles() {
 }
 
 #[test]
-fn infinite_animation_samples_completed_iteration_at_repeat_boundary() {
+fn infinite_animation_wraps_at_repeat_boundary_without_dwell() {
     let mut doc = doc_with_animation("animation: fade 1s linear infinite;");
     let id = doc.active_animations[0].element_id;
     let start = doc.active_animations[0].start_time;
@@ -1095,8 +1112,8 @@ fn infinite_animation_samples_completed_iteration_at_repeat_boundary() {
         .and_then(|(_, value)| value.parse::<f32>().ok())
         .expect("opacity override at repeat boundary");
     assert!(
-        opacity > 0.95,
-        "repeat boundary should sample the completed iteration, got {opacity}"
+        opacity < 0.05,
+        "infinite repeat boundary should continue into the next iteration, got {opacity}"
     );
     assert!(doc.needs_animation_frame);
 }
@@ -1359,10 +1376,18 @@ fn layout_applies_animation_override_to_style() {
     engine.layout(&mut doc, 800.0);
 
     // Animation just started, so at t~=0 opacity should be ~0 (from keyframe).
+    // Layout keeps the cascaded style stable and exposes the sampled frame
+    // through animation_overrides; renderer applies those overrides while
+    // building paint commands.
     let b = find_box(&doc.root, &|b: &WebCore| b.tag == "div");
     assert!(b.is_some(), "div should exist");
-    // The opacity should be close to 0 (start of fade-in) rather than 1 (stylesheet).
-    let opacity = b.unwrap().style.opacity;
+    let node_id = b.unwrap().node_id;
+    let opacity = doc
+        .animation_overrides
+        .get(&node_id)
+        .and_then(|props| props.iter().find(|(name, _)| name == "opacity"))
+        .and_then(|(_, value)| value.parse::<f32>().ok())
+        .unwrap_or(1.0);
     assert!(
         opacity < 0.2,
         "opacity at animation start should be ~0, got {}",

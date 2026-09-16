@@ -113,6 +113,21 @@ fn img_srcset_current_source_is_resolved_with_viewport_without_mutating_src() {
 }
 
 #[test]
+fn img_lazy_data_src_is_normalized_as_fallback_source() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html_with_base(
+        r#"<img id="post" loading="lazy" data-src="post.webp" width="320" height="180">"#,
+        "https://example.test/news/index.html",
+        1200.0,
+        800.0,
+    );
+    let img = doc.get_element_by_id("post").unwrap();
+    let img = doc.find_webcore(img).unwrap();
+    assert_eq!(img.resolved_src, "https://example.test/news/post.webp");
+    assert_eq!((img.image_width, img.image_height), (320, 180));
+}
+
+#[test]
 fn picture_accepts_webp_source_and_skips_unsupported_image_types() {
     let mut renderer = crate::Renderer::new();
     let doc = renderer.load_html_with_base(
@@ -3107,8 +3122,14 @@ fn async_animated_image_install_marks_intrinsic_layout_dirty() {
     doc.root.children[0].has_dirty_layout_descendant = false;
 
     let (tx, rx) = std::sync::mpsc::channel();
-    tx.send((vec![0], crate::types::PendingImageTarget::Element, decoded))
-        .unwrap();
+    tx.send(crate::types::PendingImageResult::Loaded {
+        node_id: 0,
+        path: vec![0],
+        target: crate::types::PendingImageTarget::Element,
+        url: "memory:animated-gif".to_string(),
+        decoded,
+    })
+    .unwrap();
     doc.pending_images = Some(rx);
 
     assert!(doc.poll_pending_images());

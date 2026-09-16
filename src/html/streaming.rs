@@ -102,6 +102,8 @@ pub struct StreamingParser {
     in_style: bool,
     /// Accumulated style content.
     style_buffer: String,
+    /// Whether we're inside a <script> raw-text element.
+    in_script: bool,
 }
 
 impl StreamingParser {
@@ -121,6 +123,7 @@ impl StreamingParser {
             in_title: false,
             in_style: false,
             style_buffer: String::new(),
+            in_script: false,
         }
     }
 
@@ -154,7 +157,7 @@ impl StreamingParser {
             if !text.trim().is_empty() {
                 mutations.push(DomMutation::AppendText {
                     parent_path: self.current_parent_path(),
-                    text,
+                    text: crate::html::decode_entities(&text),
                 });
                 self.bump_child_count();
             }
@@ -220,9 +223,44 @@ impl StreamingParser {
                 }
             }
 
+            if self.in_script {
+                if let Some(end) = buf.to_lowercase().find("</script>") {
+                    let text = &buf[..end];
+                    if !text.is_empty() {
+                        mutations.push(DomMutation::AppendText {
+                            parent_path: self.current_parent_path(),
+                            text: text.to_string(),
+                        });
+                        self.bump_child_count();
+                    }
+                    self.in_script = false;
+                    if self
+                        .stack
+                        .last()
+                        .is_some_and(|open| open.tag.eq_ignore_ascii_case("script"))
+                    {
+                        self.stack.pop();
+                    }
+                    mutations.push(DomMutation::CloseElement);
+                    self.buffer = buf[end + 9..].to_string();
+                    continue;
+                } else {
+                    let text = std::mem::take(&mut self.buffer);
+                    if !text.is_empty() {
+                        mutations.push(DomMutation::AppendText {
+                            parent_path: self.current_parent_path(),
+                            text,
+                        });
+                        self.bump_child_count();
+                    }
+                    break;
+                }
+            }
+
             if self.in_title {
                 if let Some(end) = buf.to_lowercase().find("</title>") {
-                    self.title.push_str(&buf[..end]);
+                    self.title
+                        .push_str(&crate::html::decode_entities(&buf[..end]));
                     mutations.push(DomMutation::TitleChanged {
                         title: self.title.clone(),
                     });
@@ -230,7 +268,7 @@ impl StreamingParser {
                     self.buffer = buf[end + 8..].to_string();
                     continue;
                 } else {
-                    self.title.push_str(&buf);
+                    self.title.push_str(&crate::html::decode_entities(&buf));
                     self.buffer.clear();
                     break;
                 }
@@ -311,6 +349,9 @@ impl StreamingParser {
                                 path: element_path,
                                 child_count: 0,
                             });
+                            if self.stack.last().is_some_and(|open| open.tag == "script") {
+                                self.in_script = true;
+                            }
                         }
                     }
                 } else {
@@ -325,7 +366,7 @@ impl StreamingParser {
                 if !text.is_empty() {
                     mutations.push(DomMutation::AppendText {
                         parent_path: self.current_parent_path(),
-                        text: text.to_string(),
+                        text: crate::html::decode_entities(text),
                     });
                     self.bump_child_count();
                 }
@@ -572,7 +613,7 @@ fn parse_tag_quick(content: &str) -> (String, HashMap<String, String>) {
                         .map(|i| i + 1)
                         .unwrap_or(remaining.len());
                     let value = &remaining[1..end];
-                    attrs.insert(name, value.to_string());
+                    attrs.insert(name, crate::html::decode_entities_attr(value));
                     remaining = if end + 1 < remaining.len() {
                         &remaining[end + 1..]
                     } else {
@@ -584,7 +625,7 @@ fn parse_tag_quick(content: &str) -> (String, HashMap<String, String>) {
                         .map(|i| i + 1)
                         .unwrap_or(remaining.len());
                     let value = &remaining[1..end];
-                    attrs.insert(name, value.to_string());
+                    attrs.insert(name, crate::html::decode_entities_attr(value));
                     remaining = if end + 1 < remaining.len() {
                         &remaining[end + 1..]
                     } else {
@@ -595,7 +636,7 @@ fn parse_tag_quick(content: &str) -> (String, HashMap<String, String>) {
                         .find(|c: char| c.is_ascii_whitespace())
                         .unwrap_or(remaining.len());
                     let value = &remaining[..end];
-                    attrs.insert(name, value.to_string());
+                    attrs.insert(name, crate::html::decode_entities_attr(value));
                     remaining = &remaining[end..];
                 }
             } else {
@@ -696,6 +737,52 @@ mod tests {
             mutations.iter().any(
                 |m| matches!(m, DomMutation::AddStylesheet { css, .. } if css.contains("red"))
             )
+        );
+    }
+
+    #[test]
+    fn streaming_script_raw_text_does_not_parse_fake_tags_before_body() {
+        let mut parser = StreamingParser::new("");
+        let mutations = parser.feed_str(
+            r#"<html><head><script>if (x < y) { document.write("<body>bad</body>"); }</script></head><body><main>Real</main></body></html>"#,
+        );
+        assert!(
+            mutations
+                .iter()
+                .any(|m| matches!(m, DomMutation::InsertElement { tag, parent_path, .. } if tag == "body" && parent_path.is_empty())),
+            "the real body must remain a root child instead of being nested under script text"
+        );
+        assert!(
+            mutations
+                .iter()
+                .any(|m| matches!(m, DomMutation::InsertElement { tag, .. } if tag == "main")),
+            "content after a script raw-text block should continue parsing normally"
+        );
+    }
+
+    #[test]
+    fn streaming_decodes_text_title_and_attribute_entities() {
+        let mut parser = StreamingParser::new("");
+        let mutations = parser
+            .feed_str(r#"<title>A&#39;B</title><p title="C&#39;D">Tom &amp; Jerry &#x1F642;</p>"#);
+        assert!(
+            mutations
+                .iter()
+                .any(|m| matches!(m, DomMutation::TitleChanged { title } if title == "A'B")),
+            "streaming title text should decode numeric entities"
+        );
+        assert!(mutations.iter().any(|m| {
+            matches!(
+                m,
+                DomMutation::InsertElement { attributes, .. }
+                    if attributes.get("title").is_some_and(|v| v == "C'D")
+            )
+        }));
+        assert!(
+            mutations.iter().any(
+                |m| matches!(m, DomMutation::AppendText { text, .. } if text == "Tom & Jerry 🙂")
+            ),
+            "streaming visible text should use the same entity decoder as the full tokenizer"
         );
     }
 

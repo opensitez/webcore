@@ -2698,7 +2698,7 @@ fn break_one_line(
     start_idx: usize,
     avail_w: f32,
 ) -> (usize, usize, usize, bool) {
-    const LINE_BREAK_EPSILON: f32 = 0.5;
+    const LINE_BREAK_EPSILON: f32 = 2.0;
     // Skip leading spaces
     let mut i = start_idx;
     while i < items.len() && items[i].is_space {
@@ -2735,6 +2735,21 @@ fn break_one_line(
 
         let new_w = cur_w + item.advance;
         if new_w > avail_w + LINE_BREAK_EPSILON && i > line_start {
+            if let Some(bp) = last_bp {
+                let gap_w = items
+                    .get(bp)
+                    .filter(|it| it.is_space)
+                    .map_or(0.0, |it| it.advance);
+                let atomic_gap = gap_w > 0.0
+                    && bp > line_start
+                    && matches!(items[bp - 1].kind, InlineItemKind::Atomic { .. })
+                    && matches!(item.kind, InlineItemKind::Atomic { .. });
+                if atomic_gap && new_w - gap_w <= avail_w + LINE_BREAK_EPSILON {
+                    cur_w = new_w;
+                    i += 1;
+                    continue;
+                }
+            }
             if let Some(bp) = last_bp {
                 // Trim trailing spaces from line
                 let mut line_end = bp;

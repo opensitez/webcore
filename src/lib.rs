@@ -45,7 +45,7 @@ static DECODED_IMAGE_CACHE: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 struct ImageDecodeState {
-    result: std::sync::Mutex<Option<Option<html::DecodedImage>>>,
+    result: std::sync::Mutex<Option<Result<html::DecodedImage, String>>>,
     done: std::sync::Condvar,
 }
 
@@ -64,7 +64,7 @@ pub(crate) fn spawn_css_resource_task(task: impl FnOnce() + Send + 'static) {
     CSS_RESOURCE_POOL.spawn(task);
 }
 
-fn spawn_image_resource_task(task: impl FnOnce() + Send + 'static) {
+pub(crate) fn spawn_image_resource_task(task: impl FnOnce() + Send + 'static) {
     IMAGE_RESOURCE_POOL.spawn(task);
 }
 
@@ -72,16 +72,52 @@ pub(crate) fn spawn_font_resource_task(task: impl FnOnce() + Send + 'static) {
     FONT_RESOURCE_POOL.spawn(task);
 }
 
-fn cached_decoded_image(
+pub(crate) fn cached_parsed_stylesheet(cache_key: &str) -> Option<css::Stylesheet> {
+    PARSED_CSS_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(cache_key).map(|sheet| (**sheet).clone()))
+}
+
+pub(crate) fn cached_decoded_image(
     url: &str,
     loader: Option<&(dyn Fn(&str) -> Option<html::DecodedImage> + Send + Sync + 'static)>,
 ) -> Option<html::DecodedImage> {
+    cached_decoded_image_result_from_option_loader(url, loader).ok()
+}
+
+pub(crate) fn cached_decoded_image_result(
+    url: &str,
+    loader: Option<&(dyn Fn(&str) -> Result<html::DecodedImage, String> + Send + Sync + 'static)>,
+) -> Result<html::DecodedImage, String> {
+    cached_decoded_image_result_inner(url, loader)
+}
+
+fn cached_decoded_image_result_from_option_loader(
+    url: &str,
+    loader: Option<&(dyn Fn(&str) -> Option<html::DecodedImage> + Send + Sync + 'static)>,
+) -> Result<html::DecodedImage, String> {
+    let wrapped = loader.map(|loader| {
+        move |src: &str| loader(src).ok_or_else(|| format!("fetch or decode failed for {src}"))
+    });
+    cached_decoded_image_result_inner(
+        url,
+        wrapped.as_ref().map(|loader| {
+            loader as &(dyn Fn(&str) -> Result<html::DecodedImage, String> + Send + Sync)
+        }),
+    )
+}
+
+fn cached_decoded_image_result_inner(
+    url: &str,
+    loader: Option<&(dyn Fn(&str) -> Result<html::DecodedImage, String> + Send + Sync)>,
+) -> Result<html::DecodedImage, String> {
     if let Some(decoded) = DECODED_IMAGE_CACHE
         .lock()
         .ok()
         .and_then(|cache| cache.get(url).cloned())
     {
-        return Some(decoded);
+        return Ok(decoded);
     }
     let (decode_state, owns_decode) = {
         let mut in_flight = DECODED_IMAGE_IN_FLIGHT
@@ -109,13 +145,19 @@ fn cached_decoded_image(
                 .wait(guard)
                 .expect("decoded image result poisoned");
         }
-        return guard.as_ref().and_then(|decoded| decoded.clone());
+        return guard
+            .as_ref()
+            .expect("decoded image result set")
+            .as_ref()
+            .cloned()
+            .map_err(Clone::clone);
     }
     let decoded = match loader {
         Some(loader) => loader(url),
-        None => html::load_decoded_image_from_src(url, ""),
+        None => html::load_decoded_image_from_src(url, "")
+            .ok_or_else(|| format!("fetch or decode failed for {url}")),
     };
-    if let Some(decoded) = decoded.as_ref()
+    if let Ok(decoded) = decoded.as_ref()
         && let Ok(mut cache) = DECODED_IMAGE_CACHE.lock()
     {
         if cache.len() > 512 {
@@ -137,6 +179,13 @@ fn cached_decoded_image(
     decoded
 }
 
+fn cached_decoded_image_ready(url: &str) -> Option<html::DecodedImage> {
+    DECODED_IMAGE_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(url).cloned())
+}
+
 fn stream_stylesheet_fragments(
     css_text: &str,
     css_url: &str,
@@ -144,19 +193,36 @@ fn stream_stylesheet_fragments(
     mut emit: impl FnMut(css::Stylesheet),
 ) -> usize {
     let mut emitted = 0;
-    for chunk in complete_css_units(css_text) {
+    let mut batch = String::new();
+    let mut batch_units = 0usize;
+    const MAX_BATCH_BYTES: usize = 64 * 1024;
+    const MAX_BATCH_UNITS: usize = 96;
+    let mut flush = |batch: &mut String, batch_units: &mut usize, emitted: &mut usize| {
+        if batch.trim().is_empty() {
+            batch.clear();
+            *batch_units = 0;
+            return;
+        }
         let mut sheet = css::Stylesheet::default();
-        sheet.parse_and_add_with_base_media(chunk, css_url, media);
-        if !sheet.rules.is_empty()
-            || !sheet.font_faces.is_empty()
-            || !sheet.keyframes.is_empty()
-            || !sheet.page_rules.is_empty()
-            || !sheet.counter_styles.is_empty()
-        {
-            emitted += 1;
+        sheet.parse_and_add_with_base_media(batch, css_url, media);
+        if stylesheet_has_content(&sheet) {
+            *emitted += 1;
             emit(sheet);
         }
+        batch.clear();
+        *batch_units = 0;
+    };
+    for chunk in complete_css_units(css_text) {
+        if !batch.is_empty() {
+            batch.push('\n');
+        }
+        batch.push_str(chunk);
+        batch_units += 1;
+        if batch.len() >= MAX_BATCH_BYTES || batch_units >= MAX_BATCH_UNITS {
+            flush(&mut batch, &mut batch_units, &mut emitted);
+        }
     }
+    flush(&mut batch, &mut batch_units, &mut emitted);
     emitted
 }
 
@@ -361,7 +427,6 @@ pub type StreamingStylesheetLoader = std::sync::Arc<
 >;
 pub type ImageLoader =
     std::sync::Arc<dyn Fn(&str) -> Option<html::DecodedImage> + Send + Sync + 'static>;
-
 pub(crate) struct CachedStylesheetLoad {
     pub sheet: css::Stylesheet,
     pub text_len: usize,
@@ -380,44 +445,54 @@ pub(crate) fn load_stylesheet_cached<F>(
 where
     F: FnMut(css::Stylesheet),
 {
+    let progressive_stream = streaming_loader.is_some();
     if cache_parsed
         && let Some(sheet) = PARSED_CSS_CACHE
             .lock()
             .ok()
             .and_then(|cache| cache.get(&cache_key).cloned())
     {
-        return CachedStylesheetLoad {
-            sheet: (*sheet).clone(),
-            text_len: 0,
-            emitted_fragments: 0,
-        };
+        if stylesheet_has_content(&sheet) {
+            return CachedStylesheetLoad {
+                sheet: (*sheet).clone(),
+                text_len: 0,
+                emitted_fragments: 0,
+            };
+        }
     }
 
-    let parse_state = if cache_parsed {
-        let mut in_flight = CSS_PARSE_IN_FLIGHT
+    let parse_state = if cache_parsed && !progressive_stream {
+        let existing = CSS_PARSE_IN_FLIGHT
             .lock()
-            .expect("CSS parse in-flight cache poisoned");
-        if let Some(state) = in_flight.get(&cache_key) {
-            let state = state.clone();
-            drop(in_flight);
+            .expect("CSS parse in-flight cache poisoned")
+            .get(&cache_key)
+            .cloned();
+        if let Some(state) = existing {
             let mut guard = state.result.lock().expect("CSS parse result poisoned");
             while guard.is_none() {
                 guard = state.done.wait(guard).expect("CSS parse result poisoned");
             }
-            return CachedStylesheetLoad {
-                sheet: guard
-                    .as_ref()
-                    .map(|sheet| (**sheet).clone())
-                    .unwrap_or_default(),
-                text_len: 0,
-                emitted_fragments: 0,
-            };
+            if let Some(sheet) = guard.as_ref()
+                && stylesheet_has_content(sheet)
+            {
+                return CachedStylesheetLoad {
+                    sheet: (**sheet).clone(),
+                    text_len: 0,
+                    emitted_fragments: 0,
+                };
+            }
+            if let Ok(mut in_flight) = CSS_PARSE_IN_FLIGHT.lock() {
+                in_flight.remove(&cache_key);
+            }
         }
         let state = std::sync::Arc::new(CssParseState {
             result: std::sync::Mutex::new(None),
             done: std::sync::Condvar::new(),
         });
-        in_flight.insert(cache_key.clone(), state.clone());
+        CSS_PARSE_IN_FLIGHT
+            .lock()
+            .expect("CSS parse in-flight cache poisoned")
+            .insert(cache_key.clone(), state.clone());
         Some(state)
     } else {
         None
@@ -428,7 +503,7 @@ where
     let mut emitted = 0usize;
     if let Some(streaming_loader) = streaming_loader {
         let mut buffer = String::new();
-        let _ = streaming_loader(&css_url, &mut |chunk| {
+        let streaming_result = streaming_loader(&css_url, &mut |chunk| {
             text_len += chunk.len();
             buffer.push_str(chunk);
             if let Some(complete_css) = drain_complete_css_text(&mut buffer) {
@@ -445,6 +520,23 @@ where
                 }
             }
         });
+        if streaming_result.is_err() || text_len == 0 {
+            match loader(&css_url) {
+                Ok(text) => {
+                    text_len = text.len();
+                    emitted = stream_stylesheet_fragments(&text, &css_url, &media, |fragment| {
+                        combined.append_fragment(fragment.clone());
+                        emit_fragment(fragment);
+                    });
+                    if emitted == 0 && !text.trim().is_empty() {
+                        combined.parse_and_add_with_base_media(&text, &css_url, &media);
+                    }
+                }
+                Err(err) => {
+                    eprintln!("  CSS failed: {css_url} ({err})");
+                }
+            }
+        }
         let tail = std::mem::take(&mut buffer);
         if !tail.trim().is_empty() {
             let mut fragment = crate::css::Stylesheet::default();
@@ -471,7 +563,10 @@ where
         }
     }
 
-    if cache_parsed && let Ok(mut cache) = PARSED_CSS_CACHE.lock() {
+    if cache_parsed
+        && stylesheet_has_content(&combined)
+        && let Ok(mut cache) = PARSED_CSS_CACHE.lock()
+    {
         if cache.len() > 512 {
             cache.clear();
         }
@@ -688,6 +783,38 @@ pub fn load_html_reusing_with_resource_loaders_and_wait(
     load_images: bool,
     css_wait: std::time::Duration,
 ) -> Document {
+    load_html_reusing_with_resource_loaders_and_wait_mode(
+        html,
+        base_url,
+        viewport_width,
+        viewport_height,
+        registry,
+        reuse,
+        stylesheet_loader,
+        streaming_stylesheet_loader,
+        image_loader,
+        load_images,
+        true,
+        true,
+        css_wait,
+    )
+}
+
+pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
+    html: &str,
+    base_url: &str,
+    viewport_width: f32,
+    viewport_height: f32,
+    registry: types::ComponentRegistry,
+    reuse: Option<&mut Renderer>,
+    stylesheet_loader: Option<StylesheetLoader>,
+    streaming_stylesheet_loader: Option<StreamingStylesheetLoader>,
+    image_loader: Option<ImageLoader>,
+    load_images: bool,
+    load_external_stylesheets: bool,
+    use_cached_external_stylesheets: bool,
+    css_wait: std::time::Duration,
+) -> Document {
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -713,6 +840,7 @@ pub fn load_html_reusing_with_resource_loaders_and_wait(
                     .map(|s| s.eq_ignore_ascii_case("stylesheet"))
                     .unwrap_or(false)
                 && !attrs.contains_key("disabled")
+                && load_external_stylesheets
             {
                 if let Some(href) = attrs.get("href") {
                     let abs = resolve_css_url(&base_owned, href);
@@ -788,7 +916,17 @@ pub fn load_html_reusing_with_resource_loaders_and_wait(
     if !doc.document_stylesheets.is_empty() {
         let mut fetched_map: std::collections::HashMap<String, crate::css::Stylesheet> =
             std::collections::HashMap::new();
-        for (_, css_url, sheet, _) in css_results {
+        let mut fetched_slots: std::collections::HashMap<usize, crate::css::Stylesheet> =
+            std::collections::HashMap::new();
+        for (idx, css_url, sheet, _) in css_results {
+            match fetched_slots.entry(idx) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().append_fragment(sheet.clone());
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(sheet.clone());
+                }
+            }
             match fetched_map.entry(css_url) {
                 std::collections::hash_map::Entry::Occupied(mut entry) => {
                     entry.get_mut().append_fragment(sheet);
@@ -798,20 +936,36 @@ pub fn load_html_reusing_with_resource_loaders_and_wait(
                 }
             }
         }
+        if use_cached_external_stylesheets {
+            for (idx, ds) in doc.document_stylesheets.iter().enumerate() {
+                if let crate::types::DocumentStylesheet::Linked { href, media } = ds {
+                    let abs = resolve_css_url(base_url, href);
+                    if fetched_slots.contains_key(&idx) {
+                        continue;
+                    }
+                    let cache_key = format!("{abs}\n{media}");
+                    if let Some(sheet) = cached_parsed_stylesheet(&cache_key) {
+                        fetched_slots.insert(idx, sheet.clone());
+                        fetched_map.insert(abs, sheet);
+                    }
+                }
+            }
+        }
         doc.stylesheet = crate::css::ua_stylesheet();
-        for ds in &doc.document_stylesheets {
+        for (idx, ds) in doc.document_stylesheets.iter().enumerate() {
             match ds {
                 crate::types::DocumentStylesheet::Inline { css } => {
                     doc.stylesheet.parse_and_add_with_base(css, &doc.base_url);
                 }
                 crate::types::DocumentStylesheet::Linked { href, .. } => {
                     let abs = resolve_css_url(base_url, href);
-                    if let Some(sheet) = fetched_map.get(&abs) {
+                    if let Some(sheet) = fetched_slots.get(&idx).or_else(|| fetched_map.get(&abs)) {
                         doc.stylesheet.append_fragment(sheet.clone());
                     }
                 }
             }
         }
+        doc.loaded_stylesheet_slots = fetched_slots;
         doc.loaded_linked_stylesheets = fetched_map;
     } else {
         css_results.sort_by_key(|(idx, _, _, _)| *idx);
@@ -868,6 +1022,8 @@ pub fn load_html_reusing_with_resource_loaders_and_wait(
 
     if load_images {
         start_async_image_fetches_with_loader(&mut doc, image_loader);
+    } else {
+        apply_ready_cached_images(&mut doc);
     }
     // Fire DOMContentLoaded — listeners registered before load_html can react.
     let mut evt = dom::HtmlEvent::new(dom::HtmlEventType::DOMContentLoaded);
@@ -895,8 +1051,15 @@ fn start_async_image_fetches_with_loader(
         std::sync::Arc<dyn Fn(&str) -> Option<html::DecodedImage> + Send + Sync + 'static>,
     >,
 ) {
-    let mut pending: Vec<(Vec<usize>, types::PendingImageTarget, String)> = Vec::new();
-    collect_remote_images(&doc.root, &doc.base_url, &mut Vec::new(), &mut pending);
+    let mut pending: Vec<(u32, Vec<usize>, types::PendingImageTarget, String)> = Vec::new();
+    collect_remote_images(
+        &doc.root,
+        &doc.base_url,
+        doc.viewport_w,
+        doc.viewport_h,
+        &mut Vec::new(),
+        &mut pending,
+    );
     if pending.is_empty() {
         return;
     }
@@ -905,50 +1068,130 @@ fn start_async_image_fetches_with_loader(
     let in_flight = doc.images_in_flight.clone();
     in_flight.store(pending.len(), std::sync::atomic::Ordering::SeqCst);
 
-    for (path, target, url) in pending {
+    for (node_id, path, target, url) in pending {
         let sender = tx.clone();
         let counter = in_flight.clone();
         let loader = loader.clone();
         spawn_image_resource_task(move || {
-            let result = cached_decoded_image(&url, loader.as_deref());
-            if let Some(decoded) = result {
-                let _ = sender.send((path, target, decoded));
-            }
+            let result = cached_decoded_image_result_from_option_loader(&url, loader.as_deref());
+            let event = match result {
+                Ok(decoded) => types::PendingImageResult::Loaded {
+                    node_id,
+                    path,
+                    target,
+                    url,
+                    decoded,
+                },
+                Err(error) => types::PendingImageResult::Failed {
+                    node_id,
+                    path,
+                    target,
+                    url,
+                    error,
+                },
+            };
+            let _ = sender.send(event);
             counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         });
     }
     doc.pending_images = Some(rx);
 }
 
+fn apply_ready_cached_images(doc: &mut types::Document) {
+    let mut pending: Vec<(u32, Vec<usize>, types::PendingImageTarget, String)> = Vec::new();
+    collect_remote_images(
+        &doc.root,
+        &doc.base_url,
+        doc.viewport_w,
+        doc.viewport_h,
+        &mut Vec::new(),
+        &mut pending,
+    );
+    for (node_id, path, target, url) in pending {
+        let Some(decoded) = cached_decoded_image_ready(&url) else {
+            continue;
+        };
+        if let Some(node) = if node_id != 0 {
+            doc.find_webcore_mut(node_id)
+        } else {
+            types::find_node_by_path_mut(&mut doc.root, &path)
+        } {
+            match target {
+                types::PendingImageTarget::Element | types::PendingImageTarget::ElementFallback => {
+                    if matches!(target, types::PendingImageTarget::ElementFallback)
+                        && node.image_data.is_some()
+                    {
+                        continue;
+                    }
+                    html::set_decoded_image_on_node(node, decoded);
+                }
+                types::PendingImageTarget::Background => {
+                    let _ = html::set_decoded_bg_image_on_node(node, decoded);
+                }
+                types::PendingImageTarget::Mask => {
+                    if let Some((data, w, h)) = html::decoded_image_pixels(decoded) {
+                        node.mask_image_data = Some(std::sync::Arc::new(data));
+                        node.mask_image_width = w;
+                        node.mask_image_height = h;
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn collect_remote_images(
     node: &types::WebCore,
     base_url: &str,
+    viewport_w: f32,
+    viewport_h: f32,
     path: &mut Vec<usize>,
-    pending: &mut Vec<(Vec<usize>, types::PendingImageTarget, String)>,
+    pending: &mut Vec<(u32, Vec<usize>, types::PendingImageTarget, String)>,
 ) {
     if (node.is_image_element() || node.tag == "video") && node.image_data.is_none() {
-        let resolved;
-        let url = if !node.resolved_src.is_empty() {
-            node.resolved_src.as_str()
+        let raw = if node.tag == "video" {
+            node.attributes.get("poster").map(|s| s.as_str())
         } else {
-            let raw = if node.tag == "video" {
-                node.attributes.get("poster").map(|s| s.as_str())
-            } else {
-                node.attributes.get("src").map(|s| s.as_str())
-            };
-            match raw {
-                Some(raw) => {
-                    resolved = html::resolve_url(raw, base_url);
-                    resolved.as_str()
-                }
-                None => "",
-            }
+            html::image_fallback_source(node)
         };
-        if is_async_image_url(url) {
+        if let Some(raw) = raw {
+            let url = html::resolve_url(raw, base_url);
+            if is_async_image_url(&url) {
+                pending.push((
+                    node.node_id,
+                    path.clone(),
+                    types::PendingImageTarget::ElementFallback,
+                    url,
+                ));
+            }
+        }
+        let preferred = if !node.resolved_src.is_empty() {
+            Some(node.resolved_src.clone())
+        } else if node.tag == "img" {
+            html::image_srcset_source(node).and_then(|srcset| {
+                html::parse_srcset_url_for(
+                    srcset,
+                    node.attributes.get("sizes").map(String::as_str),
+                    viewport_w,
+                    viewport_h,
+                    1.0,
+                )
+                .map(|candidate| html::resolve_url(&candidate, base_url))
+            })
+        } else {
+            None
+        };
+        if let Some(url) = preferred
+            && is_async_image_url(&url)
+            && !pending.iter().any(|(_, candidate_path, _, candidate)| {
+                candidate_path == path && candidate == &url
+            })
+        {
             pending.push((
+                node.node_id,
                 path.clone(),
                 types::PendingImageTarget::Element,
-                url.to_string(),
+                url,
             ));
         }
     }
@@ -957,6 +1200,7 @@ fn collect_remote_images(
         let url = resolved.as_str();
         if is_async_image_url(url) {
             pending.push((
+                node.node_id,
                 path.clone(),
                 types::PendingImageTarget::Background,
                 url.to_string(),
@@ -968,6 +1212,7 @@ fn collect_remote_images(
         let url = resolved.as_str();
         if is_async_image_url(url) {
             pending.push((
+                node.node_id,
                 path.clone(),
                 types::PendingImageTarget::Mask,
                 url.to_string(),
@@ -976,7 +1221,7 @@ fn collect_remote_images(
     }
     for (i, child) in node.children.iter().enumerate() {
         path.push(i);
-        collect_remote_images(child, base_url, path, pending);
+        collect_remote_images(child, base_url, viewport_w, viewport_h, path, pending);
         path.pop();
     }
 }
@@ -1058,6 +1303,11 @@ fn fetch_text(url: &str) -> Result<String, String> {
     // with no author CSS at all.
     if let Some(path) = url.strip_prefix("file://") {
         let path = path.split('?').next().unwrap_or(path);
+        let path = path.split('#').next().unwrap_or(path);
+        return std::fs::read_to_string(path).map_err(|e| e.to_string());
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        let path = url.split('?').next().unwrap_or(url);
         let path = path.split('#').next().unwrap_or(path);
         return std::fs::read_to_string(path).map_err(|e| e.to_string());
     }

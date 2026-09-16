@@ -3702,6 +3702,8 @@ fn apply_display(s: &mut ComputedStyle, v: &str) {
         "inline-block" => Display::InlineBlock,
         "flex" => Display::Flex,
         "inline-flex" => Display::InlineFlex,
+        "-webkit-box" => Display::Block,
+        "-webkit-inline-box" => Display::InlineBlock,
         "grid" => Display::Grid,
         "inline-grid" => Display::InlineGrid,
         "table" => Display::Table,

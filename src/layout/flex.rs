@@ -255,6 +255,10 @@ pub fn layout_flex(
         max_main: f32,
         /// Padding + border + margin on main axis
         outer_extra: f32,
+        /// Main-end margin, used for line packing tolerance. Many nav/chip rows
+        /// put spacing on every item; when the only overflow is the final
+        /// item's non-painting end margin, browsers keep the visible row intact.
+        main_end_margin: f32,
         /// Final content-box main size after grow/shrink
         main_used: f32,
         /// Final margin-box cross size
@@ -363,6 +367,17 @@ pub fn layout_flex(
                 + irb.border_bottom
                 + irb.margin_top
                 + irb.margin_bottom
+        };
+        let main_end_margin = if is_row {
+            if is_reversed {
+                irb.margin_left
+            } else {
+                irb.margin_right
+            }
+        } else if is_reversed {
+            irb.margin_top
+        } else {
+            irb.margin_bottom
         };
 
         // Resolve flex-basis → basis_main (content-box size)
@@ -730,6 +745,7 @@ pub fn layout_flex(
             min_main,
             max_main,
             outer_extra,
+            main_end_margin,
             main_used: hyp,
             cross_size: 0.0,
             baseline_off: None,
@@ -829,7 +845,13 @@ pub fn layout_flex(
                     line.main_used + (if count > 0 { gap_main } else { 0.0 }) + item_outer;
                 // An INDEFINITE main size never forces a break: the line has
                 // infinite room, so every item stays on it (Flexbox §9.2).
-                if can_wrap && count > 0 && total_with_gap > definite_main.unwrap_or(f32::INFINITY)
+                let definite = definite_main.unwrap_or(f32::INFINITY);
+                let only_overflows_by_end_margin = total_with_gap > definite
+                    && total_with_gap - items[i].main_end_margin <= definite + 0.5;
+                if can_wrap
+                    && count > 0
+                    && total_with_gap > definite
+                    && !only_overflows_by_end_margin
                 {
                     break;
                 }

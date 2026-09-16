@@ -1,6 +1,7 @@
 //! SVG source assembly and intrinsic sizing helpers.
 
 use crate::dom::attrs::AttrMap;
+use crate::types::WebCore;
 
 /// Parse an SVG length that is definite at parse time.
 ///
@@ -91,4 +92,55 @@ pub(crate) fn build_inline_svg_source(attrs: &AttrMap, body: &str) -> InlineSvgS
         explicit_w: attrs.get("width").and_then(|s| parse_px(s)),
         explicit_h: attrs.get("height").and_then(|s| parse_px(s)),
     }
+}
+
+pub(crate) fn build_inline_svg_source_from_node(node: &WebCore) -> InlineSvgSource {
+    let body = node
+        .children
+        .iter()
+        .map(serialize_svg_dom_node)
+        .collect::<String>();
+    build_inline_svg_source(&node.attributes, &body)
+}
+
+fn serialize_svg_dom_node(node: &WebCore) -> String {
+    if node.tag == "#text" {
+        return escape_svg_text(&node.text);
+    }
+    if node.tag.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push('<');
+    out.push_str(&node.tag);
+    for (name, value) in &node.attributes {
+        out.push(' ');
+        out.push_str(name);
+        out.push_str("=\"");
+        out.push_str(&escape_svg_attr(value));
+        out.push('"');
+    }
+    if node.children.is_empty() {
+        out.push_str("/>");
+        return out;
+    }
+    out.push('>');
+    for child in &node.children {
+        out.push_str(&serialize_svg_dom_node(child));
+    }
+    out.push_str("</");
+    out.push_str(&node.tag);
+    out.push('>');
+    out
+}
+
+fn escape_svg_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn escape_svg_attr(value: &str) -> String {
+    escape_svg_text(value).replace('"', "&quot;")
 }

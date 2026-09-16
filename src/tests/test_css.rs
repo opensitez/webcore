@@ -1953,6 +1953,107 @@ fn atomic_inline_breaks_after_the_box_not_before_it() {
 }
 
 #[test]
+fn atomic_inline_allows_border_rounding_fit_on_one_line() {
+    let doc = parse_and_layout(
+        r#"<style>
+             body { margin: 0; font: 15px/18px Arial; }
+             .bar { width: 690px; background: #c0000f; }
+             .title {
+               display: inline-block;
+               width: 141px;
+               height: 18px;
+               padding: 6px 10px;
+               border-right: 1px solid white;
+               box-sizing: border-box;
+               vertical-align: middle;
+             }
+             .marquee {
+               display: inline-block;
+               width: calc(100% - 140px);
+               height: 30px;
+               overflow: hidden;
+               white-space: nowrap;
+               vertical-align: middle;
+             }
+           </style>
+           <div class="bar" id="bar"><div class="title" id="title">breaking news</div>
+             <div class="marquee" id="marquee"><ul><li>one two three four five</li></ul></div></div>"#,
+        800.0,
+    );
+    let bar = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "bar")
+    })
+    .unwrap();
+    let title = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "title")
+    })
+    .unwrap();
+    let marquee = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "marquee")
+    })
+    .unwrap();
+
+    assert_eq!(
+        bar.layout.line_cache.len(),
+        1,
+        "bar should contain one inline line"
+    );
+    assert!(
+        marquee.layout.border_rect.x
+            >= title.layout.border_rect.x + title.layout.border_rect.w - 0.5,
+        "border-rounding overflow should not wrap the marquee: title={:?} marquee={:?}",
+        title.layout.border_rect,
+        marquee.layout.border_rect
+    );
+}
+
+#[test]
+fn flex_wrap_keeps_row_when_only_final_end_margin_overflows() {
+    let doc = parse_and_layout(
+        r#"<style>
+             body { margin: 0; }
+             ul {
+               display: flex;
+               flex-wrap: wrap;
+               justify-content: center;
+               width: 300px;
+               margin: 0;
+               padding: 0;
+             }
+             li {
+               display: block;
+               width: 69px;
+               height: 20px;
+               padding: 8px;
+               margin-right: 15px;
+             }
+           </style>
+           <ul id="tags"><li id="one"></li><li id="two"></li><li id="three"></li></ul>"#,
+        400.0,
+    );
+    let ul = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "tags")
+    })
+    .unwrap();
+    let one = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "one")
+    })
+    .unwrap();
+    let three = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "three")
+    })
+    .unwrap();
+
+    assert!(
+        three.layout.margin_rect.y <= one.layout.margin_rect.y + 0.5,
+        "final end margin should not create a second flex line: ul={:?} one={:?} three={:?}",
+        ul.layout.content_rect,
+        one.layout.margin_rect,
+        three.layout.margin_rect
+    );
+}
+
+#[test]
 fn floated_auto_width_inline_rows_shrink_to_measured_line_width() {
     let doc = parse_and_layout(
         r#"<style>
@@ -3827,6 +3928,78 @@ fn line_clamp_paints_ellipsis_on_last_visible_line() {
     assert!(
         !painted.contains("second"),
         "line-clamp should not paint omitted lines; painted text was {painted:?}"
+    );
+}
+
+#[test]
+fn webkit_box_line_clamp_creates_block_with_ellipsis() {
+    let mut frame = EngineFrame::new(
+        parse_html(
+            r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        a {
+            display: -webkit-box;
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            width: 110px;
+            font-size: 16px;
+            line-height: 20px;
+        }
+        p { font-size: 16px; line-height: 20px; }
+        </style>
+        <div><a>first line has too many words</a><p>next block starts below</p></div>
+    "#,
+        ),
+        240.0,
+        100.0,
+    );
+    frame.update_frame();
+    let link = find_box(&frame.doc.root, &|node| node.tag == "a").expect("link");
+    let paragraph = find_box(&frame.doc.root, &|node| node.tag == "p").expect("paragraph");
+
+    assert_eq!(link.style.display, Display::Block);
+    assert!(
+        paragraph.layout.content_rect.y >= link.layout.content_rect.bottom() - 0.5,
+        "following block should start below the clamped -webkit-box"
+    );
+
+    let list = build_display_list(&frame.doc.root, 240.0, 100.0);
+    let painted = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    assert!(
+        painted.contains('…'),
+        "clamped -webkit-box should paint an ellipsis"
+    );
+}
+
+#[test]
+fn inline_block_auto_width_measures_text_transform() {
+    let doc = parse_and_layout(
+        r#"
+        <div style="font-family: Arial; font-size: 15px">
+            <span style="display:inline-block; text-transform:uppercase; padding:6px 10px">
+                breaking news
+            </span>
+        </div>
+    "#,
+        320.0,
+    );
+    let span = find_box(&doc.root, &|node| node.tag == "span").expect("span");
+
+    assert_eq!(
+        span.layout.line_cache.len(),
+        1,
+        "auto-width inline-block should be sized from transformed max-content text"
     );
 }
 

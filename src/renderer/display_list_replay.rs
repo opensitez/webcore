@@ -17,7 +17,7 @@ use tiny_skia::{
 
 /// Replay a display list onto a pixmap (no text — use replay_with_text for full rendering).
 pub fn replay(list: &DisplayList, pixmap: &mut Pixmap, scale: f32) {
-    replay_inner(list, pixmap, scale, None, 0.0, 0.0, None, None);
+    replay_commands_inner(&list.commands, pixmap, scale, None, 0.0, 0.0, None, None);
 }
 
 /// Replay with text rendering via cosmic_text.
@@ -154,8 +154,8 @@ pub fn replay_with_text(
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
 ) {
-    replay_inner(
-        list,
+    replay_commands_inner(
+        &list.commands,
         pixmap,
         scale,
         Some((font_system, swash_cache)),
@@ -177,8 +177,8 @@ pub fn replay_with_scroll(
     scroll_x: f32,
     scroll_y: f32,
 ) {
-    replay_inner(
-        list,
+    replay_commands_inner(
+        &list.commands,
         pixmap,
         scale,
         Some((font_system, swash_cache)),
@@ -202,8 +202,8 @@ pub fn replay_with_scroll_and_transform_overrides(
     scroll_y: f32,
     transform_overrides: &HashMap<u32, [f32; 6]>,
 ) {
-    replay_inner(
-        list,
+    replay_commands_inner(
+        &list.commands,
         pixmap,
         scale,
         Some((font_system, swash_cache)),
@@ -226,8 +226,8 @@ pub fn replay_with_scroll_clip(
     scroll_y: f32,
     clip: Rect,
 ) {
-    replay_inner(
-        list,
+    replay_commands_inner(
+        &list.commands,
         pixmap,
         scale,
         Some((font_system, swash_cache)),
@@ -249,8 +249,74 @@ pub fn replay_with_scroll_clip_and_transform_overrides(
     clip: Rect,
     transform_overrides: &HashMap<u32, [f32; 6]>,
 ) {
-    replay_inner(
-        list,
+    replay_commands_inner(
+        &list.commands,
+        pixmap,
+        scale,
+        Some((font_system, swash_cache)),
+        scroll_x,
+        scroll_y,
+        Some(clip),
+        Some(transform_overrides),
+    );
+}
+
+pub fn replay_commands_with_scroll(
+    commands: &[PaintCmd],
+    pixmap: &mut Pixmap,
+    scale: f32,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    scroll_x: f32,
+    scroll_y: f32,
+) {
+    replay_commands_inner(
+        commands,
+        pixmap,
+        scale,
+        Some((font_system, swash_cache)),
+        scroll_x,
+        scroll_y,
+        None,
+        None,
+    );
+}
+
+pub fn replay_commands_with_scroll_and_transform_overrides(
+    commands: &[PaintCmd],
+    pixmap: &mut Pixmap,
+    scale: f32,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    scroll_x: f32,
+    scroll_y: f32,
+    transform_overrides: &HashMap<u32, [f32; 6]>,
+) {
+    replay_commands_inner(
+        commands,
+        pixmap,
+        scale,
+        Some((font_system, swash_cache)),
+        scroll_x,
+        scroll_y,
+        None,
+        Some(transform_overrides),
+    );
+}
+
+pub fn replay_commands_with_scroll_clip_and_transform_overrides(
+    commands: &[PaintCmd],
+    pixmap: &mut Pixmap,
+    scale: f32,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    scroll_x: f32,
+    scroll_y: f32,
+    clip: Rect,
+    transform_overrides: &HashMap<u32, [f32; 6]>,
+) {
+    replay_commands_inner(
+        commands,
         pixmap,
         scale,
         Some((font_system, swash_cache)),
@@ -268,8 +334,8 @@ struct Layer {
     alpha: f32,
 }
 
-fn replay_inner(
-    list: &DisplayList,
+fn replay_commands_inner(
+    commands: &[PaintCmd],
     pixmap: &mut Pixmap,
     scale: f32,
     mut text_ctx: Option<(&mut FontSystem, &mut SwashCache)>,
@@ -342,7 +408,7 @@ fn replay_inner(
     let mut transform_depth = 0i32;
     let mut skip_clip_depth = 0u32;
 
-    for cmd in &list.commands {
+    for cmd in commands {
         if skip_clip_depth > 0 {
             match cmd {
                 PaintCmd::PushClip { .. } | PaintCmd::PushClipPath { .. } => {

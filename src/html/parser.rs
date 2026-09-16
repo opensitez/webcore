@@ -1054,8 +1054,24 @@ impl HtmlParser {
         apply_presentational_attrs(&mut node);
 
         if tag == "img" {
-            if let Some(src) = node.attributes.get("src").cloned() {
+            if let Some(src) = crate::html::image_fallback_source(&node).map(str::to_string) {
                 node.resolved_src = resolve_url(&src, &self.base_url);
+            }
+            if let Some(w) = node
+                .attributes
+                .get("width")
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|w| *w > 0)
+            {
+                node.image_width = w;
+            }
+            if let Some(h) = node
+                .attributes
+                .get("height")
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|h| *h > 0)
+            {
+                node.image_height = h;
             }
         }
         if tag == "video" {

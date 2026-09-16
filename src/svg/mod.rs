@@ -31,4 +31,4 @@ pub use tree::{SvgAttribute, SvgDocument, SvgElementKind, SvgNode};
 pub use unsupported::{SvgUnsupportedSummary, unsupported_summary};
 
 pub(crate) use animation::{svg_document_with_animation_overrides, tick_svg_animations};
-pub(crate) use source::build_inline_svg_source;
+pub(crate) use source::{build_inline_svg_source, build_inline_svg_source_from_node};

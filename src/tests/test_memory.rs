@@ -1225,3 +1225,45 @@ fn every_positioning_scheme_survives_the_scroll_cache() {
         "an absolutely positioned box translates with the document"
     );
 }
+
+#[test]
+fn fixed_content_does_not_disable_scroll_surface_cache() {
+    let html = r#"<html><head><style>
+        body { margin:0; background:#fff; font:16px Arial }
+        #fix { position:fixed; top:0; left:0; width:800px; height:40px; background:#f00 }
+        .row { height:40px; border-bottom:1px solid #ccc }
+      </style></head><body>
+      <div id=fix></div>
+      <main>
+      <div class=row>row 0</div><div class=row>row 1</div><div class=row>row 2</div>
+      <div class=row>row 3</div><div class=row>row 4</div><div class=row>row 5</div>
+      <div class=row>row 6</div><div class=row>row 7</div><div class=row>row 8</div>
+      <div class=row>row 9</div><div class=row>row 10</div><div class=row>row 11</div>
+      <div class=row>row 12</div><div class=row>row 13</div><div class=row>row 14</div>
+      <div class=row>row 15</div><div class=row>row 16</div><div class=row>row 17</div>
+      <div class=row>row 18</div><div class=row>row 19</div><div class=row>row 20</div>
+      </main></body></html>"#;
+    let mut r = crate::Renderer::new();
+    let mut doc = r.load_html(html, 800.0);
+    let mut pm = tiny_skia::Pixmap::new(800, 300).unwrap();
+
+    r.render(&mut doc, &mut pm, 1.0);
+    assert!(
+        r.has_cached_content_surface(),
+        "the document layer should be retained separately from fixed overlays"
+    );
+
+    doc.scroll_y = 120.0;
+    r.render(&mut doc, &mut pm, 1.0);
+
+    let fixed_pixel = pm.pixel(20, 20).unwrap();
+    assert_eq!(
+        (fixed_pixel.red(), fixed_pixel.green(), fixed_pixel.blue()),
+        (255, 0, 0),
+        "fixed overlay must be composited after the scrolled document layer"
+    );
+    assert!(
+        r.has_cached_content_surface(),
+        "scrolling a page with fixed content should preserve the retained document surface"
+    );
+}

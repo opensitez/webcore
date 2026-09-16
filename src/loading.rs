@@ -57,10 +57,13 @@ fn raw_cache_get(key: &str) -> Option<Arc<Vec<u8>>> {
     RAW_RESOURCE_CACHE
         .lock()
         .ok()
-        .and_then(|cache| cache.get(key).cloned())
+        .and_then(|cache| cache.get(key).filter(|data| !data.is_empty()).cloned())
 }
 
 fn raw_cache_put(key: String, data: Arc<Vec<u8>>) {
+    if data.is_empty() {
+        return;
+    }
     if let Ok(mut cache) = RAW_RESOURCE_CACHE.lock() {
         if cache.len() > 512 {
             cache.clear();
@@ -87,6 +90,18 @@ static BYTE_FETCH_IN_FLIGHT: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 pub const DEFAULT_NEW_TAB_HTML: &str = "<!doctype html><title>New Tab</title><body></body>";
+
+fn should_emit_early_preview(html: &str, sent_preview: bool) -> bool {
+    if sent_preview || html.len() < 256 {
+        return false;
+    }
+    let start = html.len().saturating_sub(8192);
+    let tail = html[start..].to_ascii_lowercase();
+    tail.contains("</style")
+        || tail.contains("</head")
+        || tail.contains("<body")
+        || html.len() >= 4 * 1024
+}
 
 #[derive(Clone, Debug)]
 pub struct PageLoadOptions {
@@ -244,7 +259,8 @@ impl PageSession {
 #[derive(Clone, Debug)]
 pub enum PageLoadEvent {
     Preview { url: String, html: String },
-    Complete { url: String, html: String },
+    Chunk { url: String, html: String },
+    Complete { url: String },
 }
 
 pub fn spawn_page_load<F>(url: String, options: PageLoadOptions, mut on_event: F)
@@ -252,20 +268,196 @@ where
     F: FnMut(PageLoadEvent) + Send + 'static,
 {
     std::thread::spawn(move || {
-        let event = match load_document_progressive(&url, &options, |url, html| {
-            on_event(PageLoadEvent::Preview { url, html });
+        let event = match load_document_streaming_chunks(&url, &options, |url, html| {
+            on_event(PageLoadEvent::Chunk { url, html });
         }) {
-            Ok((html, final_url)) => PageLoadEvent::Complete {
-                url: final_url,
-                html,
-            },
-            Err(e) => PageLoadEvent::Complete {
-                url: url.clone(),
-                html: error_page(&url, &e),
-            },
+            Ok((_html, final_url)) => PageLoadEvent::Complete { url: final_url },
+            Err(e) => {
+                on_event(PageLoadEvent::Chunk {
+                    url: url.clone(),
+                    html: error_page(&url, &e),
+                });
+                PageLoadEvent::Complete { url: url.clone() }
+            }
         };
         on_event(event);
     });
+}
+
+fn load_document_streaming_chunks<F>(
+    url: &str,
+    options: &PageLoadOptions,
+    mut on_chunk: F,
+) -> Result<(String, String), String>
+where
+    F: FnMut(String, String),
+{
+    if url.starts_with("about:") {
+        let html = "<!doctype html><title>New Tab</title><body></body>".to_string();
+        on_chunk(url.to_string(), html.clone());
+        return Ok((html, url.to_string()));
+    }
+    if let Some(path) = url.strip_prefix("file://") {
+        let file =
+            std::fs::File::open(path).map_err(|e| format!("failed to read file {path}: {e}"))?;
+        return stream_document_reader(file, url.to_string(), options, on_chunk);
+    }
+    if let Some(cache_dir) = options.cache_dir.as_deref() {
+        return cached_fetch_document_streaming_chunks(url, cache_dir, options, on_chunk);
+    }
+    fetch_document_streaming_chunks(url, options, on_chunk)
+}
+
+fn stream_document_reader<R, F>(
+    mut reader: R,
+    final_url: String,
+    options: &PageLoadOptions,
+    mut on_chunk: F,
+) -> Result<(String, String), String>
+where
+    R: Read,
+    F: FnMut(String, String),
+{
+    let mut decoder = encoding_rs::UTF_8.new_decoder();
+    let mut html = String::new();
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        let text = decode_streaming_utf8(&mut decoder, &buf[..n], false);
+        if !text.is_empty() {
+            if options.emit_preview {
+                on_chunk(final_url.clone(), text.clone());
+            }
+            html.push_str(&text);
+        }
+    }
+    let tail = decode_streaming_utf8(&mut decoder, &[], true);
+    if !tail.is_empty() {
+        if options.emit_preview {
+            on_chunk(final_url.clone(), tail.clone());
+        }
+        html.push_str(&tail);
+    }
+    Ok((html, final_url))
+}
+
+fn stream_document_bytes<F>(
+    data: &[u8],
+    final_url: String,
+    options: &PageLoadOptions,
+    on_chunk: F,
+) -> Result<(String, String), String>
+where
+    F: FnMut(String, String),
+{
+    stream_document_reader(std::io::Cursor::new(data), final_url, options, on_chunk)
+}
+
+fn cached_fetch_document_streaming_chunks<F>(
+    url: &str,
+    cache_dir: &str,
+    options: &PageLoadOptions,
+    mut on_chunk: F,
+) -> Result<(String, String), String>
+where
+    F: FnMut(String, String),
+{
+    let key = raw_cache_key(cache_dir, url);
+    let path = url_cache_path(url, cache_dir);
+    let url_path = format!("{}.url", path.display());
+    let final_url = || {
+        std::fs::read_to_string(&url_path)
+            .map(|s| s.trim().to_string())
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| url.to_string())
+    };
+    if let Some(data) = raw_cache_get(&key) {
+        return stream_document_bytes(&data, final_url(), options, on_chunk);
+    }
+    if let Ok(file) = std::fs::File::open(&path) {
+        let final_url = final_url();
+        let (html, final_url) = stream_document_reader(file, final_url, options, &mut on_chunk)?;
+        raw_cache_put(key, Arc::new(html.as_bytes().to_vec()));
+        return Ok((html, final_url));
+    }
+
+    let (body, final_url) = fetch_document_streaming_chunks(
+        url,
+        &PageLoadOptions {
+            cache_dir: None,
+            emit_preview: options.emit_preview,
+            preview_after_bytes: options.preview_after_bytes,
+            preview_interval_bytes: options.preview_interval_bytes,
+            load_images: options.load_images,
+        },
+        &mut on_chunk,
+    )?;
+    let body = Arc::new(body);
+    raw_cache_put(key, Arc::new(body.as_bytes().to_vec()));
+    enqueue_cache_text(path, body.clone());
+    if final_url != url {
+        enqueue_cache_text(
+            std::path::PathBuf::from(url_path),
+            Arc::new(final_url.clone()),
+        );
+    }
+    Ok(((*body).clone(), final_url))
+}
+
+fn fetch_document_streaming_chunks<F>(
+    url: &str,
+    options: &PageLoadOptions,
+    mut on_chunk: F,
+) -> Result<(String, String), String>
+where
+    F: FnMut(String, String),
+{
+    let mut do_fetch = |client: &reqwest::blocking::Client,
+                        on_chunk: &mut dyn FnMut(String, String)|
+     -> Result<(String, String, bool), (String, bool)> {
+        let resp = client
+            .get(url)
+            .header(
+                "Accept",
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            )
+            .header("Sec-Fetch-Dest", "document")
+            .header("Sec-Fetch-Mode", "navigate")
+            .header("Sec-Fetch-Site", "none")
+            .header("Sec-Fetch-User", "?1")
+            .header("Upgrade-Insecure-Requests", "1")
+            .send()
+            .map_err(|e| (e.to_string(), false))?;
+        let final_url = resp.url().to_string();
+        let status = resp.status();
+        if !status.is_success() {
+            return Err((format!("HTTP {status} loading {final_url}"), false));
+        }
+        let saw_streamed_bytes = true;
+        stream_document_reader(resp, final_url, options, on_chunk)
+            .map(|(html, final_url)| (html, final_url, saw_streamed_bytes))
+            .map_err(|e| (e, saw_streamed_bytes))
+    };
+
+    match do_fetch(&crate::http_client(), &mut on_chunk) {
+        Ok((body, final_url, _)) if !body.is_empty() => Ok((body, final_url)),
+        Err((err, true)) => Err(err),
+        Err((_, false)) => match do_fetch(&crate::http_client_lenient(), &mut on_chunk) {
+            Ok((body, final_url, _)) if !body.is_empty() => Ok((body, final_url)),
+            Ok((_, final_url, _)) => Err(format!("empty streamed document from {final_url}")),
+            Err((err, _)) => Err(err),
+        },
+        Ok((_, _, true)) => Err("empty streamed document".to_string()),
+        Ok((_, _, false)) => match do_fetch(&crate::http_client_lenient(), &mut on_chunk) {
+            Ok((body, final_url, _)) if !body.is_empty() => Ok((body, final_url)),
+            Ok((_, final_url, _)) => Err(format!("empty streamed document from {final_url}")),
+            Err((err, _)) => Err(err),
+        },
+    }
 }
 
 fn build_page_document(
@@ -291,20 +483,34 @@ fn build_page_document(
     } else {
         None
     };
+    let stylesheet_loader: crate::StylesheetLoader = if preview {
+        std::sync::Arc::new(|_| Ok(String::new()))
+    } else {
+        std::sync::Arc::new(move |css_url| {
+            fetch_text_resource(css_url, cache_dir_for_css.as_deref())
+        })
+    };
+    let streaming_stylesheet_loader: Option<crate::StreamingStylesheetLoader> = if preview {
+        None
+    } else {
+        Some(std::sync::Arc::new(move |css_url, emit| {
+            fetch_text_resource_streaming(css_url, cache_dir_for_stream_css.as_deref(), emit)
+        }))
+    };
 
-    renderer.load_html_with_base_and_resource_loaders_css_wait(
+    crate::load_html_reusing_with_resource_loaders_and_wait_mode(
         html,
         url,
         viewport_w,
         viewport_h,
-        std::sync::Arc::new(move |css_url| {
-            fetch_text_resource(css_url, cache_dir_for_css.as_deref())
-        }),
-        Some(std::sync::Arc::new(move |css_url, emit| {
-            fetch_text_resource_streaming(css_url, cache_dir_for_stream_css.as_deref(), emit)
-        })),
+        renderer.component_registry.clone(),
+        Some(renderer),
+        Some(stylesheet_loader),
+        streaming_stylesheet_loader,
         image_loader,
         options.load_images && !preview,
+        !preview,
+        true,
         std::time::Duration::ZERO,
     )
 }
@@ -342,21 +548,32 @@ fn schedule_preload(
         crate::ResourceKind::Stylesheet => {
             let cache_dir = options.cache_dir.clone();
             crate::spawn_css_resource_task(move || {
-                let _ = crate::fetch_text_resource_streaming(&url, cache_dir.as_deref(), |_| {});
+                let css_url = url.clone();
+                let cache_key = format!("{css_url}\n");
+                if crate::cached_parsed_stylesheet(&cache_key).is_some() {
+                    return;
+                }
+                let loader: crate::StylesheetLoader = std::sync::Arc::new({
+                    let cache_dir = cache_dir.clone();
+                    move |css_url| crate::fetch_text_resource(css_url, cache_dir.as_deref())
+                });
+                let streaming_loader: crate::StreamingStylesheetLoader =
+                    std::sync::Arc::new(move |css_url, emit| {
+                        crate::fetch_text_resource_streaming(css_url, cache_dir.as_deref(), emit)
+                    });
+                let _ = crate::load_stylesheet_cached(
+                    cache_key,
+                    css_url,
+                    String::new(),
+                    loader,
+                    Some(streaming_loader),
+                    true,
+                    |_| {},
+                );
             });
         }
         crate::ResourceKind::Image if options.load_images => {
-            let cache_dir = options.cache_dir.clone();
-            crate::spawn_image_resource_task(move || {
-                let loader = move |src: &str| {
-                    let bytes = match cache_dir.as_deref() {
-                        Some(cache_dir) => cached_fetch_bytes(src, cache_dir).ok(),
-                        None => fetch_bytes(src).ok(),
-                    }?;
-                    crate::html::decode_image_bytes_ex(&bytes)
-                };
-                let _ = crate::cached_decoded_image(&url, Some(&loader));
-            });
+            let _ = url;
         }
         _ => {}
     }
@@ -400,7 +617,9 @@ where
             bytes_read += n;
             let decoded = decode_streaming_utf8(&mut decoder, chunk, false);
             text.push_str(&decoded);
-            if options.emit_preview && bytes_read >= next_preview_at {
+            if options.emit_preview
+                && (bytes_read >= next_preview_at || should_emit_early_preview(&text, sent_preview))
+            {
                 preview(url.to_string(), text.clone());
                 sent_preview = true;
                 while next_preview_at <= bytes_read {
@@ -429,9 +648,13 @@ pub fn fetch_text_resource(url: &str, cache_dir: Option<&str>) -> Result<String,
         }
         let path = url_cache_path(url, cache_dir);
         if let Ok(data) = std::fs::read(&path) {
-            let data = Arc::new(data);
-            raw_cache_put(key, data.clone());
-            return Ok(decode_body(&data));
+            if data.is_empty() {
+                let _ = std::fs::remove_file(&path);
+            } else {
+                let data = Arc::new(data);
+                raw_cache_put(key, data.clone());
+                return Ok(decode_body(&data));
+            }
         }
         let text = fetch_text_resource_uncached(url)?;
         let data = Arc::new(text.as_bytes().to_vec());
@@ -485,8 +708,12 @@ where
             if !tail.is_empty() {
                 on_chunk(&tail);
             }
-            raw_cache_put(key, Arc::new(body));
-            return Ok(());
+            if body.is_empty() {
+                let _ = std::fs::remove_file(&path);
+            } else {
+                raw_cache_put(key, Arc::new(body));
+                return Ok(());
+            }
         }
         let mut body = Vec::new();
         fetch_text_resource_uncached_streaming(url, |bytes| {
@@ -575,9 +802,13 @@ fn cached_fetch_bytes_uncached(url: &str, cache_dir: &str) -> Result<Vec<u8>, St
     }
     let path = url_cache_path(url, cache_dir);
     if let Ok(data) = std::fs::read(&path) {
-        let data = Arc::new(data);
-        raw_cache_put(key, data.clone());
-        return Ok((*data).clone());
+        if data.is_empty() {
+            let _ = std::fs::remove_file(&path);
+        } else {
+            let data = Arc::new(data);
+            raw_cache_put(key, data.clone());
+            return Ok((*data).clone());
+        }
     }
     if let Some(scheme_end) = url.find("://") {
         let after = &url[scheme_end + 3..];
@@ -585,10 +816,14 @@ fn cached_fetch_bytes_uncached(url: &str, cache_dir: &str) -> Result<Vec<u8>, St
             let old_url = format!("{}/.{}", &url[..scheme_end + 3], &after[slash..]);
             let old_path = url_cache_path(&old_url, cache_dir);
             if let Ok(data) = std::fs::read(&old_path) {
-                let data = Arc::new(data);
-                raw_cache_put(key, data.clone());
-                enqueue_cache_bytes(path, data.clone());
-                return Ok((*data).clone());
+                if data.is_empty() {
+                    let _ = std::fs::remove_file(&old_path);
+                } else {
+                    let data = Arc::new(data);
+                    raw_cache_put(key, data.clone());
+                    enqueue_cache_bytes(path, data.clone());
+                    return Ok((*data).clone());
+                }
             }
         }
     }
@@ -639,7 +874,14 @@ fn fetch_text_resource_uncached(url: &str) -> Result<String, String> {
             .header("Sec-Fetch-Mode", "no-cors")
             .send()
             .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("HTTP {status} loading stylesheet {url}"));
+        }
         let bytes = resp.bytes().map_err(|e| e.to_string())?;
+        if bytes.is_empty() {
+            return Err(format!("empty stylesheet response from {url}"));
+        }
         Ok(decode_body(&bytes))
     };
     match do_fetch(&crate::http_client()) {
@@ -676,13 +918,22 @@ where
             .header("Sec-Fetch-Mode", "no-cors")
             .send()
             .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("HTTP {status} loading stylesheet {url}"));
+        }
         let mut buf = [0u8; 16 * 1024];
+        let mut saw = false;
         loop {
             let n = resp.read(&mut buf).map_err(|e| e.to_string())?;
             if n == 0 {
                 break;
             }
+            saw = true;
             on_chunk(&buf[..n]);
+        }
+        if !saw {
+            return Err(format!("empty stylesheet response from {url}"));
         }
         Ok(())
     };
@@ -770,7 +1021,10 @@ where
                 bytes_read += n;
                 let text = decode_streaming_utf8(&mut decoder, &buf[..n], false);
                 html.push_str(&text);
-                if options.emit_preview && bytes_read >= next_preview_at {
+                if options.emit_preview
+                    && (bytes_read >= next_preview_at
+                        || should_emit_early_preview(&html, sent_preview))
+                {
                     preview(final_url.clone(), html.clone());
                     sent_preview = true;
                     while next_preview_at <= bytes_read {
@@ -821,8 +1075,32 @@ where
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| url.to_string());
-        let html = decode_body(&data);
-        if options.emit_preview && !html.is_empty() {
+        let mut parser = crate::StreamingParser::new(&final_url);
+        let preload_state = Arc::new(Mutex::new(PreloadState::default()));
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
+        let mut html = String::new();
+        let mut bytes_read = 0usize;
+        let mut sent_preview = false;
+        let mut next_preview_at = options.preview_after_bytes.max(1024);
+        let preview_interval = options.preview_interval_bytes.max(32 * 1024);
+        for chunk in data.chunks(16 * 1024) {
+            scan_html_chunk_for_resources(&mut parser, chunk, options, &preload_state);
+            bytes_read += chunk.len();
+            let text = decode_streaming_utf8(&mut decoder, chunk, false);
+            html.push_str(&text);
+            if options.emit_preview
+                && (bytes_read >= next_preview_at || should_emit_early_preview(&html, sent_preview))
+            {
+                preview(final_url.clone(), html.clone());
+                sent_preview = true;
+                while next_preview_at <= bytes_read {
+                    next_preview_at = next_preview_at.saturating_add(preview_interval);
+                }
+            }
+        }
+        let tail = decode_streaming_utf8(&mut decoder, &[], true);
+        html.push_str(&tail);
+        if options.emit_preview && !sent_preview && !html.is_empty() {
             preview(final_url.clone(), html.clone());
         }
         return Ok((html, final_url));
@@ -851,7 +1129,9 @@ where
             bytes_read += n;
             let text = decode_streaming_utf8(&mut decoder, &buf[..n], false);
             html.push_str(&text);
-            if options.emit_preview && bytes_read >= next_preview_at {
+            if options.emit_preview
+                && (bytes_read >= next_preview_at || should_emit_early_preview(&html, sent_preview))
+            {
                 preview(final_url.clone(), html.clone());
                 sent_preview = true;
                 while next_preview_at <= bytes_read {
@@ -981,6 +1261,246 @@ mod tests {
     }
 
     #[test]
+    fn inline_style_boundary_emits_preview_before_byte_threshold() {
+        let path = std::env::temp_dir().join(format!(
+            "webcore-inline-style-preview-{}.html",
+            std::process::id()
+        ));
+        let html = concat!(
+            "<!doctype html><html><head>",
+            "<style>body{background:#123;color:white}.hero{font-size:32px}</style>",
+            "</head><body><div class=hero>Ready early</div>",
+            "</body></html>"
+        );
+        std::fs::write(&path, html).unwrap();
+        let url = format!("file://{}", path.display());
+        let mut previews = Vec::new();
+        let result = load_document_progressive(
+            &url,
+            &PageLoadOptions {
+                emit_preview: true,
+                preview_after_bytes: 64 * 1024,
+                preview_interval_bytes: usize::MAX / 4,
+                load_images: false,
+                ..Default::default()
+            },
+            |preview_url, preview_html| {
+                assert_eq!(preview_url, url);
+                previews.push(preview_html);
+            },
+        );
+        let _ = std::fs::remove_file(&path);
+        result.expect("file load should complete");
+        assert_eq!(
+            previews.len(),
+            1,
+            "closing an inline <style> should produce an early styled preview"
+        );
+        assert!(previews[0].contains("font-size:32px"));
+    }
+
+    #[test]
+    fn preview_uses_cached_linked_stylesheet_without_fetching() {
+        let dir =
+            std::env::temp_dir().join(format!("webcore-cached-preview-css-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let css = dir.join("style.css");
+        std::fs::write(
+            &css,
+            "#hero { color: rgb(9, 8, 7); background: rgb(1, 2, 3); }",
+        )
+        .unwrap();
+        let html =
+            r#"<!doctype html><link rel="stylesheet" href="style.css"><p id="hero">Styled</p>"#;
+        let base = format!("file://{}/index.html", dir.display());
+
+        let warmed = crate::load_html_reusing_with_resource_loaders_and_wait_mode(
+            html,
+            &base,
+            800.0,
+            600.0,
+            crate::types::ComponentRegistry::default(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            true,
+            true,
+            std::time::Duration::from_secs(1),
+        );
+        let hero = warmed.get_element_by_id("hero").unwrap();
+        let hero_box = warmed.get_box_by_id(hero).unwrap();
+        assert_eq!(hero_box.style.color, crate::Color::rgb(9, 8, 7));
+
+        std::fs::write(&css, "#hero { color: rgb(200, 0, 0); }").unwrap();
+        let preview = crate::load_html_reusing_with_resource_loaders_and_wait_mode(
+            html,
+            &base,
+            800.0,
+            600.0,
+            crate::types::ComponentRegistry::default(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            true,
+            std::time::Duration::ZERO,
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let hero = preview.get_element_by_id("hero").unwrap();
+        let hero_box = preview.get_box_by_id(hero).unwrap();
+        assert_eq!(
+            hero_box.style.color,
+            crate::Color::rgb(9, 8, 7),
+            "preview should use the already parsed linked stylesheet without fetching the changed file"
+        );
+        assert_eq!(hero_box.style.background_color, crate::Color::rgb(1, 2, 3));
+    }
+
+    #[test]
+    fn hot_document_cache_still_emits_streaming_preview() {
+        let cache_dir =
+            std::env::temp_dir().join(format!("webcore-hot-document-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache_dir_str = cache_dir.to_string_lossy().to_string();
+        let url = "https://example.test/cached-stream.html";
+        let html = format!(
+            "{}{}",
+            concat!(
+                "<!doctype html><html><head>",
+                "<style>body{color:rgb(4,5,6)}</style>",
+                "</head><body><p>first paint</p>"
+            ),
+            "<div>tail</div>".repeat(4000)
+        );
+        raw_cache_put(
+            raw_cache_key(&cache_dir_str, url),
+            Arc::new(html.clone().into_bytes()),
+        );
+
+        let mut previews = Vec::new();
+        let result = cached_fetch_document(
+            url,
+            &cache_dir_str,
+            &PageLoadOptions {
+                emit_preview: true,
+                preview_after_bytes: 512 * 1024,
+                preview_interval_bytes: usize::MAX / 4,
+                load_images: false,
+                ..Default::default()
+            },
+            &mut |_, preview_html| previews.push(preview_html),
+        );
+
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        let (final_html, final_url) = result.expect("cached document should load");
+        assert_eq!(final_url, url);
+        assert_eq!(final_html.len(), html.len());
+        assert_eq!(previews.len(), 1);
+        assert!(
+            previews[0].len() < html.len(),
+            "hot cache should emit an early chunk preview instead of waiting for the complete document"
+        );
+        assert!(previews[0].contains("body{color:rgb(4,5,6)}"));
+    }
+
+    #[test]
+    fn stylesheet_preload_warms_parsed_css_cache() {
+        let dir =
+            std::env::temp_dir().join(format!("webcore-preload-parsed-css-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let css = dir.join("early.css");
+        std::fs::write(&css, "#hero { color: rgb(12, 34, 56); }").unwrap();
+        let base = format!("file://{}/index.html", dir.display());
+        let resolved = crate::html::resolve_url("early.css", &base);
+        let cache_key = format!("{resolved}\n");
+        let mut parser = crate::StreamingParser::new(&base);
+        let state = Arc::new(Mutex::new(PreloadState::default()));
+
+        scan_html_chunk_for_resources(
+            &mut parser,
+            br#"<head><link rel="stylesheet" href="early.css"></head>"#,
+            &PageLoadOptions {
+                emit_preview: false,
+                load_images: false,
+                ..Default::default()
+            },
+            &state,
+        );
+
+        let mut cached = None;
+        for _ in 0..50 {
+            cached = crate::cached_parsed_stylesheet(&cache_key);
+            if cached.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let sheet = cached.expect("stylesheet preload should parse into the shared CSS cache");
+        assert!(
+            sheet
+                .rules
+                .iter()
+                .any(|rule| rule.original_selector.contains("#hero")),
+            "preloaded parsed stylesheet should retain its rules"
+        );
+    }
+
+    #[test]
+    fn preview_uses_ready_decoded_image_cache_without_fetching() {
+        let image_url = format!("https://example.test/ready-{}.png", std::process::id());
+        let pixels = Arc::new(vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ]);
+        let loader_pixels = pixels.clone();
+        let warmed = crate::cached_decoded_image(
+            &image_url,
+            Some(&move |_| {
+                Some(crate::html::DecodedImage::Raster(
+                    loader_pixels.clone(),
+                    2,
+                    2,
+                ))
+            }),
+        );
+        assert!(
+            warmed.is_some(),
+            "test setup should warm decoded image cache"
+        );
+
+        let html = format!(r#"<!doctype html><img id="hero" src="{image_url}">"#);
+        let preview = crate::load_html_reusing_with_resource_loaders_and_wait_mode(
+            &html,
+            "https://example.test/index.html",
+            800.0,
+            600.0,
+            crate::types::ComponentRegistry::default(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            false,
+            true,
+            std::time::Duration::ZERO,
+        );
+        let hero = preview.get_element_by_id("hero").unwrap();
+        let hero_box = preview.get_box_by_id(hero).unwrap();
+        assert_eq!(hero_box.image_width, 2);
+        assert_eq!(hero_box.image_height, 2);
+        assert!(
+            hero_box.image_data.is_some(),
+            "preview should adopt already-decoded image pixels without scheduling image fetch"
+        );
+        assert!(preview.pending_images.is_none());
+    }
+
+    #[test]
     fn cached_text_resource_reuses_process_memory_before_disk() {
         let cache_dir =
             std::env::temp_dir().join(format!("webcore-resource-cache-{}", std::process::id()));
@@ -1000,6 +1520,26 @@ mod tests {
             second, first,
             "hot process cache should avoid immediate refetch/reparse work for the same resource"
         );
+    }
+
+    #[test]
+    fn zero_byte_disk_cache_entry_is_refetched() {
+        let cache_dir = std::env::temp_dir().join(format!(
+            "webcore-empty-resource-cache-{}",
+            std::process::id()
+        ));
+        let source = cache_dir.join("source.css");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(&source, "body { color: green; }").unwrap();
+        let url = source.to_string_lossy().to_string();
+        let cache_dir_str = cache_dir.to_string_lossy().to_string();
+        let cache_path = url_cache_path(&url, &cache_dir_str);
+        std::fs::write(&cache_path, "").unwrap();
+
+        let text = fetch_text_resource(&url, Some(&cache_dir_str)).unwrap();
+
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        assert_eq!(text, "body { color: green; }");
     }
 }
 

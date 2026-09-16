@@ -94,8 +94,10 @@ pub struct EngineFrame {
     streaming_parser: Option<crate::html::streaming::StreamingParser>,
     /// Stylesheet results discovered while streaming HTML.
     stylesheet_tx: Option<std::sync::mpsc::Sender<crate::types::PendingStylesheetResult>>,
-    next_stylesheet_idx: usize,
     scheduled_stylesheets: std::collections::HashSet<String>,
+    image_tx: Option<std::sync::mpsc::Sender<crate::types::PendingImageResult>>,
+    scheduled_images: std::collections::HashSet<String>,
+    cache_dir: Option<String>,
     /// Host callbacks (boxed trait object).
     callbacks: Box<dyn EngineCallbacks>,
 }
@@ -118,8 +120,10 @@ impl EngineFrame {
             first_paint_done: false,
             streaming_parser: None,
             stylesheet_tx: None,
-            next_stylesheet_idx: 0,
             scheduled_stylesheets: std::collections::HashSet::new(),
+            image_tx: None,
+            scheduled_images: std::collections::HashSet::new(),
+            cache_dir: None,
             callbacks: Box::new(NoopCallbacks),
         }
     }
@@ -133,6 +137,10 @@ impl EngineFrame {
     /// Register host callbacks. The engine pushes events — the host never polls.
     pub fn set_callbacks(&mut self, callbacks: impl EngineCallbacks + 'static) {
         self.callbacks = Box::new(callbacks);
+    }
+
+    pub fn set_cache_dir(&mut self, cache_dir: Option<String>) {
+        self.cache_dir = cache_dir;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -202,7 +210,7 @@ impl EngineFrame {
         // 1. Poll for async stylesheets/images/fonts
         if self
             .doc
-            .poll_pending_stylesheets_budgeted(32, std::time::Duration::from_millis(6))
+            .poll_pending_stylesheets_budgeted(usize::MAX, std::time::Duration::ZERO)
         {
             self.needs_style = true;
             self.needs_layout = true;
@@ -210,14 +218,14 @@ impl EngineFrame {
         }
         let image_poll = self
             .doc
-            .poll_pending_images_budgeted(32, std::time::Duration::from_millis(8));
+            .poll_pending_images_budgeted(usize::MAX, std::time::Duration::ZERO);
         if image_poll.loaded_any {
             self.needs_layout |= image_poll.needs_relayout;
             self.needs_paint = true;
         }
         if self
             .engine
-            .poll_pending_fonts_budgeted(8, std::time::Duration::from_millis(8))
+            .poll_pending_fonts_budgeted(usize::MAX, std::time::Duration::ZERO)
         {
             self.doc.style_dirty = true;
             self.needs_style = true;
@@ -251,7 +259,6 @@ impl EngineFrame {
                 self.needs_layout = true;
                 self.needs_paint = true;
             } else if !self.doc.animation_overrides.is_empty() {
-                self.doc.layout_generation = self.doc.layout_generation.wrapping_add(1);
                 self.needs_paint = true;
             }
         }
@@ -841,13 +848,16 @@ impl EngineFrame {
         self.doc.rebuild_node_index();
         self.doc.base_url = base_url.to_string();
         self.doc.stylesheet = crate::css::ua_stylesheet();
-        self.doc.preserve_stylesheet_document_order = false;
+        self.doc.preserve_stylesheet_document_order = true;
         let mut parser = crate::html::streaming::StreamingParser::new(base_url);
         parser.set_root_child_count(self.doc.root.children.len());
         self.streaming_parser = Some(parser);
         self.stylesheet_tx = None;
-        self.next_stylesheet_idx = 0;
         self.scheduled_stylesheets.clear();
+        self.image_tx = None;
+        self.scheduled_images.clear();
+        self.doc.pending_images = None;
+        self.doc.images_in_flight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         self.needs_style = true;
         self.needs_layout = true;
         self.needs_paint = true;
@@ -865,44 +875,272 @@ impl EngineFrame {
         tx
     }
 
-    fn schedule_streamed_stylesheet(&mut self, url: String) {
-        if !self.scheduled_stylesheets.insert(url.clone()) {
+    fn schedule_streamed_stylesheet(&mut self, slot_idx: usize, url: String) {
+        let scheduled_key = format!("{slot_idx}\n{url}");
+        if !self.scheduled_stylesheets.insert(scheduled_key) {
             return;
         }
-        let idx = self.next_stylesheet_idx;
-        self.next_stylesheet_idx += 1;
         let tx = self.ensure_stylesheet_sender();
+        let cache_dir = self.cache_dir.clone();
         crate::spawn_css_resource_task(move || {
-            let mut buffer = String::new();
-            let _ = crate::fetch_text_resource_streaming(&url, None, |chunk| {
-                buffer.push_str(chunk);
-                let Some(css) = crate::drain_complete_css_text(&mut buffer) else {
-                    return;
-                };
-                let mut sheet = crate::css::Stylesheet::default();
-                sheet.parse_and_add_with_base_media(&css, &url, "");
-                if !sheet.rules.is_empty()
-                    || !sheet.font_faces.is_empty()
-                    || !sheet.keyframes.is_empty()
-                    || !sheet.page_rules.is_empty()
-                    || !sheet.counter_styles.is_empty()
-                {
-                    let _ = tx.send((idx, url.clone(), sheet, String::new()));
+            let cache_key = format!("{url}\n");
+            let loader: crate::StylesheetLoader = std::sync::Arc::new({
+                let cache_dir = cache_dir.clone();
+                move |css_url| crate::fetch_text_resource(css_url, cache_dir.as_deref())
+            });
+            let streaming_loader: crate::StreamingStylesheetLoader = std::sync::Arc::new({
+                let cache_dir = cache_dir.clone();
+                move |css_url, emit| {
+                    crate::fetch_text_resource_streaming(css_url, cache_dir.as_deref(), emit)
                 }
             });
-            if !buffer.trim().is_empty() {
-                let mut sheet = crate::css::Stylesheet::default();
-                sheet.parse_and_add_with_base_media(&buffer, &url, "");
-                if !sheet.rules.is_empty()
-                    || !sheet.font_faces.is_empty()
-                    || !sheet.keyframes.is_empty()
-                    || !sheet.page_rules.is_empty()
-                    || !sheet.counter_styles.is_empty()
-                {
-                    let _ = tx.send((idx, url, sheet, String::new()));
-                }
+            let loaded = crate::load_stylesheet_cached(
+                cache_key,
+                url.clone(),
+                String::new(),
+                loader,
+                Some(streaming_loader),
+                true,
+                |sheet| {
+                    let _ = tx.send((slot_idx, url.clone(), sheet, String::new()));
+                },
+            );
+            if loaded.emitted_fragments == 0 {
+                let _ = tx.send((slot_idx, url, loaded.sheet, String::new()));
             }
         });
+    }
+
+    fn ensure_image_sender(&mut self) -> std::sync::mpsc::Sender<crate::types::PendingImageResult> {
+        if let Some(tx) = &self.image_tx {
+            return tx.clone();
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.doc.pending_images = Some(rx);
+        self.image_tx = Some(tx.clone());
+        tx
+    }
+
+    fn schedule_streamed_image(
+        &mut self,
+        path: Vec<usize>,
+        target: crate::types::PendingImageTarget,
+        url: String,
+    ) {
+        let node_id = crate::types::find_node_by_path_mut(&mut self.doc.root, &path)
+            .map(|node| node.node_id)
+            .unwrap_or(0);
+        let key = format!("{target:?}:{path:?}:{url}");
+        if url.is_empty() || !self.scheduled_images.insert(key) {
+            return;
+        }
+        let tx = self.ensure_image_sender();
+        let in_flight = self.doc.images_in_flight.clone();
+        let cache_dir = self.cache_dir.clone();
+        in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        crate::spawn_image_resource_task(move || {
+            let loader = cache_dir.map(|cache_dir| {
+                std::sync::Arc::new(move |src: &str| {
+                    let bytes = crate::loading::cached_fetch_bytes(src, &cache_dir)?;
+                    crate::html::decode_image_bytes_ex(&bytes).ok_or_else(|| {
+                        format!("unsupported image bytes: {} bytes from {src}", bytes.len())
+                    })
+                })
+                    as std::sync::Arc<
+                        dyn Fn(&str) -> Result<crate::html::DecodedImage, String>
+                            + Send
+                            + Sync
+                            + 'static,
+                    >
+            });
+            let result = crate::cached_decoded_image_result(&url, loader.as_deref());
+            let event = match result {
+                Ok(decoded) => crate::types::PendingImageResult::Loaded {
+                    node_id,
+                    path,
+                    target,
+                    url,
+                    decoded,
+                },
+                Err(error) => crate::types::PendingImageResult::Failed {
+                    node_id,
+                    path,
+                    target,
+                    url,
+                    error,
+                },
+            };
+            let _ = tx.send(event);
+            in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+
+    fn schedule_streamed_element_image(
+        &mut self,
+        tag: &str,
+        attributes: &std::collections::HashMap<String, String>,
+        path: Vec<usize>,
+    ) {
+        let requests = if tag == "video" {
+            attributes
+                .get("poster")
+                .map(|poster| {
+                    vec![(
+                        crate::types::PendingImageTarget::Element,
+                        crate::html::resolve_url(poster, &self.doc.base_url),
+                    )]
+                })
+                .unwrap_or_default()
+        } else if tag == "img" {
+            let mut requests = Vec::new();
+            if let Some(src) = find_node_by_path(&self.doc.root, &path)
+                .and_then(crate::html::image_fallback_source)
+                .or_else(|| {
+                    [
+                        "src",
+                        "data-src",
+                        "data-lazy-src",
+                        "data-original",
+                        "data-original-src",
+                        "data-hi-res-src",
+                    ]
+                    .iter()
+                    .find_map(|name| attributes.get(*name).map(String::as_str))
+                })
+            {
+                requests.push((
+                    crate::types::PendingImageTarget::ElementFallback,
+                    crate::html::resolve_url(src, &self.doc.base_url),
+                ));
+            }
+            find_node_by_path(&self.doc.root, &path)
+                .and_then(|node| (!node.resolved_src.is_empty()).then(|| node.resolved_src.clone()))
+                .or_else(|| {
+                    [
+                        "srcset",
+                        "data-srcset",
+                        "data-lazy-srcset",
+                        "data-original-srcset",
+                        "data-hi-res-srcset",
+                    ]
+                    .iter()
+                    .find_map(|name| attributes.get(*name).map(String::as_str))
+                    .and_then(|srcset| {
+                        crate::html::parse_srcset_url_for(
+                            srcset,
+                            attributes.get("sizes").map(String::as_str),
+                            self.viewport_w,
+                            self.viewport_h,
+                            1.0,
+                        )
+                    })
+                    .map(|candidate| crate::html::resolve_url(&candidate, &self.doc.base_url))
+                })
+                .map(|preferred| {
+                    if !requests.iter().any(|(_, url)| url == &preferred) {
+                        requests.push((crate::types::PendingImageTarget::Element, preferred));
+                    }
+                });
+            requests
+        } else {
+            Vec::new()
+        };
+        for (target, url) in requests {
+            self.schedule_streamed_image(path.clone(), target, url);
+        }
+    }
+
+    fn apply_streamed_image_dimension_hints(&mut self, path: &[usize]) {
+        let Some(node) = crate::types::find_node_by_path_mut(&mut self.doc.root, path) else {
+            return;
+        };
+        if node.tag != "img" {
+            return;
+        }
+        if let Some(w) = node
+            .attributes
+            .get("width")
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value > 0)
+        {
+            node.image_width = w;
+        }
+        if let Some(h) = node
+            .attributes
+            .get("height")
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value > 0)
+        {
+            node.image_height = h;
+        }
+    }
+
+    fn schedule_unscheduled_document_images(&mut self) {
+        fn collect(
+            node: &crate::types::WebCore,
+            base_url: &str,
+            viewport_w: f32,
+            viewport_h: f32,
+            path: &mut Vec<usize>,
+            out: &mut Vec<(Vec<usize>, crate::types::PendingImageTarget, String)>,
+        ) {
+            if node.is_image_element() && node.image_data.is_none() {
+                if !node.resolved_src.is_empty() {
+                    out.push((
+                        path.clone(),
+                        crate::types::PendingImageTarget::Element,
+                        node.resolved_src.clone(),
+                    ));
+                } else if let Some(src) = crate::html::image_fallback_source(node) {
+                    out.push((
+                        path.clone(),
+                        crate::types::PendingImageTarget::ElementFallback,
+                        crate::html::resolve_url(src, base_url),
+                    ));
+                } else if let Some(srcset) = crate::html::image_srcset_source(node)
+                    && let Some(candidate) = crate::html::parse_srcset_url_for(
+                        srcset,
+                        node.attributes.get("sizes").map(String::as_str),
+                        viewport_w,
+                        viewport_h,
+                        1.0,
+                    )
+                {
+                    out.push((
+                        path.clone(),
+                        crate::types::PendingImageTarget::Element,
+                        crate::html::resolve_url(&candidate, base_url),
+                    ));
+                }
+            } else if node.tag == "video"
+                && node.image_data.is_none()
+                && let Some(poster) = node.attributes.get("poster")
+            {
+                out.push((
+                    path.clone(),
+                    crate::types::PendingImageTarget::Element,
+                    crate::html::resolve_url(poster, base_url),
+                ));
+            }
+            for (idx, child) in node.children.iter().enumerate() {
+                path.push(idx);
+                collect(child, base_url, viewport_w, viewport_h, path, out);
+                path.pop();
+            }
+        }
+
+        let mut requests = Vec::new();
+        collect(
+            &self.doc.root,
+            &self.doc.base_url,
+            self.viewport_w,
+            self.viewport_h,
+            &mut Vec::new(),
+            &mut requests,
+        );
+        for (path, target, url) in requests {
+            self.schedule_streamed_image(path, target, url);
+        }
     }
 
     /// Feed a chunk of HTML to the streaming parser.
@@ -933,6 +1171,27 @@ impl EngineFrame {
                         for (name, value) in attributes {
                             self.doc.set_attribute(child_id, name, value);
                         }
+                        if tag == "img" || tag == "video" {
+                            let mut element_path = parent_path.clone();
+                            if let Some(child_index) = self
+                                .doc
+                                .get_node(parent_id)
+                                .and_then(|n| n.children.len().checked_sub(1))
+                            {
+                                element_path.push(child_index);
+                                if tag == "img" {
+                                    let base = self.doc.base_url.clone();
+                                    crate::html::resolve_picture_elements(
+                                        &mut self.doc.root,
+                                        &base,
+                                        self.viewport_w,
+                                        self.viewport_h,
+                                    );
+                                    self.apply_streamed_image_dimension_hints(&element_path);
+                                }
+                                self.schedule_streamed_element_image(tag, attributes, element_path);
+                            }
+                        }
                     }
                 }
                 DomMutation::AppendText { parent_path, text } => {
@@ -944,7 +1203,13 @@ impl EngineFrame {
                     }
                 }
                 DomMutation::AddStylesheet { css, .. } => {
-                    self.doc.stylesheet.parse_and_add(css);
+                    self.doc
+                        .document_stylesheets
+                        .push(crate::types::DocumentStylesheet::Inline { css: css.clone() });
+                    self.doc
+                        .stylesheet
+                        .parse_and_add_with_base(&css, &self.doc.base_url);
+                    self.doc.stylesheet.rebuild_index();
                     self.mark_style_dirty();
                     self.engine.invalidate_cascade();
                 }
@@ -953,7 +1218,17 @@ impl EngineFrame {
                 }
                 DomMutation::ResourceHint { kind, url } => {
                     if matches!(kind, crate::html::streaming::ResourceKind::Stylesheet) {
-                        self.schedule_streamed_stylesheet(url.clone());
+                        self.doc
+                            .linked_stylesheets
+                            .push((url.clone(), String::new()));
+                        let slot_idx = self.doc.document_stylesheets.len();
+                        self.doc.document_stylesheets.push(
+                            crate::types::DocumentStylesheet::Linked {
+                                href: url.clone(),
+                                media: String::new(),
+                            },
+                        );
+                        self.schedule_streamed_stylesheet(slot_idx, url.clone());
                     }
                     resource_hints.push((url.clone(), kind.clone()));
                 }
@@ -981,8 +1256,33 @@ impl EngineFrame {
                         if let Some(parent_id) = node_id_at_path(&self.doc.root, &parent_path) {
                             let child_id = self.doc.create_element(&tag);
                             self.doc.append_child(parent_id, child_id);
-                            for (name, value) in attributes {
+                            for (name, value) in &attributes {
                                 self.doc.set_attribute(child_id, &name, &value);
+                            }
+                            let mut element_path = parent_path.clone();
+                            let child_index =
+                                self.doc.get_node(parent_id).map(|n| n.children.len());
+                            if let Some(child_index) =
+                                child_index.and_then(|len| len.checked_sub(1))
+                            {
+                                element_path.push(child_index);
+                                if tag == "img" || tag == "video" {
+                                    if tag == "img" {
+                                        let base = self.doc.base_url.clone();
+                                        crate::html::resolve_picture_elements(
+                                            &mut self.doc.root,
+                                            &base,
+                                            self.viewport_w,
+                                            self.viewport_h,
+                                        );
+                                        self.apply_streamed_image_dimension_hints(&element_path);
+                                    }
+                                    self.schedule_streamed_element_image(
+                                        &tag,
+                                        &attributes,
+                                        element_path,
+                                    );
+                                }
                             }
                         }
                     }
@@ -995,7 +1295,15 @@ impl EngineFrame {
                         }
                     }
                     crate::html::streaming::DomMutation::AddStylesheet { css, .. } => {
-                        self.doc.stylesheet.parse_and_add(&css);
+                        let css_text = css.clone();
+                        self.doc
+                            .document_stylesheets
+                            .push(crate::types::DocumentStylesheet::Inline { css });
+                        self.doc
+                            .stylesheet
+                            .parse_and_add_with_base(&css_text, &self.doc.base_url);
+                        self.doc.stylesheet.rebuild_index();
+                        self.mark_style_dirty();
                         self.engine.invalidate_cascade();
                     }
                     crate::html::streaming::DomMutation::TitleChanged { title } => {
@@ -1003,13 +1311,27 @@ impl EngineFrame {
                     }
                     crate::html::streaming::DomMutation::ResourceHint { kind, url } => {
                         if matches!(kind, crate::html::streaming::ResourceKind::Stylesheet) {
-                            self.schedule_streamed_stylesheet(url);
+                            self.doc
+                                .linked_stylesheets
+                                .push((url.clone(), String::new()));
+                            let slot_idx = self.doc.document_stylesheets.len();
+                            self.doc.document_stylesheets.push(
+                                crate::types::DocumentStylesheet::Linked {
+                                    href: url.clone(),
+                                    media: String::new(),
+                                },
+                            );
+                            self.schedule_streamed_stylesheet(slot_idx, url);
                         }
                     }
                     _ => {}
                 }
             }
         }
+        materialize_streamed_inline_svgs(&mut self.doc.root);
+        self.schedule_unscheduled_document_images();
+        self.stylesheet_tx = None;
+        self.image_tx = None;
         self.mark_style_dirty();
         self.callbacks.on_load_complete();
     }
@@ -1043,11 +1365,51 @@ impl EngineFrame {
 }
 
 fn node_id_at_path(root: &crate::types::WebCore, path: &[usize]) -> Option<u32> {
+    find_node_by_path(root, path)
+        .map(|node| node.node_id)
+        .filter(|id| *id != 0)
+}
+
+fn find_node_by_path<'a>(
+    root: &'a crate::types::WebCore,
+    path: &[usize],
+) -> Option<&'a crate::types::WebCore> {
     let mut node = root;
     for &idx in path {
         node = node.children.get(idx)?;
     }
-    Some(node.node_id).filter(|id| *id != 0)
+    Some(node)
+}
+
+fn materialize_streamed_inline_svgs(node: &mut crate::types::WebCore) {
+    if node.tag == "svg" && !node.children.is_empty() {
+        let source = crate::svg::build_inline_svg_source_from_node(node);
+        node.svg_document = crate::svg::parse_svg_document(&source.markup).ok();
+        node.svg_viewbox_w = source.viewbox_w;
+        node.svg_viewbox_h = source.viewbox_h;
+        crate::css::apply_property(
+            std::sync::Arc::make_mut(&mut node.style),
+            "display",
+            "inline-block",
+        );
+        if let Some(w) = source.explicit_w {
+            crate::css::apply_property(
+                std::sync::Arc::make_mut(&mut node.style),
+                "width",
+                &format!("{}px", w),
+            );
+        }
+        if let Some(h) = source.explicit_h {
+            crate::css::apply_property(
+                std::sync::Arc::make_mut(&mut node.style),
+                "height",
+                &format!("{}px", h),
+            );
+        }
+    }
+    for child in &mut node.children {
+        materialize_streamed_inline_svgs(child);
+    }
 }
 
 #[cfg(test)]
@@ -1065,6 +1427,14 @@ mod tests {
         assert!(
             frame.doc.stylesheet.rules.len() > before,
             "split inline style should parse after later chunk arrives"
+        );
+        assert!(
+            frame
+                .doc
+                .document_stylesheets
+                .iter()
+                .any(|sheet| matches!(sheet, crate::types::DocumentStylesheet::Inline { css } if css.contains(".a"))),
+            "streaming should register inline stylesheets on the document as they arrive"
         );
     }
 
@@ -1129,7 +1499,172 @@ mod tests {
         assert!(
             frame
                 .scheduled_stylesheets
-                .contains("https://example.test/app.css")
+                .iter()
+                .any(|key| key.contains("https://example.test/app.css"))
         );
+        assert!(
+            frame
+                .doc
+                .linked_stylesheets
+                .iter()
+                .any(|(href, _)| href == "https://example.test/app.css"),
+            "streaming stylesheet links should be visible through document resource bookkeeping"
+        );
+    }
+
+    #[test]
+    fn streaming_frame_finish_releases_pending_stylesheet_channel() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        let _tx = frame.ensure_stylesheet_sender();
+        assert!(frame.doc.pending_stylesheets.is_some());
+
+        frame.finish_loading();
+        assert!(
+            frame.stylesheet_tx.is_none(),
+            "completed streaming frames should not keep a CSS sender alive forever"
+        );
+        drop(_tx);
+        assert!(
+            !frame
+                .doc
+                .poll_pending_stylesheets_budgeted(usize::MAX, std::time::Duration::ZERO)
+        );
+        assert!(
+            frame.doc.pending_stylesheets.is_none(),
+            "once the sender is gone and the queue is drained, idle must not see CSS as pending"
+        );
+    }
+
+    #[test]
+    fn streaming_frame_schedules_images_without_host_babysitting() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<html><body><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='2' height='2'/%3E"></body>"#,
+        );
+
+        assert!(
+            frame.doc.pending_images.is_some(),
+            "streamed image discovery should wire directly into document pending images"
+        );
+        assert_eq!(frame.scheduled_images.len(), 1);
+    }
+
+    #[test]
+    fn streaming_frame_schedules_normalized_srcset_candidate() {
+        let mut frame = EngineFrame::empty(800.0, 600.0);
+        frame.start_streaming("https://example.test/news/");
+        frame.feed_html_chunk(
+            br#"<body><img src="small.webp" srcset="small.webp 320w, large.webp 900w" sizes="700px">"#,
+        );
+
+        let img = frame.doc.query_selector("img").unwrap();
+        let img = frame.doc.get_node(img).unwrap();
+        assert_eq!(img.resolved_src, "https://example.test/news/large.webp");
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("https://example.test/news/large.webp")),
+            "streaming image loader should fetch the selected responsive candidate"
+        );
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("https://example.test/news/small.webp")),
+            "streaming image loader should also fetch the fallback candidate for progressive paint"
+        );
+    }
+
+    #[test]
+    fn streaming_frame_schedules_lazy_data_src_image() {
+        let mut frame = EngineFrame::empty(800.0, 600.0);
+        frame.start_streaming("https://example.test/news/");
+        frame.feed_html_chunk(
+            br#"<body><img loading="lazy" data-src="post.webp" width="320" height="180">"#,
+        );
+
+        let img = frame.doc.query_selector("img").unwrap();
+        let img = frame.doc.get_node(img).unwrap();
+        assert_eq!(img.resolved_src, "https://example.test/news/post.webp");
+        assert_eq!((img.image_width, img.image_height), (320, 180));
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("https://example.test/news/post.webp")),
+            "streaming image loader should schedule lazy/deferred image sources"
+        );
+    }
+
+    #[test]
+    fn streaming_frame_schedules_lazy_data_srcset_candidate() {
+        let mut frame = EngineFrame::empty(800.0, 600.0);
+        frame.start_streaming("https://example.test/news/");
+        frame.feed_html_chunk(
+            br#"<body><img data-src="tiny.webp" data-srcset="tiny.webp 320w, hero.webp 900w" sizes="700px">"#,
+        );
+
+        let img = frame.doc.query_selector("img").unwrap();
+        let img = frame.doc.get_node(img).unwrap();
+        assert_eq!(img.resolved_src, "https://example.test/news/hero.webp");
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("https://example.test/news/hero.webp")),
+            "lazy responsive image candidates should use the same resolver as srcset"
+        );
+    }
+
+    #[test]
+    fn final_image_sweep_schedules_lazy_srcset_without_src() {
+        let mut frame = EngineFrame::empty(800.0, 600.0);
+        frame.start_streaming("https://example.test/news/");
+        let body = frame.doc.create_element("body");
+        frame.doc.append_child(frame.doc.root.node_id, body);
+        let img = frame.doc.create_element("img");
+        frame.doc.append_child(body, img);
+        frame
+            .doc
+            .set_attribute(img, "data-srcset", "tiny.webp 320w, hero.webp 900w");
+        frame.doc.set_attribute(img, "sizes", "700px");
+
+        frame.schedule_unscheduled_document_images();
+
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("https://example.test/news/hero.webp")),
+            "final image sweep should not miss lazy responsive images with no src"
+        );
+    }
+
+    #[test]
+    fn streaming_frame_materializes_inline_svg_after_full_subtree_arrives() {
+        fn find_svg(node: &crate::types::WebCore) -> Option<&crate::types::WebCore> {
+            if node.tag == "svg" {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_svg)
+        }
+
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br##"<html><body><svg width="16" height="16" viewBox="0 0 16 16"><path d="M0 0H16V16H0Z" fill="#6001d2"/></svg>"##,
+        );
+        frame.finish_loading();
+
+        let svg = find_svg(&frame.doc.root).expect("streamed svg should be in the document");
+        assert!(
+            svg.svg_document.is_some(),
+            "streamed inline SVG should be converted to the same renderable SVG document as the full parser"
+        );
+        assert_eq!(svg.svg_viewbox_w, 16.0);
+        assert_eq!(svg.svg_viewbox_h, 16.0);
     }
 }

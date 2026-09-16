@@ -39,6 +39,7 @@ pub struct Renderer {
     cached_hovered_id: u32,
     display_list_dirty: bool,
     cached_layout_generation: u64,
+    cached_content_surface: Option<Pixmap>,
     cached_surface: Option<Pixmap>,
     cached_surface_w: u32,
     cached_surface_h: u32,
@@ -218,21 +219,42 @@ fn animation_override_rects(
     root: &WebCore,
     overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
 ) -> Vec<Rect> {
+    animation_override_rects_with_ids(root, overrides)
+        .into_iter()
+        .map(|(_, rect)| rect)
+        .collect()
+}
+
+fn animation_override_rects_with_ids(
+    root: &WebCore,
+    overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
+) -> Vec<(u32, Rect)> {
     fn walk(
         node: &WebCore,
         overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
-        out: &mut Vec<Rect>,
+        out: &mut Vec<(u32, Rect)>,
     ) {
         if let Some(props) = overrides.get(&node.node_id) {
             let mut rect = node.layout.border_rect;
             if rect.w <= 0.0 || rect.h <= 0.0 {
                 rect = node.layout.margin_rect;
             }
+            if rect.w <= 0.0 || rect.h <= 0.0 {
+                for child in &node.children {
+                    walk(child, overrides, out);
+                }
+                return;
+            }
             if props.iter().any(|(prop, _)| prop == "transform") {
-                let pad = rect.w.max(rect.h).max(32.0);
+                let long_inline_strip = rect.w > rect.h.max(1.0) * 8.0;
+                let pad = if long_inline_strip {
+                    rect.h.max(32.0).min(192.0)
+                } else {
+                    rect.w.max(rect.h).max(32.0).min(384.0)
+                };
                 rect = inflate_rect(rect, pad);
             }
-            out.push(rect);
+            out.push((node.node_id, rect));
         }
         for child in &node.children {
             walk(child, overrides, out);
@@ -252,6 +274,18 @@ fn animation_overrides_are_transform_only(
             .all(|props| !props.is_empty() && props.iter().all(|(prop, _)| prop == "transform"))
 }
 
+fn animation_overrides_are_transform_only_for_ids(
+    overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
+    ids: &std::collections::HashSet<u32>,
+) -> bool {
+    !ids.is_empty()
+        && ids.iter().all(|id| {
+            overrides.get(id).is_some_and(|props| {
+                !props.is_empty() && props.iter().all(|(prop, _)| prop == "transform")
+            })
+        })
+}
+
 fn display_list_has_transform_slots(
     list: &display_list::DisplayList,
     overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
@@ -264,6 +298,50 @@ fn display_list_has_transform_slots(
                 matches!(cmd, display_list::PaintCmd::PushTransform { node_id: id, .. } if id == node_id)
             })
         })
+}
+
+fn display_list_has_transform_slots_for_ids(
+    list: &display_list::DisplayList,
+    ids: &std::collections::HashSet<u32>,
+) -> bool {
+    !ids.is_empty()
+        && ids.iter().all(|node_id| {
+            list.commands.iter().chain(&list.fixed_commands).any(|cmd| {
+                matches!(cmd, display_list::PaintCmd::PushTransform { node_id: id, .. } if id == node_id)
+            })
+        })
+}
+
+fn transform_animation_commands_for_ids(
+    list: &display_list::DisplayList,
+    ids: &std::collections::HashSet<u32>,
+) -> Vec<display_list::PaintCmd> {
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut capture_depth = 0usize;
+    for cmd in &list.commands {
+        match cmd {
+            display_list::PaintCmd::PushTransform { node_id, .. }
+                if capture_depth == 0 && ids.contains(node_id) =>
+            {
+                capture_depth = 1;
+                out.push(cmd.clone());
+            }
+            display_list::PaintCmd::PushTransform { .. } if capture_depth > 0 => {
+                capture_depth += 1;
+                out.push(cmd.clone());
+            }
+            display_list::PaintCmd::PopTransform if capture_depth > 0 => {
+                out.push(cmd.clone());
+                capture_depth = capture_depth.saturating_sub(1);
+            }
+            _ if capture_depth > 0 => out.push(cmd.clone()),
+            _ => {}
+        }
+    }
+    out
 }
 
 fn animation_transform_matrices(
@@ -341,6 +419,7 @@ impl Renderer {
             cached_hovered_id: 0,
             display_list_dirty: true,
             cached_layout_generation: 0,
+            cached_content_surface: None,
             cached_surface: None,
             cached_surface_w: 0,
             cached_surface_h: 0,
@@ -369,6 +448,7 @@ impl Renderer {
         self.display_list_dirty = true;
         self.cached_paint_top = 0.0;
         self.cached_paint_bottom = 0.0;
+        self.cached_content_surface = None;
         self.cached_surface = None;
         self.dirty_paint_rects.clear();
     }
@@ -423,8 +503,10 @@ impl Renderer {
         let mut resource_requested_relayout = false;
         let scroll_changed = (doc.scroll_x - self.last_idle_scroll_x).abs() >= 0.5
             || (doc.scroll_y - self.last_idle_scroll_y).abs() >= 0.5;
+        let editor_overlay_active =
+            doc.editor.has_focus && (doc.editor.caret_box.is_some() || doc.editor.has_selection());
 
-        if doc.editor.has_focus && doc.editor.blink_update() {
+        if editor_overlay_active && doc.editor.blink_update() {
             needs_redraw = true;
             if trace_idle {
                 trace_reasons.push("editor-blink");
@@ -495,7 +577,7 @@ impl Renderer {
                 }
             }
         }
-        if doc.needs_animation_frame && !needs_relayout {
+        if doc.needs_animation_frame && !needs_relayout && !scroll_changed {
             doc.tick_animations(now);
             let css_animations_running = doc.needs_animation_frame;
             let svg_animations_running = crate::svg::tick_svg_animations(&mut doc.root, now);
@@ -520,31 +602,41 @@ impl Renderer {
                 // `background-position` over a gradient. Rebuild the viewport
                 // display list with the new sampled style, but keep the old
                 // surface and repaint only the animated boxes.
-                let transform_only =
-                    animation_overrides_are_transform_only(&doc.animation_overrides);
                 let viewport = Rect::new(doc.scroll_x, doc.scroll_y, viewport_w, viewport_h);
-                let paint_rects = animation_override_rects(&doc.root, &doc.animation_overrides)
+                let visible_animation_rects =
+                    animation_override_rects_with_ids(&doc.root, &doc.animation_overrides)
+                        .into_iter()
+                        .filter(|(_, rect)| rect_intersects(*rect, viewport))
+                        .collect::<Vec<_>>();
+                let visible_animation_ids = visible_animation_rects
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect::<std::collections::HashSet<_>>();
+                let transform_only = animation_overrides_are_transform_only_for_ids(
+                    &doc.animation_overrides,
+                    &visible_animation_ids,
+                );
+                let paint_rects = visible_animation_rects
                     .into_iter()
-                    .filter(|rect| rect_intersects(*rect, viewport))
+                    .map(|(_, rect)| rect)
                     .collect::<Vec<_>>();
                 if !paint_rects.is_empty() {
                     let can_replay_transform = transform_only
                         && self.cached_display_list.as_ref().is_some_and(|list| {
-                            display_list_has_transform_slots(list, &doc.animation_overrides)
+                            display_list_has_transform_slots_for_ids(list, &visible_animation_ids)
                         });
                     if can_replay_transform {
                         self.invalidate_paint_rects(paint_rects);
                         needs_redraw = true;
                     } else {
-                        // Do not poison the whole display-list cache for
-                        // generic paint-only CSS animation samples. Until
-                        // background/color/opacity overrides are sampled
-                        // directly during replay, repainting here either
-                        // rebuilds the whole viewport or replays the full list
-                        // for every animated skeleton rect. Both paths freeze
-                        // real pages. Keep the animation clock alive, but only
-                        // schedule visual work for cheap compositor/transform
-                        // frames.
+                        // Non-transform paint animations change the sampled
+                        // paint commands, so the cached display list cannot be
+                        // reused as-is. Keep the invalidation clipped to the
+                        // animated boxes, but rebuild the viewport list so
+                        // opacity/color/background samples become visible.
+                        self.invalidate_display_list();
+                        self.invalidate_paint_rects(paint_rects);
+                        needs_redraw = true;
                     }
                 }
                 doc.needs_animation_frame = css_animations_running || svg_animations_running;
@@ -556,7 +648,7 @@ impl Renderer {
                 needs_relayout = true;
                 self.invalidate_display_list();
             }
-        } else if doc.needs_animation_frame {
+        } else if doc.needs_animation_frame && needs_relayout {
             self.invalidate_display_list();
             if trace_idle {
                 trace_reasons.push("animation-deferred");
@@ -605,7 +697,7 @@ impl Renderer {
         let next_animated_image_deadline =
             doc.next_visible_animated_image_deadline(now, doc.scroll_y, viewport_h);
         let has_visible_animated_images = next_animated_image_deadline.is_some();
-        let has_timed_work = doc.editor.has_focus
+        let has_timed_work = editor_overlay_active
             || doc.needs_animation_frame
             || has_visible_animated_images
             || doc.pending_images.is_some()
@@ -614,13 +706,13 @@ impl Renderer {
             || self.pending_resource_relayout;
 
         if has_timed_work {
-            if doc.needs_animation_frame && needs_redraw {
-                // CSS/SVG animations need a real frame clock. Waiting for a
-                // 16ms OS timer here produced coarse wakeups on some platforms,
-                // so active animations crawl at ~1-2fps even though the runtime
-                // itself is still alive. Poll lets the event loop run the next
-                // idle/redraw turn as soon as the current paint finishes.
-                event_loop.set_control_flow(ControlFlow::Poll);
+            if doc.needs_animation_frame {
+                // CSS/SVG animations need a browser frame clock while active,
+                // not an unbounded spin loop. Schedule the next sample at
+                // roughly 60Hz; the host only wakes us, webcore owns the timer.
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    now + std::time::Duration::from_millis(16),
+                ));
             } else {
                 let mut deadline = if doc.needs_animation_frame {
                     now + std::time::Duration::from_millis(16)
@@ -633,7 +725,7 @@ impl Renderer {
                 if self.pending_resource_relayout {
                     deadline = deadline.min(now + std::time::Duration::from_millis(50));
                 }
-                if doc.editor.has_focus {
+                if editor_overlay_active {
                     deadline = deadline.min(doc.editor.next_blink_deadline());
                 }
                 event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
@@ -674,6 +766,11 @@ impl Renderer {
                 self.display_list_dirty,
             )
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_cached_content_surface(&self) -> bool {
+        self.cached_content_surface.is_some()
     }
 
     pub fn handle_window_event(
@@ -1137,11 +1234,19 @@ impl Renderer {
                 || doc
                     .hover_sensitive_nodes
                     .contains(&self.cached_surface_hovered_id));
-        let has_replay_sampled_animation =
-            animation_overrides_are_transform_only(&doc.animation_overrides)
-                && self.cached_display_list.as_ref().is_some_and(|list| {
-                    display_list_has_transform_slots(list, &doc.animation_overrides)
-                });
+        let editor_overlay_active =
+            doc.editor.has_focus && (doc.editor.caret_box.is_some() || doc.editor.has_selection());
+        let viewport = Rect::new(doc.scroll_x, doc.scroll_y, view_w, view_h);
+        let visible_animation_ids =
+            animation_override_rects_with_ids(&doc.root, &doc.animation_overrides)
+                .into_iter()
+                .filter(|(_, rect)| rect_intersects(*rect, viewport))
+                .map(|(id, _)| id)
+                .collect::<std::collections::HashSet<_>>();
+        let visible_transform_only_animation = animation_overrides_are_transform_only_for_ids(
+            &doc.animation_overrides,
+            &visible_animation_ids,
+        );
         let can_reuse_surface = self.cached_surface.as_ref().is_some_and(|surface| {
             surface.width() == pixmap.width()
                 && surface.height() == pixmap.height()
@@ -1151,11 +1256,10 @@ impl Renderer {
                 && (self.cached_surface_scroll_y - doc.scroll_y).abs() < 0.5
                 && self.cached_surface_layout_generation == doc.layout_generation
                 && !surface_hover_changed
-                && (!doc.editor.has_focus || self.cached_surface_active_id == doc.active_box)
-                && (!doc.editor.has_focus
+                && (!editor_overlay_active || self.cached_surface_active_id == doc.active_box)
+                && (!editor_overlay_active
                     || self.cached_surface_caret_visible == doc.editor.caret_visible)
                 && !self.display_list_dirty
-                && !has_replay_sampled_animation
         });
         if can_reuse_surface {
             if let Some(surface) = self.cached_surface.as_ref() {
@@ -1211,14 +1315,15 @@ impl Renderer {
         let dirty_paint_rects = self.dirty_paint_rects.clone();
         let animation_transform_overrides =
             animation_transform_matrices(&doc.root, &doc.animation_overrides, view_w, view_h);
-        let transform_only_animation_frame = !animation_transform_overrides.is_empty()
-            && animation_overrides_are_transform_only(&doc.animation_overrides);
+        let transform_only_animation_frame =
+            !animation_transform_overrides.is_empty() && visible_transform_only_animation;
+        let dirty_base_surface = self.cached_surface.as_ref();
         let dirty_paint_only = !dirty_paint_rects.is_empty()
             && !layout_changed
             && !hover_changed
             && !scroll_outside_cached_band
             && self.cached_display_list.is_some()
-            && self.cached_surface.as_ref().is_some_and(|surface| {
+            && dirty_base_surface.is_some_and(|surface| {
                 surface.width() == pixmap.width()
                     && surface.height() == pixmap.height()
                     && (self.cached_surface_scale - scale).abs() < 0.001
@@ -1293,6 +1398,7 @@ impl Renderer {
         // Replay display list (cached — only rebuilt on layout/hover change)
         let mut used_scroll_surface = false;
         let mut used_dirty_surface = false;
+        let mut page_content_repainted = false;
         if dirty_paint_only {
             if let (Some(surface), Some(list)) = (
                 self.cached_surface.as_ref(),
@@ -1309,6 +1415,11 @@ impl Renderer {
                 if can_repaint_dirty {
                     let replay_start = std::time::Instant::now();
                     pixmap.data_mut().copy_from_slice(surface.data());
+                    let animated_commands = if transform_only_animation_frame {
+                        transform_animation_commands_for_ids(list, &visible_animation_ids)
+                    } else {
+                        Vec::new()
+                    };
                     for rect in &dirty_paint_rects {
                         if let Some(clip) = viewport_clip_from_doc_rect(
                             *rect,
@@ -1318,7 +1429,19 @@ impl Renderer {
                             view_h,
                         ) {
                             fill_viewport_clip(pixmap, clip, tile_scale, canvas_color);
-                            if animation_transform_overrides.is_empty() {
+                            if !animated_commands.is_empty() {
+                                display_list_replay::replay_commands_with_scroll_clip_and_transform_overrides(
+                                    &animated_commands,
+                                    pixmap,
+                                    tile_scale,
+                                    &mut self.font_system,
+                                    &mut self.swash_cache,
+                                    doc.scroll_x,
+                                    doc.scroll_y,
+                                    clip,
+                                    &animation_transform_overrides,
+                                );
+                            } else if animation_transform_overrides.is_empty() {
                                 display_list_replay::replay_with_scroll_clip(
                                     list,
                                     pixmap,
@@ -1353,7 +1476,7 @@ impl Renderer {
         }
         if !self.use_tiles && !used_dirty_surface && (!needs_rebuild || scroll_band_rebuild_only) {
             if let (Some(surface), Some(list)) = (
-                self.cached_surface.as_ref(),
+                self.cached_content_surface.as_ref(),
                 self.cached_display_list.as_ref(),
             ) {
                 let tile_scale = scale * zoom;
@@ -1373,15 +1496,13 @@ impl Renderer {
                     Some("no-scroll-delta")
                 } else if dy_px.abs() >= pixmap.height() as f32 {
                     Some("large-scroll-delta")
-                } else if !list.fixed_commands.is_empty() {
-                    Some("fixed-commands")
                 } else if self.cached_surface_layout_generation != doc.layout_generation {
                     Some("layout-generation")
                 } else if surface_hover_changed {
                     Some("hover")
-                } else if doc.editor.has_focus && self.cached_surface_active_id != doc.active_box {
+                } else if editor_overlay_active && self.cached_surface_active_id != doc.active_box {
                     Some("active")
-                } else if doc.editor.has_focus
+                } else if editor_overlay_active
                     && self.cached_surface_caret_visible != doc.editor.caret_visible
                 {
                     Some("caret-visibility")
@@ -1391,9 +1512,7 @@ impl Renderer {
                     Some("custom-components")
                 } else if doc.open_select != 0 || doc.open_picker != 0 {
                     Some("popup")
-                } else if doc.editor.has_focus
-                    && (doc.editor.has_selection() || doc.editor.caret_visible)
-                {
+                } else if editor_overlay_active {
                     Some("editing-overlay")
                 } else {
                     None
@@ -1464,6 +1583,7 @@ impl Renderer {
                     }
                     replay_ms = replay_start.elapsed().as_millis();
                     used_scroll_surface = true;
+                    page_content_repainted = true;
                 } else if trace_render && dy_px.abs() >= 1.0 {
                     eprintln!(
                         "[webcore render] scroll_surface_reject={} dx_px={:.0} dy_px={:.0}",
@@ -1553,36 +1673,38 @@ impl Renderer {
                     );
                 }
             }
-            // `position: fixed` content, at scroll 0 — it does not move.
-            if !list.fixed_commands.is_empty() {
-                let fixed = crate::renderer::display_list::DisplayList {
-                    commands: list.fixed_commands.clone(),
-                    fixed_commands: Vec::new(),
-                };
-                if animation_transform_overrides.is_empty() {
-                    display_list_replay::replay_with_scroll(
-                        &fixed,
-                        pixmap,
-                        scale * zoom,
-                        &mut self.font_system,
-                        &mut self.swash_cache,
-                        0.0,
-                        0.0,
-                    );
-                } else {
-                    display_list_replay::replay_with_scroll_and_transform_overrides(
-                        &fixed,
-                        pixmap,
-                        scale * zoom,
-                        &mut self.font_system,
-                        &mut self.swash_cache,
-                        0.0,
-                        0.0,
-                        &animation_transform_overrides,
-                    );
-                }
-            }
+            page_content_repainted = true;
             replay_ms = replay_start.elapsed().as_millis();
+        }
+        if page_content_repainted && !transform_only_animation_frame {
+            self.cache_content_surface(pixmap);
+        }
+        if page_content_repainted
+            && let Some(ref list) = self.cached_display_list
+            && !list.fixed_commands.is_empty()
+        {
+            if animation_transform_overrides.is_empty() {
+                display_list_replay::replay_commands_with_scroll(
+                    &list.fixed_commands,
+                    pixmap,
+                    scale * zoom,
+                    &mut self.font_system,
+                    &mut self.swash_cache,
+                    0.0,
+                    0.0,
+                );
+            } else {
+                display_list_replay::replay_commands_with_scroll_and_transform_overrides(
+                    &list.fixed_commands,
+                    pixmap,
+                    scale * zoom,
+                    &mut self.font_system,
+                    &mut self.swash_cache,
+                    0.0,
+                    0.0,
+                    &animation_transform_overrides,
+                );
+            }
         }
         // Paint custom components on top of the display list
         if !self.component_registry.map.is_empty() || !self.component_registry.components.is_empty()
@@ -1726,6 +1848,17 @@ impl Renderer {
             self.cached_surface_hovered_id = doc.hovered_box;
             self.cached_surface_active_id = doc.active_box;
             self.cached_surface_caret_visible = doc.editor.caret_visible;
+        }
+    }
+
+    fn cache_content_surface(&mut self, pixmap: &Pixmap) {
+        if self.cached_content_surface.as_ref().is_none_or(|surface| {
+            surface.width() != pixmap.width() || surface.height() != pixmap.height()
+        }) {
+            self.cached_content_surface = Pixmap::new(pixmap.width(), pixmap.height());
+        }
+        if let Some(surface) = self.cached_content_surface.as_mut() {
+            surface.data_mut().copy_from_slice(pixmap.data());
         }
     }
 

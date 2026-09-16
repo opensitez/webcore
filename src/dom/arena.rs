@@ -352,13 +352,17 @@ impl DomArena {
     #[inline]
     pub fn get(&self, id: NodeId) -> &Node {
         debug_assert!(id.is_some() && (id.index()) < self.nodes.len());
-        &self.nodes[id.index()]
+        self.nodes.get(id.index()).unwrap_or(&self.nodes[0])
     }
 
     #[inline]
     pub fn get_mut(&mut self, id: NodeId) -> &mut Node {
         debug_assert!(id.is_some() && (id.index()) < self.nodes.len());
-        &mut self.nodes[id.index()]
+        if id.index() < self.nodes.len() {
+            &mut self.nodes[id.index()]
+        } else {
+            &mut self.nodes[0]
+        }
     }
 
     /// Borrow a node only if `id` names a live one.

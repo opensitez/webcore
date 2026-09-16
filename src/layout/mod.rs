@@ -6,7 +6,7 @@ pub mod inline_layout;
 pub mod perf;
 pub mod text;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 pub mod hit_test;
 pub mod layout_box;
 pub mod table;
@@ -289,6 +289,17 @@ fn load_font_bytes(fs: &mut cosmic_text::FontSystem, data: Vec<u8>) -> Vec<fontd
         .load_font_source(fontdb::Source::Binary(std::sync::Arc::new(font_data)))
         .into_iter()
         .collect()
+}
+
+fn font_face_source_key(face: &crate::css::FontFaceDecl, source: &str) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        face.family,
+        face.weight.as_deref().unwrap_or("*"),
+        face.style.as_deref().unwrap_or("*"),
+        face.stretch.as_deref().unwrap_or("*"),
+        source
+    )
 }
 
 fn css_font_family_name(raw: &str) -> Option<String> {
@@ -1279,10 +1290,11 @@ pub struct LayoutEngine {
     /// True after the first layout pass has completed. Prevents progressive
     /// layout from running on every subsequent layout (hover, image load, etc.).
     initial_layout_done: bool,
-    /// Whether @font-face font fetches have been kicked off (not necessarily finished).
-    fonts_loaded: bool,
-    /// Receiver for async font data arriving from background threads.
-    pending_fonts: Option<std::sync::mpsc::Receiver<(crate::css::FontFaceDecl, Vec<u8>)>>,
+    /// Font-face sources already scheduled/loaded. Stylesheets can arrive
+    /// progressively, so this cannot be a single document-wide latch.
+    scheduled_font_faces: HashSet<String>,
+    /// Receivers for async font data arriving from background threads.
+    pending_fonts: Vec<std::sync::mpsc::Receiver<(crate::css::FontFaceDecl, Vec<u8>)>>,
     /// Number of font fetches still in flight.
     fonts_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Containing block rect for the nearest positioned (non-static) ancestor.
@@ -1320,9 +1332,9 @@ impl LayoutEngine {
             cached_has_container_q: false,
             progressive_cutoff: 0.0,
             initial_layout_done: false,
-            fonts_loaded: false,
+            scheduled_font_faces: HashSet::new(),
             text_width_cache: std::cell::RefCell::new(HashMap::new()),
-            pending_fonts: None,
+            pending_fonts: Vec::new(),
             fonts_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             pos_cb: Cell::new(Rect::new(0.0, 0.0, 0.0, 0.0)),
             fixed_cb: Cell::new(Rect::new(0.0, 0.0, 0.0, 0.0)),
@@ -1844,6 +1856,10 @@ impl LayoutEngine {
                 if text.is_empty() {
                     return 0.0;
                 }
+                let text = crate::renderer::display_list_builder::apply_text_transform(
+                    &text,
+                    node.style.text_transform,
+                );
                 let letter_spacing = node
                     .style
                     .letter_spacing
@@ -1872,8 +1888,12 @@ impl LayoutEngine {
                 if word.is_empty() {
                     continue;
                 }
-                let w = self.measure_text_cached(
+                let word = crate::renderer::display_list_builder::apply_text_transform(
                     word,
+                    node.style.text_transform,
+                );
+                let w = self.measure_text_cached(
+                    &word,
                     font_px,
                     node.style.font_weight,
                     node.style.font_style,
@@ -2098,6 +2118,10 @@ impl LayoutEngine {
             if text.is_empty() {
                 return 0.0;
             }
+            let text = crate::renderer::display_list_builder::apply_text_transform(
+                &text,
+                node.style.text_transform,
+            );
             let letter_spacing = node
                 .style
                 .letter_spacing
@@ -2319,9 +2343,13 @@ impl LayoutEngine {
             .split(|c: char| c.is_ascii_whitespace())
             .filter(|word| !word.is_empty())
             .map(|word| {
+                let transformed = crate::renderer::display_list_builder::apply_text_transform(
+                    word,
+                    node.style.text_transform,
+                );
                 if letter_spacing != 0.0 || word_spacing != 0.0 {
                     text::measure_text_with_spacing(
-                        word,
+                        &transformed,
                         font_px,
                         letter_spacing,
                         word_spacing,
@@ -2329,7 +2357,7 @@ impl LayoutEngine {
                     )
                 } else {
                     self.measure_text_cached(
-                        word,
+                        &transformed,
                         font_px,
                         node.style.font_weight,
                         node.style.font_style,
@@ -2360,6 +2388,10 @@ impl LayoutEngine {
         if text.is_empty() {
             return 0.0;
         }
+        let text = crate::renderer::display_list_builder::apply_text_transform(
+            &text,
+            node.style.text_transform,
+        );
         let letter_spacing = node
             .style
             .letter_spacing
@@ -2400,14 +2432,18 @@ impl LayoutEngine {
         let font_px = style.font_size_px(parent_font_px, root_font_px);
         let rb = self.res_box(style, font_px, 0.0, root_font_px);
         let inline_width_ignored = matches!(style.display, Display::Inline);
+        let transformed = crate::renderer::display_list_builder::apply_text_transform(
+            content,
+            style.text_transform,
+        );
         let content_w =
             if !inline_width_ignored && !style.width.is_auto() && !style.width.has_percentage() {
                 self.res_len(&style.width, font_px, 0.0, root_font_px)
-            } else if content.is_empty() {
+            } else if transformed.is_empty() {
                 0.0
             } else {
                 self.measure_text_cached(
-                    content,
+                    &transformed,
                     font_px,
                     style.font_weight,
                     style.font_style,
@@ -2456,7 +2492,15 @@ impl LayoutEngine {
                     }
                     let url_inner = match &source.kind {
                         crate::css::FontFaceSourceKind::Local(name) => {
+                            let key = font_face_source_key(face, &format!("local({name})"));
+                            if self.scheduled_font_faces.contains(&key) {
+                                found = true;
+                                continue;
+                            }
                             found = load_local_font_face(fs, face, name);
+                            if found {
+                                self.scheduled_font_faces.insert(key);
+                            }
                             continue;
                         }
                         crate::css::FontFaceSourceKind::Url(url) => url.as_str(),
@@ -2479,17 +2523,29 @@ impl LayoutEngine {
                         .strip_prefix("data:")
                         .and_then(|s| s.find(";base64,").map(|i| &s[i + 8..]))
                     {
+                        let key = font_face_source_key(face, url_inner);
+                        if self.scheduled_font_faces.contains(&key) {
+                            found = true;
+                            continue;
+                        }
                         if let Ok(bytes) = decode_base64(b64.trim()) {
                             load_font_face_bytes(fs, face, bytes);
                             found = true;
+                            self.scheduled_font_faces.insert(key);
                         }
                         continue;
                     }
 
                     let resolved = crate::html::resolve_url(url_clean, base_url);
+                    let key = font_face_source_key(face, &resolved);
+                    if self.scheduled_font_faces.contains(&key) {
+                        found = true;
+                        continue;
+                    }
 
                     if resolved.starts_with("http://") || resolved.starts_with("https://") {
                         remote.push((face.clone(), resolved));
+                        self.scheduled_font_faces.insert(key);
                         found = true;
                     } else if !resolved.is_empty() {
                         // Local file — load immediately.
@@ -2503,6 +2559,7 @@ impl LayoutEngine {
                         if let Ok(data) = std::fs::read(path) {
                             load_font_face_bytes(fs, face, data);
                             found = true;
+                            self.scheduled_font_faces.insert(key);
                         }
                     }
                 }
@@ -2512,7 +2569,7 @@ impl LayoutEngine {
             if !remote.is_empty() {
                 let (tx, rx) = std::sync::mpsc::channel::<(crate::css::FontFaceDecl, Vec<u8>)>();
                 let in_flight = self.fonts_in_flight.clone();
-                in_flight.store(remote.len(), std::sync::atomic::Ordering::SeqCst);
+                in_flight.fetch_add(remote.len(), std::sync::atomic::Ordering::SeqCst);
 
                 for (face, url) in remote {
                     let sender = tx.clone();
@@ -2533,7 +2590,7 @@ impl LayoutEngine {
                         counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     });
                 }
-                self.pending_fonts = Some(rx);
+                self.pending_fonts.push(rx);
             }
         }
     }
@@ -2565,11 +2622,7 @@ impl LayoutEngine {
         max_fonts: usize,
         max_time: std::time::Duration,
     ) -> bool {
-        let rx = match self.pending_fonts.as_ref() {
-            Some(rx) => rx,
-            None => return false,
-        };
-        if max_fonts == 0 {
+        if max_fonts == 0 || self.pending_fonts.is_empty() {
             return false;
         }
         let fs = match self.font_system {
@@ -2579,22 +2632,28 @@ impl LayoutEngine {
 
         let mut loaded_any = false;
         let start = std::time::Instant::now();
+        let time_limited = !max_time.is_zero();
         let mut processed = 0usize;
-        while let Ok((face, bytes)) = rx.try_recv() {
-            loaded_any |= load_font_face_bytes(fs, &face, bytes);
-            processed += 1;
-            if processed >= max_fonts || start.elapsed() >= max_time {
+        for rx in &self.pending_fonts {
+            while let Ok((face, bytes)) = rx.try_recv() {
+                loaded_any |= load_font_face_bytes(fs, &face, bytes);
+                processed += 1;
+                if processed >= max_fonts || (time_limited && start.elapsed() >= max_time) {
+                    break;
+                }
+            }
+            if processed >= max_fonts || (time_limited && start.elapsed() >= max_time) {
                 break;
             }
         }
 
-        // If all fetches are done, drop the receiver.
+        // If all fetches are done, drop receivers so idle detection settles.
         if self
             .fonts_in_flight
             .load(std::sync::atomic::Ordering::SeqCst)
             == 0
         {
-            self.pending_fonts = None;
+            self.pending_fonts.clear();
         }
 
         loaded_any
@@ -2602,7 +2661,7 @@ impl LayoutEngine {
 
     /// Returns `true` if there are still font fetches in flight.
     pub fn has_pending_fonts(&self) -> bool {
-        self.pending_fonts.is_some()
+        !self.pending_fonts.is_empty()
     }
 
     /// Main entry point: layout the full document.
@@ -2636,9 +2695,8 @@ impl LayoutEngine {
         doc.stylesheet.rebuild_index();
 
         // Load @font-face fonts (non-blocking — remote fonts arrive via poll_pending_fonts).
-        if !self.fonts_loaded && !doc.stylesheet.font_faces.is_empty() {
+        if !doc.stylesheet.font_faces.is_empty() {
             self.load_font_faces(&doc.stylesheet.font_faces, &doc.base_url);
-            self.fonts_loaded = true;
         }
 
         // Cache @media / @container presence so we don't O(n)-scan rules every layout.
@@ -2932,6 +2990,7 @@ impl LayoutEngine {
         };
         self.layout_box(&mut doc.root, &root_c);
         clear_layout_inert_svg_subtrees(&mut doc.root, false);
+        clear_display_contents_boxes(&mut doc.root);
 
         // Update root geometry with the final scroll extent. Modern pages
         // commonly have positioned or late-sized descendants that extend past
@@ -3534,6 +3593,23 @@ fn resolve_all_slots(node: &mut WebCore) {
 
 fn count_nodes(node: &WebCore) -> usize {
     1 + node.children.iter().map(|c| count_nodes(c)).sum::<usize>()
+}
+
+fn clear_display_contents_boxes(node: &mut WebCore) {
+    if matches!(node.style.display, Display::Contents) {
+        node.layout.content_rect = Rect::default();
+        node.layout.padding_rect = Rect::default();
+        node.layout.border_rect = Rect::default();
+        node.layout.margin_rect = Rect::default();
+    }
+    for child in &mut node.children {
+        clear_display_contents_boxes(child);
+    }
+    if let Some(shadow_root) = node.shadow_root.as_mut() {
+        for child in &mut shadow_root.children {
+            clear_display_contents_boxes(child);
+        }
+    }
 }
 
 pub fn has_block_children(node: &WebCore) -> bool {

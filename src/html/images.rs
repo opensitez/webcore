@@ -151,13 +151,7 @@ pub(crate) fn load_image_from_src(src: &str, base_url: &str) -> Option<(Vec<u8>,
 
     // Fetch remote images via HTTP
     if path.starts_with("http://") || path.starts_with("https://") {
-        let bytes = crate::http_client()
-            .get(&path)
-            .header("Sec-Fetch-Dest", "image")
-            .send()
-            .ok()
-            .and_then(|r| r.bytes().ok())
-            .map(|b| b.to_vec())?;
+        let bytes = crate::loading::fetch_bytes(&path).ok()?;
         return decode_image_bytes(&bytes);
     }
 
@@ -173,13 +167,7 @@ pub(crate) fn load_decoded_image_from_src(src: &str, base_url: &str) -> Option<D
 
     let path = resolve_url(src, base_url);
     if path.starts_with("http://") || path.starts_with("https://") {
-        let bytes = crate::http_client()
-            .get(&path)
-            .header("Sec-Fetch-Dest", "image")
-            .send()
-            .ok()
-            .and_then(|r| r.bytes().ok())
-            .map(|b| b.to_vec())?;
+        let bytes = crate::loading::fetch_bytes(&path).ok()?;
         return decode_image_bytes_ex(&bytes);
     }
 
@@ -261,10 +249,11 @@ pub struct AnimatedImage {
 }
 
 pub fn decode_image_bytes_ex(bytes: &[u8]) -> Option<DecodedImage> {
-    if let Some(animated) = decode_animated_image(bytes) {
-        if animated.frames.len() > 1 {
-            return Some(DecodedImage::Animated(animated));
-        }
+    if (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"))
+        && let Some(animated) = decode_animated_image(bytes)
+        && animated.frames.len() > 1
+    {
+        return Some(DecodedImage::Animated(animated));
     }
 
     // Try raster formats first (PNG, JPEG, GIF, WebP, BMP)
@@ -275,6 +264,11 @@ pub fn decode_image_bytes_ex(bytes: &[u8]) -> Option<DecodedImage> {
             let mut raw = rgba.into_raw();
             premultiply_rgba(&mut raw);
             return Some(DecodedImage::Raster(std::sync::Arc::new(raw), w, h));
+        }
+    }
+    if let Some(animated) = decode_animated_image(bytes) {
+        if animated.frames.len() > 1 {
+            return Some(DecodedImage::Animated(animated));
         }
     }
     // SVG: return the markup for deferred rasterization at paint time

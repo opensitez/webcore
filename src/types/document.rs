@@ -30,11 +30,28 @@ pub struct SmoothScrollState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PendingImageTarget {
     Element,
+    ElementFallback,
     Background,
     Mask,
 }
 
-pub type PendingImageResult = (Vec<usize>, PendingImageTarget, crate::html::DecodedImage);
+#[derive(Clone)]
+pub enum PendingImageResult {
+    Loaded {
+        node_id: u32,
+        path: Vec<usize>,
+        target: PendingImageTarget,
+        url: String,
+        decoded: crate::html::DecodedImage,
+    },
+    Failed {
+        node_id: u32,
+        path: Vec<usize>,
+        target: PendingImageTarget,
+        url: String,
+        error: String,
+    },
+}
 pub type PendingStylesheetResult = (usize, String, crate::css::Stylesheet, String);
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -114,6 +131,10 @@ pub struct Document {
     /// rebuilds the CSSOM from `document_stylesheets` so late sheets keep
     /// cascade semantics instead of fetch-completion order.
     pub loaded_linked_stylesheets: HashMap<String, crate::css::Stylesheet>,
+    /// Linked author stylesheet fragments keyed by their document stylesheet
+    /// slot. This is the browser-facing storage: fetches may finish in any
+    /// order, but the cascade consumes slots in source order.
+    pub loaded_stylesheet_slots: HashMap<usize, crate::css::Stylesheet>,
     /// True while preserving exact document-order stylesheet rebuilds. Live
     /// browser loading keeps this false so streamed parsed CSS fragments append
     /// directly to the active cascade instead of cloning/rebuilding the whole
@@ -293,6 +314,7 @@ pub struct Document {
     /// Receiver for images arriving from background fetch threads.
     /// Each message is (node_path, decoded_rgba, width, height).
     pub pending_images: Option<std::sync::mpsc::Receiver<PendingImageResult>>,
+    pub image_load_errors: Vec<(Vec<usize>, PendingImageTarget, String, String)>,
     /// Number of image fetches still in flight.
     pub images_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Receiver for linked stylesheets arriving from background fetch threads.
@@ -750,6 +772,7 @@ impl Clone for Document {
             linked_stylesheets: self.linked_stylesheets.clone(),
             document_stylesheets: self.document_stylesheets.clone(),
             loaded_linked_stylesheets: self.loaded_linked_stylesheets.clone(),
+            loaded_stylesheet_slots: self.loaded_stylesheet_slots.clone(),
             preserve_stylesheet_document_order: self.preserve_stylesheet_document_order,
             editor: self.editor.clone(),
             // The canvas BITMAPS come along inside `root.clone()`, because
@@ -811,6 +834,7 @@ impl Clone for Document {
             layout_generation: self.layout_generation,
             // Async image state is not cloned — cloned docs start with no pending fetches.
             pending_images: None,
+            image_load_errors: self.image_load_errors.clone(),
             images_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             pending_stylesheets: None,
             on_form_event: None,

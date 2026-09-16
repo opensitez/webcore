@@ -502,6 +502,8 @@ fn parse_display_keyword(v: &str) -> Option<crate::types::Display> {
         "inline-block" => InlineBlock,
         "flex" => Flex,
         "inline-flex" => InlineFlex,
+        "-webkit-box" => Block,
+        "-webkit-inline-box" => InlineBlock,
         "grid" => Grid,
         "inline-grid" => InlineGrid,
         "table" => Table,
