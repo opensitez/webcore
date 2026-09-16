@@ -3854,7 +3854,7 @@ dependencies = [
 
 [[package]]
 name = "webcore"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "accesskit 0.17.1",
  "accesskit_winit",
