@@ -682,8 +682,13 @@ impl Renderer {
             let image_tick =
                 doc.tick_animated_images_in_viewport_detailed(now, doc.scroll_y, viewport_h);
             if image_tick.changed_any {
+                // Image commands carry the decoded pixel buffer captured when
+                // the display list was built. Animated image ticks replace the
+                // node's current frame buffer, so the visible viewport list has
+                // to be rebuilt even when geometry is unchanged.
+                self.invalidate_display_list();
                 if image_tick.paint_rects.is_empty() {
-                    self.invalidate_display_list();
+                    // Full display-list invalidation above is enough.
                 } else {
                     self.invalidate_paint_rects(image_tick.paint_rects);
                 }
@@ -714,7 +719,11 @@ impl Renderer {
                     now + std::time::Duration::from_millis(16),
                 ));
             } else {
-                let mut deadline = if doc.needs_animation_frame {
+                let resource_work_pending = doc.pending_images.is_some()
+                    || doc.pending_stylesheets.is_some()
+                    || self.layout_engine().has_pending_fonts()
+                    || self.pending_resource_relayout;
+                let mut deadline = if doc.needs_animation_frame || resource_work_pending {
                     now + std::time::Duration::from_millis(16)
                 } else {
                     now + std::time::Duration::from_millis(250)

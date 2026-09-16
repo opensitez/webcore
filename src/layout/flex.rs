@@ -1,6 +1,8 @@
 use super::Constraints;
 use crate::layout::block::unwrap_all_anonymous_blocks;
-use crate::layout::{LayoutEngine, ResolvedBox, layout_positioned, shift_rects};
+use crate::layout::{
+    LayoutEngine, ResolvedBox, clear_layout_subtree, layout_positioned, shift_rects,
+};
 use crate::types::*;
 
 /// Resolve a child by path through `display: contents` wrappers.
@@ -289,6 +291,7 @@ pub fn layout_flex(
     for path in &child_paths {
         let child = child_mut(node, path);
         if matches!(child.style.display, Display::None) {
+            clear_layout_subtree(child);
             continue;
         }
         if matches!(child.style.position, Position::Absolute | Position::Fixed) {

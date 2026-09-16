@@ -38,7 +38,11 @@ pub fn parse_single_track(v: &str) -> GridTrackSize {
         let px: f32 = v[..v.len() - 2].parse().unwrap_or(0.0);
         return GridTrackSize::fixed(px);
     }
-    if v.starts_with("calc(") {
+    if v.starts_with("calc(")
+        || v.starts_with("min(")
+        || v.starts_with("max(")
+        || v.starts_with("clamp(")
+    {
         let len = parse_length(v);
         return GridTrackSize {
             kind: GridTrackKind::Calc,
@@ -57,9 +61,11 @@ pub fn parse_single_track(v: &str) -> GridTrackSize {
                 value: 0.0,
                 min_kind: min_t.kind,
                 min_value: min_t.value,
+                min_calc_length: min_t.calc_length,
                 max_kind: max_t.kind,
                 max_value: max_t.value,
-                calc_length: None,
+                max_calc_length: max_t.calc_length,
+                ..Default::default()
             };
         }
     }
@@ -71,12 +77,26 @@ pub fn parse_single_track(v: &str) -> GridTrackSize {
             value: t.value,
             max_kind: t.kind,
             max_value: t.value,
+            max_calc_length: t.calc_length,
             ..Default::default()
         };
     }
     // unitless number → px
     if let Ok(n) = v.parse::<f32>() {
         return GridTrackSize::fixed(n);
+    }
+    if let Some(len) = parse_length_checked(v) {
+        return match len {
+            CssLength::Px(px) => GridTrackSize::fixed(px),
+            CssLength::Percent(pct) => GridTrackSize::percent(pct),
+            CssLength::Zero => GridTrackSize::fixed(0.0),
+            CssLength::Auto => GridTrackSize::auto(),
+            other => GridTrackSize {
+                kind: GridTrackKind::Calc,
+                calc_length: Some(other),
+                ..Default::default()
+            },
+        };
     }
     GridTrackSize::auto()
 }

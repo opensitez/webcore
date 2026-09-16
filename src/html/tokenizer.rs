@@ -23,6 +23,11 @@ pub(crate) enum Token {
     Doctype(crate::html::doctype::Doctype),
 }
 
+pub(crate) struct CompleteToken {
+    pub(crate) token: Token,
+    pub(crate) end: usize,
+}
+
 /// `html[start..end]`, clamped so a truncated tag cannot build a range that
 /// runs backwards.
 ///
@@ -195,6 +200,127 @@ pub(crate) fn tokenize(html: &str) -> Vec<Token> {
         }
     }
     tokens
+}
+
+pub(crate) fn next_complete_token(html: &str) -> Option<CompleteToken> {
+    if html.is_empty() {
+        return None;
+    }
+    let bytes = html.as_bytes();
+    if bytes[0] != b'<' {
+        let end = html.find('<').unwrap_or(html.len());
+        if end == 0 {
+            return None;
+        }
+        return Some(CompleteToken {
+            token: Token::Text(decode_entities(&html[..end])),
+            end,
+        });
+    }
+
+    if html.starts_with("<!--") {
+        return complete_comment_token(html);
+    }
+    if html.len() >= 9 && bytes[..9].eq_ignore_ascii_case(b"<!doctype") {
+        let end = html.find('>')? + 1;
+        let inner = crate::html::doctype::parse_doctype(&html[9..end - 1]);
+        return Some(CompleteToken {
+            token: Token::Doctype(inner),
+            end,
+        });
+    }
+    if html.len() > 1 && (bytes[1] == b'!' || bytes[1] == b'?') {
+        let end = html.find('>')? + 1;
+        let data_start = if bytes[1] == b'!' { 2 } else { 1 };
+        return Some(CompleteToken {
+            token: Token::Comment(html[data_start..end - 1].to_string()),
+            end,
+        });
+    }
+    if html.len() > 1 && bytes[1] == b'/' {
+        let end = html.find('>')? + 1;
+        let inner = tag_slice(html, 2, end.saturating_sub(1));
+        let tag = inner.trim().to_ascii_lowercase();
+        if tag == "br" {
+            return Some(CompleteToken {
+                token: Token::OpenTag {
+                    tag,
+                    attrs: crate::dom::attrs::AttrMap::new(),
+                    self_closing: true,
+                },
+                end,
+            });
+        }
+        return Some(CompleteToken {
+            token: Token::CloseTag { tag },
+            end,
+        });
+    }
+
+    let end = find_tag_end_streaming(html, 0)?;
+    let tag_src = tag_slice(html, 1, end.saturating_sub(1));
+    let had_slash = tag_src.trim_end().ends_with('/');
+    let tag_src = tag_src.trim_end_matches('/').trim();
+    let (tag, attrs) = parse_tag_attrs(tag_src);
+    let tag = if tag == "image" {
+        "img".to_string()
+    } else {
+        tag
+    };
+    let is_void = is_void_element(&tag);
+    let self_closing = is_void || (had_slash && is_foreign_content_tag(&tag));
+    Some(CompleteToken {
+        token: Token::OpenTag {
+            tag,
+            attrs,
+            self_closing,
+        },
+        end,
+    })
+}
+
+fn complete_comment_token(html: &str) -> Option<CompleteToken> {
+    let rest = &html[4..];
+    if rest.starts_with('>') {
+        Some(CompleteToken {
+            token: Token::Comment(String::new()),
+            end: 5,
+        })
+    } else if rest.starts_with("->") {
+        Some(CompleteToken {
+            token: Token::Comment(String::new()),
+            end: 6,
+        })
+    } else {
+        rest.find("-->").map(|e| CompleteToken {
+            token: Token::Comment(rest[..e].to_string()),
+            end: 4 + e + 3,
+        })
+    }
+}
+
+fn find_tag_end_streaming(html: &str, start: usize) -> Option<usize> {
+    let bytes = html.as_bytes();
+    let mut i = start + 1;
+    let mut in_q: Option<u8> = None;
+    let mut prev_meaningful: u8 = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = in_q {
+            if b == q {
+                in_q = None;
+            }
+        } else if (b == b'"' || b == b'\'') && prev_meaningful == b'=' {
+            in_q = Some(b);
+        } else if b == b'>' {
+            return Some(i + 1);
+        }
+        if !b.is_ascii_whitespace() {
+            prev_meaningful = b;
+        }
+        i += 1;
+    }
+    None
 }
 
 fn find_tag_end(html: &str, start: usize) -> usize {

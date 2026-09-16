@@ -98,6 +98,7 @@ pub struct EngineFrame {
     image_tx: Option<std::sync::mpsc::Sender<crate::types::PendingImageResult>>,
     scheduled_images: std::collections::HashSet<String>,
     cache_dir: Option<String>,
+    resource_wake: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     /// Host callbacks (boxed trait object).
     callbacks: Box<dyn EngineCallbacks>,
 }
@@ -124,6 +125,7 @@ impl EngineFrame {
             image_tx: None,
             scheduled_images: std::collections::HashSet::new(),
             cache_dir: None,
+            resource_wake: None,
             callbacks: Box::new(NoopCallbacks),
         }
     }
@@ -141,6 +143,15 @@ impl EngineFrame {
 
     pub fn set_cache_dir(&mut self, cache_dir: Option<String>) {
         self.cache_dir = cache_dir;
+    }
+
+    pub fn set_resource_wake(&mut self, wake: Option<std::sync::Arc<dyn Fn() + Send + Sync>>) {
+        self.resource_wake = wake;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_resource_wake(&self) -> bool {
+        self.resource_wake.is_some()
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -210,7 +221,7 @@ impl EngineFrame {
         // 1. Poll for async stylesheets/images/fonts
         if self
             .doc
-            .poll_pending_stylesheets_budgeted(usize::MAX, std::time::Duration::ZERO)
+            .poll_pending_stylesheets_budgeted(32, std::time::Duration::from_millis(6))
         {
             self.needs_style = true;
             self.needs_layout = true;
@@ -218,7 +229,7 @@ impl EngineFrame {
         }
         let image_poll = self
             .doc
-            .poll_pending_images_budgeted(usize::MAX, std::time::Duration::ZERO);
+            .poll_pending_images_budgeted(32, std::time::Duration::from_millis(8));
         if image_poll.loaded_any {
             self.needs_layout |= image_poll.needs_relayout;
             self.needs_paint = true;
@@ -272,6 +283,7 @@ impl EngineFrame {
                 self.engine
                     .layout_no_cascade(&mut self.doc, self.viewport_w);
             }
+            self.schedule_unscheduled_document_images();
             self.needs_style = false;
             self.needs_layout = false;
             self.needs_paint = true;
@@ -882,6 +894,7 @@ impl EngineFrame {
         }
         let tx = self.ensure_stylesheet_sender();
         let cache_dir = self.cache_dir.clone();
+        let wake = self.resource_wake.clone();
         crate::spawn_css_resource_task(move || {
             let cache_key = format!("{url}\n");
             let loader: crate::StylesheetLoader = std::sync::Arc::new({
@@ -903,10 +916,16 @@ impl EngineFrame {
                 true,
                 |sheet| {
                     let _ = tx.send((slot_idx, url.clone(), sheet, String::new()));
+                    if let Some(wake) = wake.as_ref() {
+                        wake();
+                    }
                 },
             );
             if loaded.emitted_fragments == 0 {
                 let _ = tx.send((slot_idx, url, loaded.sheet, String::new()));
+                if let Some(wake) = wake.as_ref() {
+                    wake();
+                }
             }
         });
     }
@@ -937,6 +956,7 @@ impl EngineFrame {
         let tx = self.ensure_image_sender();
         let in_flight = self.doc.images_in_flight.clone();
         let cache_dir = self.cache_dir.clone();
+        let wake = self.resource_wake.clone();
         in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         crate::spawn_image_resource_task(move || {
             let loader = cache_dir.map(|cache_dir| {
@@ -972,13 +992,16 @@ impl EngineFrame {
             };
             let _ = tx.send(event);
             in_flight.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(wake) = wake.as_ref() {
+                wake();
+            }
         });
     }
 
     fn schedule_streamed_element_image(
         &mut self,
         tag: &str,
-        attributes: &std::collections::HashMap<String, String>,
+        attributes: &crate::dom::attrs::AttrMap,
         path: Vec<usize>,
     ) {
         let requests = if tag == "video" {
@@ -995,18 +1018,7 @@ impl EngineFrame {
             let mut requests = Vec::new();
             if let Some(src) = find_node_by_path(&self.doc.root, &path)
                 .and_then(crate::html::image_fallback_source)
-                .or_else(|| {
-                    [
-                        "src",
-                        "data-src",
-                        "data-lazy-src",
-                        "data-original",
-                        "data-original-src",
-                        "data-hi-res-src",
-                    ]
-                    .iter()
-                    .find_map(|name| attributes.get(*name).map(String::as_str))
-                })
+                .or_else(|| crate::html::image_fallback_source_attrs(attributes))
             {
                 requests.push((
                     crate::types::PendingImageTarget::ElementFallback,
@@ -1016,25 +1028,17 @@ impl EngineFrame {
             find_node_by_path(&self.doc.root, &path)
                 .and_then(|node| (!node.resolved_src.is_empty()).then(|| node.resolved_src.clone()))
                 .or_else(|| {
-                    [
-                        "srcset",
-                        "data-srcset",
-                        "data-lazy-srcset",
-                        "data-original-srcset",
-                        "data-hi-res-srcset",
-                    ]
-                    .iter()
-                    .find_map(|name| attributes.get(*name).map(String::as_str))
-                    .and_then(|srcset| {
-                        crate::html::parse_srcset_url_for(
-                            srcset,
-                            attributes.get("sizes").map(String::as_str),
-                            self.viewport_w,
-                            self.viewport_h,
-                            1.0,
-                        )
-                    })
-                    .map(|candidate| crate::html::resolve_url(&candidate, &self.doc.base_url))
+                    crate::html::image_srcset_source_attrs(attributes)
+                        .and_then(|srcset| {
+                            crate::html::parse_srcset_url_for(
+                                srcset,
+                                attributes.get("sizes").map(String::as_str),
+                                self.viewport_w,
+                                self.viewport_h,
+                                1.0,
+                            )
+                        })
+                        .map(|candidate| crate::html::resolve_url(&candidate, &self.doc.base_url))
                 })
                 .map(|preferred| {
                     if !requests.iter().any(|(_, url)| url == &preferred) {
@@ -1072,6 +1076,21 @@ impl EngineFrame {
             .filter(|value| *value > 0)
         {
             node.image_height = h;
+        }
+    }
+
+    fn resolve_streamed_image_source(&mut self, path: &[usize]) {
+        let base = self.doc.base_url.clone();
+        if let Some(parent_path) = path.split_last().map(|(_, parent)| parent)
+            && let Some(parent) =
+                crate::types::find_node_by_path_mut(&mut self.doc.root, parent_path)
+            && parent.tag == "picture"
+        {
+            crate::html::resolve_picture_source(parent, &base, self.viewport_w, self.viewport_h);
+            return;
+        }
+        if let Some(node) = crate::types::find_node_by_path_mut(&mut self.doc.root, path) {
+            crate::html::resolve_img_source(node, &base, self.viewport_w, self.viewport_h);
         }
     }
 
@@ -1120,6 +1139,20 @@ impl EngineFrame {
                     path.clone(),
                     crate::types::PendingImageTarget::Element,
                     crate::html::resolve_url(poster, base_url),
+                ));
+            }
+            if node.bg_image_data.is_none() && !node.style.background_image_url.is_empty() {
+                out.push((
+                    path.clone(),
+                    crate::types::PendingImageTarget::Background,
+                    crate::html::resolve_url(&node.style.background_image_url, base_url),
+                ));
+            }
+            if node.mask_image_data.is_none() && !node.style.rare().mask_image_url.is_empty() {
+                out.push((
+                    path.clone(),
+                    crate::types::PendingImageTarget::Mask,
+                    crate::html::resolve_url(&node.style.rare().mask_image_url, base_url),
                 ));
             }
             for (idx, child) in node.children.iter().enumerate() {
@@ -1171,6 +1204,10 @@ impl EngineFrame {
                         for (name, value) in attributes {
                             self.doc.set_attribute(child_id, name, value);
                         }
+                        let base_url = self.doc.base_url.clone();
+                        if let Some(node) = self.doc.find_webcore_mut(child_id) {
+                            crate::html::parser::HtmlParser::post_process_node(node, &base_url);
+                        }
                         if tag == "img" || tag == "video" {
                             let mut element_path = parent_path.clone();
                             if let Some(child_index) = self
@@ -1180,13 +1217,7 @@ impl EngineFrame {
                             {
                                 element_path.push(child_index);
                                 if tag == "img" {
-                                    let base = self.doc.base_url.clone();
-                                    crate::html::resolve_picture_elements(
-                                        &mut self.doc.root,
-                                        &base,
-                                        self.viewport_w,
-                                        self.viewport_h,
-                                    );
+                                    self.resolve_streamed_image_source(&element_path);
                                     self.apply_streamed_image_dimension_hints(&element_path);
                                 }
                                 self.schedule_streamed_element_image(tag, attributes, element_path);
@@ -1237,6 +1268,7 @@ impl EngineFrame {
         }
 
         if !mutations.is_empty() {
+            materialize_streamed_inline_svgs(&mut self.doc.root);
             self.mark_style_dirty();
         }
 
@@ -1259,6 +1291,10 @@ impl EngineFrame {
                             for (name, value) in &attributes {
                                 self.doc.set_attribute(child_id, &name, &value);
                             }
+                            let base_url = self.doc.base_url.clone();
+                            if let Some(node) = self.doc.find_webcore_mut(child_id) {
+                                crate::html::parser::HtmlParser::post_process_node(node, &base_url);
+                            }
                             let mut element_path = parent_path.clone();
                             let child_index =
                                 self.doc.get_node(parent_id).map(|n| n.children.len());
@@ -1268,13 +1304,7 @@ impl EngineFrame {
                                 element_path.push(child_index);
                                 if tag == "img" || tag == "video" {
                                     if tag == "img" {
-                                        let base = self.doc.base_url.clone();
-                                        crate::html::resolve_picture_elements(
-                                            &mut self.doc.root,
-                                            &base,
-                                            self.viewport_w,
-                                            self.viewport_h,
-                                        );
+                                        self.resolve_streamed_image_source(&element_path);
                                         self.apply_streamed_image_dimension_hints(&element_path);
                                     }
                                     self.schedule_streamed_element_image(
@@ -1329,6 +1359,8 @@ impl EngineFrame {
             }
         }
         materialize_streamed_inline_svgs(&mut self.doc.root);
+        post_process_streamed_tree(&mut self.doc.root, &self.doc.base_url);
+        crate::html::number_lists(&mut self.doc.root);
         self.schedule_unscheduled_document_images();
         self.stylesheet_tx = None;
         self.image_tx = None;
@@ -1412,6 +1444,13 @@ fn materialize_streamed_inline_svgs(node: &mut crate::types::WebCore) {
     }
 }
 
+fn post_process_streamed_tree(node: &mut crate::types::WebCore, base_url: &str) {
+    for child in &mut node.children {
+        post_process_streamed_tree(child, base_url);
+    }
+    crate::html::parser::HtmlParser::post_process_node(node, base_url);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1487,6 +1526,43 @@ mod tests {
     }
 
     #[test]
+    fn streaming_frame_keeps_void_head_elements_from_swallowing_body() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<html><head><meta charset="utf-8"><link rel="stylesheet" href="/app.css"></head><body><main><h1>Real</h1></main></body></html>"#,
+        );
+        frame.finish_loading();
+
+        let head = frame
+            .doc
+            .root
+            .children
+            .iter()
+            .find(|child| child.tag == "head")
+            .expect("streamed document should have a head");
+        assert!(
+            head.children
+                .iter()
+                .filter(|child| matches!(child.tag.as_str(), "meta" | "link"))
+                .all(|child| child.children.is_empty()),
+            "void head elements must not become insertion parents"
+        );
+
+        let body = frame
+            .doc
+            .root
+            .children
+            .iter()
+            .find(|child| child.tag == "body")
+            .expect("streamed document should have a body");
+        assert!(
+            body.children.iter().any(|child| child.tag == "main"),
+            "visible body content should remain under body"
+        );
+    }
+
+    #[test]
     fn streaming_frame_schedules_stylesheet_without_host_babysitting() {
         let mut frame = EngineFrame::empty(320.0, 240.0);
         frame.start_streaming("https://example.test/");
@@ -1534,6 +1610,88 @@ mod tests {
             frame.doc.pending_stylesheets.is_none(),
             "once the sender is gone and the queue is drained, idle must not see CSS as pending"
         );
+    }
+
+    #[test]
+    fn update_frame_polls_streamed_stylesheets_in_a_bounded_batch() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        let (tx, rx) = std::sync::mpsc::channel();
+        for i in 0..64 {
+            let mut sheet = crate::css::Stylesheet::default();
+            sheet.parse_and_add_author(&format!(".stream-batch-{i} {{ color: red }}"));
+            tx.send((
+                i,
+                format!("https://example.test/{i}.css"),
+                sheet,
+                String::new(),
+            ))
+            .unwrap();
+        }
+        frame.doc.pending_stylesheets = Some(rx);
+
+        assert!(frame.update_frame());
+        let consumed = frame
+            .doc
+            .stylesheet
+            .rules
+            .iter()
+            .filter(|rule| rule.original_selector.starts_with(".stream-batch-"))
+            .count();
+        assert_eq!(
+            consumed, 32,
+            "active frames should not drain every pending stylesheet fragment in one UI tick"
+        );
+        assert!(
+            frame.doc.pending_stylesheets.is_some(),
+            "remaining stylesheet fragments should stay queued for following ticks"
+        );
+    }
+
+    #[test]
+    fn streamed_css_background_images_are_scheduled_after_cascade() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<html><head><style>.logo{background-image:url(/logo.png);width:16px;height:16px}</style></head><body><div class="logo"></div></body></html>"#,
+        );
+        frame.finish_loading();
+
+        assert!(
+            frame.update_frame(),
+            "first frame should cascade streamed CSS"
+        );
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("Background")
+                    && key.contains("https://example.test/logo.png")),
+            "streamed CSS-created background dependencies must enter the image loader"
+        );
+    }
+
+    #[test]
+    fn streamed_finish_runs_full_parser_node_post_processing() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<html><body><input type="submit"><img data-src="hero.png" width="80" height="40"></body></html>"#,
+        );
+        frame.finish_loading();
+
+        let submit = frame.doc.query_selector("input").unwrap();
+        let submit = frame.doc.get_node(submit).unwrap();
+        assert_eq!(
+            submit.children.first().map(|child| child.text.as_str()),
+            Some("Submit"),
+            "streamed controls should get the same parser normalization as full parse"
+        );
+
+        let img = frame.doc.query_selector("img").unwrap();
+        let img = frame.doc.get_node(img).unwrap();
+        assert_eq!(img.resolved_src, "https://example.test/hero.png");
+        assert_eq!((img.image_width, img.image_height), (80, 40));
     }
 
     #[test]
@@ -1666,5 +1824,39 @@ mod tests {
         );
         assert_eq!(svg.svg_viewbox_w, 16.0);
         assert_eq!(svg.svg_viewbox_h, 16.0);
+    }
+
+    #[test]
+    fn streaming_frame_paints_inline_svg_before_final_load() {
+        let mut frame = EngineFrame::empty(64.0, 64.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br##"<html><body style="margin:0"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M0 0H16V16H0Z" fill="#6001d2"/></svg>"##,
+        );
+
+        assert!(
+            frame.update_frame(),
+            "streamed inline SVG insertion should schedule a paint"
+        );
+        let list =
+            crate::renderer::display_list_builder::build_display_list(&frame.doc.root, 64.0, 64.0);
+        let image = list.commands.iter().find_map(|cmd| match cmd {
+            crate::renderer::display_list::PaintCmd::Image {
+                data: crate::renderer::display_list::ImageRef::Owned(data, w, h),
+                ..
+            } => Some((data, *w, *h)),
+            _ => None,
+        });
+        let (data, w, h) = image.expect("streamed inline SVG should rasterize to an image command");
+        assert_eq!((w, h), (16, 16));
+        let idx = ((8 * w + 8) * 4) as usize;
+        assert!(
+            data[idx] > 70 && data[idx + 1] < 40 && data[idx + 2] > 150 && data[idx + 3] > 200,
+            "center pixel should come from streamed inline SVG paint, got rgba({}, {}, {}, {})",
+            data[idx],
+            data[idx + 1],
+            data[idx + 2],
+            data[idx + 3]
+        );
     }
 }

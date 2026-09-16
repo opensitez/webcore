@@ -2,7 +2,8 @@ use super::Constraints;
 use crate::layout::block::collapse_two;
 use crate::layout::text::resolve_bidi_line;
 use crate::layout::{
-    FloatContext, FloatSide, LayoutEngine, ResolvedBox, is_layout_inert_svg_node, layout_positioned,
+    FloatContext, FloatSide, LayoutEngine, ResolvedBox, clear_layout_subtree,
+    is_layout_inert_svg_node, layout_positioned,
 };
 use crate::types::*;
 use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Stretch, Style as CTextStyle, Weight};
@@ -1610,6 +1611,10 @@ fn layout_positioned_descendants(
     root_font_px: f32,
 ) {
     for child in &mut node.children {
+        if matches!(child.style.display, Display::None) {
+            clear_layout_subtree(child);
+            continue;
+        }
         if matches!(child.style.position, Position::Absolute | Position::Fixed) {
             layout_positioned(engine, child, cb, font_px, root_font_px);
         } else if matches!(child.style.display, Display::Inline) {
@@ -3969,6 +3974,7 @@ fn prelayout_nested_inline_blocks(
 ) {
     for ci in 0..node.children.len() {
         if matches!(node.children[ci].style.display, Display::None) {
+            clear_layout_subtree(&mut node.children[ci]);
             continue;
         }
         if matches!(

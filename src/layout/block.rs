@@ -1,8 +1,8 @@
 use super::Constraints;
 use crate::layout::grid::{collect_grid_children, grid_child_mut, grid_child_ref};
 use crate::layout::{
-    FloatContext, FloatSide, LayoutEngine, ResolvedBox, is_layout_inert_svg_node,
-    layout_positioned, shift_rects,
+    FloatContext, FloatSide, LayoutEngine, ResolvedBox, clear_layout_subtree,
+    is_layout_inert_svg_node, layout_positioned, shift_rects,
 };
 use crate::types::*;
 use std::collections::HashMap;
@@ -905,6 +905,8 @@ pub fn layout_block_with_fc(
         let child_position = ch.style.position;
 
         if matches!(child_display, Display::None) {
+            let child = grid_child_mut(node, path);
+            clear_layout_subtree(child);
             continue;
         }
         if is_layout_inert_svg_node(ch) {
@@ -1745,6 +1747,7 @@ pub fn layout_columns(
         let target = child_at_mut(node, &path);
         for child in target.children.iter_mut() {
             if matches!(child.style.display, Display::None) {
+                clear_layout_subtree(child);
                 continue;
             }
             if matches!(child.style.position, Position::Absolute | Position::Fixed) {
@@ -1787,6 +1790,7 @@ pub fn layout_columns(
     let target = child_at_mut(node, &path);
     for i in 0..target.children.len() {
         if matches!(target.children[i].style.display, Display::None) {
+            clear_layout_subtree(&mut target.children[i]);
             continue;
         }
         if matches!(

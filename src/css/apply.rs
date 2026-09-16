@@ -788,7 +788,10 @@ pub fn parse_css_filter_with_current_color(
 
 /// Resolve `var(--name)` and `var(--name, fallback)` references in a CSS value.
 /// Variables in the map are pre-resolved by `pre_resolve_variables`, so one pass suffices.
-/// Any still-unresolved var() (unknown custom property with no fallback) is dropped.
+/// Any still-unresolved var() (unknown custom property with no fallback) is
+/// preserved so the caller can discard the whole declaration. Substituting an
+/// empty string into a larger value like `calc(100% / var(--n))` corrupts valid
+/// CSS into a different invalid value, which then may parse as `auto`/zero.
 pub fn resolve_var_references(val: &str, variables: &HashMap<String, String>) -> String {
     if !val.contains("var(") {
         return val.to_string();
@@ -806,12 +809,7 @@ pub fn resolve_var_references(val: &str, variables: &HashMap<String, String>) ->
         } // no progress — unresolvable
         result = next;
     }
-    // Drop any remaining unresolved var() by substituting with fallback or "".
-    if result.contains("var(") {
-        resolve_var_pass(&result, &HashMap::new())
-    } else {
-        result
-    }
+    result
 }
 
 pub(crate) fn resolve_var_pass(val: &str, variables: &HashMap<String, String>) -> String {
@@ -863,6 +861,10 @@ pub(crate) fn resolve_var_pass(val: &str, variables: &HashMap<String, String>) -
                 }
             } else if let Some(fb) = fallback {
                 out.push_str(fb);
+            } else {
+                out.push_str("var(");
+                out.push_str(inner);
+                out.push(')');
             }
         } else {
             out.push_str(rest);

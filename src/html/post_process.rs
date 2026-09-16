@@ -79,39 +79,51 @@ pub(crate) fn parse_srcset_url_for(
         .map(|c| c.url.clone())
 }
 
-pub(crate) fn image_fallback_source(node: &WebCore) -> Option<&str> {
-    [
-        "src",
-        "data-src",
-        "data-lazy-src",
-        "data-original",
-        "data-original-src",
-        "data-hi-res-src",
-    ]
-    .iter()
-    .find_map(|name| {
-        node.attributes
-            .get(*name)
+const IMAGE_FALLBACK_SOURCE_ATTRS: &[&str] = &[
+    "src",
+    "data-src",
+    "data-lazy-src",
+    "data-original",
+    "data-original-src",
+    "data-hi-res-src",
+];
+
+const IMAGE_SRCSET_SOURCE_ATTRS: &[&str] = &[
+    "srcset",
+    "data-srcset",
+    "data-lazy-srcset",
+    "data-original-srcset",
+    "data-hi-res-srcset",
+];
+
+fn image_source_attr_with<'a, F>(mut get: F, names: &[&str]) -> Option<&'a str>
+where
+    F: FnMut(&str) -> Option<&'a String>,
+{
+    names.iter().find_map(|name| {
+        get(name)
             .map(String::as_str)
             .filter(|value| !value.trim().is_empty())
     })
 }
 
+pub(crate) fn image_fallback_source_attrs(attributes: &crate::dom::attrs::AttrMap) -> Option<&str> {
+    image_source_attr_with(|name| attributes.get(name), IMAGE_FALLBACK_SOURCE_ATTRS)
+}
+
+pub(crate) fn image_fallback_source(node: &WebCore) -> Option<&str> {
+    image_source_attr_with(
+        |name| node.attributes.get(name),
+        IMAGE_FALLBACK_SOURCE_ATTRS,
+    )
+}
+
+pub(crate) fn image_srcset_source_attrs(attributes: &crate::dom::attrs::AttrMap) -> Option<&str> {
+    image_source_attr_with(|name| attributes.get(name), IMAGE_SRCSET_SOURCE_ATTRS)
+}
+
 pub(crate) fn image_srcset_source(node: &WebCore) -> Option<&str> {
-    [
-        "srcset",
-        "data-srcset",
-        "data-lazy-srcset",
-        "data-original-srcset",
-        "data-hi-res-srcset",
-    ]
-    .iter()
-    .find_map(|name| {
-        node.attributes
-            .get(*name)
-            .map(String::as_str)
-            .filter(|value| !value.trim().is_empty())
-    })
+    image_source_attr_with(|name| node.attributes.get(name), IMAGE_SRCSET_SOURCE_ATTRS)
 }
 
 #[derive(Debug)]
@@ -392,7 +404,7 @@ pub fn resolve_picture_elements(node: &mut WebCore, base_url: &str, vw: f32, vh:
     }
 }
 
-fn resolve_img_source(node: &mut WebCore, base_url: &str, vw: f32, vh: f32) {
+pub(crate) fn resolve_img_source(node: &mut WebCore, base_url: &str, vw: f32, vh: f32) {
     if let Some(srcset) = image_srcset_source(node) {
         let sizes = node.attributes.get("sizes").map(|s| s.as_str());
         if let Some(best) = parse_srcset_url_for(srcset, sizes, vw, vh, 1.0) {

@@ -42,6 +42,43 @@ fn add_presentational_style(node: &mut WebCore, prop: &str, value: &str) {
     );
 }
 
+pub(crate) fn supports_dimension_presentational_hint(tag: &str, attr: &str) -> bool {
+    let tag = tag.to_ascii_lowercase();
+    let attr = attr.to_ascii_lowercase();
+    match attr.as_str() {
+        "width" => matches!(
+            tag.as_str(),
+            "canvas"
+                | "embed"
+                | "iframe"
+                | "img"
+                | "input"
+                | "object"
+                | "table"
+                | "td"
+                | "th"
+                | "col"
+                | "colgroup"
+                | "video"
+        ),
+        "height" => matches!(
+            tag.as_str(),
+            "canvas"
+                | "embed"
+                | "iframe"
+                | "img"
+                | "input"
+                | "object"
+                | "table"
+                | "td"
+                | "th"
+                | "tr"
+                | "video"
+        ),
+        _ => false,
+    }
+}
+
 pub(crate) fn apply_presentational_attrs(node: &mut WebCore) {
     let attrs = node.attributes.clone();
     let tag = node.tag.clone();
@@ -121,7 +158,7 @@ pub(crate) fn apply_presentational_attrs(node: &mut WebCore) {
             "text" if tag == "body" => {
                 // handled above by translating to `color` attribute
             }
-            "width" => {
+            "width" if supports_dimension_presentational_hint(&tag, "width") => {
                 let clean = val.trim().trim_end_matches(';').trim();
                 if clean.ends_with('%') {
                     apply_property(std::sync::Arc::make_mut(&mut node.style), "width", clean);
@@ -136,7 +173,7 @@ pub(crate) fn apply_presentational_attrs(node: &mut WebCore) {
                     }
                 }
             }
-            "height" => {
+            "height" if supports_dimension_presentational_hint(&tag, "height") => {
                 let clean = val.trim().trim_end_matches(';').trim();
                 if clean.ends_with('%') {
                     apply_property(std::sync::Arc::make_mut(&mut node.style), "height", clean);

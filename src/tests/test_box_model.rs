@@ -422,3 +422,25 @@ fn boxmodel_display_none() {
     assert_eq!(b.unwrap().layout.content_rect.w, 0.0);
     assert_eq!(b.unwrap().layout.content_rect.h, 0.0);
 }
+
+#[test]
+fn boxmodel_display_none_clears_descendant_layout() {
+    let doc = parse_and_layout(
+        r#"<div id="hidden" style="display:none">
+             <header style="position:fixed; width:400px; height:40px">
+               <a style="display:block; width:120px; height:20px">Hidden</a>
+             </header>
+           </div>
+           <p>Visible</p>"#,
+        800.0,
+    );
+    let hidden = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "hidden")
+    })
+    .unwrap();
+    assert_eq!(hidden.layout.content_rect, Rect::default());
+    let header = find_box(&doc.root, &|b| b.tag == "header").unwrap();
+    assert_eq!(header.layout.content_rect, Rect::default());
+    let link = find_box(&doc.root, &|b| b.tag == "a").unwrap();
+    assert_eq!(link.layout.content_rect, Rect::default());
+}

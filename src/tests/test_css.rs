@@ -172,6 +172,44 @@ fn root_dir_and_inherited_box_sizing_reach_descendants() {
 }
 
 #[test]
+fn root_qualified_descendant_selector_matches_html_class() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        r#"<html class="no-js"><head><style>
+             .placeholder { display: block; }
+             html.no-js .placeholder { display: none; }
+           </style></head><body>
+             <div id="target" class="placeholder"></div>
+           </body></html>"#,
+        800.0,
+    );
+    let target = d.get_element_by_id("target").unwrap();
+    assert_eq!(d.computed_style_property(target, "display"), "none");
+}
+
+#[test]
+fn ancestor_attribute_selector_styles_current_nav_link() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        r#"<style>
+             .menu a { color: rgb(180, 0, 0); border-bottom: 0 solid transparent; }
+             .menu li[aria-current=true] a { color: rgb(255, 255, 255); border-bottom: 4px solid rgb(180, 0, 0); }
+           </style>
+           <ul class="menu"><li aria-current="true"><a id="more">More</a></li></ul>"#,
+        800.0,
+    );
+    let more = d.get_element_by_id("more").unwrap();
+    assert_eq!(
+        d.computed_style_property(more, "color"),
+        "rgb(255, 255, 255)"
+    );
+    assert_eq!(
+        d.computed_style_property(more, "border-bottom-width"),
+        "4px"
+    );
+}
+
+#[test]
 fn absolute_dropdown_wrapper_does_not_raise_flex_nav_item() {
     let doc = parse_and_layout(
         r#"<style>

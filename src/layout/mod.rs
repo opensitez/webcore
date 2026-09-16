@@ -109,6 +109,26 @@ fn clear_layout_inert_svg_subtrees(node: &mut WebCore, inside_inert_svg: bool) {
     }
 }
 
+pub(crate) fn clear_layout_subtree(node: &mut WebCore) {
+    node.layout.content_rect = Rect::default();
+    node.layout.padding_rect = Rect::default();
+    node.layout.border_rect = Rect::default();
+    node.layout.margin_rect = Rect::default();
+    node.layout.line_cache.clear();
+    node.layout.scroll_width = 0.0;
+    node.layout.scroll_height = 0.0;
+    node.layout.scroll_left = 0.0;
+    node.layout.scroll_top = 0.0;
+    for child in &mut node.children {
+        clear_layout_subtree(child);
+    }
+    if let Some(shadow) = node.shadow_root.as_mut() {
+        for child in &mut shadow.children {
+            clear_layout_subtree(child);
+        }
+    }
+}
+
 pub(crate) fn establishes_positioned_containing_block(style: &ComputedStyle) -> bool {
     let transform = style.transform.trim();
     let has_active_transform = !transform.is_empty() && !transform.eq_ignore_ascii_case("none");
@@ -3062,10 +3082,7 @@ impl LayoutEngine {
         }
         // Don't layout display:none
         if matches!(node.style.display, Display::None) {
-            node.layout.content_rect = Rect::default();
-            node.layout.padding_rect = Rect::default();
-            node.layout.border_rect = Rect::default();
-            node.layout.margin_rect = Rect::default();
+            clear_layout_subtree(node);
             return 0.0;
         }
 
@@ -3666,10 +3683,7 @@ pub fn layout_positioned_static(
     static_y: Option<f32>,
 ) {
     if matches!(node.style.display, Display::None) {
-        node.layout.content_rect = Rect::zero();
-        node.layout.padding_rect = Rect::zero();
-        node.layout.border_rect = Rect::zero();
-        node.layout.margin_rect = Rect::zero();
+        clear_layout_subtree(node);
         return;
     }
 

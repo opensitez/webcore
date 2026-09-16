@@ -39,6 +39,64 @@ fn test_grid_auto_tracks() {
 }
 
 #[test]
+fn unresolved_var_in_calc_does_not_poison_previous_declaration() {
+    let html = r#"
+        <style>#box { width: 120px; }</style>
+        <div id="box" style="width: calc(100% / (2 + var(--missing)) - 8px); height: 10px"></div>
+    "#;
+    let doc = parse_and_layout(html, 800.0);
+    let b = find_by_id(&doc.root, "box").unwrap();
+
+    assert_eq!(b.layout.border_rect.w, 120.0);
+}
+
+#[test]
+fn grid_column_flow_auto_columns_with_vars_constrains_absolute_ratio_images() {
+    let html = r#"
+        <style>
+          .carousel {
+            --peek: 0;
+            --gap: 16px;
+            display: grid;
+            grid-auto-flow: column;
+            grid-template-rows: 1fr;
+            grid-auto-columns: calc(100% / (2 + var(--peek)) - var(--gap));
+            gap: var(--gap);
+            width: 1000px;
+          }
+          .card { position: relative; display: block; }
+          .ph { position: relative; display: block; padding-bottom: 50%; background: #ddd; }
+          .ph img { position: absolute; inset: 0; width: 100%; height: 100%; }
+        </style>
+        <ul class="carousel">
+          <li id="a" class="card"><span class="ph"><img id="img-a"></span></li>
+          <li id="b" class="card"><span class="ph"><img id="img-b"></span></li>
+          <li id="c" class="card"><span class="ph"><img id="img-c"></span></li>
+        </ul>
+    "#;
+    let doc = parse_and_layout(html, 1200.0);
+    let a = find_by_id(&doc.root, "a").unwrap();
+    let img = find_by_id(&doc.root, "img-a").unwrap();
+
+    assert!(
+        (a.layout.border_rect.w - 484.0).abs() < 1.0,
+        "grid-auto-columns should resolve against the carousel width, got {}",
+        a.layout.border_rect.w
+    );
+    assert!(
+        (img.layout.border_rect.w - a.layout.border_rect.w).abs() < 1.0,
+        "absolute image should resolve percentage width against the card, got image {} card {}",
+        img.layout.border_rect.w,
+        a.layout.border_rect.w
+    );
+    assert!(
+        img.layout.border_rect.h < 300.0,
+        "ratio image should not expand to viewport-sized height, got {}",
+        img.layout.border_rect.h
+    );
+}
+
+#[test]
 fn test_grid_item_stretch_background() {
     let html = r#"
         <div style="display: grid; grid-template-columns: 100px 100px; width: 200px; font-size: 16px;">
@@ -141,6 +199,107 @@ fn grid_gap_legacy_alias_applies_to_grid_tracks() {
     assert!((b.layout.border_rect.x - 256.0).abs() < 0.5);
     assert!((c.layout.border_rect.x - 512.0).abs() < 0.5);
     assert!((d.layout.border_rect.x - 768.0).abs() < 0.5);
+}
+
+#[test]
+fn grid_minmax_zero_fr_keeps_block_container_width() {
+    let html = r#"
+        <style>
+            body { margin: 0; }
+            .wrap {
+                box-sizing: border-box;
+                width: 1248px;
+            }
+            .grid {
+                display: grid;
+                grid-gap: 16px;
+                grid-template-columns: minmax(0, 1fr) 18.75rem;
+            }
+            .main {
+                max-width: 50rem;
+                height: 20px;
+            }
+            .side {
+                height: 20px;
+            }
+        </style>
+        <div class="wrap">
+            <div id="grid" class="grid">
+                <main id="main" class="main"></main>
+                <aside id="side" class="side"></aside>
+            </div>
+        </div>
+    "#;
+    let doc = parse_and_layout(html, 1366.0);
+    let grid = find_by_id(&doc.root, "grid").unwrap();
+    let main = find_by_id(&doc.root, "main").unwrap();
+    let side = find_by_id(&doc.root, "side").unwrap();
+
+    assert!(
+        (grid.layout.content_rect.w - 1248.0).abs() < 0.5,
+        "block-level grid with auto width should fill its containing block, got {}",
+        grid.layout.content_rect.w
+    );
+    assert!(
+        main.layout.border_rect.w > 700.0,
+        "minmax(0,1fr) track should not collapse, got {}",
+        main.layout.border_rect.w
+    );
+    assert!(
+        (side.layout.border_rect.w - 300.0).abs() < 0.5,
+        "18.75rem sidebar should resolve to 300px, got {}",
+        side.layout.border_rect.w
+    );
+}
+
+#[test]
+fn media_grid_minmax_rem_track_keeps_block_container_width() {
+    let html = r#"
+        <style>
+            body { margin: 0; }
+            .wrap {
+                box-sizing: border-box;
+                margin: 0 auto;
+                max-width: 80rem;
+                padding: 0 16px;
+            }
+            @media (min-width: 56.25rem) {
+                .grid {
+                    display: grid;
+                    grid-gap: 16px;
+                    grid-template-columns: minmax(0, 1fr) 18.75rem;
+                }
+            }
+            .main { max-width: 50rem; height: 20px; }
+            .side { height: 20px; }
+        </style>
+        <div class="wrap">
+            <div id="grid" class="grid">
+                <main id="main" class="main"></main>
+                <aside id="side" class="side"></aside>
+            </div>
+        </div>
+    "#;
+    let doc = parse_and_layout(html, 1366.0);
+    let grid = find_by_id(&doc.root, "grid").unwrap();
+    let main = find_by_id(&doc.root, "main").unwrap();
+    let side = find_by_id(&doc.root, "side").unwrap();
+
+    assert!(
+        (grid.layout.content_rect.w - 1248.0).abs() < 0.5,
+        "media-matched block grid should fill wrapper content width, got {}",
+        grid.layout.content_rect.w
+    );
+    assert!(
+        main.layout.border_rect.w > 700.0,
+        "media minmax(0,1fr) track should not collapse, got {}",
+        main.layout.border_rect.w
+    );
+    assert!(
+        (side.layout.border_rect.w - 300.0).abs() < 0.5,
+        "media 18.75rem sidebar should resolve to 300px, got {}",
+        side.layout.border_rect.w
+    );
 }
 
 #[test]
@@ -1601,5 +1760,49 @@ fn grid_auto_rows_fit_content_does_not_raise_the_rows() {
         (y("q2") - 50.0).abs() < 0.5,
         "the implicit fit-content rows keep their content heights, got y={}",
         y("q2")
+    );
+}
+
+#[test]
+fn non_replaced_width_attribute_does_not_constrain_grid_container() {
+    let doc = parse_and_layout(
+        r#"
+        <style>
+          body { margin:0; }
+          .wrap { width:1248px; }
+          .grid {
+            display:grid;
+            grid-template-columns:minmax(0, 1fr) 18.75rem;
+            column-gap:16px;
+          }
+          .main { height:10px; }
+          .side { height:10px; }
+        </style>
+        <div class="wrap">
+          <div id="grid" class="grid" width="300">
+            <div id="main" class="main"></div>
+            <div id="side" class="side"></div>
+          </div>
+        </div>
+    "#,
+        1366.0,
+    );
+    let grid = find_by_id(&doc.root, "grid").unwrap();
+    let main = find_by_id(&doc.root, "main").unwrap();
+    let side = find_by_id(&doc.root, "side").unwrap();
+    assert!(
+        (grid.layout.border_rect.w - 1248.0).abs() < 0.5,
+        "width attr on div must not become CSS width; got {}",
+        grid.layout.border_rect.w
+    );
+    assert!(
+        (side.layout.border_rect.w - 300.0).abs() < 0.5,
+        "18.75rem sidebar should resolve to 300px, got {}",
+        side.layout.border_rect.w
+    );
+    assert!(
+        (main.layout.border_rect.w - 932.0).abs() < 0.5,
+        "main track should receive remaining space, got {}",
+        main.layout.border_rect.w
     );
 }

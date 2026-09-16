@@ -152,37 +152,30 @@ impl PageSession {
     {
         let options = self.options.clone();
         std::thread::spawn(move || {
-            let mut renderer = crate::Renderer::new();
             if url.starts_with("about:") {
-                let doc = build_page_document(
-                    &mut renderer,
-                    DEFAULT_NEW_TAB_HTML,
-                    &url,
-                    viewport_w,
-                    viewport_h,
-                    &options,
-                    false,
-                );
+                let mut frame = crate::EngineFrame::empty(viewport_w, viewport_h);
+                frame.set_cache_dir(options.cache_dir.clone());
+                frame.start_streaming(&url);
+                frame.feed_html_chunk(DEFAULT_NEW_TAB_HTML.as_bytes());
+                frame.finish_loading();
+                frame.update_frame();
                 on_event(PageSessionEvent::Page {
                     url,
-                    doc: Box::new(doc),
+                    doc: Box::new(frame.doc.clone()),
                     preview: false,
                 });
                 return;
             }
 
             let loading_html = "<!doctype html><title>Loading</title><body></body>";
+            let mut loading_renderer = crate::Renderer::new();
             let loading_doc = build_page_document(
-                &mut renderer,
+                &mut loading_renderer,
                 loading_html,
                 &url,
                 viewport_w,
                 viewport_h,
-                &PageLoadOptions {
-                    emit_preview: false,
-                    load_images: false,
-                    ..options.clone()
-                },
+                &options,
                 true,
             );
             on_event(PageSessionEvent::Page {
@@ -191,74 +184,61 @@ impl PageSession {
                 preview: true,
             });
 
-            let (tx, rx) = std::sync::mpsc::channel::<(String, String, bool)>();
-            let fetch_url = url.clone();
-            let fetch_options = options.clone();
-            std::thread::spawn(move || {
-                let result =
-                    load_document_progressive(&fetch_url, &fetch_options, |event_url, html| {
-                        let _ = tx.send((event_url, html, true));
-                    });
-                match result {
-                    Ok((html, final_url)) => {
-                        let _ = tx.send((final_url, html, false));
-                    }
-                    Err(e) => {
-                        let html = error_page(&fetch_url, &e);
-                        let _ = tx.send((fetch_url, html, false));
-                    }
-                }
-            });
-
+            let mut frame = crate::EngineFrame::empty(viewport_w, viewport_h);
+            frame.set_cache_dir(options.cache_dir.clone());
+            frame.start_streaming(&url);
+            let mut streamed_bytes = 0usize;
             let mut last_preview = None::<std::time::Instant>;
             let min_preview_gap = std::time::Duration::from_millis(80);
-            while let Ok(mut event) = rx.recv() {
-                if event.2 {
-                    let preview_settle = std::time::Duration::from_millis(8);
-                    while let Ok(next) = rx.recv_timeout(preview_settle) {
-                        event = next;
-                        if !event.2 {
-                            break;
+            let mut stream_options = options.clone();
+            stream_options.emit_preview = true;
+            let result =
+                load_document_streaming_chunks(&url, &stream_options, |event_url, chunk| {
+                    if streamed_bytes == 0 && frame.doc.base_url != event_url {
+                        frame.start_streaming(&event_url);
+                    }
+                    streamed_bytes = streamed_bytes.saturating_add(chunk.len());
+                    frame.feed_html_chunk(chunk.as_bytes());
+                    if options.emit_preview {
+                        let now = std::time::Instant::now();
+                        let can_emit = last_preview
+                            .map(|last| now.saturating_duration_since(last) >= min_preview_gap)
+                            .unwrap_or(true);
+                        if can_emit {
+                            frame.update_frame();
+                            on_event(PageSessionEvent::Page {
+                                url: event_url,
+                                doc: Box::new(frame.doc.clone()),
+                                preview: true,
+                            });
+                            last_preview = Some(now);
                         }
                     }
-                }
-                if !event.2 {
-                    while let Ok(next) = rx.try_recv() {
-                        event = next;
-                        if !event.2 {
-                            break;
-                        }
-                    }
-                }
-                let (event_url, html, preview) = event;
-                if preview {
-                    if last_preview.is_some_and(|instant| instant.elapsed() < min_preview_gap) {
-                        continue;
-                    }
-                    last_preview = Some(std::time::Instant::now());
-                }
-                let doc = build_page_document(
-                    &mut renderer,
-                    &html,
-                    &event_url,
-                    viewport_w,
-                    viewport_h,
-                    &options,
-                    preview,
-                );
-                on_event(PageSessionEvent::Page {
-                    url: event_url,
-                    doc: Box::new(doc),
-                    preview,
                 });
-            }
+            let final_url = match result {
+                Ok((_, final_url)) => final_url,
+                Err(e) => {
+                    let html = error_page(&url, &e);
+                    if streamed_bytes == 0 {
+                        frame.start_streaming(&url);
+                    }
+                    frame.feed_html_chunk(html.as_bytes());
+                    url.clone()
+                }
+            };
+            frame.finish_loading();
+            frame.update_frame();
+            on_event(PageSessionEvent::Page {
+                url: final_url,
+                doc: Box::new(frame.doc.clone()),
+                preview: false,
+            });
         });
     }
 }
 
 #[derive(Clone, Debug)]
 pub enum PageLoadEvent {
-    Preview { url: String, html: String },
     Chunk { url: String, html: String },
     Complete { url: String },
 }
@@ -328,18 +308,18 @@ where
         }
         let text = decode_streaming_utf8(&mut decoder, &buf[..n], false);
         if !text.is_empty() {
-            if options.emit_preview {
-                on_chunk(final_url.clone(), text.clone());
-            }
             html.push_str(&text);
+            if options.emit_preview {
+                on_chunk(final_url.clone(), text);
+            }
         }
     }
     let tail = decode_streaming_utf8(&mut decoder, &[], true);
     if !tail.is_empty() {
-        if options.emit_preview {
-            on_chunk(final_url.clone(), tail.clone());
-        }
         html.push_str(&tail);
+        if options.emit_preview {
+            on_chunk(final_url.clone(), tail);
+        }
     }
     Ok((html, final_url))
 }
@@ -573,7 +553,24 @@ fn schedule_preload(
             });
         }
         crate::ResourceKind::Image if options.load_images => {
-            let _ = url;
+            let cache_dir = options.cache_dir.clone();
+            crate::spawn_image_resource_task(move || {
+                let loader = cache_dir.map(|cache_dir| {
+                    std::sync::Arc::new(move |src: &str| {
+                        let bytes = crate::loading::cached_fetch_bytes(src, &cache_dir)?;
+                        crate::html::decode_image_bytes_ex(&bytes).ok_or_else(|| {
+                            format!("unsupported image bytes: {} bytes from {src}", bytes.len())
+                        })
+                    })
+                        as std::sync::Arc<
+                            dyn Fn(&str) -> Result<crate::html::DecodedImage, String>
+                                + Send
+                                + Sync
+                                + 'static,
+                        >
+                });
+                let _ = crate::cached_decoded_image_result(&url, loader.as_deref());
+            });
         }
         _ => {}
     }
@@ -587,57 +584,36 @@ pub fn load_document_progressive<F>(
 where
     F: FnMut(String, String),
 {
-    if url.starts_with("about:") {
-        return Ok((
-            "<!doctype html><title>New Tab</title><body></body>".to_string(),
-            url.to_string(),
-        ));
-    }
-    if let Some(path) = url.strip_prefix("file://") {
-        let mut file =
-            std::fs::File::open(path).map_err(|e| format!("failed to read file {path}: {e}"))?;
-        let mut parser = crate::StreamingParser::new(url);
-        let state = Arc::new(Mutex::new(PreloadState::default()));
-        let mut decoder = encoding_rs::UTF_8.new_decoder();
-        let mut text = String::new();
-        let mut bytes_read = 0usize;
-        let mut sent_preview = false;
-        let mut next_preview_at = options.preview_after_bytes.max(1024);
-        let preview_interval = options.preview_interval_bytes.max(32 * 1024);
-        let mut buf = [0u8; 16 * 1024];
-        loop {
-            let n = file
-                .read(&mut buf)
-                .map_err(|e| format!("failed to read file {path}: {e}"))?;
-            if n == 0 {
-                break;
-            }
-            let chunk = &buf[..n];
-            scan_html_chunk_for_resources(&mut parser, chunk, options, &state);
-            bytes_read += n;
-            let decoded = decode_streaming_utf8(&mut decoder, chunk, false);
-            text.push_str(&decoded);
-            if options.emit_preview
-                && (bytes_read >= next_preview_at || should_emit_early_preview(&text, sent_preview))
-            {
-                preview(url.to_string(), text.clone());
-                sent_preview = true;
-                while next_preview_at <= bytes_read {
-                    next_preview_at = next_preview_at.saturating_add(preview_interval);
-                }
+    let mut stream_options = options.clone();
+    stream_options.emit_preview = true;
+    let mut parser = crate::StreamingParser::new(url);
+    let state = Arc::new(Mutex::new(PreloadState::default()));
+    let mut html = String::new();
+    let mut bytes_read = 0usize;
+    let mut sent_preview = false;
+    let mut next_preview_at = options.preview_after_bytes.max(1024);
+    let preview_interval = options.preview_interval_bytes.max(32 * 1024);
+
+    load_document_streaming_chunks(url, &stream_options, |chunk_url, chunk| {
+        scan_html_chunk_for_resources(&mut parser, chunk.as_bytes(), options, &state);
+        bytes_read = bytes_read.saturating_add(chunk.len());
+        html.push_str(&chunk);
+        if options.emit_preview
+            && (bytes_read >= next_preview_at || should_emit_early_preview(&html, sent_preview))
+        {
+            preview(chunk_url, html.clone());
+            sent_preview = true;
+            while next_preview_at <= bytes_read {
+                next_preview_at = next_preview_at.saturating_add(preview_interval);
             }
         }
-        let tail = decode_streaming_utf8(&mut decoder, &[], true);
-        text.push_str(&tail);
-        if options.emit_preview && !sent_preview && !text.is_empty() {
-            preview(url.to_string(), text.clone());
+    })
+    .map(|(final_html, final_url)| {
+        if options.emit_preview && !sent_preview && !final_html.is_empty() {
+            preview(final_url.clone(), final_html.clone());
         }
-        return Ok((text, url.to_string()));
-    }
-    if let Some(cache_dir) = options.cache_dir.as_deref() {
-        return cached_fetch_document(url, cache_dir, options, &mut preview);
-    }
-    fetch_document_streaming(url, options, &mut preview)
+        (final_html, final_url)
+    })
 }
 
 pub fn fetch_text_resource(url: &str, cache_dir: Option<&str>) -> Result<String, String> {
@@ -971,205 +947,6 @@ fn decode_streaming_utf8(decoder: &mut encoding_rs::Decoder, bytes: &[u8], last:
     out
 }
 
-fn fetch_document_streaming<F>(
-    url: &str,
-    options: &PageLoadOptions,
-    preview: &mut F,
-) -> Result<(String, String), String>
-where
-    F: FnMut(String, String),
-{
-    let mut do_fetch =
-        |client: &reqwest::blocking::Client| -> Result<(String, String, bool), (String, bool)> {
-            let mut resp = client
-                .get(url)
-                .header(
-                    "Accept",
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                )
-                .header("Sec-Fetch-Dest", "document")
-                .header("Sec-Fetch-Mode", "navigate")
-                .header("Sec-Fetch-Site", "none")
-                .header("Sec-Fetch-User", "?1")
-                .header("Upgrade-Insecure-Requests", "1")
-                .send()
-                .map_err(|e| (e.to_string(), false))?;
-            let final_url = resp.url().to_string();
-            let status = resp.status();
-            if !status.is_success() {
-                return Err((format!("HTTP {status} loading {final_url}"), false));
-            }
-            let mut parser = crate::StreamingParser::new(&final_url);
-            let preload_state = Arc::new(Mutex::new(PreloadState::default()));
-            let mut html = String::new();
-            let mut decoder = encoding_rs::UTF_8.new_decoder();
-            let mut bytes_read = 0usize;
-            let mut buf = [0u8; 16 * 1024];
-            let mut sent_preview = false;
-            let mut next_preview_at = options.preview_after_bytes.max(1024);
-            let preview_interval = options.preview_interval_bytes.max(32 * 1024);
-            let mut saw_streamed_bytes = false;
-            loop {
-                let n = resp
-                    .read(&mut buf)
-                    .map_err(|e| (e.to_string(), saw_streamed_bytes))?;
-                if n == 0 {
-                    break;
-                }
-                saw_streamed_bytes = true;
-                scan_html_chunk_for_resources(&mut parser, &buf[..n], options, &preload_state);
-                bytes_read += n;
-                let text = decode_streaming_utf8(&mut decoder, &buf[..n], false);
-                html.push_str(&text);
-                if options.emit_preview
-                    && (bytes_read >= next_preview_at
-                        || should_emit_early_preview(&html, sent_preview))
-                {
-                    preview(final_url.clone(), html.clone());
-                    sent_preview = true;
-                    while next_preview_at <= bytes_read {
-                        next_preview_at = next_preview_at.saturating_add(preview_interval);
-                    }
-                }
-            }
-            let tail = decode_streaming_utf8(&mut decoder, &[], true);
-            html.push_str(&tail);
-            if options.emit_preview && !sent_preview && !html.is_empty() {
-                preview(final_url.clone(), html.clone());
-            }
-            Ok((html, final_url, saw_streamed_bytes))
-        };
-
-    match do_fetch(&crate::http_client()) {
-        Ok((body, final_url, _)) if !body.is_empty() => Ok((body, final_url)),
-        Err((err, true)) => Err(err),
-        Err((_, false)) => match do_fetch(&crate::http_client_lenient()) {
-            Ok((body, final_url, _)) if !body.is_empty() => Ok((body, final_url)),
-            Ok((_, final_url, _)) => Err(format!("empty streamed document from {final_url}")),
-            Err((err, _)) => Err(err),
-        },
-        Ok((_, _, true)) => Err("empty streamed document".to_string()),
-        Ok((_, _, false)) => match do_fetch(&crate::http_client_lenient()) {
-            Ok((body, final_url, _)) if !body.is_empty() => Ok((body, final_url)),
-            Ok((_, final_url, _)) => Err(format!("empty streamed document from {final_url}")),
-            Err((err, _)) => Err(err),
-        },
-    }
-}
-
-fn cached_fetch_document<F>(
-    url: &str,
-    cache_dir: &str,
-    options: &PageLoadOptions,
-    preview: &mut F,
-) -> Result<(String, String), String>
-where
-    F: FnMut(String, String),
-{
-    let key = raw_cache_key(cache_dir, url);
-    let path = url_cache_path(url, cache_dir);
-    let url_path = format!("{}.url", path.display());
-    if let Some(data) = raw_cache_get(&key) {
-        let final_url = std::fs::read_to_string(&url_path)
-            .map(|s| s.trim().to_string())
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| url.to_string());
-        let mut parser = crate::StreamingParser::new(&final_url);
-        let preload_state = Arc::new(Mutex::new(PreloadState::default()));
-        let mut decoder = encoding_rs::UTF_8.new_decoder();
-        let mut html = String::new();
-        let mut bytes_read = 0usize;
-        let mut sent_preview = false;
-        let mut next_preview_at = options.preview_after_bytes.max(1024);
-        let preview_interval = options.preview_interval_bytes.max(32 * 1024);
-        for chunk in data.chunks(16 * 1024) {
-            scan_html_chunk_for_resources(&mut parser, chunk, options, &preload_state);
-            bytes_read += chunk.len();
-            let text = decode_streaming_utf8(&mut decoder, chunk, false);
-            html.push_str(&text);
-            if options.emit_preview
-                && (bytes_read >= next_preview_at || should_emit_early_preview(&html, sent_preview))
-            {
-                preview(final_url.clone(), html.clone());
-                sent_preview = true;
-                while next_preview_at <= bytes_read {
-                    next_preview_at = next_preview_at.saturating_add(preview_interval);
-                }
-            }
-        }
-        let tail = decode_streaming_utf8(&mut decoder, &[], true);
-        html.push_str(&tail);
-        if options.emit_preview && !sent_preview && !html.is_empty() {
-            preview(final_url.clone(), html.clone());
-        }
-        return Ok((html, final_url));
-    }
-    if let Ok(mut file) = std::fs::File::open(&path) {
-        let final_url = std::fs::read_to_string(&url_path)
-            .map(|s| s.trim().to_string())
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| url.to_string());
-        let mut parser = crate::StreamingParser::new(&final_url);
-        let preload_state = Arc::new(Mutex::new(PreloadState::default()));
-        let mut html = String::new();
-        let mut decoder = encoding_rs::UTF_8.new_decoder();
-        let mut bytes_read = 0usize;
-        let mut buf = [0u8; 16 * 1024];
-        let mut sent_preview = false;
-        let mut next_preview_at = options.preview_after_bytes.max(1024);
-        let preview_interval = options.preview_interval_bytes.max(32 * 1024);
-        loop {
-            let n = file.read(&mut buf).map_err(|e| e.to_string())?;
-            if n == 0 {
-                break;
-            }
-            scan_html_chunk_for_resources(&mut parser, &buf[..n], options, &preload_state);
-            bytes_read += n;
-            let text = decode_streaming_utf8(&mut decoder, &buf[..n], false);
-            html.push_str(&text);
-            if options.emit_preview
-                && (bytes_read >= next_preview_at || should_emit_early_preview(&html, sent_preview))
-            {
-                preview(final_url.clone(), html.clone());
-                sent_preview = true;
-                while next_preview_at <= bytes_read {
-                    next_preview_at = next_preview_at.saturating_add(preview_interval);
-                }
-            }
-        }
-        let tail = decode_streaming_utf8(&mut decoder, &[], true);
-        html.push_str(&tail);
-        if options.emit_preview && !sent_preview && !html.is_empty() {
-            preview(final_url.clone(), html.clone());
-        }
-        raw_cache_put(key, Arc::new(html.as_bytes().to_vec()));
-        return Ok((html, final_url));
-    }
-    let (body, final_url) = fetch_document_streaming(
-        url,
-        &PageLoadOptions {
-            cache_dir: None,
-            emit_preview: options.emit_preview,
-            preview_after_bytes: options.preview_after_bytes,
-            preview_interval_bytes: options.preview_interval_bytes,
-            load_images: options.load_images,
-        },
-        preview,
-    )?;
-    let body = Arc::new(body);
-    raw_cache_put(key, Arc::new(body.as_bytes().to_vec()));
-    enqueue_cache_text(path, body.clone());
-    if final_url != url {
-        enqueue_cache_text(
-            std::path::PathBuf::from(url_path),
-            Arc::new(final_url.clone()),
-        );
-    }
-    Ok(((*body).clone(), final_url))
-}
-
 fn url_cache_path(url: &str, cache_dir: &str) -> std::path::PathBuf {
     use std::hash::{Hash, Hasher};
 
@@ -1383,17 +1160,17 @@ mod tests {
         );
 
         let mut previews = Vec::new();
-        let result = cached_fetch_document(
+        let result = load_document_progressive(
             url,
-            &cache_dir_str,
             &PageLoadOptions {
+                cache_dir: Some(cache_dir_str),
                 emit_preview: true,
                 preview_after_bytes: 512 * 1024,
                 preview_interval_bytes: usize::MAX / 4,
                 load_images: false,
                 ..Default::default()
             },
-            &mut |_, preview_html| previews.push(preview_html),
+            |_, preview_html| previews.push(preview_html),
         );
 
         let _ = std::fs::remove_dir_all(&cache_dir);
@@ -1449,6 +1226,37 @@ mod tests {
                 .any(|rule| rule.original_selector.contains("#hero")),
             "preloaded parsed stylesheet should retain its rules"
         );
+    }
+
+    #[test]
+    fn image_preload_warms_decoded_image_cache() {
+        let image_url =
+            "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='3' height='2'/%3E";
+        let mut parser = crate::StreamingParser::new("https://example.test/news/");
+        let state = Arc::new(Mutex::new(PreloadState::default()));
+
+        scan_html_chunk_for_resources(
+            &mut parser,
+            format!(r#"<img loading="lazy" data-src="{image_url}">"#).as_bytes(),
+            &PageLoadOptions {
+                emit_preview: false,
+                load_images: true,
+                ..Default::default()
+            },
+            &state,
+        );
+
+        let mut decoded = None;
+        for _ in 0..50 {
+            decoded = crate::cached_decoded_image_ready(image_url);
+            if decoded.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let decoded = decoded.expect("image preload should decode into the shared image cache");
+        let (_, w, h) = crate::html::decoded_image_pixels(decoded).expect("decoded pixels");
+        assert_eq!((w, h), (3, 2));
     }
 
     #[test]

@@ -135,7 +135,7 @@ fn apply_css_value_with_cascade_context(
         }
         CssValue::Raw(s) => {
             let resolved = resolve_var_references(s, local_vars);
-            if resolved.trim().is_empty() && s.contains("var(") {
+            if s.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var(")) {
                 return;
             }
             apply_resolved_property_with_cascade_context(
@@ -1640,7 +1640,8 @@ pub(crate) fn apply_cascade_inner(
                     continue;
                 }
                 let resolved = resolve_var_references(val, &local_vars);
-                if resolved.trim().is_empty() && val.contains("var(") {
+                if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var("))
+                {
                     continue;
                 }
                 let trimmed = resolved.trim();
@@ -1681,7 +1682,7 @@ pub(crate) fn apply_cascade_inner(
                     // Resolve var() with empty vars — triggers fallback values.
                     if s.contains("var(") {
                         let resolved = resolve_var_references(s, &local_vars);
-                        if !resolved.trim().is_empty() {
+                        if !resolved.trim().is_empty() && !resolved.contains("var(") {
                             let trimmed = resolved.trim();
                             let name = property_defs::get(id).name;
                             if trimmed == "inherit" {
@@ -1770,7 +1771,9 @@ pub(crate) fn apply_cascade_inner(
                         continue;
                     }
                     let resolved = resolve_var_references(val, &local_vars);
-                    if resolved.trim().is_empty() && val.contains("var(") {
+                    if val.contains("var(")
+                        && (resolved.trim().is_empty() || resolved.contains("var("))
+                    {
                         continue;
                     }
                     let id = properties::resolve(prop);
@@ -1869,11 +1872,16 @@ pub(crate) fn apply_cascade_inner(
             // Inline hover-* properties: hover-background-color → background-color on hover
             if let Some(real_prop) = prop.strip_prefix("hover-") {
                 let resolved = resolve_var_references(val, local_vars);
+                if val.contains("var(") && resolved.contains("var(") {
+                    continue;
+                }
                 inline_hover_props.push((real_prop.to_string(), resolved));
                 continue;
             }
             let resolved = resolve_var_references(val, local_vars);
-            if resolved.trim() == "inherit" {
+            if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var(")) {
+                continue;
+            } else if resolved.trim() == "inherit" {
                 if let Some(p) = parent_style {
                     copy_property_from_parent(&mut style, p, prop);
                 }
@@ -1939,6 +1947,9 @@ pub(crate) fn apply_cascade_inner(
     let inline_important_start_style = style.clone();
     for (prop, val) in &inline_important {
         let resolved = resolve_var_references(val, &local_vars);
+        if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var(")) {
+            continue;
+        }
         let id = properties::resolve(prop);
         apply_resolved_property_with_cascade_context(
             &mut style,
@@ -2678,7 +2689,7 @@ fn apply_presentational_hints(
                     }
                 }
             }
-            "width" => {
+            "width" if crate::html::supports_dimension_presentational_hint(&root.tag, "width") => {
                 let clean = val.trim().trim_end_matches(';').trim();
                 if clean.ends_with('%') {
                     apply_property(style, "width", clean);
@@ -2689,7 +2700,9 @@ fn apply_presentational_hints(
                     }
                 }
             }
-            "height" => {
+            "height"
+                if crate::html::supports_dimension_presentational_hint(&root.tag, "height") =>
+            {
                 let clean = val.trim().trim_end_matches(';').trim();
                 if clean.ends_with('%') {
                     apply_property(style, "height", clean);

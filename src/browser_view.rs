@@ -27,11 +27,6 @@ enum BrowserViewLoadResult {
         url: String,
         html: String,
     },
-    HtmlSnapshot {
-        load_id: usize,
-        url: String,
-        html: String,
-    },
     Complete {
         load_id: usize,
         url: String,
@@ -45,6 +40,7 @@ pub struct BrowserView {
     stream_frame: Option<EngineFrame>,
     streamed_html_len: usize,
     stream_paint_ready: bool,
+    stream_needs_layout: bool,
     url: String,
     title: String,
     loading: bool,
@@ -68,6 +64,7 @@ impl BrowserView {
             stream_frame: None,
             streamed_html_len: 0,
             stream_paint_ready: false,
+            stream_needs_layout: false,
             url: String::new(),
             title: String::new(),
             loading: false,
@@ -108,41 +105,25 @@ impl BrowserView {
         }
     }
 
-    fn feed_streaming_preview(&mut self, url: &str, html: &str) {
-        if self.stream_frame.is_none() || html.len() < self.streamed_html_len {
-            let mut frame = EngineFrame::empty(self.width, self.height);
-            frame.set_cache_dir(self.options.cache_dir.clone());
-            frame.start_streaming(url);
-            self.stream_frame = Some(frame);
-            self.streamed_html_len = 0;
-            self.stream_paint_ready = false;
-        }
-        let chunk = html
-            .as_bytes()
-            .get(self.streamed_html_len..)
-            .unwrap_or_default();
-        if !chunk.is_empty() {
-            if let Some(frame) = self.stream_frame.as_mut() {
-                frame.feed_html_chunk(chunk);
-            }
-            self.streamed_html_len = html.len();
-        }
-        if let Some(frame) = self.stream_frame.as_ref() {
-            if !frame.doc.title.is_empty() {
-                self.title = frame.doc.title.clone();
-            }
-            self.stream_paint_ready |= streamed_tree_can_paint(&frame.doc.root);
-        }
-    }
-
     fn feed_streaming_chunk(&mut self, url: &str, html: &str) {
         if self.stream_frame.is_none() {
             let mut frame = EngineFrame::empty(self.width, self.height);
             frame.set_cache_dir(self.options.cache_dir.clone());
+            frame.set_resource_wake(self.wake.clone());
             frame.start_streaming(url);
             self.stream_frame = Some(frame);
             self.streamed_html_len = 0;
             self.stream_paint_ready = false;
+            self.stream_needs_layout = true;
+        } else if self.streamed_html_len == 0
+            && self
+                .stream_frame
+                .as_ref()
+                .is_some_and(|frame| frame.doc.base_url != url)
+        {
+            if let Some(frame) = self.stream_frame.as_mut() {
+                frame.start_streaming(url);
+            }
         }
         if !html.is_empty() {
             if let Some(frame) = self.stream_frame.as_mut() {
@@ -153,6 +134,7 @@ impl BrowserView {
                 self.stream_paint_ready |= streamed_tree_can_paint(&frame.doc.root);
             }
             self.streamed_html_len = self.streamed_html_len.saturating_add(html.len());
+            self.stream_needs_layout = true;
         }
     }
 
@@ -187,6 +169,7 @@ impl BrowserView {
             frame.doc.style_dirty = true;
             engine.layout(&mut frame.doc, self.width);
             self.renderer.invalidate_display_list();
+            self.stream_needs_layout = false;
             return true;
         }
         let Some(doc) = self.doc.as_mut() else {
@@ -214,12 +197,21 @@ impl BrowserView {
             || root.margin_rect.w <= 0.0
             || root.margin_rect.h <= 0.0;
         if !needs_layout {
+            self.stream_needs_layout = false;
             return;
         }
         let engine = self.renderer.layout_engine();
         engine.viewport_h = self.height;
         engine.layout(&mut frame.doc, self.width);
         self.renderer.invalidate_display_list();
+        self.stream_needs_layout = false;
+    }
+
+    fn update_streamed_frame_before_paint(&mut self) -> bool {
+        if !self.stream_paint_ready || !self.stream_needs_layout {
+            return false;
+        }
+        self.layout_active()
     }
 
     pub fn url(&self) -> &str {
@@ -350,23 +342,21 @@ impl BrowserView {
         self.stream_frame = Some(EngineFrame::empty(self.width, self.height));
         if let Some(frame) = self.stream_frame.as_mut() {
             frame.set_cache_dir(self.options.cache_dir.clone());
+            frame.set_resource_wake(self.wake.clone());
             frame.start_streaming(&url);
         }
         self.streamed_html_len = 0;
         self.stream_paint_ready = false;
+        self.stream_needs_layout = true;
         self.invalidate_backing();
         self.load_id = self.load_id.wrapping_add(1);
         let load_id = self.load_id;
         let tx = self.tx.clone();
         let wake = self.wake.clone();
         let loader_wake = wake.clone();
-        spawn_page_load(url, self.options.clone(), move |event| match event {
-            PageLoadEvent::Preview { url, html } => {
-                let _ = tx.send(BrowserViewLoadResult::HtmlSnapshot { load_id, url, html });
-                if let Some(wake) = loader_wake.as_ref() {
-                    wake();
-                }
-            }
+        let mut load_options = self.options.clone();
+        load_options.emit_preview = true;
+        spawn_page_load(url, load_options, move |event| match event {
             PageLoadEvent::Chunk { url, html } => {
                 let _ = tx.send(BrowserViewLoadResult::HtmlChunk { load_id, url, html });
                 if let Some(wake) = loader_wake.as_ref() {
@@ -402,85 +392,56 @@ impl BrowserView {
     }
 
     pub fn poll(&mut self) -> bool {
-        let mut pending = Vec::new();
+        let mut changed = false;
+        let mut completed_url = None::<String>;
         while let Ok(result) = self.rx.try_recv() {
-            pending.push(result);
-        }
-        let mut latest_preview: Option<BrowserViewLoadResult> = None;
-        let mut completed: Option<BrowserViewLoadResult> = None;
-        let mut chunks: Vec<(String, String)> = Vec::new();
-        for result in pending {
-            match &result {
-                BrowserViewLoadResult::Complete { load_id, .. } if *load_id == self.load_id => {
-                    completed = Some(result);
-                }
+            match result {
                 BrowserViewLoadResult::HtmlChunk { load_id, url, html }
-                    if *load_id == self.load_id =>
+                    if load_id == self.load_id =>
                 {
-                    chunks.push((url.clone(), html.clone()));
+                    self.url = url.clone();
+                    self.feed_streaming_chunk(&url, &html);
+                    self.loading = true;
+                    changed = true;
                 }
-                BrowserViewLoadResult::HtmlSnapshot { load_id, .. } if *load_id == self.load_id => {
-                    latest_preview = Some(result);
+                BrowserViewLoadResult::Complete { load_id, url } if load_id == self.load_id => {
+                    completed_url = Some(url);
                 }
                 _ => {}
             }
         }
-        let mut changed = false;
-        for (url, html) in chunks {
+        if let Some(url) = completed_url {
             self.url = url.clone();
-            self.feed_streaming_chunk(&url, &html);
-            self.loading = true;
+            if let Some(frame) = self.stream_frame.as_mut() {
+                frame.finish_loading();
+                self.stream_paint_ready = true;
+                self.stream_needs_layout = true;
+                self.title = if frame.doc.title.is_empty() {
+                    url.split('/')
+                        .filter(|part| !part.is_empty())
+                        .next_back()
+                        .unwrap_or("Untitled")
+                        .to_string()
+                } else {
+                    frame.doc.title.clone()
+                };
+            } else {
+                self.title = url
+                    .split('/')
+                    .filter(|part| !part.is_empty())
+                    .next_back()
+                    .unwrap_or("Untitled")
+                    .to_string();
+            }
+            self.loading = false;
+            self.install_form_navigation_handler(&url);
             changed = true;
         }
-        let Some(result) = completed.or(latest_preview) else {
-            if changed {
-                self.renderer.invalidate_display_list();
-                self.invalidate_backing();
-                self.wake();
-            }
-            return changed;
-        };
-        match result {
-            BrowserViewLoadResult::HtmlChunk { .. } => changed,
-            BrowserViewLoadResult::HtmlSnapshot { url, html, .. } => {
-                self.url = url.clone();
-                self.feed_streaming_preview(&url, &html);
-                self.loading = true;
-                self.renderer.invalidate_display_list();
-                self.invalidate_backing();
-                self.wake();
-                true
-            }
-            BrowserViewLoadResult::Complete { url, .. } => {
-                self.url = url.clone();
-                if let Some(frame) = self.stream_frame.as_mut() {
-                    frame.finish_loading();
-                    self.stream_paint_ready = true;
-                    self.title = if frame.doc.title.is_empty() {
-                        url.split('/')
-                            .filter(|part| !part.is_empty())
-                            .last()
-                            .unwrap_or("Untitled")
-                            .to_string()
-                    } else {
-                        frame.doc.title.clone()
-                    };
-                } else {
-                    self.title = url
-                        .split('/')
-                        .filter(|part| !part.is_empty())
-                        .last()
-                        .unwrap_or("Untitled")
-                        .to_string();
-                }
-                self.loading = false;
-                self.install_form_navigation_handler(&url);
-                self.renderer.invalidate_display_list();
-                self.invalidate_backing();
-                self.wake();
-                true
-            }
+        if changed {
+            self.invalidate_backing();
+            self.wake();
         }
+        changed
     }
 
     pub fn drain_pending_navigation(&mut self) -> bool {
@@ -496,6 +457,7 @@ impl BrowserView {
     pub fn drive_idle(&mut self, event_loop: &ActiveEventLoop) -> bool {
         let changed = self.poll();
         let nav_changed = self.drain_pending_navigation();
+        let stream_layout_changed = self.update_streamed_frame_before_paint();
         let needs_redraw = if let Some(frame) = self.stream_frame.as_mut() {
             self.renderer.drive_document_idle(
                 event_loop,
@@ -514,7 +476,7 @@ impl BrowserView {
         if needs_redraw {
             self.invalidate_backing();
         }
-        changed || nav_changed || needs_redraw
+        changed || nav_changed || stream_layout_changed || needs_redraw
     }
 
     pub fn paint_into(&mut self, target: &mut Pixmap, x: i32, y: i32, scale: f32) {
@@ -697,13 +659,18 @@ impl BrowserView {
     }
 
     fn handle_activation_at(&mut self, x: f32, y: f32) {
-        let current_url = self.url.clone();
+        let view_url = self.url.clone();
         let Some(doc) = self.active_doc_mut() else {
             return;
         };
+        let current_url = if doc.base_url.is_empty() {
+            view_url.clone()
+        } else {
+            doc.base_url.clone()
+        };
         let pt = (x, y + doc.scroll_y);
         if let Some(href) = crate::layout::hit_test::hit_test_link(&doc.root, pt, 0) {
-            self.navigate(resolve_url(&self.url, &href));
+            self.navigate(resolve_browser_target(&href, &current_url, &view_url));
             return;
         }
         if let Some(hit) = crate::layout::hit_test::point_to_hit(&doc.root, pt, 0) {
@@ -721,7 +688,7 @@ impl BrowserView {
                     let target = if form_action.is_empty() {
                         current_url.clone()
                     } else {
-                        resolve_url(&current_url, &form_action)
+                        resolve_browser_target(&form_action, &current_url, &view_url)
                     };
                     let data = find_containing_form(&doc.root, hit.node_id)
                         .map(collect_form_data)
@@ -762,7 +729,12 @@ impl BrowserView {
         let target = if action.is_empty() {
             self.url.clone()
         } else {
-            resolve_url(&self.url, &action)
+            let base_url = if doc.base_url.is_empty() {
+                self.url.as_str()
+            } else {
+                doc.base_url.as_str()
+            };
+            resolve_browser_target(&action, base_url, &self.url)
         };
         let url = build_form_submit_url(&target, "get", &data);
         self.navigate(url);
@@ -799,6 +771,15 @@ fn streamed_tree_can_paint(root: &WebCore) -> bool {
                 || child.tag.eq_ignore_ascii_case("main")
                 || streamed_tree_can_paint(child)
         })
+}
+
+fn resolve_browser_target(raw: &str, document_base_url: &str, view_url: &str) -> String {
+    let base = if document_base_url.is_empty() {
+        view_url
+    } else {
+        document_base_url
+    };
+    resolve_url(raw, base)
 }
 
 fn fill_placeholder(target: &mut Pixmap, x: i32, y: i32, w: u32, h: u32) {
@@ -860,7 +841,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn browser_view_feeds_preview_tail_into_streaming_frame() {
+    fn browser_view_feeds_html_chunks_into_streaming_frame() {
         let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
         let base = "https://example.test/";
         view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
@@ -868,7 +849,7 @@ mod tests {
 
         let first =
             "<!doctype html><html><head><style>p{color:red}</style></head><body><p id='hello'>";
-        view.feed_streaming_preview(base, first);
+        view.feed_streaming_chunk(base, first);
         assert!(
             view.document()
                 .unwrap()
@@ -877,13 +858,14 @@ mod tests {
         );
         assert_eq!(view.streamed_html_len, first.len());
 
-        let second = format!("{first}Hello</p>");
-        view.feed_streaming_preview(base, &second);
+        let second = "Hello</p>";
+        view.feed_streaming_chunk(base, second);
         let doc = view.document().unwrap();
         let node_id = doc.get_element_by_id("hello").unwrap();
         let node = doc.get_box_by_id(node_id).unwrap();
         assert_eq!(node.children.len(), 1);
         assert_eq!(node.children[0].text, "Hello");
+        assert_eq!(view.streamed_html_len, first.len() + second.len());
     }
 
     #[test]
@@ -944,6 +926,128 @@ mod tests {
         assert!(
             after > 0.0,
             "first streamed paint must consume UA/inline/current CSS through layout before rendering"
+        );
+    }
+
+    #[test]
+    fn browser_view_batches_streamed_chunks_into_one_layout_before_paint() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+
+        view.feed_streaming_chunk(
+            base,
+            "<!doctype html><html><head><style>body{margin:0}p{display:block;height:20px}</style></head><body>",
+        );
+        view.feed_streaming_chunk(base, "<p>A</p><p>B</p>");
+
+        assert!(view.stream_needs_layout);
+        assert!(view.update_streamed_frame_before_paint());
+        assert!(!view.stream_needs_layout);
+
+        let height_after = view
+            .stream_frame
+            .as_ref()
+            .unwrap()
+            .doc
+            .root
+            .layout
+            .margin_rect
+            .h;
+        assert!(height_after > 0.0);
+
+        assert!(
+            !view.update_streamed_frame_before_paint(),
+            "no new streamed DOM/style work should mean no surprise second layout"
+        );
+    }
+
+    #[test]
+    fn streamed_frame_inherits_browser_wake_callback() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        view.set_wake_callback(|| {});
+
+        view.feed_streaming_chunk("https://example.test/", "<html><body>ready");
+
+        assert!(
+            view.stream_frame
+                .as_ref()
+                .is_some_and(|frame| frame.has_resource_wake()),
+            "resource workers must wake the browser view instead of waiting for timer/input polling"
+        );
+    }
+
+    #[test]
+    fn streamed_picture_resolves_without_final_tree_pass() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/articles/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+
+        view.feed_streaming_chunk(
+            base,
+            r#"<html><body><picture><source media="(min-width: 1px)" srcset="https://cdn.example.test/wide.webp 1x"><img id="hero" src="fallback.jpg"></picture>"#,
+        );
+
+        let doc = view.document().unwrap();
+        let hero_id = doc.get_element_by_id("hero").unwrap();
+        let hero = doc.get_box_by_id(hero_id).unwrap();
+        assert_eq!(hero.resolved_src, "https://cdn.example.test/wide.webp");
+    }
+
+    #[test]
+    fn first_streamed_chunk_can_correct_redirected_base_url() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame
+            .as_mut()
+            .unwrap()
+            .start_streaming("https://example.test/requested/");
+
+        view.feed_streaming_chunk(
+            "https://cdn.example.test/final/",
+            r#"<html><body><img id="hero" src="image.png">"#,
+        );
+
+        let doc = view.document().unwrap();
+        assert_eq!(doc.base_url, "https://cdn.example.test/final/");
+        let hero_id = doc.get_element_by_id("hero").unwrap();
+        let hero = doc.get_box_by_id(hero_id).unwrap();
+        assert_eq!(
+            hero.resolved_src,
+            "https://cdn.example.test/final/image.png"
+        );
+    }
+
+    #[test]
+    fn browser_navigation_resolves_targets_against_document_base() {
+        let base = "https://www.bbc.co.uk/news/";
+        let view_url = "https://www.bbc.co.uk/";
+
+        assert_eq!(
+            resolve_browser_target("/sport", base, view_url),
+            "https://www.bbc.co.uk/sport"
+        );
+        assert_eq!(
+            resolve_browser_target("articles/c123", base, view_url),
+            "https://www.bbc.co.uk/news/articles/c123"
+        );
+        assert_eq!(
+            resolve_browser_target("//static.files.bbci.co.uk/account", base, view_url),
+            "https://static.files.bbci.co.uk/account"
+        );
+        assert_eq!(
+            resolve_browser_target("", base, view_url),
+            "https://www.bbc.co.uk/news/"
+        );
+    }
+
+    #[test]
+    fn browser_navigation_falls_back_to_view_url_without_document_base() {
+        assert_eq!(
+            resolve_browser_target("next", "", "https://example.test/dir/page.html"),
+            "https://example.test/dir/next"
         );
     }
 }

@@ -1192,21 +1192,21 @@ pub fn layout_grid(
             match track.kind {
                 GridTrackKind::MinMax => {
                     let min_h = track_to_px(
-                        &GridTrackSize {
-                            kind: track.min_kind,
-                            value: track.min_value,
-                            ..Default::default()
-                        },
+                        &grid_track_component(
+                            track.min_kind,
+                            track.min_value,
+                            track.min_calc_length.clone(),
+                        ),
                         row_pct_basis,
                         font_px,
                         root_font_px,
                     );
                     let max_h = track_to_px(
-                        &GridTrackSize {
-                            kind: track.max_kind,
-                            value: track.max_value,
-                            ..Default::default()
-                        },
+                        &grid_track_component(
+                            track.max_kind,
+                            track.max_value,
+                            track.max_calc_length.clone(),
+                        ),
                         row_pct_basis,
                         font_px,
                         root_font_px,
@@ -1253,21 +1253,13 @@ pub fn layout_grid(
         if ar.kind == GridTrackKind::MinMax {
             // minmax(min, max): enforce min as floor, max as ceiling
             let min_h = track_to_px(
-                &GridTrackSize {
-                    kind: ar.min_kind,
-                    value: ar.min_value,
-                    ..Default::default()
-                },
+                &grid_track_component(ar.min_kind, ar.min_value, ar.min_calc_length.clone()),
                 row_pct_basis,
                 font_px,
                 root_font_px,
             );
             let max_h = track_to_px(
-                &GridTrackSize {
-                    kind: ar.max_kind,
-                    value: ar.max_value,
-                    ..Default::default()
-                },
+                &grid_track_component(ar.max_kind, ar.max_value, ar.max_calc_length.clone()),
                 row_pct_basis,
                 font_px,
                 root_font_px,
@@ -1858,11 +1850,11 @@ fn resolve_track_sizes_with_gap(
                 for rt in auto_repeat {
                     let px = match rt.kind {
                         GridTrackKind::MinMax => {
-                            let min_t = GridTrackSize {
-                                kind: rt.min_kind,
-                                value: rt.min_value,
-                                ..Default::default()
-                            };
+                            let min_t = grid_track_component(
+                                rt.min_kind,
+                                rt.min_value,
+                                rt.min_calc_length.clone(),
+                            );
                             let min_px = track_to_px(&min_t, container, font_px, root_font_px);
                             if min_px > 0.0 {
                                 min_px
@@ -1901,11 +1893,8 @@ fn resolve_track_sizes_with_gap(
         for rt in auto_repeat {
             let px = match rt.kind {
                 GridTrackKind::MinMax => {
-                    let min_t = GridTrackSize {
-                        kind: rt.min_kind,
-                        value: rt.min_value,
-                        ..Default::default()
-                    };
+                    let min_t =
+                        grid_track_component(rt.min_kind, rt.min_value, rt.min_calc_length.clone());
                     let min_px = track_to_px(&min_t, container, font_px, root_font_px);
                     if min_px > 0.0 {
                         min_px
@@ -1943,11 +1932,11 @@ pub fn track_to_px(track: &GridTrackSize, container: f32, font_px: f32, root_fon
         GridTrackKind::Fractional => 0.0, // resolved below
         GridTrackKind::MinMax => {
             // Use max value
-            let max_t = GridTrackSize {
-                kind: track.max_kind,
-                value: track.max_value,
-                ..Default::default()
-            };
+            let max_t = grid_track_component(
+                track.max_kind,
+                track.max_value,
+                track.max_calc_length.clone(),
+            );
             track_to_px(&max_t, container, font_px, root_font_px)
         }
         GridTrackKind::FitContent => {
@@ -1955,6 +1944,12 @@ pub fn track_to_px(track: &GridTrackSize, container: f32, font_px: f32, root_fon
             // For track_to_px we return the clamp limit (X resolved as length/percentage)
             if track.max_kind == GridTrackKind::Percent {
                 track.max_value / 100.0 * container
+            } else if track.max_kind == GridTrackKind::Calc {
+                track
+                    .max_calc_length
+                    .as_ref()
+                    .map(|l| l.resolve(font_px, container, root_font_px))
+                    .unwrap_or(track.value)
             } else {
                 track.value
             }
@@ -1967,6 +1962,19 @@ pub fn track_to_px(track: &GridTrackSize, container: f32, font_px: f32, root_fon
                 0.0
             }
         }
+    }
+}
+
+fn grid_track_component(
+    kind: GridTrackKind,
+    value: f32,
+    calc_length: Option<CssLength>,
+) -> GridTrackSize {
+    GridTrackSize {
+        kind,
+        value,
+        calc_length,
+        ..Default::default()
     }
 }
 
@@ -2083,33 +2091,49 @@ fn resolve_to_pixels(
             GridTrackKind::FitContent => {
                 // fit-content(x) = minmax(auto, max-content) clamped by x. Its
                 // max sizing function is not `auto`, so §12.7 skips it.
-                let clamp = if t.max_kind == GridTrackKind::Percent {
-                    pct(t.max_value)
-                } else {
-                    t.value
-                };
+                let clamp = resolve_track_component_px(
+                    t.max_kind,
+                    t.value,
+                    t.max_value,
+                    t.max_calc_length.as_ref(),
+                    container,
+                    font_px,
+                    root_font_px,
+                    mn,
+                    mx,
+                );
                 base[i] = mn;
                 limit[i] = mx.min(clamp.max(mn));
                 growable[i] = true;
             }
             GridTrackKind::MinMax => {
-                base[i] = match t.min_kind {
-                    GridTrackKind::Fixed => t.min_value,
-                    GridTrackKind::Percent => pct(t.min_value),
-                    GridTrackKind::MaxContent => mx,
-                    _ => mn, // auto / min-content
-                };
+                base[i] = resolve_track_component_px(
+                    t.min_kind,
+                    t.min_value,
+                    t.min_value,
+                    t.min_calc_length.as_ref(),
+                    container,
+                    font_px,
+                    root_font_px,
+                    mn,
+                    mx,
+                );
                 if t.max_kind == GridTrackKind::Fractional {
                     is_fr[i] = true;
                     fr_value[i] = t.max_value;
                     limit[i] = base[i];
                 } else {
-                    limit[i] = match t.max_kind {
-                        GridTrackKind::Fixed => t.max_value,
-                        GridTrackKind::Percent => pct(t.max_value),
-                        GridTrackKind::MinContent => mn,
-                        _ => mx, // auto / max-content
-                    };
+                    limit[i] = resolve_track_component_px(
+                        t.max_kind,
+                        t.max_value,
+                        t.max_value,
+                        t.max_calc_length.as_ref(),
+                        container,
+                        font_px,
+                        root_font_px,
+                        mn,
+                        mx,
+                    );
                     if t.max_kind == GridTrackKind::Auto {
                         max_is_auto[i] = true;
                     }
@@ -2204,6 +2228,32 @@ fn resolve_to_pixels(
         }
     }
     base
+}
+
+fn resolve_track_component_px(
+    kind: GridTrackKind,
+    value: f32,
+    fallback_value: f32,
+    calc_length: Option<&CssLength>,
+    container: f32,
+    font_px: f32,
+    root_font_px: f32,
+    min_content: f32,
+    max_content: f32,
+) -> f32 {
+    match kind {
+        GridTrackKind::Fixed => value,
+        GridTrackKind::Percent => value / 100.0 * container,
+        GridTrackKind::Calc => calc_length
+            .map(|l| l.resolve(font_px, container, root_font_px))
+            .unwrap_or(fallback_value),
+        GridTrackKind::MinContent => min_content,
+        GridTrackKind::MaxContent => max_content,
+        GridTrackKind::Auto | GridTrackKind::Subgrid => min_content,
+        GridTrackKind::Fractional => min_content,
+        GridTrackKind::FitContent => fallback_value,
+        GridTrackKind::MinMax => fallback_value,
+    }
 }
 
 fn span_width(

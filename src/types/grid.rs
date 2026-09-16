@@ -69,8 +69,10 @@ pub struct GridTrackSize {
     pub value: f32,
     pub min_kind: GridTrackKind,
     pub min_value: f32,
+    pub min_calc_length: Option<CssLength>,
     pub max_kind: GridTrackKind,
     pub max_value: f32,
+    pub max_calc_length: Option<CssLength>,
     /// For `Calc` kind: the full CssLength for deferred resolution.
     pub calc_length: Option<CssLength>,
 }
@@ -82,8 +84,10 @@ impl Default for GridTrackSize {
             value: 0.0,
             min_kind: GridTrackKind::Auto,
             min_value: 0.0,
+            min_calc_length: None,
             max_kind: GridTrackKind::Auto,
             max_value: 0.0,
+            max_calc_length: None,
             calc_length: None,
         }
     }

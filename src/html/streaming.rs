@@ -27,7 +27,7 @@
 //! let final_mutations = parser.finish();
 //! ```
 
-use std::collections::HashMap;
+use crate::dom::attrs::AttrMap;
 
 /// A DOM mutation produced by the streaming parser.
 #[derive(Clone, Debug)]
@@ -36,7 +36,7 @@ pub enum DomMutation {
     InsertElement {
         parent_path: Vec<usize>,
         tag: String,
-        attributes: HashMap<String, String>,
+        attributes: AttrMap,
     },
     /// Text content was parsed.
     AppendText {
@@ -154,7 +154,25 @@ impl StreamingParser {
         // Flush any remaining text in buffer as text content
         if !self.buffer.is_empty() {
             let text = std::mem::take(&mut self.buffer);
-            if !text.trim().is_empty() {
+            if self.in_script {
+                self.in_script = false;
+            } else if self.in_style {
+                if !text.trim().is_empty() {
+                    self.style_buffer.push_str(&text);
+                    mutations.push(DomMutation::AddStylesheet {
+                        css: std::mem::take(&mut self.style_buffer),
+                        url: String::new(),
+                        media: String::new(),
+                    });
+                }
+                self.in_style = false;
+            } else if self.in_title {
+                self.title.push_str(&crate::html::decode_entities(&text));
+                mutations.push(DomMutation::TitleChanged {
+                    title: self.title.clone(),
+                });
+                self.in_title = false;
+            } else if !text.trim().is_empty() {
                 mutations.push(DomMutation::AppendText {
                     parent_path: self.current_parent_path(),
                     text: crate::html::decode_entities(&text),
@@ -198,7 +216,11 @@ impl StreamingParser {
 
         loop {
             // Skip leading whitespace in some contexts
-            let buf = self.buffer.trim_start().to_string();
+            let buf = if self.in_style || self.in_script || self.in_title {
+                self.buffer.clone()
+            } else {
+                self.buffer.trim_start().to_string()
+            };
             if buf.is_empty() {
                 break;
             }
@@ -217,22 +239,15 @@ impl StreamingParser {
                     continue;
                 } else {
                     // Need more data
-                    self.style_buffer.push_str(&buf);
-                    self.buffer.clear();
+                    let (ready, pending) = split_raw_text_pending_close(&buf, "</style>");
+                    self.style_buffer.push_str(ready);
+                    self.buffer = pending.to_string();
                     break;
                 }
             }
 
             if self.in_script {
                 if let Some(end) = buf.to_lowercase().find("</script>") {
-                    let text = &buf[..end];
-                    if !text.is_empty() {
-                        mutations.push(DomMutation::AppendText {
-                            parent_path: self.current_parent_path(),
-                            text: text.to_string(),
-                        });
-                        self.bump_child_count();
-                    }
                     self.in_script = false;
                     if self
                         .stack
@@ -245,14 +260,8 @@ impl StreamingParser {
                     self.buffer = buf[end + 9..].to_string();
                     continue;
                 } else {
-                    let text = std::mem::take(&mut self.buffer);
-                    if !text.is_empty() {
-                        mutations.push(DomMutation::AppendText {
-                            parent_path: self.current_parent_path(),
-                            text,
-                        });
-                        self.bump_child_count();
-                    }
+                    let (_, pending) = split_raw_text_pending_close(&buf, "</script>");
+                    self.buffer = pending.to_string();
                     break;
                 }
             }
@@ -268,116 +277,109 @@ impl StreamingParser {
                     self.buffer = buf[end + 8..].to_string();
                     continue;
                 } else {
-                    self.title.push_str(&crate::html::decode_entities(&buf));
-                    self.buffer.clear();
+                    let (ready, pending) = split_raw_text_pending_close(&buf, "</title>");
+                    self.title.push_str(&crate::html::decode_entities(ready));
+                    self.buffer = pending.to_string();
                     break;
                 }
             }
 
-            if buf.starts_with('<') {
-                // Find the end of this tag
-                if let Some(end) = buf.find('>') {
-                    let tag_content = &buf[1..end];
-                    self.buffer = buf[end + 1..].to_string();
-
-                    if tag_content.starts_with('/') {
-                        // Closing tag
-                        let tag_name = tag_content[1..].trim().to_lowercase();
-                        if tag_name == "head" {
-                            self.head_closed = true;
-                        }
-                        if self
-                            .stack
-                            .last()
-                            .is_some_and(|open| open.tag.eq_ignore_ascii_case(&tag_name))
-                        {
-                            self.stack.pop();
-                        } else {
-                            self.stack.pop();
-                        }
-                        mutations.push(DomMutation::CloseElement);
-                    } else if tag_content.starts_with('!') {
-                        // Comment or doctype — skip
-                    } else {
-                        // Opening tag
-                        let (tag_name, attrs) = parse_tag_quick(tag_content);
-                        let self_closing = tag_content.ends_with('/') || is_void_element(&tag_name);
-
-                        // Resource discovery
-                        self.discover_resources(&tag_name, &attrs, &mut mutations);
-
-                        // Special tags
-                        if tag_name == "style" && !self_closing {
-                            self.in_style = true;
-                            self.style_buffer.clear();
-                            continue;
-                        }
-                        if tag_name == "title" && !self_closing {
-                            self.in_title = true;
-                            self.title.clear();
-                            continue;
-                        }
-
-                        if tag_name.eq_ignore_ascii_case("html")
-                            && self.stack.is_empty()
-                            && self.root_child_count == 0
-                        {
-                            if !self_closing {
-                                self.stack.push(OpenElement {
-                                    tag: tag_name,
-                                    path: Vec::new(),
-                                    child_count: 0,
-                                });
-                            }
-                            continue;
-                        }
-
-                        let parent_path = self.current_parent_path();
-                        let child_index = self.next_child_index();
-                        let mut element_path = parent_path.clone();
-                        element_path.push(child_index);
-                        mutations.push(DomMutation::InsertElement {
-                            parent_path,
-                            tag: tag_name.clone(),
-                            attributes: attrs,
+            let Some(complete) = crate::html::tokenizer::next_complete_token(&buf) else {
+                self.buffer = buf;
+                break;
+            };
+            self.buffer = buf[complete.end..].to_string();
+            match complete.token {
+                crate::html::tokenizer::Token::Text(text) => {
+                    if !text.is_empty() {
+                        mutations.push(DomMutation::AppendText {
+                            parent_path: self.current_parent_path(),
+                            text,
                         });
                         self.bump_child_count();
+                    }
+                }
+                crate::html::tokenizer::Token::Comment(_)
+                | crate::html::tokenizer::Token::Doctype(_) => {}
+                crate::html::tokenizer::Token::CloseTag { tag } => {
+                    if tag == "head" {
+                        self.head_closed = true;
+                    }
+                    if self.close_matching_element(&tag) {
+                        mutations.push(DomMutation::CloseElement);
+                    }
+                }
+                crate::html::tokenizer::Token::OpenTag {
+                    tag,
+                    attrs,
+                    self_closing,
+                } => {
+                    self.discover_resources(&tag, &attrs, &mut mutations);
 
+                    if tag == "style" && !self_closing {
+                        self.in_style = true;
+                        self.style_buffer.clear();
+                        continue;
+                    }
+                    if tag == "title" && !self_closing {
+                        self.in_title = true;
+                        self.title.clear();
+                        continue;
+                    }
+
+                    if tag.eq_ignore_ascii_case("html")
+                        && self.stack.is_empty()
+                        && self.root_child_count == 0
+                    {
                         if !self_closing {
                             self.stack.push(OpenElement {
-                                tag: tag_name,
-                                path: element_path,
+                                tag,
+                                path: Vec::new(),
                                 child_count: 0,
                             });
-                            if self.stack.last().is_some_and(|open| open.tag == "script") {
-                                self.in_script = true;
-                            }
                         }
+                        continue;
                     }
-                } else {
-                    // Incomplete tag — need more data
-                    self.buffer = buf;
-                    break;
-                }
-            } else {
-                // Text content — find next tag
-                let next_tag = buf.find('<').unwrap_or(buf.len());
-                let text = &buf[..next_tag];
-                if !text.is_empty() {
-                    mutations.push(DomMutation::AppendText {
-                        parent_path: self.current_parent_path(),
-                        text: crate::html::decode_entities(text),
+
+                    let parent_path = self.current_parent_path();
+                    let child_index = self.next_child_index();
+                    let mut element_path = parent_path.clone();
+                    element_path.push(child_index);
+                    mutations.push(DomMutation::InsertElement {
+                        parent_path,
+                        tag: tag.clone(),
+                        attributes: attrs,
                     });
                     self.bump_child_count();
-                }
-                self.buffer = buf[next_tag..].to_string();
-                if next_tag == buf.len() {
-                    break;
+
+                    let is_void = self_closing || is_html_void_element(&tag);
+                    if !is_void {
+                        self.stack.push(OpenElement {
+                            tag: tag.clone(),
+                            path: element_path,
+                            child_count: 0,
+                        });
+                        if tag == "script" {
+                            self.in_script = true;
+                        }
+                    }
                 }
             }
         }
 
         mutations
+    }
+
+    fn close_matching_element(&mut self, tag: &str) -> bool {
+        let Some(pos) = self
+            .stack
+            .iter()
+            .rposition(|open| open.tag.eq_ignore_ascii_case(tag))
+        else {
+            return false;
+        };
+        self.stack.truncate(pos);
+        true
     }
 
     fn current_parent_path(&self) -> Vec<usize> {
@@ -403,12 +405,7 @@ impl StreamingParser {
     }
 
     /// Discover resources in a tag for preloading.
-    fn discover_resources(
-        &mut self,
-        tag: &str,
-        attrs: &HashMap<String, String>,
-        mutations: &mut Vec<DomMutation>,
-    ) {
+    fn discover_resources(&mut self, tag: &str, attrs: &AttrMap, mutations: &mut Vec<DomMutation>) {
         match tag {
             "link" => {
                 let rel = attrs
@@ -472,7 +469,7 @@ impl StreamingParser {
                 }
             }
             "img" => {
-                if let Some(src) = attrs.get("src") {
+                if let Some(src) = crate::html::image_fallback_source_attrs(attrs) {
                     let url = crate::html::resolve_url(src, &self.base_url);
                     self.discovered_resources
                         .push((ResourceKind::Image, url.clone()));
@@ -481,7 +478,7 @@ impl StreamingParser {
                         url,
                     });
                 }
-                if let Some(srcset) = attrs.get("srcset") {
+                if let Some(srcset) = crate::html::image_srcset_source_attrs(attrs) {
                     for url in preload_srcset_urls(srcset, &self.base_url) {
                         self.discovered_resources
                             .push((ResourceKind::Image, url.clone()));
@@ -499,7 +496,7 @@ impl StreamingParser {
                     .unwrap_or_default();
                 let likely_image = source_type.is_empty() || source_type.starts_with("image/");
                 if likely_image {
-                    if let Some(srcset) = attrs.get("srcset") {
+                    if let Some(srcset) = crate::html::image_srcset_source_attrs(attrs) {
                         for url in preload_srcset_urls(srcset, &self.base_url) {
                             self.discovered_resources
                                 .push((ResourceKind::Image, url.clone()));
@@ -509,7 +506,7 @@ impl StreamingParser {
                             });
                         }
                     }
-                    if let Some(src) = attrs.get("src") {
+                    if let Some(src) = crate::html::image_fallback_source_attrs(attrs) {
                         let url = crate::html::resolve_url(src, &self.base_url);
                         self.discovered_resources
                             .push((ResourceKind::Image, url.clone()));
@@ -540,6 +537,26 @@ impl StreamingParser {
             _ => {}
         }
     }
+}
+
+fn is_html_void_element(tag: &str) -> bool {
+    matches!(
+        tag,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
 }
 
 fn preload_srcset_urls(srcset: &str, base_url: &str) -> Vec<String> {
@@ -580,96 +597,26 @@ fn push_srcset_preload_url(entry: &str, base_url: &str, urls: &mut Vec<String>) 
     }
 }
 
-/// Quick tag parser — extracts tag name and attributes.
-fn parse_tag_quick(content: &str) -> (String, HashMap<String, String>) {
-    let content = content.trim().trim_end_matches('/');
-    let mut parts = content.splitn(2, |c: char| c.is_ascii_whitespace());
-    let tag = parts.next().unwrap_or("").to_lowercase();
-    let mut attrs = HashMap::new();
-
-    if let Some(attr_str) = parts.next() {
-        // Simple attribute parser
-        let mut remaining = attr_str.trim();
-        while !remaining.is_empty() {
-            // Skip whitespace
-            remaining = remaining.trim_start();
-            if remaining.is_empty() {
-                break;
-            }
-
-            // Find attribute name
-            let name_end = remaining
-                .find(|c: char| c == '=' || c.is_ascii_whitespace())
-                .unwrap_or(remaining.len());
-            let name = remaining[..name_end].to_lowercase();
-            remaining = remaining[name_end..].trim_start();
-
-            if remaining.starts_with('=') {
-                remaining = remaining[1..].trim_start();
-                // Parse value
-                if remaining.starts_with('"') {
-                    let end = remaining[1..]
-                        .find('"')
-                        .map(|i| i + 1)
-                        .unwrap_or(remaining.len());
-                    let value = &remaining[1..end];
-                    attrs.insert(name, crate::html::decode_entities_attr(value));
-                    remaining = if end + 1 < remaining.len() {
-                        &remaining[end + 1..]
-                    } else {
-                        ""
-                    };
-                } else if remaining.starts_with('\'') {
-                    let end = remaining[1..]
-                        .find('\'')
-                        .map(|i| i + 1)
-                        .unwrap_or(remaining.len());
-                    let value = &remaining[1..end];
-                    attrs.insert(name, crate::html::decode_entities_attr(value));
-                    remaining = if end + 1 < remaining.len() {
-                        &remaining[end + 1..]
-                    } else {
-                        ""
-                    };
-                } else {
-                    let end = remaining
-                        .find(|c: char| c.is_ascii_whitespace())
-                        .unwrap_or(remaining.len());
-                    let value = &remaining[..end];
-                    attrs.insert(name, crate::html::decode_entities_attr(value));
-                    remaining = &remaining[end..];
-                }
-            } else {
-                // Boolean attribute
-                if !name.is_empty() {
-                    attrs.insert(name, String::new());
-                }
-            }
+fn split_raw_text_pending_close<'a>(text: &'a str, close: &str) -> (&'a str, &'a str) {
+    let mut keep_start = text.len();
+    for (start, _) in text.char_indices() {
+        let suffix = &text[start..];
+        if suffix.len() >= close.len() {
+            continue;
+        }
+        if ascii_prefix_eq_ignore_case(close, suffix) {
+            keep_start = start;
+            break;
         }
     }
-
-    (tag, attrs)
+    text.split_at(keep_start)
 }
 
-/// Check if an HTML element is void (self-closing, no end tag).
-fn is_void_element(tag: &str) -> bool {
-    matches!(
-        tag,
-        "area"
-            | "base"
-            | "br"
-            | "col"
-            | "embed"
-            | "hr"
-            | "img"
-            | "input"
-            | "link"
-            | "meta"
-            | "param"
-            | "source"
-            | "track"
-            | "wbr"
-    )
+fn ascii_prefix_eq_ignore_case(whole: &str, prefix: &str) -> bool {
+    whole
+        .as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
 }
 
 #[cfg(test)]
@@ -706,6 +653,49 @@ mod tests {
     }
 
     #[test]
+    fn streaming_comment_with_gt_does_not_leak_tail_text() {
+        let mut parser = StreamingParser::new("");
+        let mutations = parser.feed_str("<div>a<!--[if IE]>hidden<![endif]-->b</div>");
+        let text: String = mutations
+            .iter()
+            .filter_map(|m| match m {
+                DomMutation::AppendText { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "ab");
+        assert!(!text.contains("-->"));
+    }
+
+    #[test]
+    fn streaming_chunked_comment_waits_for_end_marker() {
+        let mut parser = StreamingParser::new("");
+        let first = parser.feed_str("<p>a<!--[if");
+        assert!(
+            first
+                .iter()
+                .any(|m| matches!(m, DomMutation::InsertElement { tag, .. } if tag == "p"))
+        );
+        assert!(
+            first
+                .iter()
+                .any(|m| matches!(m, DomMutation::AppendText { text, .. } if text == "a"))
+        );
+
+        let second = parser.feed_str(" IE]>hidden<![endif]-->b</p>");
+        let text: String = second
+            .iter()
+            .filter_map(|m| match m {
+                DomMutation::AppendText { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "b");
+        assert!(!text.contains("endif"));
+        assert!(!text.contains("-->"));
+    }
+
+    #[test]
     fn streaming_resource_discovery() {
         let mut parser = StreamingParser::new("https://example.com");
         let mutations = parser.feed_str(
@@ -716,6 +706,59 @@ mod tests {
             .filter(|m| matches!(m, DomMutation::ResourceHint { .. }))
             .collect();
         assert!(resources.len() >= 2, "should discover stylesheet and image");
+    }
+
+    #[test]
+    fn streaming_discovers_lazy_image_attributes() {
+        let mut parser = StreamingParser::new("https://example.com/news/");
+        let mutations =
+            parser.feed_str(r#"<img loading="lazy" data-src="post.webp" data-srcset="tiny.webp 320w, hero.webp 900w">"#);
+
+        assert!(mutations.iter().any(|m| {
+            matches!(
+                m,
+                DomMutation::ResourceHint {
+                    kind: ResourceKind::Image,
+                    url
+                } if url == "https://example.com/news/post.webp"
+            )
+        }));
+        assert!(mutations.iter().any(|m| {
+            matches!(
+                m,
+                DomMutation::ResourceHint {
+                    kind: ResourceKind::Image,
+                    url
+                } if url == "https://example.com/news/hero.webp"
+            )
+        }));
+    }
+
+    #[test]
+    fn streaming_discovers_lazy_picture_source_candidates() {
+        let mut parser = StreamingParser::new("https://example.com/news/");
+        let mutations = parser.feed_str(
+            r#"<picture><source type="image/webp" data-srcset="small.webp 320w, large.webp 900w"><img data-src="fallback.jpg"></picture>"#,
+        );
+
+        assert!(mutations.iter().any(|m| {
+            matches!(
+                m,
+                DomMutation::ResourceHint {
+                    kind: ResourceKind::Image,
+                    url
+                } if url == "https://example.com/news/large.webp"
+            )
+        }));
+        assert!(mutations.iter().any(|m| {
+            matches!(
+                m,
+                DomMutation::ResourceHint {
+                    kind: ResourceKind::Image,
+                    url
+                } if url == "https://example.com/news/fallback.jpg"
+            )
+        }));
     }
 
     #[test]
@@ -741,6 +784,42 @@ mod tests {
     }
 
     #[test]
+    fn streaming_void_head_elements_do_not_swallow_body_content() {
+        let mut parser = StreamingParser::new("");
+        let mutations = parser.feed_str(
+            r#"<html><head><meta charset="utf-8"><link rel="stylesheet" href="/app.css"></head><body><main>Real</main></body></html>"#,
+        );
+
+        assert!(
+            mutations
+                .iter()
+                .any(|m| matches!(m, DomMutation::InsertElement { tag, parent_path, .. } if tag == "body" && parent_path.is_empty())),
+            "body should stay a root child, not become a child of meta/link"
+        );
+        assert!(
+            mutations
+                .iter()
+                .any(|m| matches!(m, DomMutation::InsertElement { tag, parent_path, .. } if tag == "main" && parent_path == &vec![1])),
+            "main should be inserted under body after void head elements"
+        );
+    }
+
+    #[test]
+    fn streaming_unmatched_close_does_not_pop_body_or_head() {
+        let mut parser = StreamingParser::new("");
+        let mutations = parser.feed_str(
+            r#"<html><head><meta charset="utf-8"></span><title>T</title></head><body></span><main>Real</main></body></html>"#,
+        );
+
+        assert!(
+            mutations
+                .iter()
+                .any(|m| matches!(m, DomMutation::InsertElement { tag, parent_path, .. } if tag == "main" && parent_path == &vec![1])),
+            "an unmatched close tag must be ignored instead of popping body/html"
+        );
+    }
+
+    #[test]
     fn streaming_script_raw_text_does_not_parse_fake_tags_before_body() {
         let mut parser = StreamingParser::new("");
         let mutations = parser.feed_str(
@@ -757,6 +836,66 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, DomMutation::InsertElement { tag, .. } if tag == "main")),
             "content after a script raw-text block should continue parsing normally"
+        );
+        assert!(
+            !mutations.iter().any(|m| matches!(
+                m,
+                DomMutation::AppendText { text, .. } if text.contains("document.write")
+            )),
+            "script raw text must not be emitted as visible DOM text"
+        );
+    }
+
+    #[test]
+    fn streaming_script_close_can_be_split_across_chunks() {
+        let mut parser = StreamingParser::new("");
+        parser.feed_str(r#"<html><head><script src="//cdn.example/app.js"></s"#);
+        let mutations = parser.feed_str("cript></head><body><main>Real</main></body></html>");
+        assert!(
+            mutations
+                .iter()
+                .any(|m| matches!(m, DomMutation::InsertElement { tag, parent_path, .. } if tag == "body" && parent_path.is_empty())),
+            "a split script close must not trap body content under head/script"
+        );
+        assert!(
+            mutations
+                .iter()
+                .any(|m| matches!(m, DomMutation::InsertElement { tag, .. } if tag == "main"))
+        );
+    }
+
+    #[test]
+    fn streaming_script_body_can_be_split_without_leaking_visible_text() {
+        let mut parser = StreamingParser::new("");
+        let first = parser.feed_str(r#"<body><script>window.__INITIAL_DATA__ = {"title":"#);
+        let second = parser.feed_str(r#"Hello"}</script><main>Visible</main>"#);
+
+        assert!(
+            first.iter().chain(second.iter()).all(|m| !matches!(
+                m,
+                DomMutation::AppendText { text, .. } if text.contains("__INITIAL_DATA__")
+            )),
+            "streamed script chunks must stay non-rendering"
+        );
+        assert!(
+            second
+                .iter()
+                .any(|m| matches!(m, DomMutation::AppendText { text, .. } if text == "Visible"))
+        );
+    }
+
+    #[test]
+    fn streaming_style_close_can_be_split_across_chunks() {
+        let mut parser = StreamingParser::new("");
+        parser.feed_str("<style>body{color:green}</st");
+        let mutations = parser.feed_str("yle><body><p>Styled</p></body>");
+        assert!(mutations.iter().any(
+            |m| matches!(m, DomMutation::AddStylesheet { css, .. } if css == "body{color:green}")
+        ));
+        assert!(
+            mutations
+                .iter()
+                .any(|m| matches!(m, DomMutation::InsertElement { tag, .. } if tag == "body"))
         );
     }
 
