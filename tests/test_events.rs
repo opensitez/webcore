@@ -1,7 +1,7 @@
 // Tests for the event system in src/dom/mod.rs.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use webcore::dom::*;
 use webcore::parse_html;
 use webcore::types::*;
@@ -547,7 +547,7 @@ fn mouseenter_does_not_bubble() {
     // Start on A so hovered_box is set to A, then move to child inside B.
     doc.process_mouse_event(HtmlEventType::MouseMove, (50.0, 25.0), 0); // hover A
     doc.dispatch_over_out((40.0, 70.0)); // move to child inside B
-                                         // Child should get MouseEnter; #b should NOT (non-bubbling means parent doesn't get child's Enter).
+    // Child should get MouseEnter; #b should NOT (non-bubbling means parent doesn't get child's Enter).
     assert_eq!(
         child_enter.load(Ordering::SeqCst),
         1,

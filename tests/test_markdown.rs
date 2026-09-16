@@ -3,7 +3,7 @@
 // Widget API tests (MdWidget) are skipped — require wxHtmlEditWidget.
 
 use webcore::types::*;
-use webcore::{load_html, parse_html, parse_markdown, serialize_markdown, LayoutEngine};
+use webcore::{LayoutEngine, load_html, parse_html, parse_markdown, serialize_markdown};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -427,11 +427,12 @@ fn md_escaped_asterisk() {
     let text = get_text(p);
     assert!(text.contains("*not italic*"), "text: {:?}", text);
     // Should NOT be italic
-    assert!(!p
-        .layout
-        .inline_runs
-        .iter()
-        .any(|r| r.style.font_style == FontStyle::Italic));
+    assert!(
+        !p.layout
+            .inline_runs
+            .iter()
+            .any(|r| r.style.font_style == FontStyle::Italic)
+    );
 }
 
 // ============================================================

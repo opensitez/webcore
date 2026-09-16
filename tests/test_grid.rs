@@ -812,7 +812,9 @@ fn grid_template_areas_complex() {
            <div style=\"grid-area: sidebar;\">S</div>\
            <div style=\"grid-area: main;\">M</div>\
            <div style=\"grid-area: footer;\">F</div>\
-         </div>", 600.0);
+         </div>",
+        600.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let header = &grid.children[0];
     let sidebar = &grid.children[1];
@@ -869,7 +871,9 @@ fn grid_auto_fill_repeat_layout() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: repeat(auto-fill, 100px); width: 400px;\">\
            <div>A</div><div>B</div><div>C</div><div>D</div>\
-         </div>", 400.0);
+         </div>",
+        400.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     assert!(grid.children.len() >= 4);
     let a = &grid.children[0];
@@ -883,7 +887,9 @@ fn grid_auto_fill_repeat_overflow() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: repeat(auto-fill, 200px); width: 500px;\">\
            <div>A</div><div>B</div><div>C</div>\
-         </div>", 500.0);
+         </div>",
+        500.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let a = &grid.children[0];
     let c = &grid.children[2];
@@ -1023,7 +1029,9 @@ fn grid_justify_content_center() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: 200px 200px; justify-content: center;\">\
            <div>A</div><div>B</div>\
-         </div>", 800.0);
+         </div>",
+        800.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     if grid.children.len() >= 1 {
         let a = &grid.children[0];
@@ -1037,7 +1045,9 @@ fn grid_justify_content_space_between() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: 200px 200px; justify-content: space-between;\">\
            <div>A</div><div>B</div>\
-         </div>", 800.0);
+         </div>",
+        800.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     if grid.children.len() >= 2 {
         let a = &grid.children[0];
@@ -1117,7 +1127,9 @@ fn grid_place_self_center() {
     let doc = load_html(
         "<div style=\"display: grid; grid-template-columns: 200px; grid-template-rows: 100px;\">\
            <div style=\"justify-self: center; align-self: center; width: 50px; height: 30px;\">X</div>\
-         </div>", 400.0);
+         </div>",
+        400.0,
+    );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
     let x = &grid.children[0];
     assert!(x.layout.margin_rect.x > 50.0);

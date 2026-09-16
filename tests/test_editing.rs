@@ -15,25 +15,28 @@ fn editing_toggle_bold() {
     let range = TextRange { start: 0, end: 5 };
 
     // Initial state: not bold
-    assert!(!p
-        .layout
-        .inline_runs
-        .iter()
-        .any(|r| r.style.font_weight.is_bold()));
+    assert!(
+        !p.layout
+            .inline_runs
+            .iter()
+            .any(|r| r.style.font_weight.is_bold())
+    );
 
     toggle_bold(p, &range);
-    assert!(p
-        .layout
-        .inline_runs
-        .iter()
-        .any(|r| r.style.font_weight.is_bold()));
+    assert!(
+        p.layout
+            .inline_runs
+            .iter()
+            .any(|r| r.style.font_weight.is_bold())
+    );
 
     toggle_bold(p, &range);
-    assert!(!p
-        .layout
-        .inline_runs
-        .iter()
-        .any(|r| r.style.font_weight.is_bold()));
+    assert!(
+        !p.layout
+            .inline_runs
+            .iter()
+            .any(|r| r.style.font_weight.is_bold())
+    );
 }
 
 #[test]
@@ -46,18 +49,20 @@ fn editing_toggle_italic() {
     let range = TextRange { start: 0, end: 5 };
 
     toggle_italic(p, &range);
-    assert!(p
-        .layout
-        .inline_runs
-        .iter()
-        .any(|r| r.style.font_style == FontStyle::Italic));
+    assert!(
+        p.layout
+            .inline_runs
+            .iter()
+            .any(|r| r.style.font_style == FontStyle::Italic)
+    );
 
     toggle_italic(p, &range);
-    assert!(!p
-        .layout
-        .inline_runs
-        .iter()
-        .any(|r| r.style.font_style == FontStyle::Italic));
+    assert!(
+        !p.layout
+            .inline_runs
+            .iter()
+            .any(|r| r.style.font_style == FontStyle::Italic)
+    );
 }
 
 #[test]
@@ -70,11 +75,12 @@ fn editing_set_font_size() {
     let range = TextRange { start: 0, end: 5 };
 
     set_font_size(p, &range, 24.0);
-    assert!(p
-        .layout
-        .inline_runs
-        .iter()
-        .any(|r| r.style.font_size == CssLength::Px(24.0)));
+    assert!(
+        p.layout
+            .inline_runs
+            .iter()
+            .any(|r| r.style.font_size == CssLength::Px(24.0))
+    );
 }
 
 #[test]

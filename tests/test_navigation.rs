@@ -1,7 +1,7 @@
 // Tests for navigation: hit testing, offset-to-point, and line collection.
 
-use webcore::layout::hit_test::*;
 use webcore::layout::LayoutEngine;
+use webcore::layout::hit_test::*;
 use webcore::parse_html;
 use webcore::types::*;
 

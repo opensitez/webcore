@@ -11,7 +11,7 @@
 //     these used a manually-built C++ SimpleSelector struct; ported below using
 //     load_html + matches_with_ancestors instead.
 
-use webcore::css::{parse_selector, AttrOp, Combinator, SelectorPart};
+use webcore::css::{AttrOp, Combinator, SelectorPart, parse_selector};
 use webcore::parse_html;
 
 // ─── Helper: find a box in the tree matching a predicate ─────────────────────

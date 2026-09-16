@@ -4,7 +4,8 @@ fn fixed_center_plus() {
     // Use actual demo.html HTML — newline before the +
     let doc = load_html(
         "<div style=\"position: fixed; bottom: 16px; right: 16px; width: 48px; height: 48px; background-color: #3498db; color: white; text-align: center; font-size: 24pt; font-weight: bold; z-index: 100;\">\n+</div>",
-        800.0);
+        800.0,
+    );
 
     fn find<'a>(
         node: &'a webcore::WebCore,

@@ -1266,7 +1266,8 @@ fn button_emoji_text_stays_on_one_line() {
     // Emoji + text in a button: both must fit on one line (no wrap)
     let doc = load_html(
         "<button style=\"height: 30px; padding: 0 10px; font-size: 12px;\">&#128207; Compact</button>",
-        800.0);
+        800.0,
+    );
     let btn = find_box(&doc.root, &|b| b.tag == "button").unwrap();
     // Button should be wider than just the emoji (>20px) but narrow (<200px)
     assert!(

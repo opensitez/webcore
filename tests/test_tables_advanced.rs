@@ -637,13 +637,13 @@ fn table_inside_grid() {
 fn table_cell_relative_position() {
     let d = load_html(
         concat!(
-        "<table style='width:400px'><tr>",
-        "<td id='rel' style='position:relative'>",
-        "  <div id='abs' style='position:absolute;top:0;right:0;width:20px;height:20px'>X</div>",
-        "  Cell text",
-        "</td>",
-        "</tr></table>",
-    ),
+            "<table style='width:400px'><tr>",
+            "<td id='rel' style='position:relative'>",
+            "  <div id='abs' style='position:absolute;top:0;right:0;width:20px;height:20px'>X</div>",
+            "  Cell text",
+            "</td>",
+            "</tr></table>",
+        ),
         500.0,
     );
     let abs = by_id(&d.root, "abs").unwrap();
@@ -658,10 +658,10 @@ fn table_cell_relative_position() {
 fn cell_text_wraps() {
     let d = load_html(
         concat!(
-        "<table style='width:300px'><tr>",
-        "<td id='c' style='width:100px'>This text should wrap within the narrow cell width</td>",
-        "</tr></table>",
-    ),
+            "<table style='width:300px'><tr>",
+            "<td id='c' style='width:100px'>This text should wrap within the narrow cell width</td>",
+            "</tr></table>",
+        ),
         400.0,
     );
     let c = by_id(&d.root, "c").unwrap();
@@ -674,11 +674,14 @@ fn cell_text_wraps() {
 
 #[test]
 fn cell_nowrap() {
-    let d = load_html(concat!(
-        "<table style='width:600px'><tr>",
-        "<td id='nw' style='white-space:nowrap'>This text should not wrap to the next line at all</td>",
-        "</tr></table>",
-    ), 700.0);
+    let d = load_html(
+        concat!(
+            "<table style='width:600px'><tr>",
+            "<td id='nw' style='white-space:nowrap'>This text should not wrap to the next line at all</td>",
+            "</tr></table>",
+        ),
+        700.0,
+    );
     let nw = by_id(&d.root, "nw").unwrap();
     assert!(nw.layout.line_cache.len() <= 1, "nowrap = 1 line");
 }
@@ -689,16 +692,19 @@ fn cell_nowrap() {
 
 #[test]
 fn email_table_layout() {
-    let d = load_html(concat!(
-        "<table style='width:600px;margin:0 auto;border-collapse:collapse'>",
-        "<tr><td colspan='2' style='height:80px;background:navy;color:white' id='header'>Header</td></tr>",
-        "<tr>",
-        "  <td style='width:70%;vertical-align:top;padding:20px' id='main'>Main content area with text</td>",
-        "  <td style='width:30%;vertical-align:top;padding:10px;background:lightgray' id='side'>Sidebar</td>",
-        "</tr>",
-        "<tr><td colspan='2' style='height:50px;background:gray' id='footer'>Footer</td></tr>",
-        "</table>",
-    ), 700.0);
+    let d = load_html(
+        concat!(
+            "<table style='width:600px;margin:0 auto;border-collapse:collapse'>",
+            "<tr><td colspan='2' style='height:80px;background:navy;color:white' id='header'>Header</td></tr>",
+            "<tr>",
+            "  <td style='width:70%;vertical-align:top;padding:20px' id='main'>Main content area with text</td>",
+            "  <td style='width:30%;vertical-align:top;padding:10px;background:lightgray' id='side'>Sidebar</td>",
+            "</tr>",
+            "<tr><td colspan='2' style='height:50px;background:gray' id='footer'>Footer</td></tr>",
+            "</table>",
+        ),
+        700.0,
+    );
     let header = by_id(&d.root, "header").unwrap();
     let main = by_id(&d.root, "main").unwrap();
     let side = by_id(&d.root, "side").unwrap();

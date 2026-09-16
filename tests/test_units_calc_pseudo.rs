@@ -223,7 +223,10 @@ fn calc_px_minus_px() {
 
 #[test]
 fn calc_percent_minus_px() {
-    let d = load_html("<div style='width:800px'><div id='t' style='width:calc(100% - 60px);height:40px'>X</div></div>", 900.0);
+    let d = load_html(
+        "<div style='width:800px'><div id='t' style='width:calc(100% - 60px);height:40px'>X</div></div>",
+        900.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     assert!(
         (t.layout.content_rect.w - 740.0).abs() < 10.0,
@@ -234,7 +237,10 @@ fn calc_percent_minus_px() {
 
 #[test]
 fn calc_percent_plus_px() {
-    let d = load_html("<div style='width:600px'><div id='t' style='width:calc(50% + 20px);height:40px'>X</div></div>", 700.0);
+    let d = load_html(
+        "<div style='width:600px'><div id='t' style='width:calc(50% + 20px);height:40px'>X</div></div>",
+        700.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     assert!(
         (t.layout.content_rect.w - 320.0).abs() < 10.0,
@@ -273,7 +279,10 @@ fn calc_divide() {
 
 #[test]
 fn calc_in_margin() {
-    let d = load_html("<div style='width:600px'><div id='t' style='margin-left:calc(50% - 100px);width:200px;height:40px'>X</div></div>", 700.0);
+    let d = load_html(
+        "<div style='width:600px'><div id='t' style='margin-left:calc(50% - 100px);width:200px;height:40px'>X</div></div>",
+        700.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // margin-left = 300 - 100 = 200
     assert!(
@@ -330,7 +339,10 @@ fn calc_in_border_width() {
 
 #[test]
 fn calc_with_em() {
-    let d = load_html("<div style='font-size:20px'><div id='t' style='width:calc(10em - 50px);height:40px'>X</div></div>", 800.0);
+    let d = load_html(
+        "<div style='font-size:20px'><div id='t' style='width:calc(10em - 50px);height:40px'>X</div></div>",
+        800.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // 10em = 200px, - 50 = 150
     assert!(
@@ -377,7 +389,10 @@ fn calc_negative_result_clamped() {
 fn calc_whitespace_required() {
     // calc(100% -40px) is invalid without spaces around operator
     // Most browsers still parse it, we should too or at least not crash
-    let d = load_html("<div style='width:800px'><div id='t' style='width:calc(100% -40px);height:40px'>X</div></div>", 900.0);
+    let d = load_html(
+        "<div style='width:800px'><div id='t' style='width:calc(100% -40px);height:40px'>X</div></div>",
+        900.0,
+    );
     let _t = by_id(&d.root, "t").unwrap();
 }
 
@@ -388,7 +403,10 @@ fn calc_whitespace_required() {
 #[test]
 fn clamp_function() {
     // clamp(min, preferred, max)
-    let d = load_html("<div style='width:800px'><div id='t' style='width:clamp(200px, 50%, 400px);height:40px'>X</div></div>", 900.0);
+    let d = load_html(
+        "<div style='width:800px'><div id='t' style='width:clamp(200px, 50%, 400px);height:40px'>X</div></div>",
+        900.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // 50% of 800 = 400, clamped to max 400 → 400
     assert!(
@@ -400,7 +418,10 @@ fn clamp_function() {
 
 #[test]
 fn clamp_below_min() {
-    let d = load_html("<div style='width:200px'><div id='t' style='width:clamp(300px, 50%, 500px);height:40px'>X</div></div>", 300.0);
+    let d = load_html(
+        "<div style='width:200px'><div id='t' style='width:clamp(300px, 50%, 500px);height:40px'>X</div></div>",
+        300.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // 50% of 200 = 100, but min is 300 → 300
     assert!(
@@ -412,7 +433,10 @@ fn clamp_below_min() {
 
 #[test]
 fn min_function() {
-    let d = load_html("<div style='width:800px'><div id='t' style='width:min(500px, 50%);height:40px'>X</div></div>", 900.0);
+    let d = load_html(
+        "<div style='width:800px'><div id='t' style='width:min(500px, 50%);height:40px'>X</div></div>",
+        900.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // min(500, 400) = 400
     assert!(
@@ -424,7 +448,10 @@ fn min_function() {
 
 #[test]
 fn max_function() {
-    let d = load_html("<div style='width:800px'><div id='t' style='width:max(100px, 50%);height:40px'>X</div></div>", 900.0);
+    let d = load_html(
+        "<div style='width:800px'><div id='t' style='width:max(100px, 50%);height:40px'>X</div></div>",
+        900.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // max(100, 400) = 400
     assert!(
@@ -440,11 +467,14 @@ fn max_function() {
 
 #[test]
 fn border_box_with_percentage() {
-    let d = load_html(concat!(
-        "<div style='width:600px'>",
-        "<div id='t' style='box-sizing:border-box;width:50%;padding:20px;border:5px solid black;height:80px'>X</div>",
-        "</div>",
-    ), 700.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:600px'>",
+            "<div id='t' style='box-sizing:border-box;width:50%;padding:20px;border:5px solid black;height:80px'>X</div>",
+            "</div>",
+        ),
+        700.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // border-box: 50% of 600 = 300 total, content = 300 - 40 - 10 = 250
     assert!(
@@ -461,11 +491,14 @@ fn border_box_with_percentage() {
 
 #[test]
 fn border_box_with_calc() {
-    let d = load_html(concat!(
-        "<div style='width:800px'>",
-        "<div id='t' style='box-sizing:border-box;width:calc(100% - 40px);padding:15px;height:60px'>X</div>",
-        "</div>",
-    ), 900.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:800px'>",
+            "<div id='t' style='box-sizing:border-box;width:calc(100% - 40px);padding:15px;height:60px'>X</div>",
+            "</div>",
+        ),
+        900.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // calc(100% - 40px) = 760, border-box → content = 760 - 30 = 730
     assert!(
@@ -558,10 +591,13 @@ fn after_text_content() {
 
 #[test]
 fn before_empty_content_with_display_block() {
-    let d = load_html(concat!(
-        "<style>div::before { content: ''; display: block; height: 20px; background: red; }</style>",
-        "<div id='t' style='width:300px'>Text below line</div>",
-    ), 500.0);
+    let d = load_html(
+        concat!(
+            "<style>div::before { content: ''; display: block; height: 20px; background: red; }</style>",
+            "<div id='t' style='width:300px'>Text below line</div>",
+        ),
+        500.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // Block ::before with empty content = decorative bar
     assert!(
@@ -610,10 +646,13 @@ fn before_display_inline_default() {
 
 #[test]
 fn before_display_inline_block() {
-    let d = load_html(concat!(
-        "<style>h2::before { content: ''; display: inline-block; width: 8px; height: 8px; background: blue; margin-right: 8px; vertical-align: middle; }</style>",
-        "<h2 id='t'>Section Title</h2>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>h2::before { content: ''; display: inline-block; width: 8px; height: 8px; background: blue; margin-right: 8px; vertical-align: middle; }</style>",
+            "<h2 id='t'>Section Title</h2>",
+        ),
+        800.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     assert!(t.layout.content_rect.h > 10.0, "h2 has content");
     assert!(!t.layout.line_cache.is_empty(), "h2 has text lines");
@@ -621,20 +660,26 @@ fn before_display_inline_block() {
 
 #[test]
 fn before_display_block_separator() {
-    let d = load_html(concat!(
-        "<style>.section::before { content: ''; display: block; height: 2px; background: gray; margin-bottom: 10px; }</style>",
-        "<div class='section' id='t'>Content after separator</div>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>.section::before { content: ''; display: block; height: 2px; background: gray; margin-bottom: 10px; }</style>",
+            "<div class='section' id='t'>Content after separator</div>",
+        ),
+        800.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     assert!(t.layout.content_rect.h > 10.0, "section has height");
 }
 
 #[test]
 fn after_display_block() {
-    let d = load_html(concat!(
-        "<style>.item::after { content: ''; display: block; height: 1px; background: lightgray; margin-top: 10px; }</style>",
-        "<div class='item' id='t'>Item content</div>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>.item::after { content: ''; display: block; height: 1px; background: lightgray; margin-top: 10px; }</style>",
+            "<div class='item' id='t'>Item content</div>",
+        ),
+        800.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     assert!(
         t.layout.content_rect.h > 10.0,
@@ -648,12 +693,15 @@ fn after_display_block() {
 
 #[test]
 fn before_as_flex_item() {
-    let d = load_html(concat!(
-        "<style>.row::before { content: ''; flex: 0 0 40px; height: 40px; background: blue; }</style>",
-        "<div class='row' style='display:flex;width:400px'>",
-        "<div id='main' style='flex:1'>Main content</div>",
-        "</div>",
-    ), 500.0);
+    let d = load_html(
+        concat!(
+            "<style>.row::before { content: ''; flex: 0 0 40px; height: 40px; background: blue; }</style>",
+            "<div class='row' style='display:flex;width:400px'>",
+            "<div id='main' style='flex:1'>Main content</div>",
+            "</div>",
+        ),
+        500.0,
+    );
     let main = by_id(&d.root, "main").unwrap();
     // ::before takes 40px, main gets 360px
     assert!(
@@ -666,12 +714,15 @@ fn before_as_flex_item() {
 
 #[test]
 fn after_as_flex_item() {
-    let d = load_html(concat!(
-        "<style>.row::after { content: ''; flex: 0 0 60px; height: 40px; background: red; }</style>",
-        "<div class='row' style='display:flex;width:500px'>",
-        "<div id='main' style='flex:1'>Main</div>",
-        "</div>",
-    ), 600.0);
+    let d = load_html(
+        concat!(
+            "<style>.row::after { content: ''; flex: 0 0 60px; height: 40px; background: red; }</style>",
+            "<div class='row' style='display:flex;width:500px'>",
+            "<div id='main' style='flex:1'>Main</div>",
+            "</div>",
+        ),
+        600.0,
+    );
     let main = by_id(&d.root, "main").unwrap();
     assert!(
         main.layout.content_rect.w > 380.0,
@@ -683,13 +734,16 @@ fn after_as_flex_item() {
 
 #[test]
 fn before_as_grid_item() {
-    let d = load_html(concat!(
-        "<style>.grid::before { content: ''; grid-column: 1; height: 30px; background: green; }</style>",
-        "<div class='grid' style='display:grid;grid-template-columns:1fr 1fr;width:400px'>",
-        "<div id='a'>A</div>",
-        "<div id='b'>B</div>",
-        "</div>",
-    ), 500.0);
+    let d = load_html(
+        concat!(
+            "<style>.grid::before { content: ''; grid-column: 1; height: 30px; background: green; }</style>",
+            "<div class='grid' style='display:grid;grid-template-columns:1fr 1fr;width:400px'>",
+            "<div id='a'>A</div>",
+            "<div id='b'>B</div>",
+            "</div>",
+        ),
+        500.0,
+    );
     let a = by_id(&d.root, "a").unwrap();
     assert!(a.layout.content_rect.w > 100.0, "grid item with ::before");
 }
@@ -735,9 +789,9 @@ fn before_font_size() {
 fn before_background_color() {
     let d = load_html(
         concat!(
-        "<style>code::before { content: '`'; background-color: #f0f0f0; padding: 0 2px; }</style>",
-        "<code id='t'>inline code</code>",
-    ),
+            "<style>code::before { content: '`'; background-color: #f0f0f0; padding: 0 2px; }</style>",
+            "<code id='t'>inline code</code>",
+        ),
         800.0,
     );
     let t = by_id(&d.root, "t").unwrap();
@@ -830,10 +884,13 @@ fn before_and_after_same_element() {
 
 #[test]
 fn before_position_absolute() {
-    let d = load_html(concat!(
-        "<style>.badge { position: relative; } .badge::before { content: '3'; position: absolute; top: -8px; right: -8px; width: 20px; height: 20px; background: red; color: white; border-radius: 50%; text-align: center; font-size: 12px; }</style>",
-        "<div class='badge' id='t' style='display:inline-block;width:40px;height:40px;background:blue'>Icon</div>",
-    ), 500.0);
+    let d = load_html(
+        concat!(
+            "<style>.badge { position: relative; } .badge::before { content: '3'; position: absolute; top: -8px; right: -8px; width: 20px; height: 20px; background: red; color: white; border-radius: 50%; text-align: center; font-size: 12px; }</style>",
+            "<div class='badge' id='t' style='display:inline-block;width:40px;height:40px;background:blue'>Icon</div>",
+        ),
+        500.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // Badge element should have its own dimensions, ::before is absolute overlay
     assert!(
@@ -846,13 +903,16 @@ fn before_position_absolute() {
 #[test]
 fn after_position_absolute_stretch() {
     // Common "clickable card" pattern
-    let d = load_html(concat!(
-        "<style>.card { position: relative; width: 300px; } .card a::after { content: ''; position: absolute; top: 0; left: 0; right: 0; bottom: 0; }</style>",
-        "<div class='card'>",
-        "<img width='300' height='200' src='test.png'>",
-        "<a id='link' href='/'>Title</a>",
-        "</div>",
-    ), 400.0);
+    let d = load_html(
+        concat!(
+            "<style>.card { position: relative; width: 300px; } .card a::after { content: ''; position: absolute; top: 0; left: 0; right: 0; bottom: 0; }</style>",
+            "<div class='card'>",
+            "<img width='300' height='200' src='test.png'>",
+            "<a id='link' href='/'>Title</a>",
+            "</div>",
+        ),
+        400.0,
+    );
     let link = by_id(&d.root, "link").unwrap();
     // ::after absolute doesn't inflate the link
     assert!(
@@ -937,11 +997,14 @@ fn calc_zero_width() {
 
 #[test]
 fn responsive_container_calc() {
-    let d = load_html(concat!(
-        "<div style='width:1200px'>",
-        "<div id='t' style='max-width:960px;margin:0 auto;padding:0 calc((100% - 960px) / 2)'>Content</div>",
-        "</div>",
-    ), 1300.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:1200px'>",
+            "<div id='t' style='max-width:960px;margin:0 auto;padding:0 calc((100% - 960px) / 2)'>Content</div>",
+            "</div>",
+        ),
+        1300.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // Should center within 1200px
     assert!(
@@ -957,7 +1020,10 @@ fn responsive_container_calc() {
 
 #[test]
 fn calc_nested_calc() {
-    let d = load_html("<div style='width:1000px'><div id='t' style='width:calc(calc(50% + 100px) - 50px);height:40px'>X</div></div>", 1100.0);
+    let d = load_html(
+        "<div style='width:1000px'><div id='t' style='width:calc(calc(50% + 100px) - 50px);height:40px'>X</div></div>",
+        1100.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // calc(calc(500+100)-50) = 550
     assert!(
@@ -987,7 +1053,10 @@ fn calc_deeply_nested() {
 
 #[test]
 fn calc_em_plus_px() {
-    let d = load_html("<div style='font-size:20px'><div id='t' style='width:calc(5em + 30px);height:40px'>X</div></div>", 800.0);
+    let d = load_html(
+        "<div style='font-size:20px'><div id='t' style='width:calc(5em + 30px);height:40px'>X</div></div>",
+        800.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // 5em=100px + 30px = 130
     assert!(
@@ -1014,7 +1083,10 @@ fn calc_vw_minus_px() {
 
 #[test]
 fn calc_percent_times_number() {
-    let d = load_html("<div style='width:800px'><div id='t' style='width:calc(25% * 2);height:40px'>X</div></div>", 900.0);
+    let d = load_html(
+        "<div style='width:800px'><div id='t' style='width:calc(25% * 2);height:40px'>X</div></div>",
+        900.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // 25% of 800 = 200, *2 = 400
     assert!(
@@ -1030,7 +1102,10 @@ fn calc_percent_times_number() {
 
 #[test]
 fn clamp_preferred_in_range() {
-    let d = load_html("<div style='width:1000px'><div id='t' style='width:clamp(100px, 30%, 500px);height:40px'>X</div></div>", 1100.0);
+    let d = load_html(
+        "<div style='width:1000px'><div id='t' style='width:clamp(100px, 30%, 500px);height:40px'>X</div></div>",
+        1100.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // 30% of 1000=300, between 100 and 500 → 300
     assert!(
@@ -1042,7 +1117,10 @@ fn clamp_preferred_in_range() {
 
 #[test]
 fn clamp_above_max() {
-    let d = load_html("<div style='width:2000px'><div id='t' style='width:clamp(100px, 50%, 600px);height:40px'>X</div></div>", 2100.0);
+    let d = load_html(
+        "<div style='width:2000px'><div id='t' style='width:clamp(100px, 50%, 600px);height:40px'>X</div></div>",
+        2100.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // 50% of 2000=1000, clamped to max 600
     assert!(
@@ -1054,7 +1132,10 @@ fn clamp_above_max() {
 
 #[test]
 fn clamp_with_calc() {
-    let d = load_html("<div style='width:800px'><div id='t' style='width:clamp(100px, calc(50% - 50px), 500px);height:40px'>X</div></div>", 900.0);
+    let d = load_html(
+        "<div style='width:800px'><div id='t' style='width:clamp(100px, calc(50% - 50px), 500px);height:40px'>X</div></div>",
+        900.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // calc(50%-50px) = 400-50 = 350, between 100 and 500 → 350
     assert!(
@@ -1078,7 +1159,10 @@ fn clamp_in_font_size() {
 
 #[test]
 fn clamp_in_padding() {
-    let d = load_html("<div style='width:600px'><div id='t' style='padding:clamp(10px, 5%, 40px);width:200px'>X</div></div>", 700.0);
+    let d = load_html(
+        "<div style='width:600px'><div id='t' style='padding:clamp(10px, 5%, 40px);width:200px'>X</div></div>",
+        700.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // 5% of 600 = 30, between 10 and 40 → 30
     assert!(
@@ -1112,7 +1196,10 @@ fn clamp_in_gap() {
 
 #[test]
 fn min_two_percentages() {
-    let d = load_html("<div style='width:1000px'><div id='t' style='width:min(80%, 60%);height:40px'>X</div></div>", 1100.0);
+    let d = load_html(
+        "<div style='width:1000px'><div id='t' style='width:min(80%, 60%);height:40px'>X</div></div>",
+        1100.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // min(800, 600) = 600
     assert!(
@@ -1124,7 +1211,10 @@ fn min_two_percentages() {
 
 #[test]
 fn max_px_and_percent() {
-    let d = load_html("<div style='width:400px'><div id='t' style='width:max(300px, 50%);height:40px'>X</div></div>", 500.0);
+    let d = load_html(
+        "<div style='width:400px'><div id='t' style='width:max(300px, 50%);height:40px'>X</div></div>",
+        500.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // max(300, 200) = 300
     assert!(
@@ -1136,7 +1226,10 @@ fn max_px_and_percent() {
 
 #[test]
 fn min_three_values() {
-    let d = load_html("<div style='width:800px'><div id='t' style='width:min(500px, 80%, 600px);height:40px'>X</div></div>", 900.0);
+    let d = load_html(
+        "<div style='width:800px'><div id='t' style='width:min(500px, 80%, 600px);height:40px'>X</div></div>",
+        900.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // min(500, 640, 600) = 500
     assert!(
@@ -1148,7 +1241,10 @@ fn min_three_values() {
 
 #[test]
 fn max_three_values() {
-    let d = load_html("<div style='width:800px'><div id='t' style='width:max(100px, 20%, 250px);height:40px'>X</div></div>", 900.0);
+    let d = load_html(
+        "<div style='width:800px'><div id='t' style='width:max(100px, 20%, 250px);height:40px'>X</div></div>",
+        900.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // max(100, 160, 250) = 250
     assert!(
@@ -1174,7 +1270,10 @@ fn min_in_height() {
 
 #[test]
 fn max_in_margin() {
-    let d = load_html("<div style='width:600px'><div id='t' style='margin-left:max(20px, 5%);width:200px;height:40px'>X</div></div>", 700.0);
+    let d = load_html(
+        "<div style='width:600px'><div id='t' style='margin-left:max(20px, 5%);width:200px;height:40px'>X</div></div>",
+        700.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // max(20, 30) = 30
     assert!(
@@ -1190,7 +1289,10 @@ fn max_in_margin() {
 
 #[test]
 fn min_with_calc_inside() {
-    let d = load_html("<div style='width:800px'><div id='t' style='width:min(calc(100% - 100px), 500px);height:40px'>X</div></div>", 900.0);
+    let d = load_html(
+        "<div style='width:800px'><div id='t' style='width:min(calc(100% - 100px), 500px);height:40px'>X</div></div>",
+        900.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // min(700, 500) = 500
     assert!(
@@ -1202,7 +1304,10 @@ fn min_with_calc_inside() {
 
 #[test]
 fn clamp_all_calc() {
-    let d = load_html("<div style='width:1000px'><div id='t' style='width:clamp(calc(10% + 50px), calc(30% + 20px), calc(50% - 50px));height:40px'>X</div></div>", 1100.0);
+    let d = load_html(
+        "<div style='width:1000px'><div id='t' style='width:clamp(calc(10% + 50px), calc(30% + 20px), calc(50% - 50px));height:40px'>X</div></div>",
+        1100.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // min=150, preferred=320, max=450 → 320
     assert!(
@@ -1218,7 +1323,10 @@ fn clamp_all_calc() {
 
 #[test]
 fn calc_in_line_height() {
-    let d = load_html("<div id='t' style='font-size:16px;line-height:calc(1em + 8px);width:200px'>Line height test with wrapping text content</div>", 300.0);
+    let d = load_html(
+        "<div id='t' style='font-size:16px;line-height:calc(1em + 8px);width:200px'>Line height test with wrapping text content</div>",
+        300.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     if t.layout.line_cache.len() >= 2 {
         let gap = t.layout.line_cache[1].y - t.layout.line_cache[0].y;
@@ -1229,11 +1337,14 @@ fn calc_in_line_height() {
 
 #[test]
 fn calc_in_top_left() {
-    let d = load_html(concat!(
-        "<div style='position:relative;width:400px;height:300px'>",
-        "<div id='t' style='position:absolute;top:calc(50% - 25px);left:calc(50% - 50px);width:100px;height:50px'>C</div>",
-        "</div>",
-    ), 500.0);
+    let d = load_html(
+        concat!(
+            "<div style='position:relative;width:400px;height:300px'>",
+            "<div id='t' style='position:absolute;top:calc(50% - 25px);left:calc(50% - 50px);width:100px;height:50px'>C</div>",
+            "</div>",
+        ),
+        500.0,
+    );
     let parent = find(&d.root, &|b| b.style.position == Position::Relative).unwrap();
     let t = by_id(&d.root, "t").unwrap();
     // top: 150-25=125, left: 200-50=150
@@ -1275,11 +1386,14 @@ fn calc_in_flex_basis() {
 
 #[test]
 fn calc_in_grid_template() {
-    let d = load_html(concat!(
-        "<div style='display:grid;grid-template-columns:calc(50% - 10px) calc(50% - 10px);gap:20px;width:800px'>",
-        "<div id='a'>A</div><div id='b'>B</div>",
-        "</div>",
-    ), 900.0);
+    let d = load_html(
+        concat!(
+            "<div style='display:grid;grid-template-columns:calc(50% - 10px) calc(50% - 10px);gap:20px;width:800px'>",
+            "<div id='a'>A</div><div id='b'>B</div>",
+            "</div>",
+        ),
+        900.0,
+    );
     let a = by_id(&d.root, "a").unwrap();
     // calc(50%-10px) = 390
     assert!(
@@ -1334,7 +1448,10 @@ fn calc_in_min_height() {
 #[test]
 fn calc_in_border_radius() {
     // Should parse without crash
-    let d = load_html("<div id='t' style='border-radius:calc(5px + 3px);width:100px;height:100px;background:red'>X</div>", 200.0);
+    let d = load_html(
+        "<div id='t' style='border-radius:calc(5px + 3px);width:100px;height:100px;background:red'>X</div>",
+        200.0,
+    );
     let _t = by_id(&d.root, "t").unwrap();
 }
 
@@ -1483,10 +1600,13 @@ fn before_content_counter() {
 
 #[test]
 fn before_long_content_wraps() {
-    let d = load_html(concat!(
-        "<style>p::before { content: 'WARNING: This is a very important notice that precedes the paragraph text. '; color: red; font-weight: bold; }</style>",
-        "<p id='t' style='width:300px'>Rest of the text flows after the before content.</p>",
-    ), 400.0);
+    let d = load_html(
+        concat!(
+            "<style>p::before { content: 'WARNING: This is a very important notice that precedes the paragraph text. '; color: red; font-weight: bold; }</style>",
+            "<p id='t' style='width:300px'>Rest of the text flows after the before content.</p>",
+        ),
+        400.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     assert!(
         t.layout.line_cache.len() >= 2,
@@ -1575,13 +1695,16 @@ fn fluid_container_narrow_viewport() {
 
 #[test]
 fn aspect_ratio_padding_hack() {
-    let d = load_html(concat!(
-        "<div style='width:400px'>",
-        "<div id='ratio' style='width:100%;padding-top:56.25%;position:relative'>",
-        "<div id='content' style='position:absolute;top:0;left:0;right:0;bottom:0'>16:9 content</div>",
-        "</div>",
-        "</div>",
-    ), 500.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:400px'>",
+            "<div id='ratio' style='width:100%;padding-top:56.25%;position:relative'>",
+            "<div id='content' style='position:absolute;top:0;left:0;right:0;bottom:0'>16:9 content</div>",
+            "</div>",
+            "</div>",
+        ),
+        500.0,
+    );
     let ratio = by_id(&d.root, "ratio").unwrap();
     // padding-top:56.25% of 400px = 225px → 16:9 aspect ratio
     assert!(
@@ -1597,7 +1720,10 @@ fn aspect_ratio_padding_hack() {
 
 #[test]
 fn calc_all_zeros_no_crash() {
-    let d = load_html("<div id='t' style='width:calc(0px + 0px);height:calc(0);padding:calc(0px);margin:calc(0)'>X</div>", 400.0);
+    let d = load_html(
+        "<div id='t' style='width:calc(0px + 0px);height:calc(0);padding:calc(0px);margin:calc(0)'>X</div>",
+        400.0,
+    );
     let _t = by_id(&d.root, "t").unwrap();
 }
 
@@ -1681,10 +1807,13 @@ fn after_on_a_link() {
 
 #[test]
 fn before_on_blockquote() {
-    let d = load_html(concat!(
-        "<style>blockquote::before { content: '\"'; font-size: 3em; color: #ccc; float: left; margin-right: 10px; line-height: 1; }</style>",
-        "<blockquote id='t'>Famous quote here</blockquote>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>blockquote::before { content: '\"'; font-size: 3em; color: #ccc; float: left; margin-right: 10px; line-height: 1; }</style>",
+            "<blockquote id='t'>Famous quote here</blockquote>",
+        ),
+        800.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     assert!(t.layout.content_rect.h > 10.0, "blockquote renders");
 }
@@ -1708,10 +1837,13 @@ fn before_on_td() {
 
 #[test]
 fn before_content_empty_string() {
-    let d = load_html(concat!(
-        "<style>div::before { content: ''; display: inline-block; width: 10px; height: 10px; background: red; }</style>",
-        "<div id='t'>Text after dot</div>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>div::before { content: ''; display: inline-block; width: 10px; height: 10px; background: red; }</style>",
+            "<div id='t'>Text after dot</div>",
+        ),
+        800.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     // Empty content with dimensions = visual decorator
     assert!(
@@ -1774,10 +1906,13 @@ fn before_content_normal() {
 
 #[test]
 fn before_with_transition_no_crash() {
-    let d = load_html(concat!(
-        "<style>div::before { content: ''; display: block; height: 2px; background: blue; transition: background 0.3s; }</style>",
-        "<div id='t'>Hover me</div>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>div::before { content: ''; display: block; height: 2px; background: blue; transition: background 0.3s; }</style>",
+            "<div id='t'>Hover me</div>",
+        ),
+        800.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     assert!(
         t.layout.content_rect.h > 0.0,
@@ -1791,28 +1926,34 @@ fn before_with_transition_no_crash() {
 
 #[test]
 fn tooltip_arrow_before() {
-    let d = load_html(concat!(
-        "<style>",
-        ".tooltip { position: relative; display: inline-block; padding: 8px 12px; background: #333; color: white; }",
-        ".tooltip::before { content: ''; position: absolute; bottom: -8px; left: 50%; margin-left: -8px; border-width: 8px; border-style: solid; border-color: #333 transparent transparent transparent; }",
-        "</style>",
-        "<span class='tooltip' id='t'>Hover text</span>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>",
+            ".tooltip { position: relative; display: inline-block; padding: 8px 12px; background: #333; color: white; }",
+            ".tooltip::before { content: ''; position: absolute; bottom: -8px; left: 50%; margin-left: -8px; border-width: 8px; border-style: solid; border-color: #333 transparent transparent transparent; }",
+            "</style>",
+            "<span class='tooltip' id='t'>Hover text</span>",
+        ),
+        800.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     assert!(t.layout.content_rect.w > 30.0, "tooltip renders");
 }
 
 #[test]
 fn hamburger_icon_before_after() {
-    let d = load_html(concat!(
-        "<style>",
-        ".burger { position: relative; width: 30px; height: 20px; }",
-        ".burger::before, .burger::after { content: ''; position: absolute; left: 0; width: 100%; height: 3px; background: black; }",
-        ".burger::before { top: 0; }",
-        ".burger::after { bottom: 0; }",
-        "</style>",
-        "<div class='burger' id='t'></div>",
-    ), 400.0);
+    let d = load_html(
+        concat!(
+            "<style>",
+            ".burger { position: relative; width: 30px; height: 20px; }",
+            ".burger::before, .burger::after { content: ''; position: absolute; left: 0; width: 100%; height: 3px; background: black; }",
+            ".burger::before { top: 0; }",
+            ".burger::after { bottom: 0; }",
+            "</style>",
+            "<div class='burger' id='t'></div>",
+        ),
+        400.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     assert!((t.layout.content_rect.w - 30.0).abs() < 5.0, "burger w=30");
     assert!((t.layout.content_rect.h - 20.0).abs() < 5.0, "burger h=20");
@@ -1820,13 +1961,16 @@ fn hamburger_icon_before_after() {
 
 #[test]
 fn ribbon_badge_before() {
-    let d = load_html(concat!(
-        "<style>",
-        ".ribbon { position: relative; padding: 5px 20px; background: #e43; color: white; display: inline-block; }",
-        ".ribbon::before { content: ''; position: absolute; top: 100%; left: 0; border: 10px solid transparent; border-top-color: #a22; border-right-color: #a22; }",
-        "</style>",
-        "<span class='ribbon' id='t'>SALE</span>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>",
+            ".ribbon { position: relative; padding: 5px 20px; background: #e43; color: white; display: inline-block; }",
+            ".ribbon::before { content: ''; position: absolute; top: 100%; left: 0; border: 10px solid transparent; border-top-color: #a22; border-right-color: #a22; }",
+            "</style>",
+            "<span class='ribbon' id='t'>SALE</span>",
+        ),
+        800.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     assert!(t.layout.content_rect.w > 20.0, "ribbon renders");
 }
@@ -1835,9 +1979,9 @@ fn ribbon_badge_before() {
 fn required_field_after() {
     let d = load_html(
         concat!(
-        "<style>label.required::after { content: ' *'; color: red; font-weight: bold; }</style>",
-        "<label class='required' id='t'>Email</label>",
-    ),
+            "<style>label.required::after { content: ' *'; color: red; font-weight: bold; }</style>",
+            "<label class='required' id='t'>Email</label>",
+        ),
         800.0,
     );
     let t = by_id(&d.root, "t").unwrap();
@@ -1897,10 +2041,13 @@ fn price_currency_before() {
 
 #[test]
 fn before_in_overflow_hidden() {
-    let d = load_html(concat!(
-        "<style>.box::before { content: 'PREFIX '; color: blue; }</style>",
-        "<div class='box' id='t' style='width:100px;overflow:hidden;white-space:nowrap'>Long text that overflows the box</div>",
-    ), 400.0);
+    let d = load_html(
+        concat!(
+            "<style>.box::before { content: 'PREFIX '; color: blue; }</style>",
+            "<div class='box' id='t' style='width:100px;overflow:hidden;white-space:nowrap'>Long text that overflows the box</div>",
+        ),
+        400.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     assert!(
         (t.layout.content_rect.w - 100.0).abs() < 5.0,
@@ -2160,10 +2307,13 @@ fn before_after_deeply_nested() {
 
 #[test]
 fn before_content_from_var() {
-    let d = load_html(concat!(
-        "<style>:root { --prefix: '>> '; } p::before { content: var(--prefix); color: red; }</style>",
-        "<p id='t'>Text</p>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>:root { --prefix: '>> '; } p::before { content: var(--prefix); color: red; }</style>",
+            "<p id='t'>Text</p>",
+        ),
+        800.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     let has = !t.style.before_content.is_empty() || t.children.iter().any(|c| c.tag == "::before");
     assert!(has, "::before content from var");
@@ -2171,10 +2321,13 @@ fn before_content_from_var() {
 
 #[test]
 fn before_color_from_var() {
-    let d = load_html(concat!(
-        "<style>:root { --accent: #ff6600; } h2::before { content: '# '; color: var(--accent); }</style>",
-        "<h2 id='t'>Title</h2>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>:root { --accent: #ff6600; } h2::before { content: '# '; color: var(--accent); }</style>",
+            "<h2 id='t'>Title</h2>",
+        ),
+        800.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     if let Some(bs) = &t.style.before_style {
         assert_eq!(bs.color.r, 0xff, "::before color from var r={}", bs.color.r);
@@ -2184,11 +2337,14 @@ fn before_color_from_var() {
 
 #[test]
 fn before_background_from_var() {
-    let d = load_html(concat!(
-        "<style>:root { --bar-color: #0066cc; }",
-        ".section::before { content: ''; display: block; height: 4px; background: var(--bar-color); margin-bottom: 8px; }</style>",
-        "<div class='section' id='t'>Content</div>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>:root { --bar-color: #0066cc; }",
+            ".section::before { content: ''; display: block; height: 4px; background: var(--bar-color); margin-bottom: 8px; }</style>",
+            "<div class='section' id='t'>Content</div>",
+        ),
+        800.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     assert!(t.layout.content_rect.h > 10.0, "section with var ::before");
 }

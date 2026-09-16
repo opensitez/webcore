@@ -191,9 +191,9 @@ fn var_fallback_with_spaces() {
 fn var_fallback_is_another_var() {
     let doc = load_html(
         concat!(
-        "<style>:root { --backup: #0000ff; } p { color: var(--missing, var(--backup)); }</style>",
-        "<p id='t'>Blue from nested fallback</p>",
-    ),
+            "<style>:root { --backup: #0000ff; } p { color: var(--missing, var(--backup)); }</style>",
+            "<p id='t'>Blue from nested fallback</p>",
+        ),
         800.0,
     );
     let t = by_id(&doc.root, "t").unwrap();
@@ -226,10 +226,13 @@ fn var_chain_two_levels() {
 
 #[test]
 fn var_chain_three_levels() {
-    let doc = load_html(concat!(
-        "<style>:root { --x: var(--y); --y: var(--z); --z: 48px; } p { font-size: var(--x); }</style>",
-        "<p id='t'>3-level chain</p>",
-    ), 800.0);
+    let doc = load_html(
+        concat!(
+            "<style>:root { --x: var(--y); --y: var(--z); --z: 48px; } p { font-size: var(--x); }</style>",
+            "<p id='t'>3-level chain</p>",
+        ),
+        800.0,
+    );
     let t = by_id(&doc.root, "t").unwrap();
     assert!(
         (t.style.font_size_px(16.0, 16.0) - 48.0).abs() < 1.0,
@@ -256,10 +259,13 @@ fn var_circular_reference_no_crash() {
 
 #[test]
 fn var_element_level_definition() {
-    let doc = load_html(concat!(
-        "<style>.card { --card-bg: #eeeeee; } .card-inner { background-color: var(--card-bg); }</style>",
-        "<div class='card'><div class='card-inner' id='t'>Inner</div></div>",
-    ), 800.0);
+    let doc = load_html(
+        concat!(
+            "<style>.card { --card-bg: #eeeeee; } .card-inner { background-color: var(--card-bg); }</style>",
+            "<div class='card'><div class='card-inner' id='t'>Inner</div></div>",
+        ),
+        800.0,
+    );
     let t = by_id(&doc.root, "t").unwrap();
     assert_eq!(
         t.style.background_color.r, 0xee,
@@ -387,11 +393,14 @@ fn var_in_border() {
 
 #[test]
 fn var_in_gap() {
-    let doc = load_html(concat!(
-        "<style>:root { --gap: 20px; }",
-        ".grid { display:grid; grid-template-columns:1fr 1fr; gap:var(--gap); width:500px; }</style>",
-        "<div class='grid'><div id='a'>A</div><div id='b'>B</div></div>",
-    ), 600.0);
+    let doc = load_html(
+        concat!(
+            "<style>:root { --gap: 20px; }",
+            ".grid { display:grid; grid-template-columns:1fr 1fr; gap:var(--gap); width:500px; }</style>",
+            "<div class='grid'><div id='a'>A</div><div id='b'>B</div></div>",
+        ),
+        600.0,
+    );
     let a = by_id(&doc.root, "a").unwrap();
     let b = by_id(&doc.root, "b").unwrap();
     let gap = b.layout.content_rect.x - (a.layout.content_rect.x + a.layout.content_rect.w);
@@ -493,13 +502,13 @@ fn var_dark_variant_chain() {
     // with --bgDefault--DARK defined on :root
     let doc = load_html(
         concat!(
-        "<style>",
-        ":root { --bgDefault--DARK: #1a1a2e; --textColor--DARK: #e8e8e8; }",
-        ".section { --bgDefault: var(--bgDefault--DARK); --textColor: var(--textColor--DARK); }",
-        ".content { background-color: var(--bgDefault); color: var(--textColor); }",
-        "</style>",
-        "<div class='section'><div class='content' id='t'>AP News style</div></div>",
-    ),
+            "<style>",
+            ":root { --bgDefault--DARK: #1a1a2e; --textColor--DARK: #e8e8e8; }",
+            ".section { --bgDefault: var(--bgDefault--DARK); --textColor: var(--textColor--DARK); }",
+            ".content { background-color: var(--bgDefault); color: var(--textColor); }",
+            "</style>",
+            "<div class='section'><div class='content' id='t'>AP News style</div></div>",
+        ),
         800.0,
     );
     let t = by_id(&doc.root, "t").unwrap();

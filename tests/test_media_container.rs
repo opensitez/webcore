@@ -121,7 +121,10 @@ fn media_min_width_em_unit() {
 
 #[test]
 fn media_and_both_match() {
-    let d = load_html("<style>@media(min-width:500px) and (max-width:1000px){#t{color:red}}</style><div id='t'>X</div>", 800.0);
+    let d = load_html(
+        "<style>@media(min-width:500px) and (max-width:1000px){#t{color:red}}</style><div id='t'>X</div>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "t").unwrap().style.color.r,
         255,
@@ -131,7 +134,10 @@ fn media_and_both_match() {
 
 #[test]
 fn media_and_one_fails() {
-    let d = load_html("<style>@media(min-width:500px) and (max-width:700px){#t{color:red}}</style><div id='t'>X</div>", 800.0);
+    let d = load_html(
+        "<style>@media(min-width:500px) and (max-width:700px){#t{color:red}}</style><div id='t'>X</div>",
+        800.0,
+    );
     assert_ne!(by_id(&d.root, "t").unwrap().style.color.r, 255, "max fails");
 }
 
@@ -167,7 +173,10 @@ fn media_all_and_width() {
 
 #[test]
 fn media_comma_or_first_matches() {
-    let d = load_html("<style>@media(max-width:1000px),(min-width:2000px){#t{color:red}}</style><div id='t'>X</div>", 800.0);
+    let d = load_html(
+        "<style>@media(max-width:1000px),(min-width:2000px){#t{color:red}}</style><div id='t'>X</div>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "t").unwrap().style.color.r,
         255,
@@ -177,7 +186,10 @@ fn media_comma_or_first_matches() {
 
 #[test]
 fn media_comma_or_second_matches() {
-    let d = load_html("<style>@media(max-width:400px),(min-width:700px){#t{color:red}}</style><div id='t'>X</div>", 800.0);
+    let d = load_html(
+        "<style>@media(max-width:400px),(min-width:700px){#t{color:red}}</style><div id='t'>X</div>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "t").unwrap().style.color.r,
         255,
@@ -187,7 +199,10 @@ fn media_comma_or_second_matches() {
 
 #[test]
 fn media_comma_or_none_match() {
-    let d = load_html("<style>@media(max-width:400px),(min-width:1200px){#t{color:red}}</style><div id='t'>X</div>", 800.0);
+    let d = load_html(
+        "<style>@media(max-width:400px),(min-width:1200px){#t{color:red}}</style><div id='t'>X</div>",
+        800.0,
+    );
     assert_ne!(
         by_id(&d.root, "t").unwrap().style.color.r,
         255,
@@ -425,17 +440,20 @@ fn responsive_font_size() {
 
 #[test]
 fn responsive_sidebar_collapse() {
-    let d = load_html(concat!(
-        "<style>",
-        ".layout { display:block; width:100%; }",
-        ".sidebar { display:none; }",
-        "@media(min-width:992px) { .layout { display:flex; } .sidebar { display:block; width:300px; } }",
-        "</style>",
-        "<div class='layout' style='width:1000px'>",
-        "<div class='sidebar' id='sb'>Sidebar</div>",
-        "<div id='main' style='flex:1'>Main</div>",
-        "</div>",
-    ), 1024.0);
+    let d = load_html(
+        concat!(
+            "<style>",
+            ".layout { display:block; width:100%; }",
+            ".sidebar { display:none; }",
+            "@media(min-width:992px) { .layout { display:flex; } .sidebar { display:block; width:300px; } }",
+            "</style>",
+            "<div class='layout' style='width:1000px'>",
+            "<div class='sidebar' id='sb'>Sidebar</div>",
+            "<div id='main' style='flex:1'>Main</div>",
+            "</div>",
+        ),
+        1024.0,
+    );
     let sb = by_id(&d.root, "sb").unwrap();
     assert!(
         matches!(sb.style.display, Display::Block),
@@ -518,10 +536,13 @@ fn container_type_parsed() {
 
 #[test]
 fn container_name_parsed() {
-    let d = load_html(concat!(
-        "<style>.sidebar { container-type: inline-size; container-name: sidebar; width: 300px; }</style>",
-        "<div class='sidebar' id='t'><div>Content</div></div>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>.sidebar { container-type: inline-size; container-name: sidebar; width: 300px; }</style>",
+            "<div class='sidebar' id='t'><div>Content</div></div>",
+        ),
+        800.0,
+    );
     let _t = by_id(&d.root, "t").unwrap();
     // Should not crash
 }

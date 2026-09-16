@@ -399,9 +399,9 @@ fn after_content_renders() {
 fn before_with_display_block() {
     let d = load_html(
         concat!(
-        "<style>h2::before { content: ''; display: block; height: 4px; background: red; }</style>",
-        "<h2 id='t'>Title</h2>",
-    ),
+            "<style>h2::before { content: ''; display: block; height: 4px; background: red; }</style>",
+            "<h2 id='t'>Title</h2>",
+        ),
         800.0,
     );
     let t = by_id(&d.root, "t").unwrap();
@@ -859,7 +859,10 @@ fn text_decoration_underline() {
 
 #[test]
 fn line_height_unitless() {
-    let d = load_html("<div id='t' style='font-size:16px;line-height:1.5;width:200px'>Line height test with enough text to wrap</div>", 300.0);
+    let d = load_html(
+        "<div id='t' style='font-size:16px;line-height:1.5;width:200px'>Line height test with enough text to wrap</div>",
+        300.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     if t.layout.line_cache.len() >= 2 {
         let gap = t.layout.line_cache[1].y - t.layout.line_cache[0].y;
@@ -929,7 +932,10 @@ fn min_height() {
 
 #[test]
 fn max_height() {
-    let d = load_html("<div id='t' style='max-height:50px;width:200px;overflow:hidden'>Very tall content that should be clipped by max-height</div>", 400.0);
+    let d = load_html(
+        "<div id='t' style='max-height:50px;width:200px;overflow:hidden'>Very tall content that should be clipped by max-height</div>",
+        400.0,
+    );
     let t = by_id(&d.root, "t").unwrap();
     assert!(
         t.layout.content_rect.h <= 55.0,

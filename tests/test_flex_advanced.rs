@@ -598,24 +598,24 @@ fn flex_shorthand_initial() {
 fn header_logo_nav_actions() {
     let d = load_html(
         concat!(
-        "<style>",
-        ".header { display:flex; align-items:center; width:1200px; height:60px; padding:0 20px; }",
-        ".logo { width:120px; flex-shrink:0; }",
-        ".nav { display:flex; flex:1; gap:20px; margin:0 40px; }",
-        ".actions { display:flex; gap:10px; flex-shrink:0; }",
-        ".btn { padding:8px 16px; }",
-        "</style>",
-        "<div class='header'>",
-        "  <div class='logo' id='logo'>Logo</div>",
-        "  <div class='nav'>",
-        "    <a id='n1'>Home</a><a id='n2'>About</a><a id='n3'>Contact</a>",
-        "  </div>",
-        "  <div class='actions'>",
-        "    <button class='btn' id='login'>Log In</button>",
-        "    <button class='btn' id='signup'>Sign Up</button>",
-        "  </div>",
-        "</div>",
-    ),
+            "<style>",
+            ".header { display:flex; align-items:center; width:1200px; height:60px; padding:0 20px; }",
+            ".logo { width:120px; flex-shrink:0; }",
+            ".nav { display:flex; flex:1; gap:20px; margin:0 40px; }",
+            ".actions { display:flex; gap:10px; flex-shrink:0; }",
+            ".btn { padding:8px 16px; }",
+            "</style>",
+            "<div class='header'>",
+            "  <div class='logo' id='logo'>Logo</div>",
+            "  <div class='nav'>",
+            "    <a id='n1'>Home</a><a id='n2'>About</a><a id='n3'>Contact</a>",
+            "  </div>",
+            "  <div class='actions'>",
+            "    <button class='btn' id='login'>Log In</button>",
+            "    <button class='btn' id='signup'>Sign Up</button>",
+            "  </div>",
+            "</div>",
+        ),
         1300.0,
     );
     let logo = by_id(&d.root, "logo").unwrap();
@@ -695,19 +695,22 @@ fn holy_grail_layout() {
 
 #[test]
 fn card_row_equal_height() {
-    let d = load_html(concat!(
-        "<style>",
-        ".cards { display:flex; gap:20px; width:960px; }",
-        ".card { flex:1; display:flex; flex-direction:column; }",
-        ".card-body { flex:1; padding:16px; }",
-        ".card-footer { padding:8px 16px; }",
-        "</style>",
-        "<div class='cards'>",
-        "  <div class='card' id='c1'><div class='card-body'>Short text</div><div class='card-footer'>Footer</div></div>",
-        "  <div class='card' id='c2'><div class='card-body'>Much longer text content that takes up more vertical space in this card</div><div class='card-footer'>Footer</div></div>",
-        "  <div class='card' id='c3'><div class='card-body'>Medium</div><div class='card-footer'>Footer</div></div>",
-        "</div>",
-    ), 1000.0);
+    let d = load_html(
+        concat!(
+            "<style>",
+            ".cards { display:flex; gap:20px; width:960px; }",
+            ".card { flex:1; display:flex; flex-direction:column; }",
+            ".card-body { flex:1; padding:16px; }",
+            ".card-footer { padding:8px 16px; }",
+            "</style>",
+            "<div class='cards'>",
+            "  <div class='card' id='c1'><div class='card-body'>Short text</div><div class='card-footer'>Footer</div></div>",
+            "  <div class='card' id='c2'><div class='card-body'>Much longer text content that takes up more vertical space in this card</div><div class='card-footer'>Footer</div></div>",
+            "  <div class='card' id='c3'><div class='card-body'>Medium</div><div class='card-footer'>Footer</div></div>",
+            "</div>",
+        ),
+        1000.0,
+    );
     let c1 = by_id(&d.root, "c1").unwrap();
     let c2 = by_id(&d.root, "c2").unwrap();
     let c3 = by_id(&d.root, "c3").unwrap();

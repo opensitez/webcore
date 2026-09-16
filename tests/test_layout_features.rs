@@ -1,7 +1,7 @@
 // Tests for Agent C layout features:
 // position:sticky, aspect-ratio, multi-column, @font-face, will-change, contain, scroll-padding
 
-use webcore::css::{apply_property, Stylesheet};
+use webcore::css::{Stylesheet, apply_property};
 use webcore::types::*;
 use webcore::{load_html, parse_html};
 

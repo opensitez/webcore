@@ -1,7 +1,7 @@
 // Tests for link parsing and hit-testing.
 
-use webcore::layout::hit_test::*;
 use webcore::layout::LayoutEngine;
+use webcore::layout::hit_test::*;
 use webcore::parse_html;
 use webcore::types::*;
 

@@ -8,7 +8,7 @@
 // Tests that exercise APIs that *do* exist in Rust are fully ported.
 
 use webcore::dom::{
-    get_text_content, query_selector, query_selector_all, query_selector_mut, Editor, TextRange,
+    Editor, TextRange, get_text_content, query_selector, query_selector_all, query_selector_mut,
 };
 use webcore::layout::LayoutEngine;
 use webcore::types::*;

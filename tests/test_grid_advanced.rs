@@ -40,11 +40,14 @@ fn by_id<'a>(root: &'a WebCore, id: &str) -> Option<&'a WebCore> {
 
 #[test]
 fn grid_repeat_minmax_0_1fr() {
-    let doc = load_html(concat!(
-        "<div style='display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); width:1200px; gap:16px'>",
-        "<div id='a'>A</div><div id='b'>B</div><div id='c'>C</div><div id='d'>D</div>",
-        "</div>",
-    ), 1280.0);
+    let doc = load_html(
+        concat!(
+            "<div style='display:grid; grid-template-columns:repeat(4, minmax(0, 1fr)); width:1200px; gap:16px'>",
+            "<div id='a'>A</div><div id='b'>B</div><div id='c'>C</div><div id='d'>D</div>",
+            "</div>",
+        ),
+        1280.0,
+    );
     let a = by_id(&doc.root, "a").unwrap();
     let d = by_id(&doc.root, "d").unwrap();
     // 4 equal columns: (1200 - 3*16) / 4 = 288px each
@@ -110,11 +113,14 @@ fn grid_template_areas_spanning() {
 
 #[test]
 fn grid_fit_content_column() {
-    let doc = load_html(concat!(
-        "<div style='display:grid; grid-template-columns:fit-content(200px) 1fr; width:800px; gap:10px'>",
-        "<div id='label'>Short</div><div id='content'>Main content area</div>",
-        "</div>",
-    ), 1000.0);
+    let doc = load_html(
+        concat!(
+            "<div style='display:grid; grid-template-columns:fit-content(200px) 1fr; width:800px; gap:10px'>",
+            "<div id='label'>Short</div><div id='content'>Main content area</div>",
+            "</div>",
+        ),
+        1000.0,
+    );
     let label = by_id(&doc.root, "label").unwrap();
     let content = by_id(&doc.root, "content").unwrap();
     // fit-content(200px): label should be content-width, max 200px
@@ -137,11 +143,14 @@ fn grid_fit_content_column() {
 
 #[test]
 fn grid_fit_content_percent() {
-    let doc = load_html(concat!(
-        "<div style='display:grid; grid-template-columns:fit-content(25%) auto; width:1000px; gap:10px'>",
-        "<div id='a'>Label</div><div id='b'>Content</div>",
-        "</div>",
-    ), 1100.0);
+    let doc = load_html(
+        concat!(
+            "<div style='display:grid; grid-template-columns:fit-content(25%) auto; width:1000px; gap:10px'>",
+            "<div id='a'>Label</div><div id='b'>Content</div>",
+            "</div>",
+        ),
+        1100.0,
+    );
     let a = by_id(&doc.root, "a").unwrap();
     // fit-content(25%) of 1000px = max 250px
     assert!(
@@ -260,12 +269,12 @@ fn css_unset_resets_non_inherited() {
 fn grid_auto_place_with_col_span() {
     let doc = load_html(
         concat!(
-        "<div style='display:grid; grid-template-columns:repeat(3, 1fr); width:900px; gap:10px'>",
-        "<div id='wide' style='grid-column: span 2'>Wide</div>",
-        "<div id='normal'>Normal</div>",
-        "<div id='another'>Another</div>",
-        "</div>",
-    ),
+            "<div style='display:grid; grid-template-columns:repeat(3, 1fr); width:900px; gap:10px'>",
+            "<div id='wide' style='grid-column: span 2'>Wide</div>",
+            "<div id='normal'>Normal</div>",
+            "<div id='another'>Another</div>",
+            "</div>",
+        ),
         1000.0,
     );
     let wide = by_id(&doc.root, "wide").unwrap();
@@ -342,11 +351,11 @@ fn grid_named_line_placement() {
 fn grid_items_within_container_bounds() {
     let doc = load_html(
         concat!(
-        "<div style='display:grid; grid-template-columns:repeat(3, 1fr); width:900px; gap:10px'>",
-        "<div id='a'>A</div><div id='b'>B</div><div id='c'>C</div>",
-        "<div id='d'>D</div><div id='e'>E</div><div id='f'>F</div>",
-        "</div>",
-    ),
+            "<div style='display:grid; grid-template-columns:repeat(3, 1fr); width:900px; gap:10px'>",
+            "<div id='a'>A</div><div id='b'>B</div><div id='c'>C</div>",
+            "<div id='d'>D</div><div id='e'>E</div><div id='f'>F</div>",
+            "</div>",
+        ),
         1000.0,
     );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
@@ -378,12 +387,15 @@ fn grid_items_within_container_bounds() {
 
 #[test]
 fn grid_auto_fill_column_count() {
-    let doc = load_html(concat!(
-        "<div style='display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); width:1000px; gap:10px'>",
-        "<div id='a'>A</div><div id='b'>B</div><div id='c'>C</div>",
-        "<div id='d'>D</div><div id='e'>E</div>",
-        "</div>",
-    ), 1100.0);
+    let doc = load_html(
+        concat!(
+            "<div style='display:grid; grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); width:1000px; gap:10px'>",
+            "<div id='a'>A</div><div id='b'>B</div><div id='c'>C</div>",
+            "<div id='d'>D</div><div id='e'>E</div>",
+            "</div>",
+        ),
+        1100.0,
+    );
     let a = by_id(&doc.root, "a").unwrap();
     let d = by_id(&doc.root, "d").unwrap();
     // 1000px / 200px = 5 columns max, but with gaps (4*10=40) → 4 columns fit
@@ -432,11 +444,14 @@ fn grid_percentage_row_height() {
 
 #[test]
 fn grid_justify_content_space_around() {
-    let doc = load_html(concat!(
-        "<div style='display:grid; grid-template-columns:100px 100px; width:500px; justify-content:space-around'>",
-        "<div id='a'>A</div><div id='b'>B</div>",
-        "</div>",
-    ), 600.0);
+    let doc = load_html(
+        concat!(
+            "<div style='display:grid; grid-template-columns:100px 100px; width:500px; justify-content:space-around'>",
+            "<div id='a'>A</div><div id='b'>B</div>",
+            "</div>",
+        ),
+        600.0,
+    );
     let a = by_id(&doc.root, "a").unwrap();
     let b = by_id(&doc.root, "b").unwrap();
     // Space around: each col gets equal space on both sides
@@ -516,10 +531,10 @@ fn grid_implicit_columns_from_placement() {
 fn grid_minmax_clamps_column() {
     let doc = load_html(
         concat!(
-        "<div style='display:grid; grid-template-columns:minmax(100px, 300px) 1fr; width:800px'>",
-        "<div id='clamped'>Clamped</div><div id='flex'>Flex</div>",
-        "</div>",
-    ),
+            "<div style='display:grid; grid-template-columns:minmax(100px, 300px) 1fr; width:800px'>",
+            "<div id='clamped'>Clamped</div><div id='flex'>Flex</div>",
+            "</div>",
+        ),
         900.0,
     );
     let clamped = by_id(&doc.root, "clamped").unwrap();
@@ -607,12 +622,12 @@ fn grid_single_item_fills_column() {
 fn grid_items_wrap_to_rows() {
     let doc = load_html(
         concat!(
-        "<div style='display:grid; grid-template-columns:repeat(3, 1fr); width:900px; gap:10px'>",
-        "<div>1</div><div>2</div><div>3</div>",
-        "<div>4</div><div>5</div><div>6</div>",
-        "<div id='seven'>7</div>",
-        "</div>",
-    ),
+            "<div style='display:grid; grid-template-columns:repeat(3, 1fr); width:900px; gap:10px'>",
+            "<div>1</div><div>2</div><div>3</div>",
+            "<div>4</div><div>5</div><div>6</div>",
+            "<div id='seven'>7</div>",
+            "</div>",
+        ),
         1000.0,
     );
     let grid = find_box(&doc.root, &|b| b.style.display == Display::Grid).unwrap();
@@ -658,15 +673,15 @@ fn grid_align_items_stretch_default() {
 fn grid_12_column_bootstrap_pattern() {
     let doc = load_html(
         concat!(
-        "<div style='display:grid; grid-template-columns:repeat(12, 1fr); width:1140px; gap:15px'>",
-        "<div id='full' style='grid-column: span 12'>Full</div>",
-        "<div id='half1' style='grid-column: span 6'>Half1</div>",
-        "<div id='half2' style='grid-column: span 6'>Half2</div>",
-        "<div id='third1' style='grid-column: span 4'>T1</div>",
-        "<div id='third2' style='grid-column: span 4'>T2</div>",
-        "<div id='third3' style='grid-column: span 4'>T3</div>",
-        "</div>",
-    ),
+            "<div style='display:grid; grid-template-columns:repeat(12, 1fr); width:1140px; gap:15px'>",
+            "<div id='full' style='grid-column: span 12'>Full</div>",
+            "<div id='half1' style='grid-column: span 6'>Half1</div>",
+            "<div id='half2' style='grid-column: span 6'>Half2</div>",
+            "<div id='third1' style='grid-column: span 4'>T1</div>",
+            "<div id='third2' style='grid-column: span 4'>T2</div>",
+            "<div id='third3' style='grid-column: span 4'>T3</div>",
+            "</div>",
+        ),
         1200.0,
     );
     let full = by_id(&doc.root, "full").unwrap();
@@ -840,11 +855,14 @@ fn grid_template_rows_mixed_fixed_fr() {
 
 #[test]
 fn grid_auto_fit_collapses_empty_tracks() {
-    let doc = load_html(concat!(
-        "<div style='display:grid; grid-template-columns:repeat(auto-fit, minmax(100px, 1fr)); width:500px'>",
-        "<div id='a'>A</div><div id='b'>B</div>",
-        "</div>",
-    ), 600.0);
+    let doc = load_html(
+        concat!(
+            "<div style='display:grid; grid-template-columns:repeat(auto-fit, minmax(100px, 1fr)); width:500px'>",
+            "<div id='a'>A</div><div id='b'>B</div>",
+            "</div>",
+        ),
+        600.0,
+    );
     let a = by_id(&doc.root, "a").unwrap();
     let b = by_id(&doc.root, "b").unwrap();
     // auto-fit: 5 possible columns, but only 2 items → empty tracks collapse
@@ -862,11 +880,14 @@ fn grid_auto_fit_collapses_empty_tracks() {
 
 #[test]
 fn grid_auto_fill_keeps_empty_tracks() {
-    let doc = load_html(concat!(
-        "<div style='display:grid; grid-template-columns:repeat(auto-fill, minmax(100px, 1fr)); width:500px'>",
-        "<div id='a'>A</div><div id='b'>B</div>",
-        "</div>",
-    ), 600.0);
+    let doc = load_html(
+        concat!(
+            "<div style='display:grid; grid-template-columns:repeat(auto-fill, minmax(100px, 1fr)); width:500px'>",
+            "<div id='a'>A</div><div id='b'>B</div>",
+            "</div>",
+        ),
+        600.0,
+    );
     let a = by_id(&doc.root, "a").unwrap();
     // auto-fill: 5 columns of 100px, items stay at 100px (empty tracks remain)
     // Each column ≈ 100px (may stretch slightly with 1fr max)
@@ -883,12 +904,15 @@ fn grid_auto_fill_keeps_empty_tracks() {
 
 #[test]
 fn grid_auto_rows_minmax() {
-    let doc = load_html(concat!(
-        "<div style='display:grid; grid-template-columns:1fr; grid-auto-rows:minmax(40px, auto); width:400px'>",
-        "<div id='short'>X</div>",
-        "<div id='tall' style='height:200px'>Tall</div>",
-        "</div>",
-    ), 500.0);
+    let doc = load_html(
+        concat!(
+            "<div style='display:grid; grid-template-columns:1fr; grid-auto-rows:minmax(40px, auto); width:400px'>",
+            "<div id='short'>X</div>",
+            "<div id='tall' style='height:200px'>Tall</div>",
+            "</div>",
+        ),
+        500.0,
+    );
     let short = by_id(&doc.root, "short").unwrap();
     let tall = by_id(&doc.root, "tall").unwrap();
     assert!(
@@ -905,13 +929,16 @@ fn grid_auto_rows_minmax() {
 
 #[test]
 fn grid_auto_columns_with_placement() {
-    let doc = load_html(concat!(
-        "<div style='display:grid; grid-template-columns:100px; grid-auto-columns:150px; width:600px'>",
-        "<div id='a'>A</div>",
-        "<div id='b' style='grid-column:2'>B</div>",
-        "<div id='c' style='grid-column:3'>C</div>",
-        "</div>",
-    ), 700.0);
+    let doc = load_html(
+        concat!(
+            "<div style='display:grid; grid-template-columns:100px; grid-auto-columns:150px; width:600px'>",
+            "<div id='a'>A</div>",
+            "<div id='b' style='grid-column:2'>B</div>",
+            "<div id='c' style='grid-column:3'>C</div>",
+            "</div>",
+        ),
+        700.0,
+    );
     let a = by_id(&doc.root, "a").unwrap();
     let b = by_id(&doc.root, "b").unwrap();
     // Column 1 = 100px (explicit), columns 2-3 = 150px (auto)
@@ -993,11 +1020,14 @@ fn grid_container_with_padding() {
 
 #[test]
 fn grid_container_border_box() {
-    let doc = load_html(concat!(
-        "<div style='display:grid; grid-template-columns:1fr 1fr; width:500px; padding:20px; box-sizing:border-box'>",
-        "<div id='a'>A</div><div id='b'>B</div>",
-        "</div>",
-    ), 600.0);
+    let doc = load_html(
+        concat!(
+            "<div style='display:grid; grid-template-columns:1fr 1fr; width:500px; padding:20px; box-sizing:border-box'>",
+            "<div id='a'>A</div><div id='b'>B</div>",
+            "</div>",
+        ),
+        600.0,
+    );
     let a = by_id(&doc.root, "a").unwrap();
     // border-box: 500px includes padding. Content = 500 - 40 = 460. Each col = 230px
     assert!(
@@ -1096,12 +1126,12 @@ fn grid_display_none_child_skipped() {
 fn grid_absolute_child_out_of_flow() {
     let doc = load_html(
         concat!(
-        "<div style='display:grid; grid-template-columns:1fr 1fr; width:600px; position:relative'>",
-        "<div id='a'>A</div>",
-        "<div id='abs' style='position:absolute; top:0; right:0; width:100px'>Abs</div>",
-        "<div id='b'>B</div>",
-        "</div>",
-    ),
+            "<div style='display:grid; grid-template-columns:1fr 1fr; width:600px; position:relative'>",
+            "<div id='a'>A</div>",
+            "<div id='abs' style='position:absolute; top:0; right:0; width:100px'>Abs</div>",
+            "<div id='b'>B</div>",
+            "</div>",
+        ),
         700.0,
     );
     let a = by_id(&doc.root, "a").unwrap();
@@ -1146,12 +1176,15 @@ fn grid_visibility_hidden_takes_space() {
 
 #[test]
 fn grid_different_row_column_gaps() {
-    let doc = load_html(concat!(
-        "<div style='display:grid; grid-template-columns:1fr 1fr; row-gap:30px; column-gap:10px; width:600px'>",
-        "<div id='a'>A</div><div id='b'>B</div>",
-        "<div id='c'>C</div><div id='d'>D</div>",
-        "</div>",
-    ), 700.0);
+    let doc = load_html(
+        concat!(
+            "<div style='display:grid; grid-template-columns:1fr 1fr; row-gap:30px; column-gap:10px; width:600px'>",
+            "<div id='a'>A</div><div id='b'>B</div>",
+            "<div id='c'>C</div><div id='d'>D</div>",
+            "</div>",
+        ),
+        700.0,
+    );
     let a = by_id(&doc.root, "a").unwrap();
     let b = by_id(&doc.root, "b").unwrap();
     let c = by_id(&doc.root, "c").unwrap();
@@ -1177,11 +1210,14 @@ fn grid_different_row_column_gaps() {
 
 #[test]
 fn grid_minmax_auto_1fr() {
-    let doc = load_html(concat!(
-        "<div style='display:grid; grid-template-columns:minmax(auto, 1fr) minmax(auto, 1fr); width:600px'>",
-        "<div id='a'>Short</div><div id='b'>Longer content here</div>",
-        "</div>",
-    ), 700.0);
+    let doc = load_html(
+        concat!(
+            "<div style='display:grid; grid-template-columns:minmax(auto, 1fr) minmax(auto, 1fr); width:600px'>",
+            "<div id='a'>Short</div><div id='b'>Longer content here</div>",
+            "</div>",
+        ),
+        700.0,
+    );
     let a = by_id(&doc.root, "a").unwrap();
     let b = by_id(&doc.root, "b").unwrap();
     // Both should be equal width (1fr each)
@@ -1195,11 +1231,14 @@ fn grid_minmax_auto_1fr() {
 
 #[test]
 fn grid_minmax_min_content_1fr() {
-    let doc = load_html(concat!(
-        "<div style='display:grid; grid-template-columns:minmax(min-content, 1fr) 2fr; width:600px'>",
-        "<div id='a'>A</div><div id='b'>B</div>",
-        "</div>",
-    ), 700.0);
+    let doc = load_html(
+        concat!(
+            "<div style='display:grid; grid-template-columns:minmax(min-content, 1fr) 2fr; width:600px'>",
+            "<div id='a'>A</div><div id='b'>B</div>",
+            "</div>",
+        ),
+        700.0,
+    );
     let a = by_id(&doc.root, "a").unwrap();
     let b = by_id(&doc.root, "b").unwrap();
     // 1fr vs 2fr: a=200, b=400
@@ -1217,11 +1256,14 @@ fn grid_minmax_min_content_1fr() {
 
 #[test]
 fn grid_calc_column_width() {
-    let doc = load_html(concat!(
-        "<div style='display:grid; grid-template-columns:calc(50% - 20px) calc(50% - 20px); width:800px; gap:40px'>",
-        "<div id='a'>A</div><div id='b'>B</div>",
-        "</div>",
-    ), 900.0);
+    let doc = load_html(
+        concat!(
+            "<div style='display:grid; grid-template-columns:calc(50% - 20px) calc(50% - 20px); width:800px; gap:40px'>",
+            "<div id='a'>A</div><div id='b'>B</div>",
+            "</div>",
+        ),
+        900.0,
+    );
     let a = by_id(&doc.root, "a").unwrap();
     // calc(50% - 20px) = 400 - 20 = 380px
     assert!(
@@ -1237,13 +1279,16 @@ fn grid_calc_column_width() {
 
 #[test]
 fn grid_dense_fills_gaps_with_small_items() {
-    let doc = load_html(concat!(
-        "<div style='display:grid; grid-template-columns:repeat(3, 1fr); grid-auto-flow:dense; width:600px'>",
-        "<div id='wide' style='grid-column:span 2'>Wide</div>",
-        "<div id='small1'>S1</div>",
-        "<div id='small2'>S2</div>",
-        "</div>",
-    ), 700.0);
+    let doc = load_html(
+        concat!(
+            "<div style='display:grid; grid-template-columns:repeat(3, 1fr); grid-auto-flow:dense; width:600px'>",
+            "<div id='wide' style='grid-column:span 2'>Wide</div>",
+            "<div id='small1'>S1</div>",
+            "<div id='small2'>S2</div>",
+            "</div>",
+        ),
+        700.0,
+    );
     let wide = by_id(&doc.root, "wide").unwrap();
     let s1 = by_id(&doc.root, "small1").unwrap();
     // Dense: wide takes cols 1-2, s1 goes to col 3 (same row), s2 wraps
@@ -1320,10 +1365,13 @@ fn grid_nested_grids_independent() {
 
 #[test]
 fn grid_shorthand_rows_and_cols() {
-    let doc = load_html(concat!(
-        "<style>.g { display:grid; grid: 100px 200px / 1fr 2fr; width:600px; }</style>",
-        "<div class='g'><div id='a'>A</div><div id='b'>B</div><div id='c'>C</div><div id='d'>D</div></div>",
-    ), 700.0);
+    let doc = load_html(
+        concat!(
+            "<style>.g { display:grid; grid: 100px 200px / 1fr 2fr; width:600px; }</style>",
+            "<div class='g'><div id='a'>A</div><div id='b'>B</div><div id='c'>C</div><div id='d'>D</div></div>",
+        ),
+        700.0,
+    );
     let a = by_id(&doc.root, "a").unwrap();
     let b = by_id(&doc.root, "b").unwrap();
     let c = by_id(&doc.root, "c").unwrap();

@@ -116,12 +116,15 @@ fn inline_block_respects_width_height() {
 
 #[test]
 fn inline_block_with_text_and_padding() {
-    let d = load_html(concat!(
-        "<div style='width:600px'>",
-        "<span id='a' style='display:inline-block;padding:10px;border:2px solid black'>Tag A</span>",
-        "<span id='b' style='display:inline-block;padding:10px;border:2px solid black'>Tag B</span>",
-        "</div>",
-    ), 700.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:600px'>",
+            "<span id='a' style='display:inline-block;padding:10px;border:2px solid black'>Tag A</span>",
+            "<span id='b' style='display:inline-block;padding:10px;border:2px solid black'>Tag B</span>",
+            "</div>",
+        ),
+        700.0,
+    );
     let a = by_id(&d.root, "a").unwrap();
     let b = by_id(&d.root, "b").unwrap();
     assert!(a.layout.content_rect.w > 20.0, "a has width");
@@ -134,13 +137,16 @@ fn inline_block_with_text_and_padding() {
 
 #[test]
 fn inline_block_vertical_align_baseline() {
-    let d = load_html(concat!(
-        "<div style='width:600px;font-size:16px'>",
-        "Text ",
-        "<span id='ib' style='display:inline-block;width:50px;height:80px;vertical-align:baseline'>IB</span>",
-        " more text",
-        "</div>",
-    ), 700.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:600px;font-size:16px'>",
+            "Text ",
+            "<span id='ib' style='display:inline-block;width:50px;height:80px;vertical-align:baseline'>IB</span>",
+            " more text",
+            "</div>",
+        ),
+        700.0,
+    );
     let ib = by_id(&d.root, "ib").unwrap();
     assert!(
         (ib.layout.content_rect.h - 80.0).abs() < 5.0,
@@ -151,12 +157,15 @@ fn inline_block_vertical_align_baseline() {
 
 #[test]
 fn inline_block_vertical_align_middle() {
-    let d = load_html(concat!(
-        "<div style='width:600px;font-size:16px;line-height:60px'>",
-        "Text ",
-        "<span id='ib' style='display:inline-block;width:30px;height:30px;vertical-align:middle'>IB</span>",
-        "</div>",
-    ), 700.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:600px;font-size:16px;line-height:60px'>",
+            "Text ",
+            "<span id='ib' style='display:inline-block;width:30px;height:30px;vertical-align:middle'>IB</span>",
+            "</div>",
+        ),
+        700.0,
+    );
     let ib = by_id(&d.root, "ib").unwrap();
     assert!(ib.layout.content_rect.w > 25.0, "ib has width");
 }
@@ -186,13 +195,16 @@ fn inline_block_shrink_to_content() {
 
 #[test]
 fn inline_block_mixed_with_text() {
-    let d = load_html(concat!(
-        "<div id='p' style='width:500px;font-size:16px'>",
-        "Hello ",
-        "<span id='tag' style='display:inline-block;padding:2px 8px;background:blue;color:white'>NEW</span>",
-        " world",
-        "</div>",
-    ), 600.0);
+    let d = load_html(
+        concat!(
+            "<div id='p' style='width:500px;font-size:16px'>",
+            "Hello ",
+            "<span id='tag' style='display:inline-block;padding:2px 8px;background:blue;color:white'>NEW</span>",
+            " world",
+            "</div>",
+        ),
+        600.0,
+    );
     let p = by_id(&d.root, "p").unwrap();
     let tag = by_id(&d.root, "tag").unwrap();
     assert!(!p.layout.line_cache.is_empty(), "parent has text lines");
@@ -423,14 +435,14 @@ fn list_item_display_inline_overrides() {
 fn inline_flex_sits_in_text_flow() {
     let d = load_html(
         concat!(
-        "<div style='width:600px;font-size:16px'>",
-        "Before ",
-        "<span id='if' style='display:inline-flex;gap:5px;padding:4px 8px;background:lightblue'>",
-        "  <span>Tag1</span><span>Tag2</span>",
-        "</span>",
-        " after",
-        "</div>",
-    ),
+            "<div style='width:600px;font-size:16px'>",
+            "Before ",
+            "<span id='if' style='display:inline-flex;gap:5px;padding:4px 8px;background:lightblue'>",
+            "  <span>Tag1</span><span>Tag2</span>",
+            "</span>",
+            " after",
+            "</div>",
+        ),
         700.0,
     );
     let f = by_id(&d.root, "if").unwrap();
@@ -470,15 +482,18 @@ fn inline_flex_multiple_on_same_line() {
 
 #[test]
 fn inline_grid_sits_in_text_flow() {
-    let d = load_html(concat!(
-        "<div style='width:600px'>",
-        "Text ",
-        "<div id='ig' style='display:inline-grid;grid-template-columns:1fr 1fr;gap:5px;width:200px'>",
-        "  <div>A</div><div>B</div>",
-        "</div>",
-        " more text",
-        "</div>",
-    ), 700.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:600px'>",
+            "Text ",
+            "<div id='ig' style='display:inline-grid;grid-template-columns:1fr 1fr;gap:5px;width:200px'>",
+            "  <div>A</div><div>B</div>",
+            "</div>",
+            " more text",
+            "</div>",
+        ),
+        700.0,
+    );
     let ig = by_id(&d.root, "ig").unwrap();
     assert!(
         (ig.layout.content_rect.w - 200.0).abs() < 10.0,
@@ -570,18 +585,21 @@ fn display_override_block_to_none() {
 
 #[test]
 fn tag_badge_row() {
-    let d = load_html(concat!(
-        "<style>",
-        ".tags { display:flex; flex-wrap:wrap; gap:8px; width:400px; }",
-        ".tag { display:inline-block; padding:4px 12px; border-radius:4px; background:#eee; font-size:14px; }",
-        "</style>",
-        "<div class='tags'>",
-        "<span class='tag' id='t1'>JavaScript</span>",
-        "<span class='tag' id='t2'>Rust</span>",
-        "<span class='tag' id='t3'>Python</span>",
-        "<span class='tag' id='t4'>TypeScript</span>",
-        "</div>",
-    ), 500.0);
+    let d = load_html(
+        concat!(
+            "<style>",
+            ".tags { display:flex; flex-wrap:wrap; gap:8px; width:400px; }",
+            ".tag { display:inline-block; padding:4px 12px; border-radius:4px; background:#eee; font-size:14px; }",
+            "</style>",
+            "<div class='tags'>",
+            "<span class='tag' id='t1'>JavaScript</span>",
+            "<span class='tag' id='t2'>Rust</span>",
+            "<span class='tag' id='t3'>Python</span>",
+            "<span class='tag' id='t4'>TypeScript</span>",
+            "</div>",
+        ),
+        500.0,
+    );
     let t1 = by_id(&d.root, "t1").unwrap();
     let t2 = by_id(&d.root, "t2").unwrap();
     assert!(t1.layout.content_rect.w > 30.0, "tag has width");
@@ -659,12 +677,15 @@ fn tabs_inline_block() {
 
 #[test]
 fn avatar_name_inline_block() {
-    let d = load_html(concat!(
-        "<div style='width:400px;font-size:16px'>",
-        "<div id='avatar' style='display:inline-block;width:40px;height:40px;border-radius:50%;background:gray;vertical-align:middle'></div>",
-        "<span id='name' style='vertical-align:middle;margin-left:10px'>John Doe</span>",
-        "</div>",
-    ), 500.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:400px;font-size:16px'>",
+            "<div id='avatar' style='display:inline-block;width:40px;height:40px;border-radius:50%;background:gray;vertical-align:middle'></div>",
+            "<span id='name' style='vertical-align:middle;margin-left:10px'>John Doe</span>",
+            "</div>",
+        ),
+        500.0,
+    );
     let avatar = by_id(&d.root, "avatar").unwrap();
     let name = by_id(&d.root, "name").unwrap();
     assert!(
@@ -685,16 +706,16 @@ fn avatar_name_inline_block() {
 fn css_table_display() {
     let d = load_html(
         concat!(
-        "<style>",
-        ".table { display:table; width:400px; }",
-        ".row { display:table-row; }",
-        ".cell { display:table-cell; padding:8px; }",
-        "</style>",
-        "<div class='table'>",
-        "<div class='row'><div class='cell' id='a'>A</div><div class='cell' id='b'>B</div></div>",
-        "<div class='row'><div class='cell' id='c'>C</div><div class='cell' id='d'>D</div></div>",
-        "</div>",
-    ),
+            "<style>",
+            ".table { display:table; width:400px; }",
+            ".row { display:table-row; }",
+            ".cell { display:table-cell; padding:8px; }",
+            "</style>",
+            "<div class='table'>",
+            "<div class='row'><div class='cell' id='a'>A</div><div class='cell' id='b'>B</div></div>",
+            "<div class='row'><div class='cell' id='c'>C</div><div class='cell' id='d'>D</div></div>",
+            "</div>",
+        ),
         500.0,
     );
     let a = by_id(&d.root, "a").unwrap();

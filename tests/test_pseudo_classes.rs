@@ -18,7 +18,7 @@
 //   - HoverMatchesWhenHoveredBoxSet, HoverDoesNotMatchWhenBoxNotHovered
 //   - HoverAppliesAllPropertiesViaStateAwareCascade
 //   - FocusAppliesOutlineViaStateAwareCascade
-use webcore::css::{parse_selector, SelectorPart};
+use webcore::css::{SelectorPart, parse_selector};
 use webcore::parse_html;
 
 // ─── Helper: check that a stylesheet rule has a pseudo-class part with the given name ──

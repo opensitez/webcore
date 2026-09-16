@@ -2,7 +2,7 @@
 // scroll clamping, and scrollbar visibility logic.
 
 use webcore::types::*;
-use webcore::{load_html, LayoutEngine};
+use webcore::{LayoutEngine, load_html};
 
 fn parse_and_layout(html: &str, vw: f32) -> Document {
     load_html(html, vw)

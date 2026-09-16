@@ -2,8 +2,8 @@
 // CSS declaration parsing, stylesheet parsing, selector parsing, property application.
 
 use webcore::css::{
-    apply_property, parse_declarations, parse_selector, parse_stylesheet, Combinator,
-    PseudoElement, SelectorPart,
+    Combinator, PseudoElement, SelectorPart, apply_property, parse_declarations, parse_selector,
+    parse_stylesheet,
 };
 use webcore::parse_html;
 use webcore::types::*;
@@ -74,7 +74,8 @@ fn css_stylesheet_multiple_selectors() {
 fn css_variables_in_root() {
     let doc = parse_html(
         "<style>:root { --main-color: #ff0000; --gap: 10px; } p { color: var(--main-color); }</style>\
-         <p>text</p>");
+         <p>text</p>",
+    );
     assert!(
         doc.stylesheet.variables.contains_key("--main-color"),
         "--main-color variable should be stored"
@@ -133,23 +134,26 @@ fn css_pseudo_element_after() {
 #[test]
 fn css_selector_with_class() {
     let sel = parse_selector("div.container");
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Tag(t) if t == "div")));
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Class(c) if c == "container")));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Tag(t) if t == "div"))
+    );
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Class(c) if c == "container"))
+    );
 }
 
 #[test]
 fn css_selector_with_id() {
     let sel = parse_selector("#main");
-    assert!(sel
-        .parts
-        .iter()
-        .any(|p| matches!(p, SelectorPart::Id(id) if id == "main")));
+    assert!(
+        sel.parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Id(id) if id == "main"))
+    );
 }
 
 #[test]

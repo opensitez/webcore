@@ -30,6 +30,18 @@ fn find<'a>(root: &'a WebCore, pred: &dyn Fn(&WebCore) -> bool) -> Option<&'a We
     None
 }
 
+fn find_mut<'a>(root: &'a mut WebCore, pred: &dyn Fn(&WebCore) -> bool) -> Option<&'a mut WebCore> {
+    if pred(root) {
+        return Some(root);
+    }
+    for c in &mut root.children {
+        if let Some(b) = find_mut(c, pred) {
+            return Some(b);
+        }
+    }
+    None
+}
+
 fn find_attr<'a>(root: &'a WebCore, attr: &str, val: &str) -> Option<&'a WebCore> {
     find(root, &|b| b.get_attr(attr) == Some(val))
 }
@@ -383,5 +395,225 @@ fn fixed_nav_at_viewport_top() {
         nav.layout.content_rect.x < 20.0,
         "fixed nav x={} should be near 0 (viewport left)",
         nav.layout.content_rect.x
+    );
+}
+
+#[test]
+fn test_diagnose_slashdot() {
+    let path = "snapshot_cache/349d011f74fcda2f_httpsslashdot.org";
+    if !std::path::Path::new(path).exists() {
+        eprintln!("cache file not found");
+        return;
+    }
+    let mut html = std::fs::read_to_string(path).unwrap();
+
+    // Embed cached CSS into <head>
+    let mut css_all = String::new();
+    for css_file in &[
+        "snapshot_cache/e56d96de4a77796d_httpsa.fsdn.comsdclassic.cssfc755fff6459",
+        "snapshot_cache/a14e8239af3e67f3_httpsa.fsdn.comsdcssapp.cssfc755fff64591",
+        "snapshot_cache/8a470ececc8d09df_httpsa.fsdn.comconcsssfthemesandiegocmp.",
+    ] {
+        if let Ok(content) = std::fs::read_to_string(css_file) {
+            css_all.push_str(&content);
+            css_all.push('\n');
+        }
+    }
+    html = html.replace("<head>", &format!("<head><style>{}</style>", css_all));
+
+    let mut doc = load_html(&html, 1280.0);
+
+    // Call layout a second time like the browser does after image/font load!
+    let mut engine = webcore::layout::LayoutEngine::new();
+    engine.layout(&mut doc, 1280.0);
+
+    // 1. Check elements with y > 7300
+    let mut high_y_elements = Vec::new();
+    fn collect_high_y<'a>(n: &'a WebCore, out: &mut Vec<(&'a str, &'a str, &'a str, f32, f32)>) {
+        if n.layout.border_rect.y > 7300.0 {
+            out.push((
+                &n.tag,
+                n.get_attr("id").unwrap_or(""),
+                n.get_attr("class").unwrap_or(""),
+                n.layout.border_rect.y,
+                n.layout.border_rect.h,
+            ));
+        }
+        for c in &n.children {
+            collect_high_y(c, out);
+        }
+    }
+    collect_high_y(&doc.root, &mut high_y_elements);
+    eprintln!("High Y elements count: {}", high_y_elements.len());
+    for el in high_y_elements.iter().take(20) {
+        eprintln!(
+            "  tag={} id={} class={} y={} h={}",
+            el.0, el.1, el.2, el.3, el.4
+        );
+    }
+
+    // 2. Check footer logo
+    let footer_logo = find_attr(&doc.root, "id", "logo_nf");
+    if let Some(logo) = footer_logo {
+        eprintln!("footer logo_nf rect: {:?}", logo.layout.border_rect);
+        eprintln!("footer logo_nf style display: {:?}", logo.style.display);
+        for c in &logo.children {
+            eprintln!(
+                "  logo_nf child tag={} class={} rect={:?} style={:?} bg_img={:?}",
+                c.tag,
+                c.get_attr("class").unwrap_or(""),
+                c.layout.border_rect,
+                c.style.display,
+                c.style.background_image_url
+            );
+            for gc in &c.children {
+                eprintln!(
+                    "    grandchild tag={} rect={:?}",
+                    gc.tag, gc.layout.border_rect
+                );
+            }
+        }
+    }
+
+    // 3. Inspect DisplayList text commands
+    let list =
+        webcore::renderer::display_list_builder::build_display_list(&doc.root, 1280.0, 800.0);
+    eprintln!("DisplayList total commands: {}", list.commands.len());
+    for (idx, cmd) in list.commands.iter().enumerate() {
+        if let webcore::renderer::display_list::PaintCmd::Text { x, y, text, .. } = cmd {
+            if text.contains("Jimmy Kimmel")
+                || text.contains("Fourth Likely Crime")
+                || text.contains("decision to keep")
+            {
+                eprintln!("Cmd #{}: Text at ({:.1}, {:.1}): {:?}", idx, x, y, text);
+            }
+        }
+    }
+
+    // Verify:
+    // 1. Text commands: no duplicate Jimmy Kimmel text shifted down into Anthropic article
+    for cmd in &list.commands {
+        if let webcore::renderer::display_list::PaintCmd::Text { y, text, .. } = cmd {
+            if text.contains("Jimmy Kimmel") || text.contains("decision to keep") {
+                assert!(
+                    *y < 3000.0,
+                    "Jimmy Kimmel text erroneously rendered at y={} (overlapping lower articles)",
+                    y
+                );
+            }
+        }
+    }
+
+    // 2. Document scroll height should not explode to 26,000+
+    let scroll_h = webcore::Document::scroll_height(&doc.root);
+    assert!(
+        scroll_h <= 8500.0,
+        "Document scroll_height exploded to {}",
+        scroll_h
+    );
+
+    // 3. Footer logo size
+    let logo_a = find(&doc.root, &|b| {
+        b.tag == "a" && b.style.background_image_url.contains("sdlogo.svg")
+    })
+    .unwrap();
+    let ow = logo_a.layout.border_rect.w;
+    let oh = logo_a.layout.border_rect.h;
+    let iw = 374.3f32;
+    let ih = 53.5f32;
+    let scale = (ow / iw).min(oh / ih);
+    assert!((iw * scale - 138.0).abs() < 1.0);
+    assert!((ih * scale - 19.7).abs() < 1.0);
+}
+
+#[test]
+fn test_svg_ratio_only_background_size() {
+    let mut doc = load_html(
+        r#"<a style="display:block; width:138px; height:20px; background-size:auto;"></a>"#,
+        800.0,
+    );
+    let a = find_mut(&mut doc.root, &|b| b.tag == "a").unwrap();
+    let dummy_pixels = vec![0u8; 374 * 54 * 4];
+    a.bg_image_data = Some(std::sync::Arc::new(dummy_pixels));
+    a.bg_image_width = 374;
+    a.bg_image_height = 54;
+    a.bg_image_ratio_only = true;
+
+    let list = webcore::renderer::display_list_builder::build_display_list(&doc.root, 800.0, 600.0);
+    let mut found_bg = false;
+    for cmd in &list.commands {
+        if let webcore::renderer::display_list::PaintCmd::BackgroundImage {
+            draw_w, draw_h, ..
+        } = cmd
+        {
+            found_bg = true;
+            assert!(
+                (*draw_w - 138.0).abs() < 1.0,
+                "expected draw_w ~138, got {}",
+                draw_w
+            );
+            assert!(
+                (*draw_h - 19.9).abs() < 1.0,
+                "expected draw_h ~19.9, got {}",
+                draw_h
+            );
+        }
+    }
+    assert!(
+        found_bg,
+        "expected BackgroundImage paint command in display list"
+    );
+}
+
+#[test]
+fn test_inline_flex_percentage_height_in_definite_container() {
+    let doc = load_html(
+        r#"<li style="display:block; height:56px; line-height:16px;">
+             <a style="display:inline-flex; height:100%; align-items:center; justify-content:center;">
+               <span>Home</span>
+             </a>
+           </li>"#,
+        800.0,
+    );
+    let a = find(&doc.root, &|b| b.tag == "a").expect("a link found");
+    assert_eq!(
+        a.layout.border_rect.h, 56.0,
+        "inline-flex a with height:100% in a 56px container should have height 56px, got {}",
+        a.layout.border_rect.h
+    );
+    let span = find(&doc.root, &|b| b.tag == "span").expect("span found");
+    assert!(
+        span.layout.border_rect.y > 10.0,
+        "aligned text inside height:100% inline-flex link should be centered, got y={}",
+        span.layout.border_rect.y
+    );
+}
+
+#[test]
+fn test_stacking_context_does_not_suppress_positioned_descendants() {
+    let mut doc = load_html(
+        r#"<div style="position:relative;">
+             <div style="position:absolute; z-index:1;">deferred overlay</div>
+             <div style="transform:scale(1);">
+               <span style="position:relative;">
+                 <img src="test.jpg" style="position:absolute; top:0; left:0; width:100px; height:100px;">
+               </span>
+             </div>
+           </div>"#,
+        800.0,
+    );
+    let img = find_mut(&mut doc.root, &|b| b.tag == "img").expect("img found");
+    img.image_data = Some(std::sync::Arc::new(vec![255u8; 100 * 100 * 4]));
+    img.image_width = 100;
+    img.image_height = 100;
+
+    let list = webcore::renderer::display_list_builder::build_display_list(&doc.root, 800.0, 600.0);
+    let found_img = list
+        .commands
+        .iter()
+        .any(|cmd| matches!(cmd, webcore::renderer::display_list::PaintCmd::Image { .. }));
+    assert!(
+        found_img,
+        "expected PaintCmd::Image to be in display list despite ancestor deferred z-descendants"
     );
 }

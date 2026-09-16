@@ -82,7 +82,10 @@ fn selector_universal() {
 
 #[test]
 fn selector_multiple_classes() {
-    let d = load_html("<style>.a.b { color: red; }</style><div class='a b' id='t'>X</div><div class='a' id='no'>Y</div>", 800.0);
+    let d = load_html(
+        "<style>.a.b { color: red; }</style><div class='a b' id='t'>X</div><div class='a' id='no'>Y</div>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "t").unwrap().style.color.r,
         255,
@@ -101,7 +104,10 @@ fn selector_multiple_classes() {
 
 #[test]
 fn combinator_descendant() {
-    let d = load_html("<style>.parent p { color: red; }</style><div class='parent'><div><p id='t'>X</p></div></div><p id='no'>Y</p>", 800.0);
+    let d = load_html(
+        "<style>.parent p { color: red; }</style><div class='parent'><div><p id='t'>X</p></div></div><p id='no'>Y</p>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "t").unwrap().style.color.r,
         255,
@@ -116,7 +122,10 @@ fn combinator_descendant() {
 
 #[test]
 fn combinator_child() {
-    let d = load_html("<style>.parent > p { color: red; }</style><div class='parent'><p id='direct'>X</p><div><p id='deep'>Y</p></div></div>", 800.0);
+    let d = load_html(
+        "<style>.parent > p { color: red; }</style><div class='parent'><p id='direct'>X</p><div><p id='deep'>Y</p></div></div>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "direct").unwrap().style.color.r,
         255,
@@ -131,7 +140,10 @@ fn combinator_child() {
 
 #[test]
 fn combinator_adjacent_sibling() {
-    let d = load_html("<style>h2 + p { color: red; }</style><h2>Title</h2><p id='adj'>Adjacent</p><p id='far'>Far</p>", 800.0);
+    let d = load_html(
+        "<style>h2 + p { color: red; }</style><h2>Title</h2><p id='adj'>Adjacent</p><p id='far'>Far</p>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "adj").unwrap().style.color.r,
         255,
@@ -163,7 +175,10 @@ fn combinator_general_sibling() {
 
 #[test]
 fn pseudo_first_child() {
-    let d = load_html("<style>li:first-child { color: red; }</style><ul><li id='first'>A</li><li id='second'>B</li></ul>", 800.0);
+    let d = load_html(
+        "<style>li:first-child { color: red; }</style><ul><li id='first'>A</li><li id='second'>B</li></ul>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "first").unwrap().style.color.r,
         255,
@@ -178,7 +193,10 @@ fn pseudo_first_child() {
 
 #[test]
 fn pseudo_last_child() {
-    let d = load_html("<style>li:last-child { color: blue; }</style><ul><li id='first'>A</li><li id='last'>B</li></ul>", 800.0);
+    let d = load_html(
+        "<style>li:last-child { color: blue; }</style><ul><li id='first'>A</li><li id='last'>B</li></ul>",
+        800.0,
+    );
     assert_ne!(
         by_id(&d.root, "first").unwrap().style.color.b,
         255,
@@ -193,7 +211,10 @@ fn pseudo_last_child() {
 
 #[test]
 fn pseudo_nth_child_even() {
-    let d = load_html("<style>li:nth-child(even) { color: red; }</style><ul><li id='a'>1</li><li id='b'>2</li><li id='c'>3</li><li id='dd'>4</li></ul>", 800.0);
+    let d = load_html(
+        "<style>li:nth-child(even) { color: red; }</style><ul><li id='a'>1</li><li id='b'>2</li><li id='c'>3</li><li id='dd'>4</li></ul>",
+        800.0,
+    );
     assert_ne!(
         by_id(&d.root, "a").unwrap().style.color.r,
         255,
@@ -210,7 +231,10 @@ fn pseudo_nth_child_even() {
 
 #[test]
 fn pseudo_nth_child_odd() {
-    let d = load_html("<style>li:nth-child(odd) { color: blue; }</style><ul><li id='a'>1</li><li id='b'>2</li><li id='c'>3</li></ul>", 800.0);
+    let d = load_html(
+        "<style>li:nth-child(odd) { color: blue; }</style><ul><li id='a'>1</li><li id='b'>2</li><li id='c'>3</li></ul>",
+        800.0,
+    );
     assert_eq!(by_id(&d.root, "a").unwrap().style.color.b, 255, "1st odd");
     assert_ne!(
         by_id(&d.root, "b").unwrap().style.color.b,
@@ -222,7 +246,10 @@ fn pseudo_nth_child_odd() {
 
 #[test]
 fn pseudo_nth_child_3n() {
-    let d = load_html("<style>li:nth-child(3n) { color: red; }</style><ul><li id='a'>1</li><li id='b'>2</li><li id='c'>3</li><li id='dd'>4</li><li id='e'>5</li><li id='f'>6</li></ul>", 800.0);
+    let d = load_html(
+        "<style>li:nth-child(3n) { color: red; }</style><ul><li id='a'>1</li><li id='b'>2</li><li id='c'>3</li><li id='dd'>4</li><li id='e'>5</li><li id='f'>6</li></ul>",
+        800.0,
+    );
     assert_ne!(by_id(&d.root, "a").unwrap().style.color.r, 255);
     assert_ne!(by_id(&d.root, "b").unwrap().style.color.r, 255);
     assert_eq!(by_id(&d.root, "c").unwrap().style.color.r, 255, "3rd");
@@ -251,7 +278,10 @@ fn pseudo_not() {
 
 #[test]
 fn pseudo_first_of_type() {
-    let d = load_html("<style>p:first-of-type { color: red; }</style><div><span>S</span><p id='first'>P1</p><p id='second'>P2</p></div>", 800.0);
+    let d = load_html(
+        "<style>p:first-of-type { color: red; }</style><div><span>S</span><p id='first'>P1</p><p id='second'>P2</p></div>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "first").unwrap().style.color.r,
         255,
@@ -270,7 +300,10 @@ fn pseudo_first_of_type() {
 
 #[test]
 fn attr_exists() {
-    let d = load_html("<style>[data-active] { color: red; }</style><div data-active id='t'>X</div><div id='no'>Y</div>", 800.0);
+    let d = load_html(
+        "<style>[data-active] { color: red; }</style><div data-active id='t'>X</div><div id='no'>Y</div>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "t").unwrap().style.color.r,
         255,
@@ -306,7 +339,10 @@ fn attr_equals() {
 
 #[test]
 fn attr_starts_with() {
-    let d = load_html("<style>[class^='btn'] { color: red; }</style><div class='btn-primary' id='t'>X</div><div class='link' id='no'>Y</div>", 800.0);
+    let d = load_html(
+        "<style>[class^='btn'] { color: red; }</style><div class='btn-primary' id='t'>X</div><div class='link' id='no'>Y</div>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "t").unwrap().style.color.r,
         255,
@@ -321,7 +357,10 @@ fn attr_starts_with() {
 
 #[test]
 fn attr_ends_with() {
-    let d = load_html("<style>[href$='.pdf'] { color: red; }</style><a href='doc.pdf' id='t'>PDF</a><a href='doc.html' id='no'>HTML</a>", 800.0);
+    let d = load_html(
+        "<style>[href$='.pdf'] { color: red; }</style><a href='doc.pdf' id='t'>PDF</a><a href='doc.html' id='no'>HTML</a>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "t").unwrap().style.color.r,
         255,
@@ -336,7 +375,10 @@ fn attr_ends_with() {
 
 #[test]
 fn attr_contains() {
-    let d = load_html("<style>[class*='warn'] { color: red; }</style><div class='alert-warning' id='t'>X</div><div class='info' id='no'>Y</div>", 800.0);
+    let d = load_html(
+        "<style>[class*='warn'] { color: red; }</style><div class='alert-warning' id='t'>X</div><div class='info' id='no'>Y</div>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "t").unwrap().style.color.r,
         255,
@@ -437,7 +479,10 @@ fn specificity_later_rule_wins_same_specificity() {
 
 #[test]
 fn selector_group() {
-    let d = load_html("<style>h1, h2, h3 { color: red; }</style><h1 id='a'>A</h1><h2 id='b'>B</h2><p id='no'>P</p>", 800.0);
+    let d = load_html(
+        "<style>h1, h2, h3 { color: red; }</style><h1 id='a'>A</h1><h2 id='b'>B</h2><p id='no'>P</p>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "a").unwrap().style.color.r,
         255,
@@ -683,7 +728,10 @@ fn complex_selector_chain() {
 
 #[test]
 fn selector_with_pseudo_and_class() {
-    let d = load_html("<style>.list li:first-child { color: red; }</style><div class='list'><ul><li id='t'>First</li><li>Second</li></ul></div>", 800.0);
+    let d = load_html(
+        "<style>.list li:first-child { color: red; }</style><div class='list'><ul><li id='t'>First</li><li>Second</li></ul></div>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "t").unwrap().style.color.r,
         255,
@@ -693,7 +741,10 @@ fn selector_with_pseudo_and_class() {
 
 #[test]
 fn selector_type_and_class() {
-    let d = load_html("<style>div.special { color: red; }</style><div class='special' id='yes'>Y</div><span class='special' id='no'>N</span>", 800.0);
+    let d = load_html(
+        "<style>div.special { color: red; }</style><div class='special' id='yes'>Y</div><span class='special' id='no'>N</span>",
+        800.0,
+    );
     assert_eq!(
         by_id(&d.root, "yes").unwrap().style.color.r,
         255,

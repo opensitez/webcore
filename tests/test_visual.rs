@@ -1,6 +1,6 @@
 // Visual property tests – ported from cpptests/test_visual.cpp
 // Render smoke and hit-test skipped (require widget / DC infrastructure).
-use webcore::css::{apply_property, Stylesheet};
+use webcore::css::{Stylesheet, apply_property};
 use webcore::types::*;
 use webcore::{load_html, parse_html};
 
@@ -137,7 +137,8 @@ fn outline_does_not_affect_layout() {
 #[test]
 fn text_overflow_ellipsis() {
     let doc = parse_html(
-        "<div style=\"text-overflow: ellipsis; overflow: hidden; white-space: nowrap;\">Long text</div>");
+        "<div style=\"text-overflow: ellipsis; overflow: hidden; white-space: nowrap;\">Long text</div>",
+    );
     let b = find_box(&doc.root, &|b| {
         b.style.text_overflow == TextOverflow::Ellipsis
     });

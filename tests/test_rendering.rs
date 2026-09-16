@@ -11,7 +11,7 @@
 //   - Overflow tests: verify box dimensions after layout.
 use tiny_skia::Pixmap;
 use webcore::types::*;
-use webcore::{load_html, parse_html, Renderer};
+use webcore::{Renderer, load_html, parse_html};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

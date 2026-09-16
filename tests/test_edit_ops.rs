@@ -5,8 +5,8 @@
 // increase/decrease_quote_level.
 
 use webcore::dom::{
-    get_text_content, insert_hr, query_selector, query_selector_all, query_selector_mut,
-    toggle_bold, Editor, TextRange,
+    Editor, TextRange, get_text_content, insert_hr, query_selector, query_selector_all,
+    query_selector_mut, toggle_bold,
 };
 use webcore::layout::LayoutEngine;
 use webcore::parse_html;
@@ -707,11 +707,12 @@ fn toggle_bold_on_range_after_layout() {
     let p = query_selector_mut(&mut doc.root, "p").unwrap();
     let range = TextRange { start: 0, end: 5 };
     toggle_bold(p, &range);
-    assert!(p
-        .layout
-        .inline_runs
-        .iter()
-        .any(|r| r.style.font_weight.is_bold()));
+    assert!(
+        p.layout
+            .inline_runs
+            .iter()
+            .any(|r| r.style.font_weight.is_bold())
+    );
 }
 
 // ── 11. Space then text in table cell and grid div ────────────────────────────

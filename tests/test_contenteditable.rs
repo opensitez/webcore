@@ -6,7 +6,7 @@
 //     set_font_size, set_text_color using the dom module APIs
 
 use webcore::dom::{
-    set_font_size, set_text_color, toggle_bold, toggle_italic, toggle_underline, TextRange,
+    TextRange, set_font_size, set_text_color, toggle_bold, toggle_italic, toggle_underline,
 };
 use webcore::parse_html;
 use webcore::types::*;

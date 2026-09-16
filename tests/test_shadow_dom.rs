@@ -332,10 +332,15 @@ fn card_component() {
         ),
         400.0,
     );
-    attach(&mut doc.root, "card", ShadowMode::Open, concat!(
-        "<style>.c{border:1px solid #ddd;border-radius:8px}.h{padding:12px;background:#f5f5f5}.b{padding:16px}</style>",
-        "<div class='c'><div class='h'><slot name='title'></slot></div><div class='b'><slot name='body'></slot></div></div>",
-    ));
+    attach(
+        &mut doc.root,
+        "card",
+        ShadowMode::Open,
+        concat!(
+            "<style>.c{border:1px solid #ddd;border-radius:8px}.h{padding:12px;background:#f5f5f5}.b{padding:16px}</style>",
+            "<div class='c'><div class='h'><slot name='title'></slot></div><div class='b'><slot name='body'></slot></div></div>",
+        ),
+    );
     let mut r = webcore::renderer::Renderer::new();
     r.layout_engine().layout(&mut doc, 400.0);
     assert!(

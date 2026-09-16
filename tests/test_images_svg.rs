@@ -193,10 +193,10 @@ fn img_max_width_100_percent() {
 fn img_max_width_preserves_aspect_ratio() {
     let d = load_html(
         concat!(
-        "<div style='width:200px'>",
-        "<img id='i' style='max-width:100%;height:auto' width='400' height='300' src='test.png'>",
-        "</div>",
-    ),
+            "<div style='width:200px'>",
+            "<img id='i' style='max-width:100%;height:auto' width='400' height='300' src='test.png'>",
+            "</div>",
+        ),
         800.0,
     );
     let i = by_id(&d.root, "i").unwrap();
@@ -349,12 +349,15 @@ fn img_next_to_float() {
 
 #[test]
 fn img_floated_left() {
-    let d = load_html(concat!(
-        "<div style='width:500px'>",
-        "<img id='i' style='float:left;margin:0 10px 10px 0' width='200' height='150' src='test.png'>",
-        "<p id='t'>Text wraps around the floated image on the right side.</p>",
-        "</div>",
-    ), 600.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:500px'>",
+            "<img id='i' style='float:left;margin:0 10px 10px 0' width='200' height='150' src='test.png'>",
+            "<p id='t'>Text wraps around the floated image on the right side.</p>",
+            "</div>",
+        ),
+        600.0,
+    );
     let i = by_id(&d.root, "i").unwrap();
     assert!(i.layout.content_rect.x < 20.0, "floated img at left");
     assert!(
@@ -371,10 +374,10 @@ fn img_floated_left() {
 fn img_block_centered() {
     let d = load_html(
         concat!(
-        "<div style='width:600px'>",
-        "<img id='i' style='display:block;margin:0 auto' width='200' height='150' src='test.png'>",
-        "</div>",
-    ),
+            "<div style='width:600px'>",
+            "<img id='i' style='display:block;margin:0 auto' width='200' height='150' src='test.png'>",
+            "</div>",
+        ),
         700.0,
     );
     let i = by_id(&d.root, "i").unwrap();
@@ -425,10 +428,13 @@ fn svg_explicit_width_height() {
 
 #[test]
 fn svg_css_width_auto_with_viewbox() {
-    let d = load_html(concat!(
-        "<style>svg { width: auto; height: 50px; }</style>",
-        "<svg id='s' viewBox='0 0 200 100' xmlns='http://www.w3.org/2000/svg'><rect width='200' height='100'/></svg>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>svg { width: auto; height: 50px; }</style>",
+            "<svg id='s' viewBox='0 0 200 100' xmlns='http://www.w3.org/2000/svg'><rect width='200' height='100'/></svg>",
+        ),
+        800.0,
+    );
     let s = by_id(&d.root, "s").unwrap();
     // height=50, aspect ratio 2:1 from viewBox → width should be 100
     if s.svg_viewbox_w > 0.0 {
@@ -442,10 +448,13 @@ fn svg_css_width_auto_with_viewbox() {
 
 #[test]
 fn svg_css_height_auto_with_viewbox() {
-    let d = load_html(concat!(
-        "<style>svg { height: auto; width: 100px; }</style>",
-        "<svg id='s' viewBox='0 0 200 100' xmlns='http://www.w3.org/2000/svg'><rect width='200' height='100'/></svg>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>svg { height: auto; width: 100px; }</style>",
+            "<svg id='s' viewBox='0 0 200 100' xmlns='http://www.w3.org/2000/svg'><rect width='200' height='100'/></svg>",
+        ),
+        800.0,
+    );
     let s = by_id(&d.root, "s").unwrap();
     // width=100, aspect ratio 2:1 → height should be 50
     if s.svg_viewbox_w > 0.0 {
@@ -459,10 +468,13 @@ fn svg_css_height_auto_with_viewbox() {
 
 #[test]
 fn svg_width_em_units() {
-    let d = load_html(concat!(
-        "<svg id='s' width='7em' height='2em' viewBox='0 0 112 32' xmlns='http://www.w3.org/2000/svg'>",
-        "<rect width='112' height='32'/></svg>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<svg id='s' width='7em' height='2em' viewBox='0 0 112 32' xmlns='http://www.w3.org/2000/svg'>",
+            "<rect width='112' height='32'/></svg>",
+        ),
+        800.0,
+    );
     let s = by_id(&d.root, "s").unwrap();
     // 7em at default 16px = 112px, 2em = 32px
     // But parse_px only handles digits, not em. viewBox should be fallback.
@@ -475,10 +487,13 @@ fn svg_width_em_units() {
 
 #[test]
 fn svg_css_overrides_attr() {
-    let d = load_html(concat!(
-        "<style>svg { width: 150px; height: 80px; }</style>",
-        "<svg id='s' width='300' height='200' xmlns='http://www.w3.org/2000/svg'><rect width='300' height='200'/></svg>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>svg { width: 150px; height: 80px; }</style>",
+            "<svg id='s' width='300' height='200' xmlns='http://www.w3.org/2000/svg'><rect width='300' height='200'/></svg>",
+        ),
+        800.0,
+    );
     let s = by_id(&d.root, "s").unwrap();
     assert!(
         (s.layout.content_rect.w - 150.0).abs() < 10.0,
@@ -498,12 +513,15 @@ fn svg_css_overrides_attr() {
 
 #[test]
 fn svg_in_flex() {
-    let d = load_html(concat!(
-        "<div style='display:flex;align-items:center;width:600px;height:60px'>",
-        "<svg id='s' width='40' height='40' viewBox='0 0 40 40' xmlns='http://www.w3.org/2000/svg'><circle r='20'/></svg>",
-        "<span id='t'>Logo text</span>",
-        "</div>",
-    ), 700.0);
+    let d = load_html(
+        concat!(
+            "<div style='display:flex;align-items:center;width:600px;height:60px'>",
+            "<svg id='s' width='40' height='40' viewBox='0 0 40 40' xmlns='http://www.w3.org/2000/svg'><circle r='20'/></svg>",
+            "<span id='t'>Logo text</span>",
+            "</div>",
+        ),
+        700.0,
+    );
     let s = by_id(&d.root, "s").unwrap();
     let t = by_id(&d.root, "t").unwrap();
     assert!(
@@ -519,11 +537,14 @@ fn svg_in_flex() {
 
 #[test]
 fn svg_in_inline_block() {
-    let d = load_html(concat!(
-        "<span style='display:inline-block'>",
-        "<svg id='s' width='24' height='24' viewBox='0 0 24 24' xmlns='http://www.w3.org/2000/svg'><path d='M0 0h24v24H0z'/></svg>",
-        "</span>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<span style='display:inline-block'>",
+            "<svg id='s' width='24' height='24' viewBox='0 0 24 24' xmlns='http://www.w3.org/2000/svg'><path d='M0 0h24v24H0z'/></svg>",
+            "</span>",
+        ),
+        800.0,
+    );
     let s = by_id(&d.root, "s").unwrap();
     assert!(
         (s.layout.content_rect.w - 24.0).abs() < 5.0,
@@ -538,12 +559,15 @@ fn svg_in_inline_block() {
 
 #[test]
 fn svg_viewbox_aspect_ratio_width_constrained() {
-    let d = load_html(concat!(
-        "<div style='width:300px'>",
-        "<svg id='s' style='width:100%;height:auto' viewBox='0 0 600 400' xmlns='http://www.w3.org/2000/svg'>",
-        "<rect width='600' height='400'/></svg>",
-        "</div>",
-    ), 400.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:300px'>",
+            "<svg id='s' style='width:100%;height:auto' viewBox='0 0 600 400' xmlns='http://www.w3.org/2000/svg'>",
+            "<rect width='600' height='400'/></svg>",
+            "</div>",
+        ),
+        400.0,
+    );
     let s = by_id(&d.root, "s").unwrap();
     // Width = 300px (100% of container), height = 300 * 400/600 = 200
     if s.svg_viewbox_w > 0.0 {
@@ -706,13 +730,16 @@ fn svg_no_viewbox_no_size_no_crash() {
 
 #[test]
 fn bbc_logo_svg_pattern() {
-    let d = load_html(concat!(
-        "<style>.logo svg { height: 1.75rem; width: auto; display: block; }</style>",
-        "<div class='logo'>",
-        "<svg id='s' width='7em' height='2em' viewBox='0 0 112 32' fill='currentColor' xmlns='http://www.w3.org/2000/svg'>",
-        "<path d='M0 0h112v32H0z'/></svg>",
-        "</div>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<style>.logo svg { height: 1.75rem; width: auto; display: block; }</style>",
+            "<div class='logo'>",
+            "<svg id='s' width='7em' height='2em' viewBox='0 0 112 32' fill='currentColor' xmlns='http://www.w3.org/2000/svg'>",
+            "<path d='M0 0h112v32H0z'/></svg>",
+            "</div>",
+        ),
+        800.0,
+    );
     let s = by_id(&d.root, "s").unwrap();
     // CSS height: 1.75rem = 28px, width: auto → computed from viewBox aspect ratio
     // viewBox 112:32, height 28 → width = 28 * 112/32 = 98
@@ -736,13 +763,16 @@ fn bbc_logo_svg_pattern() {
 
 #[test]
 fn icon_svg_in_button() {
-    let d = load_html(concat!(
-        "<button style='display:inline-flex;align-items:center;padding:8px 16px'>",
-        "<svg id='icon' width='16' height='16' viewBox='0 0 16 16' xmlns='http://www.w3.org/2000/svg'>",
-        "<path d='M0 0h16v16H0z'/></svg>",
-        "<span id='label' style='margin-left:8px'>Click me</span>",
-        "</button>",
-    ), 800.0);
+    let d = load_html(
+        concat!(
+            "<button style='display:inline-flex;align-items:center;padding:8px 16px'>",
+            "<svg id='icon' width='16' height='16' viewBox='0 0 16 16' xmlns='http://www.w3.org/2000/svg'>",
+            "<path d='M0 0h16v16H0z'/></svg>",
+            "<span id='label' style='margin-left:8px'>Click me</span>",
+            "</button>",
+        ),
+        800.0,
+    );
     let icon = by_id(&d.root, "icon").unwrap();
     let label = by_id(&d.root, "label").unwrap();
     assert!(
@@ -764,16 +794,16 @@ fn icon_svg_in_button() {
 fn card_with_image_and_text() {
     let d = load_html(
         concat!(
-        "<style>",
-        ".card { width: 300px; }",
-        ".card img { width: 100%; height: auto; display: block; }",
-        ".card-body { padding: 16px; }",
-        "</style>",
-        "<div class='card'>",
-        "<img id='img' width='600' height='400' src='photo.jpg'>",
-        "<div class='card-body'><h3 id='title'>Card Title</h3><p id='desc'>Description</p></div>",
-        "</div>",
-    ),
+            "<style>",
+            ".card { width: 300px; }",
+            ".card img { width: 100%; height: auto; display: block; }",
+            ".card-body { padding: 16px; }",
+            "</style>",
+            "<div class='card'>",
+            "<img id='img' width='600' height='400' src='photo.jpg'>",
+            "<div class='card-body'><h3 id='title'>Card Title</h3><p id='desc'>Description</p></div>",
+            "</div>",
+        ),
         400.0,
     );
     let img = by_id(&d.root, "img").unwrap();
@@ -804,17 +834,20 @@ fn card_with_image_and_text() {
 
 #[test]
 fn gallery_grid_images() {
-    let d = load_html(concat!(
-        "<style>",
-        ".gallery { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; width: 900px; }",
-        ".gallery img { width: 100%; height: auto; display: block; }",
-        "</style>",
-        "<div class='gallery'>",
-        "<img id='a' width='400' height='300' src='a.jpg'>",
-        "<img id='b' width='400' height='300' src='b.jpg'>",
-        "<img id='c' width='400' height='300' src='c.jpg'>",
-        "</div>",
-    ), 1000.0);
+    let d = load_html(
+        concat!(
+            "<style>",
+            ".gallery { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; width: 900px; }",
+            ".gallery img { width: 100%; height: auto; display: block; }",
+            "</style>",
+            "<div class='gallery'>",
+            "<img id='a' width='400' height='300' src='a.jpg'>",
+            "<img id='b' width='400' height='300' src='b.jpg'>",
+            "<img id='c' width='400' height='300' src='c.jpg'>",
+            "</div>",
+        ),
+        1000.0,
+    );
     let a = by_id(&d.root, "a").unwrap();
     let b = by_id(&d.root, "b").unwrap();
     let c = by_id(&d.root, "c").unwrap();

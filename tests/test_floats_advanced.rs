@@ -244,12 +244,15 @@ fn clear_both() {
 
 #[test]
 fn text_wraps_around_left_float() {
-    let d = load_html(concat!(
-        "<div style='width:300px;font-size:16px'>",
-        "<div id='f' style='float:left;width:100px;height:60px'>F</div>",
-        "<span id='t'>This text should wrap around the float element on the left side of the container</span>",
-        "</div>",
-    ), 400.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:300px;font-size:16px'>",
+            "<div id='f' style='float:left;width:100px;height:60px'>F</div>",
+            "<span id='t'>This text should wrap around the float element on the left side of the container</span>",
+            "</div>",
+        ),
+        400.0,
+    );
     let f = by_id(&d.root, "f").unwrap();
     let container = find_all(&d.root, &|b| b.style.width == CssLength::Px(300.0));
     assert!(!container.is_empty());
@@ -289,12 +292,15 @@ fn text_wraps_around_right_float() {
 
 #[test]
 fn text_expands_after_float_ends() {
-    let d = load_html(concat!(
-        "<div style='width:400px;font-size:16px;line-height:20px'>",
-        "<div style='float:left;width:150px;height:40px'>F</div>",
-        "<span>Line one next to float. Line two next to float. Line three should be full width below the float since it ended.</span>",
-        "</div>",
-    ), 500.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:400px;font-size:16px;line-height:20px'>",
+            "<div style='float:left;width:150px;height:40px'>F</div>",
+            "<span>Line one next to float. Line two next to float. Line three should be full width below the float since it ended.</span>",
+            "</div>",
+        ),
+        500.0,
+    );
     let container = find_all(&d.root, &|b| b.style.width == CssLength::Px(400.0));
     assert!(!container.is_empty());
     let lines = &container[0].layout.line_cache;
@@ -424,11 +430,14 @@ fn float_shrink_wraps_children() {
 
 #[test]
 fn float_with_relative_position() {
-    let d = load_html(concat!(
-        "<div style='width:400px'>",
-        "<div id='f' style='float:left;position:relative;top:20px;left:10px;width:100px;height:80px'>FR</div>",
-        "</div>",
-    ), 500.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:400px'>",
+            "<div id='f' style='float:left;position:relative;top:20px;left:10px;width:100px;height:80px'>FR</div>",
+            "</div>",
+        ),
+        500.0,
+    );
     let f = by_id(&d.root, "f").unwrap();
     // Float placement + relative offset
     assert!(
@@ -445,12 +454,15 @@ fn float_with_relative_position() {
 
 #[test]
 fn absolute_ignores_float() {
-    let d = load_html(concat!(
-        "<div style='position:relative;width:400px'>",
-        "<div id='abs' style='position:absolute;float:left;top:10px;left:10px;width:100px;height:100px'>A</div>",
-        "<div id='t'>Text</div>",
-        "</div>",
-    ), 500.0);
+    let d = load_html(
+        concat!(
+            "<div style='position:relative;width:400px'>",
+            "<div id='abs' style='position:absolute;float:left;top:10px;left:10px;width:100px;height:100px'>A</div>",
+            "<div id='t'>Text</div>",
+            "</div>",
+        ),
+        500.0,
+    );
     let abs = by_id(&d.root, "abs").unwrap();
     // position:absolute overrides float
     assert_eq!(abs.style.position, Position::Absolute);
@@ -534,16 +546,19 @@ fn float_contained_in_bfc_sibling() {
 
 #[test]
 fn wikipedia_image_float_pattern() {
-    let d = load_html(concat!(
-        "<div style='width:600px;font-size:16px'>",
-        "<div id='img' style='float:right;width:220px;margin:0 0 10px 15px'>",
-        "  <div style='height:160px;background:gray'>Image placeholder</div>",
-        "  <div style='font-size:12px'>Caption text for the image</div>",
-        "</div>",
-        "<p id='p1'>First paragraph of article text that wraps around the floated image on the right side of the page. This is a common Wikipedia layout pattern.</p>",
-        "<p id='p2'>Second paragraph continues below, still wrapping if the float extends this far.</p>",
-        "</div>",
-    ), 700.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:600px;font-size:16px'>",
+            "<div id='img' style='float:right;width:220px;margin:0 0 10px 15px'>",
+            "  <div style='height:160px;background:gray'>Image placeholder</div>",
+            "  <div style='font-size:12px'>Caption text for the image</div>",
+            "</div>",
+            "<p id='p1'>First paragraph of article text that wraps around the floated image on the right side of the page. This is a common Wikipedia layout pattern.</p>",
+            "<p id='p2'>Second paragraph continues below, still wrapping if the float extends this far.</p>",
+            "</div>",
+        ),
+        700.0,
+    );
     let img = by_id(&d.root, "img").unwrap();
     let p1 = by_id(&d.root, "p1").unwrap();
     // Image floats right
@@ -882,15 +897,18 @@ fn overflow_hidden_clips_content() {
 
 #[test]
 fn magazine_layout() {
-    let d = load_html(concat!(
-        "<div style='width:600px;font-size:16px'>",
-        "<div id='img1' style='float:left;width:200px;height:150px;margin:0 15px 10px 0'>Img1</div>",
-        "<p id='p1'>First paragraph wraps around the image on the left. This should flow to the right of the image.</p>",
-        "<div id='img2' style='float:right;width:180px;height:120px;margin:0 0 10px 15px'>Img2</div>",
-        "<p id='p2'>Second paragraph wraps around the right-floated image. Text flows on the left side.</p>",
-        "<p id='p3' style='clear:both'>Third paragraph is fully cleared and spans the full width.</p>",
-        "</div>",
-    ), 700.0);
+    let d = load_html(
+        concat!(
+            "<div style='width:600px;font-size:16px'>",
+            "<div id='img1' style='float:left;width:200px;height:150px;margin:0 15px 10px 0'>Img1</div>",
+            "<p id='p1'>First paragraph wraps around the image on the left. This should flow to the right of the image.</p>",
+            "<div id='img2' style='float:right;width:180px;height:120px;margin:0 0 10px 15px'>Img2</div>",
+            "<p id='p2'>Second paragraph wraps around the right-floated image. Text flows on the left side.</p>",
+            "<p id='p3' style='clear:both'>Third paragraph is fully cleared and spans the full width.</p>",
+            "</div>",
+        ),
+        700.0,
+    );
     let p3 = by_id(&d.root, "p3").unwrap();
     let img1 = by_id(&d.root, "img1").unwrap();
     let img2 = by_id(&d.root, "img2").unwrap();

@@ -371,10 +371,12 @@ fn standard_property_is_case_insensitive() {
 fn counter_reset_parsed() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "counter-reset", "section");
-    assert!(style
-        .counter_reset
-        .iter()
-        .any(|(name, _)| name == "section"));
+    assert!(
+        style
+            .counter_reset
+            .iter()
+            .any(|(name, _)| name == "section")
+    );
 }
 
 #[test]
@@ -393,10 +395,12 @@ fn counter_reset_with_value() {
 fn counter_increment_parsed() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "counter-increment", "section");
-    assert!(style
-        .counter_increment
-        .iter()
-        .any(|(name, _)| name == "section"));
+    assert!(
+        style
+            .counter_increment
+            .iter()
+            .any(|(name, _)| name == "section")
+    );
 }
 
 #[test]
@@ -1707,9 +1711,11 @@ fn two_column_float_layout_no_overlap() {
             let x_overlap = a.x < b.x + b.w && b.x < a.x + a.w;
             if x_overlap && a.h > 0.0 && b.h > 0.0 {
                 let y_overlap = a.y < b.y + b.h && b.y < a.y + a.h;
-                assert!(!y_overlap,
+                assert!(
+                    !y_overlap,
                     "p[{}] at ({:.0},{:.0} {:.0}x{:.0}) overlaps p[{}] at ({:.0},{:.0} {:.0}x{:.0})",
-                    i, a.x, a.y, a.w, a.h, j, b.x, b.y, b.w, b.h);
+                    i, a.x, a.y, a.w, a.h, j, b.x, b.y, b.w, b.h
+                );
             }
         }
     }
