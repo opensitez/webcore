@@ -11,7 +11,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::Window;
 
 use webcore::platform::Platform;
-use webcore::{load_html, parse_markdown, Document, HtmlEventType, Renderer};
+use webcore::{Document, HtmlEventType, Renderer, load_html, parse_markdown};
 
 // ── Sample markdown ──────────────────────────────────────────────────────────
 

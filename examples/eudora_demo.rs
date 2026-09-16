@@ -7,7 +7,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
 
 use webcore::platform::Platform;
-use webcore::{load_html, Document, HtmlEventType, LayoutEngine, Renderer};
+use webcore::{Document, HtmlEventType, LayoutEngine, Renderer, load_html};
 
 const HTML: &str = include_str!("html/eudora.html");
 

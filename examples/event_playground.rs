@@ -6,10 +6,10 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
 
+use webcore::WebCore;
 use webcore::dom::{self, HtmlEventType};
 use webcore::platform::Platform;
-use webcore::WebCore;
-use webcore::{load_html, Document, LayoutEngine, Renderer};
+use webcore::{Document, LayoutEngine, Renderer, load_html};
 
 const HTML: &str = include_str!("html/event_playground.html");
 

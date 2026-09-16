@@ -10,7 +10,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -23,93 +23,45 @@ use tiny_skia::{Pixmap, PixmapPaint, Transform};
 use webcore::dom::{self, HtmlEventType};
 use webcore::platform::Platform;
 use webcore::renderer::display_list::{ImageRef, PaintCmd};
-use webcore::renderer::display_list_builder::build_display_list_full;
-use webcore::{hit_test_link, parse_html_with_hooks, point_to_hit, Document, Renderer};
+use webcore::renderer::display_list_builder::{
+    build_display_list_full, build_display_list_viewport,
+};
+use webcore::types::{Display, Overflow, Position};
+use webcore::{Document, Renderer, parse_html_with_hooks, point_to_hit};
 
 // ─── Layout constants ─────────────────────────────────────────────────────────
 
 const CHROME_H: f32 = 80.0; // tab-bar (36) + nav-bar (44)
-const TAB_H: f32 = 36.0;
 const TAB_MAX_W: f32 = 220.0;
 const TAB_MIN_W: f32 = 80.0;
 
 // ─── New-tab page ─────────────────────────────────────────────────────────────
 
 const NEW_TAB_URL: &str = "about:newtab";
-const NEW_TAB_HTML: &str = r#"<!DOCTYPE html><html><head><style>
-*{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%;overflow:hidden}
-body{background:#1C1C1F;display:flex;flex-direction:column;align-items:center;
-     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-     color:#E8EAED;padding-top:72px}
-.logo{font-size:50px;font-weight:200;letter-spacing:-2px;color:#E8EAED;margin-bottom:6px}
-.logo-accent{color:#5E9CF8}
-.tagline{color:#6E7077;font-size:13px;letter-spacing:0.2px;margin-bottom:44px}
-.search-hint{width:520px;max-width:90%;height:42px;background:#2A2B2E;
-             border:1.5px solid #3A3B3E;border-radius:21px;
-             display:flex;align-items:center;padding:0 18px;gap:10px;
-             color:#6E7077;font-size:13px;margin-bottom:56px}
-.search-icon{font-size:14px}
-.section{color:#6E7077;font-size:10px;font-weight:700;text-transform:uppercase;
-          letter-spacing:1.2px;margin-bottom:16px}
-.tiles{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;max-width:640px}
-.tile{background:#26272A;border:1px solid #313235;border-radius:14px;
-      padding:20px 14px 16px;width:136px;
-      display:flex;flex-direction:column;align-items:center;gap:10px;cursor:pointer}
-.fav{width:40px;height:40px;border-radius:10px;
-     display:flex;align-items:center;justify-content:center;
-     font-size:14px;font-weight:800;color:#fff}
-.tile-name{color:#C9CBD0;font-size:12px;font-weight:500}
-.tile-domain{color:#4A4C52;font-size:10px}
-a{color:inherit;text-decoration:none}
-</style></head><body>
-<div class="logo">Phoe<span class="logo-accent">nix</span></div>
-<div class="tagline">Fast, private, and beautifully simple</div>
-<div class="search-hint"><span class="search-icon">🔍</span>Search or type an address&hellip;</div>
-<div class="section">Quick Access</div>
-<div class="tiles">
-  <a href="https://news.ycombinator.com"><div class="tile"><div class="fav" style="background:#FF6600">HN</div><div class="tile-name">Hacker News</div><div class="tile-domain">ycombinator.com</div></div></a>
-  <a href="https://github.com"><div class="tile"><div class="fav" style="background:#24292E">GH</div><div class="tile-name">GitHub</div><div class="tile-domain">github.com</div></div></a>
-  <a href="https://www.rust-lang.org"><div class="tile"><div class="fav" style="background:#CE422B">Rs</div><div class="tile-name">Rust</div><div class="tile-domain">rust-lang.org</div></div></a>
-  <a href="https://crates.io"><div class="tile"><div class="fav" style="background:#7B5EA7">Cr</div><div class="tile-name">crates.io</div><div class="tile-domain">crates.io</div></div></a>
-  <a href="https://en.wikipedia.org/wiki/Main_Page"><div class="tile"><div class="fav" style="background:#E8E8E8;color:#202124">W</div><div class="tile-name">Wikipedia</div><div class="tile-domain">wikipedia.org</div></div></a>
-  <a href="https://slashdot.org/"><div class="tile"><div class="fav" style="background:#F48024">SL</div><div class="tile-name">Slashdot</div><div class="tile-domain">slashdot.org</div></div></a>
-  <a href="https://doc.rust-lang.org/book/"><div class="tile"><div class="fav" style="background:#3B4252">Bk</div><div class="tile-name">Rust Book</div><div class="tile-domain">doc.rust-lang.org</div></div></a>
-  <a href="https://www.reddit.com"><div class="tile"><div class="fav" style="background:#FF4500">Re</div><div class="tile-name">Reddit</div><div class="tile-domain">reddit.com</div></div></a>
-</div>
-</body></html>"#;
-
-// ─── Async resource results ───────────────────────────────────────────────────
-
-enum LoadResult {
-    Page {
-        tab_id: usize,
-        url: String,
-        html: String,
-    },
-}
 
 // ─── Tab ──────────────────────────────────────────────────────────────────────
 
 struct Tab {
-    id: usize,
     url: String,
     title: String,
     history: Vec<String>,
     hist_i: usize,
-    doc: Option<Document>,
+    view: webcore::BrowserView,
     loading: bool,
 }
 
 impl Tab {
-    fn new(id: usize) -> Self {
+    fn new(proxy: EventLoopProxy<()>) -> Self {
+        let mut view = webcore::BrowserView::new(1280.0, 720.0, Default::default());
+        view.set_wake_callback(move || {
+            let _ = proxy.send_event(());
+        });
         Self {
-            id,
             url: String::new(),
             title: "New Tab".into(),
             history: vec![],
             hist_i: 0,
-            doc: None,
+            view,
             loading: false,
         }
     }
@@ -150,12 +102,12 @@ struct BrowserApp {
     window: Option<Arc<Window>>,
     platform: Option<Platform>,
 
-    renderer: Renderer,        // page content
     chrome_renderer: Renderer, // browser chrome
+    chrome_pixmap: Option<Pixmap>,
+    chrome_pixmap_dirty: bool,
 
     tabs: Vec<Tab>,
     active: usize,
-    next_id: usize,
 
     chrome_doc: Option<Document>,
 
@@ -166,6 +118,8 @@ struct BrowserApp {
     mouse_pos: (f32, f32),
     width: f32,
     height: f32,
+    initial_width: f32,
+    initial_height: f32,
 
     // Inspector state
     inspect_mode: bool,
@@ -176,13 +130,10 @@ struct BrowserApp {
     inspect_dom_split: f32,  // fraction of panel height for DOM tree (top), rest for tabs (bottom)
     inspect_dom_scroll: f32, // current scroll offset of the DOM tree
 
-    pending_navigate: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-
-    tx: mpsc::Sender<LoadResult>,
-    rx: mpsc::Receiver<LoadResult>,
     proxy: EventLoopProxy<()>,
     initial_url: Option<String>,
     cache_dir: Option<String>, // Some("snapshot_cache") when --cached
+    no_images: bool,
 
     // Remote debug server (--debug-port)
     debug_cmd_rx: Option<mpsc::Receiver<(String, mpsc::Sender<String>)>>,
@@ -190,21 +141,22 @@ struct BrowserApp {
 
 impl BrowserApp {
     fn new(proxy: EventLoopProxy<()>) -> Self {
-        let (tx, rx) = mpsc::channel();
         Self {
             window: None,
             platform: None,
-            renderer: Renderer::new(),
             chrome_renderer: Renderer::new(),
-            tabs: vec![Tab::new(0)],
+            chrome_pixmap: None,
+            chrome_pixmap_dirty: true,
+            tabs: vec![Tab::new(proxy.clone())],
             active: 0,
-            next_id: 1,
             chrome_doc: None,
             url_text: String::new(),
             url_focused: false,
             mouse_pos: (0.0, 0.0),
             width: 1280.0,
             height: 800.0,
+            initial_width: 1280.0,
+            initial_height: 800.0,
             inspect_mode: false,
             inspect_node: 0,
             inspect_panel_pct: 0.0,
@@ -212,12 +164,10 @@ impl BrowserApp {
             inspect_tab: 0,
             inspect_dom_split: 0.5,
             inspect_dom_scroll: 0.0,
-            pending_navigate: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            tx,
-            rx,
             proxy,
             initial_url: None,
             cache_dir: None,
+            no_images: false,
             debug_cmd_rx: None,
         }
     }
@@ -233,6 +183,21 @@ impl BrowserApp {
         }
     }
 
+    fn start_view_navigation(&mut self, index: usize, url: String) {
+        let page_w = self.page_width();
+        let content_h = self.content_h();
+        let cache_dir = self.cache_dir.clone();
+        let load_images = !self.no_images;
+        let tab = &mut self.tabs[index];
+        tab.view.resize(page_w, content_h);
+        tab.view.set_options(webcore::PageLoadOptions {
+            cache_dir,
+            load_images,
+            ..Default::default()
+        });
+        tab.view.navigate(url);
+    }
+
     // ── Navigation ────────────────────────────────────────────────────────────
 
     fn navigate(&mut self, url: String) {
@@ -246,12 +211,10 @@ impl BrowserApp {
         tab.url = url.clone();
         tab.title = "Loading…".into();
         tab.loading = true;
-        tab.doc = None;
         self.url_text = url.clone();
         self.url_focused = false;
         self.rebuild_chrome();
-        let id = self.tabs[self.active].id;
-        self.start_fetch(id, url);
+        self.start_view_navigation(self.active, url);
     }
 
     fn go_back(&mut self) {
@@ -263,11 +226,9 @@ impl BrowserApp {
         let url = tab.history[tab.hist_i].clone();
         tab.url = url.clone();
         tab.loading = true;
-        tab.doc = None;
         self.url_text = url.clone();
         self.rebuild_chrome();
-        let id = self.tabs[self.active].id;
-        self.start_fetch(id, url);
+        self.start_view_navigation(self.active, url);
     }
 
     fn go_forward(&mut self) {
@@ -279,11 +240,9 @@ impl BrowserApp {
         let url = tab.history[tab.hist_i].clone();
         tab.url = url.clone();
         tab.loading = true;
-        tab.doc = None;
         self.url_text = url.clone();
         self.rebuild_chrome();
-        let id = self.tabs[self.active].id;
-        self.start_fetch(id, url);
+        self.start_view_navigation(self.active, url);
     }
 
     fn reload(&mut self) {
@@ -291,17 +250,13 @@ impl BrowserApp {
         if url.is_empty() {
             return;
         }
-        let id = self.tabs[self.active].id;
         self.tabs[self.active].loading = true;
-        self.tabs[self.active].doc = None;
         self.rebuild_chrome();
-        self.start_fetch(id, url);
+        self.start_view_navigation(self.active, url);
     }
 
     fn new_tab(&mut self) {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.tabs.push(Tab::new(id));
+        self.tabs.push(Tab::new(self.proxy.clone()));
         self.active = self.tabs.len() - 1;
         self.navigate(NEW_TAB_URL.to_string());
     }
@@ -313,12 +268,13 @@ impl BrowserApp {
         self.active = i;
         self.url_text = self.tabs[i].url.clone();
         self.url_focused = false;
+        self.tabs[self.active].view.invalidate_display();
         self.rebuild_chrome();
     }
 
     fn close_tab(&mut self, i: usize) {
         if self.tabs.len() == 1 {
-            self.tabs[0] = Tab::new(0);
+            self.tabs[0] = Tab::new(self.proxy.clone());
             self.navigate(NEW_TAB_URL.to_string());
             return;
         }
@@ -330,138 +286,11 @@ impl BrowserApp {
         self.rebuild_chrome();
     }
 
-    // ── Async fetch ───────────────────────────────────────────────────────────
-
-    fn start_fetch(&self, tab_id: usize, url: String) {
-        let tx = self.tx.clone();
-        let proxy = self.proxy.clone();
-        let cache_dir = self.cache_dir.clone();
-        std::thread::spawn(move || {
-            let t0 = std::time::Instant::now();
-            let mut final_url = url.clone();
-            let html = if url == NEW_TAB_URL || url.starts_with("about:") {
-                NEW_TAB_HTML.to_string()
-            } else if let Some(path) = url.strip_prefix("file://") {
-                std::fs::read_to_string(path)
-                    .unwrap_or_else(|e| format!("<h2>File error</h2><p>{e}</p>"))
-            } else if let Some(ref cd) = cache_dir {
-                match cached_fetch_document(&url, cd) {
-                    Ok((body, redirected_url)) => {
-                        final_url = redirected_url;
-                        body
-                    }
-                    Err(e) => error_page(&url, &e),
-                }
-            } else {
-                match fetch_text_with_url(&url) {
-                    Ok((body, redirected_url)) => {
-                        final_url = redirected_url;
-                        body
-                    }
-                    Err(e) => error_page(&url, &e),
-                }
-            };
-            eprintln!(
-                "[browser] HTML fetch: {:.0}ms ({} bytes)",
-                t0.elapsed().as_millis(),
-                html.len()
-            );
-
-            let _ = tx.send(LoadResult::Page {
-                tab_id,
-                url: final_url,
-                html,
-            });
-            let _ = proxy.send_event(());
-        });
-    }
-
-    // ── Process incoming results ───────────────────────────────────────────────
-
-    fn process_results(&mut self) {
-        // Collect all pending results, then batch image updates to avoid
-        // one full re-layout per image (13 images × 360ms = 5s).
-        let mut pending: Vec<LoadResult> = Vec::new();
-        while let Ok(res) = self.rx.try_recv() {
-            pending.push(res);
-        }
-        if pending.is_empty() {
-            return;
-        }
-
-        for res in pending {
-            match res {
-                LoadResult::Page { tab_id, url, html } => {
-                    let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
-                        continue;
-                    };
-
-                    let page_w = self.page_width();
-                    let content_h = self.content_h();
-                    let mut doc = if let Some(cache_dir) = self.cache_dir.clone() {
-                        self.renderer.load_html_with_base_and_stylesheet_loader(
-                            &html,
-                            &url,
-                            page_w,
-                            content_h,
-                            Arc::new(move |css_url| {
-                                cached_fetch_bytes(css_url, &cache_dir).map(decode_body)
-                            }),
-                        )
-                    } else {
-                        self.renderer
-                            .load_html_with_base(&html, &url, page_w, content_h)
-                    };
-
-                    // Update URL (may have changed due to redirects)
-                    self.tabs[idx].url = url.clone();
-                    self.tabs[idx].title = if doc.title.is_empty() {
-                        url.split('/')
-                            .filter(|s| !s.is_empty())
-                            .last()
-                            .unwrap_or("Untitled")
-                            .to_string()
-                    } else {
-                        doc.title.clone()
-                    };
-                    self.tabs[idx].loading = false;
-
-                    // Wire form events — submit navigates, collecting form data
-                    let nav = self.pending_navigate.clone();
-                    let proxy = self.proxy.clone();
-                    let tab_url = url.clone();
-                    doc.on_form_event = Some(Box::new(move |event: &webcore::FormEvent| {
-                        if let webcore::FormEventKind::Submit(action) = &event.kind {
-                            let target = if action.is_empty() {
-                                tab_url.clone()
-                            } else {
-                                resolve_url(&tab_url, action)
-                            };
-                            // TODO: collect form data and encode as query string (GET) or body (POST)
-                            // For now, just navigate to the action URL
-                            eprintln!("[browser] Form submit → {}", target);
-                            *nav.lock().unwrap() = Some(target);
-                            let _ = proxy.send_event(());
-                        }
-                    }));
-                    self.tabs[idx].doc = Some(doc);
-                    if idx == self.active {
-                        self.url_text = self.tabs[idx].url.clone();
-                    }
-                    self.rebuild_chrome();
-                }
-            }
-        }
-    }
-
     fn relayout_active(&mut self) {
-        let w = self.width;
         let ch = self.content_h();
-        if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-            let mut eng = self.renderer.layout_engine();
-            eng.viewport_h = ch;
-            eng.layout(doc, w);
-        }
+        let page_w = self.page_width();
+        self.tabs[self.active].view.resize(page_w, ch);
+        self.tabs[self.active].view.relayout();
     }
 
     // ── Chrome ────────────────────────────────────────────────────────────────
@@ -470,10 +299,11 @@ impl BrowserApp {
         let html = self.chrome_html();
         let mut doc = parse_html_with_hooks(&html, "", |_, _| {});
         let w = self.width;
-        let mut eng = self.chrome_renderer.layout_engine();
+        let eng = self.chrome_renderer.layout_engine();
         eng.viewport_h = CHROME_H;
         eng.layout(&mut doc, w);
         self.chrome_doc = Some(doc);
+        self.chrome_pixmap_dirty = true;
     }
 
     fn chrome_html(&self) -> String {
@@ -620,10 +450,8 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
             return;
         };
 
-        let renderer = &mut self.renderer;
         let chrome_renderer = &mut self.chrome_renderer;
         let chrome_doc = self.chrome_doc.as_mut();
-        let active_doc = self.tabs[self.active].doc.as_mut();
 
         let t_draw = std::time::Instant::now();
         platform.render(|scale, pixmap| {
@@ -641,29 +469,19 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
             let inspect_dom_scroll = &mut self.inspect_dom_scroll;
             let inspect_nid = self.inspect_node;
             let inspect_dom_split = self.inspect_dom_split;
-            if let Some(doc) = active_doc {
-                let page_w = if inspect_on {
-                    ((w_px as f32) * (1.0 - inspect_pct)).max(100.0) as u32
-                } else { w_px };
+            let page_w = if inspect_on {
+                ((w_px as f32) * (1.0 - inspect_pct)).max(100.0) as u32
+            } else {
+                w_px
+            };
+            self.tabs[self.active]
+                .view
+                .resize(page_w as f32 / scale, content_px as f32 / scale);
+            self.tabs[self.active]
+                .view
+                .paint_into(pixmap, 0, chrome_px as i32, scale);
 
-                // Page content (left side)
-                if let Some(mut pm) = Pixmap::new(page_w.max(1), content_px.max(1)) {
-                    pm.fill(tiny_skia::Color::from_rgba8(255, 255, 255, 255));
-                    let t_render = std::time::Instant::now();
-                    renderer.render(doc, &mut pm, scale);
-                    if inspect_on && inspect_nid != 0 {
-                        if let Some(node) = doc.get_box_by_id(inspect_nid) {
-                            webcore::draw_inspect_overlay(node, &mut pm, doc.scroll_x, doc.scroll_y, scale);
-                        }
-                    }
-                    let render_ms = t_render.elapsed().as_millis();
-                    if render_ms > 5 {
-                        eprintln!("[browser] Render: {render_ms}ms ({}x{})", page_w, content_px);
-                    }
-                    pixmap.draw_pixmap(0, chrome_px as i32, pm.as_ref(),
-                        &PixmapPaint::default(), Transform::identity(), None);
-                }
-
+            if let Some(doc) = self.tabs[self.active].view.document() {
                 // Inspector panel (right side): DOM tree on top, tabs on bottom
                 if inspect_on {
                     let panel_x = page_w;
@@ -681,7 +499,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
                          </style></head><body>{dom_tree_body}</body></html>"
                     );
                     let mut dom_doc = webcore::parse_html(&dom_html);
-                    { let mut eng = chrome_renderer.layout_engine(); eng.layout(&mut dom_doc, panel_w_logical); }
+                    { let eng = chrome_renderer.layout_engine(); eng.layout(&mut dom_doc, panel_w_logical); }
                     // Scroll DOM tree to selected element
                     if let Some(line) = selected_line {
                         let target_y = line as f32 * 16.0;
@@ -707,7 +525,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
                         "<html><body style='background:#1e1e1e;color:#666;padding:10px;font:11px monospace'>Right-click to inspect</body></html>".into()
                     };
                     let mut tabs_doc = webcore::parse_html(&tabs_html);
-                    { let mut eng = chrome_renderer.layout_engine(); eng.layout(&mut tabs_doc, panel_w_logical); }
+                    { let eng = chrome_renderer.layout_engine(); eng.layout(&mut tabs_doc, panel_w_logical); }
                     if let Some(mut pm) = Pixmap::new(panel_w, tabs_h.max(1)) {
                         pm.fill(tiny_skia::Color::from_rgba8(30, 30, 30, 255));
                         chrome_renderer.render(&mut tabs_doc, &mut pm, scale);
@@ -728,21 +546,24 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
                         pixmap.fill_rect(r, &p, Transform::identity(), None);
                     }
                 }
-            } else {
-                // Grey placeholder while loading
-                if let Some(r) = tiny_skia::Rect::from_xywh(0.0, chrome_px as f32,
-                        w_px as f32, content_px as f32) {
-                    let mut p = tiny_skia::Paint::default();
-                    p.set_color(tiny_skia::Color::from_rgba8(26, 26, 29, 255));
-                    pixmap.fill_rect(r, &p, Transform::identity(), None);
-                }
             }
 
             // Chrome rendered on top
             if let Some(doc) = chrome_doc {
-                if let Some(mut pm) = Pixmap::new(w_px, chrome_px.max(1)) {
-                    pm.fill(tiny_skia::Color::from_rgba8(28, 28, 31, 255));
-                    chrome_renderer.render(doc, &mut pm, scale);
+                let chrome_h = chrome_px.max(1);
+                let needs_chrome_pm = self.chrome_pixmap.as_ref().is_none_or(|pm| {
+                    pm.width() != w_px || pm.height() != chrome_h
+                });
+                if needs_chrome_pm {
+                    self.chrome_pixmap = Pixmap::new(w_px, chrome_h);
+                    self.chrome_pixmap_dirty = true;
+                }
+                if let Some(pm) = self.chrome_pixmap.as_mut() {
+                    if self.chrome_pixmap_dirty {
+                        pm.fill(tiny_skia::Color::from_rgba8(28, 28, 31, 255));
+                        chrome_renderer.render(doc, pm, scale);
+                        self.chrome_pixmap_dirty = false;
+                    }
                     pixmap.draw_pixmap(0, 0, pm.as_ref(),
                         &PixmapPaint::default(), Transform::identity(), None);
                 }
@@ -757,7 +578,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
             }
         });
         let draw_ms = t_draw.elapsed().as_millis();
-        if draw_ms > 5 {
+        if std::env::var_os("WEBCORE_TRACE_RENDER").is_some() && draw_ms > 5 {
             eprintln!("[browser] Draw total: {draw_ms}ms");
         }
     }
@@ -771,7 +592,10 @@ impl ApplicationHandler<()> for BrowserApp {
             el.create_window(
                 Window::default_attributes()
                     .with_title("Phoenix Browser")
-                    .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 800u32)),
+                    .with_inner_size(winit::dpi::LogicalSize::new(
+                        self.initial_width.max(1.0),
+                        self.initial_height.max(1.0),
+                    )),
             )
             .unwrap(),
         );
@@ -788,46 +612,39 @@ impl ApplicationHandler<()> for BrowserApp {
     }
 
     fn user_event(&mut self, _el: &winit::event_loop::ActiveEventLoop, _: ()) {
-        let t = std::time::Instant::now();
-        self.process_results();
-        let ms = t.elapsed().as_millis();
-        if ms > 0 {
-            eprintln!("[browser] process_results: {:.0}ms", ms);
-        }
-        // Check for pending form submit navigation
-        let nav_url = self.pending_navigate.lock().unwrap().take();
-        if let Some(url) = nav_url {
-            self.navigate(url);
-        }
-        // Drain remote debug commands
-        if self.debug_cmd_rx.is_some() {
-            let mut cmds: Vec<(String, mpsc::Sender<String>)> = Vec::new();
-            if let Some(rx) = &self.debug_cmd_rx {
-                while let Ok(pair) = rx.try_recv() {
-                    cmds.push(pair);
-                }
+        let debug_redraw = self.drain_debug_commands();
+        if debug_redraw {
+            if let Some(w) = &self.window {
+                w.request_redraw();
             }
-            for (line, reply_tx) in cmds {
-                let resp = self.handle_debug_command(&line);
-                let _ = reply_tx.send(resp);
-            }
-        }
-        if let Some(w) = &self.window {
-            w.request_redraw();
         }
     }
 
     fn about_to_wait(&mut self, el: &winit::event_loop::ActiveEventLoop) {
-        self.process_results();
-
         let page_w = self.page_width();
         let content_h = self.content_h();
-        let needs_redraw = self.renderer.drive_document_idle(
-            el,
-            self.tabs[self.active].doc.as_mut(),
-            page_w,
-            content_h,
-        );
+        self.tabs[self.active].view.resize(page_w, content_h);
+        let needs_redraw = self.tabs[self.active].view.drive_idle(el);
+        self.tabs[self.active].loading = self.tabs[self.active].view.is_loading();
+        if !self.tabs[self.active].view.title().is_empty() {
+            self.tabs[self.active].title = self.tabs[self.active].view.title().to_string();
+        }
+        if self.tabs[self.active].url != self.tabs[self.active].view.url() {
+            let url = self.tabs[self.active].view.url().to_string();
+            {
+                let tab = &mut self.tabs[self.active];
+                if tab.history.last() != Some(&url) {
+                    tab.history.truncate(tab.hist_i + 1);
+                    tab.history.push(url.clone());
+                    tab.hist_i = tab.history.len() - 1;
+                }
+                tab.url = url;
+                tab.title = tab.view.title().to_string();
+                tab.loading = tab.view.is_loading();
+            }
+            self.url_text = self.tabs[self.active].url.clone();
+            self.rebuild_chrome();
+        }
         if needs_redraw {
             if let Some(w) = &self.window {
                 w.request_redraw();
@@ -851,10 +668,28 @@ impl ApplicationHandler<()> for BrowserApp {
 }
 
 impl BrowserApp {
+    fn drain_debug_commands(&mut self) -> bool {
+        let Some(rx) = &self.debug_cmd_rx else {
+            return false;
+        };
+        let mut cmds: Vec<(String, mpsc::Sender<String>)> = Vec::new();
+        while let Ok(pair) = rx.try_recv() {
+            cmds.push(pair);
+        }
+        let mut redraw = false;
+        for (line, reply_tx) in cmds {
+            let cmd = dbg_json_str(&line, "cmd").unwrap_or_default();
+            let resp = self.handle_debug_command(&line);
+            redraw |= debug_cmd_requests_redraw(&cmd) && resp.starts_with(r#"{"ok":true"#);
+            let _ = reply_tx.send(resp);
+        }
+        redraw
+    }
+
     fn on_event(&mut self, el: &winit::event_loop::ActiveEventLoop, event: WindowEvent) -> bool {
         // Track modifier keys (Shift, Ctrl) via the renderer
         if matches!(event, WindowEvent::ModifiersChanged(_)) {
-            self.renderer.handle_window_event(&event, None);
+            self.tabs[self.active].view.handle_window_event(&event);
         }
         match event {
             WindowEvent::CloseRequested => {
@@ -888,60 +723,17 @@ impl BrowserApp {
                     self.inspect_panel_pct = (1.0 - sx / self.width).clamp(0.15, 0.7);
                     // Re-layout page at new width
                     let pw = self.page_width();
-                    if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                        let mut eng = self.renderer.layout_engine();
-                        eng.layout_no_cascade(doc, pw);
-                    }
+                    let ch = self.content_h();
+                    self.tabs[self.active].view.resize(pw, ch);
+                    self.tabs[self.active].view.relayout();
                     return true;
                 }
                 if sy >= CHROME_H {
                     let csy = sy - CHROME_H;
-                    let w = self.width;
-                    let ch = self.content_h();
-                    if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                        if doc.process_scrollbar_event(HtmlEventType::MouseMove, sx, csy, w, ch) {
-                            return true;
-                        }
-                        // Dispatch MouseMove for hover tracking
-                        let doc_pt = (sx, csy + doc.scroll_y);
-                        doc.process_mouse_event(HtmlEventType::MouseMove, doc_pt, 0);
+                    if self.tabs[self.active].view.handle_mouse_move(sx, csy) {
+                        return true;
                     }
-                }
-                // Re-layout on hover change (applies :hover cascade for dropdown menus etc.)
-                let needs_hover_relayout = self.tabs[self.active]
-                    .doc
-                    .as_ref()
-                    .map(|d| d.hover_changed)
-                    .unwrap_or(false);
-                if needs_hover_relayout {
-                    let pw = self.page_width();
-                    let ch = self.content_h();
-                    if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                        let hb = doc.hovered_box;
-                        let tag = if hb == 0 {
-                            "null".to_string()
-                        } else {
-                            doc.get_box_by_id(hb)
-                                .map(|b| b.tag.clone())
-                                .unwrap_or("null".to_string())
-                        };
-                        eprintln!("[hover] changed → relayout, hovered={}", tag);
-                        let mut eng = self.renderer.layout_engine();
-                        eng.viewport_h = ch;
-                        // ⛔ `layout`, not `layout_no_cascade`. The incremental
-                        // hover cascade lives inside `layout` — the no-cascade
-                        // variant runs geometry only, so the hover state was
-                        // recorded, the geometry recomputed from the OLD styles,
-                        // and `:hover` never applied in the window at all. The
-                        // comment above said this applied the hover cascade; it
-                        // did the opposite.
-                        eng.layout(doc, pw);
-                    }
-                    return true;
-                }
-                // Update cursor icon based on hovered element
-                if let Some(doc) = self.tabs[self.active].doc.as_ref() {
-                    let ci = self.renderer.cursor_icon(doc);
+                    let ci = self.tabs[self.active].view.cursor_at(sx, csy);
                     if let Some(w) = &self.window {
                         use winit::window::CursorIcon;
                         let icon = match ci {
@@ -1037,7 +829,7 @@ impl BrowserApp {
                                 // Click in DOM tree — select element by line (account for scroll)
                                 let line_idx =
                                     ((panel_y + self.inspect_dom_scroll) / 16.0) as usize;
-                                if let Some(doc) = self.tabs[self.active].doc.as_ref() {
+                                if let Some(doc) = self.tabs[self.active].view.document() {
                                     let mut nodes: Vec<u32> = Vec::new();
                                     collect_dom_node_ids(&doc.root, &mut nodes, 0, 20);
                                     if line_idx < nodes.len() {
@@ -1058,51 +850,21 @@ impl BrowserApp {
                             return true;
                         }
                         let csy = sy - CHROME_H;
-                        let w = self.width;
-                        let ch = self.content_h();
-                        // Check link before scrollbar (scrollbar consumed first)
-                        let link = {
-                            if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                                doc.process_scrollbar_event(
-                                    HtmlEventType::MouseDown,
-                                    sx,
-                                    csy,
-                                    w,
-                                    ch,
-                                );
-                                if bt == 0 {
-                                    let doc_pt = (sx + doc.scroll_x, csy + doc.scroll_y);
-                                    let href = hit_test_link(&doc.root, doc_pt, 0);
-                                    if let Some(ref h) = href {
-                                        doc.visited_urls.insert(h.clone());
-                                    }
-                                    href
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        };
-                        if let Some(href) = link {
-                            if !href.is_empty() {
-                                let resolved = resolve_url(&self.tabs[self.active].url, &href);
-                                self.navigate(resolved);
-                                return true;
-                            }
-                        }
-                        // Only send mouse events to page for left-click in the page area
-                        if bt == 0 {
-                            if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                                let doc_pt = (sx + doc.scroll_x, csy + doc.scroll_y);
-                                doc.process_mouse_event(HtmlEventType::MouseDown, doc_pt, bt);
-                            }
+                        if bt == 0
+                            && self.tabs[self.active].view.handle_mouse_button(
+                                HtmlEventType::MouseDown,
+                                sx,
+                                csy,
+                                bt,
+                            )
+                        {
+                            return true;
                         }
                         // Deferred inspect setup (right-click)
                         if bt == 2 {
                             // First pass: read-only to get hit target
                             let hit_nid = {
-                                if let Some(doc) = self.tabs[self.active].doc.as_ref() {
+                                if let Some(doc) = self.tabs[self.active].view.document() {
                                     let doc_pt = (sx + doc.scroll_x, csy + doc.scroll_y);
                                     point_to_hit(&doc.root, doc_pt, 2)
                                         .map(|h| h.node_id)
@@ -1117,12 +879,7 @@ impl BrowserApp {
                                 if self.inspect_panel_pct < 0.15 {
                                     self.inspect_panel_pct = 0.35;
                                 }
-                                let pw = self.page_width();
-                                if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                                    doc.stylesheet.inspect_mode = true;
-                                    let mut eng = self.renderer.layout_engine();
-                                    eng.layout(doc, pw);
-                                }
+                                self.tabs[self.active].view.set_inspect_mode(true);
                             }
                         }
                     }
@@ -1135,20 +892,19 @@ impl BrowserApp {
                     }
                     if sy >= CHROME_H {
                         let csy = sy - CHROME_H;
-                        let w = self.width;
-                        let ch = self.content_h();
-                        if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                            let doc_pt = (sx + doc.scroll_x, csy + doc.scroll_y);
-                            doc.process_scrollbar_event(HtmlEventType::MouseUp, sx, csy, w, ch);
-                            doc.process_mouse_event(HtmlEventType::MouseUp, doc_pt, bt);
-                        }
+                        self.tabs[self.active].view.handle_mouse_button(
+                            HtmlEventType::MouseUp,
+                            sx,
+                            csy,
+                            bt,
+                        );
                     }
                     return true;
                 }
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
-                let (sx, sy) = self.mouse_pos;
+                let (_, sy) = self.mouse_pos;
                 if sy >= CHROME_H {
                     let sf = self
                         .platform
@@ -1159,10 +915,7 @@ impl BrowserApp {
                         winit::event::MouseScrollDelta::LineDelta(_, y) => -y * 40.0,
                         winit::event::MouseScrollDelta::PixelDelta(p) => -(p.y as f32) / sf,
                     };
-                    if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                        let doc_pt = (sx + doc.scroll_x, (sy - CHROME_H) + doc.scroll_y);
-                        doc.process_wheel_event(doc_pt, dy);
-                    }
+                    self.tabs[self.active].view.handle_wheel(0.0, dy);
                     return true;
                 }
                 false
@@ -1215,109 +968,57 @@ impl BrowserApp {
                         if !self.inspect_mode {
                             self.inspect_node = 0;
                         }
-                        let pw = self.page_width();
-                        if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                            doc.stylesheet.inspect_mode = self.inspect_mode;
-                            let mut eng = self.renderer.layout_engine();
-                            eng.layout(doc, pw);
-                        }
+                        self.tabs[self.active]
+                            .view
+                            .set_inspect_mode(self.inspect_mode);
                         return true;
                     }
                     Key::Named(NamedKey::Escape) if self.inspect_mode => {
                         self.inspect_mode = false;
                         self.inspect_panel_pct = 0.0;
                         self.inspect_node = 0;
+                        self.tabs[self.active].view.set_inspect_mode(false);
                         return true;
                     }
                     _ => {}
                 }
-                // Tab / Shift+Tab: focus next/prev form element
-                if matches!(&event.logical_key, Key::Named(NamedKey::Tab)) {
-                    if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                        // Shift state tracked by renderer's handle_window_event
-                        let shifted = self.renderer.is_shift_held();
-                        let moved = if shifted {
-                            doc.focus_prev()
-                        } else {
-                            doc.focus_next()
-                        };
-                        if moved {
-                            return true;
-                        }
-                    }
-                }
-                // Enter in a focused text input submits the form
-                if matches!(&event.logical_key, Key::Named(NamedKey::Enter)) {
-                    if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                        if doc.focused_box != 0 {
-                            let focused = doc.get_box_by_id(doc.focused_box);
-                            if focused.map(|f| f.tag.as_str()) == Some("input") {
-                                let t: &str = focused
-                                    .unwrap()
-                                    .attributes
-                                    .get("type")
-                                    .map(|s| s.as_str())
-                                    .unwrap_or("text");
-                                if matches!(t, "text" | "password" | "email" | "search") {
-                                    // Find parent form and submit
-                                    let action = webcore::find_parent_form_action(
-                                        &doc.root,
-                                        doc.focused_box,
-                                    );
-                                    if let Some(ref mut cb) = doc.on_form_event {
-                                        cb(&webcore::FormEvent {
-                                            tag: "form".into(),
-                                            id: String::new(),
-                                            name: String::new(),
-                                            kind: webcore::FormEventKind::Submit(action),
-                                            element: doc.focused_box,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                // Route keyboard input through the engine's key event system
-                if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                    // Extract character from the key event
-                    let ch = match &event.logical_key {
-                        Key::Character(s) => s.chars().next(),
-                        Key::Named(NamedKey::Space) => Some(' '),
-                        Key::Named(NamedKey::Tab) => Some('\t'),
-                        _ => None,
+                // Route keyboard input through the browser view. The shell
+                // translates platform keys; webcore owns focused controls.
+                let ch = match &event.logical_key {
+                    Key::Character(s) => s.chars().next(),
+                    Key::Named(NamedKey::Space) => Some(' '),
+                    Key::Named(NamedKey::Tab) => Some('\t'),
+                    _ => None,
+                };
+                let kc = match &event.logical_key {
+                    Key::Named(NamedKey::Backspace) => 8,
+                    Key::Named(NamedKey::Delete) => 46,
+                    Key::Named(NamedKey::Enter) => 13,
+                    Key::Named(NamedKey::ArrowLeft) => 37,
+                    Key::Named(NamedKey::ArrowRight) => 39,
+                    Key::Named(NamedKey::Home) => 36,
+                    Key::Named(NamedKey::End) => 35,
+                    Key::Named(NamedKey::Space) => 32,
+                    Key::Character(_) => 0,
+                    _ => 0,
+                };
+                if kc != 0 || ch.is_some() {
+                    let shifted = self.tabs[self.active].view.is_shift_held();
+                    let effective_kc = if kc != 0 {
+                        kc
+                    } else {
+                        ch.unwrap_or(' ') as u32
                     };
-                    let kc = match &event.logical_key {
-                        Key::Named(NamedKey::Backspace) => 8,
-                        Key::Named(NamedKey::Delete) => 46,
-                        Key::Named(NamedKey::Enter) => 13,
-                        Key::Named(NamedKey::ArrowLeft) => 37,
-                        Key::Named(NamedKey::ArrowRight) => 39,
-                        Key::Named(NamedKey::Home) => 36,
-                        Key::Named(NamedKey::End) => 35,
-                        Key::Named(NamedKey::Space) => 32,
-                        Key::Character(_) => 0,
-                        _ => 0,
-                    };
-                    // For character input, use key code 0 and pass char
-                    // For special keys, pass key code and no char
-                    if kc != 0 || ch.is_some() {
-                        let effective_kc = if kc != 0 {
-                            kc
-                        } else {
-                            ch.unwrap_or(' ') as u32
-                        };
-                        if doc.process_key_event(
-                            webcore::dom::HtmlEventType::KeyDown,
-                            effective_kc,
-                            ch,
-                            false,
-                            false,
-                            false,
-                            false,
-                        ) {
-                            return true;
-                        }
+                    if self.tabs[self.active].view.handle_key(
+                        webcore::dom::HtmlEventType::KeyDown,
+                        effective_kc,
+                        ch,
+                        false,
+                        shifted,
+                        false,
+                        false,
+                    ) {
+                        return true;
                     }
                 }
                 false
@@ -1991,7 +1692,7 @@ fn build_inspect_panel_html(
                 html.push_str("<div style='color:#666'>(none)</div>");
             } else {
                 let mut attrs: Vec<_> = node.attributes.iter().collect();
-                attrs.sort_by_key(|(k, _)| k.clone());
+                attrs.sort_by_key(|(k, _)| k.as_str());
                 for (k, v) in &attrs {
                     let swatch = if k.as_str() == "style" || k.contains("color") {
                         color_swatch(v)
@@ -2009,7 +1710,7 @@ fn build_inspect_panel_html(
             if !node.data.is_empty() {
                 html.push_str("<h3>Custom Data</h3>");
                 let mut data: Vec<_> = node.data.iter().collect();
-                data.sort_by_key(|(k, _)| k.clone());
+                data.sort_by_key(|(k, _)| k.as_str());
                 for (k, v) in &data {
                     html.push_str(&format!(
                         "<div class='computed-row'><span class='prop'>{}</span><span class='val'>{}</span></div>",
@@ -2089,196 +1790,11 @@ fn normalize_url(s: String) -> String {
     format!("https://duckduckgo.com/?q={query}")
 }
 
-/// Resolve a (possibly relative) `href` against a `base` URL.
-fn resolve_url(base: &str, href: &str) -> String {
-    webcore::resolve_url(href, base)
-}
-
-fn shared_client() -> &'static reqwest::blocking::Client {
-    use std::sync::OnceLock;
-    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| webcore::http_client())
-}
-
-fn shared_client_lenient() -> &'static reqwest::blocking::Client {
-    use std::sync::OnceLock;
-    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| webcore::http_client_lenient())
-}
-
-/// Fetch URL text, returning (body, final_url_after_redirects).
-/// Retries with lenient TLS on cert mismatch (shared-hosting / www subdomain).
-fn fetch_text_with_url(url: &str) -> Result<(String, String), String> {
-    let do_fetch = |client: &reqwest::blocking::Client| -> Result<(String, String), String> {
-        let resp = client
-            .get(url)
-            .header(
-                "Accept",
-                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            )
-            .header("Sec-Fetch-Dest", "document")
-            .header("Sec-Fetch-Mode", "navigate")
-            .header("Sec-Fetch-Site", "none")
-            .header("Sec-Fetch-User", "?1")
-            .header("Upgrade-Insecure-Requests", "1")
-            .send()
-            .map_err(|e| e.to_string())?;
-        let final_url = resp.url().to_string();
-        let bytes = resp.bytes().map_err(|e| e.to_string())?;
-        let body = String::from_utf8(bytes.to_vec()).unwrap_or_else(|_| {
-            let (cow, _, _) = encoding_rs::WINDOWS_1252.decode(&bytes);
-            cow.into_owned()
-        });
-        Ok((body, final_url))
-    };
-    match do_fetch(shared_client()) {
-        Ok((body, url)) if !body.is_empty() => Ok((body, url)),
-        _ => do_fetch(shared_client_lenient()),
-    }
-}
-
-fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let do_fetch = |client: &reqwest::blocking::Client| -> Result<Vec<u8>, String> {
-        let resp = client
-            .get(url)
-            .header(
-                "Accept",
-                "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-            )
-            .header("Sec-Fetch-Dest", "image")
-            .header("Sec-Fetch-Mode", "no-cors")
-            .header("Sec-Fetch-Site", "cross-site")
-            .send()
-            .map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("HTTP {}", resp.status()));
-        }
-        let bytes = resp.bytes().map_err(|e| e.to_string())?;
-        Ok(bytes.to_vec())
-    };
-    match do_fetch(shared_client()) {
-        Ok(b) if !b.is_empty() => Ok(b),
-        _ => do_fetch(shared_client_lenient()),
-    }
-}
-
-fn fetch_bytes_with_retry(url: &str) -> Result<Vec<u8>, String> {
-    for attempt in 0..3 {
-        match fetch_bytes(url) {
-            Ok(bytes) => return Ok(bytes),
-            Err(e) if e.contains("429") && attempt < 2 => {
-                std::thread::sleep(std::time::Duration::from_millis(500 * (attempt as u64 + 1)));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Err("max retries".to_string())
-}
-
-// ─── Cached fetch (shared cache with snapshot example) ───────────────────────
-
-fn url_cache_path(url: &str, cache_dir: &str) -> std::path::PathBuf {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    url.hash(&mut hasher);
-    let hash = hasher.finish();
-    let suffix: String = url
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '.')
-        .take(40)
-        .collect();
-    std::path::PathBuf::from(cache_dir).join(format!("{hash:016x}_{suffix}"))
-}
-
-fn cached_fetch_bytes(url: &str, cache_dir: &str) -> Result<Vec<u8>, String> {
-    let path = url_cache_path(url, cache_dir);
-    if let Ok(data) = std::fs::read(&path) {
-        eprintln!("[browser]   [cache] {url}");
-        return Ok(data);
-    }
-    // Legacy fallback: old resolve_url produced broken URLs like "https://./assets/..."
-    // Try looking up the old-style URL in cache to avoid re-fetching everything.
-    if let Some(scheme_end) = url.find("://") {
-        let after = &url[scheme_end + 3..];
-        if let Some(slash) = after.find('/') {
-            let old_url = format!("{}/.{}", &url[..scheme_end + 3], &after[slash..]);
-            let old_path = url_cache_path(&old_url, cache_dir);
-            if let Ok(data) = std::fs::read(&old_path) {
-                eprintln!("[browser]   [cache-migrated] {url}");
-                // Re-save under correct URL key
-                let _ = std::fs::write(&path, &data);
-                return Ok(data);
-            }
-        }
-    }
-    let data = fetch_bytes(url)?;
-    let _ = std::fs::create_dir_all(cache_dir);
-    let _ = std::fs::write(&path, &data);
-    Ok(data)
-}
-
-/// A cached document fetch that PRESERVES the redirect target.
-///
-/// ⛔ The cache is keyed by the requested URL, so the URL the response came
-/// from used to be thrown away. Everything downstream then resolved against
-/// the wrong host: relative stylesheets pointed at the old domain, which
-/// redirects them to its homepage, so the "CSS" fetched was HTML and the page
-/// rendered unstyled — and the address bar kept showing the URL that had been
-/// left behind. The final URL is recorded beside the body and read back on a
-/// hit.
-fn cached_fetch_document(url: &str, cache_dir: &str) -> Result<(String, String), String> {
-    let path = url_cache_path(url, cache_dir);
-    let url_path = format!("{}.url", path.display());
-    if let Ok(data) = std::fs::read(&path) {
-        eprintln!("[browser]   [cache] {url}");
-        let final_url = std::fs::read_to_string(&url_path)
-            .map(|s| s.trim().to_string())
-            .ok()
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| url.to_string());
-        return Ok((decode_body(data), final_url));
-    }
-    let (body, final_url) = fetch_text_with_url(url)?;
-    let _ = std::fs::create_dir_all(cache_dir);
-    let _ = std::fs::write(&path, body.as_bytes());
-    if final_url != url {
-        let _ = std::fs::write(&url_path, final_url.as_bytes());
-    }
-    Ok((body, final_url))
-}
-
-/// Decode a cached body, falling back to windows-1252 like the network path.
-fn decode_body(bytes: Vec<u8>) -> String {
-    String::from_utf8(bytes.clone()).unwrap_or_else(|_| {
-        let (cow, _, _) = encoding_rs::WINDOWS_1252.decode(&bytes);
-        cow.into_owned()
-    })
-}
-
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
-}
-
-fn error_page(url: &str, err: &str) -> String {
-    format!(
-        r#"<!DOCTYPE html><html><head><style>
-body{{font-family:-apple-system,sans-serif;background:#1a1b1e;color:#f2f3f5;
-     display:flex;flex-direction:column;align-items:center;justify-content:center;
-     min-height:100vh;margin:0;gap:12px}}
-h2{{color:#ed4245;font-size:28px;font-weight:500}}
-.url{{color:#5865f2;font-size:15px}}
-.err{{color:#949ba4;font-size:13px;max-width:480px;text-align:center}}
-</style></head><body>
-<h2>Cannot load page</h2>
-<div class="url">{}</div>
-<div class="err">{}</div>
-</body></html>"#,
-        escape_html(url),
-        escape_html(err)
-    )
 }
 
 // ─── Remote debug server ──────────────────────────────────────────────────────
@@ -2618,6 +2134,8 @@ fn dbg_computed_json(node: &webcore::WebCore) -> String {
     };
     let c = s.color;
     let color_hex = format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b);
+    let oc = s.outline_color;
+    let outline_color_hex = format!("#{:02x}{:02x}{:02x}{:02x}", oc.r, oc.g, oc.b, oc.a);
     let mut buf = String::with_capacity(2048);
     let _ = write!(
         buf,
@@ -2681,15 +2199,25 @@ fn dbg_computed_json(node: &webcore::WebCore) -> String {
     );
     let _ = write!(
         buf,
-        r#","text_align":{},"vertical_align":{}"#,
+        r#","text_align":{},"vertical_align":{},"direction":{},"writing_mode":{}"#,
         dbg_json_escape(&format!("{:?}", s.text_align)),
-        dbg_json_escape(&format!("{:?}", s.vertical_align))
+        dbg_json_escape(&format!("{:?}", s.vertical_align)),
+        dbg_json_escape(&format!("{:?}", s.direction)),
+        dbg_json_escape(&format!("{:?}", s.writing_mode))
     );
     let _ = write!(
         buf,
         r#","color":{},"background":{}"#,
         dbg_json_escape(&color_hex),
         dbg_json_escape(&bg_str)
+    );
+    let _ = write!(
+        buf,
+        r#","outline":{{"width":{:.1},"style":{},"offset":{:.1},"color":{}}}"#,
+        s.outline_width,
+        dbg_json_escape(&format!("{:?}", s.outline_style)),
+        s.outline_offset,
+        dbg_json_escape(&outline_color_hex)
     );
     let _ = write!(
         buf,
@@ -2745,6 +2273,81 @@ fn dbg_computed_json(node: &webcore::WebCore) -> String {
         node.layout.line_cache.len()
     );
     buf
+}
+
+fn dbg_height_dump_json(root: &webcore::WebCore, limit: usize) -> String {
+    let mut rows: Vec<(f32, String)> = Vec::new();
+    fn walk(node: &webcore::WebCore, ancestors: &mut Vec<String>, rows: &mut Vec<(f32, String)>) {
+        if matches!(node.style.display, webcore::types::Display::None) {
+            return;
+        }
+        let mr = node.layout.margin_rect;
+        let cr = node.layout.content_rect;
+        let bottom = mr.y + mr.h;
+        if bottom <= 0.0 {
+            return;
+        }
+        let id = node.attributes.get("id").map(|v| v.as_str()).unwrap_or("");
+        let cls = node
+            .attributes
+            .get("class")
+            .map(|v| v.as_str())
+            .unwrap_or("");
+        let ancestor_json = ancestors
+            .iter()
+            .rev()
+            .take(8)
+            .rev()
+            .map(|tag| dbg_json_escape(tag))
+            .collect::<Vec<_>>()
+            .join(",");
+        rows.push((
+            bottom,
+            format!(
+                r#"{{"node_id":{},"tag":{},"id":{},"class":{},"ancestors":[{}],"display":{},"position":{},"overflow_y":{},"visibility":{},"content":[{:.1},{:.1},{:.1},{:.1}],"margin":[{:.1},{:.1},{:.1},{:.1}],"bottom":{:.1}}}"#,
+                node.node_id,
+                dbg_json_escape(&node.tag),
+                dbg_json_escape(id),
+                dbg_json_escape(cls),
+                ancestor_json,
+                dbg_json_escape(&format!("{:?}", node.style.display)),
+                dbg_json_escape(&format!("{:?}", node.style.position)),
+                dbg_json_escape(&format!("{:?}", node.style.overflow_y)),
+                dbg_json_escape(&format!("{:?}", node.style.visibility)),
+                cr.x,
+                cr.y,
+                cr.w,
+                cr.h,
+                mr.x,
+                mr.y,
+                mr.w,
+                mr.h,
+                bottom
+            ),
+        ));
+        ancestors.push(node.tag.clone());
+        for child in &node.children {
+            walk(child, ancestors, rows);
+        }
+        if let Some(shadow) = node.shadow_root.as_ref() {
+            ancestors.push("#shadow-root".to_string());
+            for child in &shadow.children {
+                walk(child, ancestors, rows);
+            }
+            ancestors.pop();
+        }
+        ancestors.pop();
+    }
+    walk(root, &mut Vec::new(), &mut rows);
+    rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    rows.truncate(limit.max(1));
+    let elements = rows.into_iter().map(|(_, json)| json).collect::<Vec<_>>();
+    format!(
+        r#"{{"ok":true,"count":{},"scroll_height":{:.1},"elements":[{}]}}"#,
+        elements.len(),
+        Document::scroll_height(root),
+        elements.join(",")
+    )
 }
 
 fn dbg_dump_box(depth: usize, node: &webcore::WebCore, buf: &mut String) {
@@ -2854,6 +2457,11 @@ impl BrowserApp {
         let t0 = std::time::Instant::now();
         let cmd = dbg_json_str(line, "cmd").unwrap_or_default();
         let result = self.dispatch_debug_cmd(&cmd, line);
+        if debug_cmd_requests_redraw(&cmd) && result.starts_with(r#"{"ok":true"#) {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
         let cmd_ms = t0.elapsed().as_micros() as f64 / 1000.0;
         if result.starts_with(r#"{"ok":true"#) && cmd != "perf" {
             let insert_pos = result.len() - 1;
@@ -2873,17 +2481,19 @@ impl BrowserApp {
                 let scale = dbg_json_num(line, "scale")
                     .map(|v| v.clamp(0.25, 4.0) as f32)
                     .unwrap_or(1.0);
-                // Compute dimensions first (before mutable borrow of doc)
-                let phys_w = ((self.width as f32) * scale).ceil() as u32;
-                let ch = ((self.content_h() as f32) * scale).ceil() as u32;
-                let Some(doc) = self.tabs[self.active].doc.as_mut() else {
+                let view_w = self.width;
+                let view_h = self.content_h();
+                let phys_w = ((view_w as f32) * scale).ceil() as u32;
+                let ch = ((view_h as f32) * scale).ceil() as u32;
+                if self.tabs[self.active].view.document().is_none() {
                     return r#"{"ok":false,"error":"no document loaded"}"#.to_string();
-                };
+                }
                 let Some(mut pm) = tiny_skia::Pixmap::new(phys_w.max(1), ch.max(1)) else {
                     return r#"{"ok":false,"error":"pixmap alloc failed"}"#.to_string();
                 };
                 pm.fill(tiny_skia::Color::WHITE);
-                self.renderer.render(doc, &mut pm, scale);
+                self.tabs[self.active].view.resize(view_w, view_h);
+                self.tabs[self.active].view.paint_into(&mut pm, 0, 0, scale);
                 match pm.save_png(&path) {
                     Ok(_) => format!(
                         r#"{{"ok":true,"path":{},"width":{},"height":{},"scale":{}}}"#,
@@ -2950,21 +2560,24 @@ impl BrowserApp {
             }
             // ── Scroll ───────────────────────────────────────────────────────
             "scroll" => {
-                if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                    if let Some(dy) = dbg_json_num(line, "dy") {
-                        doc.scroll_y = (doc.scroll_y + dy).max(0.0);
-                    } else if let Some(y) = dbg_json_num(line, "y") {
-                        doc.scroll_y = y.max(0.0);
-                    }
-                    format!(r#"{{"ok":true,"scroll_y":{:.0}}}"#, doc.scroll_y)
-                } else {
+                if self.tabs[self.active].view.document().is_none() {
                     r#"{"ok":false,"error":"no document"}"#.to_string()
+                } else {
+                    if let Some(dy) = dbg_json_num(line, "dy") {
+                        self.tabs[self.active].view.scroll_by(0.0, dy);
+                    } else if let Some(y) = dbg_json_num(line, "y") {
+                        self.tabs[self.active].view.scroll_to(0.0, y);
+                    }
+                    format!(
+                        r#"{{"ok":true,"scroll_y":{:.0}}}"#,
+                        self.tabs[self.active].view.scroll_y()
+                    )
                 }
             }
             // ── Click ────────────────────────────────────────────────────────
             "click" => {
                 let coords = if let Some(sel) = dbg_json_str(line, "selector") {
-                    let doc = self.tabs[self.active].doc.as_ref();
+                    let doc = self.tabs[self.active].view.document();
                     doc.and_then(|d| dbg_selector_center(d, &sel))
                         .ok_or_else(|| {
                             format!(
@@ -2983,18 +2596,24 @@ impl BrowserApp {
                     Ok(c) => c,
                     Err(e) => return e,
                 };
-                if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                    let pt = (x, y + doc.scroll_y);
-                    doc.process_mouse_event(webcore::dom::HtmlEventType::MouseDown, pt, 0);
-                    doc.process_mouse_event(webcore::dom::HtmlEventType::MouseUp, pt, 0);
-                }
-                self.relayout_active();
+                self.tabs[self.active].view.handle_mouse_button(
+                    webcore::dom::HtmlEventType::MouseDown,
+                    x,
+                    y,
+                    0,
+                );
+                self.tabs[self.active].view.handle_mouse_button(
+                    webcore::dom::HtmlEventType::MouseUp,
+                    x,
+                    y,
+                    0,
+                );
                 format!(r#"{{"ok":true,"x":{:.0},"y":{:.0}}}"#, x, y)
             }
             // ── Hover ────────────────────────────────────────────────────────
             "hover" => {
                 let coords = if let Some(sel) = dbg_json_str(line, "selector") {
-                    let doc = self.tabs[self.active].doc.as_ref();
+                    let doc = self.tabs[self.active].view.document();
                     doc.and_then(|d| dbg_selector_center(d, &sel))
                         .ok_or_else(|| {
                             format!(
@@ -3013,39 +2632,27 @@ impl BrowserApp {
                     Ok(c) => c,
                     Err(e) => return e,
                 };
-                let changed = if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                    let pt = (x, y + doc.scroll_y);
-                    doc.process_mouse_event(webcore::dom::HtmlEventType::MouseMove, pt, 0)
-                } else {
-                    false
-                };
-                if changed {
-                    self.relayout_active();
-                }
+                let changed = self.tabs[self.active].view.handle_mouse_move(x, y);
                 format!(r#"{{"ok":true,"changed":{}}}"#, changed)
             }
             // ── Type / Key ───────────────────────────────────────────────────
             "type" => match dbg_json_str(line, "text") {
                 Some(text) => {
                     let mut any = false;
-                    if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                        for ch in text.chars() {
-                            if doc.process_key_event(
-                                webcore::dom::HtmlEventType::KeyDown,
-                                ch as u32,
-                                Some(ch),
-                                false,
-                                false,
-                                false,
-                                false,
-                            ) {
-                                any = true;
-                            }
+                    for ch in text.chars() {
+                        if self.tabs[self.active].view.handle_key(
+                            webcore::dom::HtmlEventType::KeyDown,
+                            ch as u32,
+                            Some(ch),
+                            false,
+                            false,
+                            false,
+                            false,
+                        ) {
+                            any = true;
                         }
                     }
-                    if any {
-                        self.relayout_active();
-                    }
+                    if any {}
                     format!(r#"{{"ok":true,"typed":{}}}"#, any)
                 }
                 None => r#"{"ok":false,"error":"type needs text"}"#.to_string(),
@@ -3070,25 +2677,19 @@ impl BrowserApp {
                             return format!(
                                 r#"{{"ok":false,"error":"unknown key: {}"}}"#,
                                 dbg_json_escape(&k)
-                            )
+                            );
                         }
                     };
-                    let changed = if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                        doc.process_key_event(
-                            webcore::dom::HtmlEventType::KeyDown,
-                            code,
-                            ch,
-                            false,
-                            false,
-                            false,
-                            false,
-                        )
-                    } else {
-                        false
-                    };
-                    if changed {
-                        self.relayout_active();
-                    }
+                    let changed = self.tabs[self.active].view.handle_key(
+                        webcore::dom::HtmlEventType::KeyDown,
+                        code,
+                        ch,
+                        false,
+                        false,
+                        false,
+                        false,
+                    );
+                    if changed {}
                     format!(r#"{{"ok":true,"changed":{}}}"#, changed)
                 }
                 None => r#"{"ok":false,"error":"key needs key name"}"#.to_string(),
@@ -3097,7 +2698,7 @@ impl BrowserApp {
             "find" => match dbg_json_str(line, "selector") {
                 Some(sel) => {
                     let mut results = Vec::new();
-                    if let Some(doc) = self.tabs[self.active].doc.as_ref() {
+                    if let Some(doc) = self.tabs[self.active].view.document() {
                         Document::walk_all(&doc.root, &mut |node| {
                             if dbg_matches_query(doc, node, &sel) {
                                 let id =
@@ -3125,7 +2726,7 @@ impl BrowserApp {
             "text" => match dbg_json_str(line, "selector") {
                 Some(sel) => {
                     let mut texts = Vec::new();
-                    if let Some(doc) = self.tabs[self.active].doc.as_ref() {
+                    if let Some(doc) = self.tabs[self.active].view.document() {
                         Document::walk_all(&doc.root, &mut |node| {
                             if dbg_matches_query(doc, node, &sel) {
                                 let mut t = String::new();
@@ -3145,7 +2746,7 @@ impl BrowserApp {
             "attr" => match (dbg_json_str(line, "selector"), dbg_json_str(line, "name")) {
                 (Some(sel), Some(name)) => {
                     let mut values = Vec::new();
-                    if let Some(doc) = self.tabs[self.active].doc.as_ref() {
+                    if let Some(doc) = self.tabs[self.active].view.document() {
                         Document::walk_all(&doc.root, &mut |node| {
                             if dbg_matches_query(doc, node, &sel) {
                                 if let Some(v) = node.attributes.get(&name) {
@@ -3165,7 +2766,7 @@ impl BrowserApp {
             "html" => match dbg_json_str(line, "selector") {
                 Some(sel) => {
                     let mut results = Vec::new();
-                    if let Some(doc) = self.tabs[self.active].doc.as_ref() {
+                    if let Some(doc) = self.tabs[self.active].view.document() {
                         Document::walk_all(&doc.root, &mut |node| {
                             if dbg_matches_query(doc, node, &sel) {
                                 let mut buf = String::new();
@@ -3186,7 +2787,7 @@ impl BrowserApp {
             "inspect" => match dbg_json_str(line, "selector") {
                 Some(sel) => {
                     let mut parts = Vec::new();
-                    if let Some(doc) = self.tabs[self.active].doc.as_ref() {
+                    if let Some(doc) = self.tabs[self.active].view.document() {
                         Document::walk_all(&doc.root, &mut |node| {
                             if dbg_matches_query(doc, node, &sel) {
                                 parts.push(dbg_inspect_json(node));
@@ -3202,7 +2803,7 @@ impl BrowserApp {
                 None => r#"{"ok":false,"error":"inspect needs selector"}"#.to_string(),
             },
             "svg-metrics" => {
-                if let Some(doc) = self.tabs[self.active].doc.as_ref() {
+                if let Some(doc) = self.tabs[self.active].view.document() {
                     format!(r#"{{"ok":true,"svg":{}}}"#, dbg_svg_metrics_json(&doc.root))
                 } else {
                     r#"{"ok":false,"error":"no document"}"#.to_string()
@@ -3211,7 +2812,7 @@ impl BrowserApp {
             "computed" => match dbg_json_str(line, "selector") {
                 Some(sel) => {
                     let mut parts = Vec::new();
-                    if let Some(doc) = self.tabs[self.active].doc.as_ref() {
+                    if let Some(doc) = self.tabs[self.active].view.document() {
                         Document::walk_all(&doc.root, &mut |node| {
                             if dbg_matches_query(doc, node, &sel) {
                                 parts.push(dbg_computed_json(node));
@@ -3226,6 +2827,14 @@ impl BrowserApp {
                 }
                 None => r#"{"ok":false,"error":"computed needs selector"}"#.to_string(),
             },
+            "height-dump" => {
+                let limit = dbg_json_num(line, "limit").unwrap_or(40.0).max(1.0) as usize;
+                if let Some(doc) = self.tabs[self.active].view.document() {
+                    dbg_height_dump_json(&doc.root, limit)
+                } else {
+                    r#"{"ok":false,"error":"no document"}"#.to_string()
+                }
+            }
             "inspect-mode" => {
                 let on = dbg_json_str(line, "on")
                     .map(|v| !matches!(v.as_str(), "false" | "0"))
@@ -3241,13 +2850,55 @@ impl BrowserApp {
                 if !on {
                     self.inspect_node = 0;
                 }
-                if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                    doc.style_dirty = true;
-                    doc.stylesheet.inspect_mode = on;
-                    let mut eng = self.renderer.layout_engine();
-                    eng.layout(doc, pw);
-                }
+                let _ = pw;
+                self.tabs[self.active].view.set_inspect_mode(on);
                 format!(r#"{{"ok":true,"inspect_mode":{}}}"#, on)
+            }
+            "display-list-stats" => {
+                if let Some(doc) = self.tabs[self.active].view.document() {
+                    let view_h = self.content_h();
+                    let overscan = (view_h * 1.5).max(1200.0);
+                    let paint_top = (doc.scroll_y - overscan).max(0.0);
+                    let paint_bottom = doc.scroll_y + view_h + overscan;
+                    let list = build_display_list_viewport(
+                        &doc.root,
+                        self.width,
+                        view_h,
+                        doc.scroll_x,
+                        doc.scroll_y,
+                        paint_top,
+                        paint_bottom,
+                        0,
+                        0,
+                        &std::collections::HashSet::new(),
+                        &doc.base_url,
+                    );
+                    display_list_stats_json(&list, Some((paint_top, paint_bottom)))
+                } else {
+                    r#"{"ok":false,"error":"no document"}"#.to_string()
+                }
+            }
+            "animated-images" => {
+                if let Some(doc) = self.tabs[self.active].view.document() {
+                    animated_images_json(doc, self.content_h())
+                } else {
+                    r#"{"ok":false,"error":"no document"}"#.to_string()
+                }
+            }
+            "image-states" => {
+                if let Some(doc) = self.tabs[self.active].view.document() {
+                    let limit = dbg_json_num(line, "limit").unwrap_or(80.0).max(1.0) as usize;
+                    image_states_json(doc, limit)
+                } else {
+                    r#"{"ok":false,"error":"no document"}"#.to_string()
+                }
+            }
+            "animations" => {
+                if let Some(doc) = self.tabs[self.active].view.document() {
+                    animations_json(doc, self.content_h())
+                } else {
+                    r#"{"ok":false,"error":"no document"}"#.to_string()
+                }
             }
             "paint-dump" => {
                 let x = dbg_json_num(line, "x").unwrap_or(0.0);
@@ -3258,7 +2909,7 @@ impl BrowserApp {
                 let qx2 = x + w.max(0.0);
                 let qy2 = y + h.max(0.0);
                 let mut out = Vec::new();
-                if let Some(doc) = self.tabs[self.active].doc.as_ref() {
+                if let Some(doc) = self.tabs[self.active].view.document() {
                     let list = build_display_list_full(
                         &doc.root,
                         self.width,
@@ -3293,6 +2944,56 @@ impl BrowserApp {
                                         color.r, color.g, color.b, color.a,
                                         radius[0], radius[1], radius[2], radius[3],
                                         radius_y[0], radius_y[1], radius_y[2], radius_y[3]
+                                    ));
+                                }
+                            }
+                            PaintCmd::Border {
+                                rect,
+                                widths,
+                                colors,
+                                styles,
+                                ..
+                            } => {
+                                if rect.x <= qx2
+                                    && rect.right() >= x
+                                    && rect.y <= qy2
+                                    && rect.bottom() >= y
+                                    && widths.iter().any(|w| *w > 0.0)
+                                {
+                                    out.push(format!(
+                                        r##"{{"kind":"border","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"widths":[{:.1},{:.1},{:.1},{:.1}],"colors":["#{:02x}{:02x}{:02x}{:02x}","#{:02x}{:02x}{:02x}{:02x}","#{:02x}{:02x}{:02x}{:02x}","#{:02x}{:02x}{:02x}{:02x}"],"styles":[{},{},{},{}]}}"##,
+                                        rect.x, rect.y, rect.w, rect.h,
+                                        widths[0], widths[1], widths[2], widths[3],
+                                        colors[0].r, colors[0].g, colors[0].b, colors[0].a,
+                                        colors[1].r, colors[1].g, colors[1].b, colors[1].a,
+                                        colors[2].r, colors[2].g, colors[2].b, colors[2].a,
+                                        colors[3].r, colors[3].g, colors[3].b, colors[3].a,
+                                        styles[0], styles[1], styles[2], styles[3]
+                                    ));
+                                }
+                            }
+                            PaintCmd::Outline {
+                                rect,
+                                width,
+                                color,
+                                style,
+                                offset,
+                                ..
+                            } => {
+                                if rect.x <= qx2
+                                    && rect.right() >= x
+                                    && rect.y <= qy2
+                                    && rect.bottom() >= y
+                                    && *width > 0.0
+                                    && color.a > 0
+                                {
+                                    out.push(format!(
+                                        r##"{{"kind":"outline","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"width":{:.1},"color":"#{:02x}{:02x}{:02x}{:02x}","style":{},"offset":{:.1}}}"##,
+                                        rect.x, rect.y, rect.w, rect.h,
+                                        width,
+                                        color.r, color.g, color.b, color.a,
+                                        style,
+                                        offset
                                     ));
                                 }
                             }
@@ -3360,6 +3061,81 @@ impl BrowserApp {
                                     ));
                                 }
                             }
+                            PaintCmd::BackgroundImage {
+                                container,
+                                clip,
+                                draw_w,
+                                draw_h,
+                                pos_x,
+                                pos_y,
+                                ..
+                            } => {
+                                if clip.x <= qx2
+                                    && clip.right() >= x
+                                    && clip.y <= qy2
+                                    && clip.bottom() >= y
+                                {
+                                    out.push(format!(
+                                        r#"{{"kind":"background-image","container":[{:.1},{:.1},{:.1},{:.1}],"clip":[{:.1},{:.1},{:.1},{:.1}],"draw_w":{:.1},"draw_h":{:.1},"pos_x":{:.1},"pos_y":{:.1}}}"#,
+                                        container.x, container.y, container.w, container.h,
+                                        clip.x, clip.y, clip.w, clip.h,
+                                        draw_w, draw_h, pos_x, pos_y
+                                    ));
+                                }
+                            }
+                            PaintCmd::Gradient {
+                                rect,
+                                clip,
+                                gradient_type,
+                                angle,
+                                stops,
+                                ..
+                            } => {
+                                if clip.x <= qx2
+                                    && clip.right() >= x
+                                    && clip.y <= qy2
+                                    && clip.bottom() >= y
+                                {
+                                    out.push(format!(
+                                        r#"{{"kind":"gradient","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"clip":[{:.1},{:.1},{:.1},{:.1}],"gradient_type":{},"angle":{:.1},"stops":{}}}"#,
+                                        rect.x, rect.y, rect.w, rect.h,
+                                        clip.x, clip.y, clip.w, clip.h,
+                                        gradient_type, angle, stops.len()
+                                    ));
+                                }
+                            }
+                            PaintCmd::BoxShadow {
+                                rect,
+                                color,
+                                offset_x,
+                                offset_y,
+                                blur,
+                                spread,
+                                inset,
+                                ..
+                            } => {
+                                let sx = rect.x + offset_x - spread - blur * 4.0;
+                                let sy = rect.y + offset_y - spread - blur * 4.0;
+                                let sw = rect.w + spread * 2.0 + blur * 8.0;
+                                let sh = rect.h + spread * 2.0 + blur * 8.0;
+                                if sx <= qx2 && sx + sw >= x && sy <= qy2 && sy + sh >= y {
+                                    out.push(format!(
+                                        r##"{{"kind":"box-shadow","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"color":"#{:02x}{:02x}{:02x}{:02x}","offset_x":{:.1},"offset_y":{:.1},"blur":{:.1},"spread":{:.1},"inset":{}}}"##,
+                                        rect.x, rect.y, rect.w, rect.h,
+                                        color.r, color.g, color.b, color.a,
+                                        offset_x, offset_y, blur, spread, inset
+                                    ));
+                                }
+                            }
+                            PaintCmd::BeginStackingContext { node_id, z_index } => {
+                                out.push(format!(
+                                    r#"{{"kind":"begin-stacking-context","node_id":{},"z_index":{}}}"#,
+                                    node_id, z_index
+                                ));
+                            }
+                            PaintCmd::EndStackingContext => {
+                                out.push(r#"{"kind":"end-stacking-context"}"#.to_string());
+                            }
                             PaintCmd::PushClip {
                                 rect,
                                 radius,
@@ -3375,6 +3151,53 @@ impl BrowserApp {
                                         rect.x, rect.y, rect.w, rect.h,
                                         radius[0], radius[1], radius[2], radius[3],
                                         radius_y[0], radius_y[1], radius_y[2], radius_y[3]
+                                    ));
+                                }
+                            }
+                            PaintCmd::PushClipPath { points } => {
+                                out.push(format!(
+                                    r#"{{"kind":"push-clip-path","points":{}}}"#,
+                                    points.len()
+                                ));
+                            }
+                            PaintCmd::PushTransform { node_id, transform } => {
+                                out.push(format!(
+                                    r#"{{"kind":"push-transform","node_id":{},"matrix":[{:.4},{:.4},{:.4},{:.4},{:.1},{:.1}]}}"#,
+                                    node_id,
+                                    transform[0], transform[1], transform[2], transform[3],
+                                    transform[4], transform[5]
+                                ));
+                            }
+                            PaintCmd::PopTransform => {
+                                out.push(r#"{"kind":"pop-transform"}"#.to_string());
+                            }
+                            PaintCmd::PushOpacity { alpha } => {
+                                out.push(format!(
+                                    r#"{{"kind":"push-opacity","alpha":{:.3}}}"#,
+                                    alpha
+                                ));
+                            }
+                            PaintCmd::PopOpacity => {
+                                out.push(r#"{"kind":"pop-opacity"}"#.to_string());
+                            }
+                            PaintCmd::PushFilter { filters } => {
+                                out.push(format!(
+                                    r#"{{"kind":"push-filter","filters":{}}}"#,
+                                    filters.len()
+                                ));
+                            }
+                            PaintCmd::PopFilter => {
+                                out.push(r#"{"kind":"pop-filter"}"#.to_string());
+                            }
+                            PaintCmd::BackdropFilter { rect, filters } => {
+                                if rect.x <= qx2
+                                    && rect.right() >= x
+                                    && rect.y <= qy2
+                                    && rect.bottom() >= y
+                                {
+                                    out.push(format!(
+                                        r#"{{"kind":"backdrop-filter","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"filters":{}}}"#,
+                                        rect.x, rect.y, rect.w, rect.h, filters.len()
                                     ));
                                 }
                             }
@@ -3398,6 +3221,15 @@ impl BrowserApp {
                             PaintCmd::PopMask => {
                                 out.push(r#"{"kind":"pop-mask"}"#.to_string());
                             }
+                            PaintCmd::PushBlendMode { mode } => {
+                                out.push(format!(
+                                    r#"{{"kind":"push-blend-mode","mode":{}}}"#,
+                                    mode
+                                ));
+                            }
+                            PaintCmd::PopBlendMode => {
+                                out.push(r#"{"kind":"pop-blend-mode"}"#.to_string());
+                            }
                             PaintCmd::PopClip => {
                                 // Standalone pop clips are technically in the global display list,
                                 // but in a filtered dump they hide the commands we are trying to
@@ -3417,7 +3249,7 @@ impl BrowserApp {
                 let query = dbg_json_str(line, "query").unwrap_or_default();
                 let limit = dbg_json_num(line, "limit").unwrap_or(20.0).max(1.0) as usize;
                 let mut matches = Vec::new();
-                if let Some(doc) = self.tabs[self.active].doc.as_ref() {
+                if let Some(doc) = self.tabs[self.active].view.document() {
                     for rule in &doc.stylesheet.rules {
                         if matches.len() >= limit {
                             break;
@@ -3451,10 +3283,55 @@ impl BrowserApp {
                     matches.join(",")
                 )
             }
+            "keyframes" => {
+                let query = dbg_json_str(line, "query").unwrap_or_default();
+                let limit = dbg_json_num(line, "limit").unwrap_or(20.0).max(1.0) as usize;
+                let mut matches = Vec::new();
+                if let Some(doc) = self.tabs[self.active].view.document() {
+                    for (name, stops) in &doc.stylesheet.keyframes {
+                        if matches.len() >= limit {
+                            break;
+                        }
+                        if !query.is_empty() && !name.contains(&query) {
+                            continue;
+                        }
+                        let stop_json: Vec<String> = stops
+                            .iter()
+                            .map(|stop| {
+                                let props: Vec<String> = stop
+                                    .properties
+                                    .iter()
+                                    .map(|(k, v)| {
+                                        format!("{}:{}", dbg_json_escape(k), dbg_json_escape(v))
+                                    })
+                                    .collect();
+                                format!(
+                                    r#"{{"offset":{:.6},"properties":{{{}}}}}"#,
+                                    stop.offset,
+                                    props.join(",")
+                                )
+                            })
+                            .collect();
+                        matches.push(format!(
+                            r#"{{"name":{},"stops":[{}]}}"#,
+                            dbg_json_escape(name),
+                            stop_json.join(",")
+                        ));
+                    }
+                } else {
+                    return r#"{"ok":false,"error":"no document"}"#.to_string();
+                }
+                format!(
+                    r#"{{"ok":true,"query":{},"count":{},"keyframes":[{}]}}"#,
+                    dbg_json_escape(&query),
+                    matches.len(),
+                    matches.join(",")
+                )
+            }
             "rules" | "matched-rules" => match dbg_json_str(line, "selector") {
                 Some(sel) => {
                     let mut results = Vec::new();
-                    if let Some(doc) = self.tabs[self.active].doc.as_ref() {
+                    if let Some(doc) = self.tabs[self.active].view.document() {
                         Document::walk_all(&doc.root, &mut |node| {
                             if dbg_matches_query(doc, node, &sel) {
                                 let rules: Vec<String> = node.matched_rules.iter().map(|r| {
@@ -3501,7 +3378,7 @@ impl BrowserApp {
                 ) {
                     (Some(sel), Some(prop), Some(val)) => {
                         let mut count = 0usize;
-                        if let Some(doc) = self.tabs[self.active].doc.as_mut() {
+                        if let Some(doc) = self.tabs[self.active].view.document_mut() {
                             // Resolved against the PRE-mutation tree: a mutating
                             // walk cannot hold the immutable borrow the engine's
                             // matcher needs, and matching what the selector named
@@ -3537,7 +3414,7 @@ impl BrowserApp {
                 ) {
                     (Some(sel), Some(name), Some(val)) => {
                         let mut count = 0usize;
-                        if let Some(doc) = self.tabs[self.active].doc.as_mut() {
+                        if let Some(doc) = self.tabs[self.active].view.document_mut() {
                             let hits = dbg_query_ids(doc, &sel);
                             Document::walk_all_mut(&mut doc.root, &mut |node| {
                                 if hits.contains(&node.node_id) {
@@ -3560,7 +3437,7 @@ impl BrowserApp {
             "tree" => {
                 let sel = dbg_json_str(line, "selector");
                 let mut buf = String::new();
-                if let Some(doc) = self.tabs[self.active].doc.as_ref() {
+                if let Some(doc) = self.tabs[self.active].view.document() {
                     match sel.as_deref() {
                         Some(sel) => Document::walk_all(&doc.root, &mut |node| {
                             if dbg_matches_query(doc, node, sel) {
@@ -3580,15 +3457,18 @@ impl BrowserApp {
                     let scale = dbg_json_num(line, "scale")
                         .map(|v| v.clamp(0.25, 4.0) as f32)
                         .unwrap_or(1.0);
-                    let phys_w = ((self.width as f32) * scale).ceil() as u32;
-                    let ch = ((self.content_h() as f32) * scale).ceil() as u32;
+                    let view_w = self.width;
+                    let view_h = self.content_h();
+                    let phys_w = ((view_w as f32) * scale).ceil() as u32;
+                    let ch = ((view_h as f32) * scale).ceil() as u32;
                     let Some(mut pm) = tiny_skia::Pixmap::new(phys_w.max(1), ch.max(1)) else {
                         return r#"{"ok":false,"error":"pixmap alloc failed"}"#.to_string();
                     };
                     pm.fill(tiny_skia::Color::WHITE);
                     let mut count = 0usize;
-                    if let Some(doc) = self.tabs[self.active].doc.as_mut() {
-                        self.renderer.render(doc, &mut pm, scale);
+                    self.tabs[self.active].view.resize(view_w, view_h);
+                    self.tabs[self.active].view.paint_into(&mut pm, 0, 0, scale);
+                    if let Some(doc) = self.tabs[self.active].view.document() {
                         Document::walk_all(&doc.root, &mut |node| {
                             if dbg_matches_query(doc, node, &sel) {
                                 webcore::draw_inspect_overlay(node, &mut pm, 0.0, 0.0, scale);
@@ -3621,8 +3501,25 @@ impl BrowserApp {
                     self.tabs.len()
                 )
             }
+            "resource-states" => {
+                let Some(doc) = self.tabs[self.active].view.document() else {
+                    return r#"{"ok":false,"error":"no document"}"#.to_string();
+                };
+                format!(
+                    r#"{{"ok":true,"loading":{},"pending_css":{},"pending_images":{},"images_in_flight":{},"css_rules":{},"linked_stylesheets":{},"loaded_stylesheet_slots":{},"doc_height":{:.0}}}"#,
+                    self.tabs[self.active].loading,
+                    doc.pending_stylesheets.is_some(),
+                    doc.pending_images.is_some(),
+                    doc.images_in_flight
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                    doc.stylesheet.rules.len(),
+                    doc.linked_stylesheets.len(),
+                    doc.loaded_stylesheet_slots.len(),
+                    webcore::Document::scroll_height(&doc.root),
+                )
+            }
             "deep" => {
-                let Some(doc) = self.tabs[self.active].doc.as_ref() else {
+                let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
@@ -3661,7 +3558,7 @@ impl BrowserApp {
                 )
             }
             "css" => {
-                let Some(doc) = self.tabs[self.active].doc.as_ref() else {
+                let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
@@ -3729,7 +3626,7 @@ impl BrowserApp {
                 }
                 // Second pass for the properties the fast match did not know.
                 if !fallbacks.is_empty() {
-                    if let Some(doc) = self.tabs[self.active].doc.as_mut() {
+                    if let Some(doc) = self.tabs[self.active].view.document_mut() {
                         for (ni, prop) in fallbacks {
                             let Some(&nid) = ids.get(ni) else { continue };
                             let val = doc.computed_style_property(nid, &prop);
@@ -3748,13 +3645,13 @@ impl BrowserApp {
             "bench" => {
                 let n = dbg_json_num(line, "n").unwrap_or(1.0) as u32;
                 let n = n.max(1).min(100);
-                let Some(doc) = self.tabs[self.active].doc.as_mut() else {
+                if self.tabs[self.active].view.document().is_none() {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
-                };
+                }
                 let mut layout_times = Vec::new();
                 for _ in 0..n {
                     let t = std::time::Instant::now();
-                    self.renderer.layout_engine().layout(doc, self.width);
+                    self.tabs[self.active].view.relayout();
                     layout_times.push(t.elapsed().as_micros() as f64 / 1000.0);
                 }
                 let avg = layout_times.iter().sum::<f64>() / layout_times.len() as f64;
@@ -3765,7 +3662,7 @@ impl BrowserApp {
             }
             // ── DOM mutation commands ─────────────────────────────────────
             "set-text" => {
-                let Some(doc) = self.tabs[self.active].doc.as_mut() else {
+                let Some(doc) = self.tabs[self.active].view.document_mut() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
@@ -3777,7 +3674,7 @@ impl BrowserApp {
                 r#"{"ok":true}"#.to_string()
             }
             "add-class" => {
-                let Some(doc) = self.tabs[self.active].doc.as_mut() else {
+                let Some(doc) = self.tabs[self.active].view.document_mut() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
@@ -3790,7 +3687,7 @@ impl BrowserApp {
                 r#"{"ok":true}"#.to_string()
             }
             "remove-class" => {
-                let Some(doc) = self.tabs[self.active].doc.as_mut() else {
+                let Some(doc) = self.tabs[self.active].view.document_mut() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
@@ -3803,7 +3700,7 @@ impl BrowserApp {
                 r#"{"ok":true}"#.to_string()
             }
             "toggle-class" => {
-                let Some(doc) = self.tabs[self.active].doc.as_mut() else {
+                let Some(doc) = self.tabs[self.active].view.document_mut() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
@@ -3817,7 +3714,7 @@ impl BrowserApp {
             }
             // ── Event listeners query ────────────────────────────────────────
             "event-listeners" => {
-                let Some(doc) = self.tabs[self.active].doc.as_ref() else {
+                let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 // There is one listener system now — the WHATWG one.
@@ -3826,7 +3723,7 @@ impl BrowserApp {
             }
             // ── Force element state ──────────────────────────────────────────
             "force-state" => {
-                let Some(doc) = self.tabs[self.active].doc.as_mut() else {
+                let Some(doc) = self.tabs[self.active].view.document_mut() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
@@ -3853,7 +3750,7 @@ impl BrowserApp {
             }
             // ── Search DOM by text content ───────────────────────────────────
             "search" => {
-                let Some(doc) = self.tabs[self.active].doc.as_ref() else {
+                let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let query = dbg_json_str(line, "query")
@@ -3893,7 +3790,7 @@ impl BrowserApp {
             }
             // ── Box model (Chrome-style) ─────────────────────────────────────
             "box-model" => {
-                let Some(doc) = self.tabs[self.active].doc.as_ref() else {
+                let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
@@ -3932,7 +3829,7 @@ impl BrowserApp {
             // ── Network log ──────────────────────────────────────────────────
             "network" => {
                 // Return basic info about loaded resources
-                let Some(doc) = self.tabs[self.active].doc.as_ref() else {
+                let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let css_count = doc.linked_stylesheets.len();
@@ -3951,7 +3848,7 @@ impl BrowserApp {
             "media" => {
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
                 let action = dbg_json_str(line, "action").unwrap_or_else(|| "state".to_string());
-                let Some(doc) = self.tabs[self.active].doc.as_mut() else {
+                let Some(doc) = self.tabs[self.active].view.document_mut() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let Some(id) = doc.query_selector(&selector) else {
@@ -3986,10 +3883,6 @@ impl BrowserApp {
                     "state" => true,
                     _ => false,
                 };
-                if changed && action != "state" {
-                    let mut eng = self.renderer.layout_engine();
-                    eng.layout(doc, self.width);
-                }
                 let src = doc.media_current_src(id).unwrap_or_default();
                 let current_time = doc.media_current_time(id).unwrap_or(0.0);
                 let duration = doc
@@ -4017,6 +3910,9 @@ impl BrowserApp {
                     })
                     .collect::<Vec<_>>()
                     .join(",");
+                if changed && action != "state" {
+                    self.tabs[self.active].view.relayout();
+                }
                 format!(
                     r#"{{"ok":true,"changed":{},"node_id":{},"src":{},"currentTime":{:.3},"duration":{},"readyState":{},"networkState":{},"paused":{},"ended":{},"volume":{:.3},"muted":{},"textTracks":[{}]}}"#,
                     changed,
@@ -4034,8 +3930,8 @@ impl BrowserApp {
                 )
             }
             // ── HTML output ────────────────────────────────────────────────
-            "dom-html" | "html" => {
-                let Some(doc) = self.tabs[self.active].doc.as_ref() else {
+            "dom-html" => {
+                let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
@@ -4055,20 +3951,20 @@ impl BrowserApp {
                 let scroll_x = self
                     .tabs
                     .get(self.active)
-                    .and_then(|t| t.doc.as_ref())
+                    .and_then(|t| t.view.document())
                     .map(|d| d.scroll_x)
                     .unwrap_or(0.0);
                 let scroll_y = self
                     .tabs
                     .get(self.active)
-                    .and_then(|t| t.doc.as_ref())
+                    .and_then(|t| t.view.document())
                     .map(|d| d.scroll_y)
                     .unwrap_or(0.0);
                 let doc_h = self
                     .tabs
                     .get(self.active)
-                    .and_then(|t| t.doc.as_ref())
-                    .map(|d| d.root.layout.margin_rect.h)
+                    .and_then(|t| t.view.document())
+                    .map(|d| Document::scroll_height(&d.root))
                     .unwrap_or(0.0);
                 format!(
                     r#"{{"ok":true,"width":{:.0},"height":{:.0},"scroll_x":{:.1},"scroll_y":{:.1},"doc_height":{:.0},"scale":{:.1}}}"#,
@@ -4077,12 +3973,12 @@ impl BrowserApp {
                     scroll_x,
                     scroll_y,
                     doc_h,
-                    self.renderer.zoom
+                    self.tabs[self.active].view.zoom()
                 )
             }
             // ── Accessibility tree ───────────────────────────────────────────
             "accessibility" | "a11y" => {
-                let Some(doc) = self.tabs[self.active].doc.as_ref() else {
+                let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 fn a11y_walk(node: &webcore::WebCore, depth: usize, out: &mut String) {
@@ -4117,11 +4013,7 @@ impl BrowserApp {
                                 .get("role")
                                 .map(|s| s.as_str())
                                 .unwrap_or("");
-                            if !aria.is_empty() {
-                                aria
-                            } else {
-                                ""
-                            }
+                            if !aria.is_empty() { aria } else { "" }
                         }
                     };
                     if !role.is_empty() {
@@ -4151,7 +4043,7 @@ impl BrowserApp {
             }
             // ── Measure distance between elements ────────────────────────────
             "measure" => {
-                let Some(doc) = self.tabs[self.active].doc.as_ref() else {
+                let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let from = dbg_json_str(line, "from").unwrap_or_default();
@@ -4186,7 +4078,7 @@ impl BrowserApp {
             // ── Structured DOM tree (JSON) ────────────────────────────────
             // ── Inspect by node_id ────────────────────────────────────────
             "inspect-node" => {
-                let Some(doc) = self.tabs[self.active].doc.as_ref() else {
+                let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let nid = dbg_json_num(line, "nid").unwrap_or(0.0) as u32;
@@ -4207,7 +4099,8 @@ impl BrowserApp {
                             r#""border":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"#,
                             r#""padding":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"#,
                             r#""content":{{"x":{:.1},"y":{:.1},"width":{:.1},"height":{:.1}}},"#,
-                            r#""font_size":{:.1},"color":"{:02x}{:02x}{:02x}","bg":"{:02x}{:02x}{:02x}{:02x}""#,
+                            r#""font_size":{:.1},"color":"{:02x}{:02x}{:02x}","bg":"{:02x}{:02x}{:02x}{:02x}","#,
+                            r#""image":{{"width":{},"height":{},"bytes":{},"src":"{}"}}"#,
                             r#"}}"#
                         ),
                         tag,
@@ -4240,13 +4133,17 @@ impl BrowserApp {
                         node.style.background_color.g,
                         node.style.background_color.b,
                         node.style.background_color.a,
+                        node.image_width,
+                        node.image_height,
+                        node.image_data.as_ref().map(|d| d.len()).unwrap_or(0),
+                        node.resolved_src.replace('"', "\\\""),
                     )
                 } else {
                     format!(r#"{{"ok":false,"error":"node {} not found"}}"#, nid)
                 }
             }
             "dom-tree" => {
-                let Some(doc) = self.tabs[self.active].doc.as_ref() else {
+                let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let max_depth = dbg_json_num(line, "depth").unwrap_or(3.0) as usize;
@@ -4321,7 +4218,7 @@ impl BrowserApp {
             }
             // ── DOM path (CSS selector chain to element) ─────────────────
             "dom-path" | "path" => {
-                let Some(doc) = self.tabs[self.active].doc.as_ref() else {
+                let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
@@ -4367,7 +4264,7 @@ impl BrowserApp {
             }
             // ── Parent / ancestor chain ──────────────────────────────────────
             "parent" => {
-                let Some(doc) = self.tabs[self.active].doc.as_ref() else {
+                let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
@@ -4408,7 +4305,7 @@ impl BrowserApp {
             }
             // ── Hit test at coordinates ──────────────────────────────────────
             "hit" => {
-                let Some(doc) = self.tabs[self.active].doc.as_ref() else {
+                let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let x = dbg_json_num(line, "x").unwrap_or(0.0) as f32;
@@ -4430,30 +4327,46 @@ impl BrowserApp {
             }
             // ── Progressive layout benchmark ─────────────────────────────────
             "bench-progressive" => {
-                let Some(doc) = self.tabs[self.active].doc.as_mut() else {
+                let Some((full_ms, above_ms)) =
+                    self.tabs[self.active].view.benchmark_progressive_layout()
+                else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
-                let mut eng = self.renderer.layout_engine();
-                // Full layout
-                doc.root.layout.layout_dirty = true;
-                let t0 = std::time::Instant::now();
-                eng.layout(doc, self.width);
-                let full_ms = t0.elapsed().as_micros() as f64 / 1000.0;
-                // Above fold
-                fn mark_dirty(n: &mut webcore::WebCore) {
-                    n.layout.layout_dirty = true;
-                    for c in &mut n.children {
-                        mark_dirty(c);
-                    }
-                }
-                mark_dirty(&mut doc.root);
-                let t1 = std::time::Instant::now();
-                let _more = eng.layout_above_fold(doc, self.width);
-                let above_ms = t1.elapsed().as_micros() as f64 / 1000.0;
-                eng.layout_remainder(doc, self.width);
                 format!(
                     r#"{{"ok":true,"full_ms":{:.1},"above_fold_ms":{:.1}}}"#,
                     full_ms, above_ms
+                )
+            }
+            "bench-render" => {
+                let scale = dbg_json_num(line, "scale")
+                    .map(|v| v.clamp(0.25, 4.0) as f32)
+                    .unwrap_or(1.0);
+                let dy = dbg_json_num(line, "dy").unwrap_or(500.0) as f32;
+                let view_w = self.page_width();
+                let view_h = self.content_h();
+                let phys_w = (view_w * scale).ceil().max(1.0) as u32;
+                let phys_h = (view_h * scale).ceil().max(1.0) as u32;
+                let Some(mut pm) = tiny_skia::Pixmap::new(phys_w, phys_h) else {
+                    return r#"{"ok":false,"error":"pixmap failed"}"#.to_string();
+                };
+                let view = &mut self.tabs[self.active].view;
+                let original_y = view.scroll_y();
+                let t0 = std::time::Instant::now();
+                view.paint_into(&mut pm, 0, 0, scale);
+                let first = t0.elapsed().as_micros() as f64 / 1000.0;
+                view.scroll_by(0.0, dy);
+                let t1 = std::time::Instant::now();
+                view.paint_into(&mut pm, 0, 0, scale);
+                let scroll = t1.elapsed().as_micros() as f64 / 1000.0;
+                let t2 = std::time::Instant::now();
+                view.paint_into(&mut pm, 0, 0, scale);
+                let cached = t2.elapsed().as_micros() as f64 / 1000.0;
+                let scroll_y = view.scroll_y();
+                view.scroll_to(0.0, original_y);
+                view.paint_into(&mut pm, 0, 0, scale);
+                format!(
+                    r#"{{"ok":true,"first_ms":{:.1},"scroll_ms":{:.1},"cached_ms":{:.1},"scroll_y":{:.0},"width":{},"height":{},"scale":{}}}"#,
+                    first, scroll, cached, scroll_y, phys_w, phys_h, scale
                 )
             }
             "quit" => {
@@ -4465,6 +4378,27 @@ impl BrowserApp {
             ),
         }
     }
+}
+
+fn debug_cmd_requests_redraw(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "navigate"
+            | "switch-tab"
+            | "resize"
+            | "scroll"
+            | "click"
+            | "hover"
+            | "type"
+            | "key"
+            | "set-text"
+            | "add-class"
+            | "remove-class"
+            | "toggle-class"
+            | "force-state"
+            | "bench"
+            | "bench-progressive"
+    )
 }
 
 /// TCP listener for the browser debug server.
@@ -4529,7 +4463,9 @@ fn browser_debug_spawn_tcp(
                         };
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{}",
-                            content_type, body.len(), body
+                            content_type,
+                            body.len(),
+                            body
                         );
                         let _ = writer.write_all(response.as_bytes());
                         let _ = writer.flush();
@@ -5071,6 +5007,9 @@ fn main() {
         let mut app = BrowserApp::new(proxy.clone());
         app.initial_url = initial_url;
         app.cache_dir = cache_dir;
+        app.no_images = no_images;
+        app.initial_width = width;
+        app.initial_height = height;
         if let Some(port) = debug_port {
             let (cmd_tx, cmd_rx) = mpsc::channel::<(String, mpsc::Sender<String>)>();
             app.debug_cmd_rx = Some(cmd_rx);
@@ -5127,151 +5066,28 @@ fn run_headless(
         }
     }
 
-    // Load document
-    let mut doc = webcore::load_html_vp("", width, height);
+    // Load document through the same browser view/widget used by the GUI path.
     let fetch_start = std::time::Instant::now();
-
-    // Fetch HTML.
-    //
-    // ⛔ The base URL is the url the response CAME FROM, not the one asked
-    // for. A redirect is the normal case — bare domain to `www`, `http` to
-    // `https`, one domain to another — and keeping the requested URL resolved
-    // every relative `<link>` against the wrong host. Those requests then
-    // redirect to the site's homepage, so the "stylesheet" fetched is HTML and
-    // the page renders with no author CSS at all. `usps.gov` does exactly this:
-    // it 301s to `usps.com`, and `usps.gov/assets/css/…` 301s to the homepage.
-    let mut base = url.clone();
-    let html = if url.starts_with("file://") {
-        let path = url.trim_start_matches("file://");
-        std::fs::read_to_string(path).unwrap_or_default()
-    } else if url != "about:blank" {
-        let fetch_result = if let Some(ref cd) = cache_dir {
-            cached_fetch_document(&url, cd)
-        } else {
-            webcore::fetch_document(&url).map_err(|e| e.to_string())
-        };
-        match fetch_result {
-            Ok((text, final_url)) => {
-                base = final_url;
-                text
-            }
-            Err(_) => String::new(),
-        }
-    } else {
-        String::new()
-    };
-    let url = base;
-
-    if !html.is_empty() {
-        doc = webcore::html::parse_html_with_base(&html, &url);
-    }
-
-    // Fetch CSS
-    for (href, media) in doc.linked_stylesheets.clone() {
-        if media == "print" {
-            continue;
-        }
-        let css_url = resolve_url(&url, &href);
-        let css_result = if let Some(ref cd) = cache_dir {
-            cached_fetch_bytes(&css_url, cd).map(decode_body)
-        } else {
-            webcore::http_client()
-                .get(&css_url)
-                .send()
-                .and_then(|r| r.text())
-                .map_err(|e| e.to_string())
-        };
-        if let Ok(css) = css_result {
-            // AUTHOR origin, and relative `url()` inside the sheet resolves
-            // against the SHEET's location, not the document's.
-            doc.stylesheet
-                .parse_and_add_with_base_media(&css, &css_url, &media);
-        }
-    }
-
-    // ⛔ Re-cascade after the stylesheets land. The rules were fetched and
-    // added, but nothing told the document its style was stale, so layout ran
-    // against the cascade from BEFORE the CSS arrived — UA rules only. The
-    // page came out completely unstyled while the rule count said the CSS was
-    // there. The GUI path already does this; headless did not.
-    doc.stylesheet.rebuild_index();
-    let mut renderer = Renderer::new();
-    {
-        let eng = renderer.layout_engine();
-        eng.invalidate_cascade();
-    }
-    webcore::css::apply_cascade_vp(
-        &mut doc.root,
-        &doc.stylesheet,
-        None,
-        16.0,
+    let mut view = webcore::BrowserView::new(
         width,
         height,
-        0,
-        false,
+        webcore::PageLoadOptions {
+            cache_dir: cache_dir.clone(),
+            load_images: !no_images,
+            emit_preview: true,
+            ..Default::default()
+        },
     );
-
-    // Layout
-    let mut eng = renderer.layout_engine();
-    eng.viewport_h = height;
-    eng.layout(&mut doc, width);
-    wait_for_headless_fonts(&mut renderer, &mut doc, width, height);
-
-    // Fetch images
-    if !no_images {
-        let mut img_srcs: Vec<String> = Vec::new();
-        Document::walk_all(&doc.root, &mut |b| {
-            if b.tag == "img" {
-                if let Some(src) = b.attributes.get("src") {
-                    let abs = resolve_url(&url, src);
-                    if !abs.is_empty() && !img_srcs.contains(&abs) {
-                        img_srcs.push(abs);
-                    }
-                }
-            }
-        });
-        for src in &img_srcs {
-            let bytes_result = if let Some(ref cd) = cache_dir {
-                cached_fetch_bytes(src, cd)
-            } else {
-                fetch_bytes_with_retry(src)
-            };
-            if let Ok(bytes) = bytes_result {
-                if let Some(decoded) = webcore::html::decode_image_bytes_ex(&bytes) {
-                    let src2 = src.clone();
-                    Document::walk_all_mut(&mut doc.root, &mut |b| {
-                        if b.tag == "img" {
-                            if let Some(s) = b.attributes.get("src") {
-                                if resolve_url(&url, s) == src2 {
-                                    webcore::html::set_decoded_image_on_node(b, decoded.clone());
-                                    b.layout.layout_dirty = true;
-                                    b.layout.cached_intrinsic_w.set(f32::NAN);
-                                    b.layout.intrinsic_dirty = true;
-                                }
-                            }
-                        }
-                    });
-                }
-            }
-        }
-        // Background images
-        webcore::svg::load_background_images(&mut doc.root, &url);
-        // ⛔ The viewport height has to be set again. This second layout ran at
-        // the engine's default, so every `vh` length was rescaled by the ratio
-        // between the real viewport and that default — `5vh` came out 35px on a
-        // 900px viewport instead of 45.
-        let eng = renderer.layout_engine();
-        eng.viewport_h = height;
-        eng.layout(&mut doc, width);
-        wait_for_headless_fonts(&mut renderer, &mut doc, width, height);
-    }
+    view.load_until_ready(url.clone(), std::time::Duration::from_secs(30));
 
     let load_ms = fetch_start.elapsed().as_millis();
+    let (node_count, rule_count) = view
+        .document()
+        .map(|doc| (doc.root.child_count(), doc.stylesheet.rules.len()))
+        .unwrap_or((0, 0));
     eprintln!(
         "[headless] Loaded in {}ms ({} nodes, {} rules)",
-        load_ms,
-        doc.root.child_count(),
-        doc.stylesheet.rules.len()
+        load_ms, node_count, rule_count
     );
     eprintln!("[headless] Debug server on http://127.0.0.1:{}", port);
 
@@ -5305,9 +5121,7 @@ fn run_headless(
                 let query = path.split('?').nth(1).unwrap_or("");
                 let cmd_json = urldecode(query.strip_prefix("cmd=").unwrap_or("{}"));
                 let resp = dispatch_headless_cmd(
-                    &mut doc,
-                    &mut renderer,
-                    &url,
+                    &mut view,
                     width,
                     height,
                     &cmd_json,
@@ -5318,22 +5132,17 @@ fn run_headless(
             } else {
                 ("text/html", INSPECTOR_HTML.to_string())
             };
-            let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{body}", body.len());
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {ct}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
             let _ = writer.write_all(resp.as_bytes());
         } else {
             // JSON protocol
             let line = first_line.trim().to_string();
             if !line.is_empty() {
-                let resp = dispatch_headless_cmd(
-                    &mut doc,
-                    &mut renderer,
-                    &url,
-                    width,
-                    height,
-                    &line,
-                    &cache_dir,
-                    chrome_port,
-                );
+                let resp =
+                    dispatch_headless_cmd(&mut view, width, height, &line, &cache_dir, chrome_port);
                 let _ = writeln!(writer, "{}", resp);
                 let _ = writer.flush();
             }
@@ -5342,16 +5151,8 @@ fn run_headless(
                 if line.trim().is_empty() {
                     continue;
                 }
-                let resp = dispatch_headless_cmd(
-                    &mut doc,
-                    &mut renderer,
-                    &url,
-                    width,
-                    height,
-                    &line,
-                    &cache_dir,
-                    chrome_port,
-                );
+                let resp =
+                    dispatch_headless_cmd(&mut view, width, height, &line, &cache_dir, chrome_port);
                 let _ = writeln!(writer, "{}", resp);
                 let _ = writer.flush();
             }
@@ -5388,43 +5189,618 @@ fn fmt_px(v: f32) -> String {
     }
 }
 
+fn animated_images_json(doc: &Document, viewport_h: f32) -> String {
+    fn hidden_by_style(node: &webcore::WebCore) -> bool {
+        matches!(node.style.display, Display::None)
+            || !node.style.visibility
+            || node.style.opacity <= 0.0
+    }
+
+    fn interval(node: &webcore::WebCore, scroll_y: f32) -> (f32, f32) {
+        let r = node.layout.margin_rect;
+        if matches!(node.style.position, Position::Fixed) {
+            (scroll_y + r.y, scroll_y + r.y + r.h)
+        } else {
+            (r.y, r.y + r.h)
+        }
+    }
+
+    fn child_clip(
+        node: &webcore::WebCore,
+        scroll_y: f32,
+        clip_top: f32,
+        clip_bottom: f32,
+    ) -> (f32, f32) {
+        if matches!(
+            node.style.overflow_y,
+            Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
+        ) {
+            let r = node.layout.content_rect;
+            if r.h <= 0.0 {
+                return (1.0, 0.0);
+            }
+            let (top, bottom) = if matches!(node.style.position, Position::Fixed) {
+                (scroll_y + r.y, scroll_y + r.y + r.h)
+            } else {
+                (r.y, r.y + r.h)
+            };
+            (clip_top.max(top), clip_bottom.min(bottom))
+        } else {
+            (clip_top, clip_bottom)
+        }
+    }
+
+    fn walk(
+        node: &webcore::WebCore,
+        scroll_y: f32,
+        viewport_h: f32,
+        inherited_visible: bool,
+        clip_top: f32,
+        clip_bottom: f32,
+        out: &mut Vec<String>,
+    ) {
+        let visible_branch = inherited_visible && !hidden_by_style(node);
+        let (top, bottom) = interval(node, scroll_y);
+        let r = node.layout.margin_rect;
+        if let Some(animated) = node.animated_image.as_ref() {
+            let visible = visible_branch
+                && r.w > 0.0
+                && r.h > 0.0
+                && bottom >= scroll_y
+                && top <= scroll_y + viewport_h
+                && bottom >= clip_top
+                && top <= clip_bottom;
+            let src = node
+                .attributes
+                .get("src")
+                .or_else(|| node.attributes.get("data-src"))
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let class = node
+                .attributes
+                .get("class")
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            out.push(format!(
+                r#"{{"nid":{},"tag":{},"class":{},"src":{},"visible":{},"frames":{},"frame":{},"x":{},"y":{},"w":{},"h":{},"clip_top":{},"clip_bottom":{}}}"#,
+                node.node_id,
+                dbg_json_escape(&node.tag),
+                dbg_json_escape(class),
+                dbg_json_escape(src),
+                visible,
+                animated.frames.len(),
+                node.animated_image_frame,
+                fmt_px(r.x),
+                fmt_px(r.y),
+                fmt_px(r.w),
+                fmt_px(r.h),
+                fmt_px(clip_top),
+                fmt_px(clip_bottom)
+            ));
+        }
+        if !visible_branch {
+            return;
+        }
+        let (child_clip_top, child_clip_bottom) = child_clip(node, scroll_y, clip_top, clip_bottom);
+        if child_clip_bottom < child_clip_top {
+            return;
+        }
+        for child in &node.children {
+            walk(
+                child,
+                scroll_y,
+                viewport_h,
+                visible_branch,
+                child_clip_top,
+                child_clip_bottom,
+                out,
+            );
+        }
+    }
+
+    let mut items = Vec::new();
+    walk(
+        &doc.root,
+        doc.scroll_y,
+        viewport_h,
+        true,
+        doc.scroll_y,
+        doc.scroll_y + viewport_h,
+        &mut items,
+    );
+    let visible = items
+        .iter()
+        .filter(|item| item.contains(r#""visible":true"#))
+        .count();
+    format!(
+        r#"{{"ok":true,"count":{},"visible":{},"items":[{}]}}"#,
+        items.len(),
+        visible,
+        items.join(",")
+    )
+}
+
+fn image_states_json(doc: &Document, limit: usize) -> String {
+    fn walk(node: &webcore::WebCore, out: &mut Vec<String>, limit: usize) {
+        if out.len() >= limit {
+            return;
+        }
+        let has_element_image = node.image_data.is_some();
+        let has_background = node.bg_image_data.is_some();
+        let has_mask = node.mask_image_data.is_some();
+        let is_image_like = node.is_image_element()
+            || node.tag == "video"
+            || has_element_image
+            || has_background
+            || has_mask
+            || !node.style.background_image_url.is_empty()
+            || !node.style.rare().mask_image_url.is_empty();
+        if is_image_like {
+            let r = node.layout.border_rect;
+            let src = if !node.resolved_src.is_empty() {
+                node.resolved_src.as_str()
+            } else {
+                node.attributes
+                    .get("src")
+                    .or_else(|| node.attributes.get("poster"))
+                    .or_else(|| node.attributes.get("data-src"))
+                    .map(|s| s.as_str())
+                    .unwrap_or("")
+            };
+            out.push(format!(
+                concat!(
+                    r#"{{"nid":{},"tag":{},"class":{},"src":{},"srcset":{},"#,
+                    r#""element_loaded":{},"element_size":[{},{}],"element_bytes":{},"#,
+                    r#""background_url":{},"background_loaded":{},"background_size":[{},{}],"#,
+                    r#""mask_url":{},"mask_loaded":{},"mask_size":[{},{}],"#,
+                    r#""rect":[{},{},{},{}]}}"#
+                ),
+                node.node_id,
+                dbg_json_escape(&node.tag),
+                dbg_json_escape(
+                    node.attributes
+                        .get("class")
+                        .map(String::as_str)
+                        .unwrap_or("")
+                ),
+                dbg_json_escape(src),
+                dbg_json_escape(
+                    node.attributes
+                        .get("srcset")
+                        .map(String::as_str)
+                        .unwrap_or("")
+                ),
+                has_element_image,
+                node.image_width,
+                node.image_height,
+                node.image_data.as_ref().map(|d| d.len()).unwrap_or(0),
+                dbg_json_escape(&node.style.background_image_url),
+                has_background,
+                node.bg_image_width,
+                node.bg_image_height,
+                dbg_json_escape(&node.style.rare().mask_image_url),
+                has_mask,
+                node.mask_image_width,
+                node.mask_image_height,
+                fmt_px(r.x),
+                fmt_px(r.y),
+                fmt_px(r.w),
+                fmt_px(r.h)
+            ));
+        }
+        for child in &node.children {
+            walk(child, out, limit);
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    let mut items = Vec::new();
+    walk(&doc.root, &mut items, limit);
+    let errors: Vec<String> = doc
+        .image_load_errors
+        .iter()
+        .rev()
+        .take(limit)
+        .map(|(path, target, url, error)| {
+            format!(
+                r#"{{"path":{},"target":"{:?}","url":{},"error":{}}}"#,
+                dbg_json_escape(&format!("{path:?}")),
+                target,
+                dbg_json_escape(url),
+                dbg_json_escape(error)
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"ok":true,"count":{},"errors":{},"pending_channel":{},"in_flight":{},"images":[{}],"load_errors":[{}]}}"#,
+        items.len(),
+        doc.image_load_errors.len(),
+        doc.pending_images.is_some(),
+        doc.images_in_flight
+            .load(std::sync::atomic::Ordering::SeqCst),
+        items.join(","),
+        errors.join(",")
+    )
+}
+
+fn animations_json(doc: &Document, viewport_h: f32) -> String {
+    let mut items = Vec::new();
+    for state in &doc.active_animations {
+        let props = doc
+            .stylesheet
+            .keyframes
+            .get(&state.animation.name)
+            .map(|stops| {
+                let mut props = Vec::<String>::new();
+                for stop in stops {
+                    for (prop, _) in &stop.properties {
+                        if !props.iter().any(|p| p == prop) {
+                            props.push(prop.clone());
+                        }
+                    }
+                }
+                props
+            })
+            .unwrap_or_default();
+        let node = doc.get_box_by_id(state.element_id);
+        let tag = node.map(|n| n.tag.as_str()).unwrap_or("");
+        let rect = node.map(|n| n.layout.margin_rect).unwrap_or_default();
+        let current: Vec<String> = doc
+            .animation_overrides_for(state.element_id)
+            .map(|props| {
+                props
+                    .iter()
+                    .map(|(name, value)| {
+                        format!("{}:{}", dbg_json_escape(name), dbg_json_escape(value))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let visible = node.is_some_and(|n| {
+            !matches!(n.style.display, Display::None)
+                && n.style.visibility
+                && n.style.opacity > 0.0
+                && rect.w > 0.0
+                && rect.h > 0.0
+                && rect.y + rect.h >= doc.scroll_y
+                && rect.y <= doc.scroll_y + viewport_h
+        });
+        items.push(format!(
+            r#"{{"nid":{},"tag":{},"name":{},"visible":{},"x":{},"y":{},"w":{},"h":{},"duration_ms":{},"delay_ms":{},"iterations":{},"paused":{},"properties":[{}],"current":{{{}}}}}"#,
+            state.element_id,
+            dbg_json_escape(tag),
+            dbg_json_escape(&state.animation.name),
+            visible,
+            fmt_px(rect.x),
+            fmt_px(rect.y),
+            fmt_px(rect.w),
+            fmt_px(rect.h),
+            state.animation.duration_ms,
+            state.animation.delay_ms,
+            state.animation.iteration_count,
+            state.animation.play_state_paused,
+            props
+                .iter()
+                .map(|p| dbg_json_escape(p))
+                .collect::<Vec<_>>()
+                .join(","),
+            current.join(",")
+        ));
+    }
+    format!(
+        r#"{{"ok":true,"needs_frame":{},"active":{},"items":[{}]}}"#,
+        doc.needs_animation_frame,
+        doc.active_animations.len(),
+        items.join(",")
+    )
+}
+
+fn display_list_stats_json(
+    list: &webcore::renderer::display_list::DisplayList,
+    paint_band: Option<(f32, f32)>,
+) -> String {
+    let mut fills = 0usize;
+    let mut borders = 0usize;
+    let mut text = 0usize;
+    let mut images = 0usize;
+    let mut clips = 0usize;
+    let mut clip_paths = 0usize;
+    let mut transforms = 0usize;
+    let mut layers = 0usize;
+    let mut masks = 0usize;
+    for cmd in list.commands.iter().chain(list.fixed_commands.iter()) {
+        match cmd {
+            PaintCmd::FillRect { .. } => fills += 1,
+            PaintCmd::Border { .. } | PaintCmd::BorderImage { .. } => borders += 1,
+            PaintCmd::Text { .. } => text += 1,
+            PaintCmd::Image { .. }
+            | PaintCmd::BackgroundImage { .. }
+            | PaintCmd::ListMarker { image: Some(_), .. } => images += 1,
+            PaintCmd::PushClip { .. } => clips += 1,
+            PaintCmd::PushClipPath { .. } => clip_paths += 1,
+            PaintCmd::PushTransform { .. } => transforms += 1,
+            PaintCmd::PushOpacity { .. }
+            | PaintCmd::PushFilter { .. }
+            | PaintCmd::PushBlendMode { .. } => layers += 1,
+            PaintCmd::PushMask { .. } => masks += 1,
+            _ => {}
+        }
+    }
+    let band_json = paint_band
+        .map(|(top, bottom)| format!(r#","paint_top":{top:.1},"paint_bottom":{bottom:.1}"#))
+        .unwrap_or_default();
+    format!(
+        r#"{{"ok":true,"commands":{},"fixed_commands":{},"fills":{},"borders":{},"text":{},"images":{},"clips":{},"clip_paths":{},"transforms":{},"layers":{},"masks":{}{}}}"#,
+        list.commands.len(),
+        list.fixed_commands.len(),
+        fills,
+        borders,
+        text,
+        images,
+        clips,
+        clip_paths,
+        transforms,
+        layers,
+        masks,
+        band_json
+    )
+}
+
+fn append_cmd_ms(result: String, started: std::time::Instant) -> String {
+    let ms = started.elapsed().as_micros() as f64 / 1000.0;
+    if result.ends_with('}') {
+        format!(
+            "{}{}\"cmd_ms\":{:.2}}}",
+            &result[..result.len() - 1],
+            if result.len() > 2 { "," } else { "" },
+            ms
+        )
+    } else {
+        result
+    }
+}
+
+fn dispatch_headless_view_cmd(
+    view: &mut webcore::BrowserView,
+    cmd: &str,
+    line: &str,
+    width: f32,
+    height: f32,
+) -> String {
+    match cmd {
+        "screenshot" => {
+            let path = dbg_json_str(line, "out").unwrap_or_else(|| "snapshot.png".to_string());
+            let scale = dbg_json_num(line, "scale")
+                .map(|v| v.clamp(0.25, 4.0) as f32)
+                .unwrap_or(1.0);
+            let phys_w = (width * scale).ceil().max(1.0) as u32;
+            let phys_h = (height * scale).ceil().max(1.0) as u32;
+            let Some(mut pm) = tiny_skia::Pixmap::new(phys_w, phys_h) else {
+                return r#"{"ok":false,"error":"pixmap failed"}"#.to_string();
+            };
+            pm.fill(tiny_skia::Color::WHITE);
+            view.resize(width, height);
+            view.paint_into(&mut pm, 0, 0, scale);
+            match pm.save_png(&path) {
+                Ok(_) => format!(
+                    r#"{{"ok":true,"path":"{}","width":{},"height":{},"scale":{}}}"#,
+                    path, phys_w, phys_h, scale
+                ),
+                Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, e),
+            }
+        }
+        "scroll" => {
+            if let Some(y) = dbg_json_num(line, "y") {
+                view.scroll_to(0.0, y as f32);
+            } else {
+                let dy = dbg_json_num(line, "dy").unwrap_or(0.0) as f32;
+                view.scroll_by(0.0, dy);
+            }
+            format!(r#"{{"ok":true,"scroll_y":{:.0}}}"#, view.scroll_y())
+        }
+        "click" => {
+            let coords = if let Some(sel) = dbg_json_str(line, "selector") {
+                view.document()
+                    .and_then(|doc| dbg_selector_center(doc, &sel))
+                    .ok_or_else(|| {
+                        format!(
+                            r#"{{"ok":false,"error":"no element matches {}"}}"#,
+                            dbg_json_escape(&sel)
+                        )
+                    })
+            } else if let (Some(x), Some(y)) = (dbg_json_num(line, "x"), dbg_json_num(line, "y")) {
+                Ok((x, y))
+            } else {
+                return r#"{"ok":false,"error":"click needs x,y or selector"}"#.to_string();
+            };
+            let (x, y) = match coords {
+                Ok(c) => c,
+                Err(e) => return e,
+            };
+            view.handle_mouse_button(webcore::dom::HtmlEventType::MouseDown, x, y, 0);
+            view.handle_mouse_button(webcore::dom::HtmlEventType::MouseUp, x, y, 0);
+            format!(r#"{{"ok":true,"x":{:.0},"y":{:.0}}}"#, x, y)
+        }
+        "hover" => {
+            let coords = if let Some(sel) = dbg_json_str(line, "selector") {
+                view.document()
+                    .and_then(|doc| dbg_selector_center(doc, &sel))
+                    .ok_or_else(|| {
+                        format!(
+                            r#"{{"ok":false,"error":"no element matches {}"}}"#,
+                            dbg_json_escape(&sel)
+                        )
+                    })
+            } else if let (Some(x), Some(y)) = (dbg_json_num(line, "x"), dbg_json_num(line, "y")) {
+                Ok((x, y))
+            } else {
+                return r#"{"ok":false,"error":"hover needs x,y or selector"}"#.to_string();
+            };
+            let (x, y) = match coords {
+                Ok(c) => c,
+                Err(e) => return e,
+            };
+            let changed = view.handle_mouse_move(x, y);
+            format!(r#"{{"ok":true,"changed":{}}}"#, changed)
+        }
+        "type" => match dbg_json_str(line, "text") {
+            Some(text) => {
+                let mut any = false;
+                for ch in text.chars() {
+                    any |= view.handle_key(
+                        webcore::dom::HtmlEventType::KeyDown,
+                        ch as u32,
+                        Some(ch),
+                        false,
+                        false,
+                        false,
+                        false,
+                    );
+                }
+                format!(r#"{{"ok":true,"typed":{}}}"#, any)
+            }
+            None => r#"{"ok":false,"error":"type needs text"}"#.to_string(),
+        },
+        "key" => match dbg_json_str(line, "key") {
+            Some(k) => {
+                let (code, ch) = match k.as_str() {
+                    "Enter" => (13, Some('\r')),
+                    "Tab" => (9, Some('\t')),
+                    "Backspace" => (8, None),
+                    "Delete" => (46, None),
+                    "Escape" => (27, None),
+                    "ArrowLeft" => (37, None),
+                    "ArrowRight" => (39, None),
+                    "ArrowUp" => (38, None),
+                    "ArrowDown" => (40, None),
+                    "Home" => (36, None),
+                    "End" => (35, None),
+                    "Space" => (32, Some(' ')),
+                    s if s.len() == 1 => (s.chars().next().unwrap() as u32, s.chars().next()),
+                    _ => {
+                        return format!(
+                            r#"{{"ok":false,"error":"unknown key: {}"}}"#,
+                            dbg_json_escape(&k)
+                        );
+                    }
+                };
+                let changed = view.handle_key(
+                    webcore::dom::HtmlEventType::KeyDown,
+                    code,
+                    ch,
+                    false,
+                    false,
+                    false,
+                    false,
+                );
+                format!(r#"{{"ok":true,"changed":{}}}"#, changed)
+            }
+            None => r#"{"ok":false,"error":"key needs key name"}"#.to_string(),
+        },
+        "inspect-mode" => {
+            let on = dbg_json_str(line, "on")
+                .map(|v| !matches!(v.as_str(), "false" | "0"))
+                .or_else(|| dbg_json_num(line, "on").map(|v| v != 0.0))
+                .unwrap_or(true);
+            view.set_inspect_mode(on);
+            format!(r#"{{"ok":true,"inspect_mode":{}}}"#, on)
+        }
+        "resize" => {
+            view.resize(width, height);
+            r#"{"ok":true}"#.to_string()
+        }
+        "bench-progressive" => match view.benchmark_progressive_layout() {
+            Some((full, above)) => format!(
+                r#"{{"ok":true,"full_ms":{:.1},"above_fold_ms":{:.1}}}"#,
+                full, above
+            ),
+            None => r#"{"ok":false,"error":"no document"}"#.to_string(),
+        },
+        "bench-render" => {
+            let scale = dbg_json_num(line, "scale")
+                .map(|v| v.clamp(0.25, 4.0) as f32)
+                .unwrap_or(1.0);
+            let dy = dbg_json_num(line, "dy").unwrap_or(500.0) as f32;
+            let phys_w = (width * scale).ceil().max(1.0) as u32;
+            let phys_h = (height * scale).ceil().max(1.0) as u32;
+            let Some(mut pm) = tiny_skia::Pixmap::new(phys_w, phys_h) else {
+                return r#"{"ok":false,"error":"pixmap failed"}"#.to_string();
+            };
+            let original_y = view.scroll_y();
+            let t0 = std::time::Instant::now();
+            view.paint_into(&mut pm, 0, 0, scale);
+            let first = t0.elapsed().as_micros() as f64 / 1000.0;
+            view.scroll_by(0.0, dy);
+            let t1 = std::time::Instant::now();
+            view.paint_into(&mut pm, 0, 0, scale);
+            let scrolled = t1.elapsed().as_micros() as f64 / 1000.0;
+            let t2 = std::time::Instant::now();
+            view.paint_into(&mut pm, 0, 0, scale);
+            let cached = t2.elapsed().as_micros() as f64 / 1000.0;
+            view.scroll_to(0.0, original_y);
+            format!(
+                r#"{{"ok":true,"first_ms":{:.1},"scroll_ms":{:.1},"cached_ms":{:.1},"width":{},"height":{},"scale":{}}}"#,
+                first, scrolled, cached, phys_w, phys_h, scale
+            )
+        }
+        _ => r#"{"ok":false,"error":"unsupported browser command"}"#.to_string(),
+    }
+}
+
 fn dispatch_headless_cmd(
-    doc: &mut Document,
-    renderer: &mut Renderer,
-    url: &str,
+    view: &mut webcore::BrowserView,
     width: f32,
     height: f32,
     line: &str,
     _cache_dir: &Option<String>,
     chrome_port: u16,
 ) -> String {
-    poll_headless_fonts(renderer, doc, width, height);
     let cmd_start = std::time::Instant::now();
     let cmd = dbg_json_str(line, "cmd").unwrap_or_default();
+    if cmd == "navigate" {
+        let result = if let Some(new_url) = dbg_json_str(line, "url") {
+            let new_url = normalize_url(new_url);
+            view.load_until_ready(new_url.clone(), std::time::Duration::from_secs(30));
+            format!(r#"{{"ok":true,"url":"{}"}}"#, view.url())
+        } else {
+            r#"{"ok":false,"error":"need url"}"#.to_string()
+        };
+        return append_cmd_ms(result, cmd_start);
+    }
+    if matches!(
+        cmd.as_str(),
+        "screenshot"
+            | "scroll"
+            | "click"
+            | "hover"
+            | "type"
+            | "key"
+            | "inspect-mode"
+            | "resize"
+            | "bench-progressive"
+            | "bench-render"
+    ) {
+        return append_cmd_ms(
+            dispatch_headless_view_cmd(view, &cmd, line, width, height),
+            cmd_start,
+        );
+    }
+
+    let Some((doc, renderer)) = view.document_and_renderer_mut() else {
+        return r#"{"ok":false,"error":"no document"}"#.to_string();
+    };
     let result = match cmd.as_str() {
-        "screenshot" => {
-            let path = dbg_json_str(line, "out").unwrap_or_else(|| "snapshot.png".to_string());
-            let scale = dbg_json_num(line, "scale")
-                .map(|v| v.clamp(0.25, 4.0))
-                .unwrap_or(1.0);
-            let doc_h = Document::scroll_height(&doc.root)
-                .max(doc.root.layout.margin_rect.h)
-                .ceil() as u32;
-            let phys_w = (width * scale).ceil() as u32;
-            let rh = ((doc_h.max(1).min(4000) as f32) * scale).ceil() as u32;
-            if let Some(mut pm) = tiny_skia::Pixmap::new(phys_w.max(1), rh.max(1)) {
-                pm.fill(tiny_skia::Color::WHITE);
-                renderer.render(doc, &mut pm, scale);
-                match pm.save_png(&path) {
-                    Ok(_) => format!(
-                        r#"{{"ok":true,"path":"{}","width":{},"height":{},"scale":{}}}"#,
-                        path, phys_w, rh, scale
-                    ),
-                    Err(e) => format!(r#"{{"ok":false,"error":"{}"}}"#, e),
-                }
-            } else {
-                r#"{"ok":false,"error":"pixmap failed"}"#.to_string()
+        "step" | "tick" => {
+            let ms = dbg_json_num(line, "ms").unwrap_or(100.0);
+            if ms > 0.0 {
+                std::thread::sleep(std::time::Duration::from_millis(ms as u64));
             }
+            renderer.layout_engine().viewport_h = height;
+            renderer.layout_engine().layout(doc, width);
+            renderer.invalidate_display_list();
+            format!(r#"{{"ok":true,"ms":{}}}"#, ms)
         }
         "find" => {
             let sel = dbg_json_str(line, "selector").unwrap_or_default();
@@ -5456,6 +5832,35 @@ fn dispatch_headless_cmd(
                 items.join(",")
             )
         }
+        "height-dump" => {
+            let limit = dbg_json_num(line, "limit").unwrap_or(40.0).max(1.0) as usize;
+            dbg_height_dump_json(&doc.root, limit)
+        }
+        "display-list-stats" => {
+            let overscan = (height * 1.5).max(1200.0);
+            let paint_top = (doc.scroll_y - overscan).max(0.0);
+            let paint_bottom = doc.scroll_y + height + overscan;
+            let list = build_display_list_viewport(
+                &doc.root,
+                width,
+                height,
+                doc.scroll_x,
+                doc.scroll_y,
+                paint_top,
+                paint_bottom,
+                0,
+                0,
+                &std::collections::HashSet::new(),
+                &doc.base_url,
+            );
+            display_list_stats_json(&list, Some((paint_top, paint_bottom)))
+        }
+        "animated-images" => animated_images_json(doc, height),
+        "image-states" => {
+            let limit = dbg_json_num(line, "limit").unwrap_or(80.0).max(1.0) as usize;
+            image_states_json(doc, limit)
+        }
+        "animations" => animations_json(doc, height),
         "paint-dump" => {
             let x = dbg_json_num(line, "x").unwrap_or(0.0);
             let y = dbg_json_num(line, "y").unwrap_or(0.0);
@@ -5499,6 +5904,56 @@ fn dispatch_headless_cmd(
                                 color.r, color.g, color.b, color.a,
                                 radius[0], radius[1], radius[2], radius[3],
                                 radius_y[0], radius_y[1], radius_y[2], radius_y[3]
+                            ));
+                        }
+                    }
+                    PaintCmd::Border {
+                        rect,
+                        widths,
+                        colors,
+                        styles,
+                        ..
+                    } => {
+                        if rect.x <= qx2
+                            && rect.right() >= x
+                            && rect.y <= qy2
+                            && rect.bottom() >= y
+                            && widths.iter().any(|w| *w > 0.0)
+                        {
+                            out.push(format!(
+                                r##"{{"kind":"border","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"widths":[{:.1},{:.1},{:.1},{:.1}],"colors":["#{:02x}{:02x}{:02x}{:02x}","#{:02x}{:02x}{:02x}{:02x}","#{:02x}{:02x}{:02x}{:02x}","#{:02x}{:02x}{:02x}{:02x}"],"styles":[{},{},{},{}]}}"##,
+                                rect.x, rect.y, rect.w, rect.h,
+                                widths[0], widths[1], widths[2], widths[3],
+                                colors[0].r, colors[0].g, colors[0].b, colors[0].a,
+                                colors[1].r, colors[1].g, colors[1].b, colors[1].a,
+                                colors[2].r, colors[2].g, colors[2].b, colors[2].a,
+                                colors[3].r, colors[3].g, colors[3].b, colors[3].a,
+                                styles[0], styles[1], styles[2], styles[3]
+                            ));
+                        }
+                    }
+                    PaintCmd::Outline {
+                        rect,
+                        width,
+                        color,
+                        style,
+                        offset,
+                        ..
+                    } => {
+                        if rect.x <= qx2
+                            && rect.right() >= x
+                            && rect.y <= qy2
+                            && rect.bottom() >= y
+                            && *width > 0.0
+                            && color.a > 0
+                        {
+                            out.push(format!(
+                                r##"{{"kind":"outline","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"width":{:.1},"color":"#{:02x}{:02x}{:02x}{:02x}","style":{},"offset":{:.1}}}"##,
+                                rect.x, rect.y, rect.w, rect.h,
+                                width,
+                                color.r, color.g, color.b, color.a,
+                                style,
+                                offset
                             ));
                         }
                     }
@@ -5555,6 +6010,75 @@ fn dispatch_headless_cmd(
                             ));
                         }
                     }
+                    PaintCmd::BackgroundImage {
+                        container,
+                        clip,
+                        draw_w,
+                        draw_h,
+                        pos_x,
+                        pos_y,
+                        ..
+                    } => {
+                        if clip.x <= qx2 && clip.right() >= x && clip.y <= qy2 && clip.bottom() >= y
+                        {
+                            out.push(format!(
+                                r#"{{"kind":"background-image","container":[{:.1},{:.1},{:.1},{:.1}],"clip":[{:.1},{:.1},{:.1},{:.1}],"draw_w":{:.1},"draw_h":{:.1},"pos_x":{:.1},"pos_y":{:.1}}}"#,
+                                container.x, container.y, container.w, container.h,
+                                clip.x, clip.y, clip.w, clip.h,
+                                draw_w, draw_h, pos_x, pos_y
+                            ));
+                        }
+                    }
+                    PaintCmd::Gradient {
+                        rect,
+                        clip,
+                        gradient_type,
+                        angle,
+                        stops,
+                        ..
+                    } => {
+                        if clip.x <= qx2 && clip.right() >= x && clip.y <= qy2 && clip.bottom() >= y
+                        {
+                            out.push(format!(
+                                r#"{{"kind":"gradient","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"clip":[{:.1},{:.1},{:.1},{:.1}],"gradient_type":{},"angle":{:.1},"stops":{}}}"#,
+                                rect.x, rect.y, rect.w, rect.h,
+                                clip.x, clip.y, clip.w, clip.h,
+                                gradient_type, angle, stops.len()
+                            ));
+                        }
+                    }
+                    PaintCmd::BoxShadow {
+                        rect,
+                        color,
+                        offset_x,
+                        offset_y,
+                        blur,
+                        spread,
+                        inset,
+                        ..
+                    } => {
+                        let sx = rect.x + offset_x - spread - blur * 4.0;
+                        let sy = rect.y + offset_y - spread - blur * 4.0;
+                        let sw = rect.w + spread * 2.0 + blur * 8.0;
+                        let sh = rect.h + spread * 2.0 + blur * 8.0;
+                        if sx <= qx2 && sx + sw >= x && sy <= qy2 && sy + sh >= y {
+                            out.push(format!(
+                                r##"{{"kind":"box-shadow","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"color":"#{:02x}{:02x}{:02x}{:02x}","offset_x":{:.1},"offset_y":{:.1},"blur":{:.1},"spread":{:.1},"inset":{}}}"##,
+                                rect.x, rect.y, rect.w, rect.h,
+                                color.r, color.g, color.b, color.a,
+                                offset_x, offset_y, blur, spread, inset
+                            ));
+                        }
+                    }
+                    PaintCmd::BeginStackingContext { node_id, z_index } => {
+                        out.push(format!(
+                            r#"{{"kind":"begin-stacking-context","node_id":{},"z_index":{}}}"#,
+                            node_id, z_index
+                        ));
+                    }
+                    PaintCmd::EndStackingContext => {
+                        out.push(r#"{"kind":"end-stacking-context"}"#.to_string());
+                    }
                     PaintCmd::PushClip {
                         rect,
                         radius,
@@ -5567,6 +6091,47 @@ fn dispatch_headless_cmd(
                                 rect.x, rect.y, rect.w, rect.h,
                                 radius[0], radius[1], radius[2], radius[3],
                                 radius_y[0], radius_y[1], radius_y[2], radius_y[3]
+                            ));
+                        }
+                    }
+                    PaintCmd::PushClipPath { points } => {
+                        out.push(format!(
+                            r#"{{"kind":"push-clip-path","points":{}}}"#,
+                            points.len()
+                        ));
+                    }
+                    PaintCmd::PushTransform { node_id, transform } => {
+                        out.push(format!(
+                            r#"{{"kind":"push-transform","node_id":{},"matrix":[{:.4},{:.4},{:.4},{:.4},{:.1},{:.1}]}}"#,
+                            node_id,
+                            transform[0], transform[1], transform[2], transform[3],
+                            transform[4], transform[5]
+                        ));
+                    }
+                    PaintCmd::PopTransform => {
+                        out.push(r#"{"kind":"pop-transform"}"#.to_string());
+                    }
+                    PaintCmd::PushOpacity { alpha } => {
+                        out.push(format!(r#"{{"kind":"push-opacity","alpha":{:.3}}}"#, alpha));
+                    }
+                    PaintCmd::PopOpacity => {
+                        out.push(r#"{"kind":"pop-opacity"}"#.to_string());
+                    }
+                    PaintCmd::PushFilter { filters } => {
+                        out.push(format!(
+                            r#"{{"kind":"push-filter","filters":{}}}"#,
+                            filters.len()
+                        ));
+                    }
+                    PaintCmd::PopFilter => {
+                        out.push(r#"{"kind":"pop-filter"}"#.to_string());
+                    }
+                    PaintCmd::BackdropFilter { rect, filters } => {
+                        if rect.x <= qx2 && rect.right() >= x && rect.y <= qy2 && rect.bottom() >= y
+                        {
+                            out.push(format!(
+                                r#"{{"kind":"backdrop-filter","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"filters":{}}}"#,
+                                rect.x, rect.y, rect.w, rect.h, filters.len()
                             ));
                         }
                     }
@@ -5583,6 +6148,12 @@ fn dispatch_headless_cmd(
                         }
                     }
                     PaintCmd::PopMask => out.push(r#"{"kind":"pop-mask"}"#.to_string()),
+                    PaintCmd::PushBlendMode { mode } => {
+                        out.push(format!(r#"{{"kind":"push-blend-mode","mode":{}}}"#, mode));
+                    }
+                    PaintCmd::PopBlendMode => {
+                        out.push(r#"{"kind":"pop-blend-mode"}"#.to_string());
+                    }
                     PaintCmd::PopClip => out.push(r#"{"kind":"pop-clip"}"#.to_string()),
                     _ => {}
                 }
@@ -5592,36 +6163,6 @@ fn dispatch_headless_cmd(
                 out.len(),
                 out.join(",")
             )
-        }
-        "navigate" => {
-            if let Some(new_url) = dbg_json_str(line, "url") {
-                let new_url = normalize_url(new_url);
-                // Same rule as the initial load: the base is where the
-                // response came FROM, so a redirect does not leave every
-                // relative URL pointing at the old host.
-                let (html, new_url) = match webcore::fetch_document(&new_url) {
-                    Ok(pair) => pair,
-                    Err(_) => (String::new(), new_url),
-                };
-                *doc = webcore::html::parse_html_with_base(&html, &new_url);
-                for (href, media) in doc.linked_stylesheets.clone() {
-                    if media == "print" {
-                        continue;
-                    }
-                    let css_url = resolve_url(&new_url, &href);
-                    if let Ok(css) = webcore::http_client()
-                        .get(&css_url)
-                        .send()
-                        .and_then(|r| r.text())
-                    {
-                        doc.stylesheet.parse_and_add(&css);
-                    }
-                }
-                renderer.layout_engine().layout(doc, width);
-                format!(r#"{{"ok":true,"url":"{}"}}"#, new_url)
-            } else {
-                r#"{"ok":false,"error":"need url"}"#.to_string()
-            }
         }
         "tree" => {
             let mut buf = String::new();
@@ -5720,7 +6261,7 @@ fn dispatch_headless_cmd(
             if let Some(n) = doc.get_box_by_id(nid) {
                 let l = &n.layout;
                 format!(
-                    r#"{{"ok":true,"tag":"{}","id":"{}","class":"{}","nid":{},"display":"{:?}","position":"{:?}","margin":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"border":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"padding":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"content":{{"x":{:.1},"y":{:.1},"width":{:.1},"height":{:.1}}},"font_size":{:.1},"color":"{:02x}{:02x}{:02x}","bg":"{:02x}{:02x}{:02x}{:02x}"}}"#,
+                    r#"{{"ok":true,"tag":"{}","id":"{}","class":"{}","nid":{},"display":"{:?}","position":"{:?}","margin":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"border":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"padding":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"content":{{"x":{:.1},"y":{:.1},"width":{:.1},"height":{:.1}}},"font_size":{:.1},"color":"{:02x}{:02x}{:02x}","bg":"{:02x}{:02x}{:02x}{:02x}","image":{{"width":{},"height":{},"bytes":{},"src":"{}"}}}}"#,
                     n.tag,
                     n.attributes.get("id").unwrap_or(&String::new()),
                     n.attributes.get("class").unwrap_or(&String::new()),
@@ -5750,7 +6291,11 @@ fn dispatch_headless_cmd(
                     n.style.background_color.r,
                     n.style.background_color.g,
                     n.style.background_color.b,
-                    n.style.background_color.a
+                    n.style.background_color.a,
+                    n.image_width,
+                    n.image_height,
+                    n.image_data.as_ref().map(|d| d.len()).unwrap_or(0),
+                    n.resolved_src.replace('"', "\\\"")
                 )
             } else {
                 format!(r#"{{"ok":false,"error":"node not found"}}"#)
@@ -5844,7 +6389,8 @@ fn dispatch_headless_cmd(
             // is relative to the viewport, our rects are absolute, and any page
             // tall enough to scroll made every y disagree by the scroll offset.
             let js = format!(
-                "[...document.querySelectorAll({sel:?})].map((e,i)=>{{const r=e.getBoundingClientRect();                 return [e.id||('@'+i),r.x+window.scrollX,r.y+window.scrollY,r.width,r.height].join(',')}}).join(';')");
+                "[...document.querySelectorAll({sel:?})].map((e,i)=>{{const r=e.getBoundingClientRect();                 return [e.id||('@'+i),r.x+window.scrollX,r.y+window.scrollY,r.width,r.height].join(',')}}).join(';')"
+            );
             let params = format!(
                 r#"{{"expression":{},"returnByValue":true}}"#,
                 json_quote(&js)
@@ -6041,7 +6587,7 @@ fn dispatch_headless_cmd(
             )
         }
         "viewport" => {
-            let doc_h = Document::scroll_height(&doc.root).max(doc.root.layout.margin_rect.h);
+            let doc_h = Document::scroll_height(&doc.root);
             format!(
                 r#"{{"ok":true,"width":{:.0},"height":{:.0},"doc_height":{:.0}}}"#,
                 width, height, doc_h
@@ -6153,21 +6699,10 @@ fn dispatch_headless_cmd(
             renderer.layout_engine().layout(doc, width);
             r#"{"ok":true}"#.to_string()
         }
-        "scroll" => {
-            let dy = dbg_json_num(line, "dy").unwrap_or(0.0) as f32;
-            doc.scroll_y = (doc.scroll_y + dy).max(0.0);
-            r#"{"ok":true}"#.to_string()
-        }
-        "resize" => {
-            // Note: can't change width/height since they're not mut here.
-            // Just re-layout at current size.
-            renderer.layout_engine().layout(doc, width);
-            r#"{"ok":true}"#.to_string()
-        }
         "highlight" => {
             let sel = dbg_json_str(line, "selector").unwrap_or_default();
             let out = dbg_json_str(line, "out").unwrap_or_else(|| "highlight.png".to_string());
-            let rh = doc.root.layout.margin_rect.h.ceil() as u32;
+            let rh = Document::scroll_height(&doc.root).ceil() as u32;
             let rh = rh.max(1).min(4000);
             if let Some(mut pm) = tiny_skia::Pixmap::new(width as u32, rh) {
                 pm.fill(tiny_skia::Color::WHITE);
@@ -6180,27 +6715,6 @@ fn dispatch_headless_cmd(
             } else {
                 r#"{"ok":false,"error":"pixmap failed"}"#.to_string()
             }
-        }
-        "bench-progressive" => {
-            fn md(n: &mut webcore::WebCore) {
-                n.layout.layout_dirty = true;
-                for c in &mut n.children {
-                    md(c);
-                }
-            }
-            md(&mut doc.root);
-            let t0 = std::time::Instant::now();
-            renderer.layout_engine().layout(doc, width);
-            let full = t0.elapsed().as_micros() as f64 / 1000.0;
-            md(&mut doc.root);
-            let t1 = std::time::Instant::now();
-            renderer.layout_engine().layout_above_fold(doc, width);
-            let above = t1.elapsed().as_micros() as f64 / 1000.0;
-            renderer.layout_engine().layout_remainder(doc, width);
-            format!(
-                r#"{{"ok":true,"full_ms":{:.1},"above_fold_ms":{:.1}}}"#,
-                full, above
-            )
         }
         // ── Inspect (by selector or nid) ─────────────────────────────────
         "inspect" => {
@@ -6234,16 +6748,6 @@ fn dispatch_headless_cmd(
                 parts.len(),
                 parts.join(",")
             )
-        }
-        "inspect-mode" => {
-            let on = dbg_json_str(line, "on")
-                .map(|v| !matches!(v.as_str(), "false" | "0"))
-                .or_else(|| dbg_json_num(line, "on").map(|v| v != 0.0))
-                .unwrap_or(true);
-            doc.style_dirty = true;
-            doc.stylesheet.inspect_mode = on;
-            renderer.layout_engine().layout(doc, width);
-            format!(r#"{{"ok":true,"inspect_mode":{}}}"#, on)
         }
         // ── Matched CSS rules ────────────────────────────────────────────
         "rules" | "matched-rules" => {
@@ -6415,7 +6919,9 @@ fn dispatch_headless_cmd(
             });
             format!(
                 r#"{{"ok":true,"nodes":{},"css_rules":{},"doc_height":{:.0}}}"#,
-                node_count, rules, doc.root.layout.margin_rect.h
+                node_count,
+                rules,
+                Document::scroll_height(&doc.root)
             )
         }
         "rule-search" => {
@@ -6452,6 +6958,45 @@ fn dispatch_headless_cmd(
                 matches.join(",")
             )
         }
+        "keyframes" => {
+            let query = dbg_json_str(line, "query").unwrap_or_default();
+            let limit = dbg_json_num(line, "limit").unwrap_or(20.0).max(1.0) as usize;
+            let mut matches = Vec::new();
+            for (name, stops) in &doc.stylesheet.keyframes {
+                if matches.len() >= limit {
+                    break;
+                }
+                if !query.is_empty() && !name.contains(&query) {
+                    continue;
+                }
+                let stop_json: Vec<String> = stops
+                    .iter()
+                    .map(|stop| {
+                        let props: Vec<String> = stop
+                            .properties
+                            .iter()
+                            .map(|(k, v)| format!("{}:{}", dbg_json_escape(k), dbg_json_escape(v)))
+                            .collect();
+                        format!(
+                            r#"{{"offset":{:.6},"properties":{{{}}}}}"#,
+                            stop.offset,
+                            props.join(",")
+                        )
+                    })
+                    .collect();
+                matches.push(format!(
+                    r#"{{"name":{},"stops":[{}]}}"#,
+                    dbg_json_escape(name),
+                    stop_json.join(",")
+                ));
+            }
+            format!(
+                r#"{{"ok":true,"query":{},"count":{},"keyframes":[{}]}}"#,
+                dbg_json_escape(&query),
+                matches.len(),
+                matches.join(",")
+            )
+        }
         "resolve-css" => {
             let value = dbg_json_str(line, "value").unwrap_or_default();
             let resolved = webcore::css::resolve_var_references(&value, &doc.stylesheet.variables);
@@ -6462,119 +7007,6 @@ fn dispatch_headless_cmd(
                 doc.stylesheet.variables.len()
             )
         }
-        // ── Click ────────────────────────────────────────────────────────
-        "click" => {
-            let coords = if let Some(sel) = dbg_json_str(line, "selector") {
-                dbg_selector_center(doc, &sel).ok_or_else(|| {
-                    format!(
-                        r#"{{"ok":false,"error":"no element matches {}"}}"#,
-                        dbg_json_escape(&sel)
-                    )
-                })
-            } else if let (Some(x), Some(y)) = (dbg_json_num(line, "x"), dbg_json_num(line, "y")) {
-                Ok((x, y))
-            } else {
-                return r#"{"ok":false,"error":"click needs x,y or selector"}"#.to_string();
-            };
-            let (x, y) = match coords {
-                Ok(c) => c,
-                Err(e) => return e,
-            };
-            let pt = (x, y + doc.scroll_y);
-            doc.process_mouse_event(webcore::dom::HtmlEventType::MouseDown, pt, 0);
-            doc.process_mouse_event(webcore::dom::HtmlEventType::MouseUp, pt, 0);
-            renderer.layout_engine().layout(doc, width);
-            format!(r#"{{"ok":true,"x":{:.0},"y":{:.0}}}"#, x, y)
-        }
-        // ── Hover ────────────────────────────────────────────────────────
-        "hover" => {
-            let coords = if let Some(sel) = dbg_json_str(line, "selector") {
-                dbg_selector_center(doc, &sel).ok_or_else(|| {
-                    format!(
-                        r#"{{"ok":false,"error":"no element matches {}"}}"#,
-                        dbg_json_escape(&sel)
-                    )
-                })
-            } else if let (Some(x), Some(y)) = (dbg_json_num(line, "x"), dbg_json_num(line, "y")) {
-                Ok((x, y))
-            } else {
-                return r#"{"ok":false,"error":"hover needs x,y or selector"}"#.to_string();
-            };
-            let (x, y) = match coords {
-                Ok(c) => c,
-                Err(e) => return e,
-            };
-            let pt = (x, y + doc.scroll_y);
-            let changed = doc.process_mouse_event(webcore::dom::HtmlEventType::MouseMove, pt, 0);
-            if changed {
-                renderer.layout_engine().layout(doc, width);
-            }
-            format!(r#"{{"ok":true,"changed":{}}}"#, changed)
-        }
-        // ── Type text ────────────────────────────────────────────────────
-        "type" => match dbg_json_str(line, "text") {
-            Some(text) => {
-                let mut any = false;
-                for ch in text.chars() {
-                    if doc.process_key_event(
-                        webcore::dom::HtmlEventType::KeyDown,
-                        ch as u32,
-                        Some(ch),
-                        false,
-                        false,
-                        false,
-                        false,
-                    ) {
-                        any = true;
-                    }
-                }
-                if any {
-                    renderer.layout_engine().layout(doc, width);
-                }
-                format!(r#"{{"ok":true,"typed":{}}}"#, any)
-            }
-            None => r#"{"ok":false,"error":"type needs text"}"#.to_string(),
-        },
-        // ── Send key ─────────────────────────────────────────────────────
-        "key" => match dbg_json_str(line, "key") {
-            Some(k) => {
-                let (code, ch) = match k.as_str() {
-                    "Enter" => (13, Some('\r')),
-                    "Tab" => (9, Some('\t')),
-                    "Backspace" => (8, None),
-                    "Delete" => (46, None),
-                    "Escape" => (27, None),
-                    "ArrowLeft" => (37, None),
-                    "ArrowRight" => (39, None),
-                    "ArrowUp" => (38, None),
-                    "ArrowDown" => (40, None),
-                    "Home" => (36, None),
-                    "End" => (35, None),
-                    "Space" => (32, Some(' ')),
-                    s if s.len() == 1 => (s.chars().next().unwrap() as u32, s.chars().next()),
-                    _ => {
-                        return format!(
-                            r#"{{"ok":false,"error":"unknown key: {}"}}"#,
-                            dbg_json_escape(&k)
-                        )
-                    }
-                };
-                let changed = doc.process_key_event(
-                    webcore::dom::HtmlEventType::KeyDown,
-                    code,
-                    ch,
-                    false,
-                    false,
-                    false,
-                    false,
-                );
-                if changed {
-                    renderer.layout_engine().layout(doc, width);
-                }
-                format!(r#"{{"ok":true,"changed":{}}}"#, changed)
-            }
-            None => r#"{"ok":false,"error":"key needs key name"}"#.to_string(),
-        },
         // ── Force element state ──────────────────────────────────────────
         "force-state" => {
             let selector = dbg_json_str(line, "selector").unwrap_or_default();
@@ -6671,9 +7103,24 @@ fn dispatch_headless_cmd(
             let nodes = webcore::dom::query_selector_all(&doc.root, &selector);
             let mut items: Vec<String> = Vec::new();
             for node in nodes.into_iter().take(6) {
-                let lines: Vec<String> = node.layout.line_cache.iter().map(|l| format!(
-                    r#"{{"y":{:.2},"h":{:.2},"asc":{:.2},"desc":{:.2},"w":{:.2},"len":{}}}"#,
-                    l.y, l.height, l.ascent, l.descent, l.width, l.text_length)).collect();
+                let lines: Vec<String> = node.layout.line_cache.iter().map(|l| {
+                    let visual: Vec<String> = l.visual_segments.iter().map(|seg| format!(
+                        r#"{{"s":{},"len":{},"level":{},"x":{:.2},"w":{:.2}}}"#,
+                        seg.logical_start, seg.length, seg.level, seg.x, seg.width
+                    )).collect();
+                    format!(
+                        r#"{{"x":{:.2},"y":{:.2},"h":{:.2},"asc":{:.2},"desc":{:.2},"w":{:.2},"text_x":{:.2},"len":{},"visual":[{}]}}"#,
+                        l.x,
+                        l.y,
+                        l.height,
+                        l.ascent,
+                        l.descent,
+                        l.width,
+                        l.text_x_offset,
+                        l.text_length,
+                        visual.join(",")
+                    )
+                }).collect();
                 items.push(format!(
                     r#"{{"tag":"{}","id":"{}","font_px":{:.2},"line_height":"{:?}","content_h":{:.2},"lines":[{}]}}"#,
                     node.tag,
@@ -6702,29 +7149,5 @@ fn dispatch_headless_cmd(
         )
     } else {
         result
-    }
-}
-
-fn poll_headless_fonts(
-    renderer: &mut Renderer,
-    doc: &mut Document,
-    width: f32,
-    height: f32,
-) -> bool {
-    let loaded = renderer.layout_engine().poll_pending_fonts();
-    if loaded {
-        renderer.layout_engine().viewport_h = height;
-        renderer.layout_engine().layout(doc, width);
-        renderer.invalidate_display_list();
-    }
-    loaded
-}
-
-fn wait_for_headless_fonts(renderer: &mut Renderer, doc: &mut Document, width: f32, height: f32) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while renderer.layout_engine().has_pending_fonts() && std::time::Instant::now() < deadline {
-        if !poll_headless_fonts(renderer, doc, width, height) {
-            std::thread::sleep(std::time::Duration::from_millis(25));
-        }
     }
 }

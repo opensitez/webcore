@@ -7,7 +7,7 @@ use winit::window::Window;
 use webcore::dom::{self, HtmlEventType};
 use webcore::platform::Platform;
 use webcore::types::ComponentRegistry;
-use webcore::{load_html_with_registry, Document, LayoutEngine, Renderer};
+use webcore::{Document, LayoutEngine, Renderer, load_html_with_registry};
 
 const HTML: &str = include_str!("html/calculator.html");
 

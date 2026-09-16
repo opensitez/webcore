@@ -8,7 +8,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
 
 use webcore::platform::Platform;
-use webcore::{load_html, Document, HtmlEventType, Renderer};
+use webcore::{Document, HtmlEventType, Renderer, load_html};
 
 const HTML: &str = include_str!("html/animation_demo.html");
 

@@ -13,7 +13,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
 
 use webcore::platform::Platform;
-use webcore::{load_html_vp, Document, HtmlEventType, LayoutEngine, Renderer};
+use webcore::{Document, HtmlEventType, LayoutEngine, Renderer, load_html_vp};
 
 const HTML: &str = include_str!("html/transform_filter_demo.html");
 

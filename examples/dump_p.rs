@@ -1,6 +1,6 @@
 use std::fs;
 use webcore::html::serialize_html;
-use webcore::{parse_html_with_base, LayoutEngine};
+use webcore::{LayoutEngine, parse_html_with_base};
 
 fn traverse(node: &webcore::WebCore, depth: usize) {
     if node.tag == "p" {
@@ -75,10 +75,29 @@ fn main() {
             }
         }
         if found && node.tag == "div" {
-            println!("[HERO] found hero container: tag={} display={:?} content_rect={:?} border_rect={:?} margin_rect={:?}", node.tag, node.style.display, node.layout.content_rect, node.layout.border_rect, node.layout.margin_rect);
+            println!(
+                "[HERO] found hero container: tag={} display={:?} content_rect={:?} border_rect={:?} margin_rect={:?}",
+                node.tag,
+                node.style.display,
+                node.layout.content_rect,
+                node.layout.border_rect,
+                node.layout.margin_rect
+            );
             for (i, ch) in node.children.iter().enumerate() {
-                println!(" [HERO] child[{}] tag={} display={:?} margin_rect={:?} border_rect={:?} content_rect={:?} style.position={:?} style.top={:?} style.left={:?} style.right={:?} style.bottom={:?}",
-                         i, ch.tag, ch.style.display, ch.layout.margin_rect, ch.layout.border_rect, ch.layout.content_rect, ch.style.position, ch.style.top, ch.style.left, ch.style.right, ch.style.bottom);
+                println!(
+                    " [HERO] child[{}] tag={} display={:?} margin_rect={:?} border_rect={:?} content_rect={:?} style.position={:?} style.top={:?} style.left={:?} style.right={:?} style.bottom={:?}",
+                    i,
+                    ch.tag,
+                    ch.style.display,
+                    ch.layout.margin_rect,
+                    ch.layout.border_rect,
+                    ch.layout.content_rect,
+                    ch.style.position,
+                    ch.style.top,
+                    ch.style.left,
+                    ch.style.right,
+                    ch.style.bottom
+                );
             }
         }
         for ch in &node.children {

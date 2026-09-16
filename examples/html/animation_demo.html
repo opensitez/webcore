@@ -218,6 +218,38 @@ h1 {
   font-weight: 600;
   animation: shake 2s ease-in-out infinite;
 }
+
+/* ── News ticker / chiron ──────────────── */
+@keyframes ticker-scroll {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(-100%); }
+}
+.ticker-card {
+  align-items: stretch;
+  max-width: 1216px;
+  margin: 24px auto 0;
+}
+.ticker {
+  width: 100%;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #111827;
+  border: 1px solid #334155;
+  height: 42px;
+  display: flex;
+  align-items: center;
+}
+.ticker-track {
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 700;
+  color: #f8fafc;
+  will-change: transform;
+  animation: ticker-scroll 8s linear infinite;
+}
+.ticker-track span {
+  margin-right: 48px;
+}
 </style>
 </head>
 <body>
@@ -279,6 +311,18 @@ h1 {
       <div class="heart">♥</div>
     </div>
 
+  </div>
+
+  <div class="card ticker-card">
+    <h2>Breaking News Ticker</h2>
+    <div class="ticker">
+      <div class="ticker-track">
+        <span>Phoenix engine streams style as it arrives</span>
+        <span>Animations must stay smooth without JavaScript</span>
+        <span>Scrolling and paint are owned by webcore</span>
+        <span>Cached resources should not block first paint</span>
+      </div>
+    </div>
   </div>
 </body>
 </html>

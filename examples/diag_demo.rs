@@ -1,7 +1,7 @@
 use webcore::types::{Display, WebCore};
 /// Port of wxhtmledit/examples/diag.cpp
 /// Diagnostic: dump box tree to see layout results.
-use webcore::{load_html, LayoutEngine};
+use webcore::{LayoutEngine, load_html};
 
 fn dump_box_tree(node: &WebCore, depth: usize) {
     if matches!(node.style.display, Display::None) {

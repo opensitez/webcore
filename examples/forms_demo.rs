@@ -15,10 +15,10 @@ use winit::event_loop::EventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
 
+use webcore::WebCore;
 use webcore::dom::{self, HtmlEventType};
 use webcore::platform::Platform;
-use webcore::WebCore;
-use webcore::{load_html, LayoutEngine, Renderer};
+use webcore::{LayoutEngine, Renderer, load_html};
 
 const HTML: &str = include_str!("html/forms_demo.html");
 

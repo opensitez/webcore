@@ -78,9 +78,12 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 |---------|---------|
 | `screenshot` | `{"cmd":"screenshot","out":"/tmp/page.png"}`; add `"scale":2` to exercise the same HiDPI raster path as a Retina GUI window |
 | `navigate` | `{"cmd":"navigate","url":"https://example.com"}` |
+| `tabs` | `{"cmd":"tabs"}` — list open demo-browser tabs |
+| `switch-tab` | `{"cmd":"switch-tab","index":0}` — switch the active demo-browser tab |
 | `scroll` | `{"cmd":"scroll","dy":200}` |
 | `resize` | `{"cmd":"resize","width":800,"height":600}` |
 | `viewport` | `{"cmd":"viewport"}` — returns width, height, scroll, doc_height |
+| `quit` | `{"cmd":"quit"}` — stop the debugged browser process |
 
 ### Finding & Querying
 | Command | Example |
@@ -88,6 +91,8 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 | `find` | `{"cmd":"find","selector":"h1"}` |
 | `text` | `{"cmd":"text","selector":"h1"}` |
 | `attr` | `{"cmd":"attr","selector":"a","name":"href"}` |
+| `html` | `{"cmd":"html","selector":"main"}` — serialized HTML for a matched element |
+| `dom-html` | `{"cmd":"dom-html"}` — serialized current document HTML |
 | `search` | `{"cmd":"search","query":"hello"}` — search by text content |
 | `hit` | `{"cmd":"hit","x":640,"y":200}` — hit test at coordinates |
 | `dom-path` | `{"cmd":"dom-path","selector":"h1"}` — CSS selector path |
@@ -97,18 +102,28 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 | Command | Example |
 |---------|---------|
 | `inspect` | `{"cmd":"inspect","selector":".sidebar"}` |
-| `inspect-node` | `{"cmd":"inspect-node","nid":42}` — by node_id |
+| `inspect-node` | `{"cmd":"inspect-node","nid":42}` — by node_id; image nodes include decoded `image` metadata (`src`, natural width/height, byte count) when available |
 | `deep` | `{"cmd":"deep","selector":"td"}` — full dump |
-| `computed` | `{"cmd":"computed","selector":"h1"}` |
+| `computed` | `{"cmd":"computed","selector":"h1"}` — includes box geometry, display/flex fields, `direction`, `writing_mode`, resolved padding/margins |
 | `css` | `{"cmd":"css","selector":"td","props":"display,width"}` |
+| `resolve-css` | `{"cmd":"resolve-css","value":"var(--brand)"}` — resolve CSS variable references against the active stylesheet |
 | `rules` | `{"cmd":"rules","selector":"h1"}` — matched CSS rules |
 | `inspect-mode` | `{"cmd":"inspect-mode","on":"true"}` — recascade with matched-rule capture enabled for scripted `rules` inspection; GUI mode preserves the pre-panel page viewport so responsive media queries do not change while the inspector opens |
 | `rule-search` | `{"cmd":"rule-search","query":"lg\\:flex","limit":10}` — search loaded stylesheet selectors while debugging cascade misses |
-| `paint-dump` | `{"cmd":"paint-dump","x":0,"y":0,"w":400,"h":200,"limit":80}` — display-list commands in a viewport rectangle; text entries include font metrics and decoration flags, fill rectangles include color/radius, and CSS mask entries include mask image dimensions |
+| `keyframes` | `{"cmd":"keyframes","query":"ticker","limit":10}` — inspect parsed `@keyframes` stops and properties for animation debugging |
+| `lines` | `{"cmd":"lines","selector":"p"}` — line-cache geometry for matched elements, including bidi visual segments (`x`, `w`, `level`) for RTL/LTR paint debugging |
+| `paint-dump` | `{"cmd":"paint-dump","x":0,"y":0,"w":400,"h":200,"limit":80}` — display-list commands in a viewport rectangle; text entries include font metrics and decoration flags, fill rectangles include color/radius, borders include per-side widths/colors/styles, and CSS mask entries include mask image dimensions |
+| `display-list-stats` | `{"cmd":"display-list-stats"}` — command counts for the current viewport paint-band display list, including text, image, clip, transform, layer, and mask commands plus `paint_top`/`paint_bottom` |
+| `image-states` | `{"cmd":"image-states","limit":80}` — DOM image/background/mask state, including source URLs, `srcset`, node IDs, element/background/mask decoded state, natural sizes, byte counts, layout rects, pending-channel/in-flight status, and load errors |
+| `resource-states` | `{"cmd":"resource-states"}` — loading flag plus pending CSS/image/font resource state, stylesheet counts, and document height |
+| `animated-images` | `{"cmd":"animated-images"}` — list animated image nodes, frame counts, layout rects, clip band, and whether the engine currently considers them visible |
+| `animations` | `{"cmd":"animations"}` — list active CSS keyframe animations, their target node IDs, duration, iteration count, and animated property names |
 | `svg-metrics` | `{"cmd":"svg-metrics"}` — counts parsed SVG documents plus unsupported native SVG elements/attributes seen on the current page |
 | `box-model` | `{"cmd":"box-model","selector":"div"}` — Chrome-style |
 | `highlight` | `{"cmd":"highlight","selector":"h1","out":"/tmp/hl.png"}`; accepts `"scale":2` for HiDPI output |
 | `dom-tree` | `{"cmd":"dom-tree","depth":2}` — structured JSON tree |
+| `tree` | `{"cmd":"tree","depth":2}` — compact DOM/layout tree alias used by quick probes |
+| `height-dump` | `{"cmd":"height-dump","limit":40}` — largest layout boxes by height for scroll/document-height debugging |
 | `a11y` | `{"cmd":"a11y"}` — accessibility tree |
 
 ### Interaction
@@ -119,6 +134,7 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 | `type` | `{"cmd":"type","text":"hello"}` |
 | `key` | `{"cmd":"key","key":"Enter"}` |
 | `force-state` | `{"cmd":"force-state","selector":".item","state":"hover"}` |
+| `event-listeners` | `{"cmd":"event-listeners","selector":"button"}` — event listener summary for the matched node |
 | `media` | `{"cmd":"media","selector":"video","action":"state"}`; actions: `play`, `pause`, `toggle`, `load`, `seek` with `"time":12.5`, `volume`/`muted`/`rate` with `"value"` |
 
 ### Mutation
@@ -134,23 +150,29 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 ### Performance
 | Command | Example |
 |---------|---------|
-| `perf` | `{"cmd":"perf"}` — load timing breakdown |
+| `perf` | `{"cmd":"perf"}` — current browser-view load state for the active tab |
 | `bench` | `{"cmd":"bench","n":5}` — cascade/layout benchmark |
 | `bench-progressive` | `{"cmd":"bench-progressive"}` — above-fold vs full |
+| `bench-render` | `{"cmd":"bench-render","dy":500}` — live BrowserView paint/scroll/cached-paint benchmark in the GUI path |
 | `network` | `{"cmd":"network"}` — resource count |
 | `measure` | `{"cmd":"measure","from":"#a","to":"#b"}` — distance |
+| `step` / `tick` | `{"cmd":"tick","ms":100}` — advance debug timing/state in scripted sessions |
+
+Environment flags for frame diagnostics:
+
+```bash
+WEBCORE_TRACE_IDLE=1 cargo run --release --example browser -- --cached https://example.com
+WEBCORE_TRACE_RENDER=1 cargo run --release --example browser -- --cached https://example.com
+```
+
+`WEBCORE_TRACE_IDLE` reports why the engine requested work (`stylesheet`, `image-layout`, `image-paint`, `font`, `css-animation-paint`, `css-animation-layout`, `animated-image`, etc.) and whether more timed work is pending. `WEBCORE_TRACE_RENDER` splits each render into display-list build and replay time, and reports whether the renderer-owned backing surface was reused.
 
 ### Chrome Comparison (requires `--chrome`)
 | Command | Example |
 |---------|---------|
 | `chrome-screenshot` | `{"cmd":"chrome-screenshot","out":"/tmp/chrome.png"}` |
-| `chrome-sync` | `{"cmd":"chrome-sync"}` — sync scroll to Chrome |
-
-### Browser Tabs (GUI mode only)
-| Command | Example |
-|---------|---------|
-| `tabs` | `{"cmd":"tabs"}` — list open tabs |
-| `switch-tab` | `{"cmd":"switch-tab","index":1}` |
+| `chrome-sync` | `{"cmd":"chrome-sync"}` — navigate Chrome to the active webcore URL for side-by-side inspection |
+| `compare` | `{"cmd":"compare","out":"/tmp/compare.png"}` — capture webcore and Chrome screenshots and report visual diff metadata |
 
 ## Python REPL Shortcuts
 

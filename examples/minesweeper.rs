@@ -9,7 +9,7 @@ use winit::window::Window;
 use rand::Rng;
 use webcore::dom::{self, HtmlEventType};
 use webcore::platform::Platform;
-use webcore::{load_html, Document, LayoutEngine, Renderer, WebCore};
+use webcore::{Document, LayoutEngine, Renderer, WebCore, load_html};
 
 const HTML: &str = include_str!("html/minesweeper.html");
 
