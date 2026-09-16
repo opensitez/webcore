@@ -541,11 +541,13 @@ pub fn build_box_rects(
     // (e.g. float:left; width:320px; margin-left:-320px) occupy their visual width.
     let mr_w =
         (node.layout.border_rect.w + margin_left + margin_right).max(node.layout.border_rect.w);
+    let mr_h = (node.layout.border_rect.h + rbox.margin_top + rbox.margin_bottom)
+        .max(node.layout.border_rect.h);
     node.layout.margin_rect = Rect::new(
         node.layout.border_rect.x - margin_left,
         node.layout.border_rect.y - rbox.margin_top,
         mr_w,
-        node.layout.border_rect.h + rbox.margin_top + rbox.margin_bottom,
+        mr_h,
     );
     node.layout.baseline = find_last_in_flow_baseline(node).unwrap_or(content_y + content_h);
 
@@ -2027,12 +2029,17 @@ pub fn wrap_mixed_children_in_anonymous_blocks(node: &mut WebCore) {
                 anon.children.push(child);
             }
         } else {
-            // Out of flow (e.g. float or absolute)
-            if let Some(ref mut anon) = current_anon {
-                anon.children.push(child);
-            } else {
-                new_children.push(child);
+            // Out-of-flow boxes remain real children of the block container.
+            // Anonymous block boxes are layout fragments, not DOM parents; if
+            // an absolutely positioned button is wrapped here, selectors like
+            // `.form > .button` stop matching and resource scheduling sees the
+            // wrong ancestor chain.
+            if let Some(anon) = current_anon.take()
+                && has_renderable_content(&anon)
+            {
+                new_children.push(anon);
             }
+            new_children.push(child);
         }
     }
     if let Some(anon) = current_anon {

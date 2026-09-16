@@ -163,14 +163,14 @@ impl BrowserView {
     }
 
     fn layout_active(&mut self) -> bool {
+        self.wire_streamed_font_resources();
         if let Some(frame) = self.stream_frame.as_mut() {
-            let engine = self.renderer.layout_engine();
-            engine.viewport_h = self.height;
+            frame.set_viewport(self.width, self.height);
             frame.doc.style_dirty = true;
-            engine.layout(&mut frame.doc, self.width);
+            let changed = frame.update_frame();
             self.renderer.invalidate_display_list();
             self.stream_needs_layout = false;
-            return true;
+            return changed;
         }
         let Some(doc) = self.doc.as_mut() else {
             return false;
@@ -186,32 +186,42 @@ impl BrowserView {
         if !self.stream_paint_ready {
             return;
         }
+        self.wire_streamed_font_resources();
         let Some(frame) = self.stream_frame.as_mut() else {
             return;
         };
-        let root = &frame.doc.root.layout;
-        let needs_layout = frame.doc.style_dirty
-            || frame.doc.root.layout.layout_dirty
-            || !root.margin_rect.w.is_finite()
-            || !root.margin_rect.h.is_finite()
-            || root.margin_rect.w <= 0.0
-            || root.margin_rect.h <= 0.0;
-        if !needs_layout {
-            self.stream_needs_layout = false;
-            return;
+        frame.set_viewport(self.width, self.height);
+        if frame.update_frame() {
+            self.renderer.invalidate_display_list();
         }
-        let engine = self.renderer.layout_engine();
-        engine.viewport_h = self.height;
-        engine.layout(&mut frame.doc, self.width);
-        self.renderer.invalidate_display_list();
         self.stream_needs_layout = false;
     }
 
     fn update_streamed_frame_before_paint(&mut self) -> bool {
-        if !self.stream_paint_ready || !self.stream_needs_layout {
+        if !self.stream_paint_ready {
             return false;
         }
-        self.layout_active()
+        self.wire_streamed_font_resources();
+        let Some(frame) = self.stream_frame.as_mut() else {
+            return false;
+        };
+        frame.set_viewport(self.width, self.height);
+        let changed = frame.update_frame();
+        if changed {
+            self.renderer.invalidate_display_list();
+        }
+        self.stream_needs_layout = false;
+        changed
+    }
+
+    fn wire_streamed_font_resources(&mut self) {
+        let cache_dir = self.options.cache_dir.clone();
+        let font_system = &mut self.renderer.font_system as *mut _;
+        if let Some(frame) = self.stream_frame.as_mut() {
+            frame.engine.font_system = Some(font_system);
+            frame.engine.resource_cache_dir = cache_dir.clone();
+        }
+        self.renderer.layout_engine().resource_cache_dir = cache_dir;
     }
 
     pub fn url(&self) -> &str {
@@ -458,13 +468,8 @@ impl BrowserView {
         let changed = self.poll();
         let nav_changed = self.drain_pending_navigation();
         let stream_layout_changed = self.update_streamed_frame_before_paint();
-        let needs_redraw = if let Some(frame) = self.stream_frame.as_mut() {
-            self.renderer.drive_document_idle(
-                event_loop,
-                Some(&mut frame.doc),
-                self.width,
-                self.height,
-            )
+        let needs_redraw = if self.stream_frame.is_some() {
+            stream_layout_changed
         } else {
             self.renderer.drive_document_idle(
                 event_loop,
@@ -480,6 +485,7 @@ impl BrowserView {
     }
 
     pub fn paint_into(&mut self, target: &mut Pixmap, x: i32, y: i32, scale: f32) {
+        self.wire_streamed_font_resources();
         self.ensure_streamed_paint_layout();
         let width_px = target.width().max(1);
         let height_px = target.height().max(1);
@@ -926,6 +932,31 @@ mod tests {
         assert!(
             after > 0.0,
             "first streamed paint must consume UA/inline/current CSS through layout before rendering"
+        );
+    }
+
+    #[test]
+    fn browser_view_first_paint_drives_frame_resource_scheduler() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+        view.feed_streaming_chunk(
+            base,
+            "<!doctype html><html><head><style>.logo{display:block;width:16px;height:16px;background-image:url(/logo.png)}</style></head><body><div class='logo'></div>",
+        );
+
+        let mut target = Pixmap::new(480, 320).unwrap();
+        view.paint_into(&mut target, 0, 0, 1.0);
+
+        assert!(
+            view.stream_frame
+                .as_ref()
+                .unwrap()
+                .doc
+                .pending_images
+                .is_some(),
+            "BrowserView must let EngineFrame discover CSS background dependencies"
         );
     }
 

@@ -142,7 +142,8 @@ impl EngineFrame {
     }
 
     pub fn set_cache_dir(&mut self, cache_dir: Option<String>) {
-        self.cache_dir = cache_dir;
+        self.cache_dir = cache_dir.clone();
+        self.engine.resource_cache_dir = cache_dir;
     }
 
     pub fn set_resource_wake(&mut self, wake: Option<std::sync::Arc<dyn Fn() + Send + Sync>>) {
@@ -949,7 +950,11 @@ impl EngineFrame {
         let node_id = crate::types::find_node_by_path_mut(&mut self.doc.root, &path)
             .map(|node| node.node_id)
             .unwrap_or(0);
-        let key = format!("{target:?}:{path:?}:{url}");
+        let key = if node_id != 0 {
+            format!("{target:?}:#{node_id}:{url}")
+        } else {
+            format!("{target:?}:{path:?}:{url}")
+        };
         if url.is_empty() || !self.scheduled_images.insert(key) {
             return;
         }

@@ -1995,6 +1995,188 @@ fn whole_string_and_word_by_word_measurement_agree() {
     );
 }
 
+#[test]
+fn padded_story_title_wraps_before_reserved_right_controls() {
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { width: 1200px; }
+        h2 {
+          width: 978px;
+          font: bold 16px/24px arial, serif;
+          padding: 4px 155px 4px 10px;
+        }
+        .story-title { position: relative; left: 15px; }
+        </style>
+        <h2 id="story">
+          <span class="story-title">Anthropic Commits to Independent AI Evaluators, Wants Slower Development. Nvidia's CEO Wants It 'As Fast as You Can'</span>
+        </h2>
+    "#,
+        1200.0,
+    );
+    let mut pm = tiny_skia::Pixmap::new(1200, 120).unwrap();
+    renderer.render(&mut doc, &mut pm, 1.0);
+    fn find<'a>(node: &'a crate::types::WebCore, id: &str) -> Option<&'a crate::types::WebCore> {
+        if node.attributes.get("id").map(String::as_str) == Some(id) {
+            return Some(node);
+        }
+        node.children.iter().find_map(|child| find(child, id))
+    }
+    let story = find(&doc.root, "story").expect("story h2");
+    assert!(
+        story.layout.line_cache.len() >= 2,
+        "reserved controls should force at least two title lines, got {:?}",
+        story.layout.line_cache
+    );
+    let first = &story.layout.line_cache[0];
+    assert!(
+        first.width <= story.layout.content_rect.w + 0.5,
+        "first line width {} must fit content width {}",
+        first.width,
+        story.layout.content_rect.w
+    );
+    let flat_text = crate::layout::inline_layout::collect_flat_text(story);
+    let first_text = flat_text
+        .get(first.text_start..first.text_start + first.text_length)
+        .unwrap_or("");
+    assert!(
+        !first_text.contains("As Fast as"),
+        "first line wrapped too late into reserved controls: {first_text:?}"
+    );
+}
+
+#[test]
+fn inline_run_boundaries_preserve_collapsed_spaces() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list_full;
+
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
+        r##"
+        <style>
+        * { margin: 0; padding: 0; }
+        body { font: 16px/24px Arial, sans-serif; }
+        p { width: 800px; }
+        </style>
+        <p id="story">Nvidia argued <em>against</em> slowing development. Musk <a href="#">posted</a> on X and published a <a href="#">37-page training manual</a> "for deployment."</p>
+    "##,
+        900.0,
+    );
+    let mut pm = tiny_skia::Pixmap::new(900, 120).unwrap();
+    renderer.render(&mut doc, &mut pm, 1.0);
+    let list = build_display_list_full(
+        &doc.root,
+        900.0,
+        120.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+    let painted = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+
+    assert!(
+        painted.contains("against slowing"),
+        "space after inline em was lost: {painted:?}"
+    );
+    assert!(
+        painted.contains("posted on"),
+        "space after inline link was lost: {painted:?}"
+    );
+    assert!(
+        painted.contains("manual \"for"),
+        "space after inline link before quote was lost: {painted:?}"
+    );
+
+    let mut against = None;
+    let mut slowing = None;
+    for cmd in &list.commands {
+        if let PaintCmd::Text {
+            x,
+            text,
+            font_size,
+            font_weight,
+            font_style,
+            font_family,
+            ..
+        } = cmd
+        {
+            if text == "against" {
+                against = Some((
+                    *x,
+                    text.clone(),
+                    *font_size,
+                    *font_weight,
+                    *font_style,
+                    font_family.clone(),
+                ));
+            } else if let Some(idx) = text.find("slowing") {
+                slowing = Some((
+                    *x,
+                    text[..idx].to_string(),
+                    *font_size,
+                    *font_weight,
+                    *font_style,
+                    font_family.clone(),
+                ));
+            }
+        }
+    }
+    let (against_x, against_text, against_size, against_weight, against_style, against_family) =
+        against.expect("against command");
+    let (slowing_x, slowing_prefix, slowing_size, slowing_weight, slowing_style, slowing_family) =
+        slowing.expect("slowing command");
+    let weight = crate::types::FontWeight::Value(against_weight as u16);
+    let style = match against_style {
+        1 => crate::types::FontStyle::Italic,
+        2 => crate::types::FontStyle::Oblique,
+        _ => crate::types::FontStyle::Normal,
+    };
+    let against_w = crate::layout::inline_layout::measure_text_width_weighted(
+        &against_text,
+        against_size,
+        None,
+        weight,
+        style,
+        1.0,
+        &against_family,
+    );
+    let slowing_prefix_weight = crate::types::FontWeight::Value(slowing_weight as u16);
+    let slowing_prefix_style = match slowing_style {
+        1 => crate::types::FontStyle::Italic,
+        2 => crate::types::FontStyle::Oblique,
+        _ => crate::types::FontStyle::Normal,
+    };
+    let slowing_visible_x = slowing_x
+        + crate::layout::inline_layout::measure_text_width_weighted(
+            &slowing_prefix,
+            slowing_size,
+            None,
+            slowing_prefix_weight,
+            slowing_prefix_style,
+            1.0,
+            &slowing_family,
+        );
+    assert!(
+        slowing_visible_x > against_x + against_w + 2.0,
+        "space after inline em did not advance geometry: against right={} slowing_x={} text={painted:?}",
+        against_x + against_w,
+        slowing_visible_x
+    );
+}
+
 /// **The measuring and painting font resolvers must agree on generic family
 /// names.** Sizing goes through `resolve_css_family`, painting through the
 /// cheaper `css_family_to_cosmic`. They disagreed about `system-ui`: the first

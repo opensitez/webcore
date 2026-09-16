@@ -1565,11 +1565,13 @@ fn set_box_rects(
     );
     let mr_w =
         (node.layout.border_rect.w + margin_left + margin_right).max(node.layout.border_rect.w);
+    let mr_h = (node.layout.border_rect.h + rbox.margin_top + rbox.margin_bottom)
+        .max(node.layout.border_rect.h);
     node.layout.margin_rect = Rect::new(
         node.layout.border_rect.x - margin_left,
         node.layout.border_rect.y - rbox.margin_top,
         mr_w,
-        node.layout.border_rect.h + rbox.margin_top + rbox.margin_bottom,
+        mr_h,
     );
     node.layout.baseline = content_y + content_h;
     // Cache resolved values (same as build_box_rects in block.rs)
@@ -3741,7 +3743,8 @@ pub fn fill_char_x_for_line(
 
     let mut cursor_x = 0.0f32;
 
-    if !line.visual_segments.is_empty() {
+    let has_rtl_visual_segments = line.visual_segments.iter().any(|vs| (vs.level & 1) != 0);
+    if has_rtl_visual_segments {
         // BiDi: iterate in visual segment order so cursor_x advances
         // left-to-right in visual order, and RTL text gets correct positions.
         for vs_idx in 0..line.visual_segments.len() {

@@ -219,7 +219,7 @@ static REMOTE_FONT_BYTES_IN_FLIGHT: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<RemoteFontFetchState>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-fn cached_remote_font_bytes(url: &str) -> Option<Vec<u8>> {
+fn cached_remote_font_bytes(url: &str, cache_dir: Option<&str>) -> Option<Vec<u8>> {
     if let Some(bytes) = REMOTE_FONT_BYTES_CACHE
         .lock()
         .ok()
@@ -254,7 +254,10 @@ fn cached_remote_font_bytes(url: &str) -> Option<Vec<u8>> {
             .and_then(|bytes| bytes.as_ref().map(|b| (**b).clone()));
     }
 
-    let result = fetch_remote_font_bytes(url).map(std::sync::Arc::new);
+    let result = cache_dir
+        .and_then(|dir| crate::loading::cached_fetch_bytes(url, dir).ok())
+        .or_else(|| fetch_remote_font_bytes(url))
+        .map(std::sync::Arc::new);
     if let Some(bytes) = result.as_ref()
         && let Ok(mut cache) = REMOTE_FONT_BYTES_CACHE.lock()
     {
@@ -1317,6 +1320,8 @@ pub struct LayoutEngine {
     pending_fonts: Vec<std::sync::mpsc::Receiver<(crate::css::FontFaceDecl, Vec<u8>)>>,
     /// Number of font fetches still in flight.
     fonts_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Shared browser resource cache for remote font bytes.
+    pub resource_cache_dir: Option<String>,
     /// Containing block rect for the nearest positioned (non-static) ancestor.
     /// Used by abs-pos children to resolve their containing block correctly.
     pub pos_cb: Cell<Rect>,
@@ -1356,6 +1361,7 @@ impl LayoutEngine {
             text_width_cache: std::cell::RefCell::new(HashMap::new()),
             pending_fonts: Vec::new(),
             fonts_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            resource_cache_dir: None,
             pos_cb: Cell::new(Rect::new(0.0, 0.0, 0.0, 0.0)),
             fixed_cb: Cell::new(Rect::new(0.0, 0.0, 0.0, 0.0)),
             layout_depth: Cell::new(0),
@@ -2589,13 +2595,15 @@ impl LayoutEngine {
             if !remote.is_empty() {
                 let (tx, rx) = std::sync::mpsc::channel::<(crate::css::FontFaceDecl, Vec<u8>)>();
                 let in_flight = self.fonts_in_flight.clone();
+                let cache_dir = self.resource_cache_dir.clone();
                 in_flight.fetch_add(remote.len(), std::sync::atomic::Ordering::SeqCst);
 
                 for (face, url) in remote {
                     let sender = tx.clone();
                     let counter = in_flight.clone();
+                    let cache_dir = cache_dir.clone();
                     crate::spawn_font_resource_task(move || {
-                        let result = cached_remote_font_bytes(&url);
+                        let result = cached_remote_font_bytes(&url, cache_dir.as_deref());
                         if let Some(bytes) = result {
                             eprintln!(
                                 "  Font loaded: {} ({} bytes) from {}",
@@ -2710,6 +2718,12 @@ impl LayoutEngine {
         // branch in `cascade.rs`), and layout picks it up below.
         let cascade_root_px = self.root_font_px;
         let root_font_px = cascade_root_px;
+
+        // Anonymous blocks are layout fragments, not DOM nodes. Progressive
+        // rendering may create them before the final stylesheet has arrived;
+        // if they remain in the tree during a later cascade, child combinators
+        // such as `.toolbar > .button` stop matching.
+        crate::layout::block::unwrap_all_anonymous_blocks(&mut doc.root);
 
         // Rebuild selector index if rules changed (lazy, skips if already up-to-date).
         doc.stylesheet.rebuild_index();

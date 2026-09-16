@@ -1769,7 +1769,8 @@ fn build_inline_text(
         }
         let mut chunks: Vec<Chunk> = Vec::new();
 
-        if !line.visual_segments.is_empty() && !node.layout.inline_runs.is_empty() {
+        let has_rtl_visual_segments = line.visual_segments.iter().any(|vs| (vs.level & 1) != 0);
+        if has_rtl_visual_segments && !node.layout.inline_runs.is_empty() {
             // BiDi: use visual segment order
             for vs in &line.visual_segments {
                 let seg_s = vs.logical_start;
@@ -1866,6 +1867,7 @@ fn build_inline_text(
 
         let mut cursor_x = lx + line.text_x_offset;
         let mut previous_collapsible_space = false;
+        let mut previous_logical_end: Option<usize> = None;
 
         for (chunk_idx, chunk) in chunks.iter().enumerate() {
             let s = floor_cb(&flat, chunk.s);
@@ -1917,8 +1919,30 @@ fn build_inline_text(
                 seg_text_for_draw
             };
             let mut draw_text = apply_text_transform(text_for_transform, style_ref.text_transform);
-            if draw_text.is_empty() {
-                continue;
+
+            if !chunk.rtl
+                && collapses_spaces_for_paint(style_ref.white_space)
+                && !draw_text.starts_with(' ')
+                && let Some(prev_end) = previous_logical_end
+            {
+                let gap_start = floor_cb(&flat, prev_end.min(flat.len()));
+                if gap_start < s {
+                    let gap = &flat[gap_start..s];
+                    if !gap.is_empty() && gap.chars().all(char::is_whitespace) {
+                        let gap_w = crate::layout::inline_layout::measure_text_width_weighted(
+                            " ",
+                            run_font_px,
+                            None,
+                            style_ref.font_weight,
+                            style_ref.font_style,
+                            1.0,
+                            &style_ref.font_family,
+                        ) + run_letter_spc
+                            + run_word_spc
+                            + line.extra_space_per_word;
+                        cursor_x += gap_w;
+                    }
+                }
             }
 
             let run_line_h = if line.height > 0.0 {
@@ -1957,18 +1981,16 @@ fn build_inline_text(
                 }
             }
 
-            let measured_advance = || {
-                crate::layout::inline_layout::measure_text_width_weighted(
-                    &draw_text,
-                    run_font_px,
-                    None,
-                    style_ref.font_weight,
-                    style_ref.font_style,
-                    1.0,
-                    &style_ref.font_family,
-                ) + run_letter_spc * draw_text.chars().count() as f32
-                    + run_word_spc * draw_text.chars().filter(|&c| c == ' ').count() as f32
-            };
+            let measured_advance = crate::layout::inline_layout::measure_text_width_weighted(
+                &draw_text,
+                run_font_px,
+                None,
+                style_ref.font_weight,
+                style_ref.font_style,
+                1.0,
+                &style_ref.font_family,
+            ) + run_letter_spc * draw_text.chars().count() as f32
+                + run_word_spc * draw_text.chars().filter(|&c| c == ' ').count() as f32;
 
             let layout_advance = if !line.char_x.is_empty() {
                 let start_off = s.saturating_sub(line_start);
@@ -1986,7 +2008,7 @@ fn build_inline_text(
             } else {
                 None
             };
-            let mut chunk_advance = layout_advance.unwrap_or_else(measured_advance);
+            let mut chunk_advance = layout_advance.unwrap_or(measured_advance);
             if chunk.rtl {
                 if let Some(visual_x) = chunk.visual_x {
                     let segment_right = lx + line.text_x_offset + visual_x + chunk.visual_w;
@@ -1996,6 +2018,12 @@ fn build_inline_text(
                     }
                 }
             };
+
+            if draw_text.is_empty() {
+                cursor_x += chunk_advance;
+                previous_logical_end = Some(e);
+                continue;
+            }
 
             let x_pos = if let Some((start, _)) = char_x_start_end {
                 let exact_x = lx + line.text_x_offset + start;
@@ -2238,9 +2266,12 @@ fn build_inline_text(
                 } else {
                     cursor_x += chunk_advance;
                 }
+                cursor_x = cursor_x.max(x_pos + measured_advance);
             } else {
                 cursor_x += chunk_advance;
+                cursor_x = cursor_x.max(x_pos + measured_advance);
             }
+            previous_logical_end = Some(e);
         }
     }
 }
