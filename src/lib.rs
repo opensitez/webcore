@@ -27,9 +27,83 @@ static FONT_RESOURCE_POOL: std::sync::LazyLock<rayon::ThreadPool> =
             .expect("webcore font resource pool")
     });
 
-static PARSED_CSS_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<css::Stylesheet>>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+const PARSED_CSS_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+struct ParsedCssCache {
+    entries: std::collections::HashMap<String, (std::sync::Arc<css::Stylesheet>, usize, u64)>,
+    order: std::collections::VecDeque<(String, u64)>,
+    bytes: usize,
+    next_generation: u64,
+}
+
+impl ParsedCssCache {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            bytes: 0,
+            next_generation: 1,
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<std::sync::Arc<css::Stylesheet>> {
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        let sheet = self
+            .entries
+            .get_mut(key)
+            .map(|(sheet, _, entry_generation)| {
+                *entry_generation = generation;
+                sheet.clone()
+            })?;
+        self.order.push_back((key.to_string(), generation));
+        self.compact_order_if_needed();
+        Some(sheet)
+    }
+
+    fn insert(&mut self, key: String, sheet: std::sync::Arc<css::Stylesheet>) {
+        let bytes = stylesheet_cache_bytes(&sheet);
+        if bytes > PARSED_CSS_CACHE_MAX_BYTES {
+            return;
+        }
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        if let Some((_, old_bytes, _)) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(old_bytes);
+        }
+        while self.bytes.saturating_add(bytes) > PARSED_CSS_CACHE_MAX_BYTES {
+            let Some((oldest, oldest_generation)) = self.order.pop_front() else {
+                break;
+            };
+            let should_remove = self
+                .entries
+                .get(&oldest)
+                .is_some_and(|(_, _, entry_generation)| *entry_generation == oldest_generation);
+            if should_remove && let Some((_, old_bytes, _)) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(old_bytes);
+            }
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.order.push_back((key.clone(), generation));
+        self.entries.insert(key, (sheet, bytes, generation));
+        self.compact_order_if_needed();
+    }
+
+    fn compact_order_if_needed(&mut self) {
+        let live = self.entries.len().max(1);
+        if self.order.len() <= live.saturating_mul(4).saturating_add(32) {
+            return;
+        }
+        self.order.retain(|(key, generation)| {
+            self.entries
+                .get(key)
+                .is_some_and(|(_, _, entry_generation)| entry_generation == generation)
+        });
+    }
+}
+
+static PARSED_CSS_CACHE: std::sync::LazyLock<std::sync::Mutex<ParsedCssCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(ParsedCssCache::new()));
 
 struct CssParseState {
     result: std::sync::Mutex<Option<std::sync::Arc<css::Stylesheet>>>,
@@ -40,9 +114,197 @@ static CSS_PARSE_IN_FLIGHT: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<CssParseState>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-static DECODED_IMAGE_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, html::DecodedImage>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+fn stylesheet_cache_bytes(sheet: &css::Stylesheet) -> usize {
+    let string_bytes = |s: &String| std::mem::size_of::<String>().saturating_add(s.capacity());
+    let mut bytes = std::mem::size_of::<css::Stylesheet>()
+        .saturating_add(
+            sheet
+                .rules
+                .capacity()
+                .saturating_mul(std::mem::size_of::<css::CssRule>()),
+        )
+        .saturating_add(
+            sheet
+                .font_faces
+                .capacity()
+                .saturating_mul(std::mem::size_of::<css::FontFaceDecl>()),
+        )
+        .saturating_add(
+            sheet
+                .page_rules
+                .capacity()
+                .saturating_mul(std::mem::size_of::<css::PageRule>()),
+        )
+        .saturating_add(
+            sheet
+                .counter_styles
+                .capacity()
+                .saturating_mul(std::mem::size_of::<css::CounterStyleRule>()),
+        );
+    for source in &sheet.raw_sources {
+        bytes = bytes.saturating_add(string_bytes(source));
+    }
+    for (name, value) in &sheet.variables {
+        bytes = bytes
+            .saturating_add(string_bytes(name))
+            .saturating_add(string_bytes(value));
+    }
+    for (name, stops) in &sheet.keyframes {
+        bytes = bytes.saturating_add(string_bytes(name)).saturating_add(
+            stops
+                .capacity()
+                .saturating_mul(std::mem::size_of::<types::KeyframeStop>()),
+        );
+    }
+    for layer in &sheet.layer_order {
+        bytes = bytes.saturating_add(string_bytes(layer));
+    }
+    for rule in &sheet.rules {
+        bytes =
+            bytes
+                .saturating_add(string_bytes(&rule.layer))
+                .saturating_add(string_bytes(&rule.media_condition))
+                .saturating_add(string_bytes(&rule.container_condition))
+                .saturating_add(string_bytes(&rule.container_name))
+                .saturating_add(string_bytes(&rule.original_selector))
+                .saturating_add(
+                    rule.selectors
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<css::CssSelector>()),
+                )
+                .saturating_add(rule.compiled_decls.capacity().saturating_mul(
+                    std::mem::size_of::<(css::properties::PropertyId, types::CssValue)>(),
+                ))
+                .saturating_add(rule.compiled_important.capacity().saturating_mul(
+                    std::mem::size_of::<(css::properties::PropertyId, types::CssValue)>(),
+                ))
+                .saturating_add(
+                    rule.scopes
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<css::ScopeFrame>()),
+                );
+        for (name, value) in rule
+            .declarations
+            .iter()
+            .chain(rule.important_declarations.iter())
+        {
+            bytes = bytes
+                .saturating_add(string_bytes(name))
+                .saturating_add(string_bytes(value));
+        }
+    }
+    bytes
+}
+
+const DECODED_IMAGE_CACHE_MAX_BYTES: usize = 128 * 1024 * 1024;
+
+struct DecodedImageCache {
+    entries: std::collections::HashMap<String, (html::DecodedImage, usize, u64)>,
+    order: std::collections::VecDeque<(String, u64)>,
+    bytes: usize,
+    next_generation: u64,
+}
+
+impl DecodedImageCache {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            bytes: 0,
+            next_generation: 1,
+        }
+    }
+
+    fn get(&mut self, url: &str) -> Option<html::DecodedImage> {
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        let decoded = self.entries.get_mut(url).map(|(decoded, _, entry_gen)| {
+            *entry_gen = generation;
+            decoded.clone()
+        })?;
+        self.order.push_back((url.to_string(), generation));
+        self.compact_order_if_needed();
+        Some(decoded)
+    }
+
+    fn insert(&mut self, url: String, decoded: html::DecodedImage) {
+        let bytes = decoded_image_footprint(&decoded);
+        if bytes > DECODED_IMAGE_CACHE_MAX_BYTES {
+            return;
+        }
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        if let Some((_, old_bytes, _)) = self.entries.remove(&url) {
+            self.bytes = self.bytes.saturating_sub(old_bytes);
+        }
+        while self.bytes.saturating_add(bytes) > DECODED_IMAGE_CACHE_MAX_BYTES {
+            let Some((oldest, oldest_generation)) = self.order.pop_front() else {
+                break;
+            };
+            let should_remove = self
+                .entries
+                .get(&oldest)
+                .is_some_and(|(_, _, entry_generation)| *entry_generation == oldest_generation);
+            if should_remove && let Some((_, old_bytes, _)) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(old_bytes);
+            }
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.order.push_back((url.clone(), generation));
+        self.entries.insert(url, (decoded, bytes, generation));
+        self.compact_order_if_needed();
+    }
+
+    fn compact_order_if_needed(&mut self) {
+        let live = self.entries.len().max(1);
+        if self.order.len() <= live.saturating_mul(4).saturating_add(32) {
+            return;
+        }
+        self.order.retain(|(key, generation)| {
+            self.entries
+                .get(key)
+                .is_some_and(|(_, _, entry_generation)| entry_generation == generation)
+        });
+    }
+}
+
+static DECODED_IMAGE_CACHE: std::sync::LazyLock<std::sync::Mutex<DecodedImageCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(DecodedImageCache::new()));
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CacheMemoryStats {
+    pub entries: usize,
+    pub bytes: usize,
+}
+
+pub(crate) fn decoded_image_cache_stats() -> CacheMemoryStats {
+    DECODED_IMAGE_CACHE
+        .lock()
+        .map(|cache| CacheMemoryStats {
+            entries: cache.entries.len(),
+            bytes: cache.bytes,
+        })
+        .unwrap_or_default()
+}
+
+fn decoded_image_footprint(decoded: &html::DecodedImage) -> usize {
+    match decoded {
+        html::DecodedImage::Raster(data, _, _) => data.len(),
+        html::DecodedImage::Animated(animated) => {
+            animated
+                .frames
+                .iter()
+                .map(|frame| frame.pixels.len())
+                .sum::<usize>()
+                + animated
+                    .source_bytes
+                    .as_ref()
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(0)
+        }
+        html::DecodedImage::Svg(markup, _, _) => markup.len(),
+    }
+}
 
 struct ImageDecodeState {
     result: std::sync::Mutex<Option<Result<html::DecodedImage, String>>>,
@@ -76,7 +338,17 @@ pub(crate) fn cached_parsed_stylesheet(cache_key: &str) -> Option<css::Styleshee
     PARSED_CSS_CACHE
         .lock()
         .ok()
-        .and_then(|cache| cache.get(cache_key).map(|sheet| (**sheet).clone()))
+        .and_then(|mut cache| cache.get(cache_key).map(|sheet| (*sheet).clone()))
+}
+
+pub(crate) fn parsed_css_cache_stats() -> CacheMemoryStats {
+    PARSED_CSS_CACHE
+        .lock()
+        .map(|cache| CacheMemoryStats {
+            entries: cache.entries.len(),
+            bytes: cache.bytes,
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn cached_decoded_image(
@@ -115,7 +387,7 @@ fn cached_decoded_image_result_inner(
     if let Some(decoded) = DECODED_IMAGE_CACHE
         .lock()
         .ok()
-        .and_then(|cache| cache.get(url).cloned())
+        .and_then(|mut cache| cache.get(url))
     {
         return Ok(decoded);
     }
@@ -160,9 +432,6 @@ fn cached_decoded_image_result_inner(
     if let Ok(decoded) = decoded.as_ref()
         && let Ok(mut cache) = DECODED_IMAGE_CACHE.lock()
     {
-        if cache.len() > 512 {
-            cache.clear();
-        }
         cache.insert(url.to_string(), decoded.clone());
     }
     {
@@ -183,7 +452,7 @@ fn cached_decoded_image_ready(url: &str) -> Option<html::DecodedImage> {
     DECODED_IMAGE_CACHE
         .lock()
         .ok()
-        .and_then(|cache| cache.get(url).cloned())
+        .and_then(|mut cache| cache.get(url))
 }
 
 fn stream_stylesheet_fragments(
@@ -450,7 +719,7 @@ where
         && let Some(sheet) = PARSED_CSS_CACHE
             .lock()
             .ok()
-            .and_then(|cache| cache.get(&cache_key).cloned())
+            .and_then(|mut cache| cache.get(&cache_key))
     {
         if stylesheet_has_content(&sheet) {
             return CachedStylesheetLoad {
@@ -567,9 +836,6 @@ where
         && stylesheet_has_content(&combined)
         && let Ok(mut cache) = PARSED_CSS_CACHE.lock()
     {
-        if cache.len() > 512 {
-            cache.clear();
-        }
         cache.insert(cache_key.clone(), std::sync::Arc::new(combined.clone()));
     }
     if let Some(parse_state) = parse_state {
@@ -1128,9 +1394,12 @@ fn apply_ready_cached_images(doc: &mut types::Document) {
                 types::PendingImageTarget::Background => {
                     let _ = html::set_decoded_bg_image_on_node(node, decoded);
                 }
+                types::PendingImageTarget::BackgroundLayer(layer_index) => {
+                    let _ = html::set_decoded_bg_image_layer_on_node(node, layer_index, decoded);
+                }
                 types::PendingImageTarget::Mask => {
-                    if let Some((data, w, h)) = html::decoded_image_pixels(decoded) {
-                        node.mask_image_data = Some(std::sync::Arc::new(data));
+                    if let Some((data, w, h)) = html::decoded_image_pixels_arc(decoded) {
+                        node.mask_image_data = Some(data);
                         node.mask_image_width = w;
                         node.mask_image_height = h;
                     }
@@ -1203,6 +1472,35 @@ fn collect_remote_images(
                 node.node_id,
                 path.clone(),
                 types::PendingImageTarget::Background,
+                url.to_string(),
+            ));
+        }
+    }
+    for (layer_index, layer) in node
+        .style
+        .rare()
+        .additional_background_layers
+        .iter()
+        .enumerate()
+    {
+        if layer.image_url.is_empty() {
+            continue;
+        }
+        let loaded = node
+            .additional_bg_images
+            .get(layer_index)
+            .and_then(|image| image.as_ref())
+            .is_some();
+        if loaded {
+            continue;
+        }
+        let resolved = html::resolve_url(&layer.image_url, base_url);
+        let url = resolved.as_str();
+        if is_async_image_url(url) {
+            pending.push((
+                node.node_id,
+                path.clone(),
+                types::PendingImageTarget::BackgroundLayer(layer_index),
                 url.to_string(),
             ));
         }

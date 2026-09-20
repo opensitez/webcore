@@ -7,9 +7,96 @@
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
-static RAW_RESOURCE_CACHE: std::sync::LazyLock<
-    Mutex<std::collections::HashMap<String, Arc<Vec<u8>>>>,
-> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+const RAW_RESOURCE_CACHE_MAX_BYTES: usize = 128 * 1024 * 1024;
+
+struct RawResourceCache {
+    entries: std::collections::HashMap<String, (Arc<Vec<u8>>, u64)>,
+    order: std::collections::VecDeque<(String, u64)>,
+    bytes: usize,
+    next_generation: u64,
+}
+
+impl RawResourceCache {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            bytes: 0,
+            next_generation: 1,
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<Arc<Vec<u8>>> {
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        let data = self
+            .entries
+            .get_mut(key)
+            .and_then(|(data, entry_generation)| {
+                if data.is_empty() {
+                    None
+                } else {
+                    *entry_generation = generation;
+                    Some(data.clone())
+                }
+            })?;
+        self.order.push_back((key.to_string(), generation));
+        self.compact_order_if_needed();
+        Some(data)
+    }
+
+    fn insert(&mut self, key: String, data: Arc<Vec<u8>>) {
+        if data.is_empty() || data.len() > RAW_RESOURCE_CACHE_MAX_BYTES {
+            return;
+        }
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        if let Some((old, _)) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(old.len());
+        }
+        while self.bytes.saturating_add(data.len()) > RAW_RESOURCE_CACHE_MAX_BYTES {
+            let Some((oldest, oldest_generation)) = self.order.pop_front() else {
+                break;
+            };
+            let should_remove = self
+                .entries
+                .get(&oldest)
+                .is_some_and(|(_, entry_generation)| *entry_generation == oldest_generation);
+            if should_remove && let Some((old, _)) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(old.len());
+            }
+        }
+        self.bytes = self.bytes.saturating_add(data.len());
+        self.order.push_back((key.clone(), generation));
+        self.entries.insert(key, (data, generation));
+        self.compact_order_if_needed();
+    }
+
+    fn compact_order_if_needed(&mut self) {
+        let live = self.entries.len().max(1);
+        if self.order.len() <= live.saturating_mul(4).saturating_add(32) {
+            return;
+        }
+        self.order.retain(|(key, generation)| {
+            self.entries
+                .get(key)
+                .is_some_and(|(_, entry_generation)| entry_generation == generation)
+        });
+    }
+}
+
+static RAW_RESOURCE_CACHE: std::sync::LazyLock<Mutex<RawResourceCache>> =
+    std::sync::LazyLock::new(|| Mutex::new(RawResourceCache::new()));
+
+pub(crate) fn raw_resource_cache_stats() -> crate::CacheMemoryStats {
+    RAW_RESOURCE_CACHE
+        .lock()
+        .map(|cache| crate::CacheMemoryStats {
+            entries: cache.entries.len(),
+            bytes: cache.bytes,
+        })
+        .unwrap_or_default()
+}
 
 enum CacheWrite {
     Bytes {
@@ -57,17 +144,11 @@ fn raw_cache_get(key: &str) -> Option<Arc<Vec<u8>>> {
     RAW_RESOURCE_CACHE
         .lock()
         .ok()
-        .and_then(|cache| cache.get(key).filter(|data| !data.is_empty()).cloned())
+        .and_then(|mut cache| cache.get(key))
 }
 
 fn raw_cache_put(key: String, data: Arc<Vec<u8>>) {
-    if data.is_empty() {
-        return;
-    }
     if let Ok(mut cache) = RAW_RESOURCE_CACHE.lock() {
-        if cache.len() > 512 {
-            cache.clear();
-        }
         cache.insert(key, data);
     }
 }
@@ -189,7 +270,7 @@ impl PageSession {
             frame.start_streaming(&url);
             let mut streamed_bytes = 0usize;
             let mut last_preview = None::<std::time::Instant>;
-            let min_preview_gap = std::time::Duration::from_millis(80);
+            let min_preview_gap = std::time::Duration::from_millis(32);
             let mut stream_options = options.clone();
             stream_options.emit_preview = true;
             let result =
@@ -300,6 +381,10 @@ where
 {
     let mut decoder = encoding_rs::UTF_8.new_decoder();
     let mut html = String::new();
+    let mut pending_emit = String::new();
+    let mut sent_preview = false;
+    let mut next_preview_at = options.preview_after_bytes.max(1024);
+    let preview_interval = options.preview_interval_bytes.max(32 * 1024);
     let mut buf = [0u8; 16 * 1024];
     loop {
         let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
@@ -310,7 +395,14 @@ where
         if !text.is_empty() {
             html.push_str(&text);
             if options.emit_preview {
-                on_chunk(final_url.clone(), text);
+                pending_emit.push_str(&text);
+                if html.len() >= next_preview_at || should_emit_early_preview(&html, sent_preview) {
+                    on_chunk(final_url.clone(), std::mem::take(&mut pending_emit));
+                    sent_preview = true;
+                    while next_preview_at <= html.len() {
+                        next_preview_at = next_preview_at.saturating_add(preview_interval);
+                    }
+                }
             }
         }
     }
@@ -318,8 +410,11 @@ where
     if !tail.is_empty() {
         html.push_str(&tail);
         if options.emit_preview {
-            on_chunk(final_url.clone(), tail);
+            pending_emit.push_str(&tail);
         }
+    }
+    if options.emit_preview && !pending_emit.is_empty() {
+        on_chunk(final_url.clone(), pending_emit);
     }
     Ok((html, final_url))
 }
@@ -455,9 +550,9 @@ fn build_page_document(
     let image_loader = if options.load_images && !preview {
         cache_dir_for_images.map(|cache_dir| {
             std::sync::Arc::new(move |src: &str| {
-                cached_fetch_bytes(src, &cache_dir)
+                cached_fetch_bytes_arc(src, &cache_dir)
                     .ok()
-                    .and_then(|bytes| crate::html::decode_image_bytes_ex(&bytes))
+                    .and_then(crate::html::decode_image_bytes_arc)
             }) as crate::ImageLoader
         })
     } else {
@@ -557,8 +652,8 @@ fn schedule_preload(
             crate::spawn_image_resource_task(move || {
                 let loader = cache_dir.map(|cache_dir| {
                     std::sync::Arc::new(move |src: &str| {
-                        let bytes = crate::loading::cached_fetch_bytes(src, &cache_dir)?;
-                        crate::html::decode_image_bytes_ex(&bytes).ok_or_else(|| {
+                        let bytes = crate::loading::cached_fetch_bytes_arc(src, &cache_dir)?;
+                        crate::html::decode_image_bytes_arc(bytes.clone()).ok_or_else(|| {
                             format!("unsupported image bytes: {} bytes from {src}", bytes.len())
                         })
                     })
@@ -723,6 +818,15 @@ where
 }
 
 pub fn cached_fetch_bytes(url: &str, cache_dir: &str) -> Result<Vec<u8>, String> {
+    cached_fetch_bytes_arc(url, cache_dir).map(|bytes| bytes.as_ref().clone())
+}
+
+pub fn cached_fetch_bytes_arc(url: &str, cache_dir: &str) -> Result<Arc<Vec<u8>>, String> {
+    if url.starts_with("data:") {
+        return crate::html::image_data_url_bytes(url)
+            .map(Arc::new)
+            .ok_or_else(|| format!("invalid data URL bytes: {url}"));
+    }
     let key = format!("{cache_dir}\n{url}");
     let state = {
         let mut in_flight = BYTE_FETCH_IN_FLIGHT
@@ -749,10 +853,12 @@ pub fn cached_fetch_bytes(url: &str, cache_dir: &str) -> Result<Vec<u8>, String>
                 .result
                 .lock()
                 .map_err(|_| "byte fetch result lock poisoned".to_string())?;
-            return match slot.as_ref().expect("byte fetch result set") {
-                Ok(bytes) => Ok((**bytes).clone()),
-                Err(err) => Err(err.clone()),
-            };
+            return slot
+                .as_ref()
+                .expect("byte fetch result set")
+                .as_ref()
+                .cloned()
+                .map_err(Clone::clone);
         }
     };
     let mut slot = state
@@ -766,7 +872,7 @@ pub fn cached_fetch_bytes(url: &str, cache_dir: &str) -> Result<Vec<u8>, String>
             .map_err(|_| "byte fetch wait lock poisoned".to_string())?;
     }
     match slot.as_ref().expect("byte fetch result set") {
-        Ok(bytes) => Ok((**bytes).clone()),
+        Ok(bytes) => Ok(bytes.clone()),
         Err(err) => Err(err.clone()),
     }
 }
@@ -1328,6 +1434,20 @@ mod tests {
             second, first,
             "hot process cache should avoid immediate refetch/reparse work for the same resource"
         );
+    }
+
+    #[test]
+    fn cached_byte_resource_accepts_data_image_urls() {
+        let cache_dir =
+            std::env::temp_dir().join(format!("webcore-data-url-cache-{}", std::process::id()));
+        let cache_dir_str = cache_dir.to_string_lossy().to_string();
+        let url =
+            "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==";
+
+        let bytes = cached_fetch_bytes(url, &cache_dir_str).unwrap();
+
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        assert!(crate::html::decode_image_bytes_ex(&bytes).is_some());
     }
 
     #[test]

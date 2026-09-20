@@ -9,16 +9,17 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use tiny_skia::{Pixmap, Transform};
 use winit::event::WindowEvent;
-use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::{ActiveEventLoop, ControlFlow};
 
+use crate::KeyframeStop;
 use crate::dom::HtmlEventType;
 use crate::frame::EngineFrame;
 use crate::html::resolve_url;
 use crate::loading::{PageLoadEvent, PageLoadOptions, spawn_page_load};
 use crate::renderer::Renderer;
 use crate::types::{
-    CSSCursor, Document, FormEvent, FormEventKind, WebCore, build_form_submit_url,
-    collect_form_data, find_parent_form_action,
+    CSSCursor, DecodedBackgroundImage, Document, FormEvent, FormEventKind, WebCore,
+    build_form_submit_url, collect_form_data, find_parent_form_action,
 };
 
 enum BrowserViewLoadResult {
@@ -44,6 +45,7 @@ pub struct BrowserView {
     url: String,
     title: String,
     loading: bool,
+    scroll_priority_frame: bool,
     width: f32,
     height: f32,
     viewport_pixmap: Option<Pixmap>,
@@ -53,6 +55,349 @@ pub struct BrowserView {
     rx: mpsc::Receiver<BrowserViewLoadResult>,
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
     pending_navigate: Arc<Mutex<Option<String>>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BrowserMemoryStats {
+    pub viewport_surface_bytes: usize,
+    pub renderer_cached_content_surface_bytes: usize,
+    pub renderer_cached_surface_bytes: usize,
+    pub tile_surface_bytes: usize,
+    pub tile_count: usize,
+    pub display_list_commands: usize,
+    pub display_list_estimated_bytes: usize,
+    pub display_list_inline_bytes: usize,
+    pub display_list_heap_bytes: usize,
+    pub display_list_text_bytes: usize,
+    pub display_list_image_bytes: usize,
+    pub display_list_vector_bytes: usize,
+    pub raw_resource_cache_entries: usize,
+    pub raw_resource_cache_bytes: usize,
+    pub parsed_css_cache_entries: usize,
+    pub parsed_css_cache_bytes: usize,
+    pub decoded_image_cache_entries: usize,
+    pub decoded_image_cache_bytes: usize,
+    pub dom_nodes: usize,
+    pub image_nodes: usize,
+    pub dom_estimated_bytes: usize,
+    pub layout_estimated_bytes: usize,
+    pub style_estimated_bytes: usize,
+    pub unique_styles: usize,
+    pub line_cache_estimated_bytes: usize,
+    pub matched_rules_estimated_bytes: usize,
+    pub stylesheet_estimated_bytes: usize,
+    pub decoded_dom_image_bytes: usize,
+}
+
+fn string_bytes(value: &str) -> usize {
+    value.len()
+}
+
+fn node_string_bytes(node: &WebCore) -> usize {
+    let mut bytes = string_bytes(&node.tag)
+        .saturating_add(string_bytes(&node.text))
+        .saturating_add(string_bytes(&node.resolved_src));
+    if let Some(value) = &node.value_state {
+        bytes = bytes.saturating_add(string_bytes(value));
+    }
+    for (key, value) in node.attributes.iter() {
+        bytes = bytes
+            .saturating_add(string_bytes(key))
+            .saturating_add(string_bytes(value));
+    }
+    bytes = bytes.saturating_add(
+        node.data
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(String, String)>()),
+    );
+    for (key, value) in &node.data {
+        bytes = bytes
+            .saturating_add(string_bytes(key))
+            .saturating_add(string_bytes(value));
+    }
+    bytes
+}
+
+fn line_cache_bytes(layout: &crate::types::LayoutBox) -> usize {
+    let mut bytes = layout
+        .line_cache
+        .capacity()
+        .saturating_mul(std::mem::size_of::<crate::types::LayoutLine>());
+    for line in &layout.line_cache {
+        bytes = bytes
+            .saturating_add(
+                line.visual_segments
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<crate::types::VisualSegment>()),
+            )
+            .saturating_add(
+                line.char_x
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<f32>()),
+            );
+    }
+    bytes
+}
+
+fn layout_bytes(layout: &crate::types::LayoutBox) -> usize {
+    std::mem::size_of::<crate::types::LayoutBox>()
+        .saturating_add(line_cache_bytes(layout))
+        .saturating_add(
+            layout
+                .inline_runs
+                .capacity()
+                .saturating_mul(std::mem::size_of::<crate::types::InlineRun>()),
+        )
+        .saturating_add(
+            layout
+                .collapsed_border_segments
+                .capacity()
+                .saturating_mul(std::mem::size_of::<crate::types::CollapsedBorderSegment>()),
+        )
+}
+
+fn style_string_bytes(style: &crate::types::ComputedStyle) -> usize {
+    let mut bytes = 0usize;
+    macro_rules! add {
+        ($field:ident) => {
+            bytes = bytes.saturating_add(string_bytes(&style.$field));
+        };
+    }
+    add!(font_family);
+    add!(custom_list_style_type);
+    add!(grid_column_start_name);
+    add!(grid_column_end_name);
+    add!(grid_row_start_name);
+    add!(grid_row_end_name);
+    add!(grid_area);
+    add!(text_overflow_string);
+    add!(font_variant_alternates);
+    add!(font_variant_caps);
+    add!(font_variant_east_asian);
+    add!(font_variant_emoji);
+    add!(font_variant_ligatures);
+    add!(font_variant_numeric);
+    add!(font_variant_position);
+    add!(before_content);
+    add!(after_content);
+    add!(marker_content);
+    add!(border_image_source);
+    add!(border_image_slice);
+    add!(border_image_width);
+    add!(border_image_outset);
+    add!(border_image_repeat);
+    add!(background_image_url);
+    add!(text_combine_upright);
+    add!(container_name);
+    add!(list_style_image);
+    add!(text_decoration_skip_ink);
+    add!(text_emphasis_style);
+    add!(text_emphasis_position);
+    add!(text_wrap);
+    add!(background_blend_mode);
+    add!(overflow_anchor);
+    add!(overflow_clip_margin);
+    add!(anchor_name);
+    add!(position_anchor);
+    add!(view_transition_name);
+    add!(animation_timeline);
+    add!(scroll_timeline);
+    add!(offset_path);
+    add!(scrollbar_width);
+    add!(scrollbar_gutter);
+    add!(appearance);
+    add!(field_sizing);
+    add!(interpolate_size);
+    add!(margin_trim);
+    add!(forced_color_adjust);
+    bytes
+}
+
+fn style_bytes(style: &crate::types::ComputedStyle) -> usize {
+    let mut bytes = std::mem::size_of::<crate::types::ComputedStyle>()
+        .saturating_add(style_string_bytes(style))
+        .saturating_add(
+            style
+                .box_shadow
+                .capacity()
+                .saturating_mul(std::mem::size_of::<crate::types::BoxShadow>()),
+        )
+        .saturating_add(
+            style
+                .grid_col_line_names
+                .capacity()
+                .saturating_mul(std::mem::size_of::<(String, Vec<usize>)>()),
+        )
+        .saturating_add(
+            style
+                .grid_row_line_names
+                .capacity()
+                .saturating_mul(std::mem::size_of::<(String, Vec<usize>)>()),
+        );
+    for map in [&style.grid_col_line_names, &style.grid_row_line_names] {
+        for (key, value) in map {
+            bytes = bytes.saturating_add(string_bytes(key)).saturating_add(
+                value
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<usize>()),
+            );
+        }
+    }
+    if let Some(rare) = &style.rare {
+        bytes = bytes.saturating_add(std::mem::size_of_val(rare.as_ref()));
+    }
+    macro_rules! boxed_style {
+        ($field:ident) => {
+            if let Some(child) = &style.$field {
+                bytes = bytes.saturating_add(style_bytes(child));
+            }
+        };
+    }
+    boxed_style!(before_style);
+    boxed_style!(after_style);
+    boxed_style!(selection_style);
+    boxed_style!(placeholder_style);
+    boxed_style!(marker_style);
+    boxed_style!(backdrop_style);
+    boxed_style!(file_selector_button_style);
+    boxed_style!(hover_style);
+    boxed_style!(active_style);
+    boxed_style!(visited_style);
+    bytes
+}
+
+fn matched_rules_bytes(node: &WebCore) -> usize {
+    let mut bytes = node
+        .matched_rules
+        .capacity()
+        .saturating_mul(std::mem::size_of::<crate::types::MatchedRule>());
+    for rule in &node.matched_rules {
+        bytes = bytes
+            .saturating_add(string_bytes(&rule.selector))
+            .saturating_add(string_bytes(&rule.source))
+            .saturating_add(string_bytes(&rule.layer))
+            .saturating_add(
+                rule.declarations
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(String, String)>()),
+            );
+        for (name, value) in &rule.declarations {
+            bytes = bytes
+                .saturating_add(string_bytes(name))
+                .saturating_add(string_bytes(value));
+        }
+    }
+    bytes
+}
+
+fn stylesheet_bytes(sheet: &crate::css::Stylesheet) -> usize {
+    let mut bytes = std::mem::size_of::<crate::css::Stylesheet>()
+        .saturating_add(
+            sheet
+                .rules
+                .capacity()
+                .saturating_mul(std::mem::size_of::<crate::css::CssRule>()),
+        )
+        .saturating_add(
+            sheet
+                .font_faces
+                .capacity()
+                .saturating_mul(std::mem::size_of::<crate::css::FontFaceDecl>()),
+        )
+        .saturating_add(
+            sheet
+                .page_rules
+                .capacity()
+                .saturating_mul(std::mem::size_of::<crate::css::PageRule>()),
+        )
+        .saturating_add(
+            sheet
+                .counter_styles
+                .capacity()
+                .saturating_mul(std::mem::size_of::<crate::css::CounterStyleRule>()),
+        );
+    for source in &sheet.raw_sources {
+        bytes = bytes.saturating_add(string_bytes(source));
+    }
+    for (name, value) in &sheet.variables {
+        bytes = bytes
+            .saturating_add(string_bytes(name))
+            .saturating_add(string_bytes(value));
+    }
+    for (name, stops) in &sheet.keyframes {
+        bytes = bytes.saturating_add(string_bytes(name)).saturating_add(
+            stops
+                .capacity()
+                .saturating_mul(std::mem::size_of::<KeyframeStop>()),
+        );
+    }
+    for layer in &sheet.layer_order {
+        bytes = bytes.saturating_add(string_bytes(layer));
+    }
+    for rule in &sheet.rules {
+        bytes = bytes
+            .saturating_add(string_bytes(&rule.layer))
+            .saturating_add(string_bytes(&rule.media_condition))
+            .saturating_add(string_bytes(&rule.container_condition))
+            .saturating_add(string_bytes(&rule.container_name))
+            .saturating_add(string_bytes(&rule.original_selector))
+            .saturating_add(
+                rule.selectors
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<crate::css::CssSelector>()),
+            )
+            .saturating_add(
+                rule.compiled_decls
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(
+                        crate::css::properties::PropertyId,
+                        crate::types::CssValue,
+                    )>()),
+            )
+            .saturating_add(rule.compiled_important.capacity().saturating_mul(
+                std::mem::size_of::<(crate::css::properties::PropertyId, crate::types::CssValue)>(),
+            ))
+            .saturating_add(
+                rule.scopes
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<crate::css::ScopeFrame>()),
+            );
+        for (name, value) in rule
+            .declarations
+            .iter()
+            .chain(rule.important_declarations.iter())
+        {
+            bytes = bytes
+                .saturating_add(string_bytes(name))
+                .saturating_add(string_bytes(value));
+        }
+    }
+    bytes
+}
+
+fn add_arc_bytes(
+    seen: &mut std::collections::HashSet<usize>,
+    total: &mut usize,
+    data: &Option<Arc<Vec<u8>>>,
+) {
+    let Some(data) = data.as_ref() else {
+        return;
+    };
+    let ptr = Arc::as_ptr(data) as usize;
+    if seen.insert(ptr) {
+        *total = total.saturating_add(data.len());
+    }
+}
+
+fn add_arc_bytes_ref(
+    seen: &mut std::collections::HashSet<usize>,
+    total: &mut usize,
+    data: &Arc<Vec<u8>>,
+) {
+    let ptr = Arc::as_ptr(data) as usize;
+    if seen.insert(ptr) {
+        *total = total.saturating_add(data.len());
+    }
 }
 
 impl BrowserView {
@@ -68,6 +413,7 @@ impl BrowserView {
             url: String::new(),
             title: String::new(),
             loading: false,
+            scroll_priority_frame: false,
             width,
             height,
             viewport_pixmap: None,
@@ -166,11 +512,36 @@ impl BrowserView {
         self.wire_streamed_font_resources();
         if let Some(frame) = self.stream_frame.as_mut() {
             frame.set_viewport(self.width, self.height);
-            frame.doc.style_dirty = true;
-            let changed = frame.update_frame();
-            self.renderer.invalidate_display_list();
+            let scroll_priority = std::mem::take(&mut self.scroll_priority_frame);
+            let update = frame.update_frame_detailed_with_scroll_priority(scroll_priority);
+            let mut visual_changed = update.changed;
+            if update.paint_only_display_list_rebuild {
+                let non_transform_visible = self
+                    .renderer
+                    .invalidate_non_transform_animation_paint_rects(
+                        &frame.doc,
+                        self.width,
+                        self.height,
+                    );
+                visual_changed = self.renderer.invalidate_animation_paint_rects(
+                    &frame.doc,
+                    self.width,
+                    self.height,
+                ) || non_transform_visible;
+                if non_transform_visible {
+                    self.renderer.invalidate_paint_only_display_list();
+                }
+            } else if update.rebuild_display_list {
+                self.renderer.invalidate_display_list();
+            } else if update.changed {
+                visual_changed = self.renderer.invalidate_animation_paint_rects(
+                    &frame.doc,
+                    self.width,
+                    self.height,
+                );
+            }
             self.stream_needs_layout = false;
-            return changed;
+            return visual_changed;
         }
         let Some(doc) = self.doc.as_mut() else {
             return false;
@@ -186,15 +557,41 @@ impl BrowserView {
         if !self.stream_paint_ready {
             return;
         }
+        if !self.stream_needs_layout {
+            return;
+        }
         self.wire_streamed_font_resources();
         let Some(frame) = self.stream_frame.as_mut() else {
             return;
         };
         frame.set_viewport(self.width, self.height);
-        if frame.update_frame() {
+        let scroll_priority = std::mem::take(&mut self.scroll_priority_frame);
+        let update = frame.update_frame_detailed_with_scroll_priority(scroll_priority);
+        let mut visual_changed = update.changed;
+        if update.paint_only_display_list_rebuild {
+            let non_transform_visible =
+                self.renderer
+                    .invalidate_non_transform_animation_paint_rects(
+                        &frame.doc,
+                        self.width,
+                        self.height,
+                    );
+            visual_changed = self
+                .renderer
+                .invalidate_animation_paint_rects(&frame.doc, self.width, self.height)
+                || non_transform_visible;
+            if non_transform_visible {
+                self.renderer.invalidate_paint_only_display_list();
+            }
+        } else if update.rebuild_display_list {
             self.renderer.invalidate_display_list();
+        } else if update.changed {
+            visual_changed =
+                self.renderer
+                    .invalidate_animation_paint_rects(&frame.doc, self.width, self.height);
         }
         self.stream_needs_layout = false;
+        let _ = visual_changed;
     }
 
     fn update_streamed_frame_before_paint(&mut self) -> bool {
@@ -206,12 +603,33 @@ impl BrowserView {
             return false;
         };
         frame.set_viewport(self.width, self.height);
-        let changed = frame.update_frame();
-        if changed {
+        let scroll_priority = std::mem::take(&mut self.scroll_priority_frame);
+        let update = frame.update_frame_detailed_with_scroll_priority(scroll_priority);
+        let mut visual_changed = update.changed;
+        if update.paint_only_display_list_rebuild {
+            let non_transform_visible =
+                self.renderer
+                    .invalidate_non_transform_animation_paint_rects(
+                        &frame.doc,
+                        self.width,
+                        self.height,
+                    );
+            visual_changed = self
+                .renderer
+                .invalidate_animation_paint_rects(&frame.doc, self.width, self.height)
+                || non_transform_visible;
+            if non_transform_visible {
+                self.renderer.invalidate_paint_only_display_list();
+            }
+        } else if update.rebuild_display_list {
             self.renderer.invalidate_display_list();
+        } else if update.changed {
+            visual_changed =
+                self.renderer
+                    .invalidate_animation_paint_rects(&frame.doc, self.width, self.height);
         }
         self.stream_needs_layout = false;
-        changed
+        visual_changed
     }
 
     fn wire_streamed_font_resources(&mut self) {
@@ -254,6 +672,126 @@ impl BrowserView {
         }
         let doc = self.doc.as_mut()?;
         Some((doc, &mut self.renderer))
+    }
+
+    pub fn memory_stats(&self) -> BrowserMemoryStats {
+        let renderer = self.renderer.memory_stats();
+        let raw = crate::loading::raw_resource_cache_stats();
+        let parsed_css = crate::parsed_css_cache_stats();
+        let decoded = crate::decoded_image_cache_stats();
+        let mut stats = BrowserMemoryStats {
+            viewport_surface_bytes: self
+                .viewport_pixmap
+                .as_ref()
+                .map(|surface| surface.data().len())
+                .unwrap_or(0),
+            renderer_cached_content_surface_bytes: renderer.cached_content_surface_bytes,
+            renderer_cached_surface_bytes: renderer.cached_surface_bytes,
+            tile_surface_bytes: renderer.tile_surface_bytes,
+            tile_count: renderer.tile_count,
+            display_list_commands: renderer.display_list_commands,
+            display_list_estimated_bytes: renderer.display_list_estimated_bytes,
+            display_list_inline_bytes: renderer.display_list_inline_bytes,
+            display_list_heap_bytes: renderer.display_list_heap_bytes,
+            display_list_text_bytes: renderer.display_list_text_bytes,
+            display_list_image_bytes: renderer.display_list_image_bytes,
+            display_list_vector_bytes: renderer.display_list_vector_bytes,
+            raw_resource_cache_entries: raw.entries,
+            raw_resource_cache_bytes: raw.bytes,
+            parsed_css_cache_entries: parsed_css.entries,
+            parsed_css_cache_bytes: parsed_css.bytes,
+            decoded_image_cache_entries: decoded.entries,
+            decoded_image_cache_bytes: decoded.bytes,
+            ..Default::default()
+        };
+        if let Some(doc) = self.active_doc() {
+            let mut seen = std::collections::HashSet::<usize>::new();
+            let mut seen_styles = std::collections::HashSet::<usize>::new();
+            stats.stylesheet_estimated_bytes = stylesheet_bytes(&doc.stylesheet);
+            Document::walk_all(&doc.root, &mut |node| {
+                stats.dom_nodes += 1;
+                if node.tag.eq_ignore_ascii_case("img") {
+                    stats.image_nodes += 1;
+                }
+                stats.dom_estimated_bytes = stats
+                    .dom_estimated_bytes
+                    .saturating_add(std::mem::size_of::<WebCore>())
+                    .saturating_add(node_string_bytes(node))
+                    .saturating_add(
+                        node.children
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<WebCore>()),
+                    )
+                    .saturating_add(
+                        node.additional_bg_images
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<Option<DecodedBackgroundImage>>()),
+                    )
+                    .saturating_add(
+                        node.svg_animation_overrides
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<(Vec<usize>, String, String)>()),
+                    )
+                    .saturating_add(
+                        node.svg_animation_controls
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<(Vec<usize>, String, f32)>()),
+                    );
+                stats.layout_estimated_bytes = stats
+                    .layout_estimated_bytes
+                    .saturating_add(layout_bytes(&node.layout));
+                stats.line_cache_estimated_bytes = stats
+                    .line_cache_estimated_bytes
+                    .saturating_add(line_cache_bytes(&node.layout));
+                stats.matched_rules_estimated_bytes = stats
+                    .matched_rules_estimated_bytes
+                    .saturating_add(matched_rules_bytes(node));
+                let style_ptr = std::sync::Arc::as_ptr(&node.style) as usize;
+                if seen_styles.insert(style_ptr) {
+                    stats.unique_styles += 1;
+                    stats.style_estimated_bytes = stats
+                        .style_estimated_bytes
+                        .saturating_add(style_bytes(&node.style));
+                }
+                add_arc_bytes(
+                    &mut seen,
+                    &mut stats.decoded_dom_image_bytes,
+                    &node.image_data,
+                );
+                if let Some(animated) = node.animated_image.as_ref() {
+                    for frame in &animated.frames {
+                        add_arc_bytes_ref(
+                            &mut seen,
+                            &mut stats.decoded_dom_image_bytes,
+                            &frame.pixels,
+                        );
+                    }
+                    if let Some(bytes) = animated.source_bytes.as_ref() {
+                        add_arc_bytes_ref(&mut seen, &mut stats.decoded_dom_image_bytes, bytes);
+                    }
+                }
+                add_arc_bytes(
+                    &mut seen,
+                    &mut stats.decoded_dom_image_bytes,
+                    &node.bg_image_data,
+                );
+                add_arc_bytes(
+                    &mut seen,
+                    &mut stats.decoded_dom_image_bytes,
+                    &node.mask_image_data,
+                );
+                for layer in &node.additional_bg_images {
+                    if let Some(layer) = layer.as_ref() {
+                        add_arc_bytes_ref(
+                            &mut seen,
+                            &mut stats.decoded_dom_image_bytes,
+                            &layer.data,
+                        );
+                    }
+                }
+            });
+        }
+        stats
     }
 
     pub fn handle_window_event(&mut self, event: &WindowEvent) {
@@ -404,7 +942,19 @@ impl BrowserView {
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
         let mut completed_url = None::<String>;
-        while let Ok(result) = self.rx.try_recv() {
+        let start = std::time::Instant::now();
+        let mut html_chunks = 0usize;
+        let mut budget_exhausted = false;
+        loop {
+            if html_chunks >= 8
+                || (html_chunks > 0 && start.elapsed() >= std::time::Duration::from_millis(16))
+            {
+                budget_exhausted = true;
+                break;
+            }
+            let Ok(result) = self.rx.try_recv() else {
+                break;
+            };
             match result {
                 BrowserViewLoadResult::HtmlChunk { load_id, url, html }
                     if load_id == self.load_id =>
@@ -412,6 +962,7 @@ impl BrowserView {
                     self.url = url.clone();
                     self.feed_streaming_chunk(&url, &html);
                     self.loading = true;
+                    html_chunks += 1;
                     changed = true;
                 }
                 BrowserViewLoadResult::Complete { load_id, url } if load_id == self.load_id => {
@@ -451,6 +1002,9 @@ impl BrowserView {
             self.invalidate_backing();
             self.wake();
         }
+        if budget_exhausted {
+            self.wake();
+        }
         changed
     }
 
@@ -469,7 +1023,15 @@ impl BrowserView {
         let nav_changed = self.drain_pending_navigation();
         let stream_layout_changed = self.update_streamed_frame_before_paint();
         let needs_redraw = if self.stream_frame.is_some() {
-            stream_layout_changed
+            let (stream_needs_wake, stream_needs_redraw) = self.stream_idle_state();
+            if stream_needs_wake {
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    std::time::Instant::now() + std::time::Duration::from_millis(16),
+                ));
+            } else {
+                event_loop.set_control_flow(ControlFlow::Wait);
+            }
+            stream_layout_changed || stream_needs_redraw
         } else {
             self.renderer.drive_document_idle(
                 event_loop,
@@ -482,6 +1044,24 @@ impl BrowserView {
             self.invalidate_backing();
         }
         changed || nav_changed || stream_layout_changed || needs_redraw
+    }
+
+    fn stream_idle_state(&self) -> (bool, bool) {
+        let Some(frame) = self.stream_frame.as_ref() else {
+            return (false, false);
+        };
+        let pending_resources = frame.doc.pending_images.is_some()
+            || frame.doc.pending_stylesheets.is_some()
+            || frame.engine.has_pending_fonts();
+        let frame_needs_render = frame.needs_render();
+        let has_animations = frame.has_animations();
+        let needs_wake = self.loading
+            || pending_resources
+            || frame_needs_render
+            || has_animations
+            || self.stream_needs_layout;
+        let needs_redraw = frame_needs_render || has_animations || self.stream_needs_layout;
+        (needs_wake, needs_redraw)
     }
 
     pub fn paint_into(&mut self, target: &mut Pixmap, x: i32, y: i32, scale: f32) {
@@ -541,10 +1121,11 @@ impl BrowserView {
         if doc.process_scrollbar_event(HtmlEventType::MouseMove, x, y, width, height)
             && (doc.scroll_y - old_scroll_y).abs() >= 0.5
         {
+            self.scroll_priority_frame = true;
             self.wake();
             return true;
         }
-        doc.process_mouse_event(HtmlEventType::MouseMove, (x, y + doc.scroll_y), 0);
+        let redraw = doc.process_mouse_event(HtmlEventType::MouseMove, (x, y + doc.scroll_y), 0);
         let needs_style = doc.hover_changed
             && (doc.hover_sensitive_nodes.contains(&doc.hovered_box)
                 || doc.hover_sensitive_nodes.contains(&doc.prev_hovered_box));
@@ -552,7 +1133,15 @@ impl BrowserView {
             doc.hover_changed = false;
             doc.prev_hovered_box = doc.hovered_box;
         }
-        needs_style
+        if needs_style {
+            self.renderer.invalidate_display_list();
+            self.invalidate_backing();
+            self.wake();
+        } else if redraw {
+            self.invalidate_backing();
+            self.wake();
+        }
+        redraw || needs_style
     }
 
     pub fn handle_mouse_button(&mut self, kind: HtmlEventType, x: f32, y: f32, button: u8) -> bool {
@@ -565,6 +1154,7 @@ impl BrowserView {
         if doc.process_scrollbar_event(kind, x, y, width, height)
             && (doc.scroll_y - old_scroll_y).abs() >= 0.5
         {
+            self.scroll_priority_frame = true;
             self.wake();
             return true;
         }
@@ -585,6 +1175,7 @@ impl BrowserView {
         doc.scroll_x = (doc.scroll_x + dx).max(0.0);
         doc.scroll_y = (doc.scroll_y + dy).clamp(0.0, max_y);
         if (doc.scroll_y - old_y).abs() >= 0.5 {
+            self.scroll_priority_frame = true;
             self.wake();
             true
         } else {
@@ -606,6 +1197,7 @@ impl BrowserView {
         doc.scroll_x = x.max(0.0);
         doc.scroll_y = y.clamp(0.0, max_y);
         if (doc.scroll_y - old.1).abs() >= 0.5 || (doc.scroll_x - old.0).abs() >= 0.5 {
+            self.scroll_priority_frame = true;
             self.wake();
             true
         } else {
@@ -961,6 +1553,47 @@ mod tests {
     }
 
     #[test]
+    fn browser_view_paint_does_not_poll_streamed_resource_queues_after_layout() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+        view.feed_streaming_chunk(base, "<!doctype html><body><p>Ready</p>");
+
+        let mut target = Pixmap::new(480, 320).unwrap();
+        view.paint_into(&mut target, 0, 0, 1.0);
+        assert!(!view.stream_needs_layout);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut sheet = crate::css::Stylesheet::default();
+        sheet.parse_and_add_author("p{color:red}");
+        tx.send((
+            0,
+            "https://example.test/late.css".to_string(),
+            sheet,
+            String::new(),
+        ))
+        .unwrap();
+        view.stream_frame.as_mut().unwrap().doc.pending_stylesheets = Some(rx);
+
+        view.paint_into(&mut target, 0, 0, 1.0);
+
+        assert!(
+            view.stream_frame
+                .as_ref()
+                .unwrap()
+                .doc
+                .pending_stylesheets
+                .is_some(),
+            "paint must not drain async resources; BrowserView::drive_idle owns frame updates"
+        );
+        assert!(
+            view.update_streamed_frame_before_paint(),
+            "the browser idle/update loop should consume pending resources"
+        );
+    }
+
+    #[test]
     fn browser_view_batches_streamed_chunks_into_one_layout_before_paint() {
         let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
         let base = "https://example.test/";
@@ -995,6 +1628,91 @@ mod tests {
     }
 
     #[test]
+    fn browser_view_relayout_is_noop_when_streamed_frame_is_clean() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+
+        view.feed_streaming_chunk(
+            base,
+            "<!doctype html><html><head><style>body{margin:0}p{display:block;height:20px}</style></head><body><p>A</p>",
+        );
+        assert!(view.update_streamed_frame_before_paint());
+        assert!(!view.stream_needs_layout);
+        assert!(!view.stream_frame.as_ref().unwrap().doc.style_dirty);
+
+        assert!(
+            !view.relayout(),
+            "a clean streamed frame should not force a full cascade/layout"
+        );
+    }
+
+    #[test]
+    fn pending_stream_resources_wake_without_forcing_repaint() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+        view.feed_streaming_chunk(base, "<!doctype html><body><p>Ready</p>");
+        assert!(view.update_streamed_frame_before_paint());
+        assert!(!view.stream_needs_layout);
+
+        let (_tx, rx) = std::sync::mpsc::channel();
+        view.stream_frame.as_mut().unwrap().doc.pending_stylesheets = Some(rx);
+
+        let (needs_wake, needs_redraw) = view.stream_idle_state();
+        assert!(needs_wake, "pending resources should keep the browser loop alive");
+        assert!(
+            !needs_redraw,
+            "queued resources alone should not discard a valid painted frame"
+        );
+    }
+
+    #[test]
+    fn browser_view_poll_budgets_streamed_html_chunks() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/".to_string();
+        view.load_id = 42;
+
+        for idx in 0..12 {
+            view.tx
+                .send(BrowserViewLoadResult::HtmlChunk {
+                    load_id: 42,
+                    url: base.clone(),
+                    html: if idx == 0 {
+                        "<!doctype html><body><p>0</p>".to_string()
+                    } else {
+                        format!("<p>{idx}</p>")
+                    },
+                })
+                .unwrap();
+        }
+
+        let first_len = "<!doctype html><body><p>0</p>".len();
+        let total_len = first_len
+            + (1..12)
+                .map(|idx| format!("<p>{idx}</p>").len())
+                .sum::<usize>();
+
+        assert!(view.poll());
+        assert!(
+            view.streamed_html_len < total_len,
+            "one UI tick should ingest a bounded batch, not the whole queued document"
+        );
+
+        assert!(view.poll());
+        assert!(
+            view.streamed_html_len > first_len,
+            "the next browser tick should continue streaming the remaining chunks"
+        );
+        while view.streamed_html_len < total_len {
+            assert!(view.poll());
+        }
+        assert_eq!(view.streamed_html_len, total_len);
+    }
+
+    #[test]
     fn streamed_frame_inherits_browser_wake_callback() {
         let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
         view.set_wake_callback(|| {});
@@ -1025,6 +1743,26 @@ mod tests {
         let hero_id = doc.get_element_by_id("hero").unwrap();
         let hero = doc.get_box_by_id(hero_id).unwrap();
         assert_eq!(hero.resolved_src, "https://cdn.example.test/wide.webp");
+    }
+
+    #[test]
+    fn streamed_picture_source_dimensions_override_fallback_image_hint() {
+        let mut view = BrowserView::new(800.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/articles/";
+        view.stream_frame = Some(EngineFrame::empty(800.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+
+        view.feed_streaming_chunk(
+            base,
+            r#"<html><body><picture><source media="(min-width: 500px)" srcset="wide.svg" width="84" height="29"><img id="badge" src="small.svg" width="25" height="25"></picture>"#,
+        );
+
+        let doc = view.document().unwrap();
+        let badge_id = doc.get_element_by_id("badge").unwrap();
+        let badge = doc.get_box_by_id(badge_id).unwrap();
+        assert_eq!(badge.resolved_src, "https://example.test/articles/wide.svg");
+        assert_eq!(badge.selected_source_width, Some(84));
+        assert_eq!(badge.selected_source_height, Some(29));
     }
 
     #[test]
