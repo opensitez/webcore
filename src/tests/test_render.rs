@@ -2177,6 +2177,93 @@ fn inline_run_boundaries_preserve_collapsed_spaces() {
     );
 }
 
+#[test]
+fn inline_child_boundary_preserves_following_text_space() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list_full;
+
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
+        r##"
+        <style>
+        * { margin: 0; padding: 0; }
+        body { font: 13px/20px Arial, sans-serif; }
+        .byline { width: 700px; white-space: nowrap; }
+        </style>
+        <p class="byline">Posted by Editor <time>on Wednesday September 16, 2026 @01:34PM</time>
+             from the <span>rise-of-the-machines</span> dept.</p>
+    "##,
+        900.0,
+    );
+    let mut pm = tiny_skia::Pixmap::new(900, 80).unwrap();
+    renderer.render(&mut doc, &mut pm, 1.0);
+    let list = build_display_list_full(
+        &doc.root,
+        900.0,
+        80.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+
+    let mut time = None;
+    let mut from = None;
+    for cmd in &list.commands {
+        if let PaintCmd::Text {
+            x,
+            text,
+            font_size,
+            font_weight,
+            font_style,
+            font_family,
+            ..
+        } = cmd
+        {
+            if text.contains("@01:34PM") {
+                time = Some((
+                    *x,
+                    text.clone(),
+                    *font_size,
+                    *font_weight,
+                    *font_style,
+                    font_family.clone(),
+                ));
+            } else if text.contains("from the") {
+                from = Some((*x, text.clone()));
+            }
+        }
+    }
+
+    let (time_x, time_text, time_size, time_weight, time_style, time_family) =
+        time.expect("time text command");
+    let (from_x, from_text) = from.expect("from-the text command");
+    let time_weight = crate::types::FontWeight::Value(time_weight as u16);
+    let time_style = match time_style {
+        1 => crate::types::FontStyle::Italic,
+        2 => crate::types::FontStyle::Oblique,
+        _ => crate::types::FontStyle::Normal,
+    };
+    let time_w = crate::layout::inline_layout::measure_text_width_weighted(
+        &time_text,
+        time_size,
+        None,
+        time_weight,
+        time_style,
+        1.0,
+        &time_family,
+    );
+
+    assert!(
+        from_x > time_x + time_w + 2.0,
+        "space after inline child did not advance geometry: time right={} from_x={} from={from_text:?}",
+        time_x + time_w,
+        from_x
+    );
+}
+
 /// **The measuring and painting font resolvers must agree on generic family
 /// names.** Sizing goes through `resolve_css_family`, painting through the
 /// cheaper `css_family_to_cosmic`. They disagreed about `system-ui`: the first

@@ -1118,6 +1118,8 @@ fn dirty_loaded_image_reflows_fit_content_wrapper() {
     let pic = find_by_id_mut(&mut doc.root, "pic").expect("pic");
     pic.image_width = 1312;
     pic.image_height = 738;
+    pic.image_data_width = 1312;
+    pic.image_data_height = 738;
     pic.image_data = Some(std::sync::Arc::new(vec![0xff; 1312 * 738 * 4]));
     pic.layout.layout_dirty = true;
     pic.layout.cached_intrinsic_w.set(f32::NAN);
@@ -1713,6 +1715,228 @@ fn balance_never_starves_a_column() {
         2,
         "with 104px of content over 2 columns, both columns must receive some content, got {} distinct x positions (all content in one column)",
         xs.len()
+    );
+}
+
+#[test]
+fn multicol_flows_inline_block_list_items_into_columns() {
+    let html = r#"
+        <style>
+          .langlist > ul {
+            column-width: 80px;
+            column-gap: 0;
+            width: 240px;
+          }
+          .langlist > ul > li {
+            display: inline-block;
+            width: 60px;
+            height: 20px;
+          }
+        </style>
+        <div class="langlist">
+          <ul>
+            <li class="item">a</li><li class="item">b</li><li class="item">c</li>
+            <li class="item">d</li><li class="item">e</li><li class="item">f</li>
+          </ul>
+        </div>
+    "#;
+    let doc = parse_and_layout(html, 900.0);
+    let items = crate::tests::harness::find_all_boxes(&doc.root, &|b: &WebCore| {
+        b.attributes
+            .get("class")
+            .map(|c| c == "item")
+            .unwrap_or(false)
+    });
+    let mut xs: Vec<f32> = items.iter().map(|b| b.layout.margin_rect.x).collect();
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    xs.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+    assert!(
+        xs.len() >= 2,
+        "inline-block list items in a multicol container should be distributed across columns, got x positions {xs:?}"
+    );
+}
+
+#[test]
+fn multicol_flows_text_sized_inline_block_list_items_into_columns() {
+    let html = r#"
+        <style>
+          body { margin: 0; font: 16px/20px sans-serif; }
+          .langlist > ul {
+            column-width: 80px;
+            column-gap: 0;
+            width: 240px;
+          }
+          .langlist > ul > li {
+            display: inline-block;
+            padding: 0 8px;
+          }
+        </style>
+        <div class="langlist">
+          <ul>
+            <li class="item">Arabic</li><li class="item">Deutsch</li><li class="item">English</li>
+            <li class="item">Spanish</li><li class="item">French</li><li class="item">Italian</li>
+          </ul>
+        </div>
+    "#;
+    let doc = parse_and_layout(html, 900.0);
+    let items = crate::tests::harness::find_all_boxes(&doc.root, &|b: &WebCore| {
+        b.attributes
+            .get("class")
+            .map(|c| c == "item")
+            .unwrap_or(false)
+    });
+    assert!(
+        items.iter().all(|b| b.layout.margin_rect.h >= 18.0),
+        "text-sized inline-block list items should keep line height, got {:?}",
+        items
+            .iter()
+            .map(|b| b.layout.margin_rect.h)
+            .collect::<Vec<_>>()
+    );
+    let mut xs: Vec<f32> = items.iter().map(|b| b.layout.margin_rect.x).collect();
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    xs.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+    assert!(
+        xs.len() >= 2,
+        "text-sized inline-block list items in a multicol container should be distributed across columns, got x positions {xs:?}"
+    );
+}
+
+#[test]
+fn wikipedia_language_list_stays_in_multicol_layout_under_nojs_overrides() {
+    let html = r#"
+        <html class="no-js">
+        <head>
+        <style>
+          body { margin: 0; font: 16px/20px sans-serif; }
+          .langlist > ul {
+            column-width: 11.2rem;
+            column-gap: 0;
+            width: 1040px;
+            margin: 0;
+            padding: 0;
+          }
+          .langlist > ul > li {
+            display: block;
+            line-height: 1.7;
+            break-inside: avoid;
+          }
+          .no-js .langlist > ul {
+            text-align: center;
+            list-style-type: circle;
+          }
+          .no-js .langlist > ul > li {
+            display: inline-block;
+            padding: 0 .8rem;
+          }
+        </style>
+        </head>
+        <body>
+        <div class="langlist">
+          <ul id="langs">
+            <li class="item">Asturianu</li><li class="item">Azərbaycanca</li><li class="item">বাংলা</li>
+            <li class="item">Bân-lâm-gú</li><li class="item">Беларуская</li><li class="item">Български</li>
+            <li class="item">Català</li><li class="item">Čeština</li><li class="item">Dansk</li>
+            <li class="item">Deutsch</li><li class="item">Eesti</li><li class="item">English</li>
+            <li class="item">Español</li><li class="item">Esperanto</li><li class="item">Euskara</li>
+            <li class="item">فارسی</li><li class="item">Français</li><li class="item">Galego</li>
+            <li class="item">한국어</li><li class="item">Italiano</li><li class="item">עברית</li>
+          </ul>
+        </div>
+        </body>
+        </html>
+    "#;
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(html, 1366.0);
+    let ul_id = doc.get_element_by_id("langs").unwrap();
+    assert_eq!(
+        doc.computed_style_property(ul_id, "column-width"),
+        "179.2px"
+    );
+    let ul = find_by_id(&doc.root, "langs").unwrap();
+    assert!(
+        ul.layout.line_cache.is_empty(),
+        "a column-width list must use the multicol fragment path, not inline rows; line count={}",
+        ul.layout.line_cache.len()
+    );
+
+    let items = crate::tests::harness::find_all_boxes(&doc.root, &|b: &WebCore| {
+        b.attributes
+            .get("class")
+            .map(|c| c == "item")
+            .unwrap_or(false)
+    });
+    assert_eq!(items.len(), 21);
+
+    let mut xs: Vec<f32> = items
+        .iter()
+        .map(|b| b.layout.margin_rect.x.round())
+        .collect();
+    xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    xs.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+    assert!(
+        (5..=7).contains(&xs.len()),
+        "Chrome lays this fixture into roughly six columns; got x positions {xs:?}"
+    );
+
+    let mut first_column_ys: Vec<f32> = items
+        .iter()
+        .filter(|b| (b.layout.margin_rect.x.round() - xs[0]).abs() < 1.0)
+        .map(|b| b.layout.margin_rect.y.round())
+        .collect();
+    first_column_ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    first_column_ys.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+    assert!(
+        first_column_ys.len() >= 2,
+        "items should stack vertically inside the first column, got y positions {first_column_ys:?}"
+    );
+}
+
+#[test]
+fn relative_inline_label_can_overlap_a_one_pixel_separator_line() {
+    let html = r#"
+        <style>
+          body { margin: 0; font: 16px/20px sans-serif; }
+          .separator {
+            display: block;
+            width: 400px;
+            height: 1px;
+            margin-top: 40px;
+            color: #aaa;
+          }
+          .rule {
+            display: block;
+            border-top: 1px solid currentColor;
+            text-align: center;
+            white-space: nowrap;
+          }
+          .label {
+            position: relative;
+            top: -16px;
+            padding: 0 8px;
+            background: white;
+          }
+        </style>
+        <h2 id="separator" class="separator">
+          <span class="rule">
+            <span id="label" class="label">100,000+ articles</span>
+          </span>
+        </h2>
+    "#;
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(html, 800.0);
+    let separator_id = doc.get_element_by_id("separator").unwrap();
+    let label_id = doc.get_element_by_id("label").unwrap();
+    let separator = doc.get_bounding_client_rect(separator_id).unwrap();
+    let label = doc.get_bounding_client_rect(label_id).unwrap();
+
+    assert!(
+        label.y + label.h > separator.y,
+        "label should still overlap the separator line; separator={separator:?}, label={label:?}"
+    );
+    assert!(
+        label.y < separator.y - 8.0,
+        "position:relative top:-16px should move the inline label above the 1px line; separator={separator:?}, label={label:?}"
     );
 }
 

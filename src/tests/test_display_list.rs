@@ -107,6 +107,62 @@ fn block_pseudo_child_and_following_text_are_painted() {
 }
 
 #[test]
+fn absolutely_positioned_block_pseudo_text_is_painted() {
+    let (_frame, list) = build_full(
+        r#"<body style="margin:0">
+             <style>
+             .switch { position:relative; display:block; width:45px; height:25px; }
+             .switch::before {
+               content:"\f186";
+               position:absolute;
+               left:3px;
+               bottom:3px;
+               width:19px;
+               height:19px;
+               line-height:20px;
+               text-align:center;
+               font-family:FontAwesome;
+               background:white;
+               color:#666;
+             }
+             </style>
+             <span class="switch"></span>
+           </body>"#,
+    );
+
+    let moon = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::Text {
+                x,
+                y,
+                text,
+                font_family,
+                font_size,
+                line_height,
+                ..
+            } if text == "\u{f186}" && font_family == "FontAwesome" => {
+                Some((*x, *y, *font_size, *line_height))
+            }
+            _ => None,
+        })
+        .expect("positioned block ::before generated content should paint as text");
+
+    let text_w = moon.2 * 0.55;
+    let text_center_x = moon.0 + text_w * 0.5;
+    let text_center_y = moon.1 + moon.3 * 0.5;
+    assert!(
+        (text_center_x - 12.5).abs() < 1.0,
+        "moon icon should be horizontally centered in the 19px knob; command={moon:?}"
+    );
+    assert!(
+        (text_center_y - 12.5).abs() < 1.0,
+        "moon icon should be vertically centered in the 19px knob; command={moon:?}"
+    );
+}
+
+#[test]
 fn rtl_mixed_inline_text_commands_stay_inside_line_box() {
     let (_frame, list) = build_full(
         r##"<html dir="rtl"><body style="margin:0">
@@ -1378,6 +1434,11 @@ fn replay_scrolls_form_element_content() {
         font_family: "Arial".to_string(),
         color: Color::BLACK,
         placeholder_color: Color::rgba(0, 0, 0, 128),
+        file_button_color: Color::BLACK,
+        file_button_background: Color::TRANSPARENT,
+        file_button_font_size: 16.0,
+        file_button_font_weight: 400,
+        file_button_font_family: "Arial".to_string(),
         checked: true,
         value: String::new(),
         placeholder: String::new(),
@@ -1976,6 +2037,54 @@ fn parent_background_before_child() {
 }
 
 #[test]
+fn padded_inline_background_paints_the_inline_box_not_only_glyphs() {
+    let (_, list) = build(
+        r#"<body style="margin:0; font:16px/20px sans-serif">
+             <div style="width:300px">
+               <span style="display:inline; background:#202122; color:white; padding:0 8px">100+</span>
+             </div>
+           </body>"#,
+    );
+
+    let (text_idx, text_x) = list
+        .commands
+        .iter()
+        .enumerate()
+        .find_map(|cmd| match cmd {
+            (idx, PaintCmd::Text { text, x, .. }) if text.contains("100+") => Some((idx, *x)),
+            _ => None,
+        })
+        .expect("text should paint");
+    let (bg_idx, bg) = list
+        .commands
+        .iter()
+        .enumerate()
+        .filter_map(|cmd| match cmd {
+            (idx, PaintCmd::FillRect { rect, color, .. })
+                if color.r == 32 && color.g == 33 && color.b == 34 =>
+            {
+                Some((idx, *rect))
+            }
+            _ => None,
+        })
+        .max_by(|(_, a), (_, b)| a.w.partial_cmp(&b.w).unwrap())
+        .expect("inline background should paint");
+
+    assert!(
+        bg_idx < text_idx,
+        "padded inline background must paint before text; bg@{bg_idx}, text@{text_idx}"
+    );
+    assert!(
+        bg.x <= text_x - 7.5,
+        "left inline padding should be painted; bg={bg:?}, text_x={text_x}"
+    );
+    assert!(
+        bg.x + bg.w >= text_x + 37.5,
+        "inline background should include right padding beyond the text run, bg={bg:?}, text_x={text_x}"
+    );
+}
+
+#[test]
 fn command_count_scales_with_elements() {
     let small = build("<div>one</div>").1;
     let big = build("<div><p>a</p><p>b</p><p>c</p><p>d</p><p>e</p></div>").1;
@@ -2017,6 +2126,8 @@ fn build_with_image(html: &str, iw: u32, ih: u32) -> DisplayList {
         if n.tag == "img" {
             n.image_width = iw;
             n.image_height = ih;
+            n.image_data_width = iw;
+            n.image_data_height = ih;
             n.image_data = Some(std::sync::Arc::new(vec![255u8; (iw * ih * 4) as usize]));
         }
         for c in &mut n.children {
@@ -2396,6 +2507,66 @@ fn multiple_background_gradient_layers_are_painted() {
 }
 
 #[test]
+fn additional_background_url_layer_after_gradient_is_painted() {
+    fn find_by_id_mut<'a>(
+        node: &'a mut crate::WebCore,
+        id: &str,
+    ) -> Option<&'a mut crate::WebCore> {
+        if node.attributes.get("id").map(String::as_str) == Some(id) {
+            return Some(node);
+        }
+        node.children
+            .iter_mut()
+            .find_map(|child| find_by_id_mut(child, id))
+    }
+
+    let doc = parse_html(
+        r#"<div id="sprite" style="width:22px;height:22px;background-image:linear-gradient(transparent,transparent),url(sprite.svg);background-position:0 -747px;background-repeat:no-repeat"></div>"#,
+    );
+    let mut frame = EngineFrame::new(doc, 200.0, 120.0);
+    frame.update_frame();
+    let node = find_by_id_mut(&mut frame.doc.root, "sprite").expect("sprite node");
+    assert_eq!(
+        node.style.rare().additional_background_layers.len(),
+        1,
+        "url layer after transparent gradient should be retained as an additional layer"
+    );
+    node.additional_bg_images = vec![Some(crate::types::DecodedBackgroundImage {
+        data: std::sync::Arc::new(vec![255; 32 * 800 * 4]),
+        width: 32,
+        height: 800,
+        ratio_only: false,
+    })];
+
+    let list = build_display_list_full(
+        &frame.doc.root,
+        200.0,
+        120.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+    assert!(
+        list.commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::BackgroundImage {
+            container,
+            draw_w,
+            draw_h,
+            pos_y,
+            ..
+        }
+                if (*draw_w - 32.0).abs() < 0.1
+                    && (*draw_h - 800.0).abs() < 0.1
+                    && (*pos_y - (container.y - 747.0)).abs() < 0.1)),
+        "second background URL layer should paint with sprite background-position"
+    );
+}
+
+#[test]
 fn a_stop_before_its_predecessor_is_clamped_up_to_it() {
     // css-images-3 §4.3.1 fixup step 3.
     let (_, list) = build(
@@ -2669,6 +2840,11 @@ fn appearance_none_checkbox_does_not_paint_native_chrome() {
         font_family: "Arial".to_string(),
         color: Color::BLACK,
         placeholder_color: Color::rgba(0, 0, 0, 128),
+        file_button_color: Color::BLACK,
+        file_button_background: Color::TRANSPARENT,
+        file_button_font_size: 16.0,
+        file_button_font_weight: 400,
+        file_button_font_family: "Arial".to_string(),
         checked: true,
         value: String::new(),
         placeholder: String::new(),
@@ -3083,6 +3259,86 @@ fn custom_counter_style_paints_list_marker() {
 }
 
 #[test]
+fn collapsed_table_borders_resolve_per_spanning_edge_segment() {
+    let (_, list) = build(
+        r#"
+        <style>
+        body { margin: 0; }
+        table { border-collapse: collapse; border-spacing: 0; }
+        td { padding: 0; width: 40px; height: 30px; border: 0; }
+        #span { border-right: 4px solid red; }
+        #top { border-left: 8px solid blue; }
+        #bottom { border-left: 1px solid green; }
+        </style>
+        <table>
+          <tr><td id="span" rowspan="2"></td><td id="top"></td></tr>
+          <tr><td id="bottom"></td></tr>
+        </table>
+    "#,
+    );
+
+    let mut has_blue_segment = false;
+    let mut has_red_segment = false;
+    let mut has_green_segment = false;
+    for cmd in &list.commands {
+        if let PaintCmd::Border { widths, colors, .. } = cmd {
+            if widths.iter().any(|w| *w > 0.0) && colors.contains(&Color::rgb(0, 0, 255)) {
+                has_blue_segment = true;
+            }
+            if widths.iter().any(|w| *w > 0.0) && colors.contains(&Color::rgb(255, 0, 0)) {
+                has_red_segment = true;
+            }
+            if widths.iter().any(|w| *w > 0.0) && colors.contains(&Color::rgb(0, 128, 0)) {
+                has_green_segment = true;
+            }
+        }
+    }
+
+    assert!(
+        has_blue_segment,
+        "top internal segment should use the wider blue border"
+    );
+    assert!(
+        has_red_segment,
+        "bottom internal segment should use the spanning red border"
+    );
+    assert!(
+        !has_green_segment,
+        "weaker green border must lose only its own segment, not overwrite the whole spanning edge"
+    );
+}
+
+#[test]
+fn disclosure_open_and_closed_markers_paint_distinct_glyphs() {
+    let (_, list) = build(
+        r#"
+        <style>
+        #closed { list-style-type: disclosure-closed; }
+        #open { list-style-type: disclosure-open; }
+        </style>
+        <ul><li id="closed">closed</li><li id="open">open</li></ul>
+    "#,
+    );
+
+    let markers: Vec<&str> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::ListMarker { text, .. } if text == "\u{25b8}" || text == "\u{25be}" => {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        markers.contains(&"\u{25b8}") && markers.contains(&"\u{25be}"),
+        "open and closed disclosure markers should paint different glyphs; got {:?}",
+        markers
+    );
+}
+
+#[test]
 fn custom_counter_style_applies_range_fixed_start_pad_and_fallback() {
     let (frame, _) = build(
         r#"
@@ -3431,7 +3687,7 @@ fn mask_layer_applies_to_nested_paint_commands() {
                 data: ImageRef::Owned(
                     vec![
                         255, 255, 255, 255, // left half visible
-                        0, 0, 0, 255, // right half transparent by luminance
+                        0, 0, 0, 0, // right half transparent by alpha
                     ],
                     2,
                     1,
@@ -3463,6 +3719,33 @@ fn mask_layer_applies_to_nested_paint_commands() {
         alpha_at(15, 5),
         0,
         "transparent mask half should hide later nested paint commands"
+    );
+}
+
+#[test]
+fn mask_layer_uses_alpha_for_black_svg_icons() {
+    let list = DisplayList {
+        commands: vec![
+            PaintCmd::PushMask {
+                rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+                data: ImageRef::Owned(vec![0, 0, 0, 255], 1, 1),
+            },
+            PaintCmd::FillRect {
+                rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+                color: Color::rgba(32, 33, 34, 255),
+                radius: [0.0; 4],
+                radius_y: [0.0; 4],
+            },
+            PaintCmd::PopMask,
+        ],
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(12, 12).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let data = pixmap.data();
+    assert!(
+        data[(5 * 12 + 5) * 4 + 3] > 200,
+        "opaque black mask pixels should reveal the masked fill"
     );
 }
 

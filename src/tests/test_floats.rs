@@ -147,4 +147,94 @@ mod tests {
             ib.layout.margin_rect.y
         );
     }
+
+    #[test]
+    fn floated_percentage_columns_ignore_auto_horizontal_margins() {
+        let html = r#"
+            <style>
+                body { margin: 0; }
+                .row { width: 1200px; }
+                .main, .side {
+                    float: left;
+                    margin-left: auto;
+                    margin-right: auto;
+                    box-sizing: border-box;
+                    height: 40px;
+                }
+                .main { width: 66.66666667%; }
+                .side { width: 33.33333333%; }
+            </style>
+            <div class="row">
+                <div id="main" class="main"></div>
+                <div id="side" class="side"></div>
+            </div>
+        "#;
+        let doc = parse_and_layout(html, 1300.0);
+        let main = crate::tests::test_grid::find_by_id(&doc.root, "main").expect("main not found");
+        let side = crate::tests::test_grid::find_by_id(&doc.root, "side").expect("side not found");
+
+        assert!(
+            (main.layout.margin_rect.y - side.layout.margin_rect.y).abs() < 0.1,
+            "floated percentage columns should share a row; main y={}, side y={}, main={:?}, side={:?}, main margins=({}, {}), side margins=({}, {})",
+            main.layout.margin_rect.y,
+            side.layout.margin_rect.y,
+            main.layout.margin_rect,
+            side.layout.margin_rect,
+            main.layout.resolved_margin_left,
+            main.layout.resolved_margin_right,
+            side.layout.resolved_margin_left,
+            side.layout.resolved_margin_right
+        );
+        assert!(
+            side.layout.margin_rect.x >= main.layout.margin_rect.right() - 1.0,
+            "sidebar should sit after main column, main={:?}, side={:?}",
+            main.layout.margin_rect,
+            side.layout.margin_rect
+        );
+        assert_eq!(main.layout.resolved_margin_left, 0.0);
+        assert_eq!(side.layout.resolved_margin_right, 0.0);
+    }
+
+    #[test]
+    fn flex_items_contain_internal_floats_for_cross_size() {
+        let html = r#"
+            <style>
+                body { margin: 0; }
+                .bar {
+                    display: flex;
+                    align-items: center;
+                    width: 500px;
+                    height: 60px;
+                }
+                .center { flex: 1 1 auto; }
+                .item {
+                    float: left;
+                    width: 80px;
+                    height: 60px;
+                }
+            </style>
+            <div class="bar">
+                <div id="center" class="center">
+                    <div id="item" class="item"></div>
+                </div>
+            </div>
+        "#;
+        let doc = parse_and_layout(html, 600.0);
+        let center =
+            crate::tests::test_grid::find_by_id(&doc.root, "center").expect("center not found");
+        let item = crate::tests::test_grid::find_by_id(&doc.root, "item").expect("item not found");
+
+        assert!(
+            center.layout.margin_rect.h >= 59.0,
+            "flex item should contain internal floats for auto cross-size, center={:?}, item={:?}",
+            center.layout.margin_rect,
+            item.layout.margin_rect
+        );
+        assert!(
+            (center.layout.margin_rect.y - item.layout.margin_rect.y).abs() < 0.1,
+            "internal float should start at the flex item's top, center={:?}, item={:?}",
+            center.layout.margin_rect,
+            item.layout.margin_rect
+        );
+    }
 }

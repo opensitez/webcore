@@ -1164,6 +1164,35 @@ fn an_unchanged_frame_and_a_scroll_are_cheap() {
     );
 }
 
+#[test]
+fn full_repaint_clears_animation_dirty_rects() {
+    let mut r = crate::Renderer::new();
+    let mut doc = r.load_html(
+        r#"<style>body{margin:0}.box{width:80px;height:80px;background:red}</style><div class="box"></div>"#,
+        320.0,
+    );
+    let mut pm = tiny_skia::Pixmap::new(320, 240).unwrap();
+
+    r.render(&mut doc, &mut pm, 1.0);
+    r.invalidate_paint_rects([crate::types::Rect::new(0.0, 0.0, 80.0, 80.0)]);
+    r.invalidate_paint_only_display_list();
+    assert!(r.dirty_paint_rect_count_for_test() > 0);
+    assert!(r.paint_only_display_list_dirty_for_test());
+
+    doc.layout_generation = doc.layout_generation.wrapping_add(1);
+    r.render(&mut doc, &mut pm, 1.0);
+
+    assert_eq!(
+        r.dirty_paint_rect_count_for_test(),
+        0,
+        "a full repaint must not carry stale animation dirty rects into later frames"
+    );
+    assert!(
+        !r.paint_only_display_list_dirty_for_test(),
+        "a full repaint consumes the paint-only display-list state"
+    );
+}
+
 /// ⛔ Every positioning scheme must survive the scroll-cached display list.
 ///
 /// The list is built once in DOCUMENT coordinates and translated by the scroll

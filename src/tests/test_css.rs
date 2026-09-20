@@ -987,6 +987,23 @@ fn background_shorthand_resets_omitted_longhands() {
 }
 
 #[test]
+fn background_image_cascade_preserves_additional_url_layers() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "background-image",
+        "linear-gradient(transparent, transparent), url(sprite.svg)",
+    );
+
+    assert_eq!(style.gradient_type, GradientType::Linear);
+    assert_eq!(style.rare().additional_background_layers.len(), 1);
+    assert_eq!(
+        style.rare().additional_background_layers[0].image_url,
+        "sprite.svg"
+    );
+}
+
+#[test]
 fn background_shorthand_accepts_unspaced_position_size_separator() {
     let mut style = ComputedStyle::default();
     apply_property(
@@ -1105,7 +1122,7 @@ fn background_image_none_and_gradient_are_case_insensitive() {
 #[test]
 fn desktop_media_background_image_none_clears_responsive_gradient() {
     let mut r = crate::Renderer::new();
-    let d = r.load_html(
+    let mut d = r.load_html(
         r#"<style>
              #popular {
                width: 300px;
@@ -1683,7 +1700,7 @@ fn viewbox_only_svg_scales_to_smaller_definite_slot() {
 #[test]
 fn image_dimension_attributes_accept_browser_compatible_leading_integer() {
     let mut r = crate::Renderer::new();
-    let d = r.load_html(
+    let mut d = r.load_html(
         r#"<style>
              body { margin: 0; }
              .gallery-group { width: 1000px; }
@@ -2152,6 +2169,51 @@ fn floated_auto_width_inline_rows_shrink_to_measured_line_width() {
         logo.layout.border_rect,
         site.layout.border_rect,
         button.layout.border_rect
+    );
+}
+
+#[test]
+fn floated_nav_list_intrinsic_width_includes_item_padding_slop() {
+    let doc = parse_and_layout(
+        r#"<style>
+             body { margin: 0; font: 13px/44px Arial; }
+             .bar { display: flex; justify-content: center; width: 1021px; }
+             .item { flex: 0 1 auto; }
+             ul { display: block; list-style: none; margin: 0; padding: 0; }
+             li { float: left; padding-right: 12px; height: 44px; }
+             li:last-child { padding-right: 0; }
+           </style>
+           <div class="bar">
+             <div class="item">
+               <ul id="menu">
+                 <li id="morocco">Morocco</li>
+                 <li id="lifestyle">Lifestyle</li>
+                 <li id="sahara">Western Sahara</li>
+               </ul>
+             </div>
+           </div>"#,
+        1200.0,
+    );
+    let first = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "morocco")
+            .unwrap_or(false)
+    })
+    .unwrap();
+    let last = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "sahara")
+            .unwrap_or(false)
+    })
+    .unwrap();
+
+    assert!(
+        (last.layout.margin_rect.y - first.layout.margin_rect.y).abs() <= 0.5,
+        "floated nav items should stay on one row: first={:?} last={:?}",
+        first.layout.margin_rect,
+        last.layout.margin_rect
     );
 }
 
@@ -2674,6 +2736,31 @@ fn propagated_text_decoration_uses_decorating_box_color() {
     });
 
     assert_eq!(span_decoration_color, Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn text_decoration_paints_through_descendants_without_becoming_inherited_style() {
+    let mut frame = EngineFrame::new(
+        parse_html(
+            r#"<p style="color: blue; text-decoration: underline">a <span id="child" style="color: red">b</span></p>"#,
+        ),
+        800.0,
+        600.0,
+    );
+    frame.update_frame();
+    let child = frame.doc.get_element_by_id("child").unwrap();
+    let child_style = frame.doc.get_computed_style(child).unwrap();
+    assert!(!child_style.text_decoration.underline);
+
+    let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+    let painted_underline = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Text {
+            text, decoration, ..
+        } if text.contains('b') => Some(decoration.underline),
+        _ => None,
+    });
+
+    assert_eq!(painted_underline, Some(true));
 }
 
 #[test]
@@ -3626,6 +3713,9 @@ fn css_overflow_property() {
     apply_property(&mut style, "overflow", "hidden");
     assert_eq!(style.overflow_x, Overflow::Hidden);
     assert_eq!(style.overflow_y, Overflow::Hidden);
+    apply_property(&mut style, "overflow", "hidden auto");
+    assert_eq!(style.overflow_x, Overflow::Hidden);
+    assert_eq!(style.overflow_y, Overflow::Auto);
     apply_property(&mut style, "overflow", "clip");
     assert_eq!(style.overflow_x, Overflow::Clip);
     assert_eq!(style.overflow_y, Overflow::Clip);
@@ -3760,6 +3850,10 @@ fn css_list_style_type_property() {
     assert_eq!(style.list_style_type, ListStyleType::Armenian);
     apply_property(&mut style, "list-style-type", "circle");
     assert_eq!(style.list_style_type, ListStyleType::Circle);
+    apply_property(&mut style, "list-style-type", "disclosure-closed");
+    assert_eq!(style.list_style_type, ListStyleType::DisclosureClosed);
+    apply_property(&mut style, "list-style-type", "disclosure-open");
+    assert_eq!(style.list_style_type, ListStyleType::DisclosureOpen);
     apply_property(&mut style, "list-style-type", "none");
     assert_eq!(style.list_style_type, ListStyleType::None);
 }
@@ -3861,9 +3955,75 @@ fn standards_known_pseudo_elements_do_not_drop_rules() {
     assert!(
         ss.rules
             .iter()
-            .filter(|r| r.pseudo_element != PseudoElement::Backdrop)
+            .any(|r| r.pseudo_element == PseudoElement::FileSelectorButton)
+    );
+    assert!(
+        ss.rules
+            .iter()
+            .filter(|r| {
+                !matches!(
+                    r.pseudo_element,
+                    PseudoElement::Backdrop | PseudoElement::FileSelectorButton
+                )
+            })
             .all(|r| r.pseudo_element == PseudoElement::Ignored)
     );
+}
+
+#[test]
+fn file_selector_button_pseudo_styles_native_file_button_part() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        r#"<style>
+             input::file-selector-button {
+               color: rgb(1, 2, 3);
+               background-color: rgb(4, 5, 6);
+               font-size: 20px;
+               font-weight: 700;
+               font-family: serif;
+             }
+           </style>
+           <input id="file" type="file">"#,
+        400.0,
+    );
+    let input = d.get_element_by_id("file").unwrap();
+    assert_eq!(
+        d.computed_style_pseudo_property(input, "::file-selector-button", "color"),
+        "rgb(1, 2, 3)"
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(input, "::file-selector-button", "background-color"),
+        "rgb(4, 5, 6)"
+    );
+
+    let list = build_display_list(&d.root, 400.0, 200.0);
+    let Some(PaintCmd::FormElement {
+        input_type,
+        file_button_color,
+        file_button_background,
+        file_button_font_size,
+        file_button_font_weight,
+        file_button_font_family,
+        ..
+    }) = list.commands.iter().find(|cmd| {
+        matches!(
+            cmd,
+            PaintCmd::FormElement {
+                tag,
+                input_type,
+                ..
+            } if tag == "input" && input_type == "file"
+        )
+    })
+    else {
+        panic!("file input should emit a FormElement command");
+    };
+    assert_eq!(input_type, "file");
+    assert_eq!(*file_button_color, Color::rgb(1, 2, 3));
+    assert_eq!(*file_button_background, Color::rgb(4, 5, 6));
+    assert!((*file_button_font_size - 20.0).abs() < 0.01);
+    assert_eq!(*file_button_font_weight, 700);
+    assert_eq!(file_button_font_family, "serif");
 }
 
 // ── Additional property application ───────────────────────────────────────────
@@ -5223,6 +5383,18 @@ fn computed_style_exposes_stored_longhands() {
         d.computed_style_property(box_id, "mask-composite"),
         "exclude"
     );
+}
+
+#[test]
+fn compact_child_selector_applies_column_width() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        r#"<style>.langlist>ul{column-width:11.2rem}</style>
+           <div class="langlist"><ul id="langs"><li>English</li></ul></div>"#,
+        800.0,
+    );
+    let ul = d.get_element_by_id("langs").unwrap();
+    assert_eq!(d.computed_style_property(ul, "column-width"), "179.2px");
 }
 
 #[test]
@@ -7070,6 +7242,75 @@ fn wpt_fractional_flex_factors_use_partial_free_space() {
     assert!((width(&d, "s1") - 150.0).abs() < 0.5);
     assert!((width(&d, "s2a") - 50.0).abs() < 0.5);
     assert!((width(&d, "s2b") - 75.0).abs() < 0.5);
+}
+
+#[test]
+fn vertical_writing_mode_block_children_flow_on_the_block_axis() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>
+         body{margin:0}
+         #rl,#lr{width:100px; writing-mode:vertical-rl}
+         #lr{writing-mode:vertical-lr}
+         .child{display:block; width:20px; height:30px}
+         </style>
+         <div id=rl><div id=rl_a class=child></div><div id=rl_b class=child></div></div>
+         <div id=lr><div id=lr_a class=child></div><div id=lr_b class=child></div></div>",
+        900.0,
+    );
+
+    let rl = d.get_element_by_id("rl").unwrap();
+    let rl_a = d.get_element_by_id("rl_a").unwrap();
+    let rl_b = d.get_element_by_id("rl_b").unwrap();
+    let lr = d.get_element_by_id("lr").unwrap();
+    let lr_a = d.get_element_by_id("lr_a").unwrap();
+    let lr_b = d.get_element_by_id("lr_b").unwrap();
+    let rl_r = d.get_bounding_client_rect(rl).unwrap();
+    let rl_ar = d.get_bounding_client_rect(rl_a).unwrap();
+    let rl_br = d.get_bounding_client_rect(rl_b).unwrap();
+    let lr_r = d.get_bounding_client_rect(lr).unwrap();
+    let lr_ar = d.get_bounding_client_rect(lr_a).unwrap();
+    let lr_br = d.get_bounding_client_rect(lr_b).unwrap();
+
+    assert!(
+        (rl_ar.x - 80.0).abs() < 0.5,
+        "vertical-rl first child x {}",
+        rl_ar.x
+    );
+    assert!(
+        (rl_br.x - 60.0).abs() < 0.5,
+        "vertical-rl second child x {}",
+        rl_br.x
+    );
+    assert!(
+        (rl_ar.y - rl_br.y).abs() < 0.5,
+        "vertical-rl children should share inline-start y"
+    );
+    assert!(
+        (rl_r.h - 30.0).abs() < 0.5,
+        "vertical-rl auto block inline extent {}",
+        rl_r.h
+    );
+
+    assert!(
+        (lr_ar.x - 0.0).abs() < 0.5,
+        "vertical-lr first child x {}",
+        lr_ar.x
+    );
+    assert!(
+        (lr_br.x - 20.0).abs() < 0.5,
+        "vertical-lr second child x {}",
+        lr_br.x
+    );
+    assert!(
+        (lr_ar.y - lr_br.y).abs() < 0.5,
+        "vertical-lr children should share inline-start y"
+    );
+    assert!(
+        (lr_r.h - 30.0).abs() < 0.5,
+        "vertical-lr auto block inline extent {}",
+        lr_r.h
+    );
 }
 
 #[test]

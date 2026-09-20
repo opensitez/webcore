@@ -3057,13 +3057,40 @@ fn tiny_animated_gif() -> Vec<u8> {
 #[test]
 fn gif_decode_preserves_animation_frames() {
     let decoded = crate::html::decode_image_bytes_ex(&tiny_animated_gif()).unwrap();
-    let crate::html::DecodedImage::Animated(animated) = decoded else {
+    let crate::html::DecodedImage::Animated(mut animated) = decoded else {
         panic!("animated GIF should decode as animated image");
     };
+    assert_eq!(
+        (animated.intrinsic_width, animated.intrinsic_height),
+        (1, 1)
+    );
     assert_eq!((animated.width, animated.height), (1, 1));
+    assert!(animated.can_animate());
+    assert_eq!(animated.frames.len(), 1);
+    assert_eq!(&animated.frames[0].pixels[..4], &[255, 0, 0, 255]);
+
+    assert!(crate::html::expand_animated_image_to_size(
+        &mut animated,
+        1,
+        1
+    ));
     assert_eq!(animated.frames.len(), 2);
     assert_eq!(&animated.frames[0].pixels[..4], &[255, 0, 0, 255]);
     assert_eq!(&animated.frames[1].pixels[..4], &[0, 0, 255, 255]);
+}
+
+#[test]
+fn single_frame_data_gif_decodes_as_raster_image() {
+    let decoded = crate::html::load_decoded_image_from_src(
+        "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==",
+        "",
+    )
+    .expect("1x1 data GIF should decode");
+
+    let crate::html::DecodedImage::Raster(_, w, h) = decoded else {
+        panic!("single-frame GIF should become a raster image");
+    };
+    assert_eq!((w, h), (1, 1));
 }
 
 #[test]
@@ -3144,4 +3171,41 @@ fn async_animated_image_install_marks_intrinsic_layout_dirty() {
     assert!(doc.root.children[0].layout.intrinsic_dirty);
     assert!(doc.root.has_dirty_layout_descendant);
     assert!(doc.root.layout.intrinsic_dirty);
+}
+
+#[test]
+fn async_image_success_clears_stale_errors_for_same_target() {
+    let decoded = crate::html::decode_image_bytes_ex(&tiny_animated_gif()).unwrap();
+    let mut doc = crate::types::Document::new();
+    doc.root.children.push(crate::types::WebCore::new("img"));
+    doc.image_load_errors.push((
+        vec![0],
+        crate::types::PendingImageTarget::ElementFallback,
+        "data:image/gif;base64,bad".to_string(),
+        "builder error".to_string(),
+    ));
+    doc.image_load_errors.push((
+        vec![0],
+        crate::types::PendingImageTarget::Background,
+        "bad-bg.png".to_string(),
+        "builder error".to_string(),
+    ));
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(crate::types::PendingImageResult::Loaded {
+        node_id: 0,
+        path: vec![0],
+        target: crate::types::PendingImageTarget::ElementFallback,
+        url: "data:image/gif;base64,ok".to_string(),
+        decoded,
+    })
+    .unwrap();
+    doc.pending_images = Some(rx);
+
+    assert!(doc.poll_pending_images());
+    assert_eq!(doc.image_load_errors.len(), 1);
+    assert_eq!(
+        doc.image_load_errors[0].1,
+        crate::types::PendingImageTarget::Background
+    );
 }

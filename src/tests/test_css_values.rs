@@ -63,6 +63,20 @@ fn env_length_uses_fallback_and_known_safe_area_zero() {
 }
 
 #[test]
+fn env_length_works_inside_calc_expressions() {
+    assert_eq!(
+        parse_length("calc(env(safe-area-inset-bottom, 20px) + 6px)")
+            .resolve_vp(16.0, 100.0, 16.0, 800.0, 600.0),
+        6.0
+    );
+    assert_eq!(
+        parse_length("calc(env(--unknown-inset, 20px) + 6px)")
+            .resolve_vp(16.0, 100.0, 16.0, 800.0, 600.0),
+        26.0
+    );
+}
+
+#[test]
 fn env_color_uses_fallback_for_unknown_variables() {
     assert_eq!(
         parse_color("env(--brand-color, rebeccapurple)"),
@@ -319,6 +333,26 @@ fn background_image_data_url_keeps_semicolon_and_comma_payload() {
 }
 
 #[test]
+fn background_image_data_url_keeps_escaped_quotes_in_svg_payload() {
+    let mut s = crate::types::ComputedStyle::default();
+    crate::css::apply_property(
+        &mut s,
+        "background-image",
+        r#"url("data:image/svg+xml;utf8,<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\"><path d=\"M1 1h18v18H1z\"/></svg>")"#,
+    );
+    assert!(
+        s.background_image_url
+            .starts_with("data:image/svg+xml;utf8,<svg")
+    );
+    assert!(
+        s.background_image_url
+            .contains(r#"xmlns="http://www.w3.org/2000/svg""#)
+    );
+    assert!(s.background_image_url.contains(r#"viewBox="0 0 20 20""#));
+    assert!(s.background_image_url.ends_with("</svg>"));
+}
+
+#[test]
 fn background_image_image_set_selects_supported_one_x_candidate() {
     for (input, expected) in [
         (
@@ -327,6 +361,22 @@ fn background_image_image_set_selects_supported_one_x_candidate() {
         ),
         (
             "image-set(\"hero.avif\" type(\"image/avif\") 1x, url(hero.png) type(\"image/png\") 1x)",
+            "hero.png",
+        ),
+        (
+            "image-set(\"hero.avif\" type(\"image/avif\") 1x, url(hero.webp) type(\"image/webp\") 1x)",
+            "hero.webp",
+        ),
+        (
+            "image-set(\"logo.avif\" type(\"image/avif\") 1x, url(logo.svg) type(\"image/svg+xml; charset=utf-8\") 1x)",
+            "logo.svg",
+        ),
+        (
+            "image-set(url(hero@2x.png) 192dpi, url(hero.png) 96dpi)",
+            "hero.png",
+        ),
+        (
+            "image-set(url(hero@2x.png) 75.590552dpcm, url(hero.png) 37.795276dpcm)",
             "hero.png",
         ),
         (
@@ -352,6 +402,23 @@ fn background_image_image_set_keeps_quoted_data_url_candidate_together() {
         r#"image-set("data:image/png;base64,AAAA" 1x, url(hero@2x.png) 2x)"#,
     );
     assert_eq!(s.background_image_url, "data:image/png;base64,AAAA");
+}
+
+#[test]
+fn background_image_image_set_works_in_multiple_layers() {
+    let mut s = crate::types::ComputedStyle::default();
+    crate::css::apply_property(
+        &mut s,
+        "background-image",
+        "image-set(url(top@2x.png) 2x, url(top.png) 1x), image-set(url(bottom@2x.webp) 2x, url(bottom.webp) 1x)",
+    );
+
+    assert_eq!(s.background_image_url, "top.png");
+    assert_eq!(s.rare().additional_background_layers.len(), 1);
+    assert_eq!(
+        s.rare().additional_background_layers[0].image_url,
+        "bottom.webp"
+    );
 }
 
 /// And it must resolve against the document origin, keeping the scheme.

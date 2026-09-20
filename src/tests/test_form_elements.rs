@@ -663,6 +663,30 @@ fn select_has_width() {
 }
 
 #[test]
+fn inline_select_keeps_explicit_size_inside_clipped_wrapper() {
+    let doc = layout_html(
+        r#"<div style="width:68px;height:24px;overflow:hidden">
+             <select id="s" style="display:inline;width:11rem;height:2.4rem;padding:0 .8rem">
+               <option selected>English</option>
+             </select>
+           </div>"#,
+        400.0,
+    );
+    let select = find_by_id(&doc.root, "s").unwrap();
+    assert!(
+        select.layout.content_rect.w > 120.0,
+        "inline native select should keep its explicit width, got {}",
+        select.layout.content_rect.w
+    );
+    assert!(
+        select.layout.content_rect.h > 20.0,
+        "inline native select should keep its explicit height, got {}",
+        select.layout.content_rect.h
+    );
+    assert_eq!(crate::html::forms::selected_index(select), 0);
+}
+
+#[test]
 fn optgroup_preserved_in_dom() {
     let doc = layout_html(
         r#"<select>
@@ -1739,6 +1763,83 @@ fn click_checkbox_toggles() {
         "the click wrote a `checked` attribute into the document"
     );
     assert!(cb.dirty_checked, "a user interaction raises the dirty flag");
+}
+
+#[test]
+fn click_hidden_checkbox_for_css_dropdown_toggles_checked_state() {
+    let mut doc = layout_html(
+        r#"<style>
+        #menu { opacity: 0; visibility: hidden; height: 0; overflow: hidden auto; }
+        #toggle:checked ~ #menu { opacity: 1; visibility: visible; height: auto; }
+        </style>
+        <div><input id="toggle" type="checkbox" style="position:absolute; width:24px; height:24px; opacity:0">
+        <label for="toggle" style="display:inline-block; width:24px; height:24px"></label>
+        <div id="menu">open</div></div>"#,
+        400.0,
+    );
+    let cb = find_by_id(&doc.root, "toggle").unwrap();
+    let center = (
+        cb.layout.border_rect.x + cb.layout.border_rect.w / 2.0,
+        cb.layout.border_rect.y + cb.layout.border_rect.h / 2.0,
+    );
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, center, 0);
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, center, 0);
+    doc.recascade();
+
+    let cb = find_by_id(&doc.root, "toggle").unwrap();
+    assert!(cb.checkedness, "hidden checkbox should still toggle");
+    let menu = find_by_id(&doc.root, "menu").unwrap();
+    assert_eq!(menu.style.opacity, 1.0);
+    assert!(menu.style.visibility);
+    assert!(
+        menu.style.height.is_auto(),
+        "checked sibling rule should restore height:auto"
+    );
+}
+
+#[test]
+fn checked_class_sibling_selector_tracks_live_checkbox_state() {
+    let mut doc = layout_html(
+        r#"<style>
+        .dropdown .content { opacity: 0; visibility: hidden; height: 0; overflow: hidden auto; }
+        .dropdown .checkbox:checked ~ .content { opacity: 1; visibility: visible; height: auto; }
+        </style>
+        <div class="dropdown">
+          <input id="toggle" class="checkbox" type="checkbox" style="position:absolute;width:24px;height:24px;opacity:0">
+          <label for="toggle" style="display:inline-block;width:24px;height:24px">menu</label>
+          <div id="menu" class="content">open</div>
+        </div>"#,
+        400.0,
+    );
+    let cb = find_by_id(&doc.root, "toggle").unwrap();
+    let center = (
+        cb.layout.border_rect.x + cb.layout.border_rect.w / 2.0,
+        cb.layout.border_rect.y + cb.layout.border_rect.h / 2.0,
+    );
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, center, 0);
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, center, 0);
+    doc.recascade();
+
+    let menu = find_by_id(&doc.root, "menu").unwrap();
+    assert_eq!(menu.style.opacity, 1.0);
+    assert!(menu.style.visibility);
+    assert!(menu.style.height.is_auto());
+}
+
+#[test]
+fn checkbox_type_matching_is_ascii_case_insensitive_and_trimmed() {
+    let mut doc = layout_html(r#"<input type=" CheCkBoX " id="c">"#, 400.0);
+    let cb = find_by_id(&doc.root, "c").unwrap();
+    let center = (
+        cb.layout.border_rect.x + cb.layout.border_rect.w / 2.0,
+        cb.layout.border_rect.y + cb.layout.border_rect.h / 2.0,
+    );
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, center, 0);
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, center, 0);
+    assert!(
+        find_by_id(&doc.root, "c").unwrap().checkedness,
+        "input type tokens are ASCII case-insensitive in HTML"
+    );
 }
 
 #[test]

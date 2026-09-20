@@ -501,6 +501,8 @@ fn grid_full_span_subgrid_with_fluid_image_does_not_inflate_fr_tracks() {
     let pic = find_by_id_mut(&mut doc.root, "pic").expect("pic");
     pic.image_width = 1312;
     pic.image_height = 738;
+    pic.image_data_width = 1312;
+    pic.image_data_height = 738;
     pic.image_data = Some(std::sync::Arc::new(vec![0xff; 1312 * 738 * 4]));
     LayoutEngine::new().layout(&mut doc, 1280.0);
 

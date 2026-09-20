@@ -39,6 +39,18 @@ fn find_by_class<'a>(node: &'a WebCore, class: &str) -> Option<&'a WebCore> {
     None
 }
 
+fn find_descendant_tag<'a>(node: &'a WebCore, tag: &str) -> Option<&'a WebCore> {
+    for child in &node.children {
+        if child.tag == tag {
+            return Some(child);
+        }
+        if let Some(found) = find_descendant_tag(child, tag) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn recascade_with_hover(doc: &mut Document, hovered_id: &str) {
     let hovered_id_val = find_by_id(&doc.root, hovered_id)
         .map(|n| n.node_id)
@@ -49,6 +61,156 @@ fn recascade_with_hover(doc: &mut Document, hovered_id: &str) {
     eng.viewport_h = 900.0;
     // Force cascade by setting last_cascade_vw to NaN (new engine)
     eng.layout(doc, 800.0);
+}
+
+#[test]
+fn mouse_leave_preserves_previous_hover_for_recascade() {
+    let mut doc = layout_html(
+        r##"
+        <style>
+            body { margin: 0; }
+            #link { display: block; width: 120px; height: 40px; color: black; }
+            #link:hover { color: red; background: #eee; }
+        </style>
+        <a id="link" href="#">Deutsch</a>
+        <p id="outside">Outside</p>
+    "##,
+        800.0,
+    );
+
+    let link = find_by_id(&doc.root, "link").unwrap();
+    let link_id = link.node_id;
+    let r = link.layout.border_rect;
+    assert!(doc.process_mouse_event(
+        crate::dom::HtmlEventType::MouseMove,
+        (r.x + r.w / 2.0, r.y + r.h / 2.0),
+        0,
+    ));
+    let mut eng = LayoutEngine::new();
+    eng.viewport_h = 900.0;
+    eng.layout(&mut doc, 800.0);
+    assert_eq!(
+        find_by_id(&doc.root, "link").unwrap().style.color,
+        Color::rgb(255, 0, 0)
+    );
+
+    assert!(doc.process_mouse_event(crate::dom::HtmlEventType::MouseMove, (400.0, 400.0), 0));
+    assert_eq!(
+        doc.prev_hovered_box, link_id,
+        "the old hovered element must stay available for the leave recascade"
+    );
+    eng.layout(&mut doc, 800.0);
+    assert_eq!(
+        find_by_id(&doc.root, "link").unwrap().style.color,
+        Color::rgb(0, 0, 0)
+    );
+}
+
+#[test]
+fn mouse_leave_after_incremental_hover_relayout_clears_hover() {
+    let mut doc = parse_html(
+        r##"
+        <style>
+            body { margin: 0; }
+            #link { display: block; width: 120px; height: 40px; font-size: 16px; color: black; }
+            #link:hover { font-size: 24px; color: red; background: #eee; }
+            #outside { margin-top: 100px; }
+        </style>
+        <a id="link" href="#">Deutsch</a>
+        <p id="outside">Outside</p>
+    "##,
+    );
+    let mut eng = LayoutEngine::new();
+    eng.viewport_h = 900.0;
+    eng.layout(&mut doc, 800.0);
+
+    let link = find_by_id(&doc.root, "link").unwrap();
+    let normal_font = link.style.font_size_px(16.0, 16.0);
+    let r = link.layout.border_rect;
+    assert!(doc.process_mouse_event(
+        crate::dom::HtmlEventType::MouseMove,
+        (r.x + r.w / 2.0, r.y + r.h / 2.0),
+        0,
+    ));
+    eng.layout(&mut doc, 800.0);
+    let hovered = find_by_id(&doc.root, "link").unwrap();
+    assert!(
+        hovered.style.font_size_px(16.0, 16.0) > normal_font,
+        "hover should enlarge the link for the regression setup"
+    );
+    assert_eq!(hovered.style.color, Color::rgb(255, 0, 0));
+
+    assert!(
+        doc.process_mouse_event(crate::dom::HtmlEventType::MouseMove, (400.0, 400.0), 0),
+        "leaving immediately after an incremental hover relayout must not be suppressed"
+    );
+    eng.layout(&mut doc, 800.0);
+    let cleared = find_by_id(&doc.root, "link").unwrap();
+    assert_eq!(cleared.style.color, Color::rgb(0, 0, 0));
+    assert_eq!(cleared.style.font_size_px(16.0, 16.0), normal_font);
+}
+
+#[test]
+fn incremental_hover_keeps_rem_font_sizes_on_computed_root() {
+    let mut doc = parse_html(
+        r##"
+        <style>
+            html { font-size: 62.5%; }
+            body { margin: 0; }
+            .central-featured-lang { position: absolute; width: 15.6rem; }
+            .central-featured-lang .link-box {
+                display: block;
+                color: #36c;
+                text-align: center;
+                text-decoration: none;
+            }
+            .central-featured-lang strong {
+                display: block;
+                font-size: 1.6rem;
+            }
+            .central-featured-lang .link-box:hover strong {
+                text-decoration: underline;
+            }
+            .central-featured-lang :hover {
+                background-color: #f8f9fa;
+            }
+        </style>
+        <div class="central-featured-lang">
+            <a id="fr" class="link-box" href="#"><strong>Français</strong></a>
+        </div>
+    "##,
+    );
+    let mut eng = LayoutEngine::new();
+    eng.viewport_h = 900.0;
+    eng.layout(&mut doc, 800.0);
+
+    let link = find_by_id(&doc.root, "fr").unwrap();
+    let strong = find_descendant_tag(link, "strong").unwrap();
+    let before_font = strong.style.font_size_px(16.0, 10.0);
+    assert_eq!(
+        before_font, 16.0,
+        "1.6rem should resolve against the computed 10px root"
+    );
+
+    let r = link.layout.border_rect;
+    assert!(doc.process_mouse_event(
+        crate::dom::HtmlEventType::MouseMove,
+        (r.x + r.w / 2.0, r.y + r.h / 2.0),
+        0,
+    ));
+    eng.layout(&mut doc, 800.0);
+
+    let link = find_by_id(&doc.root, "fr").unwrap();
+    let strong = find_descendant_tag(link, "strong").unwrap();
+    assert_eq!(
+        strong.style.font_size_px(16.0, 10.0),
+        before_font,
+        "incremental hover recascade must keep rem units on the computed root font"
+    );
+    assert!(
+        strong.style.text_decoration.underline,
+        "the hover descendant rule should still apply"
+    );
 }
 
 // ── Basic self-hover ──────────────────────────────────────────────────────

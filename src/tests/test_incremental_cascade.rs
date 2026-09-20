@@ -112,6 +112,7 @@ fn incremental_cascade_correctness() {
     let old_chain = HashSet::new(); // no previous hover
     mark_hover_dirty(
         &mut doc_inc.root,
+        &doc_inc.stylesheet,
         &old_chain,
         &hover_chain_inc,
         false,
@@ -183,6 +184,7 @@ fn incremental_cascade_skips_clean_subtrees() {
     doc.rebuild_node_map();
     mark_hover_dirty(
         &mut doc.root,
+        &doc.stylesheet,
         &old_chain,
         &hover_chain,
         false,
@@ -219,6 +221,7 @@ fn incremental_cascade_skips_clean_subtrees() {
     doc.rebuild_node_map();
     mark_hover_dirty(
         &mut doc.root,
+        &doc.stylesheet,
         &hover_chain,
         &chain_nav1,
         doc.stylesheet.has_hover_descendant_rules,
@@ -329,7 +332,14 @@ fn incremental_cascade_handles_hover_transition() {
     let chain_a = build_hover_chain(&doc.root, a);
     let old_empty = HashSet::new();
     doc.rebuild_node_map();
-    mark_hover_dirty(&mut doc.root, &old_empty, &chain_a, false, &HashSet::new());
+    mark_hover_dirty(
+        &mut doc.root,
+        &doc.stylesheet,
+        &old_empty,
+        &chain_a,
+        false,
+        &HashSet::new(),
+    );
     apply_cascade_incremental(
         &mut doc.root,
         &doc.stylesheet,
@@ -346,7 +356,14 @@ fn incremental_cascade_handles_hover_transition() {
     // Move hover from A to B
     let chain_b = build_hover_chain(&doc.root, b);
     doc.rebuild_node_map();
-    mark_hover_dirty(&mut doc.root, &chain_a, &chain_b, false, &HashSet::new());
+    mark_hover_dirty(
+        &mut doc.root,
+        &doc.stylesheet,
+        &chain_a,
+        &chain_b,
+        false,
+        &HashSet::new(),
+    );
     apply_cascade_incremental(
         &mut doc.root,
         &doc.stylesheet,
@@ -540,6 +557,57 @@ fn parallel_cascade_matches_a_sibling_under_a_descendant() {
         by_id(&doc.root, "icon").unwrap().style.position,
         crate::types::Position::Static
     );
+}
+
+#[test]
+fn parallel_cascade_applies_simple_class_rule_with_trailing_class_space() {
+    let doc = big_sheet_doc(
+        ".matin-breaking-news { margin-top: 20px; background-color: #c0000f }",
+        "<div id=t class='matin-breaking-news '>ticker</div>",
+    );
+    let t = by_id(&doc.root, "t").unwrap();
+    assert_eq!(
+        t.style.background_color,
+        crate::types::Color {
+            r: 0xc0,
+            g: 0,
+            b: 0x0f,
+            a: 255,
+        }
+    );
+    assert_eq!(t.style.margin_top, crate::types::CssLength::Px(20.0));
+}
+
+#[test]
+fn style_sharing_keeps_descendant_selector_ancestor_context() {
+    let doc = big_sheet_doc(
+        ".scoped .item { margin-top: 20px; background-color: #c0000f }",
+        concat!(
+            "<div><span id=plain class=item>plain</span></div>",
+            "<section class=scoped><div><span id=scoped class=item>scoped</span></div></section>",
+        ),
+    );
+    let plain = by_id(&doc.root, "plain").unwrap();
+    let scoped = by_id(&doc.root, "scoped").unwrap();
+    assert_eq!(
+        plain.style.background_color,
+        crate::types::Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        }
+    );
+    assert_eq!(
+        scoped.style.background_color,
+        crate::types::Color {
+            r: 0xc0,
+            g: 0,
+            b: 0x0f,
+            a: 255,
+        }
+    );
+    assert_eq!(scoped.style.margin_top, crate::types::CssLength::Px(20.0));
 }
 
 // ── The two cascades must agree ──────────────────────────────────────────────
@@ -889,7 +957,14 @@ fn a_re_cascade_does_not_change_a_page_that_loaded_on_the_parallel_path() {
     // then run the incremental (serial) cascade.
     let hov = doc.get_element_by_id("hov").unwrap();
     let chain = build_hover_chain(&doc.root, hov);
-    mark_hover_dirty(&mut doc.root, &empty, &chain, true, &HashSet::new());
+    mark_hover_dirty(
+        &mut doc.root,
+        &doc.stylesheet,
+        &empty,
+        &chain,
+        true,
+        &HashSet::new(),
+    );
     apply_cascade_incremental(
         &mut doc.root,
         &doc.stylesheet,
