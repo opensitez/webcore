@@ -313,7 +313,8 @@ pub enum ListStyleType {
     HiraganaIroha,
     KatakanaIroha,
     CjkDecimal,
-    Disclosure,
+    DisclosureOpen,
+    DisclosureClosed,
 }
 
 impl Default for ListStyleType {

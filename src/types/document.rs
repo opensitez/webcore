@@ -32,6 +32,7 @@ pub enum PendingImageTarget {
     Element,
     ElementFallback,
     Background,
+    BackgroundLayer(usize),
     Mask,
 }
 

@@ -553,6 +553,7 @@ impl Default for ComputedStyle {
             placeholder_style: None,
             marker_style: None,
             backdrop_style: None,
+            file_selector_button_style: None,
 
             caret_color: None,
             scrollbar_thumb_color: None,

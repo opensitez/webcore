@@ -9,6 +9,16 @@ use std::collections::{HashMap, HashSet};
 
 // ─── Layout Box (geometry computed by the layout pass) ───────────────────────
 
+#[derive(Clone, Debug, Default)]
+pub struct CollapsedBorderSegment {
+    pub rect: Rect,
+    pub width: f32,
+    pub color: Color,
+    pub style: BorderStyle,
+    /// 0 = horizontal, 1 = vertical.
+    pub axis: u8,
+}
+
 /// Layout-only data for a box. Separated from DOM data so that each pipeline
 /// stage owns its own data — better cache behavior, independent invalidation,
 /// and the ability to have multiple layout views from one DOM.
@@ -65,6 +75,13 @@ pub struct LayoutBox {
     pub resolved_pad_left: f32,
     pub resolved_content_width: f32,
 
+    /// Per-segment winners for `border-collapse: collapse`.
+    ///
+    /// A row- or column-spanning cell can have different winning collapsed
+    /// borders along one physical side, so this cannot be represented by the
+    /// ordinary four `border-*-style` longhands.
+    pub collapsed_border_segments: Vec<CollapsedBorderSegment>,
+
     /// Cached intrinsic (max-content) width — `NAN` means not yet computed.
     pub cached_intrinsic_w: std::cell::Cell<f32>,
 }
@@ -104,6 +121,7 @@ impl Default for LayoutBox {
             resolved_pad_bottom: 0.0,
             resolved_pad_left: 0.0,
             resolved_content_width: 0.0,
+            collapsed_border_segments: Vec::new(),
             cached_intrinsic_w: std::cell::Cell::new(f32::NAN),
         }
     }

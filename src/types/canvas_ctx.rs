@@ -211,6 +211,8 @@ impl CanvasContext {
     /// Copy pixel buffer to an WebCore's image_data for rendering.
     pub fn apply_to_node(&self, node: &mut WebCore) {
         node.image_data = Some(std::sync::Arc::new(self.pixels.clone()));
+        node.image_data_width = self.width;
+        node.image_data_height = self.height;
         node.image_width = self.width;
         node.image_height = self.height;
     }
@@ -316,8 +318,12 @@ impl WebCore {
 
             resolved_src: String::new(),
             image_data: None,
+            image_data_width: 0,
+            image_data_height: 0,
             image_width: 0,
             image_height: 0,
+            selected_source_width: None,
+            selected_source_height: None,
             animated_image: None,
             animated_image_frame: 0,
             animated_image_last_tick: None,
@@ -333,6 +339,7 @@ impl WebCore {
             bg_image_width: 0,
             bg_image_height: 0,
             bg_image_ratio_only: false,
+            additional_bg_images: Vec::new(),
 
             svg_document: None,
             svg_tree_path: None,

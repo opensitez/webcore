@@ -9,6 +9,14 @@ use std::collections::{HashMap, HashSet};
 
 // ─── HTML Box (DOM node) ─────────────────────────────────────────────────────
 
+#[derive(Clone, Debug)]
+pub struct DecodedBackgroundImage {
+    pub data: std::sync::Arc<Vec<u8>>,
+    pub width: u32,
+    pub height: u32,
+    pub ratio_only: bool,
+}
+
 /// A box/node in the box tree.  Mirrors the C++ `Box` struct.
 #[derive(Clone, Debug)]
 pub struct WebCore {
@@ -54,8 +62,14 @@ pub struct WebCore {
     /// likes, but not by pretending to be a content attribute.
     pub resolved_src: String,
     pub image_data: Option<std::sync::Arc<Vec<u8>>>,
+    pub image_data_width: u32,
+    pub image_data_height: u32,
     pub image_width: u32,
     pub image_height: u32,
+    /// Intrinsic dimensions supplied by the selected `<picture><source>`.
+    /// These are internal current-source state, not DOM attributes.
+    pub selected_source_width: Option<u32>,
+    pub selected_source_height: Option<u32>,
     pub animated_image: Option<crate::html::AnimatedImage>,
     pub animated_image_frame: usize,
     pub animated_image_last_tick: Option<std::time::Instant>,
@@ -71,6 +85,7 @@ pub struct WebCore {
     pub bg_image_width: u32,
     pub bg_image_height: u32,
     pub bg_image_ratio_only: bool,
+    pub additional_bg_images: Vec<Option<DecodedBackgroundImage>>,
 
     // CSS mask-image data (SVG rasterized to alpha mask)
     pub mask_image_data: Option<std::sync::Arc<Vec<u8>>>,

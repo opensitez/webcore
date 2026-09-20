@@ -78,7 +78,11 @@ impl Document {
             smooth_scrolls: Vec::new(),
             hover_changed: false,
             hover_sensitive_nodes: HashSet::new(),
-            style_dirty: false,
+            // A new document has never had the author/UA cascade applied.
+            // Reused renderers keep layout-engine cache state across pages, so
+            // the document itself must force its first cascade even when the
+            // viewport is unchanged and no media query boundary moved.
+            style_dirty: true,
             prev_hovered_box: 0,
             pending_announcements: Vec::new(),
             live_region_snapshots: HashMap::new(),
@@ -278,6 +282,8 @@ impl Document {
             let mut loaded_target = false;
             let mut target_needs_relayout = false;
             let mut paint_rect = None;
+            let loaded_path = path.clone();
+            let loaded_target_kind = target;
             if let Some(node) = if node_id != 0 {
                 self.find_webcore_mut(node_id)
             } else {
@@ -304,9 +310,18 @@ impl Document {
                             loaded_target = true;
                         }
                     }
+                    PendingImageTarget::BackgroundLayer(layer_index) => {
+                        if crate::html::set_decoded_bg_image_layer_on_node(
+                            node,
+                            layer_index,
+                            decoded,
+                        ) {
+                            loaded_target = true;
+                        }
+                    }
                     PendingImageTarget::Mask => {
-                        if let Some((data, w, h)) = crate::html::decoded_image_pixels(decoded) {
-                            node.mask_image_data = Some(std::sync::Arc::new(data));
+                        if let Some((data, w, h)) = crate::html::decoded_image_pixels_arc(decoded) {
+                            node.mask_image_data = Some(data);
                             node.mask_image_width = w;
                             node.mask_image_height = h;
                             loaded_target = true;
@@ -315,6 +330,10 @@ impl Document {
                 }
             }
             if loaded_target {
+                self.image_load_errors
+                    .retain(|(err_path, err_target, _, _)| {
+                        err_path != &loaded_path || *err_target != loaded_target_kind
+                    });
                 if target_needs_relayout {
                     mark_layout_path_dirty(&mut self.root, &path);
                     poll.needs_relayout = true;
@@ -388,10 +407,30 @@ impl Document {
         ) {
             let visible = inherited_visible && !animated_image_hidden_by_style(node);
             if !visible {
+                collapse_animated_subtree(node);
                 return;
             }
-            if animated_image_intersects_clip(node, scroll_y, viewport_h, clip_top, clip_bottom) {
-                if let Some(animated) = node.animated_image.as_ref() {
+            let intersects =
+                animated_image_intersects_clip(node, scroll_y, viewport_h, clip_top, clip_bottom);
+            if intersects {
+                if let Some(animated) = node.animated_image.as_mut() {
+                    if animated.source_bytes.is_some() && !animated.fully_decoded {
+                        let target_width = node.layout.border_rect.w.ceil().max(1.0) as u32;
+                        let target_height = node.layout.border_rect.h.ceil().max(1.0) as u32;
+                        if crate::html::expand_animated_image_to_size(
+                            animated,
+                            target_width,
+                            target_height,
+                        ) {
+                            node.animated_image_frame = 0;
+                            node.animated_image_last_tick = Some(now);
+                            node.image_data =
+                                animated.frames.first().map(|frame| frame.pixels.clone());
+                            node.image_data_width = animated.width;
+                            node.image_data_height = animated.height;
+                            tick.changed_any = true;
+                        }
+                    }
                     if animated.frames.len() > 1 {
                         let current = node
                             .animated_image_frame
@@ -405,6 +444,8 @@ impl Document {
                             node.animated_image_frame = next;
                             node.animated_image_last_tick = Some(now);
                             node.image_data = Some(animated.frames[next].pixels.clone());
+                            node.image_data_width = animated.width;
+                            node.image_data_height = animated.height;
                             tick.changed_any = true;
                             let rect = node.layout.border_rect;
                             if rect.w > 0.0 && rect.h > 0.0 {
@@ -415,6 +456,8 @@ impl Document {
                         }
                     }
                 }
+            } else if collapse_node_animation(node) {
+                tick.changed_any = true;
             }
             let (child_clip_top, child_clip_bottom) =
                 animated_child_clip(node, scroll_y, viewport_h, clip_top, clip_bottom);
@@ -685,10 +728,32 @@ impl Document {
     }
 }
 
+fn collapse_node_animation(node: &mut WebCore) -> bool {
+    let Some(animated) = node.animated_image.as_mut() else {
+        return false;
+    };
+    if !crate::html::collapse_animated_image(animated, node.animated_image_frame) {
+        return false;
+    }
+    node.animated_image_frame = 0;
+    node.animated_image_last_tick = None;
+    node.image_data = animated.frames.first().map(|frame| frame.pixels.clone());
+    node.image_data_width = animated.width;
+    node.image_data_height = animated.height;
+    true
+}
+
+fn collapse_animated_subtree(node: &mut WebCore) {
+    collapse_node_animation(node);
+    for child in &mut node.children {
+        collapse_animated_subtree(child);
+    }
+}
+
 fn has_animated_images(node: &WebCore) -> bool {
     node.animated_image
         .as_ref()
-        .is_some_and(|animated| animated.frames.len() > 1)
+        .is_some_and(|animated| animated.can_animate())
         || node.children.iter().any(has_animated_images)
 }
 
@@ -709,7 +774,7 @@ fn has_visible_animated_images(node: &WebCore, scroll_y: f32, viewport_h: f32) -
             && node
                 .animated_image
                 .as_ref()
-                .is_some_and(|animated| animated.frames.len() > 1)
+                .is_some_and(|animated| animated.can_animate())
         {
             return true;
         }
@@ -762,7 +827,7 @@ fn next_visible_animated_image_deadline(
         }
         if animated_image_intersects_clip(node, scroll_y, viewport_h, clip_top, clip_bottom)
             && let Some(animated) = node.animated_image.as_ref()
-            && animated.frames.len() > 1
+            && animated.can_animate()
         {
             let current = node
                 .animated_image_frame

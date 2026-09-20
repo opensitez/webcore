@@ -57,6 +57,12 @@ impl Document {
         evt.button = button;
         let hit_result = crate::layout::hit_test::point_to_hit(&self.root, doc_pt, button);
         let mut hit_node_id: u32 = hit_result.as_ref().map(|h| h.node_id).unwrap_or(0);
+        if self
+            .get_node(hit_node_id)
+            .is_some_and(|node| !is_pointer_owner(node))
+        {
+            hit_node_id = normalize_pointer_target(&self.root, hit_node_id);
+        }
         // For inline links: check if the hit point is inside an inline run
         // with an href. If so, find the ancestor <a> element for hover styling.
         if let Some(ref hr) = hit_result {
@@ -92,14 +98,12 @@ impl Document {
                         redraw = true;
                     }
                 }
-                // After a hover-triggered relayout (e.g. dropdown opens), the
-                // layout changes and re-hit-testing at the same mouse position may
-                // find a different element, causing a feedback loop
-                // (open → re-hit → close → re-hit → open …).
-                // Suppress one hover change after each hover-triggered relayout.
                 if self.hover_suppress_count > 0 {
                     self.hover_suppress_count -= 1;
-                } else if self.hovered_box != hit_node_id {
+                }
+                if self.hovered_box != hit_node_id {
+                    let old_hovered = self.hovered_box;
+                    self.prev_hovered_box = old_hovered;
                     self.hovered_box = hit_node_id;
                     self.hover_changed = true;
                     redraw = true;
@@ -773,9 +777,17 @@ impl Document {
     pub fn dispatch_over_out(&mut self, doc_pt: (f32, f32)) -> bool {
         use crate::dom::{HtmlEvent, HtmlEventType};
         let client_pos = (doc_pt.0, doc_pt.1 - self.scroll_y);
-        let new_id: u32 = crate::layout::hit_test::point_to_hit(&self.root, doc_pt, 0)
+        let raw_new_id: u32 = crate::layout::hit_test::point_to_hit(&self.root, doc_pt, 0)
             .map(|h| h.node_id)
             .unwrap_or(0);
+        let new_id = if self
+            .get_node(raw_new_id)
+            .is_some_and(|node| !is_pointer_owner(node))
+        {
+            normalize_pointer_target(&self.root, raw_new_id)
+        } else {
+            raw_new_id
+        };
         let old_id = self.hovered_box;
         if new_id == old_id {
             return false;
@@ -858,4 +870,65 @@ impl Document {
         }
         redraw
     }
+}
+
+fn normalize_pointer_target(root: &WebCore, target_id: u32) -> u32 {
+    if target_id == 0 {
+        return 0;
+    }
+
+    fn walk(
+        node: &WebCore,
+        target_id: u32,
+        nearest_element: u32,
+        nearest_owner: u32,
+    ) -> Option<u32> {
+        let current_element = if node.is_element() && node.node_id != 0 {
+            node.node_id
+        } else {
+            nearest_element
+        };
+        let current_owner = if node.node_id != 0 && is_pointer_owner(node) {
+            node.node_id
+        } else {
+            nearest_owner
+        };
+        if node.node_id == target_id {
+            if current_owner != 0 {
+                return Some(current_owner);
+            }
+            return if node.is_element() {
+                Some(node.node_id)
+            } else if current_element != 0 {
+                Some(current_element)
+            } else {
+                Some(target_id)
+            };
+        }
+        for child in &node.children {
+            if let Some(found) = walk(child, target_id, current_element, current_owner) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    walk(root, target_id, 0, 0).unwrap_or(target_id)
+}
+
+fn is_pointer_owner(node: &WebCore) -> bool {
+    matches!(
+        node.tag.as_str(),
+        "a" | "button"
+            | "input"
+            | "select"
+            | "textarea"
+            | "label"
+            | "summary"
+            | "option"
+            | "video"
+            | "audio"
+    ) || node.attributes.contains_key("onclick")
+        || node.attributes.contains_key("role")
+        || node.attributes.contains_key("tabindex")
 }

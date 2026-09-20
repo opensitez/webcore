@@ -15,4 +15,5 @@ pub struct InlineRun {
     pub text_offset: usize,
     pub length: usize,
     pub style: ComputedStyle,
+    pub path: Vec<usize>,
 }

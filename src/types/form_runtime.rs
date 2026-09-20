@@ -42,6 +42,49 @@ pub fn handle_form_click(
         }
         None
     }
+    fn find_label_control_id(root: &WebCore, label_id: u32) -> Option<u32> {
+        fn find_by_html_id(node: &WebCore, id: &str) -> Option<u32> {
+            if node.attributes.get("id").is_some_and(|value| value == id) && is_labelable(node) {
+                return Some(node.node_id);
+            }
+            for child in &node.children {
+                if let Some(found) = find_by_html_id(child, id) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        fn first_labelable_descendant(node: &WebCore) -> Option<u32> {
+            for child in &node.children {
+                if is_labelable(child) {
+                    return Some(child.node_id);
+                }
+                if let Some(found) = first_labelable_descendant(child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let label = find_ref(root, label_id)?;
+        if label.tag != "label" {
+            return None;
+        }
+        if let Some(for_id) = label.attributes.get("for") {
+            if let Some(control) = find_by_html_id(root, for_id) {
+                return Some(control);
+            }
+        }
+        first_labelable_descendant(label)
+    }
+    fn is_labelable(node: &WebCore) -> bool {
+        matches!(
+            node.tag.as_str(),
+            "button" | "input" | "meter" | "output" | "progress" | "select" | "textarea"
+        ) && node
+            .attributes
+            .get("type")
+            .is_none_or(|ty| !ty.eq_ignore_ascii_case("hidden"))
+    }
 
     // If the target is a #text node, find the parent form element instead.
     // This handles clicks on text inside <select>, <button>, etc.
@@ -79,7 +122,7 @@ pub fn handle_form_click(
         let input_type = target_node
             .attributes
             .get("type")
-            .cloned()
+            .map(|ty| ty.trim().to_ascii_lowercase())
             .unwrap_or_default();
         let name = target_node
             .attributes
@@ -100,6 +143,13 @@ pub fn handle_form_click(
     };
 
     match tag.as_str() {
+        "label" => {
+            let control_id = find_label_control_id(root, target)?;
+            if control_id == target {
+                return None;
+            }
+            handle_form_click(root, control_id, callback)
+        }
         "input" => {
             match input_type.as_str() {
                 "checkbox" => {

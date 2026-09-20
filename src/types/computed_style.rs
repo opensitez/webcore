@@ -358,6 +358,8 @@ pub struct ComputedStyle {
     pub marker_style: Option<Box<ComputedStyle>>,
     /// Style for ::backdrop (modal/top-layer backdrop paint).
     pub backdrop_style: Option<Box<ComputedStyle>>,
+    /// Style for the native button part of `<input type=file>`.
+    pub file_selector_button_style: Option<Box<ComputedStyle>>,
 
     // Caret and scrollbar theming
     pub caret_color: Option<Color>,
