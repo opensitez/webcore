@@ -186,6 +186,10 @@ impl Document {
             "placeholder" => (node.style.placeholder_style.as_deref(), &empty_content),
             "selection" => (node.style.selection_style.as_deref(), &empty_content),
             "backdrop" => (node.style.backdrop_style.as_deref(), &empty_content),
+            "file-selector-button" => (
+                node.style.file_selector_button_style.as_deref(),
+                &empty_content,
+            ),
             _ => (None, &empty_content),
         };
         let Some(style) = style else {
@@ -1305,7 +1309,8 @@ fn serialize_list_style_type(v: crate::types::ListStyleType) -> String {
         L::HiraganaIroha => "hiragana-iroha",
         L::KatakanaIroha => "katakana-iroha",
         L::CjkDecimal => "cjk-decimal",
-        L::Disclosure => "disclosure-open",
+        L::DisclosureOpen => "disclosure-open",
+        L::DisclosureClosed => "disclosure-closed",
     }
     .to_string()
 }

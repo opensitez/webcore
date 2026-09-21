@@ -55,12 +55,12 @@ figure { display: block; margin-top: 1em; margin-bottom: 1em; margin-left: 40px;
 figcaption { display: block; }
 details { display: block; }
 summary { display: list-item; list-style-type: disclosure-closed; }
-/* A closed `<details>` shows only its summary (HTML §4.11.1). Said in CSS so
-   it holds after ANY cascade — `apply_details_summary_post_cascade` runs at
-   parse time only, so toggling `open` at runtime was undone by the next
-   restyle. Phrased as "hide when closed" rather than "show when open" on
-   purpose: a revealed child keeps its own `display`, and a rule that forced
-   `block` would turn a revealed `<span>` into one. */
+details[open] > summary { list-style-type: disclosure-open; }
+/* A closed `<details>` shows only its summary (HTML §4.11.1). Keep that in the
+   UA sheet so the rule participates in normal cascade/runtime restyle. Phrased
+   as "hide when closed" rather than "show when open" on purpose: a revealed
+   child keeps its own `display`, and a rule that forced `block` would turn a
+   revealed `<span>` into one. */
 details:not([open]) > *:not(summary) { display: none; }
 /* HTML §15.3.3 — `<dialog>`.
    A dialog is a block that is HIDDEN until it is open, and it is the UA sheet

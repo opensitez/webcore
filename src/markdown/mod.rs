@@ -154,6 +154,7 @@ fn append_run(block: &mut WebCore, text: &str, style: ComputedStyle) {
         text_offset: offset,
         length: text.len(),
         style,
+        path: Vec::new(),
     });
 }
 
@@ -387,6 +388,8 @@ impl<'a> InlineParser<'a> {
                                     );
                                 }
                                 img.image_data = Some(std::sync::Arc::new(data));
+                                img.image_data_width = w;
+                                img.image_data_height = h;
                                 img.image_width = w;
                                 img.image_height = h;
                             }

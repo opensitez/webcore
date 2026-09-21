@@ -309,32 +309,10 @@ impl Stylesheet {
         // Detect if any rule has :hover on a non-subject part (descendant hover selectors).
         // e.g., ".parent:hover .child" — :hover is on .parent (ancestor), not .child (subject).
         // Can any selector distinguish two siblings that share `(tag, class)`?
-        self.has_sibling_sensitive_rules = self.rules.iter().any(|rule| {
-            rule.selectors.iter().any(|sel| {
-                sel.parts.iter().any(|part| match part {
-                    SelectorPart::Combinator(c) => {
-                        matches!(c, Combinator::AdjacentSibling | Combinator::GeneralSibling)
-                    }
-                    SelectorPart::PseudoClass(pc) => {
-                        let name = pc.split('(').next().unwrap_or(pc);
-                        matches!(
-                            name,
-                            "first-child"
-                                | "last-child"
-                                | "only-child"
-                                | "first-of-type"
-                                | "last-of-type"
-                                | "only-of-type"
-                                | "nth-child"
-                                | "nth-last-child"
-                                | "nth-of-type"
-                                | "nth-last-of-type"
-                        )
-                    }
-                    _ => false,
-                })
-            })
-        });
+        self.has_sibling_sensitive_rules = self
+            .rules
+            .iter()
+            .any(|rule| rule.selectors.iter().any(selector_is_sibling_sensitive));
 
         self.has_hover_descendant_rules = false;
         'rules: for rule in &self.rules {
@@ -428,6 +406,47 @@ impl Stylesheet {
             }
         }
     }
+
+    pub(crate) fn candidate_rules_are_sibling_sensitive(&self, candidates: &[usize]) -> bool {
+        candidates.iter().copied().any(|rule_idx| {
+            self.rules
+                .get(rule_idx)
+                .is_some_and(|rule| rule.selectors.iter().any(selector_is_sibling_sensitive))
+        })
+    }
+
+    pub(crate) fn candidate_rules_need_selector_context(&self, candidates: &[usize]) -> bool {
+        candidates.iter().copied().any(|rule_idx| {
+            self.rules
+                .get(rule_idx)
+                .is_some_and(|rule| rule.selectors.iter().any(|selector| !selector.is_simple))
+        })
+    }
+}
+
+fn selector_is_sibling_sensitive(sel: &CssSelector) -> bool {
+    sel.parts.iter().any(|part| match part {
+        SelectorPart::Combinator(c) => {
+            matches!(c, Combinator::AdjacentSibling | Combinator::GeneralSibling)
+        }
+        SelectorPart::PseudoClass(pc) => {
+            let name = pc.split('(').next().unwrap_or(pc);
+            matches!(
+                name,
+                "first-child"
+                    | "last-child"
+                    | "only-child"
+                    | "first-of-type"
+                    | "last-of-type"
+                    | "only-of-type"
+                    | "nth-child"
+                    | "nth-last-child"
+                    | "nth-of-type"
+                    | "nth-last-of-type"
+            )
+        }
+        _ => false,
+    })
 }
 
 /// Key extracted from the rightmost simple selector of a rule.

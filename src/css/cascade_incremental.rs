@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 /// and `has_dirty_descendant` on their ancestors (the hover chain path).
 pub fn mark_hover_dirty(
     root: &mut crate::types::WebCore,
+    stylesheet: &Stylesheet,
     old_chain: &std::collections::HashSet<u32>,
     new_chain: &std::collections::HashSet<u32>,
     has_hover_descendant_rules: bool,
@@ -26,10 +27,16 @@ pub fn mark_hover_dirty(
 
     fn walk(
         node: &mut crate::types::WebCore,
+        stylesheet: &Stylesheet,
         toggled: &std::collections::HashSet<u32>,
         path: &std::collections::HashSet<u32>,
         has_hover_desc: bool,
         sensitive: &std::collections::HashSet<u32>,
+        ancestors: &mut Vec<AncestorInfo>,
+        child_index: usize,
+        sibling_count: usize,
+        type_child_index: usize,
+        type_sibling_count: usize,
     ) -> bool {
         let mut any_dirty = false;
         // Only mark cascade_dirty if this node is hover-sensitive — it has
@@ -40,8 +47,19 @@ pub fn mark_hover_dirty(
         // in the sensitive set, so its toggle was skipped and the panel inside
         // it never re-cascaded. The set is an optimisation; it cannot be
         // trusted once a hover somewhere can restyle a subtree.
+        let descendant_hover_anchor = has_hover_desc
+            && toggled.contains(&node.node_id)
+            && hover_descendant_anchor_matches(
+                node,
+                stylesheet,
+                ancestors,
+                child_index,
+                sibling_count,
+                type_child_index,
+                type_sibling_count,
+            );
         let considered =
-            has_hover_desc || sensitive.is_empty() || sensitive.contains(&node.node_id);
+            descendant_hover_anchor || sensitive.is_empty() || sensitive.contains(&node.node_id);
         if toggled.contains(&node.node_id) && considered {
             node.cascade_dirty = true;
             // ⛔ Geometry too, not only style. A hover rule routinely changes
@@ -52,7 +70,7 @@ pub fn mark_hover_dirty(
             // box anyway; one that animates `max-height` stayed shut.
             node.layout.layout_dirty = true;
             any_dirty = true;
-            if has_hover_desc {
+            if descendant_hover_anchor {
                 mark_children_cascade_dirty(node);
             }
         }
@@ -60,22 +78,135 @@ pub fn mark_hover_dirty(
             node.has_dirty_descendant = true;
             any_dirty = true;
         }
-        for child in &mut node.children {
-            if walk(child, toggled, path, has_hover_desc, sensitive) {
+        let anc = AncestorInfo {
+            tag: node.tag.clone(),
+            attributes: node.attributes.clone(),
+            child_index,
+            sibling_count,
+            type_child_index,
+            type_sibling_count,
+            node_id: node.node_id,
+        };
+        ancestors.push(anc);
+
+        let child_count = node.children.len();
+        for i in 0..child_count {
+            let child_tag = node.children[i].tag.clone();
+            let mut t_idx = 0usize;
+            let mut t_count = 0usize;
+            for (j, sib) in node.children.iter().enumerate() {
+                if sib.tag == child_tag {
+                    if j == i {
+                        t_idx = t_count;
+                    }
+                    t_count += 1;
+                }
+            }
+            let child = &mut node.children[i];
+            if walk(
+                child,
+                stylesheet,
+                toggled,
+                path,
+                has_hover_desc,
+                sensitive,
+                ancestors,
+                i,
+                child_count,
+                t_idx,
+                t_count,
+            ) {
                 node.has_dirty_descendant = true;
                 any_dirty = true;
             }
         }
+        ancestors.pop();
         any_dirty
     }
 
+    let mut ancestors = Vec::new();
     walk(
         root,
+        stylesheet,
         &toggled,
         &path,
         has_hover_descendant_rules,
         hover_sensitive,
+        &mut ancestors,
+        0,
+        1,
+        0,
+        1,
     );
+}
+
+fn hover_descendant_anchor_matches(
+    node: &crate::types::WebCore,
+    stylesheet: &Stylesheet,
+    ancestors: &[AncestorInfo],
+    child_index: usize,
+    sibling_count: usize,
+    type_child_index: usize,
+    type_sibling_count: usize,
+) -> bool {
+    let empty_hover = std::collections::HashSet::new();
+    let ctx = MatchContext {
+        focused_box: 0,
+        keyboard_focus: false,
+        type_child_index,
+        type_sibling_count,
+        html_box: Some(node),
+        hover_chain: &empty_hover,
+        element_id: node.node_id,
+        scope_root_id: 0,
+        target_id: 0,
+        document_url: "",
+        prev_siblings: &[],
+        next_siblings: &[],
+        next_sibling_nodes: &[],
+    };
+
+    for rule in &stylesheet.rules {
+        if !rule.is_hover || !matches!(rule.pseudo_element, PseudoElement::None) {
+            continue;
+        }
+        for sel in &rule.selectors {
+            let Some(pos) = sel
+                .parts
+                .iter()
+                .rposition(|p| matches!(p, SelectorPart::Combinator(_)))
+            else {
+                continue;
+            };
+            let prefix = &sel.parts[..pos];
+            if !prefix
+                .iter()
+                .any(|p| matches!(p, SelectorPart::PseudoClass(pc) if pc == "hover"))
+            {
+                continue;
+            }
+            let stripped: Vec<SelectorPart> = prefix
+                .iter()
+                .filter(|p| !matches!(p, SelectorPart::PseudoClass(pc) if pc == "hover"))
+                .cloned()
+                .collect();
+            if stripped.is_empty() {
+                return true;
+            }
+            if matches_selector_with_ancestors(
+                &stripped,
+                &node.tag,
+                &node.attributes,
+                child_index,
+                sibling_count,
+                ancestors,
+                &ctx,
+            ) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn mark_children_cascade_dirty(node: &mut crate::types::WebCore) {
@@ -170,6 +301,7 @@ fn apply_cascade_incremental_walk(
     counters: &mut HashMap<String, Vec<i32>>,
     hover_chain: &std::collections::HashSet<u32>,
 ) {
+    const CSS_INITIAL_ROOT_FONT_PX: f32 = 16.0;
     // SKIP: neither this node nor any descendant needs work
     if !node.cascade_dirty && !node.has_dirty_descendant {
         return;
@@ -180,11 +312,16 @@ fn apply_cascade_incremental_walk(
         // apply_cascade_inner handles this node AND recurses into all children,
         // which is correct because when a parent's hover state changes,
         // children may inherit different values or match descendant selectors differently.
+        let cascade_root_font_px = if node.tag.eq_ignore_ascii_case("html") {
+            CSS_INITIAL_ROOT_FONT_PX
+        } else {
+            root_font_px
+        };
         apply_cascade_inner(
             node,
             stylesheet,
             parent_style,
-            root_font_px,
+            cascade_root_font_px,
             ancestors,
             child_index,
             sibling_count,

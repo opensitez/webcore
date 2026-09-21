@@ -50,11 +50,11 @@ struct CascadeWorkItem<'a> {
     sibling_count: usize,
     type_child_index: usize,
     type_sibling_count: usize,
-    /// The parent's element children as `(tag, id, class)`, in order, shared by
-    /// every sibling — one list per parent rather than a private copy each.
+    /// The parent's element children, in order, shared by every sibling — one
+    /// list per parent rather than a private copy each.
     /// `sibling_pos` is where this element sits in it, so the slice before that
     /// is what `+` and `~` look at.
-    siblings: std::sync::Arc<Vec<(String, String, String)>>,
+    siblings: std::sync::Arc<Vec<SiblingInfo>>,
     sibling_pos: usize,
     sibling_nodes: std::sync::Arc<Vec<MatchNode<'a>>>,
     raw_child_index: usize,
@@ -69,7 +69,7 @@ fn flatten_tree_for_cascade<'a>(
     sibling_count: usize,
     type_child_index: usize,
     type_sibling_count: usize,
-    siblings: &std::sync::Arc<Vec<(String, String, String)>>,
+    siblings: &std::sync::Arc<Vec<SiblingInfo>>,
     sibling_pos: usize,
     sibling_nodes: &std::sync::Arc<Vec<MatchNode<'a>>>,
     raw_child_index: usize,
@@ -151,13 +151,7 @@ fn flatten_tree_for_cascade<'a>(
             node.children
                 .iter()
                 .filter(|c| c.is_element())
-                .map(|c| {
-                    (
-                        c.tag.clone(),
-                        c.attributes.get("id").cloned().unwrap_or_default(),
-                        c.attributes.get("class").cloned().unwrap_or_default(),
-                    )
-                })
+                .map(SiblingInfo::from_node)
                 .collect::<Vec<_>>(),
         );
         let child_nodes =

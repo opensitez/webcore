@@ -50,6 +50,8 @@ impl Document {
             node.image_width = 300;
             node.image_height = 150;
         }
+        node.image_data_width = node.image_width;
+        node.image_data_height = node.image_height;
         let want = (node.image_width as usize) * (node.image_height as usize) * 4;
         match node.image_data {
             Some(ref data) if data.len() == want => {}
@@ -88,6 +90,8 @@ impl Document {
         };
         let out = self.canvas_surfaces.with_context(id, &mut pixels, w, h, f);
         if let Some(node) = self.find_webcore_mut(id) {
+            node.image_data_width = w;
+            node.image_data_height = h;
             node.image_data = Some(std::sync::Arc::new(pixels));
         }
         out
@@ -110,6 +114,8 @@ impl Document {
         }
         node.image_width = width;
         node.image_height = height;
+        node.image_data_width = width;
+        node.image_data_height = height;
         node.image_data = Some(std::sync::Arc::new(vec![
             0u8;
             (width as usize)

@@ -32,6 +32,10 @@ pub struct Constraints {
     pub forced_width: Option<f32>,
     /// Forced content height (overrides style.height in resolve_box_vp).
     pub forced_height: Option<f32>,
+    /// The caller requires the child to establish an independent formatting
+    /// context. Flex items do this, which means their internal floats contribute
+    /// to the item's auto cross-size instead of escaping and collapsing it.
+    pub force_independent_formatting_context: bool,
 }
 
 impl Constraints {
@@ -52,6 +56,7 @@ impl Constraints {
             root_font_px,
             forced_width: None,
             forced_height: None,
+            force_independent_formatting_context: false,
         }
     }
 
@@ -74,6 +79,7 @@ impl Constraints {
             root_font_px,
             forced_width: None,
             forced_height: None,
+            force_independent_formatting_context: false,
         }
     }
 
@@ -97,6 +103,7 @@ impl Constraints {
             root_font_px,
             forced_width,
             forced_height,
+            force_independent_formatting_context: false,
         }
     }
 }

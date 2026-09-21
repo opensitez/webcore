@@ -11,6 +11,26 @@ pub fn load_background_images(node: &mut WebCore, base_url: &str) {
             crate::html::set_decoded_bg_image_on_node(node, decoded);
         }
     }
+    let layers: Vec<(usize, String)> = node
+        .style
+        .rare()
+        .additional_background_layers
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, layer)| {
+            (!layer.image_url.is_empty()).then(|| (idx, layer.image_url.clone()))
+        })
+        .collect();
+    for (layer_index, url) in layers {
+        let loaded = node
+            .additional_bg_images
+            .get(layer_index)
+            .and_then(|image| image.as_ref())
+            .is_some();
+        if !loaded && let Some(decoded) = crate::html::load_decoded_image_from_src(&url, base_url) {
+            crate::html::set_decoded_bg_image_layer_on_node(node, layer_index, decoded);
+        }
+    }
     if node.mask_image_data.is_none() && !node.style.rare().mask_image_url.is_empty() {
         let url = node.style.rare().mask_image_url.clone();
         if let Some((data, w, h)) = load_image_from_src(&url, base_url) {

@@ -226,18 +226,12 @@ fn query_walk(
 ) -> bool {
     let pos = child_positions(&node.children);
     // `+` and `~` look BACKWARDS, so this accumulates as the walk moves right.
-    let mut prev_siblings: Vec<(String, String, String)> = Vec::new();
-    let sibling_records: Vec<(String, String, String)> = node
+    let mut prev_siblings: Vec<crate::css::SiblingInfo> = Vec::new();
+    let sibling_records: Vec<crate::css::SiblingInfo> = node
         .children
         .iter()
         .filter(|c| c.is_element())
-        .map(|c| {
-            (
-                c.tag.to_ascii_lowercase(),
-                c.attributes.get("id").cloned().unwrap_or_default(),
-                c.attributes.get("class").cloned().unwrap_or_default(),
-            )
-        })
+        .map(crate::css::SiblingInfo::from_node)
         .collect();
 
     let child_refs: Vec<&WebCore> = node.children.iter().collect();
@@ -303,11 +297,7 @@ fn query_walk(
             return true;
         }
 
-        prev_siblings.push((
-            child.tag.to_ascii_lowercase(),
-            child.attributes.get("id").cloned().unwrap_or_default(),
-            child.attributes.get("class").cloned().unwrap_or_default(),
-        ));
+        prev_siblings.push(crate::css::SiblingInfo::from_node(child));
     }
     false
 }

@@ -1210,6 +1210,141 @@ fn resolve_collapsed_borders(
     num_rows: usize,
     num_cols: usize,
 ) {
+    #[derive(Clone, Copy)]
+    struct BorderCandidate {
+        path: Option<(usize, usize)>,
+        width: f32,
+        style: BorderStyle,
+        color: Color,
+    }
+
+    fn cell_border_candidate(
+        node: &WebCore,
+        row_refs: &[RowRef],
+        path: (usize, usize),
+        side: usize,
+    ) -> BorderCandidate {
+        let cell = &row_ref(node, &row_refs[path.0]).children[path.1];
+        let (width, style, color) = match side {
+            0 => (
+                cell.style.border_top_width.resolve(0.0, 0.0, 0.0),
+                cell.style.border_top_style,
+                cell.style.border_top_color,
+            ),
+            1 => (
+                cell.style.border_right_width.resolve(0.0, 0.0, 0.0),
+                cell.style.border_right_style,
+                cell.style.border_right_color,
+            ),
+            2 => (
+                cell.style.border_bottom_width.resolve(0.0, 0.0, 0.0),
+                cell.style.border_bottom_style,
+                cell.style.border_bottom_color,
+            ),
+            _ => (
+                cell.style.border_left_width.resolve(0.0, 0.0, 0.0),
+                cell.style.border_left_style,
+                cell.style.border_left_color,
+            ),
+        };
+        BorderCandidate {
+            path: Some(path),
+            width,
+            style,
+            color,
+        }
+    }
+
+    fn table_border_candidate(node: &WebCore, side: usize) -> BorderCandidate {
+        let (width, style, color) = match side {
+            0 => (
+                node.style.border_top_width.resolve(0.0, 0.0, 0.0),
+                node.style.border_top_style,
+                node.style.border_top_color,
+            ),
+            1 => (
+                node.style.border_right_width.resolve(0.0, 0.0, 0.0),
+                node.style.border_right_style,
+                node.style.border_right_color,
+            ),
+            2 => (
+                node.style.border_bottom_width.resolve(0.0, 0.0, 0.0),
+                node.style.border_bottom_style,
+                node.style.border_bottom_color,
+            ),
+            _ => (
+                node.style.border_left_width.resolve(0.0, 0.0, 0.0),
+                node.style.border_left_style,
+                node.style.border_left_color,
+            ),
+        };
+        BorderCandidate {
+            path: None,
+            width,
+            style,
+            color,
+        }
+    }
+
+    fn winning_border(a: BorderCandidate, b: BorderCandidate) -> BorderCandidate {
+        if border_wins(a.width, a.style, b.width, b.style) {
+            a
+        } else {
+            b
+        }
+    }
+
+    fn cell_rect(node: &WebCore, row_refs: &[RowRef], path: (usize, usize)) -> Rect {
+        row_ref(node, &row_refs[path.0]).children[path.1]
+            .layout
+            .border_rect
+    }
+
+    fn add_segment(
+        node: &mut WebCore,
+        row_refs: &[RowRef],
+        winner: BorderCandidate,
+        rect: Rect,
+        axis: u8,
+    ) {
+        if winner.width <= 0.0 || winner.style == BorderStyle::None {
+            return;
+        }
+        let segment = CollapsedBorderSegment {
+            rect,
+            width: winner.width,
+            color: winner.color,
+            style: winner.style,
+            axis,
+        };
+        if let Some((ri, ci)) = winner.path {
+            row_ref_mut(node, &row_refs[ri]).children[ci]
+                .layout
+                .collapsed_border_segments
+                .push(segment);
+        } else {
+            node.layout.collapsed_border_segments.push(segment);
+        }
+    }
+
+    let mut paths = Vec::<(usize, usize)>::new();
+    for row in grid {
+        for slot in row {
+            if let Some(path) = slot.box_path
+                && !paths.contains(&path)
+            {
+                paths.push(path);
+            }
+        }
+    }
+    node.layout.collapsed_border_segments.clear();
+    for (ri, ci) in &paths {
+        row_ref_mut(node, &row_refs[*ri]).children[*ci]
+            .layout
+            .collapsed_border_segments
+            .clear();
+    }
+
     // Horizontal edges: between row r bottom and row r+1 top
     for r in 0..num_rows.saturating_sub(1) {
         for c in 0..num_cols {
@@ -1221,44 +1356,27 @@ fn resolve_collapsed_borders(
             if top_path == bot_path {
                 continue;
             } // same cell (rowspan)
-            if c > 0
-                && grid[r][c - 1].box_path == top_path
-                && grid[r + 1][c - 1].box_path == bot_path
-            {
+            let top_path = top_path.unwrap();
+            let bot_path = bot_path.unwrap();
+            let top_rect = cell_rect(node, row_refs, top_path);
+            let bot_rect = cell_rect(node, row_refs, bot_path);
+            let x1 = top_rect.x.max(bot_rect.x);
+            let x2 = (top_rect.x + top_rect.w).min(bot_rect.x + bot_rect.w);
+            if x2 <= x1 {
                 continue;
             }
-
-            let (top_w, top_s) = {
-                let (ri, ci) = top_path.unwrap();
-                let cell = &row_ref(node, &row_refs[ri]).children[ci];
-                (
-                    cell.style.border_bottom_width.resolve(0.0, 0.0, 0.0),
-                    cell.style.border_bottom_style,
-                )
-            };
-            let (bot_w, bot_s) = {
-                let (ri, ci) = bot_path.unwrap();
-                let cell = &row_ref(node, &row_refs[ri]).children[ci];
-                (
-                    cell.style.border_top_width.resolve(0.0, 0.0, 0.0),
-                    cell.style.border_top_style,
-                )
-            };
-            if border_wins(top_w, top_s, bot_w, bot_s) {
-                let (ri, ci) = bot_path.unwrap();
-                let row = row_ref_mut(node, &row_refs[ri]);
-                std::sync::Arc::make_mut(&mut row.children[ci].style).border_top_style =
-                    BorderStyle::None;
-                std::sync::Arc::make_mut(&mut row.children[ci].style).border_top_width =
-                    CssLength::Zero;
-            } else {
-                let (ri, ci) = top_path.unwrap();
-                let row = row_ref_mut(node, &row_refs[ri]);
-                std::sync::Arc::make_mut(&mut row.children[ci].style).border_bottom_style =
-                    BorderStyle::None;
-                std::sync::Arc::make_mut(&mut row.children[ci].style).border_bottom_width =
-                    CssLength::Zero;
-            }
+            let winner = winning_border(
+                cell_border_candidate(node, row_refs, top_path, 2),
+                cell_border_candidate(node, row_refs, bot_path, 0),
+            );
+            let y = top_rect.y + top_rect.h - winner.width / 2.0;
+            add_segment(
+                node,
+                row_refs,
+                winner,
+                Rect::new(x1, y, x2 - x1, winner.width),
+                0,
+            );
         }
     }
 
@@ -1273,137 +1391,119 @@ fn resolve_collapsed_borders(
             if left_path == right_path {
                 continue;
             }
-            if r > 0
-                && grid[r - 1][c].box_path == left_path
-                && grid[r - 1][c + 1].box_path == right_path
-            {
+            let left_path = left_path.unwrap();
+            let right_path = right_path.unwrap();
+            let left_rect = cell_rect(node, row_refs, left_path);
+            let right_rect = cell_rect(node, row_refs, right_path);
+            let y1 = left_rect.y.max(right_rect.y);
+            let y2 = (left_rect.y + left_rect.h).min(right_rect.y + right_rect.h);
+            if y2 <= y1 {
                 continue;
             }
-
-            let (l_w, l_s) = {
-                let (ri, ci) = left_path.unwrap();
-                let cell = &row_ref(node, &row_refs[ri]).children[ci];
-                (
-                    cell.style.border_right_width.resolve(0.0, 0.0, 0.0),
-                    cell.style.border_right_style,
-                )
-            };
-            let (r_w, r_s) = {
-                let (ri, ci) = right_path.unwrap();
-                let cell = &row_ref(node, &row_refs[ri]).children[ci];
-                (
-                    cell.style.border_left_width.resolve(0.0, 0.0, 0.0),
-                    cell.style.border_left_style,
-                )
-            };
-            if border_wins(l_w, l_s, r_w, r_s) {
-                let (ri, ci) = right_path.unwrap();
-                let row = row_ref_mut(node, &row_refs[ri]);
-                std::sync::Arc::make_mut(&mut row.children[ci].style).border_left_style =
-                    BorderStyle::None;
-                std::sync::Arc::make_mut(&mut row.children[ci].style).border_left_width =
-                    CssLength::Zero;
-            } else {
-                let (ri, ci) = left_path.unwrap();
-                let row = row_ref_mut(node, &row_refs[ri]);
-                std::sync::Arc::make_mut(&mut row.children[ci].style).border_right_style =
-                    BorderStyle::None;
-                std::sync::Arc::make_mut(&mut row.children[ci].style).border_right_width =
-                    CssLength::Zero;
-            }
+            let winner = winning_border(
+                cell_border_candidate(node, row_refs, left_path, 1),
+                cell_border_candidate(node, row_refs, right_path, 3),
+            );
+            let x = left_rect.x + left_rect.w - winner.width / 2.0;
+            add_segment(
+                node,
+                row_refs,
+                winner,
+                Rect::new(x, y1, winner.width, y2 - y1),
+                1,
+            );
         }
     }
-
-    // Table border vs. outer cells (CSS 2.1 §17.6.2.1)
-    // Snapshot table border values before mutating cells
-    let tbl_top_w = node.style.border_top_width.clone();
-    let tbl_top_s = node.style.border_top_style;
-    let tbl_top_c = node.style.border_top_color;
-    let tbl_bot_w = node.style.border_bottom_width.clone();
-    let tbl_bot_s = node.style.border_bottom_style;
-    let tbl_bot_c = node.style.border_bottom_color;
-    let tbl_left_w = node.style.border_left_width.clone();
-    let tbl_left_s = node.style.border_left_style;
-    let tbl_left_c = node.style.border_left_color;
-    let tbl_right_w = node.style.border_right_width.clone();
-    let tbl_right_s = node.style.border_right_style;
-    let tbl_right_c = node.style.border_right_color;
 
     // Top row
     for c in 0..num_cols {
         if let Some((ri, ci)) = grid[0][c].box_path {
-            let (tw, ts) = (tbl_top_w.resolve(0.0, 0.0, 0.0), tbl_top_s);
-            let (cw, cs) = {
-                let cell = &row_ref(node, &row_refs[ri]).children[ci];
-                (
-                    cell.style.border_top_width.resolve(0.0, 0.0, 0.0),
-                    cell.style.border_top_style,
-                )
-            };
-            if border_wins(tw, ts, cw, cs) {
-                let cell = &mut row_ref_mut(node, &row_refs[ri]).children[ci];
-                std::sync::Arc::make_mut(&mut cell.style).border_top_width = tbl_top_w.clone();
-                std::sync::Arc::make_mut(&mut cell.style).border_top_style = tbl_top_s;
-                std::sync::Arc::make_mut(&mut cell.style).border_top_color = tbl_top_c;
-            }
+            let rect = cell_rect(node, row_refs, (ri, ci));
+            let winner = winning_border(
+                table_border_candidate(node, 0),
+                cell_border_candidate(node, row_refs, (ri, ci), 0),
+            );
+            add_segment(
+                node,
+                row_refs,
+                winner,
+                Rect::new(rect.x, rect.y - winner.width / 2.0, rect.w, winner.width),
+                0,
+            );
         }
     }
     // Bottom row
     for c in 0..num_cols {
         if let Some((ri, ci)) = grid[num_rows - 1][c].box_path {
-            let (tw, ts) = (tbl_bot_w.resolve(0.0, 0.0, 0.0), tbl_bot_s);
-            let (cw, cs) = {
-                let cell = &row_ref(node, &row_refs[ri]).children[ci];
-                (
-                    cell.style.border_bottom_width.resolve(0.0, 0.0, 0.0),
-                    cell.style.border_bottom_style,
-                )
-            };
-            if border_wins(tw, ts, cw, cs) {
-                let cell = &mut row_ref_mut(node, &row_refs[ri]).children[ci];
-                std::sync::Arc::make_mut(&mut cell.style).border_bottom_width = tbl_bot_w.clone();
-                std::sync::Arc::make_mut(&mut cell.style).border_bottom_style = tbl_bot_s;
-                std::sync::Arc::make_mut(&mut cell.style).border_bottom_color = tbl_bot_c;
-            }
+            let rect = cell_rect(node, row_refs, (ri, ci));
+            let winner = winning_border(
+                table_border_candidate(node, 2),
+                cell_border_candidate(node, row_refs, (ri, ci), 2),
+            );
+            add_segment(
+                node,
+                row_refs,
+                winner,
+                Rect::new(
+                    rect.x,
+                    rect.y + rect.h - winner.width / 2.0,
+                    rect.w,
+                    winner.width,
+                ),
+                0,
+            );
         }
     }
     // Left column
     for r in 0..num_rows {
         if let Some((ri, ci)) = grid[r][0].box_path {
-            let (tw, ts) = (tbl_left_w.resolve(0.0, 0.0, 0.0), tbl_left_s);
-            let (cw, cs) = {
-                let cell = &row_ref(node, &row_refs[ri]).children[ci];
-                (
-                    cell.style.border_left_width.resolve(0.0, 0.0, 0.0),
-                    cell.style.border_left_style,
-                )
-            };
-            if border_wins(tw, ts, cw, cs) {
-                let cell = &mut row_ref_mut(node, &row_refs[ri]).children[ci];
-                std::sync::Arc::make_mut(&mut cell.style).border_left_width = tbl_left_w.clone();
-                std::sync::Arc::make_mut(&mut cell.style).border_left_style = tbl_left_s;
-                std::sync::Arc::make_mut(&mut cell.style).border_left_color = tbl_left_c;
-            }
+            let rect = cell_rect(node, row_refs, (ri, ci));
+            let winner = winning_border(
+                table_border_candidate(node, 3),
+                cell_border_candidate(node, row_refs, (ri, ci), 3),
+            );
+            add_segment(
+                node,
+                row_refs,
+                winner,
+                Rect::new(rect.x - winner.width / 2.0, rect.y, winner.width, rect.h),
+                1,
+            );
         }
     }
     // Right column
     for r in 0..num_rows {
         if let Some((ri, ci)) = grid[r][num_cols - 1].box_path {
-            let (tw, ts) = (tbl_right_w.resolve(0.0, 0.0, 0.0), tbl_right_s);
-            let (cw, cs) = {
-                let cell = &row_ref(node, &row_refs[ri]).children[ci];
-                (
-                    cell.style.border_right_width.resolve(0.0, 0.0, 0.0),
-                    cell.style.border_right_style,
-                )
-            };
-            if border_wins(tw, ts, cw, cs) {
-                let cell = &mut row_ref_mut(node, &row_refs[ri]).children[ci];
-                std::sync::Arc::make_mut(&mut cell.style).border_right_width = tbl_right_w.clone();
-                std::sync::Arc::make_mut(&mut cell.style).border_right_style = tbl_right_s;
-                std::sync::Arc::make_mut(&mut cell.style).border_right_color = tbl_right_c;
-            }
+            let rect = cell_rect(node, row_refs, (ri, ci));
+            let winner = winning_border(
+                table_border_candidate(node, 1),
+                cell_border_candidate(node, row_refs, (ri, ci), 1),
+            );
+            add_segment(
+                node,
+                row_refs,
+                winner,
+                Rect::new(
+                    rect.x + rect.w - winner.width / 2.0,
+                    rect.y,
+                    winner.width,
+                    rect.h,
+                ),
+                1,
+            );
         }
+    }
+
+    node.layout.resolved_border_top = 0.0;
+    node.layout.resolved_border_right = 0.0;
+    node.layout.resolved_border_bottom = 0.0;
+    node.layout.resolved_border_left = 0.0;
+    for (ri, ci) in paths {
+        let cell = &mut row_ref_mut(node, &row_refs[ri]).children[ci];
+        cell.layout.resolved_border_top = 0.0;
+        cell.layout.resolved_border_right = 0.0;
+        cell.layout.resolved_border_bottom = 0.0;
+        cell.layout.resolved_border_left = 0.0;
     }
 }
 

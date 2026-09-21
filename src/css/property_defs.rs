@@ -3776,9 +3776,16 @@ fn apply_overflow_y(s: &mut ComputedStyle, v: &str) {
     s.overflow_y = super::parse_overflow(v);
 }
 fn apply_overflow(s: &mut ComputedStyle, v: &str) {
-    let ov = super::parse_overflow(v);
-    s.overflow_x = ov;
-    s.overflow_y = ov;
+    let mut parts = v.split_whitespace();
+    let first = parts.next().unwrap_or("");
+    let second = parts.next();
+    if parts.next().is_some() {
+        return;
+    }
+    let ov_x = super::parse_overflow(first);
+    let ov_y = second.map(super::parse_overflow).unwrap_or(ov_x);
+    s.overflow_x = ov_x;
+    s.overflow_y = ov_y;
 }
 
 fn copy_display(d: &mut ComputedStyle, s: &ComputedStyle) {
@@ -4673,6 +4680,8 @@ fn apply_list_style_type(s: &mut ComputedStyle, v: &str) {
         "hiragana-iroha" => ListStyleType::HiraganaIroha,
         "katakana-iroha" => ListStyleType::KatakanaIroha,
         "cjk-decimal" => ListStyleType::CjkDecimal,
+        "disclosure-open" => ListStyleType::DisclosureOpen,
+        "disclosure-closed" => ListStyleType::DisclosureClosed,
         _ => {
             if is_custom_ident(v) {
                 s.custom_list_style_type = v.to_string();
@@ -5755,77 +5764,168 @@ fn image_set_candidate_type_is_supported(candidate: &str) -> bool {
         .trim()
         .trim_matches('"')
         .trim_matches('\'')
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
         .to_ascii_lowercase();
     matches!(
         mime.as_str(),
-        "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/bmp" | "image/svg+xml"
+        "image/png"
+            | "image/jpeg"
+            | "image/jpg"
+            | "image/gif"
+            | "image/webp"
+            | "image/bmp"
+            | "image/svg+xml"
     )
 }
-fn apply_background_size(s: &mut ComputedStyle, v: &str) {
+fn parse_background_size_layer(v: &str) -> (BackgroundSize, CssLength, CssLength) {
     let tokens = background_size_tokens(v);
     match tokens.first().map(|tok| tok.to_ascii_lowercase()) {
         Some(keyword) if keyword == "cover" => {
-            s.background_size = BackgroundSize::Cover;
-            s.background_size_w = CssLength::Auto;
-            s.background_size_h = CssLength::Auto;
+            (BackgroundSize::Cover, CssLength::Auto, CssLength::Auto)
         }
         Some(keyword) if keyword == "contain" => {
-            s.background_size = BackgroundSize::Contain;
-            s.background_size_w = CssLength::Auto;
-            s.background_size_h = CssLength::Auto;
+            (BackgroundSize::Contain, CssLength::Auto, CssLength::Auto)
         }
         Some(keyword) if keyword == "auto" && tokens.len() == 1 => {
-            s.background_size = BackgroundSize::Auto;
-            s.background_size_w = CssLength::Auto;
-            s.background_size_h = CssLength::Auto;
+            (BackgroundSize::Auto, CssLength::Auto, CssLength::Auto)
         }
         _ => {
-            s.background_size = BackgroundSize::Explicit;
-            s.background_size_w = parse_length(tokens.first().copied().unwrap_or("auto"));
-            s.background_size_h = tokens
+            let w = parse_length(tokens.first().copied().unwrap_or("auto"));
+            let h = tokens
                 .get(1)
                 .map(|tok| parse_length(tok))
                 .unwrap_or(CssLength::Auto);
+            (BackgroundSize::Explicit, w, h)
         }
     }
 }
-fn apply_background_position(s: &mut ComputedStyle, v: &str) {
+
+fn apply_background_size(s: &mut ComputedStyle, v: &str) {
+    let layers = crate::css::value_parse::split_top_level_commas(v);
+    let layer_values: Vec<&str> = if layers.is_empty() {
+        vec![v]
+    } else {
+        layers.iter().copied().collect()
+    };
+    let (size, size_w, size_h) = parse_background_size_layer(layer_values[0].trim());
+    s.background_size = size;
+    s.background_size_w = size_w;
+    s.background_size_h = size_h;
+    let fallback = layer_values.last().copied().unwrap_or(v).trim();
+    for (idx, layer) in s
+        .rare_mut()
+        .additional_background_layers
+        .iter_mut()
+        .enumerate()
+    {
+        let value = layer_values
+            .get(idx + 1)
+            .copied()
+            .unwrap_or(fallback)
+            .trim();
+        let (size, size_w, size_h) = parse_background_size_layer(value);
+        layer.size = size;
+        layer.size_w = size_w;
+        layer.size_h = size_h;
+    }
+}
+
+fn parse_background_position_pair(v: &str) -> (CssLength, CssLength) {
     let parts: Vec<&str> = v.split_whitespace().collect();
     let x_str = parts.first().copied().unwrap_or("0%");
-    s.background_position_x = match x_str.to_ascii_lowercase().as_str() {
+    let x = match x_str.to_ascii_lowercase().as_str() {
         "left" => CssLength::Percent(0.0),
         "center" => CssLength::Percent(50.0),
         "right" => CssLength::Percent(100.0),
         _ => parse_length(x_str),
     };
     let y_str = parts.get(1).copied().unwrap_or("center");
-    s.background_position_y = match y_str.to_ascii_lowercase().as_str() {
+    let y = match y_str.to_ascii_lowercase().as_str() {
         "top" => CssLength::Percent(0.0),
         "center" => CssLength::Percent(50.0),
         "bottom" => CssLength::Percent(100.0),
         _ => parse_length(y_str),
     };
+    (x, y)
+}
+
+fn apply_background_position(s: &mut ComputedStyle, v: &str) {
+    let layers = crate::css::value_parse::split_top_level_commas(v);
+    let layer_values: Vec<&str> = if layers.is_empty() {
+        vec![v]
+    } else {
+        layers.iter().copied().collect()
+    };
+    let (x, y) = parse_background_position_pair(layer_values[0].trim());
+    s.background_position_x = x;
+    s.background_position_y = y;
+    let fallback = layer_values.last().copied().unwrap_or(v).trim();
+    for (idx, layer) in s
+        .rare_mut()
+        .additional_background_layers
+        .iter_mut()
+        .enumerate()
+    {
+        let value = layer_values
+            .get(idx + 1)
+            .copied()
+            .unwrap_or(fallback)
+            .trim();
+        let (x, y) = parse_background_position_pair(value);
+        layer.position_x = x;
+        layer.position_y = y;
+    }
 }
 fn apply_background_position_x(s: &mut ComputedStyle, v: &str) {
-    s.background_position_x = match v.trim().to_ascii_lowercase().as_str() {
+    let x = match v.trim().to_ascii_lowercase().as_str() {
         "left" => CssLength::Percent(0.0),
         "center" => CssLength::Percent(50.0),
         "right" => CssLength::Percent(100.0),
         other => parse_length(other),
     };
+    s.background_position_x = x.clone();
+    for layer in &mut s.rare_mut().additional_background_layers {
+        layer.position_x = x.clone();
+    }
 }
 fn apply_background_position_y(s: &mut ComputedStyle, v: &str) {
-    s.background_position_y = match v.trim().to_ascii_lowercase().as_str() {
+    let y = match v.trim().to_ascii_lowercase().as_str() {
         "top" => CssLength::Percent(0.0),
         "center" => CssLength::Percent(50.0),
         "bottom" => CssLength::Percent(100.0),
         other => parse_length(other),
     };
+    s.background_position_y = y.clone();
+    for layer in &mut s.rare_mut().additional_background_layers {
+        layer.position_y = y.clone();
+    }
 }
 fn apply_background_repeat(s: &mut ComputedStyle, v: &str) {
-    let normalized = v.to_ascii_lowercase();
-    let tokens: Vec<&str> = normalized.split_whitespace().collect();
-    apply_background_repeat_tokens(s, &tokens);
+    let layers = crate::css::value_parse::split_top_level_commas(v);
+    let layer_values: Vec<&str> = if layers.is_empty() {
+        vec![v]
+    } else {
+        layers.iter().copied().collect()
+    };
+    s.background_repeat =
+        parse_background_repeat_value(layer_values[0].trim(), s.background_repeat);
+    let fallback = layer_values.last().copied().unwrap_or(v).trim();
+    for (idx, layer) in s
+        .rare_mut()
+        .additional_background_layers
+        .iter_mut()
+        .enumerate()
+    {
+        let value = layer_values
+            .get(idx + 1)
+            .copied()
+            .unwrap_or(fallback)
+            .trim();
+        layer.repeat = parse_background_repeat_value(value, layer.repeat);
+    }
 }
 
 fn is_background_repeat_token(token: &str) -> bool {
@@ -5845,13 +5945,15 @@ fn background_repeat_axis(token: &str) -> Option<BackgroundRepeatAxis> {
     }
 }
 
-fn apply_background_repeat_tokens(s: &mut ComputedStyle, tokens: &[&str]) {
+fn parse_background_repeat_value(value: &str, current: BackgroundRepeat) -> BackgroundRepeat {
+    let normalized = value.to_ascii_lowercase();
+    let tokens: Vec<&str> = normalized.split_whitespace().collect();
     let Some(first) = tokens.first().copied() else {
-        return;
+        return current;
     };
     let first_lower = first.to_ascii_lowercase();
     let second_lower = tokens.get(1).map(|tok| tok.to_ascii_lowercase());
-    s.background_repeat = match (first_lower.as_str(), second_lower.as_deref()) {
+    match (first_lower.as_str(), second_lower.as_deref()) {
         ("repeat-x", _) => BackgroundRepeat::RepeatX,
         ("repeat-y", _) => BackgroundRepeat::RepeatY,
         (_, Some(second)) => match (
@@ -5859,14 +5961,23 @@ fn apply_background_repeat_tokens(s: &mut ComputedStyle, tokens: &[&str]) {
             background_repeat_axis(second),
         ) {
             (Some(x), Some(y)) => BackgroundRepeat::TwoValue(x, y),
-            _ => s.background_repeat,
+            _ => current,
         },
         ("repeat", None) => BackgroundRepeat::Repeat,
         ("no-repeat", None) => BackgroundRepeat::NoRepeat,
         ("space", None) => BackgroundRepeat::Space,
         ("round", None) => BackgroundRepeat::Round,
-        _ => s.background_repeat,
-    };
+        _ => current,
+    }
+}
+
+fn apply_background_repeat_tokens(s: &mut ComputedStyle, tokens: &[&str]) {
+    let value = tokens.join(" ");
+    s.background_repeat = parse_background_repeat_value(&value, s.background_repeat);
+    let repeat = s.background_repeat;
+    for layer in &mut s.rare_mut().additional_background_layers {
+        layer.repeat = repeat;
+    }
 }
 fn apply_background_clip(s: &mut ComputedStyle, v: &str) {
     s.background_clip = match v.to_ascii_lowercase().as_str() {
@@ -5927,6 +6038,7 @@ fn copy_background_image(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.gradient_radial_position_x = s.gradient_radial_position_x.clone();
     d.gradient_radial_position_y = s.gradient_radial_position_y.clone();
     d.rare_mut().gradient_stops = s.rare().gradient_stops.clone();
+    d.rare_mut().additional_background_layers = s.rare().additional_background_layers.clone();
 }
 fn copy_background_size(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.background_size = s.background_size;

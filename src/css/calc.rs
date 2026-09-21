@@ -32,7 +32,12 @@ pub(crate) fn parse_calc(expr: &str) -> CssLength {
         let l = expr.to_ascii_lowercase();
         l.contains("vmin") || l.contains("vmax")
     };
-    if has_vmin_vmax || expr.contains("min(") || expr.contains("max(") || expr.contains("clamp(") {
+    if has_vmin_vmax
+        || expr.contains("env(")
+        || expr.contains("min(")
+        || expr.contains("max(")
+        || expr.contains("clamp(")
+    {
         let node = parse_calc_tree(expr);
         return CssLength::CalcExpr(Box::new(node));
     }

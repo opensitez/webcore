@@ -93,6 +93,35 @@ pub struct AncestorInfo {
     pub node_id: u32,              // stable node id for hover chain check
 }
 
+/// Previous/following element sibling state used by sibling combinators.
+///
+/// Selectors such as `input:checked ~ .menu` need the sibling's live form state,
+/// not only its tag/class/id attributes. Keeping this as a compact record avoids
+/// handing full DOM nodes through every combinator path while preserving the
+/// state pseudo-classes that are answerable from a sibling row.
+#[derive(Clone, Debug, Default)]
+pub struct SiblingInfo {
+    pub tag: String,
+    pub id: String,
+    pub class_attr: String,
+    pub node_id: u32,
+    pub checkedness: bool,
+    pub selectedness: bool,
+}
+
+impl SiblingInfo {
+    pub fn from_node(node: &crate::types::WebCore) -> Self {
+        Self {
+            tag: node.tag.clone(),
+            id: node.attributes.get("id").cloned().unwrap_or_default(),
+            class_attr: node.attributes.get("class").cloned().unwrap_or_default(),
+            node_id: node.node_id,
+            checkedness: node.checkedness,
+            selectedness: node.selectedness,
+        }
+    }
+}
+
 /// Extra context passed down through selector matching.
 #[derive(Clone, Copy, Debug)]
 pub struct MatchContext<'a> {
@@ -118,11 +147,10 @@ pub struct MatchContext<'a> {
     /// Document URL used by URL-state selectors such as `:local-link`.
     pub document_url: &'a str,
     /// Previous non-text sibling info for `+` and `~` combinators.
-    /// Each entry: (tag, id, classes) of preceding element siblings.
-    pub prev_siblings: &'a [(String, String, String)],
+    pub prev_siblings: &'a [SiblingInfo],
     /// Following non-text sibling info for right-to-left selectors such as
     /// `:nth-last-child(An+B of S)`.
-    pub next_siblings: &'a [(String, String, String)],
+    pub next_siblings: &'a [SiblingInfo],
     /// Following sibling DOM element nodes for forward-looking relative selectors
     /// such as `:has(+ S)` and `:has(~ S)`.
     pub next_sibling_nodes: &'a [&'a crate::types::WebCore],
@@ -285,17 +313,23 @@ pub fn matches_selector_with_ancestors(
 /// subject.
 fn matches_sibling(
     left_parts: &[SelectorPart],
-    sib: &(String, String, String),
-    sib_prev: &[(String, String, String)],
+    sib: &SiblingInfo,
+    sib_prev: &[SiblingInfo],
     ancestors: &[AncestorInfo],
     ctx: &MatchContext<'_>,
 ) -> bool {
     let mut attrs = crate::dom::attrs::AttrMap::new();
-    if !sib.1.is_empty() {
-        attrs.insert("id".to_string(), sib.1.clone());
+    if !sib.id.is_empty() {
+        attrs.insert("id".to_string(), sib.id.clone());
     }
-    if !sib.2.is_empty() {
-        attrs.insert("class".to_string(), sib.2.clone());
+    if !sib.class_attr.is_empty() {
+        attrs.insert("class".to_string(), sib.class_attr.clone());
+    }
+    if sib.checkedness {
+        attrs.insert("checked".to_string(), String::new());
+    }
+    if sib.selectedness {
+        attrs.insert("selected".to_string(), String::new());
     }
     let sib_ctx = MatchContext {
         focused_box: ctx.focused_box,
@@ -306,7 +340,7 @@ fn matches_sibling(
         // pseudo-classes must not answer for the sibling from it.
         html_box: None,
         hover_chain: ctx.hover_chain,
-        element_id: 0,
+        element_id: sib.node_id,
         scope_root_id: ctx.scope_root_id,
         target_id: ctx.target_id,
         document_url: ctx.document_url,
@@ -316,7 +350,7 @@ fn matches_sibling(
     };
     matches_selector_with_ancestors(
         left_parts,
-        &sib.0,
+        &sib.tag,
         &attrs,
         sib_prev.len(),
         0,
@@ -668,7 +702,9 @@ pub(crate) fn matches_part_with_context(
                             let index = ctx
                                 .prev_siblings
                                 .iter()
-                                .filter(|(t, i, c)| simple_matches_raw(&sel, t, i, c))
+                                .filter(|sib| {
+                                    simple_matches_raw(&sel, &sib.tag, &sib.id, &sib.class_attr)
+                                })
                                 .count();
                             return nth_matches(&nth, index + 1);
                         }
@@ -689,7 +725,9 @@ pub(crate) fn matches_part_with_context(
                             let after = ctx
                                 .next_siblings
                                 .iter()
-                                .filter(|(t, i, c)| simple_matches_raw(&sel, t, i, c))
+                                .filter(|sib| {
+                                    simple_matches_raw(&sel, &sib.tag, &sib.id, &sib.class_attr)
+                                })
                                 .count();
                             return nth_matches(&nth, after + 1);
                         }

@@ -1085,7 +1085,7 @@ fn strip_pseudo_element(sel: &str) -> (String, PseudoElement) {
         } else if pe_str.starts_with("placeholder") {
             (11, PseudoElement::Placeholder)
         } else if pe_str.starts_with("file-selector-button") {
-            (20, PseudoElement::Ignored)
+            (20, PseudoElement::FileSelectorButton)
         } else if pe_str.starts_with("details-content") {
             (15, PseudoElement::Ignored)
         } else if pe_str.starts_with("spelling-error") {

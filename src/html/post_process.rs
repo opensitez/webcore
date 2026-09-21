@@ -431,10 +431,17 @@ fn apply_resolved_image_source(
     if let Some((w, h)) = intrinsic_hint {
         node.image_width = w;
         node.image_height = h;
+        node.selected_source_width = Some(w);
+        node.selected_source_height = Some(h);
+    } else {
+        node.selected_source_width = None;
+        node.selected_source_height = None;
     }
 
     if changed {
         node.image_data = None;
+        node.image_data_width = 0;
+        node.image_data_height = 0;
         node.animated_image = None;
         node.animated_image_frame = 0;
         if intrinsic_hint.is_none() {
@@ -632,20 +639,6 @@ impl crate::html::parser::HtmlParser {
                     }
                 }
                 _ => {}
-            }
-        }
-        if node.tag == "details" {
-            let is_open = node.attributes.contains_key("open");
-            for child in &mut node.children {
-                if child.tag == "summary" {
-                    // summary always visible
-                } else if !is_open {
-                    apply_property(
-                        std::sync::Arc::make_mut(&mut child.style),
-                        "display",
-                        "none",
-                    );
-                }
             }
         }
     }

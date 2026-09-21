@@ -1578,12 +1578,85 @@ pub fn apply_border_side_shorthand(
 }
 
 pub fn extract_url(v: &str) -> Option<String> {
-    let lower = v.to_lowercase();
-    let start = lower.find("url(")?;
-    let inner = v[start + 4..].trim();
-    let inner = inner.trim_start_matches('"').trim_start_matches('\'');
-    let end = inner.find(|c| c == ')' || c == '"' || c == '\'')?;
-    Some(inner[..end].to_string())
+    let start = find_url_function(v)?;
+    let (url, _) = parse_url_function(&v[start..])?;
+    Some(url)
+}
+
+fn find_url_function(v: &str) -> Option<usize> {
+    let bytes = v.as_bytes();
+    let needle = b"url(";
+    if bytes.len() < needle.len() {
+        return None;
+    }
+    for i in 0..=bytes.len() - needle.len() {
+        if bytes[i..i + needle.len()].eq_ignore_ascii_case(needle) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn parse_url_function(v: &str) -> Option<(String, usize)> {
+    if !v.get(..4)?.eq_ignore_ascii_case("url(") {
+        return None;
+    }
+    let mut pos = 4;
+    pos += leading_ws_len(&v[pos..]);
+    let bytes = v.as_bytes();
+    let mut value = String::new();
+    if matches!(bytes.get(pos), Some(b'"' | b'\'')) {
+        let quote = bytes[pos];
+        pos += 1;
+        while pos < v.len() {
+            let ch = v[pos..].chars().next()?;
+            pos += ch.len_utf8();
+            if ch == '\\' {
+                if pos < v.len() {
+                    let next = v[pos..].chars().next()?;
+                    value.push('\\');
+                    value.push(next);
+                    pos += next.len_utf8();
+                }
+                continue;
+            }
+            if ch as u8 == quote {
+                break;
+            }
+            value.push(ch);
+        }
+        pos += leading_ws_len(&v[pos..]);
+        if !matches!(v.as_bytes().get(pos), Some(b')')) {
+            return None;
+        }
+        pos += 1;
+        return Some((unescape_css_string(&value), pos));
+    }
+
+    while pos < v.len() {
+        let ch = v[pos..].chars().next()?;
+        if ch == ')' {
+            break;
+        }
+        value.push(ch);
+        pos += ch.len_utf8();
+    }
+    if !matches!(v.as_bytes().get(pos), Some(b')')) {
+        return None;
+    }
+    pos += 1;
+    Some((unescape_css_string(value.trim()), pos))
+}
+
+fn leading_ws_len(s: &str) -> usize {
+    let mut len = 0;
+    for ch in s.chars() {
+        if !ch.is_ascii_whitespace() {
+            break;
+        }
+        len += ch.len_utf8();
+    }
+    len
 }
 
 /// Resolve all `url()` references in CSS text relative to the CSS file's URL.
@@ -1602,33 +1675,15 @@ pub fn resolve_css_urls(css: &str, css_base_url: &str) -> String {
 
     let mut result = String::with_capacity(css.len());
     let mut remaining = css;
-    while let Some(url_start) = remaining.to_lowercase().find("url(") {
+    while let Some(url_start) = find_url_function(remaining) {
         // Copy everything before url(
         result.push_str(&remaining[..url_start]);
-        let after_url = &remaining[url_start + 4..];
-        let _inner = after_url.trim_start();
-        // Find the closing )
-        let mut depth = 1;
-        let mut end_idx = 0;
-        for (i, ch) in after_url.char_indices() {
-            if ch == '(' {
-                depth += 1;
-            }
-            if ch == ')' {
-                depth -= 1;
-                if depth == 0 {
-                    end_idx = i;
-                    break;
-                }
-            }
-        }
-        if end_idx == 0 {
+        let url_src = &remaining[url_start..];
+        let Some((url_content, consumed)) = parse_url_function(url_src) else {
             // Malformed — just copy as-is
             result.push_str(&remaining[url_start..]);
             break;
-        }
-        let url_content = after_url[..end_idx].trim();
-        let url_content = url_content.trim_matches('"').trim_matches('\'');
+        };
 
         // Only resolve relative URLs (not absolute, data:, or already-resolved)
         let resolved = if url_content.contains("://")
@@ -1641,7 +1696,7 @@ pub fn resolve_css_urls(css: &str, css_base_url: &str) -> String {
         };
 
         result.push_str(&format!("url('{}')", resolved));
-        remaining = &after_url[end_idx + 1..];
+        remaining = &url_src[consumed..];
     }
     result.push_str(remaining);
     result

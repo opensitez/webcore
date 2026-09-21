@@ -1754,6 +1754,7 @@ fn item_constraints(
         forced_height,
     );
     c.available_height = available_h;
+    c.force_independent_formatting_context = true;
     c
 }
 

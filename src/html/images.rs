@@ -82,6 +82,8 @@ pub fn resolve_url(src: &str, base_url: &str) -> String {
 /// aspect-ratio sizing after the CSS cascade has set any explicit width/height.
 pub fn set_image_on_node(node: &mut WebCore, data: Vec<u8>, w: u32, h: u32) {
     node.image_data = Some(std::sync::Arc::new(data));
+    node.image_data_width = w;
+    node.image_data_height = h;
     node.image_width = w;
     node.image_height = h;
     node.animated_image = None;
@@ -95,6 +97,8 @@ pub fn set_decoded_image_on_node(node: &mut WebCore, decoded: DecodedImage) {
     match decoded {
         DecodedImage::Raster(data, w, h) => {
             node.image_data = Some(data);
+            node.image_data_width = w;
+            node.image_data_height = h;
             node.image_width = w;
             node.image_height = h;
             node.animated_image = None;
@@ -103,8 +107,10 @@ pub fn set_decoded_image_on_node(node: &mut WebCore, decoded: DecodedImage) {
         }
         DecodedImage::Animated(animated) => {
             node.image_data = animated.frames.first().map(|frame| frame.pixels.clone());
-            node.image_width = animated.width;
-            node.image_height = animated.height;
+            node.image_data_width = animated.width;
+            node.image_data_height = animated.height;
+            node.image_width = animated.intrinsic_width;
+            node.image_height = animated.intrinsic_height;
             node.animated_image = Some(animated);
             node.animated_image_frame = 0;
             node.animated_image_last_tick = Some(std::time::Instant::now());
@@ -114,6 +120,8 @@ pub fn set_decoded_image_on_node(node: &mut WebCore, decoded: DecodedImage) {
             node.svg_viewbox_w = iw;
             node.svg_viewbox_h = ih;
             // Set intrinsic dimensions so layout can compute aspect ratio
+            node.image_data_width = 0;
+            node.image_data_height = 0;
             node.image_width = iw.ceil() as u32;
             node.image_height = ih.ceil() as u32;
             node.animated_image = None;
@@ -128,11 +136,37 @@ pub fn set_decoded_bg_image_on_node(node: &mut WebCore, decoded: DecodedImage) -
         DecodedImage::Svg(svg, _, _) => crate::svg::has_ratio_only_from_markup(svg),
         _ => false,
     };
-    if let Some((data, w, h)) = decoded_image_pixels(decoded) {
-        node.bg_image_data = Some(std::sync::Arc::new(data));
+    if let Some((data, w, h)) = decoded_image_pixels_arc(decoded) {
+        node.bg_image_data = Some(data);
         node.bg_image_width = w;
         node.bg_image_height = h;
         node.bg_image_ratio_only = is_ratio_only;
+        true
+    } else {
+        false
+    }
+}
+
+pub fn set_decoded_bg_image_layer_on_node(
+    node: &mut WebCore,
+    layer_index: usize,
+    decoded: DecodedImage,
+) -> bool {
+    let is_ratio_only = match &decoded {
+        DecodedImage::Svg(svg, _, _) => crate::svg::has_ratio_only_from_markup(svg),
+        _ => false,
+    };
+    if let Some((data, width, height)) = decoded_image_pixels_arc(decoded) {
+        if node.additional_bg_images.len() <= layer_index {
+            node.additional_bg_images
+                .resize_with(layer_index + 1, || None);
+        }
+        node.additional_bg_images[layer_index] = Some(crate::types::DecodedBackgroundImage {
+            data,
+            width,
+            height,
+            ratio_only: is_ratio_only,
+        });
         true
     } else {
         false
@@ -157,6 +191,32 @@ pub(crate) fn load_image_from_src(src: &str, base_url: &str) -> Option<(Vec<u8>,
 
     let bytes = std::fs::read(&path).ok()?;
     decode_image_bytes(&bytes)
+}
+
+/// Paint-time image lookup that never performs remote network I/O.
+///
+/// Display-list construction is on the render path. Fetching from there makes
+/// scroll/animation frames block on network and decode work. Remote images are
+/// used only once a resource task has already warmed the decoded cache; data
+/// URLs and local files remain synchronous because their bytes are already local
+/// to the document/runtime.
+pub(crate) fn load_paint_image_from_src(
+    src: &str,
+    base_url: &str,
+) -> Option<(std::sync::Arc<Vec<u8>>, u32, u32)> {
+    if src.starts_with("data:") {
+        let (data, w, h) = load_image_data_url(src)?;
+        return Some((std::sync::Arc::new(data), w, h));
+    }
+
+    let path = resolve_url(src, base_url);
+    if path.starts_with("http://") || path.starts_with("https://") {
+        let decoded = crate::cached_decoded_image_ready(&path)?;
+        return decoded_image_pixels_arc(decoded);
+    }
+
+    let bytes = std::fs::read(&path).ok()?;
+    decoded_image_pixels_arc(decode_image_bytes_ex(&bytes)?)
 }
 
 pub(crate) fn load_decoded_image_from_src(src: &str, base_url: &str) -> Option<DecodedImage> {
@@ -188,7 +248,7 @@ fn load_image_data_url(src: &str) -> Option<(Vec<u8>, u32, u32)> {
     decode_image_bytes(&bytes)
 }
 
-fn image_data_url_bytes(src: &str) -> Option<Vec<u8>> {
+pub(crate) fn image_data_url_bytes(src: &str) -> Option<Vec<u8>> {
     // data:image/png;base64,<data> or data:image/svg+xml,<percent-encoded markup>
     let comma = src.find(',')?;
     let header = &src[5..comma]; // strip "data:"
@@ -243,17 +303,48 @@ pub struct AnimatedImageFrame {
 
 #[derive(Clone, Debug)]
 pub struct AnimatedImage {
+    pub intrinsic_width: u32,
+    pub intrinsic_height: u32,
     pub width: u32,
     pub height: u32,
     pub frames: Vec<AnimatedImageFrame>,
+    pub source_bytes: Option<std::sync::Arc<Vec<u8>>>,
+    pub fully_decoded: bool,
+}
+
+impl AnimatedImage {
+    pub fn can_animate(&self) -> bool {
+        self.frames.len() > 1 || self.source_bytes.is_some()
+    }
 }
 
 pub fn decode_image_bytes_ex(bytes: &[u8]) -> Option<DecodedImage> {
-    if (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"))
-        && let Some(animated) = decode_animated_image(bytes)
-        && animated.frames.len() > 1
+    decode_image_bytes_ex_with_source(bytes, None)
+}
+
+pub fn decode_image_bytes_arc(bytes: std::sync::Arc<Vec<u8>>) -> Option<DecodedImage> {
+    decode_image_bytes_ex_with_source(bytes.as_slice(), Some(bytes.clone()))
+}
+
+fn decode_image_bytes_ex_with_source(
+    bytes: &[u8],
+    source_bytes: Option<std::sync::Arc<Vec<u8>>>,
+) -> Option<DecodedImage> {
+    if (bytes.starts_with(b"GIF87a")
+        || bytes.starts_with(b"GIF89a")
+        || (bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP"))
+        && let Some(animated) = decode_animated_image(bytes, source_bytes.clone())
     {
-        return Some(DecodedImage::Animated(animated));
+        if animated.can_animate() {
+            return Some(DecodedImage::Animated(animated));
+        }
+        if let Some(frame) = animated.frames.first() {
+            return Some(DecodedImage::Raster(
+                frame.pixels.clone(),
+                animated.width,
+                animated.height,
+            ));
+        }
     }
 
     // Try raster formats first (PNG, JPEG, GIF, WebP, BMP)
@@ -266,8 +357,8 @@ pub fn decode_image_bytes_ex(bytes: &[u8]) -> Option<DecodedImage> {
             return Some(DecodedImage::Raster(std::sync::Arc::new(raw), w, h));
         }
     }
-    if let Some(animated) = decode_animated_image(bytes) {
-        if animated.frames.len() > 1 {
+    if let Some(animated) = decode_animated_image(bytes, source_bytes) {
+        if animated.can_animate() {
             return Some(DecodedImage::Animated(animated));
         }
     }
@@ -292,44 +383,62 @@ pub fn decode_image_bytes(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 }
 
 pub fn decoded_image_pixels(decoded: DecodedImage) -> Option<(Vec<u8>, u32, u32)> {
+    decoded_image_pixels_arc(decoded).map(|(data, w, h)| (data.as_ref().clone(), w, h))
+}
+
+pub fn decoded_image_pixels_arc(
+    decoded: DecodedImage,
+) -> Option<(std::sync::Arc<Vec<u8>>, u32, u32)> {
     match decoded {
-        DecodedImage::Raster(data, w, h) => Some((data.as_ref().clone(), w, h)),
-        DecodedImage::Animated(animated) => animated.frames.first().map(|frame| {
-            (
-                frame.pixels.as_ref().clone(),
-                animated.width,
-                animated.height,
-            )
-        }),
-        DecodedImage::Svg(svg, _, _) => crate::svg::rasterize_svg_intrinsic(&svg),
+        DecodedImage::Raster(data, w, h) => Some((data, w, h)),
+        DecodedImage::Animated(animated) => animated
+            .frames
+            .first()
+            .map(|frame| (frame.pixels.clone(), animated.width, animated.height)),
+        DecodedImage::Svg(svg, _, _) => crate::svg::rasterize_svg_intrinsic(&svg)
+            .map(|(data, w, h)| (std::sync::Arc::new(data), w, h)),
     }
 }
 
-fn decode_animated_image(bytes: &[u8]) -> Option<AnimatedImage> {
+fn decode_animated_image(
+    bytes: &[u8],
+    source_bytes: Option<std::sync::Arc<Vec<u8>>>,
+) -> Option<AnimatedImage> {
+    let source_bytes = source_bytes.unwrap_or_else(|| std::sync::Arc::new(bytes.to_vec()));
     if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        return decode_animation_frames(
+        return decode_animation_frames_inner(
             image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?,
+            Some(source_bytes),
+            Some(2),
+            None,
         );
     }
     if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        return decode_animation_frames(
+        return decode_animation_frames_inner(
             image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).ok()?,
+            Some(source_bytes),
+            Some(2),
+            None,
         );
     }
     None
 }
 
-fn decode_animation_frames<'a, D>(decoder: D) -> Option<AnimatedImage>
+fn decode_animation_frames_inner<'a, D>(
+    decoder: D,
+    source_bytes: Option<std::sync::Arc<Vec<u8>>>,
+    max_frames: Option<usize>,
+    target_size: Option<(u32, u32)>,
+) -> Option<AnimatedImage>
 where
     D: image::AnimationDecoder<'a> + image::ImageDecoder,
 {
     let (width, height) = decoder.dimensions();
-    let frames = decoder.into_frames().collect_frames().ok()?;
-    if frames.is_empty() {
-        return None;
-    }
-    let mut out = Vec::with_capacity(frames.len());
-    for frame in frames {
+    let (frame_width, frame_height) = animated_frame_decode_size(width, height, target_size);
+    let limit = max_frames.unwrap_or(usize::MAX);
+    let mut out = Vec::new();
+    for frame in decoder.into_frames().take(limit) {
+        let frame = frame.ok()?;
         let delay_ms = frame.delay().numer_denom_ms();
         let duration_ms = if delay_ms.0 == 0 {
             100
@@ -337,6 +446,16 @@ where
             ((delay_ms.0 as f64 / delay_ms.1.max(1) as f64).round() as u32).max(10)
         };
         let buffer = frame.into_buffer();
+        let buffer = if frame_width != width || frame_height != height {
+            image::imageops::resize(
+                &buffer,
+                frame_width,
+                frame_height,
+                image::imageops::FilterType::Triangle,
+            )
+        } else {
+            buffer
+        };
         let mut raw = buffer.into_raw();
         premultiply_rgba(&mut raw);
         out.push(AnimatedImageFrame {
@@ -344,11 +463,105 @@ where
             duration_ms,
         });
     }
+    if out.is_empty() {
+        return None;
+    }
+    let has_more_frames = max_frames.is_some() && out.len() > 1;
+    if has_more_frames {
+        out.truncate(1);
+    }
+    let fully_decoded = max_frames.is_none() || !has_more_frames;
     Some(AnimatedImage {
-        width,
-        height,
+        intrinsic_width: width,
+        intrinsic_height: height,
+        width: frame_width,
+        height: frame_height,
         frames: out,
+        source_bytes: if has_more_frames { source_bytes } else { None },
+        fully_decoded,
     })
+}
+
+pub(crate) fn expand_animated_image_to_size(
+    animated: &mut AnimatedImage,
+    target_width: u32,
+    target_height: u32,
+) -> bool {
+    if animated.fully_decoded {
+        return false;
+    }
+    let Some(bytes) = animated.source_bytes.clone() else {
+        animated.fully_decoded = true;
+        return false;
+    };
+    let target_size = if target_width > 0 && target_height > 0 {
+        Some((target_width, target_height))
+    } else {
+        None
+    };
+    let decoded = if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes.as_slice()))
+            .ok()
+            .and_then(|decoder| decode_animation_frames_inner(decoder, None, None, target_size))
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes.as_slice()))
+            .ok()
+            .and_then(|decoder| decode_animation_frames_inner(decoder, None, None, target_size))
+    } else {
+        None
+    };
+    let Some(decoded) = decoded else {
+        animated.fully_decoded = true;
+        animated.source_bytes = None;
+        return false;
+    };
+    *animated = decoded;
+    animated.fully_decoded = true;
+    animated.source_bytes = Some(bytes);
+    true
+}
+
+pub(crate) fn collapse_animated_image(animated: &mut AnimatedImage, current_frame: usize) -> bool {
+    if !animated.fully_decoded || animated.source_bytes.is_none() || animated.frames.len() <= 1 {
+        return false;
+    }
+    let frame = animated
+        .frames
+        .get(current_frame.min(animated.frames.len().saturating_sub(1)))
+        .cloned()
+        .or_else(|| animated.frames.first().cloned());
+    let Some(frame) = frame else {
+        return false;
+    };
+    animated.frames.clear();
+    animated.frames.push(frame);
+    animated.fully_decoded = false;
+    true
+}
+
+fn animated_frame_decode_size(
+    width: u32,
+    height: u32,
+    target_size: Option<(u32, u32)>,
+) -> (u32, u32) {
+    const MAX_ANIMATED_FRAME_PIXELS: u32 = 192 * 192;
+    if let Some((target_w, target_h)) = target_size {
+        let target_w = target_w.max(1).min(width.max(1));
+        let target_h = target_h.max(1).min(height.max(1));
+        let target_pixels = target_w.saturating_mul(target_h);
+        if target_pixels <= MAX_ANIMATED_FRAME_PIXELS {
+            return (target_w, target_h);
+        }
+    }
+    let pixels = width.saturating_mul(height);
+    if width == 0 || height == 0 || pixels <= MAX_ANIMATED_FRAME_PIXELS {
+        return (width, height);
+    }
+    let scale = (MAX_ANIMATED_FRAME_PIXELS as f64 / pixels as f64).sqrt();
+    (
+        ((width as f64 * scale).round() as u32).max(1),
+        ((height as f64 * scale).round() as u32).max(1),
+    )
 }
 
 fn premultiply_rgba(raw: &mut [u8]) {

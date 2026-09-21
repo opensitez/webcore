@@ -755,13 +755,6 @@ impl HtmlParser {
                         }
                     }
 
-                    // Summary: always list-item + Disclosure marker
-                    if tag == "summary" {
-                        std::sync::Arc::make_mut(&mut node.style).display = Display::ListItem;
-                        std::sync::Arc::make_mut(&mut node.style).list_style_type =
-                            ListStyleType::Disclosure;
-                    }
-
                     // `<a>` and `<nobr>` close a still-open element of their own
                     // kind (HTML §13.2.6.4.7 runs the adoption agency for them
                     // on the start tag). `<a href=1>1<a href=2>2</a>` is two
@@ -1077,6 +1070,12 @@ impl HtmlParser {
         if tag == "video" {
             if let Some(poster) = node.attributes.get("poster").cloned() {
                 node.resolved_src = resolve_url(&poster, &self.base_url);
+                if poster.trim_start().starts_with("data:")
+                    && let Some(decoded) =
+                        crate::html::load_decoded_image_from_src(&poster, &self.base_url)
+                {
+                    crate::html::set_decoded_image_on_node(&mut node, decoded);
+                }
             }
         }
         // Canvas/video/audio: set default dimensions from width/height attributes
@@ -1104,6 +1103,8 @@ impl HtmlParser {
             if tag == "canvas" {
                 node.image_width = w;
                 node.image_height = h;
+                node.image_data_width = w;
+                node.image_data_height = h;
                 // Transparent pixel buffer — ready for drawing
                 node.image_data = Some(std::sync::Arc::new(vec![0u8; (w * h * 4) as usize]));
             }
@@ -1115,11 +1116,6 @@ impl HtmlParser {
             *ol_counter += 1;
             std::sync::Arc::make_mut(&mut node.style).list_index = *ol_counter;
         }
-        if tag == "summary" {
-            std::sync::Arc::make_mut(&mut node.style).display = Display::ListItem;
-            std::sync::Arc::make_mut(&mut node.style).list_style_type = ListStyleType::Disclosure;
-        }
-
         if !self_closing {
             let mut inner_ol = 0i32;
             self.parse_children_into(&tag, &mut node.children, &mut inner_ol);

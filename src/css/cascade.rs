@@ -358,7 +358,9 @@ pub fn apply_cascade_vp_hover_target_url(
     document_url: &str,
 ) {
     // Use parallel cascade when the stylesheet is large enough to justify the overhead.
-    if stylesheet.rules.len() > 1000 {
+    if stylesheet.rules.len() > 1000
+        && std::env::var_os("WEBCORE_DISABLE_PARALLEL_CASCADE").is_none()
+    {
         apply_cascade_parallel(
             root,
             stylesheet,
@@ -1062,6 +1064,7 @@ pub(crate) struct MatchSets {
     pub placeholder_matched: Vec<(u32, usize, Option<u32>)>,
     pub marker_matched: Vec<(u32, usize, Option<u32>)>,
     pub backdrop_matched: Vec<(u32, usize, Option<u32>)>,
+    pub file_selector_button_matched: Vec<(u32, usize, Option<u32>)>,
 }
 
 /// Precomputed match results, keyed by `node_id`.
@@ -1071,6 +1074,233 @@ pub(crate) struct MatchSets {
 /// walk: every later sibling then reads its neighbour's rules, and the last one
 /// reads none at all. `node_id` is stable across that insertion.
 pub(crate) type MatchMap = HashMap<u32, MatchSets>;
+
+/// Debug-only view of what the cascade matcher sees for one live element.
+///
+/// This deliberately calls the same `match_rules` entry point used by both the
+/// serial and parallel cascades, so browser inspection can distinguish "selector
+/// matching failed" from "the matched declarations were not applied" without
+/// reimplementing selector behavior in the example app.
+#[derive(Clone, Debug, Default)]
+pub struct CssMatchDebugReport {
+    pub node_id: u32,
+    pub tag: String,
+    pub id: String,
+    pub class_attr: String,
+    pub candidate_rule_indices: Vec<usize>,
+    pub matched_rule_indices: Vec<usize>,
+    pub hover_rule_indices: Vec<usize>,
+    pub active_rule_indices: Vec<usize>,
+    pub visited_rule_indices: Vec<usize>,
+    pub before_rule_indices: Vec<usize>,
+    pub after_rule_indices: Vec<usize>,
+}
+
+/// Run the normal cascade matcher against the element with `target_node_id`.
+pub fn debug_match_report_for_node(
+    root: &crate::types::WebCore,
+    stylesheet: &Stylesheet,
+    target_node_id: u32,
+    vw: f32,
+    vh: f32,
+    focused_box: u32,
+    keyboard_focus: bool,
+    hover_chain: &std::collections::HashSet<u32>,
+    fragment_target_id: u32,
+    document_url: &str,
+) -> Option<CssMatchDebugReport> {
+    fn walk(
+        node: &crate::types::WebCore,
+        stylesheet: &Stylesheet,
+        target_node_id: u32,
+        vw: f32,
+        vh: f32,
+        focused_box: u32,
+        keyboard_focus: bool,
+        hover_chain: &std::collections::HashSet<u32>,
+        fragment_target_id: u32,
+        document_url: &str,
+        ancestors: &mut Vec<AncestorInfo>,
+        child_index: usize,
+        sibling_count: usize,
+        type_child_index: usize,
+        type_sibling_count: usize,
+        prev_siblings: &[SiblingInfo],
+        next_siblings: &[SiblingInfo],
+        next_sibling_nodes: &[&crate::types::WebCore],
+    ) -> Option<CssMatchDebugReport> {
+        if node.node_id == target_node_id {
+            let id = node.attributes.get("id").map(|s| s.as_str());
+            let class_attr = node
+                .attributes
+                .get("class")
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let classes: Vec<&str> = class_attr.split_whitespace().collect();
+            let mut candidates = Vec::new();
+            stylesheet.candidate_rules(&node.tag, id, &classes, &mut candidates);
+            let mut scratch = Vec::new();
+            let sets = match_rules(
+                node,
+                stylesheet,
+                ancestors,
+                child_index,
+                sibling_count,
+                type_child_index,
+                type_sibling_count,
+                vw,
+                vh,
+                focused_box,
+                keyboard_focus,
+                hover_chain,
+                fragment_target_id,
+                document_url,
+                prev_siblings,
+                next_siblings,
+                next_sibling_nodes,
+                &mut scratch,
+            );
+            return Some(CssMatchDebugReport {
+                node_id: node.node_id,
+                tag: node.tag.clone(),
+                id: id.unwrap_or("").to_string(),
+                class_attr: class_attr.to_string(),
+                candidate_rule_indices: candidates,
+                matched_rule_indices: sets.matched.iter().map(|(_, idx, _)| *idx).collect(),
+                hover_rule_indices: sets.hover_matched.iter().map(|(_, idx, _)| *idx).collect(),
+                active_rule_indices: sets.active_matched.iter().map(|(_, idx, _)| *idx).collect(),
+                visited_rule_indices: sets.visited_matched.iter().map(|(_, idx, _)| *idx).collect(),
+                before_rule_indices: sets.before_matched.iter().map(|(_, idx, _)| *idx).collect(),
+                after_rule_indices: sets.after_matched.iter().map(|(_, idx, _)| *idx).collect(),
+            });
+        }
+        if ancestors.len() >= MAX_CASCADE_DEPTH || !node.is_element() {
+            return None;
+        }
+
+        ancestors.push(AncestorInfo {
+            tag: node.tag.clone(),
+            attributes: node.attributes.clone(),
+            child_index,
+            sibling_count,
+            type_child_index,
+            type_sibling_count,
+            node_id: node.node_id,
+        });
+
+        let n_children = node.children.len();
+        let child_tags: Vec<String> = node
+            .children
+            .iter()
+            .map(|c| c.tag.to_ascii_lowercase())
+            .collect();
+        let mut type_running: HashMap<&str, usize> = HashMap::new();
+        let type_counts: Vec<usize> = child_tags
+            .iter()
+            .map(|tag| {
+                let slot = type_running.entry(tag.as_str()).or_insert(0);
+                let idx = *slot;
+                *slot += 1;
+                idx
+            })
+            .collect();
+        let type_totals: Vec<usize> = child_tags
+            .iter()
+            .map(|tag| *type_running.get(tag.as_str()).unwrap_or(&0))
+            .collect();
+        let n_elem_children = node.children.iter().filter(|c| c.is_element()).count();
+        let mut elem_pos = 0usize;
+        let elem_indices: Vec<usize> = node
+            .children
+            .iter()
+            .map(|c| {
+                if !c.is_element() {
+                    0
+                } else {
+                    let p = elem_pos;
+                    elem_pos += 1;
+                    p
+                }
+            })
+            .collect();
+        let child_siblings = node
+            .children
+            .iter()
+            .filter(|c| c.is_element())
+            .map(SiblingInfo::from_node)
+            .collect::<Vec<_>>();
+        let child_nodes = node.children.iter().collect::<Vec<_>>();
+        for (i, child) in node.children.iter().enumerate() {
+            let (ci, ns) = if !child.is_element() {
+                (i, n_children)
+            } else {
+                (elem_indices[i], n_elem_children)
+            };
+            let prev_elem = if child.is_element() {
+                &child_siblings[..elem_indices[i]]
+            } else {
+                &[]
+            };
+            let next_elem = if child.is_element() {
+                &child_siblings[elem_indices[i].saturating_add(1)..]
+            } else {
+                &[]
+            };
+            let next_nodes = if i + 1 < child_nodes.len() {
+                &child_nodes[i + 1..]
+            } else {
+                &[]
+            };
+            if let Some(report) = walk(
+                child,
+                stylesheet,
+                target_node_id,
+                vw,
+                vh,
+                focused_box,
+                keyboard_focus,
+                hover_chain,
+                fragment_target_id,
+                document_url,
+                ancestors,
+                ci,
+                ns,
+                type_counts[i],
+                type_totals[i],
+                prev_elem,
+                next_elem,
+                next_nodes,
+            ) {
+                ancestors.pop();
+                return Some(report);
+            }
+        }
+        ancestors.pop();
+        None
+    }
+
+    let mut ancestors = Vec::new();
+    walk(
+        root,
+        stylesheet,
+        target_node_id,
+        vw,
+        vh,
+        focused_box,
+        keyboard_focus,
+        hover_chain,
+        fragment_target_id,
+        document_url,
+        &mut ancestors,
+        0,
+        1,
+        0,
+        1,
+        &[],
+        &[],
+        &[],
+    )
+}
 
 /// Run the selectors of `stylesheet` against one element.
 ///
@@ -1091,8 +1321,8 @@ pub(crate) fn match_rules(
     hover_chain: &std::collections::HashSet<u32>,
     target_id: u32,
     document_url: &str,
-    prev_siblings: &[(String, String, String)],
-    next_siblings: &[(String, String, String)],
+    prev_siblings: &[SiblingInfo],
+    next_siblings: &[SiblingInfo],
     next_sibling_nodes: &[&crate::types::WebCore],
     candidates_buf: &mut Vec<usize>,
 ) -> MatchSets {
@@ -1231,6 +1461,11 @@ pub(crate) fn match_rules(
                         sets.backdrop_matched
                             .push((rule.specificity, rule_idx, scope_proximity))
                     }
+                    PseudoElement::FileSelectorButton => sets.file_selector_button_matched.push((
+                        rule.specificity,
+                        rule_idx,
+                        scope_proximity,
+                    )),
                     PseudoElement::None => {
                         sets.matched
                             .push((rule.specificity, rule_idx, scope_proximity))
@@ -1453,8 +1688,8 @@ pub(crate) fn apply_cascade_inner(
     candidates_buf: &mut Vec<usize>,
     counters: &mut HashMap<String, Vec<i32>>,
     hover_chain: &std::collections::HashSet<u32>,
-    prev_siblings: &[(String, String, String)],
-    next_siblings: &[(String, String, String)],
+    prev_siblings: &[SiblingInfo],
+    next_siblings: &[SiblingInfo],
     next_sibling_nodes: &[&crate::types::WebCore],
     share_cache: &mut ShareCache,
     // Selector matches computed off-thread by the parallel pass, keyed by
@@ -1550,6 +1785,7 @@ pub(crate) fn apply_cascade_inner(
         mut placeholder_matched,
         mut marker_matched,
         mut backdrop_matched,
+        mut file_selector_button_matched,
     } = sets;
     matched.sort_by(|&a, &b| normal_cascade_cmp(&stylesheet.rules, a, b));
     // Build variable scope: inherited from parent + any --custom-properties from matched rules.
@@ -2263,6 +2499,15 @@ pub(crate) fn apply_cascade_inner(
     ) {
         std::sync::Arc::make_mut(&mut root.style).backdrop_style = Some(ps);
     }
+    if let Some((_, ps)) = build_pseudo_style_shared(
+        &mut file_selector_button_matched,
+        &root.style,
+        &local_vars,
+        &root.attributes,
+        &stylesheet.rules,
+    ) {
+        std::sync::Arc::make_mut(&mut root.style).file_selector_button_style = Some(ps);
+    }
 
     {
         let authored_content = root.style.rare().content.clone();
@@ -2349,21 +2594,23 @@ pub(crate) fn apply_cascade_inner(
             .collect();
         // One sibling row feeds both left-looking combinators and
         // right-looking `:nth-last-child(... of S)`.
-        let sibling_records: Vec<(String, String, String)> = children
+        let sibling_records: Vec<SiblingInfo> = children
             .iter()
             .filter(|c| c.is_element())
-            .map(|c| {
-                (
-                    c.tag.clone(),
-                    c.attributes.get("id").cloned().unwrap_or_default(),
-                    c.attributes.get("class").cloned().unwrap_or_default(),
-                )
-            })
+            .map(SiblingInfo::from_node)
             .collect();
         // ⛔ The cache is the caller's now, spanning the whole document —
         // see `ShareCache`. A per-parent one could only ever share between
         // siblings, which measured 2.9% on demo.html.
-        let parent_id = std::sync::Arc::as_ptr(parent_style) as usize;
+        // Scope sharing to the actual parent node, not to the parent's computed
+        // style pointer. Different parents can legitimately share the same
+        // ComputedStyle Arc while living under different ancestor chains; a
+        // descendant selector such as `.section .item` can then match under one
+        // parent and not the other. Sharing across those parents hands later
+        // nodes a cached style from the wrong selector context, which makes
+        // loaded CSS appear to vanish on large streamed pages.
+        let parent_node_id = ancestors.last().map(|ancestor| ancestor.node_id).unwrap_or(0);
+        let parent_id = parent_node_id as usize;
         for i in 0..n_children {
             let (_before, rest) = children.split_at_mut(i);
             let (child, after) = rest.split_first_mut().unwrap();
@@ -2420,8 +2667,21 @@ pub(crate) fn apply_cascade_inner(
                 parts.push(child.selector_state_key(focused_box));
                 parts.join("\u{1}")
             };
+            let id = child.attributes.get("id").map(|s| s.as_str());
+            let class_attr = child
+                .attributes
+                .get("class")
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let classes: Vec<&str> = class_attr.split_whitespace().collect();
+            stylesheet.candidate_rules(&child.tag, id, &classes, candidates_buf);
+            let child_has_sibling_sensitive_candidates = stylesheet.has_sibling_sensitive_rules
+                && stylesheet.candidate_rules_are_sibling_sensitive(candidates_buf);
+            let child_has_context_sensitive_candidates =
+                stylesheet.candidate_rules_need_selector_context(candidates_buf);
             let can_share = child.is_element()
                 && child.tag != "::before" && child.tag != "::after"
+                && parent_node_id != 0
                 && !child.attributes.contains_key("id")
                 && !child.attributes.contains_key("style")
                 && !hover_chain.contains(&child.node_id)
@@ -2431,8 +2691,13 @@ pub(crate) fn apply_cascade_inner(
                 // — the second was handed the first one's style and the rule
                 // vanished. Verified both ways: the test goes green with
                 // sharing off and red with it on.
-                && !stylesheet.has_sibling_sensitive_rules
-                && child.children.is_empty(); // only for leaf elements (no pseudo-elements to worry about)
+                && !child_has_sibling_sensitive_candidates
+                // Context selectors (`.section .item`, `.nav > a`, `:has`,
+                // pseudo-elements in candidate buckets, etc.) can distinguish
+                // two otherwise-identical elements by ancestry or structure.
+                // Such nodes must run the matcher instead of borrowing a style
+                // from a previous same-key element.
+                && !child_has_context_sensitive_candidates;
             let share_key = (parent_id, child.tag.clone(), child_class.clone());
 
             if can_share {
@@ -2690,7 +2955,17 @@ fn apply_presentational_hints(
                 }
             }
             "width" if crate::html::supports_dimension_presentational_hint(&root.tag, "width") => {
-                let clean = val.trim().trim_end_matches(';').trim();
+                let selected_source_width;
+                let clean = if root.tag == "img" {
+                    if let Some(w) = root.selected_source_width {
+                        selected_source_width = w.to_string();
+                        selected_source_width.as_str()
+                    } else {
+                        val.trim().trim_end_matches(';').trim()
+                    }
+                } else {
+                    val.trim().trim_end_matches(';').trim()
+                };
                 if clean.ends_with('%') {
                     apply_property(style, "width", clean);
                 } else {
@@ -2703,7 +2978,17 @@ fn apply_presentational_hints(
             "height"
                 if crate::html::supports_dimension_presentational_hint(&root.tag, "height") =>
             {
-                let clean = val.trim().trim_end_matches(';').trim();
+                let selected_source_height;
+                let clean = if root.tag == "img" {
+                    if let Some(h) = root.selected_source_height {
+                        selected_source_height = h.to_string();
+                        selected_source_height.as_str()
+                    } else {
+                        val.trim().trim_end_matches(';').trim()
+                    }
+                } else {
+                    val.trim().trim_end_matches(';').trim()
+                };
                 if clean.ends_with('%') {
                     apply_property(style, "height", clean);
                 } else {

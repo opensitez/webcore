@@ -4136,7 +4136,8 @@ fn serialize_inline_list_style_type(value: crate::types::ListStyleType) -> Strin
         L::HiraganaIroha => "hiragana-iroha",
         L::KatakanaIroha => "katakana-iroha",
         L::CjkDecimal => "cjk-decimal",
-        L::Disclosure => "disclosure-open",
+        L::DisclosureOpen => "disclosure-open",
+        L::DisclosureClosed => "disclosure-closed",
     }
     .to_string()
 }

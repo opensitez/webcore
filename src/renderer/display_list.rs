@@ -209,6 +209,11 @@ pub enum PaintCmd {
         font_family: String,
         color: Color,
         placeholder_color: Color,
+        file_button_color: Color,
+        file_button_background: Color,
+        file_button_font_size: f32,
+        file_button_font_weight: u16,
+        file_button_font_family: String,
         checked: bool,
         value: String,
         placeholder: String,
@@ -347,6 +352,20 @@ impl DisplayList {
         self.commands.len()
     }
 
+    pub fn memory_estimate(&self) -> DisplayListMemoryEstimate {
+        let commands = self.commands.len() + self.fixed_commands.len();
+        let mut estimate = DisplayListMemoryEstimate {
+            commands,
+            inline_command_bytes: commands.saturating_mul(std::mem::size_of::<PaintCmd>()),
+            ..Default::default()
+        };
+        let mut seen_shared_images = std::collections::HashSet::<usize>::new();
+        for cmd in self.commands.iter().chain(self.fixed_commands.iter()) {
+            estimate.add_command(cmd, &mut seen_shared_images);
+        }
+        estimate
+    }
+
     /// Hit test: find the deepest node_id at a point by walking the display
     /// list in reverse (last painted = topmost visual).
     pub fn hit_test(&self, x: f32, y: f32) -> Option<u32> {
@@ -376,6 +395,150 @@ impl DisplayList {
             }
         }
         None
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DisplayListMemoryEstimate {
+    pub commands: usize,
+    pub inline_command_bytes: usize,
+    pub heap_bytes: usize,
+    pub text_bytes: usize,
+    pub image_bytes: usize,
+    pub vector_bytes: usize,
+}
+
+impl DisplayListMemoryEstimate {
+    pub fn total_bytes(self) -> usize {
+        self.inline_command_bytes.saturating_add(self.heap_bytes)
+    }
+
+    fn add_command(
+        &mut self,
+        cmd: &PaintCmd,
+        seen_shared_images: &mut std::collections::HashSet<usize>,
+    ) {
+        match cmd {
+            PaintCmd::Text {
+                text, font_family, ..
+            }
+            | PaintCmd::TextShadow {
+                text, font_family, ..
+            } => {
+                self.add_string(text);
+                self.add_string(font_family);
+            }
+            PaintCmd::Image { data, .. }
+            | PaintCmd::BorderImage { data, .. }
+            | PaintCmd::PushMask { data, .. }
+            | PaintCmd::BackgroundImage { data, .. } => self.add_image(data, seen_shared_images),
+            PaintCmd::ListMarker {
+                text,
+                image,
+                font_family,
+                ..
+            } => {
+                self.add_string(text);
+                self.add_string(font_family);
+                if let Some(image) = image {
+                    self.add_image(image, seen_shared_images);
+                }
+            }
+            PaintCmd::PushClipPath { points } => {
+                self.add_vec_bytes(
+                    points
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<(f32, f32)>()),
+                );
+            }
+            PaintCmd::PushFilter { filters } | PaintCmd::BackdropFilter { filters, .. } => {
+                self.add_vec_bytes(filters.capacity().saturating_mul(std::mem::size_of::<(
+                    u8,
+                    f32,
+                    f32,
+                    f32,
+                    crate::types::Color,
+                )>()));
+            }
+            PaintCmd::Gradient { stops, .. } => {
+                self.add_vec_bytes(
+                    stops
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<(Color, f32)>()),
+                );
+            }
+            PaintCmd::FormElement {
+                tag,
+                input_type,
+                attributes,
+                font_family,
+                file_button_font_family,
+                value,
+                placeholder,
+                options,
+                selected_all,
+                ..
+            } => {
+                self.add_string(tag);
+                self.add_string(input_type);
+                self.add_string(font_family);
+                self.add_string(file_button_font_family);
+                self.add_string(value);
+                self.add_string(placeholder);
+                self.add_vec_bytes(
+                    attributes
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<(String, String)>()),
+                );
+                for (name, value) in attributes {
+                    self.add_string(name);
+                    self.add_string(value);
+                }
+                self.add_vec_bytes(
+                    options
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<String>()),
+                );
+                for option in options {
+                    self.add_string(option);
+                }
+                self.add_vec_bytes(
+                    selected_all
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<bool>()),
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn add_string(&mut self, value: &String) {
+        self.text_bytes = self.text_bytes.saturating_add(value.capacity());
+        self.heap_bytes = self.heap_bytes.saturating_add(value.capacity());
+    }
+
+    fn add_vec_bytes(&mut self, bytes: usize) {
+        self.vector_bytes = self.vector_bytes.saturating_add(bytes);
+        self.heap_bytes = self.heap_bytes.saturating_add(bytes);
+    }
+
+    fn add_image(
+        &mut self,
+        image: &ImageRef,
+        seen_shared_images: &mut std::collections::HashSet<usize>,
+    ) {
+        let bytes = match image {
+            ImageRef::Owned(data, _, _) => data.capacity(),
+            ImageRef::Shared(data, _, _) => {
+                let ptr = std::sync::Arc::as_ptr(data) as usize;
+                if !seen_shared_images.insert(ptr) {
+                    return;
+                }
+                data.capacity()
+            }
+        };
+        self.image_bytes = self.image_bytes.saturating_add(bytes);
+        self.heap_bytes = self.heap_bytes.saturating_add(bytes);
     }
 }
 

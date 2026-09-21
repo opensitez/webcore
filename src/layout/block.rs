@@ -553,7 +553,7 @@ pub fn build_box_rects(
 
     // Cache resolved values
     node.layout.resolved_margin_top = rbox.margin_top;
-    node.layout.resolved_margin_right = rbox.margin_right;
+    node.layout.resolved_margin_right = margin_right;
     node.layout.resolved_margin_bottom = rbox.margin_bottom;
     node.layout.resolved_margin_left = margin_left;
     node.layout.resolved_border_top = rbox.border_top;
@@ -744,6 +744,10 @@ pub fn layout_block_with_fc(
     // min/max-width clamping so `width:auto; max-width:...; margin:0 auto`
     // centers the clamped box instead of sticking to inline-start.
     // CSS 2.1 §10.3.3 applies only to block-level non-replaced elements in normal flow.
+    // Floats are out of normal flow; their auto horizontal margins compute to 0
+    // (CSS 2.1 §10.3.5). Bootstrap/Visual Composer columns commonly combine
+    // `float:left`, percentage widths, and inherited `margin:auto`, and those
+    // columns must still sit side-by-side.
     // For inline-level elements (inline-block, inline-flex, etc.), auto margins evaluate to 0 (CSS 2.1 §10.3.10).
     let left_is_auto = node.style.margin_left.is_auto();
     let right_is_auto = node.style.margin_right.is_auto();
@@ -752,7 +756,8 @@ pub fn layout_block_with_fc(
             node.style.display,
             Display::InlineBlock | Display::Inline | Display::InlineFlex | Display::InlineGrid
         );
-    let (margin_left, margin_right) = if is_block_box && (left_is_auto || right_is_auto) {
+    let is_normal_flow_block = is_block_box && matches!(node.style.float, Float::None);
+    let (margin_left, margin_right) = if is_normal_flow_block && (left_is_auto || right_is_auto) {
         let non_margin_space = rbox.border_left
             + rbox.padding_left
             + content_w
@@ -771,11 +776,20 @@ pub fn layout_block_with_fc(
         } else {
             (rbox.margin_left, rbox.margin_right)
         }
+    } else if !matches!(node.style.float, Float::None) {
+        (
+            if left_is_auto { 0.0 } else { rbox.margin_left },
+            if right_is_auto {
+                0.0
+            } else {
+                rbox.margin_right
+            },
+        )
     } else {
         (rbox.margin_left, rbox.margin_right)
     };
 
-    let is_bfc = establishes_bfc(&node.style);
+    let is_bfc = c.force_independent_formatting_context || establishes_bfc(&node.style);
 
     let content_x = x
         + margin_left
@@ -1323,6 +1337,45 @@ pub fn layout_block_with_fc(
                 }
             }
         }
+    }
+
+    if !matches!(node.style.writing_mode, WritingMode::HorizontalTB)
+        && !block_in_flow_paths.is_empty()
+        && node.layout.line_cache.is_empty()
+    {
+        let rtl_block_flow = matches!(
+            node.style.writing_mode,
+            WritingMode::VerticalRL | WritingMode::SidewaysRL
+        );
+        let mut block_cursor = if rtl_block_flow {
+            content_x + content_w
+        } else {
+            content_x
+        };
+        let mut inline_extent = 0.0f32;
+        for path in block_in_flow_paths.clone() {
+            let child = grid_child_ref(node, &path);
+            let child_w = child.layout.margin_rect.w;
+            let target_x = if rtl_block_flow {
+                block_cursor - child_w
+            } else {
+                block_cursor
+            };
+            let target_y = content_y;
+            let dx = target_x - child.layout.margin_rect.x;
+            let dy = target_y - child.layout.margin_rect.y;
+            if dx.abs() > 0.01 || dy.abs() > 0.01 {
+                shift_rects(grid_child_mut(node, &path), dx, dy);
+            }
+            if rtl_block_flow {
+                block_cursor -= child_w;
+            } else {
+                block_cursor += child_w;
+            }
+            let child = grid_child_ref(node, &path);
+            inline_extent = inline_extent.max(child.layout.margin_rect.h);
+        }
+        child_y = inline_extent;
     }
 
     // Flush trailing inline line

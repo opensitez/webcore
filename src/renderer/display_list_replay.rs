@@ -1550,6 +1550,11 @@ fn replay_commands_inner(
                 font_family,
                 color,
                 placeholder_color,
+                file_button_color,
+                file_button_background,
+                file_button_font_size,
+                file_button_font_weight,
+                file_button_font_family,
                 checked,
                 value,
                 placeholder,
@@ -1855,35 +1860,52 @@ fn replay_commands_inner(
                     // drew the value as bare text, which for an empty control
                     // is nothing at all.
                     ("input", "file") => {
-                        let line_h = *font_size * 1.2;
-                        let text_y = rect.y + (rect.h - line_h).max(0.0) / 2.0;
+                        let button_line_h = *file_button_font_size * 1.2;
+                        let button_text_y = rect.y + (rect.h - button_line_h).max(0.0) / 2.0;
                         // Measured from the label so the chrome cannot clip its
                         // own word in a large font.
-                        let label_w =
-                            crate::widgets::CHOOSE.chars().count() as f32 * *font_size * 0.55;
+                        let label_w = crate::widgets::CHOOSE.chars().count() as f32
+                            * *file_button_font_size
+                            * 0.55;
                         let button_w = crate::widgets::FileButton::width_for(label_w).min(rect.w);
                         if !*appearance_none {
-                            let mut button = crate::widgets::FileButton::new(button_w, rect.h);
-                            button.disabled = attributes.iter().any(|(k, _)| k == "disabled");
-                            button.paint(target, rect.x, rect.y, scale);
+                            if file_button_background.a > 0 {
+                                let bg = apply_opacity(file_button_background, a2);
+                                let mut paint = Paint::default();
+                                paint.anti_alias = true;
+                                paint.set_color_rgba8(bg.r, bg.g, bg.b, bg.a);
+                                if let Some(r) = SkRect::from_xywh(rect.x, rect.y, button_w, rect.h)
+                                {
+                                    target.fill_rect(
+                                        r,
+                                        &paint,
+                                        Transform::from_scale(scale, scale),
+                                        clip_mask,
+                                    );
+                                }
+                            } else {
+                                let mut button = crate::widgets::FileButton::new(button_w, rect.h);
+                                button.disabled = attributes.iter().any(|(k, _)| k == "disabled");
+                                button.paint(target, rect.x, rect.y, scale);
+                            }
                         }
                         if let Some((ref mut fs, ref mut sc)) = text_ctx {
-                            let c = apply_opacity(color, a2);
+                            let button_color = apply_opacity(file_button_color, a2);
                             draw_text_cmd(
                                 target,
                                 *fs,
                                 *sc,
                                 scale,
                                 rect.x + 8.0,
-                                text_y,
+                                button_text_y,
                                 crate::widgets::CHOOSE,
-                                font_family,
-                                *font_size,
-                                *font_weight,
+                                file_button_font_family,
+                                *file_button_font_size,
+                                *file_button_font_weight,
                                 0,
                                 button_w,
-                                line_h,
-                                &c,
+                                button_line_h,
+                                &button_color,
                                 &super::display_list::TextDecoration::default(),
                                 0.0,
                                 0.0,
@@ -1899,6 +1921,9 @@ fn replay_commands_inner(
                             } else {
                                 value
                             };
+                            let line_h = *font_size * 1.2;
+                            let text_y = rect.y + (rect.h - line_h).max(0.0) / 2.0;
+                            let c = apply_opacity(color, a2);
                             draw_text_cmd(
                                 target,
                                 *fs,
@@ -2471,8 +2496,12 @@ fn composite_masked_layer(
             let mg = mask_rgba.get(base + 1).copied().unwrap_or(0) as u32;
             let mb = mask_rgba.get(base + 2).copied().unwrap_or(0) as u32;
             let ma = mask_rgba.get(base + 3).copied().unwrap_or(0) as u32;
-            let lum = (mr * 77 + mg * 150 + mb * 29) >> 8;
-            (lum * ma / 255) as u8
+            // CSS mask images default to alpha masking for raster/SVG image
+            // sources. Many icon fonts ship black SVG paths with an opaque
+            // alpha channel; treating every mask as luminance turns those into
+            // fully transparent masks, so toolbar icons disappear.
+            let _lum = (mr * 77 + mg * 150 + mb * 29) >> 8;
+            ma as u8
         } else {
             0
         };

@@ -471,8 +471,6 @@ fn parse_html_full(
         );
     }
 
-    // Post-cascade fixes
-    apply_details_summary_post_cascade(&mut doc.root);
     number_lists(&mut doc.root);
     // Standalone parse_html has no layout viewport. Use the same deterministic
     // default viewport the old parser path used for DOM current-source state;

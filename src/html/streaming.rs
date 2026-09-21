@@ -32,6 +32,9 @@ use crate::dom::attrs::AttrMap;
 /// A DOM mutation produced by the streaming parser.
 #[derive(Clone, Debug)]
 pub enum DomMutation {
+    /// Attributes from the document element when an incoming `<html>` tag is
+    /// adopted into the existing root.
+    SetRootAttributes { attributes: AttrMap },
     /// A new element was parsed and should be inserted.
     InsertElement {
         parent_path: Vec<usize>,
@@ -331,6 +334,9 @@ impl StreamingParser {
                         && self.stack.is_empty()
                         && self.root_child_count == 0
                     {
+                        if !attrs.is_empty() {
+                            mutations.push(DomMutation::SetRootAttributes { attributes: attrs });
+                        }
                         if !self_closing {
                             self.stack.push(OpenElement {
                                 tag,

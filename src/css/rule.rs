@@ -17,7 +17,8 @@ pub enum PseudoElement {
     Placeholder,
     Marker,   // ::marker
     Backdrop, // ::backdrop
-    Ignored,  // ::first-line, ::first-letter, unknown vendor pseudo-elements
+    FileSelectorButton,
+    Ignored, // ::first-line, ::first-letter, unknown vendor pseudo-elements
 }
 
 impl Default for PseudoElement {
