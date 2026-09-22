@@ -1,3 +1,9 @@
+# 20260922 0.3.3
+- demo browser
+- fixes on css transitions and animations
+- regression fixes from progressive rendering on wikipedia, slashdot
+- rtl and woff spacing issues
+
 # 202609 0.3.1
 - Progressive Rendering
 - rtl fixes
