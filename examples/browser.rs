@@ -24,7 +24,7 @@ use webcore::dom::{self, HtmlEventType};
 use webcore::platform::Platform;
 use webcore::renderer::display_list::{ImageRef, PaintCmd};
 use webcore::renderer::display_list_builder::{
-    build_display_list_full, build_display_list_viewport,
+    build_display_list_full_with_font_system, build_display_list_viewport,
 };
 use webcore::types::{Display, Overflow, Position};
 use webcore::{Document, Renderer, parse_html_with_hooks, point_to_hit};
@@ -137,6 +137,7 @@ struct BrowserApp {
 
     // Remote debug server (--debug-port)
     debug_cmd_rx: Option<mpsc::Receiver<(String, mpsc::Sender<String>)>>,
+    last_memory_trace: Option<std::time::Instant>,
 }
 
 impl BrowserApp {
@@ -169,6 +170,7 @@ impl BrowserApp {
             cache_dir: None,
             no_images: false,
             debug_cmd_rx: None,
+            last_memory_trace: None,
         }
     }
 
@@ -581,6 +583,56 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
         if std::env::var_os("WEBCORE_TRACE_RENDER").is_some() && draw_ms > 5 {
             eprintln!("[browser] Draw total: {draw_ms}ms");
         }
+        self.trace_memory_if_requested();
+    }
+
+    fn trace_memory_if_requested(&mut self) {
+        if std::env::var_os("WEBCORE_TRACE_MEMORY").is_none() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        if self.last_memory_trace.is_some_and(|last| {
+            now.saturating_duration_since(last) < std::time::Duration::from_secs(2)
+        }) {
+            return;
+        }
+        self.last_memory_trace = Some(now);
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let stats = tab.view.memory_stats();
+        let process = process_memory_stats();
+        let rss = process.map(|p| p.rss_bytes).unwrap_or(0);
+        let vsz = process.map(|p| p.vsz_bytes).unwrap_or(0);
+        eprintln!(
+            concat!(
+                "[browser][mem] rss={}MiB vsz={}MiB ",
+                "viewport={}MiB surfaces={}MiB tiles={}MiB ",
+                "display={}MiB dl_img={}MiB raw_cache={}MiB css_cache={}MiB decoded_cache={}MiB ",
+                "dom_img={}MiB dom={}MiB layout={}MiB style={}MiB sheets={}MiB ",
+                "nodes={} images={} styles={}"
+            ),
+            rss / 1024 / 1024,
+            vsz / 1024 / 1024,
+            stats.viewport_surface_bytes / 1024 / 1024,
+            (stats.renderer_cached_content_surface_bytes + stats.renderer_cached_surface_bytes)
+                / 1024
+                / 1024,
+            stats.tile_surface_bytes / 1024 / 1024,
+            stats.display_list_estimated_bytes / 1024 / 1024,
+            stats.display_list_image_bytes / 1024 / 1024,
+            stats.raw_resource_cache_bytes / 1024 / 1024,
+            stats.parsed_css_cache_bytes / 1024 / 1024,
+            stats.decoded_image_cache_bytes / 1024 / 1024,
+            stats.decoded_dom_image_bytes / 1024 / 1024,
+            stats.dom_estimated_bytes / 1024 / 1024,
+            stats.layout_estimated_bytes / 1024 / 1024,
+            stats.style_estimated_bytes / 1024 / 1024,
+            stats.stylesheet_estimated_bytes / 1024 / 1024,
+            stats.dom_nodes,
+            stats.image_nodes,
+            stats.unique_styles,
+        );
     }
 }
 
@@ -1404,6 +1456,7 @@ fn build_inspect_panel_html(
                 ("align-self", format!("{:?}", s.align_self)),
                 ("justify-content", format!("{:?}", s.justify_content)),
                 ("vertical-align", format!("{:?}", s.vertical_align)),
+                ("text-align", format!("{:?}", s.text_align)),
                 ("font-size", format!("{:.1}px", s.font_size_px(16.0, 16.0))),
                 ("line-height", format!("{:?}", s.line_height)),
                 (
@@ -2036,12 +2089,12 @@ fn dbg_inspect_json(node: &webcore::WebCore) -> String {
             r#""padding":{{"x":{7:.1},"y":{8:.1},"w":{9:.1},"h":{10:.1}}},"#,
             r#""margin":{{"x":{11:.1},"y":{12:.1},"w":{13:.1},"h":{14:.1}}},"#,
             r#""display":{15},"position":{16},"#,
-            r#""font_size":{17:.1},"color":{18},"background":{19},"#,
-            r#""margin_trbl":[{20:.1},{21:.1},{22:.1},{23:.1}],"#,
-            r#""padding_trbl":[{24:.1},{25:.1},{26:.1},{27:.1}],"#,
-            r#""border_trbl":[{28:.1},{29:.1},{30:.1},{31:.1}],"#,
-            r#""children":{32},"svg_parsed":{33},"svg_children":{34},"#,
-            r#""mask_image":{35},"mask_loaded":{36},"mask_size":[{37},{38}]}}"#
+            r#""font_size":{17:.1},"text_align":{18},"color":{19},"background":{20},"#,
+            r#""margin_trbl":[{21:.1},{22:.1},{23:.1},{24:.1}],"#,
+            r#""padding_trbl":[{25:.1},{26:.1},{27:.1},{28:.1}],"#,
+            r#""border_trbl":[{29:.1},{30:.1},{31:.1},{32:.1}],"#,
+            r#""children":{33},"svg_parsed":{34},"svg_children":{35},"#,
+            r#""mask_image":{36},"mask_loaded":{37},"mask_size":[{38},{39}]}}"#
         ),
         dbg_json_escape(&node.tag),
         dbg_json_escape(id),
@@ -2061,6 +2114,7 @@ fn dbg_inspect_json(node: &webcore::WebCore) -> String {
         dbg_json_escape(&format!("{:?}", s.display)),
         dbg_json_escape(&format!("{:?}", s.position)),
         s.font_size_px(16.0, 16.0),
+        dbg_json_escape(&format!("{:?}", s.text_align)),
         dbg_json_escape(&color_str),
         dbg_json_escape(&bg_str),
         node.layout.resolved_margin_top,
@@ -2139,7 +2193,8 @@ fn dbg_computed_json(node: &webcore::WebCore) -> String {
     let mut buf = String::with_capacity(2048);
     let _ = write!(
         buf,
-        r#"{{"tag":{0},"id":{1},"class":{2}"#,
+        r#"{{"node_id":{},"tag":{},"id":{},"class":{}"#,
+        node.node_id,
         dbg_json_escape(&node.tag),
         dbg_json_escape(id),
         dbg_json_escape(cls)
@@ -2267,12 +2322,70 @@ fn dbg_computed_json(node: &webcore::WebCore) -> String {
     );
     let _ = write!(
         buf,
+        r#","checked":{},"selected":{},"dirty_checked":{},"dirty_selected":{}"#,
+        node.checkedness, node.selectedness, node.dirty_checked, node.dirty_selectedness
+    );
+    let _ = write!(
+        buf,
         r#","border_collapse":{},"matched_rules":{},"line_count":{}}}"#,
         s.border_collapse,
         node.matched_rules.len(),
         node.layout.line_cache.len()
     );
     buf
+}
+
+fn dbg_match_report_json(doc: &Document, node: &webcore::WebCore) -> String {
+    let hover_chain = webcore::css::build_hover_chain(&doc.root, doc.hovered_box);
+    let Some(report) = webcore::css::debug_match_report_for_node(
+        &doc.root,
+        &doc.stylesheet,
+        node.node_id,
+        doc.viewport_w,
+        doc.viewport_h,
+        doc.focused_box,
+        doc.keyboard_focus,
+        &hover_chain,
+        0,
+        &doc.base_url,
+    ) else {
+        return format!(
+            r#"{{"node_id":{},"ok":false,"error":"node not found"}}"#,
+            node.node_id
+        );
+    };
+    let rule_names = |indices: &[usize]| -> String {
+        indices
+            .iter()
+            .filter_map(|idx| {
+                doc.stylesheet.rules.get(*idx).map(|rule| {
+                    format!(
+                        r#"{{"idx":{},"selector":{},"pseudo":"{:?}"}}"#,
+                        idx,
+                        dbg_json_escape(&rule.original_selector),
+                        rule.pseudo_element
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    format!(
+        r#"{{"ok":true,"node_id":{},"tag":{},"id":{},"class":{},"candidate_count":{},"matched_count":{},"candidates":[{}],"matched":[{}],"hover":[{}],"active":[{}],"visited":[{}],"before":[{}],"after":[{}]}}"#,
+        report.node_id,
+        dbg_json_escape(&report.tag),
+        dbg_json_escape(&report.id),
+        dbg_json_escape(&report.class_attr),
+        report.candidate_rule_indices.len(),
+        report.matched_rule_indices.len(),
+        rule_names(&report.candidate_rule_indices),
+        rule_names(&report.matched_rule_indices),
+        rule_names(&report.hover_rule_indices),
+        rule_names(&report.active_rule_indices),
+        rule_names(&report.visited_rule_indices),
+        rule_names(&report.before_rule_indices),
+        rule_names(&report.after_rule_indices)
+    )
 }
 
 fn dbg_height_dump_json(root: &webcore::WebCore, limit: usize) -> String {
@@ -2709,8 +2822,8 @@ impl BrowserApp {
                                     .map(|v| v.as_str())
                                     .unwrap_or("");
                                 let r = &node.layout.content_rect;
-                                results.push(format!(r#"{{"tag":{},"id":{},"class":{},"x":{:.0},"y":{:.0},"w":{:.0},"h":{:.0}}}"#,
-                                        dbg_json_escape(&node.tag), dbg_json_escape(id), dbg_json_escape(cls),
+                                results.push(format!(r#"{{"node_id":{},"tag":{},"id":{},"class":{},"x":{:.0},"y":{:.0},"w":{:.0},"h":{:.0}}}"#,
+                                        node.node_id, dbg_json_escape(&node.tag), dbg_json_escape(id), dbg_json_escape(cls),
                                         r.x, r.y, r.w, r.h));
                             }
                         });
@@ -2803,7 +2916,9 @@ impl BrowserApp {
                 None => r#"{"ok":false,"error":"inspect needs selector"}"#.to_string(),
             },
             "svg-metrics" => {
-                if let Some(doc) = self.tabs[self.active].view.document() {
+                if let Some((doc, _renderer)) =
+                    self.tabs[self.active].view.document_and_renderer_mut()
+                {
                     format!(r#"{{"ok":true,"svg":{}}}"#, dbg_svg_metrics_json(&doc.root))
                 } else {
                     r#"{"ok":false,"error":"no document"}"#.to_string()
@@ -2909,17 +3024,23 @@ impl BrowserApp {
                 let qx2 = x + w.max(0.0);
                 let qy2 = y + h.max(0.0);
                 let mut out = Vec::new();
-                if let Some(doc) = self.tabs[self.active].view.document() {
-                    let list = build_display_list_full(
+                let view_w = self.width;
+                let view_h = self.content_h();
+                if let Some((doc, renderer)) =
+                    self.tabs[self.active].view.document_and_renderer_mut()
+                {
+                    let font_system = Some(&mut renderer.font_system as *mut _);
+                    let list = build_display_list_full_with_font_system(
                         &doc.root,
-                        self.width,
-                        self.content_h(),
+                        view_w,
+                        view_h,
                         doc.scroll_x,
                         doc.scroll_y,
                         0,
                         0,
                         &std::collections::HashSet::new(),
                         &doc.base_url,
+                        font_system,
                     );
                     for cmd in &list.commands {
                         if out.len() >= limit {
@@ -3263,14 +3384,24 @@ impl BrowserApp {
                                     format!("{}:{}", dbg_json_escape(k), dbg_json_escape(v))
                                 })
                                 .collect();
+                            let selector_ast = format!("{:?}", rule.selectors);
+                            let scope_selector = format!("{:?}", rule.scope_selector);
+                            let scope_limit_selector = format!("{:?}", rule.scope_limit_selector);
+                            let scopes = format!("{:?}", rule.scopes);
                             matches.push(format!(
-                                r#"{{"selector":{},"pseudo":"{:?}","specificity":{},"layer":{},"layer_rank":{},"media":{},"declarations":{{{}}}}}"#,
+                                r#"{{"selector":{},"selector_ast":{},"pseudo":"{:?}","specificity":{},"layer":{},"layer_rank":{},"media":{},"scope":{},"scope_limit":{},"scopes":{},"compiled":{},"compiled_important":{},"declarations":{{{}}}}}"#,
                                 dbg_json_escape(&rule.original_selector),
+                                dbg_json_escape(&selector_ast),
                                 rule.pseudo_element,
                                 rule.specificity,
                                 dbg_json_escape(&rule.layer),
                                 rule.layer_rank,
                                 dbg_json_escape(&rule.media_condition),
+                                dbg_json_escape(&scope_selector),
+                                dbg_json_escape(&scope_limit_selector),
+                                dbg_json_escape(&scopes),
+                                rule.compiled_decls.len(),
+                                rule.compiled_important.len(),
                                 decls.join(",")
                             ));
                         }
@@ -3281,6 +3412,129 @@ impl BrowserApp {
                     dbg_json_escape(&query),
                     matches.len(),
                     matches.join(",")
+                )
+            }
+            "style-debug" => match dbg_json_str(line, "selector") {
+                Some(sel) => {
+                    let limit = dbg_json_num(line, "limit").unwrap_or(20.0).max(1.0) as usize;
+                    let query = dbg_json_str(line, "query").unwrap_or_default();
+                    let mut parts = Vec::new();
+                    if let Some(doc) = self.tabs[self.active].view.document() {
+                        Document::walk_all(&doc.root, &mut |node| {
+                            if parts.len() >= limit {
+                                return;
+                            }
+                            if dbg_matches_query(doc, node, &sel) {
+                                let id = node.attributes.get("id").map(|s| s.as_str());
+                                let class_attr = node
+                                    .attributes
+                                    .get("class")
+                                    .map(|s| s.as_str())
+                                    .unwrap_or("");
+                                let classes: Vec<&str> = class_attr.split_whitespace().collect();
+                                let mut candidates = Vec::new();
+                                doc.stylesheet.candidate_rules(
+                                    &node.tag,
+                                    id,
+                                    &classes,
+                                    &mut candidates,
+                                );
+                                let candidate_selectors = candidates
+                                    .iter()
+                                    .take(24)
+                                    .filter_map(|idx| doc.stylesheet.rules.get(*idx))
+                                    .map(|rule| dbg_json_escape(&rule.original_selector))
+                                    .collect::<Vec<_>>();
+                                let filtered_candidates = if query.is_empty() {
+                                    Vec::new()
+                                } else {
+                                    candidates
+                                        .iter()
+                                        .filter_map(|idx| doc.stylesheet.rules.get(*idx))
+                                        .filter(|rule| rule.original_selector.contains(&query))
+                                        .map(|rule| dbg_json_escape(&rule.original_selector))
+                                        .collect::<Vec<_>>()
+                                };
+                                parts.push(format!(
+                                    r#"{{"node_id":{},"tag":{},"id":{},"class":{},"candidate_count":{},"candidates":[{}],"filtered_candidates":[{}]}}"#,
+                                    node.node_id,
+                                    dbg_json_escape(&node.tag),
+                                    dbg_json_escape(id.unwrap_or("")),
+                                    dbg_json_escape(class_attr),
+                                    candidates.len(),
+                                    candidate_selectors.join(","),
+                                    filtered_candidates.join(",")
+                                ));
+                            }
+                        });
+                    }
+                    format!(
+                        r#"{{"ok":true,"count":{},"elements":[{}]}}"#,
+                        parts.len(),
+                        parts.join(",")
+                    )
+                }
+                None => r#"{"ok":false,"error":"style-debug needs selector"}"#.to_string(),
+            },
+            "match-debug" => match dbg_json_str(line, "selector") {
+                Some(sel) => {
+                    let mut parts = Vec::new();
+                    let limit = dbg_json_num(line, "limit").unwrap_or(10.0).max(1.0) as usize;
+                    if let Some(doc) = self.tabs[self.active].view.document() {
+                        Document::walk_all(&doc.root, &mut |node| {
+                            if parts.len() >= limit {
+                                return;
+                            }
+                            if dbg_matches_query(doc, node, &sel) {
+                                parts.push(dbg_match_report_json(doc, node));
+                            }
+                        });
+                    }
+                    format!(
+                        r#"{{"ok":true,"count":{},"elements":[{}]}}"#,
+                        parts.len(),
+                        parts.join(",")
+                    )
+                }
+                None => r#"{"ok":false,"error":"match-debug needs selector"}"#.to_string(),
+            },
+            "node-id-stats" => {
+                let mut total = 0usize;
+                let mut zero = 0usize;
+                let mut ids = std::collections::HashMap::<u32, usize>::new();
+                if let Some(doc) = self.tabs[self.active].view.document() {
+                    Document::walk_all(&doc.root, &mut |node| {
+                        total += 1;
+                        if node.node_id == 0 {
+                            zero += 1;
+                        } else {
+                            *ids.entry(node.node_id).or_insert(0) += 1;
+                        }
+                    });
+                }
+                let mut duplicates = ids
+                    .into_iter()
+                    .filter(|(_, count)| *count > 1)
+                    .collect::<Vec<_>>();
+                duplicates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                let dup_json = duplicates
+                    .iter()
+                    .take(20)
+                    .map(|(id, count)| format!(r#"{{"id":{},"count":{}}}"#, id, count))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    r#"{{"ok":true,"total":{},"zero":{},"unique":{},"duplicate_ids":{},"duplicates":[{}]}}"#,
+                    total,
+                    zero,
+                    total.saturating_sub(zero).saturating_sub(
+                        duplicates
+                            .iter()
+                            .map(|(_, count)| count.saturating_sub(1))
+                            .sum::<usize>()
+                    ),
+                    duplicates.len(),
+                    dup_json
                 )
             }
             "keyframes" => {
@@ -3516,6 +3770,43 @@ impl BrowserApp {
                     doc.linked_stylesheets.len(),
                     doc.loaded_stylesheet_slots.len(),
                     webcore::Document::scroll_height(&doc.root),
+                )
+            }
+            "memory-stats" => {
+                let stats = self.tabs[self.active].view.memory_stats();
+                let process = process_memory_stats();
+                format!(
+                    r#"{{"ok":true,"process_rss_bytes":{},"process_vsz_bytes":{},"viewport_surface_bytes":{},"renderer_cached_content_surface_bytes":{},"renderer_cached_surface_bytes":{},"tile_surface_bytes":{},"tile_count":{},"display_list_commands":{},"display_list_estimated_bytes":{},"display_list_inline_bytes":{},"display_list_heap_bytes":{},"display_list_text_bytes":{},"display_list_image_bytes":{},"display_list_vector_bytes":{},"raw_resource_cache_entries":{},"raw_resource_cache_bytes":{},"parsed_css_cache_entries":{},"parsed_css_cache_bytes":{},"decoded_image_cache_entries":{},"decoded_image_cache_bytes":{},"dom_nodes":{},"image_nodes":{},"unique_styles":{},"dom_estimated_bytes":{},"layout_estimated_bytes":{},"style_estimated_bytes":{},"line_cache_estimated_bytes":{},"matched_rules_estimated_bytes":{},"stylesheet_estimated_bytes":{},"decoded_dom_image_bytes":{}}}"#,
+                    process.map(|p| p.rss_bytes).unwrap_or(0),
+                    process.map(|p| p.vsz_bytes).unwrap_or(0),
+                    stats.viewport_surface_bytes,
+                    stats.renderer_cached_content_surface_bytes,
+                    stats.renderer_cached_surface_bytes,
+                    stats.tile_surface_bytes,
+                    stats.tile_count,
+                    stats.display_list_commands,
+                    stats.display_list_estimated_bytes,
+                    stats.display_list_inline_bytes,
+                    stats.display_list_heap_bytes,
+                    stats.display_list_text_bytes,
+                    stats.display_list_image_bytes,
+                    stats.display_list_vector_bytes,
+                    stats.raw_resource_cache_entries,
+                    stats.raw_resource_cache_bytes,
+                    stats.parsed_css_cache_entries,
+                    stats.parsed_css_cache_bytes,
+                    stats.decoded_image_cache_entries,
+                    stats.decoded_image_cache_bytes,
+                    stats.dom_nodes,
+                    stats.image_nodes,
+                    stats.unique_styles,
+                    stats.dom_estimated_bytes,
+                    stats.layout_estimated_bytes,
+                    stats.style_estimated_bytes,
+                    stats.line_cache_estimated_bytes,
+                    stats.matched_rules_estimated_bytes,
+                    stats.stylesheet_estimated_bytes,
+                    stats.decoded_dom_image_bytes,
                 )
             }
             "deep" => {
@@ -5548,6 +5839,31 @@ fn display_list_stats_json(
     )
 }
 
+#[derive(Clone, Copy, Debug)]
+struct ProcessMemoryStats {
+    rss_bytes: u64,
+    vsz_bytes: u64,
+}
+
+fn process_memory_stats() -> Option<ProcessMemoryStats> {
+    let pid = std::process::id().to_string();
+    let output = std::process::Command::new("ps")
+        .args(["-o", "rss=,vsz=", "-p", &pid])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let mut parts = text.split_whitespace();
+    let rss_kib = parts.next()?.parse::<u64>().ok()?;
+    let vsz_kib = parts.next()?.parse::<u64>().ok()?;
+    Some(ProcessMemoryStats {
+        rss_bytes: rss_kib.saturating_mul(1024),
+        vsz_bytes: vsz_kib.saturating_mul(1024),
+    })
+}
+
 fn append_cmd_ms(result: String, started: std::time::Instant) -> String {
     let ms = started.elapsed().as_micros() as f64 / 1000.0;
     if result.ends_with('}') {
@@ -5810,7 +6126,8 @@ fn dispatch_headless_cmd(
                 .map(|n| {
                     let b = n.layout.border_rect;
                     format!(
-                        r#"{{"tag":"{}","id":"{}","class":"{}","x":{},"y":{},"w":{},"h":{}}}"#,
+                        r#"{{"node_id":{},"tag":"{}","id":"{}","class":"{}","x":{},"y":{},"w":{},"h":{}}}"#,
+                        n.node_id,
                         n.tag,
                         n.attributes.get("id").unwrap_or(&String::new()),
                         n.attributes.get("class").unwrap_or(&String::new()),
@@ -5869,7 +6186,8 @@ fn dispatch_headless_cmd(
             let limit = dbg_json_num(line, "limit").unwrap_or(80.0).max(1.0) as usize;
             let qx2 = x + w.max(0.0);
             let qy2 = y + h.max(0.0);
-            let list = build_display_list_full(
+            let font_system = Some(&mut renderer.font_system as *mut _);
+            let list = build_display_list_full_with_font_system(
                 &doc.root,
                 width,
                 height,
@@ -5879,6 +6197,7 @@ fn dispatch_headless_cmd(
                 0,
                 &std::collections::HashSet::new(),
                 &doc.base_url,
+                font_system,
             );
             let mut out = Vec::new();
             for cmd in &list.commands {
@@ -6939,14 +7258,24 @@ fn dispatch_headless_cmd(
                         .filter(|(k, _)| !k.starts_with("--"))
                         .map(|(k, v)| format!("{}:{}", dbg_json_escape(k), dbg_json_escape(v)))
                         .collect();
+                    let selector_ast = format!("{:?}", rule.selectors);
+                    let scope_selector = format!("{:?}", rule.scope_selector);
+                    let scope_limit_selector = format!("{:?}", rule.scope_limit_selector);
+                    let scopes = format!("{:?}", rule.scopes);
                     matches.push(format!(
-                        r#"{{"selector":{},"pseudo":"{:?}","specificity":{},"layer":{},"layer_rank":{},"media":{},"declarations":{{{}}}}}"#,
+                        r#"{{"selector":{},"selector_ast":{},"pseudo":"{:?}","specificity":{},"layer":{},"layer_rank":{},"media":{},"scope":{},"scope_limit":{},"scopes":{},"compiled":{},"compiled_important":{},"declarations":{{{}}}}}"#,
                         dbg_json_escape(&rule.original_selector),
+                        dbg_json_escape(&selector_ast),
                         rule.pseudo_element,
                         rule.specificity,
                         dbg_json_escape(&rule.layer),
                         rule.layer_rank,
                         dbg_json_escape(&rule.media_condition),
+                        dbg_json_escape(&scope_selector),
+                        dbg_json_escape(&scope_limit_selector),
+                        dbg_json_escape(&scopes),
+                        rule.compiled_decls.len(),
+                        rule.compiled_important.len(),
                         decls.join(",")
                     ));
                 }
@@ -6956,6 +7285,62 @@ fn dispatch_headless_cmd(
                 dbg_json_escape(&query),
                 matches.len(),
                 matches.join(",")
+            )
+        }
+        "match-debug" => match dbg_json_str(line, "selector") {
+            Some(sel) => {
+                let mut parts = Vec::new();
+                let limit = dbg_json_num(line, "limit").unwrap_or(10.0).max(1.0) as usize;
+                Document::walk_all(&doc.root, &mut |node| {
+                    if parts.len() >= limit {
+                        return;
+                    }
+                    if dbg_matches_query(doc, node, &sel) {
+                        parts.push(dbg_match_report_json(doc, node));
+                    }
+                });
+                format!(
+                    r#"{{"ok":true,"count":{},"elements":[{}]}}"#,
+                    parts.len(),
+                    parts.join(",")
+                )
+            }
+            None => r#"{"ok":false,"error":"match-debug needs selector"}"#.to_string(),
+        },
+        "node-id-stats" => {
+            let mut total = 0usize;
+            let mut zero = 0usize;
+            let mut ids = std::collections::HashMap::<u32, usize>::new();
+            Document::walk_all(&doc.root, &mut |node| {
+                total += 1;
+                if node.node_id == 0 {
+                    zero += 1;
+                } else {
+                    *ids.entry(node.node_id).or_insert(0) += 1;
+                }
+            });
+            let mut duplicates = ids
+                .into_iter()
+                .filter(|(_, count)| *count > 1)
+                .collect::<Vec<_>>();
+            duplicates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let duplicate_extras = duplicates
+                .iter()
+                .map(|(_, count)| count.saturating_sub(1))
+                .sum::<usize>();
+            let dup_json = duplicates
+                .iter()
+                .take(20)
+                .map(|(id, count)| format!(r#"{{"id":{},"count":{}}}"#, id, count))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                r#"{{"ok":true,"total":{},"zero":{},"unique":{},"duplicate_ids":{},"duplicates":[{}]}}"#,
+                total,
+                zero,
+                total.saturating_sub(zero).saturating_sub(duplicate_extras),
+                duplicates.len(),
+                dup_json
             )
         }
         "keyframes" => {

@@ -88,7 +88,7 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 ### Finding & Querying
 | Command | Example |
 |---------|---------|
-| `find` | `{"cmd":"find","selector":"h1"}` |
+| `find` | `{"cmd":"find","selector":"h1"}` — returns `node_id` plus geometry so follow-up commands can target the same node |
 | `text` | `{"cmd":"text","selector":"h1"}` |
 | `attr` | `{"cmd":"attr","selector":"a","name":"href"}` |
 | `html` | `{"cmd":"html","selector":"main"}` — serialized HTML for a matched element |
@@ -104,18 +104,22 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 | `inspect` | `{"cmd":"inspect","selector":".sidebar"}` |
 | `inspect-node` | `{"cmd":"inspect-node","nid":42}` — by node_id; image nodes include decoded `image` metadata (`src`, natural width/height, byte count) when available |
 | `deep` | `{"cmd":"deep","selector":"td"}` — full dump |
-| `computed` | `{"cmd":"computed","selector":"h1"}` — includes box geometry, display/flex fields, `direction`, `writing_mode`, resolved padding/margins |
+| `computed` | `{"cmd":"computed","selector":"h1"}` — includes `node_id`, box geometry, display/flex fields, `direction`, `writing_mode`, resolved padding/margins |
 | `css` | `{"cmd":"css","selector":"td","props":"display,width"}` |
 | `resolve-css` | `{"cmd":"resolve-css","value":"var(--brand)"}` — resolve CSS variable references against the active stylesheet |
 | `rules` | `{"cmd":"rules","selector":"h1"}` — matched CSS rules |
 | `inspect-mode` | `{"cmd":"inspect-mode","on":"true"}` — recascade with matched-rule capture enabled for scripted `rules` inspection; GUI mode preserves the pre-panel page viewport so responsive media queries do not change while the inspector opens |
 | `rule-search` | `{"cmd":"rule-search","query":"lg\\:flex","limit":10}` — search loaded stylesheet selectors while debugging cascade misses |
+| `style-debug` | `{"cmd":"style-debug","selector":".box","query":"box"}` — returns `node_id`, selector-index candidates, and filtered candidates for cascade debugging |
+| `match-debug` | `{"cmd":"match-debug","selector":".box","limit":3}` — runs the real cascade matcher against live nodes and reports candidate/matched rule indices and selectors |
+| `node-id-stats` | `{"cmd":"node-id-stats"}` — counts duplicate `node_id` values in the current DOM/render tree |
 | `keyframes` | `{"cmd":"keyframes","query":"ticker","limit":10}` — inspect parsed `@keyframes` stops and properties for animation debugging |
 | `lines` | `{"cmd":"lines","selector":"p"}` — line-cache geometry for matched elements, including bidi visual segments (`x`, `w`, `level`) for RTL/LTR paint debugging |
 | `paint-dump` | `{"cmd":"paint-dump","x":0,"y":0,"w":400,"h":200,"limit":80}` — display-list commands in a viewport rectangle; text entries include font metrics and decoration flags, fill rectangles include color/radius, borders include per-side widths/colors/styles, and CSS mask entries include mask image dimensions |
 | `display-list-stats` | `{"cmd":"display-list-stats"}` — command counts for the current viewport paint-band display list, including text, image, clip, transform, layer, and mask commands plus `paint_top`/`paint_bottom` |
 | `image-states` | `{"cmd":"image-states","limit":80}` — DOM image/background/mask state, including source URLs, `srcset`, node IDs, element/background/mask decoded state, natural sizes, byte counts, layout rects, pending-channel/in-flight status, and load errors |
 | `resource-states` | `{"cmd":"resource-states"}` — loading flag plus pending CSS/image/font resource state, stylesheet counts, and document height |
+| `memory-stats` | `{"cmd":"memory-stats"}` — browser-owned memory accounting plus OS process RSS/VSZ; includes retained viewport/content surfaces, tile surfaces, display-list command count with inline/heap/text/image/vector byte estimates, raw resource cache, parsed CSS cache, decoded image cache, DOM node/image/style counts, estimated DOM/layout/computed-style/line-cache/matched-rule/stylesheet bytes, and unique decoded DOM image buffers |
 | `animated-images` | `{"cmd":"animated-images"}` — list animated image nodes, frame counts, layout rects, clip band, and whether the engine currently considers them visible |
 | `animations` | `{"cmd":"animations"}` — list active CSS keyframe animations, their target node IDs, duration, iteration count, and animated property names |
 | `svg-metrics` | `{"cmd":"svg-metrics"}` — counts parsed SVG documents plus unsupported native SVG elements/attributes seen on the current page |

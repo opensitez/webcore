@@ -107,6 +107,7 @@
     user-select: none;
   }
   .label-item:hover { background: #e8e8e8; border-radius: 6px; margin: 0 6px; padding: 0 12px; }
+  .label-item.active { background: #e8f0fe; border-radius: 6px; margin: 0 6px; padding: 0 12px; color: #0078d4; font-weight: 600; }
   .label-dot {
     width: 10px;
     height: 10px;
@@ -425,6 +426,71 @@
     border-bottom: 1px solid #ebebeb;
   }
   .email-body tr:nth-child(odd) td { background: #fafafa; }
+
+  .dark body { background: #111827; color: #e5e7eb; }
+  .dark .sidebar,
+  .dark .toolbar,
+  .dark .preview-bar {
+    background: #111827;
+    border-color: #263244;
+  }
+  .dark .center-col,
+  .dark .right-col,
+  .dark .email-list,
+  .dark .preview-pane {
+    background: #0f172a;
+    border-color: #263244;
+    color: #e5e7eb;
+  }
+  .dark .sidebar-item,
+  .dark .label-item,
+  .dark .btn {
+    color: #d1d5db;
+  }
+  .dark .sidebar-item:hover,
+  .dark .label-item:hover,
+  .dark .btn:hover,
+  .dark .email-item:hover {
+    background: #1f2937;
+  }
+  .dark .sidebar-item.active,
+  .dark .email-item.selected {
+    background: #1d4ed8;
+    color: #ffffff;
+  }
+  .dark .label-item.active {
+    background: #1e3a8a;
+    color: #bfdbfe;
+  }
+  .dark .btn-outlined {
+    border-color: #4b5563;
+  }
+  .dark .email-sender,
+  .dark .email-subject,
+  .dark .email-subject-title,
+  .dark .email-body {
+    color: #f3f4f6;
+  }
+  .dark .email-date,
+  .dark .email-preview,
+  .dark .email-meta {
+    color: #9ca3af;
+  }
+  .dark .email-header,
+  .dark .email-divider,
+  .dark .email-body td {
+    border-color: #263244;
+  }
+  .dark .email-divider {
+    background: #263244;
+  }
+  .dark .email-body tr:nth-child(odd) td,
+  .dark .email-body code {
+    background: #1f2937;
+  }
+  .dark .email-body blockquote {
+    border-left-color: #64748b;
+  }
 
   /* Scrollbar styling */
   ::-webkit-scrollbar { width: 6px; }

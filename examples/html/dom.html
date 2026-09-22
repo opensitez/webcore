@@ -36,6 +36,7 @@
     }
     .tb-btn:hover { background: #e2e8f0; }
     .tb-toggle { background: #e0e7ff; color: #4338ca; border-color: #a5b4fc; }
+    .tb-active { background: #4338ca; color: #ffffff; border-color: #312e81; }
     .tb-label  { font-size: 12px; color: #64748b; }
     .tb-slider { width: 90px; }
 
@@ -197,7 +198,7 @@
   <button class="tb-btn">&#128465; Feed</button>
   <span style="flex: 1;"></span>
   <span class="tb-label">Speed:</span>
-  <input type="range" class="tb-slider" min="200" max="3000" value="1000" title="Update interval (ms)">
+  <input id="speed-slider" type="range" class="tb-slider" min="200" max="3000" value="1000" title="Update interval (ms)">
 </div>
 
 <!-- ══════════════════════════════════════════

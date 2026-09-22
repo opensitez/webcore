@@ -1,0 +1,776 @@
+<body style="background-color: #fffdea;" text="#2c3e50">
+<style>
+  * { box-sizing: border-box; }  .highlight { background-color: #ffffcc; color: #333; padding: 4px; }  .important { font-weight: bold; color: darkred; }  p.note { margin-left: 20px; padding: 8px; background-color: #f0f0ff; border: 1px solid #ccccff; }  #greeting { font-size: 18pt; color: navy; font-family: Georgia, serif; }  .email-table th { background-color: #2c3e50; color: white; padding: 10px; }  .email-table td { padding: 8px; border: 1px solid #ddd; }  .email-table .alt-row { background-color: #f9f9f9; }  .email-table .total-row { font-weight: bold; background-color: #ecf0f1; }  .serif { font-family: Times New Roman, Times, serif; }  .mono { font-family: Courier New, Courier, monospace; }  .sans { font-family: Arial, Helvetica, sans-serif; }  .handwriting { font-family: Comic Sans MS, cursive; font-size: 14pt; color: #555; }  .fancy-heading { font-size: 22pt; color: #2c3e50; letter-spacing: 2px; text-transform: uppercase; }  .badge { background-color: #e74c3c; color: white; padding: 2px 6px; font-size: 9pt; font-weight: bold; }  .muted { color: #999; font-size: 10pt; font-style: italic; }  .menu-item { padding: 10px 16px; font-size: 11pt; border-bottom: 1px solid #e0e0e0; }  .menu-header { background-color: #2c3e50; color: white; font-weight: bold; font-size: 12pt; padding: 12px 16px; }  .menu-active { background-color: #3498db; color: white; font-weight: bold; padding: 10px 16px; font-size: 11pt; }</style>
+<h1 style="color: #2c3e50; font-family: Georgia, serif; margin-top: 44px;">
+HTML Editor Feature Showcase</h1>
+<p id="greeting">
+Hello World!</p>
+<p class="muted">
+A comprehensive demo of all supported HTML and CSS features.</p>
+<hr>
+<h2>
+Links</h2>
+<p>
+Visit the <a href="https://www.opensite.com/vybe">
+Vybe homepage</a>
+ for documentation. See also: <a href="https://opensite.com/vybe/docs">
+API Reference</a>
+, <a href="https://github.com/opensitez/webcore">
+GitHub repo</a>
+, and <a href="https://github.com/opensitez/vybe/">
+the wiki</a>
+.</p>
+<p class="muted">
+Links fire events to the application. Navigation is disabled by default.</p>
+<hr>
+<h2>
+SVG Support</h2>
+<div style="display: flex; gap: 16px;">
+  <div style="padding: 8px; background-color: #fafafa; border: 1px solid #eee; border-radius: 8px;">
+    <svg width="180" height="180" viewBox="0 0 180 180">
+      <circle cx="90" cy="90" r="85" fill="#ffeaa7"/>
+      <circle cx="90" cy="90" r="80" fill="#fdcb6e" stroke="#f39c12" stroke-width="2"/>
+      <circle cx="65" cy="72" r="10" fill="#2d3436"/>
+      <circle cx="115" cy="72" r="10" fill="#2d3436"/>
+      <circle cx="68" cy="69" r="3" fill="white"/>
+      <circle cx="118" cy="69" r="3" fill="white"/>
+      <path d="M60 115 Q90 145 120 115" stroke="#2d3436" stroke-width="3" fill="none" stroke-linecap="round"/>
+    </svg>
+  </div>
+  <div style="padding: 8px; background-color: #fafafa; border: 1px solid #eee; border-radius: 8px;">
+    <svg width="200" height="180" viewBox="0 0 200 160">
+      <rect x="0" y="60" width="200" height="100" rx="8" fill="#74b9ff"/>
+      <rect x="10" y="70" width="180" height="80" rx="4" fill="#0984e3"/>
+      <polygon points="100,5 130,55 70,55" fill="#e17055"/>
+      <polygon points="100,15 122,50 78,50" fill="#fab1a0"/>
+      <rect x="85" y="95" width="30" height="45" rx="2" fill="#dfe6e9"/>
+      <rect x="55" y="80" width="20" height="20" rx="2" fill="#dfe6e9"/>
+      <rect x="125" y="80" width="20" height="20" rx="2" fill="#dfe6e9"/>
+      <circle cx="160" cy="30" r="18" fill="#ffeaa7"/>
+      <circle cx="30" cy="50" r="14" fill="white" opacity="0.6"/>
+      <circle cx="50" cy="40" r="10" fill="white" opacity="0.4"/>
+    </svg>
+  </div>
+  <div style="padding: 8px; background-color: #fafafa; border: 1px solid #eee; border-radius: 8px;">
+    <svg width="160" height="180" viewBox="0 0 160 160">
+      <rect x="10" y="130" width="140" height="20" rx="10" fill="#b2bec3"/>
+      <ellipse cx="80" cy="120" rx="35" ry="12" fill="#636e72"/>
+      <rect x="55" y="30" width="50" height="90" rx="6" fill="#6c5ce7"/>
+      <rect x="60" y="45" width="40" height="55" rx="3" fill="#a29bfe"/>
+      <circle cx="80" cy="110" r="5" fill="#2d3436"/>
+      <rect x="65" y="35" width="30" height="4" rx="2" fill="#a29bfe"/>
+      <line x1="72" y1="55" x2="72" y2="90" stroke="#dfe6e9" stroke-width="1"/>
+      <line x1="80" y1="55" x2="80" y2="90" stroke="#dfe6e9" stroke-width="1"/>
+      <line x1="88" y1="55" x2="88" y2="90" stroke="#dfe6e9" stroke-width="1"/>
+      <line x1="60" y1="65" x2="100" y2="65" stroke="#dfe6e9" stroke-width="1"/>
+      <line x1="60" y1="75" x2="100" y2="75" stroke="#dfe6e9" stroke-width="1"/>
+      <line x1="60" y1="85" x2="100" y2="85" stroke="#dfe6e9" stroke-width="1"/>
+    </svg>
+  </div>
+</div>
+<hr>
+<h2>
+Fonts: Attribute vs CSS</h2>
+<p>
+<font face="Georgia" size="4" color="#8e44ad">
+Font via &lt;font&gt; attribute: Georgia, size 4, purple</font>
+</p>
+<p style="font-family: Georgia, serif; font-size: 14pt; color: #8e44ad;">
+Font via CSS style: Georgia, 14pt, purple</p>
+<p class="serif">
+Serif font via CSS class: <b>
+Times New Roman</b>
+</p>
+<p class="sans">
+Sans-serif font via CSS class: <b>
+Arial / Helvetica</b>
+</p>
+<p class="mono">
+Monospace font via CSS class: <code>
+Courier New</code>
+</p>
+<p class="handwriting">
+Handwriting-style via CSS class (Comic Sans MS)</p>
+<hr>
+<h2>
+Inline Formatting</h2>
+<p>
+Normal, <b>
+bold</b>
+, <i>
+italic</i>
+, <u>
+underline</u>
+, <s>
+strikethrough</s>
+, <b>
+<i>
+bold italic</i>
+</b>
+, <b>
+<u>
+bold underline</u>
+</b>
+, <b>
+<i>
+<u>
+all three</u>
+</i>
+</b>
+.</p>
+<p>
+<small>
+small text</small>
+, <code>
+inline code</code>
+, <sup>
+super</sup>
+script, <sub>
+sub</sub>
+script.</p>
+<p>
+Water: H<sub>
+2</sub>
+O &nbsp;&nbsp; Einstein: E=mc<sup>
+2</sup>
+</p>
+<p>
+Colors: <span style="color: red;">
+red</span>
+, <span style="color: #e67e22;">
+orange</span>
+, <span style="color: green;">
+green</span>
+, <span style="color: blue;">
+blue</span>
+, <span style="color: #8e44ad;">
+purple</span>
+.</p>
+<p>
+Backgrounds: <span style="background-color: #ffcccc;">
+red bg</span>
+, <span style="background-color: #ccffcc;">
+green bg</span>
+, <span style="background-color: #ccccff;">
+blue bg</span>
+, <span class="badge">
+badge</span>
+.</p>
+<hr>
+<h2>
+CSS Class &amp; ID Selectors</h2>
+<p class="note">
+This paragraph uses p.note class: left margin, padding, light blue background, and border.</p>
+<div class="highlight">
+Highlighted block via .highlight CSS class with padding.</div>
+<span class="important">
+Important text via .important class.</span>
+<div style="display: none;">
+This should NOT appear (display:none).</div>
+<hr>
+<h2>
+Text Effects</h2>
+<p style="text-transform: uppercase;">
+this text should be all uppercase</p>
+<p style="text-transform: capitalize;">
+this text should be capitalized</p>
+<p style="letter-spacing: 4px;">
+Wide letter spacing (4px)</p>
+<p style="text-indent: 40px;">
+This paragraph has a 40px text indent. Lorem ipsum dolor sit amet.</p>
+<p style="margin: 8px 24px; padding: 8px; background-color: #e8ffe8; border-left: 4px solid #27ae60;">
+Block with margin, padding, green background, and left accent border.</p>
+<p class="fancy-heading">
+Fancy Heading Class</p>
+<hr>
+<h2>
+Links</h2>
+<p>
+Visit <a href="https://example.com">
+Example Website</a>
+ or send <a href="mailto:user@example.com">
+an email</a>
+.</p>
+<hr>
+<h2>
+Lists</h2>
+<ul>
+  <li>
+Disc bullet (default)</li>
+  <li>
+Second item</li>
+  <li>
+Third item</li>
+</ul>
+<ol>
+  <li>
+Ordered item 1</li>
+  <li>
+Ordered item 2</li>
+  <li>
+Ordered item 3</li>
+</ol>
+<hr>
+<h2>
+Block Elements</h2>
+<blockquote>
+First-level quote.<blockquote>
+Nested second-level quote.</blockquote>
+</blockquote>
+<pre>
+Preformatted   code    with   preserved   spacing
+    indented line
+        doubly indented</pre>
+<hr>
+<h2>
+Text Alignment</h2>
+<p style="text-align: left;">
+Left-aligned text (default).</p>
+<p style="text-align: center;">
+Center-aligned text.</p>
+<p style="text-align: right;">
+Right-aligned text.</p>
+<p style="text-align: justify;">
+Justified text. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>
+<hr>
+<h2>
+Styled Table (CSS Classes)</h2>
+<table class="email-table" border="1" cellpadding="6" cellspacing="0" width="100%">
+  <tr>
+<th>
+Item</th>
+<th>
+Qty</th>
+<th>
+Price</th>
+</tr>
+  <tr>
+<td>
+Widget Pro</td>
+<td style="text-align: center;">
+3</td>
+<td style="text-align: right;">
+$29.99</td>
+</tr>
+  <tr class="alt-row">
+<td>
+Gadget Plus</td>
+<td style="text-align: center;">
+1</td>
+<td style="text-align: right;">
+$49.99</td>
+</tr>
+  <tr>
+<td>
+Cable Kit</td>
+<td style="text-align: center;">
+5</td>
+<td style="text-align: right;">
+$9.99</td>
+</tr>
+  <tr class="total-row">
+<td colspan="2" style="text-align: right;">
+Total:</td>
+<td style="text-align: right;">
+$189.91</td>
+</tr>
+</table>
+<hr>
+<h2>
+Classic Table (HTML Attributes)</h2>
+<table border="1" cellpadding="6" cellspacing="0" bgcolor="#fafafa" width="100%">
+  <tr bgcolor="#34495e">
+    <th colspan="3" style="color: white;">
+Project Status Report</th>
+  </tr>
+  <tr>
+    <td rowspan="2" bgcolor="#eaf2f8" align="center" valign="middle" width="120">
+<b>
+Q1 2026</b>
+</td>
+    <td bgcolor="#d5f5e3">
+<font color="#27ae60">
+Feature A — Complete</font>
+</td>
+    <td align="right" style="font-size: 10pt; color: #999;">
+Jan 15</td>
+  </tr>
+  <tr>
+    <td bgcolor="#fdebd0">
+<font color="#e67e22">
+Feature B — In Progress</font>
+</td>
+    <td align="right" style="font-size: 10pt; color: #999;">
+Mar 01</td>
+  </tr>
+  <tr>
+    <td bgcolor="#eaf2f8" align="center">
+<b>
+Q2 2026</b>
+</td>
+    <td bgcolor="#fadbd8">
+<font color="#e74c3c">
+Feature C — Planned</font>
+</td>
+    <td align="right" style="font-size: 10pt; color: #999;">
+TBD</td>
+  </tr>
+</table>
+<hr>
+<h2>
+CSS Positioning</h2>
+<div style="width: 50%; float: left; padding: 8px; background-color: #ebf5fb; border: 1px solid #3498db;">
+  Left-floated block at 50% width.</div>
+<div style="width: 50%; float: right; padding: 8px; background-color: #fdedec; border: 1px solid #e74c3c;">
+  Right-floated block at 50% width.</div>
+<div style="clear: both;">
+</div>
+<div style="position: relative; top: 4px; left: 20px; background-color: #f9e79f; padding: 4px; display: inline-block;">
+  Relatively positioned, nudged right &amp; down.</div>
+<hr>
+<h2>
+Flexbox Layout</h2>
+<p style="color: #666; font-size: 10pt;">
+Horizontal flex with 12px gap:</p>
+<div style="display: flex; gap: 12px;">
+  <div style="background-color: #eaf2f8; padding: 12px; border: 1px solid #3498db;">
+    <b>
+Card 1</b>
+<br>
+Flex items arranged horizontally with gap.</div>
+  <div style="background-color: #fef9e7; padding: 12px; border: 1px solid #f1c40f;">
+    <b>
+Card 2</b>
+<br>
+Each card is a separate editable region.</div>
+  <div style="background-color: #fdedec; padding: 12px; border: 1px solid #e74c3c;">
+    <b>
+Card 3</b>
+<br>
+Background, border, padding, font.</div>
+</div>
+<p style="color: #666; font-size: 10pt;">
+No gap, flush cells:</p>
+<div style="display: flex;">
+  <div style="background-color: #2c3e50; color: white; padding: 10px; font-weight: bold;">
+Nav</div>
+  <div style="background-color: #ecf0f1; padding: 10px;">
+Main content area with no gaps</div>
+  <div style="background-color: #bdc3c7; padding: 10px;">
+Sidebar</div>
+</div>
+<p style="color: #666; font-size: 10pt;">
+Vertical column flex:</p>
+<div style="display: flex; flex-direction: column; gap: 4px;">
+  <div style="padding: 8px; background-color: #d5f5e3; border-left: 4px solid #27ae60;">
+Vertical flex — Row 1</div>
+  <div style="padding: 8px; background-color: #d6eaf8; border-left: 4px solid #2980b9;">
+Vertical flex — Row 2</div>
+  <div style="padding: 8px; background-color: #fadbd8; border-left: 4px solid #e74c3c;">
+Vertical flex — Row 3</div>
+</div>
+<p style="color: #666; font-size: 10pt;">
+Flex wrap:</p>
+<div style="display: flex; flex-wrap: wrap; gap: 8px;">
+  <div style="background-color: #eaf2f8; padding: 10px; border: 1px solid #3498db; width: 180px;">
+Wrap 1</div>
+  <div style="background-color: #fef9e7; padding: 10px; border: 1px solid #f1c40f; width: 180px;">
+Wrap 2</div>
+  <div style="background-color: #fdedec; padding: 10px; border: 1px solid #e74c3c; width: 180px;">
+Wrap 3</div>
+  <div style="background-color: #e8daef; padding: 10px; border: 1px solid #8e44ad; width: 180px;">
+Wrap 4</div>
+  <div style="background-color: #d5f5e3; padding: 10px; border: 1px solid #27ae60; width: 180px;">
+Wrap 5</div>
+  <div style="background-color: #fdebd0; padding: 10px; border: 1px solid #e67e22; width: 180px;">
+Wrap 6</div>
+</div>
+<hr>
+<h2>
+CSS Grid Layout</h2>
+<p style="color: #666; font-size: 10pt;">
+3-column grid with gap:</p>
+<div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;">
+  <div style="background-color: #eaf2f8; padding: 10px; border: 1px solid #aaa;">
+Grid Cell 1</div>
+  <div style="background-color: #fef9e7; padding: 10px; border: 1px solid #aaa;">
+Grid Cell 2</div>
+  <div style="background-color: #fdedec; padding: 10px; border: 1px solid #aaa;">
+Grid Cell 3</div>
+  <div style="background-color: #e8daef; padding: 10px; border: 1px solid #aaa;">
+Grid Cell 4</div>
+  <div style="background-color: #d5f5e3; padding: 10px; border: 1px solid #aaa;">
+Grid Cell 5</div>
+  <div style="background-color: #fdebd0; padding: 10px; border: 1px solid #aaa;">
+Grid Cell 6</div>
+</div>
+<p style="color: #666; font-size: 10pt;">
+No-gap grid (flush tiles):</p>
+<div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr;">
+  <div style="background-color: #e74c3c; color: white; padding: 8px;">
+Red</div>
+  <div style="background-color: #3498db; color: white; padding: 8px;">
+Blue</div>
+  <div style="background-color: #2ecc71; color: white; padding: 8px;">
+Green</div>
+  <div style="background-color: #f39c12; color: white; padding: 8px;">
+Orange</div>
+</div>
+<hr>
+<h3>
+Heading 3</h3>
+<h4>
+Heading 4</h4>
+<h5>
+Heading 5</h5>
+<h6>
+Heading 6</h6>
+<hr>
+<h2>
+Code &amp; Preformatted Text</h2>
+<p>
+Inline code: Use <code>
+git commit -m "message"</code>
+ to commit your changes.</p>
+<pre>
+
+fn main() {
+    println!("Hello, world!");
+    let x = 42;
+    if x >
+ 0 {
+        println!("positive");
+    }
+}
+</pre>
+<hr>
+<h2>
+Superscript &amp; Subscript</h2>
+<p>
+The equation E = mc<sup>
+2</sup>
+ changed physics forever.</p>
+<p>
+Water is H<sub>
+2</sub>
+O. Carbon dioxide is CO<sub>
+2</sub>
+.</p>
+<hr>
+<h2>
+CSS Text Properties</h2>
+<p style="font-style: italic;">
+CSS font-style: italic.</p>
+<p style="text-decoration: underline;">
+CSS text-decoration: underline.</p>
+<p style="text-decoration: line-through;">
+CSS text-decoration: line-through.</p>
+<p style="line-height: 32px;">
+Line-height: 32px. Extra spacing between lines visible when text wraps to multiple lines.</p>
+<hr>
+<h2>
+Text Transform &amp; Spacing</h2>
+<p style="text-transform: uppercase;">
+This text is transformed to uppercase via CSS.</p>
+<p style="text-transform: capitalize;">
+this text has each word capitalized via css.</p>
+<p style="letter-spacing: 5px;">
+This paragraph has 5px letter-spacing.</p>
+<hr>
+<h2>
+Opacity</h2>
+<p style="opacity: 1.0;">
+Full opacity (1.0) — normal text.</p>
+<p style="opacity: 0.6;">
+Reduced opacity (0.6) — partially transparent.</p>
+<p style="opacity: 0.3;">
+Low opacity (0.3) — very faded.</p>
+<hr>
+<h2>Images</h2>
+<p>Inline image:</p>
+<p><img src="test" width="80" height="60" style="display:block;"></p>
+<p>followed by text.</p>
+<p><img src="test" width="200" height="120" style="border: 2px solid #333; display:block;"></p>
+<hr>
+<h2>
+Percentage Widths</h2>
+<div style="display: flex; gap: 8px;">
+  <div style="width: 30%; padding: 10px; background-color: #eaf2f8; border: 1px solid #3498db;">
+30% wide</div>
+  <div style="width: 50%; padding: 10px; background-color: #fef9e7; border: 1px solid #f1c40f;">
+50% wide</div>
+  <div style="width: 20%; padding: 10px; background-color: #fdedec; border: 1px solid #e74c3c;">
+20% wide</div>
+</div>
+<h2>
+RTL &amp; Bidirectional Text</h2>
+<p dir="rtl" style="text-align: right; font-size: 14pt;">
+مرحبا بالعالم — Hello World!</p>
+<p dir="rtl" style="text-align: right;">
+هذا نص باللغة العربية مع <b>
+كلمات عريضة</b>
+ و<i>
+مائلة</i>
+.</p>
+<p dir="rtl" style="text-align: right; font-family: serif; color: #8e44ad;">
+اللغة العربية جميلة — Arabic is beautiful</p>
+<div style="padding: 10px; background-color: #f0f0ff; border: 1px solid #ccccff; direction: rtl; text-align: right;">
+  <p style="font-size: 16pt; color: #2c3e50;">
+عنوان بالعربية</p>
+  <p>
+فقرة نصية تحتوي على <span style="color: red;">
+نص أحمر</span>
+ و<span style="background-color: #ffffcc;">
+خلفية صفراء</span>
+.</p>
+</div>
+<hr>
+<h2>
+Hero with Overlaid Caption</h2>
+<div style="position: relative; width: 100%; height: 220px; background-color: #2c3e50; border: 1px solid #1a252f;">
+  <img src="hero" width="680" height="220">
+  <div style="position: absolute; bottom: 0px; left: 0px; width: 100%; padding: 16px 20px; background-color: rgba(0,0,0,0.6);">
+    <p style="color: white; font-size: 18pt; font-weight: bold; margin: 0;">
+Breaking: Layout Engine Now Supports Positioning</p>
+    <p style="color: #ccc; font-size: 10pt; margin: 4px 0 0 0;">
+By Staff Reporter &mdash; March 5, 2026</p>
+  </div>
+  <div style="position: absolute; top: 10px; right: 10px; padding: 4px 10px; background-color: #e74c3c; color: white; font-weight: bold; font-size: 9pt;">
+    LIVE</div>
+  <div style="position: absolute; top: 10px; left: 10px; padding: 4px 10px; background-color: #f39c12; color: white; font-weight: bold; font-size: 9pt;">
+    FEATURED</div>
+</div>
+<hr>
+<h2>
+Multi-Column Article Layout</h2>
+<div style="display: flex; gap: 16px;">
+  <div style="width: 65%; position: relative;">
+    <div style="padding: 16px; background-color: #fff; border: 1px solid #ddd;">
+      <h3 style="color: #2c3e50; margin: 0 0 8px 0;">
+The Art of CSS Positioning</h3>
+      <p style="color: #666; font-size: 10pt;">
+Published: March 5, 2026 &bull; 5 min read</p>
+      <p>
+CSS positioning is one of the most powerful tools for creating complex layouts. With <code>
+position: relative</code>
+, <code>
+absolute</code>
+, and <code>
+fixed</code>
+, you can place elements precisely where you need them.</p>
+      <p>
+When an element is set to <code>
+position: absolute</code>
+, it is removed from the normal document flow and positioned relative to its nearest positioned ancestor.</p>
+      <div style="position: relative; padding: 12px; margin: 12px 0; background-color: #f8f9fa; border-left: 4px solid #3498db;">
+        <i>
+"Absolute positioning is the secret weapon of every layout engineer."</i>
+        <div style="position: absolute; top: -8px; right: 10px; padding: 2px 8px; background-color: #3498db; color: white; font-size: 8pt; font-weight: bold;">
+          QUOTE</div>
+      </div>
+      <p>
+Meanwhile, <code>
+position: fixed</code>
+ elements stay in place relative to the viewport, even as the user scrolls. This is commonly used for navigation bars, floating action buttons, and notification badges.</p>
+    </div>
+  </div>
+  <div style="width: 35%;">
+    <div style="position: relative; padding: 16px; background-color: #eaf2f8; border: 1px solid #3498db; margin-bottom: 12px;">
+      <div style="position: absolute; top: -1px; right: -1px; padding: 4px 10px; background-color: #e74c3c; color: white; font-size: 8pt; font-weight: bold;">
+        NEW</div>
+      <b style="color: #2c3e50;">
+Related Article</b>
+      <p style="font-size: 10pt; color: #555;">
+Understanding the CSS Box Model: margins, borders, padding and content areas explained.</p>
+    </div>
+    <div style="position: relative; padding: 16px; background-color: #fef9e7; border: 1px solid #f1c40f;">
+      <div style="position: absolute; top: 8px; left: 8px; width: 24px; height: 24px; line-height: 24px; background-color: #f1c40f; color: white; text-align: center; font-weight: bold; font-size: 14pt;">
+        !</div>
+      <div style="margin-left: 36px;">
+        <b style="color: #856404;">
+Pro Tip</b>
+        <p style="font-size: 10pt; color: #666;">
+Always set <code>
+position: relative</code>
+ on the parent container when using absolute positioning on children.</p>
+      </div>
+    </div>
+  </div>
+</div>
+<hr>
+<h2>
+Product Cards with Overlays</h2>
+<div style="display: flex; gap: 12px;">
+  <div style="position: relative; width: 33%; background-color: #fff; border: 1px solid #ddd; padding-bottom: 40px;">
+    <img src="product1" width="220" height="140">
+    <div style="padding: 10px;">
+      <b>
+Widget Pro</b>
+      <p style="font-size: 10pt; color: #666;">
+The ultimate widget for professionals.</p>
+    </div>
+    <div style="position: absolute; top: 8px; left: 8px; padding: 2px 8px; background-color: #27ae60; color: white; font-size: 9pt; font-weight: bold;">
+SALE</div>
+    <div style="position: absolute; bottom: 0px; left: 0px; width: 100%; padding: 8px; background-color: #2c3e50; color: white; text-align: center; font-weight: bold;">
+$29.99</div>
+  </div>
+  <div style="position: relative; width: 33%; background-color: #fff; border: 1px solid #ddd; padding-bottom: 40px;">
+    <img src="product2" width="220" height="140">
+    <div style="padding: 10px;">
+      <b>
+Gadget Plus</b>
+      <p style="font-size: 10pt; color: #666;">
+Next-gen gadget with premium features.</p>
+    </div>
+    <div style="position: absolute; top: 8px; left: 8px; padding: 2px 8px; background-color: #e74c3c; color: white; font-size: 9pt; font-weight: bold;">
+HOT</div>
+    <div style="position: absolute; bottom: 0px; left: 0px; width: 100%; padding: 8px; background-color: #2c3e50; color: white; text-align: center; font-weight: bold;">
+$49.99</div>
+  </div>
+  <div style="position: relative; width: 33%; background-color: #fff; border: 1px solid #ddd; padding-bottom: 40px;">
+    <img src="product3" width="220" height="140">
+    <div style="padding: 10px;">
+      <b>
+Cable Kit</b>
+      <p style="font-size: 10pt; color: #666;">
+Everything you need in one box.</p>
+    </div>
+    <div style="position: absolute; bottom: 0px; left: 0px; width: 100%; padding: 8px; background-color: #2c3e50; color: white; text-align: center; font-weight: bold;">
+$9.99</div>
+  </div>
+</div>
+<hr>
+<h2>
+Border Radius</h2>
+<div style="display: flex; gap: 16px;">
+  <div style="background-color: #3498db; color: white; padding: 20px; border-radius: 8px; font-weight: bold;">
+8px radius</div>
+  <div style="background-color: #e74c3c; color: white; padding: 20px; border-radius: 20px; font-weight: bold;">
+20px radius</div>
+  <div style="background-color: #27ae60; color: white; padding: 20px; border-radius: 50px; font-weight: bold;">
+50px pill</div>
+  <div style="background-color: #8e44ad; color: white; padding: 20px; border: 3px solid #6c3483; border-radius: 12px; font-weight: bold;">
+With border</div>
+</div>
+<hr>
+<h2>
+Box Shadow</h2>
+<div style="display: flex; gap: 24px;">
+  <div style="background-color: white; padding: 20px; border-radius: 8px; box-shadow: 2px 4px 8px rgba(0,0,0,0.3);">
+Soft shadow</div>
+  <div style="background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0px 8px 16px rgba(52,152,219,0.5);">
+Blue shadow</div>
+  <div style="background-color: #2c3e50; color: white; padding: 20px; border-radius: 12px; box-shadow: 4px 6px 12px rgba(0,0,0,0.5);">
+Dark card</div>
+  <div style="background-color: #fff3cd; padding: 20px; border-radius: 8px; border: 1px solid #ffc107; box-shadow: 0px 2px 6px rgba(255,193,7,0.4);">
+Warning card</div>
+</div>
+<hr>
+<h2>
+Text Shadow</h2>
+<p style="font-size: 24pt; font-weight: bold; color: #2c3e50; text-shadow: 2px 2px 4px rgba(0,0,0,0.3);">
+Text with drop shadow</p>
+<p style="font-size: 20pt; font-weight: bold; color: #e74c3c; text-shadow: 1px 1px 2px rgba(0,0,0,0.5);">
+Red heading with shadow</p>
+<p style="font-size: 18pt; font-weight: bold; color: white; background-color: #2c3e50; padding: 10px; text-shadow: 0px 0px 8px rgba(52,152,219,0.8);">
+Glow effect on dark background</p>
+<hr>
+<h2>
+Combined Effects — Cards</h2>
+<div style="display: flex; gap: 16px;">
+  <div style="width: 33%; background-color: white; border-radius: 12px; box-shadow: 0px 4px 12px rgba(0,0,0,0.15); padding: 16px;">
+    <p style="font-size: 14pt; font-weight: bold; color: #2c3e50; text-shadow: 1px 1px 2px rgba(0,0,0,0.1);">
+Modern Card</p>
+    <p style="font-size: 10pt; color: #666;">
+Rounded corners, soft shadow, and text shadow combined for a polished look.</p>
+  </div>
+  <div style="width: 33%; background-color: #667eea; border-radius: 12px; box-shadow: 0px 6px 20px rgba(102,126,234,0.4); padding: 16px;">
+    <p style="font-size: 14pt; font-weight: bold; color: white; text-shadow: 0px 1px 3px rgba(0,0,0,0.3);">
+Gradient Feel</p>
+    <p style="font-size: 10pt; color: #e0e0ff;">
+Purple card with colored shadow matching the background tone.</p>
+  </div>
+  <div style="width: 33%; background-color: #1a1a2e; border-radius: 12px; box-shadow: 0px 4px 16px rgba(0,0,0,0.5); padding: 16px;">
+    <p style="font-size: 14pt; font-weight: bold; color: #e94560; text-shadow: 0px 0px 6px rgba(233,69,96,0.6);">
+Dark Mode</p>
+    <p style="font-size: 10pt; color: #aaa;">
+Neon glow text on a dark card with deep shadow.</p>
+  </div>
+</div>
+<hr>
+<h2>
+Image with Effects</h2>
+<div style="display: flex; gap: 20px;">
+  <div style="padding: 4px; background-color: white; border-radius: 12px; box-shadow: 0px 4px 12px rgba(0,0,0,0.2);">
+    <img src="silicon" width="240" height="160">
+  </div>
+  <div>
+    <p style="font-size: 14pt; font-weight: bold; color: #2c3e50; text-shadow: 1px 1px 2px rgba(0,0,0,0.1);">
+Silicon Chip</p>
+    <p style="font-size: 10pt; color: #666;">
+Image displayed inside a rounded, shadowed card container.</p>
+    <div style="padding: 8px 12px; background-color: #d5f5e3; border-radius: 6px; border: 1px solid #27ae60; box-shadow: 0px 2px 4px rgba(39,174,96,0.2);">
+      <span style="color: #27ae60; font-weight: bold;">
+Status:</span>
+ Rendering complete</div>
+  </div>
+</div>
+<hr>
+<h2>
+CSS Gradients</h2>
+<div style="display: flex; gap: 12px;">
+  <div style="width: 50%; background: linear-gradient(to bottom, #667eea, #764ba2); padding: 20px; border-radius: 12px; min-height: 120px;">
+    <p style="color: white; font-weight: bold; font-size: 14pt; text-shadow: 0px 1px 3px rgba(0,0,0,0.3);">
+Linear Gradient</p>
+    <p style="color: #e0e0ff; font-size: 10pt;">
+Top-to-bottom: #667eea to #764ba2</p>
+  </div>
+  <div style="width: 50%; background: linear-gradient(to right, #f093fb, #f5576c); padding: 20px; border-radius: 12px; min-height: 120px;">
+    <p style="color: white; font-weight: bold; font-size: 14pt; text-shadow: 0px 1px 3px rgba(0,0,0,0.3);">
+Left to Right</p>
+    <p style="color: #ffe0e8; font-size: 10pt;">
+linear-gradient(to right, ...)</p>
+  </div>
+</div>
+<br>
+<div style="display: flex; gap: 12px;">
+  <div style="width: 33%; background: linear-gradient(135deg, #a18cd1, #fbc2eb); padding: 16px; border-radius: 8px;">
+    <p style="color: white; font-weight: bold; text-shadow: 0px 1px 2px rgba(0,0,0,0.2);">
+135deg</p>
+  </div>
+  <div style="width: 33%; background: linear-gradient(to bottom, #43e97b, #38f9d7); padding: 16px; border-radius: 8px;">
+    <p style="color: #1a3a2a; font-weight: bold;">
+Green Gradient</p>
+  </div>
+  <div style="width: 33%; background: linear-gradient(to bottom, #fa709a, #fee140); padding: 16px; border-radius: 8px;">
+    <p style="color: white; font-weight: bold; text-shadow: 0px 1px 2px rgba(0,0,0,0.2);">
+Sunset</p>
+  </div>
+</div>
+<br>
+<div style="background: radial-gradient(#667eea, #764ba2, #2c3e50); padding: 24px; border-radius: 12px; min-height: 140px;">
+  <p style="color: white; font-size: 16pt; font-weight: bold; text-align: center; text-shadow: 0px 2px 4px rgba(0,0,0,0.4);">
+Radial Gradient</p>
+  <p style="color: #ccc; font-size: 10pt; text-align: center;">
+radial-gradient(#667eea, #764ba2, #2c3e50)</p>
+</div>
+<hr>
+<h2>
+Position Fixed</h2>
+<p style="color: #666; font-size: 10pt;">
+The navigation bar below stays fixed at the bottom-right when scrolling:</p>
+<div style="position: fixed; top: 0px; left: 0px; width: 100%; padding: 8px 16px; background-color: #2c3e50; z-index: 100;">
+  <div style="display: flex;">
+    <a href="#top" style="display: block; color: white; text-decoration: none; font-weight: bold; font-size: 12pt; padding: 4px 12px;">
+webcore</a>
+    <a href="#home" style="display: block; color: #ecf0f1; text-decoration: none; padding: 4px 12px; text-align: center; hover-background-color: #e74c3c; hover-color: white;">
+Home</a>
+    <a href="#docs" style="display: block; color: #ecf0f1; text-decoration: none; padding: 4px 12px; text-align: center; hover-background-color: #e74c3c; hover-color: white;">
+Docs</a>
+    <a href="#examples" style="display: block; color: #ecf0f1; text-decoration: none; padding: 4px 12px; text-align: center; hover-background-color: #e74c3c; hover-color: white;">
+Examples</a>
+  </div>
+</div>
+<div style="position: fixed; bottom: 16px; right: 16px; width: 48px; height: 48px; background-color: #3498db; color: white; text-align: center; font-size: 24pt; font-weight: bold; z-index: 100;">
++</div>
+</body>

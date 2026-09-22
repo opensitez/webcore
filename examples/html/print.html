@@ -162,24 +162,27 @@
      TOOLBAR
      ══════════════════════════════════════════ -->
 <div id="toolbar">
-  <button class="tb-btn" title="Print document (Ctrl+P)" onclick="window.print()">Print...</button>
-  <button class="tb-btn" title="Quick preview with current settings">Print Preview</button>
-  <button class="tb-btn" title="Configure settings then preview">Preview (Settings)...</button>
+  <button id="btn-print" class="tb-btn" title="Print document (Ctrl+P)">Print...</button>
+  <button id="btn-preview" class="tb-btn" title="Quick preview with current settings">Print Preview</button>
+  <button id="btn-settings" class="tb-btn" title="Configure settings then preview">Preview (Settings)...</button>
 
   <div class="tb-sep"></div>
 
-  <label class="tb-checkbox-wrap">
+  <label id="lbl-header" class="tb-checkbox-wrap">
     <input type="checkbox" id="chk-header"> Header
   </label>
-  <label class="tb-checkbox-wrap">
+  <label id="lbl-footer" class="tb-checkbox-wrap">
     <input type="checkbox" id="chk-footer" checked> Footer
   </label>
 
   <div class="tb-sep"></div>
 
   <span class="tb-label">Scale:</span>
-  <input type="number" class="tb-spin" value="100" min="25" max="400" step="5" title="Print scale (100% = fit page width)">
+  <input id="scale-input" type="number" class="tb-spin" value="100" min="25" max="400" step="5" title="Print scale (100% = fit page width)">
   <span class="tb-label">%</span>
+</div>
+<div id="notice" style="background:#fff8dc;border-bottom:1px solid #e0c060;color:#6b4f00;padding:6px 10px;font-size:12px;">
+  Adjust header, footer, and scale to update the preview.
 </div>
 
 <!-- ══════════════════════════════════════════

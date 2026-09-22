@@ -12,8 +12,10 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::Window;
 
+use webcore::dom;
+use webcore::dom::events::ListenerOptions;
 use webcore::platform::Platform;
-use webcore::{Document, HtmlEventType, LayoutEngine, Renderer, load_html};
+use webcore::{Document, LayoutEngine, Renderer, load_html};
 
 const HTML: &str = include_str!("html/print.html");
 
@@ -45,11 +47,15 @@ impl ApplicationHandler for App {
         );
         let platform = Platform::new_windowed(window.clone());
         self.scale = platform.scale_factor();
+        self.renderer.set_scale(self.scale);
         self.width = platform.logical_width();
         self.height = platform.logical_height();
 
         let mut doc = load_html(HTML, self.width);
         doc.editor.read_only = true;
+        install_print_demo_handlers(&mut doc);
+        apply_print_demo_state(&mut doc);
+        LayoutEngine::new().layout(&mut doc, self.width);
         self.doc = Some(doc);
         self.window = Some(window);
         self.platform = Some(platform);
@@ -61,6 +67,22 @@ impl ApplicationHandler for App {
         _window_id: winit::window::WindowId,
         event: WindowEvent,
     ) {
+        let renderer_handled = match event {
+            WindowEvent::CursorMoved { .. }
+            | WindowEvent::MouseInput { .. }
+            | WindowEvent::KeyboardInput { .. }
+            | WindowEvent::ModifiersChanged(_) => {
+                self.renderer.handle_window_event(&event, self.doc.as_mut())
+            }
+            _ => false,
+        };
+        if renderer_handled {
+            if let Some(doc) = self.doc.as_mut() {
+                apply_print_demo_state(doc);
+                LayoutEngine::new().layout(doc, self.width);
+            }
+            self.request_redraw();
+        }
         let (_window, platform) = match (self.window.as_ref(), self.platform.as_mut()) {
             (Some(w), Some(p)) => (w, p),
             _ => return,
@@ -70,6 +92,7 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(size) => {
                 platform.resize(size.width, size.height);
                 self.scale = platform.scale_factor();
+                self.renderer.set_scale(self.scale);
                 self.width = platform.logical_width();
                 self.height = platform.logical_height();
                 if let Some(doc) = self.doc.as_mut() {
@@ -94,25 +117,16 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_x = position.x as f32;
                 self.mouse_y = position.y as f32;
-                let (mx, my, sc) = (self.mouse_x, self.mouse_y, self.scale);
-                if let Some(doc) = self.doc.as_mut() {
-                    let pt = (mx / sc, my / sc + doc.scroll_y);
-                    if doc.process_mouse_event(HtmlEventType::MouseMove, pt, 0) {
-                        self.request_redraw();
-                    }
-                }
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if state == ElementState::Pressed && button == MouseButton::Left {
-                    let (mx, my, sc) = (self.mouse_x, self.mouse_y, self.scale);
-                    if let Some(doc) = self.doc.as_mut() {
-                        let pt = (mx / sc, my / sc + doc.scroll_y);
-                        doc.process_mouse_event(HtmlEventType::MouseDown, pt, 0);
-                        self.request_redraw();
-                    }
+                if state == ElementState::Released && button == MouseButton::Left {
+                    self.request_redraw();
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if renderer_handled {
+                    return;
+                }
                 // Space / Page-Down: scroll one page; Escape: exit
                 match &event.logical_key {
                     Key::Named(NamedKey::Escape) => event_loop.exit(),
@@ -178,7 +192,6 @@ fn draw_page_breaks(
     _width: f32,
     page_height: f32,
 ) {
-    let pw = pixmap.width() as f32;
     let ph = pixmap.height() as f32;
 
     // First page boundary visible in the current scroll window
@@ -202,6 +215,114 @@ fn draw_page_breaks(
             }
         }
         y_logical += page_height;
+    }
+}
+
+fn install_print_demo_handlers(doc: &mut Document) {
+    let root = doc.root.node_id;
+    doc.add_event_listener(
+        root,
+        "click",
+        Box::new(move |evt, doc: &mut Document| {
+            if doc.closest(evt.target, "#btn-print").is_some() {
+                set_notice(
+                    doc,
+                    "Print output is not implemented yet; showing the current preview settings.",
+                );
+                apply_print_demo_state(doc);
+                return;
+            }
+            if doc.closest(evt.target, "#btn-preview").is_some() {
+                set_notice(doc, "Print preview refreshed.");
+                apply_print_demo_state(doc);
+                return;
+            }
+            if doc.closest(evt.target, "#btn-settings").is_some() {
+                set_notice(
+                    doc,
+                    "Preview settings are live: header, footer, and scale update here.",
+                );
+                apply_print_demo_state(doc);
+                return;
+            }
+            if doc.closest(evt.target, "#chk-header").is_some() {
+                set_notice(doc, "Preview options updated.");
+                apply_print_demo_state(doc);
+                return;
+            }
+            if doc.closest(evt.target, "#chk-footer").is_some() {
+                set_notice(doc, "Preview options updated.");
+                apply_print_demo_state(doc);
+                return;
+            }
+            if doc.closest(evt.target, "#lbl-header").is_some() {
+                toggle_checked(doc, "#chk-header");
+                set_notice(doc, "Preview options updated.");
+                apply_print_demo_state(doc);
+                return;
+            }
+            if doc.closest(evt.target, "#lbl-footer").is_some() {
+                toggle_checked(doc, "#chk-footer");
+                set_notice(doc, "Preview options updated.");
+                apply_print_demo_state(doc);
+            }
+        }),
+        ListenerOptions::default(),
+    );
+}
+
+fn apply_print_demo_state(doc: &mut Document) {
+    let header_checked = selector_checked(doc, "#chk-header");
+    let footer_checked = selector_checked(doc, "#chk-footer");
+    let scale_pct = doc
+        .query_selector("#scale-input")
+        .map(|id| doc.value(id))
+        .and_then(|value| value.trim().parse::<f32>().ok())
+        .unwrap_or(100.0)
+        .clamp(25.0, 400.0);
+
+    if let Some(id) = doc.query_selector("#page-header") {
+        doc.set_style_property(id, "display", if header_checked { "block" } else { "none" });
+    }
+    if let Some(id) = doc.query_selector("#page-footer") {
+        doc.set_style_property(id, "display", if footer_checked { "block" } else { "none" });
+    }
+    if let Some(id) = doc.query_selector("#doc-content") {
+        doc.set_style_property(
+            id,
+            "font-size",
+            &format!("{:.2}px", 16.0 * scale_pct / 100.0),
+        );
+    }
+    if let Some(id) = doc.query_selector("#scale-input") {
+        let normalized = format!("{scale_pct:.0}");
+        if doc.value(id) != normalized {
+            doc.set_value(id, &normalized);
+        }
+    }
+}
+
+fn selector_checked(doc: &Document, selector: &str) -> bool {
+    doc.query_selector(selector)
+        .and_then(|id| doc.get_attribute(id, "checked"))
+        .is_some()
+}
+
+fn toggle_checked(doc: &mut Document, selector: &str) {
+    if let Some(id) = doc.query_selector(selector) {
+        if doc.get_attribute(id, "checked").is_some() {
+            doc.remove_attribute(id, "checked");
+        } else {
+            doc.set_attribute(id, "checked", "");
+        }
+    }
+}
+
+fn set_notice(doc: &mut Document, text: &str) {
+    if let Some(id) = doc.query_selector("#notice") {
+        if let Some(node) = dom::find_box_mut(&mut doc.root, id) {
+            dom::set_text_content(node, text);
+        }
     }
 }
 

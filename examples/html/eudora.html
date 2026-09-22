@@ -734,9 +734,180 @@
   .security-table td { padding: 4px 12px; }
   .security-table tr:nth-child(even) { background: rgba(0,0,0,0.03); }
 
-  /* Dark mode support (future-ready) */
-  @media (prefers-color-scheme: dark) {
-    /* intentionally empty; toggle handled by JS */
+  /* Dark mode */
+  .dark body { background: #1e1e21; color: #cdc8c1; }
+  .dark #app,
+  .dark #toolbar,
+  .dark #statusbar {
+    background: #1a1a1d;
+    border-color: #32323a;
+  }
+  .dark .tbtn,
+  .dark .ctbtn {
+    color: #cdc8c1;
+  }
+  .dark .tbtn:hover,
+  .dark .ctbtn:hover {
+    background: #2a2a2f;
+  }
+  .dark #wazoo,
+  .dark .msg-list-wrap,
+  .dark .msg-body,
+  .dark .contact-list-wrap,
+  .dark .contact-search input,
+  .dark #page-filters,
+  .dark .filter-cards,
+  .dark .compose-editor {
+    background: #121215;
+  }
+  .dark #right-panel,
+  .dark .contact-detail-wrap {
+    background: #1e1e21;
+  }
+  .dark .wazoo-item {
+    color: #c8c3bc;
+  }
+  .dark .wazoo-item:hover,
+  .dark table.msg-list tbody tr:hover:not(.selected),
+  .dark .contact-card:hover,
+  .dark .recent-email-row:hover {
+    background: #202025;
+  }
+  .dark .tab.selected,
+  .dark .wazoo-item.selected,
+  .dark table.msg-list tbody tr.selected,
+  .dark .contact-card.selected {
+    background: #2d4d78;
+    color: #ffffff;
+  }
+  .dark .wazoo-tabs,
+  .dark #tabbar,
+  .dark .compose-toolbar,
+  .dark .msg-header,
+  .dark .compose-header {
+    background: #161619;
+    border-color: #282830;
+  }
+  .dark .tab {
+    color: #827d76;
+    border-color: #32323a;
+  }
+  .dark .tab:hover:not(.selected) {
+    background: #202025;
+    color: #d2cdc6;
+  }
+  .dark .tab.selected {
+    background: #202024;
+    color: #d2cdc6;
+    border-top-color: #326ea5;
+  }
+  .dark .tab .tab-close {
+    color: #9a948c;
+  }
+  .dark .tab .tab-close:hover {
+    background: #e03228;
+    color: #ffffff;
+  }
+  .dark table.msg-list thead th {
+    background: #181818;
+    color: #7d7870;
+    border-color: #282830;
+  }
+  .dark table.msg-list tbody tr {
+    border-color: #242428;
+  }
+  .dark table.msg-list tbody tr:nth-child(even) {
+    background: #161619;
+  }
+  .dark table.msg-list td {
+    color: #c8c3bc;
+  }
+  .dark td.col-date,
+  .dark td.col-size {
+    color: #8e8982;
+  }
+  .dark tr.unread td.col-who,
+  .dark tr.unread td.col-subj {
+    color: #f0ebe4;
+  }
+  .dark table.msg-list tbody tr.selected td,
+  .dark table.msg-list tbody tr.selected td.col-date,
+  .dark table.msg-list tbody tr.selected td.col-size,
+  .dark table.msg-list tbody tr.selected td.col-who,
+  .dark table.msg-list tbody tr.selected td.col-subj {
+    color: #ffffff;
+  }
+  .dark .msg-header,
+  .dark .compose-header,
+  .dark .compose-editor-inner,
+  .dark .msg-body-inner,
+  .dark .contact-name,
+  .dark .contact-title,
+  .dark .contact-detail-name,
+  .dark .contact-info-value,
+  .dark .recent-email-subj,
+  .dark .filters-title,
+  .dark .filter-name,
+  .dark .filter-text {
+    color: #c8c3bc;
+  }
+  .dark .msg-header .lbl,
+  .dark .msg-header .meta,
+  .dark .msg-header .lbl-to,
+  .dark .contact-email,
+  .dark .contact-detail-title,
+  .dark .contact-info-label,
+  .dark .recent-label,
+  .dark .recent-email-date,
+  .dark .filters-meta,
+  .dark .filter-num,
+  .dark .filter-name.inactive,
+  .dark .filter-text.inactive,
+  .dark .filter-action-text.inactive,
+  .dark #sb-center,
+  .dark #sb-right {
+    color: #7d7870;
+  }
+  .dark .msg-header .subj,
+  .dark .contact-info-value.email,
+  .dark .filter-action-text,
+  .dark .filter-arrow {
+    color: #6da8df;
+  }
+  .dark .filter-card,
+  .dark .contact-detail-card,
+  .dark .contact-action-btn,
+  .dark .recent-email-row {
+    background: #202024;
+    border-color: #2c2c30;
+  }
+  .dark .contact-card {
+    border-color: #242428;
+  }
+  .dark .contact-card.selected .contact-name,
+  .dark .contact-card.selected .contact-title,
+  .dark .contact-card.selected .contact-email {
+    color: #ffffff;
+  }
+  .dark .contact-search input {
+    border-color: #32323a;
+    color: #c8c3bc;
+  }
+  .dark .contact-detail-divider,
+  .dark .filters-header {
+    border-color: #32323a;
+  }
+  .dark .contact-action-btn:hover:not(.primary) {
+    background: #2a2a2f;
+  }
+  .dark .compose-value {
+    background: #1c1c1f;
+    border-color: #2c2c30;
+    color: #c8c3bc;
+  }
+  .dark #sb-left {
+    color: #c8c3bc;
+    border-color: #32323a;
   }
 </style>
 </head>
