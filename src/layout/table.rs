@@ -252,6 +252,19 @@ fn distribute_spanned_width(
     }
 }
 
+fn cell_intrinsic_outer_width(
+    engine: &LayoutEngine,
+    cell: &WebCore,
+    font_px: f32,
+    containing_w: f32,
+    root_font_px: f32,
+) -> (f32, f32) {
+    let sizes = engine.intrinsic_sizes(cell, font_px, root_font_px);
+    let rb = engine.res_box(&cell.style, font_px, containing_w, root_font_px);
+    let outer = rb.h_space();
+    (sizes.min_content + outer, sizes.max_content + outer)
+}
+
 /// Get a reference to a row box given a RowRef.
 fn row_ref<'a>(table: &'a WebCore, rr: &RowRef) -> &'a WebCore {
     match rr.grandchild_idx {
@@ -442,7 +455,10 @@ pub fn layout_table(
     // width = min(max(preferred minimum width, available width), preferred width)
     // For tables: preferred width = sum of column max-content widths.
     if node.style.width.is_auto() {
-        // Measure each column's max-content width
+        // Measure each column's min/max-content width. An auto table may
+        // overflow its containing block; it must not squeeze columns below
+        // min-content just to fit the container.
+        let mut col_min_content: Vec<f32> = vec![0.0; num_cols];
         let mut col_max_content: Vec<f32> = vec![0.0; num_cols];
         for r in 0..num_rows {
             for c in 0..num_cols {
@@ -455,18 +471,36 @@ pub fn layout_table(
                         continue;
                     }
                     let cell = &row_ref(node, &row_refs[row_idx]).children[ci];
-                    let cw = if !cell.style.width.is_auto() {
-                        engine.res_len(&cell.style.width, font_px, containing_w, root_font_px)
+                    let (mn, cw) = if !cell.style.width.is_auto() {
+                        let w =
+                            engine.res_len(&cell.style.width, font_px, containing_w, root_font_px);
+                        let (min_outer, _) = cell_intrinsic_outer_width(
+                            engine,
+                            cell,
+                            font_px,
+                            content_w,
+                            root_font_px,
+                        );
+                        let constrained = w.max(min_outer);
+                        (constrained, constrained)
                     } else {
-                        engine
-                            .intrinsic_sizes(cell, font_px, root_font_px)
-                            .max_content
+                        cell_intrinsic_outer_width(engine, cell, font_px, content_w, root_font_px)
                     };
                     if slot.colspan == 1 {
+                        if mn > col_min_content[c] {
+                            col_min_content[c] = mn;
+                        }
                         if cw > col_max_content[c] {
                             col_max_content[c] = cw;
                         }
                     } else {
+                        distribute_spanned_width(
+                            &mut col_min_content,
+                            c,
+                            slot.colspan,
+                            mn,
+                            spacing_h,
+                        );
                         distribute_spanned_width(
                             &mut col_max_content,
                             c,
@@ -478,18 +512,20 @@ pub fn layout_table(
                 }
             }
         }
+        let mut preferred_min_w: f32 = col_min_content.iter().sum::<f32>() + total_spacing;
         let mut intrinsic_w: f32 = col_max_content.iter().sum::<f32>() + total_spacing;
         if let Some(ci) = caption_idx {
-            let cap_w = engine
-                .intrinsic_sizes(&node.children[ci], font_px, root_font_px)
-                .max_content;
+            let cap = engine.intrinsic_sizes(&node.children[ci], font_px, root_font_px);
+            let cap_w = cap.max_content;
             if !caption_inline_start && !caption_inline_end && cap_w > intrinsic_w {
                 intrinsic_w = cap_w;
             }
+            if !caption_inline_start && !caption_inline_end && cap.min_content > preferred_min_w {
+                preferred_min_w = cap.min_content;
+            }
         }
-        // Shrink-to-fit: use intrinsic width but don't exceed container
-        // and don't go below min-width
-        let mut shrunk = intrinsic_w.min(content_w).max(0.0);
+        let available_w = content_w.max(0.0);
+        let mut shrunk = preferred_min_w.max(available_w).min(intrinsic_w).max(0.0);
         if !node.style.min_width.is_auto() {
             let min_w = engine.res_len(&node.style.min_width, font_px, containing_w, root_font_px);
             if min_w > shrunk {
@@ -500,7 +536,7 @@ pub fn layout_table(
     }
 
     // ── Determine column widths ───────────────────────────────────────────────
-    let cell_area = (table_width - total_spacing).max(0.0);
+    let mut cell_area = (table_width - total_spacing).max(0.0);
 
     let mut col_widths: Vec<f32> = vec![0.0; num_cols];
     let mut col_has_explicit: Vec<bool> = vec![false; num_cols];
@@ -610,6 +646,14 @@ pub fn layout_table(
                     let cell = &row_ref(node, &row_refs[row_idx]).children[ci];
                     if !cell.style.width.is_auto() {
                         let w = engine.res_len(&cell.style.width, font_px, cell_area, root_font_px);
+                        let (min_outer, _) = cell_intrinsic_outer_width(
+                            engine,
+                            cell,
+                            font_px,
+                            cell_area,
+                            root_font_px,
+                        );
+                        let w = w.max(min_outer);
                         if slot.colspan == 1 {
                             if w > col_widths[c] {
                                 if !col_has_explicit[c] {
@@ -686,13 +730,15 @@ pub fn layout_table(
                         }
                     }
                 } else {
-                    // Not enough room even for minimums: distribute proportionally.
+                    // Not enough room even for minimums: let the auto table
+                    // overflow instead of clipping min-content cell text.
                     for c in 0..num_cols {
                         if !col_has_explicit[c] {
-                            col_widths[c] =
-                                (available_for_flex * col_min_widths[c] / flex_min_total).max(1.0);
+                            col_widths[c] = col_min_widths[c];
                         }
                     }
+                    table_width = used_explicit + flex_min_total + total_spacing;
+                    cell_area = used_explicit + flex_min_total;
                 }
             }
         }
@@ -735,9 +781,8 @@ pub fn layout_table(
                     col_widths[c] += extra;
                 }
             } else if remaining < 0.0 && used > 0.0 {
-                for c in 0..num_cols {
-                    col_widths[c] = (col_widths[c] * cell_area / used).max(1.0);
-                }
+                table_width = used + total_spacing;
+                cell_area = used;
             }
         }
 

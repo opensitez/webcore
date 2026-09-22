@@ -1,4 +1,94 @@
 // Pixel-level render tests for blend modes, gradients, and layout.
+#[test]
+fn flow_root_block_border_avoids_active_right_float() {
+    use super::harness::{find_box, parse_and_layout};
+
+    let doc = parse_and_layout(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        aside { float: right; width: 120px; height: 180px; }
+        h2 { display: flow-root; border-bottom: 1px solid #aaa; font: 24px serif; }
+        </style>
+        <aside id="float"></aside>
+        <h2 id="heading">Early life</h2>
+    "#,
+        500.0,
+    );
+
+    let float = find_box(&doc.root, &|n| {
+        n.attributes
+            .get("id")
+            .map(|id| id == "float")
+            .unwrap_or(false)
+    })
+    .expect("float not found");
+    let heading = find_box(&doc.root, &|n| {
+        n.attributes
+            .get("id")
+            .map(|id| id == "heading")
+            .unwrap_or(false)
+    })
+    .expect("heading not found");
+
+    assert!(
+        heading.layout.border_rect.right() <= float.layout.margin_rect.x + 0.5,
+        "flow-root heading border must stop before the active right float; heading={:?} float={:?}",
+        heading.layout.border_rect,
+        float.layout.margin_rect
+    );
+}
+
+#[test]
+fn auto_table_percentage_header_keeps_min_content_width() {
+    use super::harness::{find_box, parse_and_layout};
+
+    let doc = parse_and_layout(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        table { border-collapse: collapse; width: 500px; font: 14px sans-serif; }
+        th { width: 1%; white-space: nowrap; padding: 4px 12px; }
+        td { padding: 4px 12px; }
+        </style>
+        <table>
+          <tr>
+            <th id="group">Active</th>
+            <td id="list">35 Player · 43 Player · 44 Player</td>
+          </tr>
+        </table>
+    "#,
+        600.0,
+    );
+
+    let group = find_box(&doc.root, &|n| {
+        n.attributes
+            .get("id")
+            .map(|id| id == "group")
+            .unwrap_or(false)
+    })
+    .expect("group cell not found");
+    let list = find_box(&doc.root, &|n| {
+        n.attributes
+            .get("id")
+            .map(|id| id == "list")
+            .unwrap_or(false)
+    })
+    .expect("list cell not found");
+
+    assert!(
+        group.layout.border_rect.w > 50.0,
+        "percentage table header must keep enough width for nowrap min-content; group={:?}",
+        group.layout.border_rect
+    );
+    assert!(
+        group.layout.border_rect.right() <= list.layout.border_rect.x + 0.5,
+        "table cells must not overlap; group={:?} list={:?}",
+        group.layout.border_rect,
+        list.layout.border_rect
+    );
+}
+
 // ── Button background covers right padding ───────────────────────────────────
 // Pixel test: the background color must appear in the right-padding zone.
 #[test]
@@ -293,6 +383,94 @@ fn box_shadow_blur_softens_outside_the_shadow_rect() {
     assert!(
         r < 250 && g < 250 && b < 250,
         "blurred box-shadow should paint soft pixels outside the box edge; got rgb({r}, {g}, {b})"
+    );
+}
+
+#[test]
+fn zero_blur_box_shadow_paints_only_visible_shadow_difference() {
+    let pm = render_html(
+        r#"
+        <style>
+          body { margin: 0; background: white; }
+          #box { margin: 40px; width: 100px; height: 32px; box-shadow: 0 1px 0 rgb(200, 204, 209); }
+        </style>
+        <div id="box"></div>
+        "#,
+        180,
+        100,
+    );
+
+    let (ir, ig, ib, _) = pixel(&pm, 50, 50);
+    assert!(
+        ir > 245 && ig > 245 && ib > 245,
+        "zero-blur outer shadow must not fill the element interior; got rgb({ir}, {ig}, {ib})"
+    );
+
+    let (lr, lg, lb, _) = pixel(&pm, 50, 72);
+    assert!(
+        (lr as i16 - 200).abs() <= 8
+            && (lg as i16 - 204).abs() <= 8
+            && (lb as i16 - 209).abs() <= 8,
+        "zero-blur offset shadow should still paint the exposed bottom line; got rgb({lr}, {lg}, {lb})"
+    );
+}
+
+#[test]
+fn leading_space_in_split_text_run_renders_like_unsplit_text() {
+    let html = |body: &str| {
+        format!(
+            r#"
+        <style>
+          body {{ margin: 0; background: white; color: black; font: 32px/40px Menlo; }}
+          span {{ color: black; }}
+        </style>
+        <div>{body}</div>
+        "#
+        )
+    };
+    let joined = render_html(&html("<span>A</span>B"), 140, 50);
+    let split = render_html(&html("<span>A</span> B"), 140, 50);
+
+    fn max_blank_gap_between_glyphs(pm: &Pixmap) -> u32 {
+        let mut first_ink = None;
+        let mut last_ink = None;
+        let mut ink_columns = Vec::new();
+        for x in 0..pm.width() {
+            let mut has_ink = false;
+            for y in 0..pm.height() {
+                let (r, g, b, _) = pixel(pm, x, y);
+                if r < 120 && g < 120 && b < 120 {
+                    has_ink = true;
+                    break;
+                }
+            }
+            if has_ink {
+                first_ink.get_or_insert(x);
+                last_ink = Some(x);
+            }
+            ink_columns.push(has_ink);
+        }
+        let (Some(first), Some(last)) = (first_ink, last_ink) else {
+            return 0;
+        };
+        let mut best = 0;
+        let mut run = 0;
+        for x in first..=last {
+            if ink_columns[x as usize] {
+                best = best.max(run);
+                run = 0;
+            } else {
+                run += 1;
+            }
+        }
+        best.max(run)
+    }
+
+    let joined_gap = max_blank_gap_between_glyphs(&joined);
+    let split_gap = max_blank_gap_between_glyphs(&split);
+    assert!(
+        split_gap > joined_gap + 6,
+        "split text with a leading-space run should render an actual word gap; joined gap {joined_gap}, split gap {split_gap}"
     );
 }
 
@@ -2264,6 +2442,439 @@ fn inline_child_boundary_preserves_following_text_space() {
     );
 }
 
+#[test]
+fn inline_child_first_word_after_space_can_wrap_ltr_and_rtl() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list_full;
+
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
+        r##"
+        <style>
+        * { margin: 0; padding: 0; }
+        body { font: 16px/26px Arial, sans-serif; }
+        .news { width: 390px; }
+        .rtl { width: 210px; direction: rtl; unicode-bidi: isolate; }
+        </style>
+        <p class="news">At <a>the Primetime Emmy Awards</a>, <i>Widow's Bay</i> wins <a>Outstanding Drama Series</a>.</p>
+        <p class="rtl">فاز <a>النص العربي الطويل جدا</a> اليوم</p>
+    "##,
+        500.0,
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(500, 180).unwrap();
+    renderer.render(&mut doc, &mut pixmap, 1.0);
+    let list = build_display_list_full(
+        &doc.root,
+        500.0,
+        180.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+
+    let mut wins = None;
+    let mut drama = None;
+    let mut arabic_lead = None;
+    let mut arabic_link = None;
+    for command in &list.commands {
+        if let PaintCmd::Text { x, y, text, .. } = command {
+            if text.contains("wins") {
+                wins = Some((*x, *y));
+            } else if text.contains("Outstanding Drama Series") {
+                drama = Some((*x, *y));
+            } else if text.contains("فاز") {
+                arabic_lead = Some((*x, *y));
+            } else if text.contains("النص العربي الطويل جدا") {
+                arabic_link = Some((*x, *y));
+            }
+        }
+    }
+
+    let (wins_x, wins_y) = wins.expect("LTR text before long link");
+    let (drama_x, drama_y) = drama.expect("LTR long link");
+    assert!(
+        drama_y > wins_y + 10.0 || drama_x > wins_x + 30.0,
+        "long LTR link after a space must wrap or advance after preceding text: wins=({wins_x},{wins_y}) drama=({drama_x},{drama_y})"
+    );
+
+    let (arabic_lead_x, arabic_lead_y) = arabic_lead.expect("RTL text before long link");
+    let (arabic_link_x, arabic_link_y) = arabic_link.expect("RTL long link");
+    assert!(
+        (arabic_link_y - arabic_lead_y).abs() > 10.0
+            || (arabic_link_x - arabic_lead_x).abs() > 20.0,
+        "long RTL link after a space must not collapse onto preceding text: lead=({arabic_lead_x},{arabic_lead_y}) link=({arabic_link_x},{arabic_link_y})"
+    );
+}
+
+#[test]
+fn punctuation_after_inline_link_does_not_get_word_gap() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list_full;
+
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        body { font: 16px/26px Arial, sans-serif; }
+        p { width: 500px; }
+        </style>
+        <p><a>Arequipa</a>, Peru and <a>plants</a>. Done</p>
+    "#,
+        600.0,
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(600, 80).unwrap();
+    renderer.render(&mut doc, &mut pixmap, 1.0);
+    let list = build_display_list_full(
+        &doc.root,
+        600.0,
+        80.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+
+    let mut arequipa = None;
+    let mut comma = None;
+    let mut plants = None;
+    let mut period = None;
+    for command in &list.commands {
+        if let PaintCmd::Text {
+            x,
+            y,
+            text,
+            font_size,
+            font_weight,
+            font_style,
+            font_family,
+            ..
+        } = command
+        {
+            let entry = (
+                *x,
+                *y,
+                *font_size,
+                *font_weight,
+                *font_style,
+                font_family.clone(),
+            );
+            if text == "Arequipa" {
+                arequipa = Some(entry);
+            } else if text.starts_with(',') {
+                comma = Some(entry);
+            } else if text == "plants" {
+                plants = Some(entry);
+            } else if text.starts_with('.') {
+                period = Some(entry);
+            }
+        }
+    }
+
+    let right_edge = |entry: (f32, f32, f32, u16, u8, String), text: &str| {
+        let style = match entry.4 {
+            1 => crate::types::FontStyle::Italic,
+            2 => crate::types::FontStyle::Oblique,
+            _ => crate::types::FontStyle::Normal,
+        };
+        entry.0
+            + crate::layout::inline_layout::measure_text_width_weighted(
+                text,
+                entry.2,
+                None,
+                crate::types::FontWeight::Value(entry.3 as u16),
+                style,
+                1.0,
+                &entry.5,
+            )
+    };
+
+    let arequipa = arequipa.expect("Arequipa command");
+    let comma = comma.expect("comma command");
+    let plants = plants.expect("plants command");
+    let period = period.expect("period command");
+    let comma_gap = comma.0 - right_edge(arequipa, "Arequipa");
+    let period_gap = period.0 - right_edge(plants, "plants");
+    assert!(
+        comma_gap < 3.0,
+        "comma after inline link got a word-sized gap: {comma_gap}"
+    );
+    assert!(
+        period_gap < 3.0,
+        "period after inline link got a word-sized gap: {period_gap}"
+    );
+}
+
+#[test]
+fn punctuation_after_italic_inline_does_not_get_word_gap() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list_full_with_font_system;
+
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        body { font: 16px/26px Arial, sans-serif; }
+        </style>
+        <p>The <b><a>tilcayo</a></b> <i>(pictured)</i>, a new species.</p>
+    "#,
+        600.0,
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(600, 80).unwrap();
+    renderer.render(&mut doc, &mut pixmap, 1.0);
+    let font_system = Some(&mut renderer.font_system as *mut _);
+    let list = build_display_list_full_with_font_system(
+        &doc.root,
+        600.0,
+        80.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+        font_system,
+    );
+
+    let mut tilcayo = None;
+    let mut pictured = None;
+    let mut comma = None;
+    for command in &list.commands {
+        if let PaintCmd::Text {
+            x,
+            text,
+            font_size,
+            font_weight,
+            font_style,
+            font_family,
+            ..
+        } = command
+        {
+            if text == "tilcayo" {
+                tilcayo = Some((
+                    *x,
+                    text.clone(),
+                    *font_size,
+                    *font_weight,
+                    *font_style,
+                    font_family.clone(),
+                ));
+            } else if text == "(pictured)" {
+                pictured = Some((
+                    *x,
+                    text.clone(),
+                    *font_size,
+                    *font_weight,
+                    *font_style,
+                    font_family.clone(),
+                ));
+            } else if text.starts_with(',') {
+                comma = Some((*x, text.clone()));
+            }
+        }
+    }
+
+    let (tilcayo_x, tilcayo_text, tilcayo_size, tilcayo_weight, tilcayo_style, tilcayo_family) =
+        tilcayo.expect("tilcayo command");
+    let (
+        pictured_x,
+        pictured_text,
+        pictured_size,
+        pictured_weight,
+        pictured_style,
+        pictured_family,
+    ) = pictured.expect("pictured command");
+    let (comma_x, comma_text) = comma.expect("comma command");
+    let tilcayo_style = match tilcayo_style {
+        1 => crate::types::FontStyle::Italic,
+        2 => crate::types::FontStyle::Oblique,
+        _ => crate::types::FontStyle::Normal,
+    };
+    let pictured_style = match pictured_style {
+        1 => crate::types::FontStyle::Italic,
+        2 => crate::types::FontStyle::Oblique,
+        _ => crate::types::FontStyle::Normal,
+    };
+    let tilcayo_right = tilcayo_x
+        + crate::layout::inline_layout::measure_text_width_weighted(
+            &tilcayo_text,
+            tilcayo_size,
+            Some(&mut renderer.font_system),
+            crate::types::FontWeight::Value(tilcayo_weight as u16),
+            tilcayo_style,
+            1.0,
+            &tilcayo_family,
+        );
+    let space_width = crate::layout::inline_layout::measure_text_width_weighted(
+        " ",
+        tilcayo_size,
+        Some(&mut renderer.font_system),
+        crate::types::FontWeight::Value(tilcayo_weight as u16),
+        tilcayo_style,
+        1.0,
+        &tilcayo_family,
+    );
+    let pictured_right = pictured_x
+        + crate::layout::inline_layout::measure_text_width_weighted(
+            &pictured_text,
+            pictured_size,
+            Some(&mut renderer.font_system),
+            crate::types::FontWeight::Value(pictured_weight as u16),
+            pictured_style,
+            1.0,
+            &pictured_family,
+        );
+    let before_pictured_gap = pictured_x - tilcayo_right;
+    assert!(
+        before_pictured_gap > space_width * 0.35,
+        "space between bold inline link and italic text collapsed/overlapped: gap={before_pictured_gap}, space={space_width}"
+    );
+    let gap = comma_x - pictured_right;
+    assert!(
+        gap < 3.0,
+        "comma after italic inline got a word-sized gap: {gap}, comma={comma_text:?}"
+    );
+}
+
+#[test]
+fn newline_after_inline_link_collapses_to_visible_space() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list_full;
+
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        body { font: 16px/26px Arial, sans-serif; }
+        </style>
+        <p><b><a>Misti</a></b>
+is a volcano in the southern Peruvian <a>Andes</a>, rising above <a>Arequipa</a>, Peru.</p>
+    "#,
+        700.0,
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(700, 90).unwrap();
+    renderer.render(&mut doc, &mut pixmap, 1.0);
+    let list = build_display_list_full(
+        &doc.root,
+        700.0,
+        90.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+
+    let mut misti = None;
+    let mut volcano = None;
+    for command in &list.commands {
+        if let PaintCmd::Text {
+            x,
+            text,
+            font_size,
+            font_weight,
+            font_style,
+            font_family,
+            ..
+        } = command
+        {
+            if text == "Misti" {
+                misti = Some((
+                    *x,
+                    text.clone(),
+                    *font_size,
+                    *font_weight,
+                    *font_style,
+                    font_family.clone(),
+                ));
+            } else if text.starts_with("is a volcano") || text.starts_with(" is a volcano") {
+                volcano = Some((*x, text.clone()));
+            }
+        }
+    }
+
+    let (misti_x, misti_text, misti_size, misti_weight, misti_style, misti_family) =
+        misti.expect("Misti command");
+    let (volcano_x, volcano_text) = volcano.expect("volcano command");
+    let style = match misti_style {
+        1 => crate::types::FontStyle::Italic,
+        2 => crate::types::FontStyle::Oblique,
+        _ => crate::types::FontStyle::Normal,
+    };
+    let misti_right = misti_x
+        + crate::layout::inline_layout::measure_text_width_weighted(
+            &misti_text,
+            misti_size,
+            None,
+            crate::types::FontWeight::Value(misti_weight as u16),
+            style,
+            1.0,
+            &misti_family,
+        );
+    assert!(
+        !volcano_text.starts_with(char::is_whitespace) && volcano_x > misti_right,
+        "collapsed newline after inline link did not leave a visible word gap: right={misti_right} next_x={volcano_x} next={volcano_text:?}"
+    );
+}
+
+#[test]
+fn flex_text_boundary_preserves_separator_space_before_icon() {
+    use super::harness::find_box;
+
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        h2 { display: flex; align-items: center; font: 700 18px/23px Arial, sans-serif; }
+        .icon { display: inline-flex; width: 18px; height: 18px; }
+        </style>
+        <h2 id="title">Top Stories  <span id="icon" class="icon"></span></h2>
+    "#,
+        400.0,
+    );
+    let mut pm = tiny_skia::Pixmap::new(400, 80).unwrap();
+    renderer.render(&mut doc, &mut pm, 1.0);
+    let text_w = renderer.layout_engine().measure_text_cached(
+        "Top Stories",
+        18.0,
+        crate::types::FontWeight::Value(700),
+        crate::types::FontStyle::Normal,
+        "Arial, sans-serif",
+    );
+    let space_w = renderer.layout_engine().measure_text_cached(
+        " ",
+        18.0,
+        crate::types::FontWeight::Value(700),
+        crate::types::FontStyle::Normal,
+        "Arial, sans-serif",
+    );
+    let title = find_box(&doc.root, &|n| {
+        n.attributes.get("id").map(String::as_str) == Some("title")
+    })
+    .expect("#title");
+    let icon = find_box(&doc.root, &|n| {
+        n.attributes.get("id").map(String::as_str) == Some("icon")
+    })
+    .expect("#icon");
+    assert!(
+        icon.layout.content_rect.x >= title.layout.content_rect.x + text_w + space_w * 0.5,
+        "flex text/icon boundary lost collapsed space: title_x={} text_w={} space_w={} icon_x={}",
+        title.layout.content_rect.x,
+        text_w,
+        space_w,
+        icon.layout.content_rect.x
+    );
+}
+
 /// **The measuring and painting font resolvers must agree on generic family
 /// names.** Sizing goes through `resolve_css_family`, painting through the
 /// cheaper `css_family_to_cosmic`. They disagreed about `system-ui`: the first
@@ -2436,15 +3047,19 @@ fn letter_spacing_reaches_painted_glyph_positions() {
     };
 
     let plain = render_html(&html("0"), 240, 80);
-    let spaced = render_html(&html("8px"), 240, 80);
+    let spaced = render_html(&html("16px"), 240, 80);
     let (plain_first, plain_last) = red_text_bounds(&plain).expect("plain text painted");
     let (spaced_first, spaced_last) = red_text_bounds(&spaced).expect("spaced text painted");
     let plain_width = plain_last.saturating_sub(plain_first);
     let spaced_width = spaced_last.saturating_sub(spaced_first);
 
     assert!(
-        spaced_width > plain_width + 16,
+        spaced_width > plain_width + 28,
         "letter-spacing should widen the painted glyph bounds; plain={plain_width} spaced={spaced_width}"
+    );
+    assert!(
+        spaced_width < plain_width + 55,
+        "letter-spacing must not be applied twice while painting; plain={plain_width} spaced={spaced_width}"
     );
 }
 

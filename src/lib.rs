@@ -1330,11 +1330,62 @@ fn start_async_image_fetches_with_loader(
         return;
     }
 
+    let mut async_pending = Vec::with_capacity(pending.len());
+    for (node_id, path, target, url) in pending {
+        let url_trimmed = url.trim();
+        if url_trimmed.starts_with("data:")
+            && matches!(
+                target,
+                types::PendingImageTarget::Background
+                    | types::PendingImageTarget::BackgroundLayer(_)
+                    | types::PendingImageTarget::Mask
+            )
+        {
+            match cached_decoded_image_result_from_option_loader(url_trimmed, loader.as_deref()) {
+                Ok(decoded) => {
+                    let Some(node) = (if node_id != 0 {
+                        doc.find_webcore_mut(node_id)
+                    } else {
+                        types::find_node_by_path_mut(&mut doc.root, &path)
+                    }) else {
+                        continue;
+                    };
+                    match target {
+                        types::PendingImageTarget::Background => {
+                            let _ = html::set_decoded_bg_image_on_node(node, decoded);
+                        }
+                        types::PendingImageTarget::BackgroundLayer(layer_index) => {
+                            let _ = html::set_decoded_bg_image_layer_on_node(
+                                node,
+                                layer_index,
+                                decoded,
+                            );
+                        }
+                        types::PendingImageTarget::Mask => {
+                            if let Some((data, w, h)) = html::decoded_image_pixels_arc(decoded) {
+                                node.mask_image_data = Some(data);
+                                node.mask_image_width = w;
+                                node.mask_image_height = h;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Err(error) => doc.image_load_errors.push((path, target, url, error)),
+            }
+        } else {
+            async_pending.push((node_id, path, target, url));
+        }
+    }
+    if async_pending.is_empty() {
+        return;
+    }
+
     let (tx, rx) = std::sync::mpsc::channel::<types::PendingImageResult>();
     let in_flight = doc.images_in_flight.clone();
-    in_flight.store(pending.len(), std::sync::atomic::Ordering::SeqCst);
+    in_flight.store(async_pending.len(), std::sync::atomic::Ordering::SeqCst);
 
-    for (node_id, path, target, url) in pending {
+    for (node_id, path, target, url) in async_pending {
         let sender = tx.clone();
         let counter = in_flight.clone();
         let loader = loader.clone();

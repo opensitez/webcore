@@ -108,6 +108,10 @@ pub struct BackgroundLayer {
     pub size_w: CssLength,
     pub size_h: CssLength,
     pub repeat: BackgroundRepeat,
+    pub attachment: BackgroundAttachment,
+    pub origin: BackgroundClip,
+    pub clip: BackgroundClip,
+    pub blend_mode: String,
 }
 
 impl RareStyle {

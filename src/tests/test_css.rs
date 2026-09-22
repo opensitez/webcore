@@ -72,6 +72,110 @@ fn collapsible_space_across_inline_boundaries_is_not_measured_or_painted_twice()
 }
 
 #[test]
+fn leading_space_after_inline_link_is_preserved_in_paint_text() {
+    let texts = build_display_texts(
+        r#"<style>
+             body { margin: 0; font: 16px/20px Menlo; }
+             a { color: blue; }
+           </style>
+           <p><a>Misti</a> is a volcano, and mudflows <a>and</a> hydropower plants.</p>"#,
+    );
+    assert_eq!(
+        texts.concat(),
+        "Misti is a volcano, and mudflows and hydropower plants."
+    );
+    assert!(
+        texts.iter().any(|text| text.starts_with(" is a volcano")),
+        "text after inline link should keep the collapsed separator space: {texts:?}"
+    );
+}
+
+#[test]
+fn mixed_direction_inline_links_paint_as_separate_runs() {
+    let html = r#"<style>
+             body { margin: 0; font: 16px/20px sans-serif; }
+             li { display: inline; }
+             li::after { content: " · "; font-weight: 700; }
+           </style>
+           <ul>
+             <li><a><span>العربية</span></a></li>
+             <li><a><span>Deutsch</span></a></li>
+             <li><a><span>Español</span></a></li>
+           </ul>"#;
+    let doc = parse_and_layout(html, 800.0);
+    let list = build_display_list(&doc.root, 800.0, 200.0);
+    let text_cmds: Vec<(f32, String)> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Text { x, text, .. } => Some((*x, text.clone())),
+            _ => None,
+        })
+        .collect();
+
+    let arabic = text_cmds
+        .iter()
+        .find(|(_, text)| text == "العربية")
+        .expect("Arabic link should paint as its own command")
+        .0;
+    let deutsch = text_cmds
+        .iter()
+        .find(|(_, text)| text == "Deutsch")
+        .expect("Deutsch link should not be split by the Arabic run")
+        .0;
+    let espanol = text_cmds
+        .iter()
+        .find(|(_, text)| text == "Español")
+        .expect("following LTR link should paint as its own command")
+        .0;
+
+    assert!(
+        arabic < deutsch && deutsch < espanol,
+        "mixed-direction links must paint in their laid-out order: {text_cmds:?}"
+    );
+}
+
+#[test]
+fn flex_row_min_height_participates_in_cross_axis_alignment() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"<style>
+             body { margin: 0; font: 14px/17px sans-serif; }
+             a {
+               display: flex;
+               align-items: center;
+               min-height: 32px;
+               position: relative;
+               width: 80px;
+             }
+             a::after {
+               content: "";
+               position: absolute;
+               left: 0;
+               right: 0;
+               bottom: 0;
+               height: 2px;
+             }
+           </style>
+           <a id="tab"><span id="label">Main Page</span></a>"#,
+        400.0,
+    );
+    let tab = doc.get_element_by_id("tab").unwrap();
+    let label = doc.get_element_by_id("label").unwrap();
+    let tab_rect = doc.get_bounding_client_rect(tab).unwrap();
+    let label_rect = doc.get_bounding_client_rect(label).unwrap();
+
+    assert!(
+        tab_rect.h >= 31.5,
+        "flex row should honor min-height, got {tab_rect:?}"
+    );
+    assert!(
+        label_rect.y > tab_rect.y + 5.0,
+        "align-items:center should center the label inside min-height: tab={tab_rect:?} label={label_rect:?}"
+    );
+}
+
+#[test]
 fn text_nodes_inside_inline_block_controls_remain_inline() {
     let mut r = crate::Renderer::new();
     let mut d = r.load_html(
@@ -1004,6 +1108,30 @@ fn background_image_cascade_preserves_additional_url_layers() {
 }
 
 #[test]
+fn background_longhands_apply_to_additional_layers() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "background-image",
+        "linear-gradient(red, red), linear-gradient(blue, blue)",
+    );
+    apply_property(&mut style, "background-origin", "border-box, content-box");
+    apply_property(&mut style, "background-clip", "padding-box, text");
+    apply_property(&mut style, "background-attachment", "fixed, local");
+    apply_property(&mut style, "background-blend-mode", "multiply, screen");
+
+    assert_eq!(style.background_origin, BackgroundClip::BorderBox);
+    assert_eq!(style.background_clip, BackgroundClip::PaddingBox);
+    assert_eq!(style.background_attachment, BackgroundAttachment::Fixed);
+    assert_eq!(style.background_blend_mode, "multiply, screen");
+    let layer = &style.rare().additional_background_layers[0];
+    assert_eq!(layer.origin, BackgroundClip::ContentBox);
+    assert_eq!(layer.clip, BackgroundClip::Text);
+    assert_eq!(layer.attachment, BackgroundAttachment::Local);
+    assert_eq!(layer.blend_mode, "screen");
+}
+
+#[test]
 fn background_shorthand_accepts_unspaced_position_size_separator() {
     let mut style = ComputedStyle::default();
     apply_property(
@@ -1663,6 +1791,28 @@ fn inline_svg_percentage_size_does_not_become_pixel_size() {
         "svg width=100% should resolve against the containing block, not become 100px; got {}",
         svg.layout.content_rect.w
     );
+}
+
+#[test]
+fn inline_svg_width_height_attributes_override_viewbox_intrinsic_size() {
+    let doc = parse_and_layout(
+        r#"<button style="display:flex;width:48px;height:48px;align-items:center;justify-content:center">
+             <svg id="search" viewBox="0 0 256 256" width="20" height="20">
+               <path d="M0 0h256v256H0z"/>
+             </svg>
+           </button>"#,
+        400.0,
+    );
+    let svg = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .map(|id| id == "search")
+            .unwrap_or(false)
+    })
+    .unwrap();
+
+    assert_eq!(svg.layout.content_rect.w.round(), 20.0);
+    assert_eq!(svg.layout.content_rect.h.round(), 20.0);
 }
 
 #[test]

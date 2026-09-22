@@ -669,12 +669,6 @@ fn replay_commands_inner(
                 small_caps,
                 decoration,
             } => {
-                // Apply the current transform to text position and scale.
-                // Extract effective scale factor from the transform matrix.
-                let eff_sx = (ts.sx * ts.sx + ts.ky * ts.ky).sqrt();
-                let eff_sy = (ts.kx * ts.kx + ts.sy * ts.sy).sqrt();
-                let eff_scale = eff_sx.max(eff_sy);
-                // Transform the text origin
                 let phys_x = ts.sx * *x + ts.ky * *y + ts.tx;
                 let phys_y = ts.kx * *x + ts.sy * *y + ts.ty;
 
@@ -687,38 +681,58 @@ fn replay_commands_inner(
                     continue;
                 }
 
-                let alpha = 1.0;
                 if let Some((ref mut fs, ref mut sc)) = text_ctx {
                     let target = layer_stack
                         .last_mut()
                         .map(|l| &mut l.pixmap)
                         .unwrap_or(pixmap);
-                    // draw_text_cmd expects logical coords that it will multiply by scale.
-                    // We pass pre-transformed coords divided by eff_scale so the multiplication
-                    // brings them back to the correct physical position.
-                    let text_x = phys_x / eff_scale;
-                    let text_y = phys_y / eff_scale;
-                    draw_text_cmd(
-                        target,
-                        *fs,
-                        *sc,
-                        eff_scale,
-                        text_x,
-                        text_y,
-                        text,
-                        font_family,
-                        *font_size,
-                        *font_weight,
-                        *font_style,
-                        *font_stretch,
-                        *line_height,
-                        &apply_opacity(color, alpha),
-                        decoration,
-                        *letter_spacing,
-                        *word_spacing,
-                        *small_caps,
-                        clip_mask,
-                    );
+                    if transform_stack.is_empty() {
+                        let (text_scale, text_x, text_y) = transformed_text_origin(&ts, *x, *y);
+                        draw_text_cmd(
+                            target,
+                            *fs,
+                            *sc,
+                            text_scale,
+                            text_x,
+                            text_y,
+                            text,
+                            font_family,
+                            *font_size,
+                            *font_weight,
+                            *font_style,
+                            *font_stretch,
+                            *line_height,
+                            color,
+                            decoration,
+                            *letter_spacing,
+                            *word_spacing,
+                            *small_caps,
+                            clip_mask,
+                        );
+                    } else {
+                        draw_transformed_text_cmd(
+                            target,
+                            *fs,
+                            *sc,
+                            scale,
+                            ts,
+                            *x,
+                            *y,
+                            text,
+                            font_family,
+                            *font_size,
+                            *font_weight,
+                            *font_style,
+                            *font_stretch,
+                            *line_height,
+                            color,
+                            decoration,
+                            *letter_spacing,
+                            *word_spacing,
+                            *small_caps,
+                            clip_mask,
+                        );
+                    }
                 }
             }
 
@@ -743,11 +757,16 @@ fn replay_commands_inner(
                     }
                 }
                 clip_stack.push(*rect);
-                // Build a clip mask from the clip rect
-                let mut mask = if simple_clip_contains_viewport(
-                    rect, radius, radius_y, pw, ph, scale, scroll_x, scroll_y,
-                ) {
+                // Build a clip mask from the clip rect. A clip pushed inside a
+                // transformed stacking context lives in that same transformed
+                // coordinate space, just like the paint commands it clips.
+                let mut mask = if transform_depth == 0
+                    && simple_clip_contains_viewport(
+                        rect, radius, radius_y, pw, ph, scale, scroll_x, scroll_y,
+                    ) {
                     None
+                } else if transform_depth > 0 {
+                    build_clip_mask_with_transform(rect, radius, radius_y, pw, ph, ts)
                 } else {
                     build_clip_mask(rect, radius, radius_y, pw, ph, scale, scroll_x, scroll_y)
                 };
@@ -778,7 +797,11 @@ fn replay_commands_inner(
                     }
                 }
                 clip_stack.push(bounds);
-                let mut mask = build_polygon_clip_mask(points, pw, ph, scale, scroll_x, scroll_y);
+                let mut mask = if transform_depth > 0 {
+                    build_polygon_clip_mask_with_transform(points, pw, ph, ts)
+                } else {
+                    build_polygon_clip_mask(points, pw, ph, scale, scroll_x, scroll_y)
+                };
                 if let (Some(m), Some(prev)) =
                     (&mut mask, clip_mask_stack.last().and_then(|x| x.as_ref()))
                 {
@@ -1112,33 +1135,7 @@ fn replay_commands_inner(
                     } else {
                         let mut paint = Paint::default();
                         paint.set_color(to_sk_color(&c));
-                        let max_r = radii[0].max(radii[1]).max(radii[2]).max(radii[3]);
-                        if max_r > 0.5 {
-                            let expanded_radii = [
-                                (radii[0] + spread).max(0.0),
-                                (radii[1] + spread).max(0.0),
-                                (radii[2] + spread).max(0.0),
-                                (radii[3] + spread).max(0.0),
-                            ];
-                            let expanded_radii_y = [
-                                (radii_y[0] + spread).max(0.0),
-                                (radii_y[1] + spread).max(0.0),
-                                (radii_y[2] + spread).max(0.0),
-                                (radii_y[3] + spread).max(0.0),
-                            ];
-                            if let Some(path) = rounded_rect_path_corners_xy(
-                                sr.x,
-                                sr.y,
-                                sr.w,
-                                sr.h,
-                                expanded_radii,
-                                expanded_radii_y,
-                            ) {
-                                target.fill_path(&path, &paint, FillRule::Winding, ts, clip_mask);
-                            }
-                        } else if let Some(r) = SkRect::from_xywh(sr.x, sr.y, sr.w, sr.h) {
-                            target.fill_rect(r, &paint, ts, clip_mask);
-                        }
+                        fill_outer_box_shadow_shape(target, sr, *rect, &paint, ts, clip_mask);
                     }
                 }
             }
@@ -2392,8 +2389,11 @@ fn replay_commands_inner(
                 // negative. Nothing is painted outside the PAINTING area
                 // (`background-clip`); the tile grid below is still anchored in
                 // the POSITIONING area (css-backgrounds-3 §3.6, §3.7).
-                let bg_clip =
-                    build_clip_mask(clip, radii, radii_y, pw, ph, scale, scroll_x, scroll_y);
+                let bg_clip = if transform_depth > 0 {
+                    build_clip_mask_with_transform(clip, radii, radii_y, pw, ph, ts)
+                } else {
+                    build_clip_mask(clip, radii, radii_y, pw, ph, scale, scroll_x, scroll_y)
+                };
                 let bg_clip_ref = bg_clip.as_ref().or(clip_mask);
                 if let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(rgba, iw, ih) {
                     let paint = tiny_skia::PixmapPaint::default();
@@ -2712,7 +2712,6 @@ pub(crate) fn blit_shaped_buffer(
         origin_x: i32,
         origin_y: i32,
         color_alpha: u32,
-        tracking: f32,
         word_offsets: Vec<f32>,
         glyph_index: usize,
         clip_mask: Option<&'a tiny_skia::Mask>,
@@ -2738,8 +2737,7 @@ pub(crate) fn blit_shaped_buffer(
                 .get(self.glyph_index)
                 .copied()
                 .unwrap_or(0.0);
-            physical_glyph.x +=
-                (self.glyph_index as f32 * self.tracking + word_offset).round() as i32;
+            physical_glyph.x += word_offset.round() as i32;
             self.glyph_index += 1;
             let origin_x = self.origin_x;
             let origin_y = self.origin_y;
@@ -2784,7 +2782,6 @@ pub(crate) fn blit_shaped_buffer(
         origin_x: phys_x as i32,
         origin_y: phys_y as i32,
         color_alpha: color.a() as u32,
-        tracking: _letter_spacing,
         word_offsets,
         glyph_index: 0,
         clip_mask,
@@ -2878,6 +2875,51 @@ fn draw_text_cmd(
     clip_mask: Option<&tiny_skia::Mask>,
 ) {
     if text.is_empty() {
+        return;
+    }
+    if word_spacing == 0.0 && text.starts_with(char::is_whitespace) {
+        let visible_start = text
+            .char_indices()
+            .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx));
+        let Some(visible_start) = visible_start else {
+            return;
+        };
+        let leading = &text[..visible_start];
+        let visible = &text[visible_start..];
+        let leading_advance = crate::layout::inline_layout::measure_text_width_fs_attrs(
+            font_system,
+            leading,
+            font_size,
+            cosmic_text::Weight(font_weight),
+            match font_style {
+                1 => CTextStyle::Italic,
+                2 => CTextStyle::Oblique,
+                _ => CTextStyle::Normal,
+            },
+            scale,
+            font_family,
+        ) + _letter_spacing * leading.chars().count() as f32;
+        draw_text_cmd(
+            pixmap,
+            font_system,
+            swash_cache,
+            scale,
+            x + leading_advance,
+            y,
+            visible,
+            font_family,
+            font_size,
+            font_weight,
+            font_style,
+            font_stretch,
+            line_height,
+            color,
+            decoration,
+            _letter_spacing,
+            word_spacing,
+            _small_caps,
+            clip_mask,
+        );
         return;
     }
     if word_spacing != 0.0 && text.chars().any(char::is_whitespace) {
@@ -3185,6 +3227,97 @@ fn draw_text_cmd(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_transformed_text_cmd(
+    pixmap: &mut Pixmap,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    scale: f32,
+    transform: Transform,
+    x: f32,
+    y: f32,
+    text: &str,
+    font_family: &str,
+    font_size: f32,
+    font_weight: u16,
+    font_style: u8,
+    font_stretch: f32,
+    line_height: f32,
+    color: &Color,
+    decoration: &super::display_list::TextDecoration,
+    letter_spacing: f32,
+    word_spacing: f32,
+    small_caps: bool,
+    clip_mask: Option<&tiny_skia::Mask>,
+) {
+    if text.is_empty() || scale <= 0.0 {
+        return;
+    }
+
+    let ct_style = match font_style {
+        1 => CTextStyle::Italic,
+        2 => CTextStyle::Oblique,
+        _ => CTextStyle::Normal,
+    };
+    let measured = crate::layout::inline_layout::measure_text_width_fs_attrs(
+        font_system,
+        text,
+        font_size,
+        cosmic_text::Weight(font_weight),
+        ct_style,
+        1.0,
+        font_family,
+    );
+    let spacing = letter_spacing.max(0.0) * text.chars().count() as f32
+        + word_spacing.max(0.0) * text.chars().filter(|c| c.is_whitespace()).count() as f32;
+    let line_h = line_height.max(font_size * 1.2).max(1.0);
+    let pad = line_h.max(font_size).max(1.0) * 2.0 + 8.0;
+    let logical_w = (measured + spacing + pad * 2.0).max(1.0);
+    let logical_h = (line_h + pad * 2.0).max(1.0);
+    let pix_w = (logical_w * scale).ceil().clamp(1.0, 16384.0) as u32;
+    let pix_h = (logical_h * scale).ceil().clamp(1.0, 16384.0) as u32;
+    let Some(mut layer) = Pixmap::new(pix_w, pix_h) else {
+        return;
+    };
+    layer.fill(tiny_skia::Color::TRANSPARENT);
+
+    draw_text_cmd(
+        &mut layer,
+        font_system,
+        swash_cache,
+        scale,
+        pad,
+        pad,
+        text,
+        font_family,
+        font_size,
+        font_weight,
+        font_style,
+        font_stretch,
+        line_height,
+        color,
+        decoration,
+        letter_spacing,
+        word_spacing,
+        small_caps,
+        None,
+    );
+
+    let origin_x = x - pad;
+    let origin_y = y - pad;
+    let image_transform = transform
+        .pre_translate(origin_x, origin_y)
+        .pre_scale(1.0 / scale, 1.0 / scale);
+    pixmap.draw_pixmap(
+        0,
+        0,
+        layer.as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        image_transform,
+        clip_mask,
+    );
+}
+
 fn underline_skip_ink_segments(text: &str, x: f32, width: f32) -> Vec<(f32, f32)> {
     let count = text.chars().count();
     if count == 0 || width <= 0.0 {
@@ -3211,6 +3344,98 @@ fn underline_skip_ink_segments(text: &str, x: f32, width: f32) -> Vec<(f32, f32)
         out.push((start, cursor - start));
     }
     out
+}
+
+fn fill_outer_box_shadow_shape(
+    target: &mut Pixmap,
+    shadow_rect: Rect,
+    border_rect: Rect,
+    paint: &Paint,
+    transform: Transform,
+    clip_mask: Option<&tiny_skia::Mask>,
+) {
+    fn fill_piece(
+        target: &mut Pixmap,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        paint: &Paint,
+        transform: Transform,
+        clip_mask: Option<&tiny_skia::Mask>,
+    ) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        if let Some(rect) = SkRect::from_xywh(x, y, w, h) {
+            target.fill_rect(rect, paint, transform, clip_mask);
+        }
+    }
+
+    let shadow_right = shadow_rect.x + shadow_rect.w;
+    let shadow_bottom = shadow_rect.y + shadow_rect.h;
+    let border_right = border_rect.x + border_rect.w;
+    let border_bottom = border_rect.y + border_rect.h;
+
+    let ix0 = shadow_rect.x.max(border_rect.x);
+    let iy0 = shadow_rect.y.max(border_rect.y);
+    let ix1 = shadow_right.min(border_right);
+    let iy1 = shadow_bottom.min(border_bottom);
+
+    if ix0 >= ix1 || iy0 >= iy1 {
+        fill_piece(
+            target,
+            shadow_rect.x,
+            shadow_rect.y,
+            shadow_rect.w,
+            shadow_rect.h,
+            paint,
+            transform,
+            clip_mask,
+        );
+        return;
+    }
+
+    fill_piece(
+        target,
+        shadow_rect.x,
+        shadow_rect.y,
+        shadow_rect.w,
+        iy0 - shadow_rect.y,
+        paint,
+        transform,
+        clip_mask,
+    );
+    fill_piece(
+        target,
+        shadow_rect.x,
+        iy1,
+        shadow_rect.w,
+        shadow_bottom - iy1,
+        paint,
+        transform,
+        clip_mask,
+    );
+    fill_piece(
+        target,
+        shadow_rect.x,
+        iy0,
+        ix0 - shadow_rect.x,
+        iy1 - iy0,
+        paint,
+        transform,
+        clip_mask,
+    );
+    fill_piece(
+        target,
+        ix1,
+        iy0,
+        shadow_right - ix1,
+        iy1 - iy0,
+        paint,
+        transform,
+        clip_mask,
+    );
 }
 
 /// Composite a layer onto the destination pixmap with a blend mode.
@@ -3526,8 +3751,19 @@ fn build_clip_mask(
     scroll_x: f32,
     scroll_y: f32,
 ) -> Option<tiny_skia::Mask> {
-    let mut mask = tiny_skia::Mask::new(pw, ph)?;
     let ts = Transform::from_scale(scale, scale).pre_translate(-scroll_x, -scroll_y);
+    build_clip_mask_with_transform(rect, radius, radius_y, pw, ph, ts)
+}
+
+fn build_clip_mask_with_transform(
+    rect: &Rect,
+    radius: &[f32; 4],
+    radius_y: &[f32; 4],
+    pw: u32,
+    ph: u32,
+    ts: Transform,
+) -> Option<tiny_skia::Mask> {
+    let mut mask = tiny_skia::Mask::new(pw, ph)?;
     let mut paint = Paint::default();
     paint.set_color_rgba8(255, 255, 255, 255);
     let max_r = radius[0].max(radius[1]).max(radius[2]).max(radius[3]);
@@ -3601,11 +3837,20 @@ fn build_polygon_clip_mask(
     scroll_x: f32,
     scroll_y: f32,
 ) -> Option<tiny_skia::Mask> {
+    let ts = Transform::from_scale(scale, scale).pre_translate(-scroll_x, -scroll_y);
+    build_polygon_clip_mask_with_transform(points, pw, ph, ts)
+}
+
+fn build_polygon_clip_mask_with_transform(
+    points: &[(f32, f32)],
+    pw: u32,
+    ph: u32,
+    ts: Transform,
+) -> Option<tiny_skia::Mask> {
     if points.len() < 3 {
         return None;
     }
     let mut mask = tiny_skia::Mask::new(pw, ph)?;
-    let ts = Transform::from_scale(scale, scale).pre_translate(-scroll_x, -scroll_y);
     let mut pb = PathBuilder::new();
     let (x0, y0) = points[0];
     pb.move_to(x0, y0);

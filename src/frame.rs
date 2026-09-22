@@ -43,7 +43,7 @@
 //! 5. Paint using renderer.render() when update_frame() returns true
 
 use crate::layout::LayoutEngine;
-use crate::types::Document;
+use crate::types::{Document, Rect};
 
 /// Callbacks the engine fires to notify the host of state changes.
 /// The host implements this trait — the engine calls it, never the other way around.
@@ -71,11 +71,12 @@ pub trait EngineCallbacks {
 struct NoopCallbacks;
 impl EngineCallbacks for NoopCallbacks {}
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct FrameUpdate {
     pub changed: bool,
     pub rebuild_display_list: bool,
     pub paint_only_display_list_rebuild: bool,
+    pub paint_rects: Vec<Rect>,
 }
 
 /// The self-contained engine. Wraps Document + LayoutEngine into a frame-based
@@ -249,6 +250,9 @@ impl EngineFrame {
             self.needs_style = true;
             self.needs_layout = true;
             self.needs_paint = true;
+        } else if self.doc.has_dirty_layout() {
+            self.needs_layout = true;
+            self.needs_paint = true;
         }
         // 1. Poll for async stylesheets/images/fonts
         let now = std::time::Instant::now();
@@ -268,12 +272,20 @@ impl EngineFrame {
                 if image_poll.needs_relayout {
                     resource_requested_relayout = true;
                 } else {
-                    self.needs_paint = true;
                     // Display-list image commands capture the decoded buffer at
-                    // build time. A newly arrived image with stable geometry still
-                    // needs the viewport list rebuilt once so the command points at
-                    // the loaded pixels.
-                    update.rebuild_display_list = true;
+                    // build time. A fixed-size image that arrives inside the
+                    // retained paint band needs fresh paint commands so the
+                    // command points at the loaded pixels. Keep this as a
+                    // paint-only clipped rebuild; a full display-list rebuild
+                    // on every arriving image makes the UI thread freeze while
+                    // pages are still loading.
+                    if image_poll.paint_rects.iter().any(|rect| {
+                        rect_intersects(*rect, retained_paint_band(&self.doc, self.viewport_h))
+                    }) {
+                        self.needs_paint = true;
+                        update.paint_only_display_list_rebuild = true;
+                        update.paint_rects.extend(image_poll.paint_rects);
+                    }
                 }
             }
             if self
@@ -306,12 +318,19 @@ impl EngineFrame {
         }
 
         if !scroll_priority {
-            if self
-                .doc
-                .tick_animated_images_in_viewport(now, self.doc.scroll_y, self.viewport_h)
-            {
+            let image_tick = self.doc.tick_animated_images_in_viewport_detailed(
+                now,
+                self.doc.scroll_y,
+                self.viewport_h,
+            );
+            if image_tick.changed_any {
                 self.needs_paint = true;
-                update.rebuild_display_list = true;
+                if image_tick.paint_rects.is_empty() {
+                    update.rebuild_display_list = true;
+                } else {
+                    update.paint_only_display_list_rebuild = true;
+                    update.paint_rects.extend(image_tick.paint_rects);
+                }
             }
         }
 
@@ -349,13 +368,14 @@ impl EngineFrame {
                     || media_running
                     || !animation_overrides_are_transform_only(&self.doc.animation_overrides)
                 {
-                    update.rebuild_display_list = true;
                     if !animation_needs_layout
                         && !svg_animations_running
                         && !media_running
                         && !animation_overrides_are_transform_only(&self.doc.animation_overrides)
                     {
                         update.paint_only_display_list_rebuild = true;
+                    } else {
+                        update.rebuild_display_list = true;
                     }
                 }
             }
@@ -413,6 +433,20 @@ impl EngineFrame {
             || self.needs_layout
             || self.doc.hover_changed
             || self.doc.needs_animation_frame
+            || self
+                .doc
+                .has_visible_animated_images(self.doc.scroll_y, self.viewport_h)
+    }
+
+    /// True when a frame already has visible work queued. Unlike
+    /// `needs_render`, this deliberately does not treat a running CSS/SVG
+    /// animation clock as paint damage by itself; `update_frame_detailed`
+    /// samples animations and reports visible damage for the current frame.
+    pub(crate) fn needs_visible_render(&self) -> bool {
+        self.needs_paint
+            || self.needs_style
+            || self.needs_layout
+            || self.doc.hover_changed
             || self
                 .doc
                 .has_visible_animated_images(self.doc.scroll_y, self.viewport_h)
@@ -1056,6 +1090,48 @@ impl EngineFrame {
         target: crate::types::PendingImageTarget,
         url: String,
     ) {
+        let url_trimmed = url.trim();
+        if url_trimmed.starts_with("data:")
+            && matches!(
+                target,
+                crate::types::PendingImageTarget::Background
+                    | crate::types::PendingImageTarget::BackgroundLayer(_)
+                    | crate::types::PendingImageTarget::Mask
+            )
+        {
+            match crate::cached_decoded_image_result(url_trimmed, None) {
+                Ok(decoded) => {
+                    if let Some(node) =
+                        crate::types::find_node_by_path_mut(&mut self.doc.root, &path)
+                    {
+                        match target {
+                            crate::types::PendingImageTarget::Background => {
+                                let _ = crate::html::set_decoded_bg_image_on_node(node, decoded);
+                            }
+                            crate::types::PendingImageTarget::BackgroundLayer(layer_index) => {
+                                let _ = crate::html::set_decoded_bg_image_layer_on_node(
+                                    node,
+                                    layer_index,
+                                    decoded,
+                                );
+                            }
+                            crate::types::PendingImageTarget::Mask => {
+                                if let Some((data, w, h)) =
+                                    crate::html::decoded_image_pixels_arc(decoded)
+                                {
+                                    node.mask_image_data = Some(data);
+                                    node.mask_image_width = w;
+                                    node.mask_image_height = h;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(error) => self.doc.image_load_errors.push((path, target, url, error)),
+            }
+            return;
+        }
         let node_id = crate::types::find_node_by_path_mut(&mut self.doc.root, &path)
             .map(|node| node.node_id)
             .unwrap_or(0);
@@ -1556,6 +1632,23 @@ fn animation_overrides_are_transform_only(
             .all(|props| !props.is_empty() && props.iter().all(|(prop, _)| prop == "transform"))
 }
 
+fn retained_paint_band(doc: &Document, viewport_h: f32) -> crate::types::Rect {
+    let doc_h = crate::types::Document::scroll_height(&doc.root).max(viewport_h);
+    let overscan = (viewport_h * 8.0).max(6000.0);
+    let top = (doc.scroll_y - overscan).max(0.0);
+    let bottom = (doc.scroll_y + viewport_h + overscan).min(doc_h);
+    crate::types::Rect::new(
+        0.0,
+        top,
+        doc.root.layout.margin_rect.w.max(1.0),
+        bottom - top,
+    )
+}
+
+fn rect_intersects(a: crate::types::Rect, b: crate::types::Rect) -> bool {
+    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+}
+
 fn node_id_at_path(root: &crate::types::WebCore, path: &[usize]) -> Option<u32> {
     find_node_by_path(root, path)
         .map(|node| node.node_id)
@@ -1645,7 +1738,7 @@ mod tests {
         frame.feed_html_chunk(b" stream</h1></main>");
         frame.finish_loading();
         let text = crate::dom::get_text_content(&frame.doc.root);
-        assert!(text.contains("Hellostream"), "streamed text was {text:?}");
+        assert!(text.contains("Hello stream"), "streamed text was {text:?}");
     }
 
     #[test]
@@ -1846,14 +1939,20 @@ mod tests {
         );
         frame.finish_loading();
         assert!(frame.update_frame());
-        fn by_id_attr<'a>(node: &'a crate::types::WebCore, id: &str) -> Option<&'a crate::types::WebCore> {
+        fn by_id_attr<'a>(
+            node: &'a crate::types::WebCore,
+            id: &str,
+        ) -> Option<&'a crate::types::WebCore> {
             if node.attributes.get("id").is_some_and(|value| value == id) {
                 return Some(node);
             }
             node.children.iter().find_map(|child| by_id_attr(child, id))
         }
         let ticker = by_id_attr(&frame.doc.root, "ticker").expect("ticker node before stylesheet");
-        assert_eq!(ticker.style.background_color, crate::types::Color::TRANSPARENT);
+        assert_eq!(
+            ticker.style.background_color,
+            crate::types::Color::TRANSPARENT
+        );
 
         let (tx, rx) = std::sync::mpsc::channel();
         let mut sheet = crate::css::Stylesheet::default();
@@ -1869,12 +1968,13 @@ mod tests {
         .unwrap();
         drop(tx);
         frame.doc.pending_stylesheets = Some(rx);
-        frame.doc.document_stylesheets.push(
-            crate::types::DocumentStylesheet::Linked {
+        frame
+            .doc
+            .document_stylesheets
+            .push(crate::types::DocumentStylesheet::Linked {
                 href: "https://example.test/site.css".to_string(),
                 media: String::new(),
-            },
-        );
+            });
         frame.doc.preserve_stylesheet_document_order = true;
 
         assert!(frame.update_frame());
@@ -2018,6 +2118,79 @@ mod tests {
     }
 
     #[test]
+    fn streamed_offscreen_fixed_size_image_does_not_rebuild_current_paint_band() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<html><body style="margin:0"><div style="height:8000px"></div><img id="far" src="far.png" width="80" height="40"></body></html>"#,
+        );
+        frame.finish_loading();
+        assert!(frame.update_frame(), "initial layout");
+
+        let far = frame.doc.get_element_by_id("far").expect("far image");
+        let tx = frame.ensure_image_sender();
+        tx.send(crate::types::PendingImageResult::Loaded {
+            node_id: far,
+            path: Vec::new(),
+            target: crate::types::PendingImageTarget::Element,
+            url: "https://example.test/far.png".to_string(),
+            decoded: crate::html::DecodedImage::Raster(
+                std::sync::Arc::new(vec![0, 0, 255, 255].repeat(80 * 40)),
+                80,
+                40,
+            ),
+        })
+        .unwrap();
+
+        let update = frame.update_frame_detailed();
+        assert!(
+            !update.changed,
+            "a far-offscreen fixed-size image should be installed in the DOM without repainting the current band"
+        );
+        assert!(
+            !update.rebuild_display_list,
+            "far-offscreen image completion should wait for a later scroll-band rebuild"
+        );
+    }
+
+    #[test]
+    fn streamed_visible_fixed_size_image_rebuilds_current_paint_band() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<html><body style="margin:0"><img id="hero" src="hero.png" width="80" height="40"></body></html>"#,
+        );
+        frame.finish_loading();
+        assert!(frame.update_frame(), "initial layout");
+
+        let hero = frame.doc.get_element_by_id("hero").expect("hero image");
+        let tx = frame.ensure_image_sender();
+        tx.send(crate::types::PendingImageResult::Loaded {
+            node_id: hero,
+            path: Vec::new(),
+            target: crate::types::PendingImageTarget::Element,
+            url: "https://example.test/hero.png".to_string(),
+            decoded: crate::html::DecodedImage::Raster(
+                std::sync::Arc::new(vec![255, 0, 0, 255].repeat(80 * 40)),
+                80,
+                40,
+            ),
+        })
+        .unwrap();
+
+        let update = frame.update_frame_detailed();
+        assert!(update.changed);
+        assert!(
+            update.paint_only_display_list_rebuild,
+            "visible fixed-size image completion should repaint the image rect without rebuilding the whole band"
+        );
+        assert!(
+            !update.rebuild_display_list,
+            "visible fixed-size image completion should not force a full display-list rebuild"
+        );
+    }
+
+    #[test]
     fn streaming_frame_ticks_svg_animations() {
         let mut frame = EngineFrame::empty(120.0, 80.0);
         frame.start_streaming("https://example.test/");
@@ -2029,7 +2202,10 @@ mod tests {
         frame.doc.needs_animation_frame = true;
 
         let update = frame.update_frame_detailed();
-        assert!(update.changed, "streamed SVG animation should request a frame");
+        assert!(
+            update.changed,
+            "streamed SVG animation should request a frame"
+        );
         assert!(
             update.rebuild_display_list,
             "SVG animation samples change rasterized paint commands"
@@ -2091,7 +2267,10 @@ mod tests {
             </body></html>"#,
         );
         frame.finish_loading();
-        assert!(frame.update_frame(), "streamed inline CSS should trigger layout");
+        assert!(
+            frame.update_frame(),
+            "streamed inline CSS should trigger layout"
+        );
 
         let banner = frame
             .doc
@@ -2287,7 +2466,11 @@ mod tests {
             crate::renderer::display_list::PaintCmd::Image {
                 data: crate::renderer::display_list::ImageRef::Owned(data, w, h),
                 ..
-            } => Some((data, *w, *h)),
+            } => Some((data.as_slice(), *w, *h)),
+            crate::renderer::display_list::PaintCmd::Image {
+                data: crate::renderer::display_list::ImageRef::Shared(data, w, h),
+                ..
+            } => Some((data.as_slice(), *w, *h)),
             _ => None,
         });
         let (data, w, h) = image.expect("streamed inline SVG should rasterize to an image command");
@@ -2321,6 +2504,40 @@ mod tests {
         assert!(
             !update.rebuild_display_list,
             "transform-only animation samples should reuse the retained display list"
+        );
+    }
+
+    #[test]
+    fn dom_text_mutation_relayouts_on_frame_update() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.load_html("<div id='box' style='width:40px'>short</div>");
+        assert!(frame.update_frame_detailed().rebuild_display_list);
+
+        let box_id = frame.doc.query_selector("#box").unwrap();
+        let old_height = frame
+            .doc
+            .find_webcore(box_id)
+            .map(|node| node.layout.margin_rect.h)
+            .unwrap();
+
+        frame.doc.set_text_content(
+            box_id,
+            "this text is intentionally long enough to wrap onto several lines",
+        );
+        assert!(frame.doc.has_dirty_layout());
+
+        let update = frame.update_frame_detailed();
+        let new_height = frame
+            .doc
+            .find_webcore(box_id)
+            .map(|node| node.layout.margin_rect.h)
+            .unwrap();
+
+        assert!(update.changed);
+        assert!(update.rebuild_display_list);
+        assert!(
+            new_height > old_height,
+            "dirty DOM text should relayout through the frame update path"
         );
     }
 }

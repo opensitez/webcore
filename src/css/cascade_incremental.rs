@@ -140,6 +140,110 @@ pub fn mark_hover_dirty(
     );
 }
 
+pub fn hover_change_requires_style(
+    root: &crate::types::WebCore,
+    stylesheet: &Stylesheet,
+    old_hovered: u32,
+    new_hovered: u32,
+    hover_sensitive: &std::collections::HashSet<u32>,
+) -> bool {
+    if old_hovered == new_hovered {
+        return false;
+    }
+
+    let old_chain = build_hover_chain(root, old_hovered);
+    let new_chain = build_hover_chain(root, new_hovered);
+    let toggled: std::collections::HashSet<u32> = old_chain
+        .symmetric_difference(&new_chain)
+        .copied()
+        .collect();
+    if toggled.is_empty() {
+        return false;
+    }
+
+    if toggled.iter().any(|id| hover_sensitive.contains(id)) {
+        return true;
+    }
+
+    if hover_sensitive.is_empty() && stylesheet.rules.iter().any(|rule| rule.is_hover) {
+        return true;
+    }
+
+    if !stylesheet.has_hover_descendant_rules {
+        return false;
+    }
+
+    fn walk(
+        node: &crate::types::WebCore,
+        stylesheet: &Stylesheet,
+        toggled: &std::collections::HashSet<u32>,
+        ancestors: &mut Vec<AncestorInfo>,
+        child_index: usize,
+        sibling_count: usize,
+        type_child_index: usize,
+        type_sibling_count: usize,
+    ) -> bool {
+        if toggled.contains(&node.node_id)
+            && hover_descendant_anchor_matches(
+                node,
+                stylesheet,
+                ancestors,
+                child_index,
+                sibling_count,
+                type_child_index,
+                type_sibling_count,
+            )
+        {
+            return true;
+        }
+
+        let anc = AncestorInfo {
+            tag: node.tag.clone(),
+            attributes: node.attributes.clone(),
+            child_index,
+            sibling_count,
+            type_child_index,
+            type_sibling_count,
+            node_id: node.node_id,
+        };
+        ancestors.push(anc);
+
+        let child_count = node.children.len();
+        for i in 0..child_count {
+            let child_tag = node.children[i].tag.clone();
+            let mut t_idx = 0usize;
+            let mut t_count = 0usize;
+            for (j, sib) in node.children.iter().enumerate() {
+                if sib.tag == child_tag {
+                    if j == i {
+                        t_idx = t_count;
+                    }
+                    t_count += 1;
+                }
+            }
+            if walk(
+                &node.children[i],
+                stylesheet,
+                toggled,
+                ancestors,
+                i,
+                child_count,
+                t_idx,
+                t_count,
+            ) {
+                ancestors.pop();
+                return true;
+            }
+        }
+
+        ancestors.pop();
+        false
+    }
+
+    let mut ancestors = Vec::new();
+    walk(root, stylesheet, &toggled, &mut ancestors, 0, 1, 0, 1)
+}
+
 fn hover_descendant_anchor_matches(
     node: &crate::types::WebCore,
     stylesheet: &Stylesheet,
@@ -527,10 +631,17 @@ fn swap_hover_inner(
             stored.marker_content = cur_marker_content;
             stored.placeholder_style = cur_placeholder_style;
             stored.backdrop_style = cur_backdrop_style;
+            let old_inherited_style = (*stored).clone();
 
             std::sync::Arc::make_mut(&mut node.style).hover_style = Some(stored);
             std::sync::Arc::make_mut(&mut node.style).active_style = as_backup;
             std::sync::Arc::make_mut(&mut node.style).visited_style = vs_backup;
+            let new_inherited_style = node.style.clone();
+            crate::css::inherit::sync_inherited_descendants_after_parent_style_swap(
+                &mut node.children,
+                &old_inherited_style,
+                &new_inherited_style,
+            );
             node.hover_applied = should_hover;
             changed = true;
 

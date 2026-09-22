@@ -157,6 +157,70 @@ fn propagate_to_text_descendants(children: &mut Vec<WebCore>, props: &[(&str, &s
     }
 }
 
+pub(crate) fn sync_inherited_descendants_after_parent_style_swap(
+    children: &mut Vec<WebCore>,
+    old_parent: &ComputedStyle,
+    new_parent: &ComputedStyle,
+) {
+    for child in children {
+        let old_child = (*child.style).clone();
+        {
+            let style = std::sync::Arc::make_mut(&mut child.style);
+            sync_inherited_property(style, &old_child, old_parent, new_parent, "color");
+            sync_inherited_property(style, &old_child, old_parent, new_parent, "font-size");
+            sync_inherited_property(style, &old_child, old_parent, new_parent, "font-weight");
+            sync_inherited_property(style, &old_child, old_parent, new_parent, "font-style");
+            sync_inherited_property(style, &old_child, old_parent, new_parent, "font-family");
+            sync_inherited_property(style, &old_child, old_parent, new_parent, "line-height");
+            sync_inherited_property(style, &old_child, old_parent, new_parent, "letter-spacing");
+            sync_inherited_property(style, &old_child, old_parent, new_parent, "word-spacing");
+            sync_inherited_property(style, &old_child, old_parent, new_parent, "text-indent");
+            sync_inherited_property(style, &old_child, old_parent, new_parent, "text-transform");
+            sync_inherited_property(style, &old_child, old_parent, new_parent, "visibility");
+            sync_inherited_property(style, &old_child, old_parent, new_parent, "cursor");
+        }
+        let new_child = child.style.clone();
+        sync_inherited_descendants_after_parent_style_swap(
+            &mut child.children,
+            &old_child,
+            &new_child,
+        );
+    }
+}
+
+fn sync_inherited_property(
+    style: &mut ComputedStyle,
+    old_child: &ComputedStyle,
+    old_parent: &ComputedStyle,
+    new_parent: &ComputedStyle,
+    prop: &str,
+) {
+    if inherited_property_same(old_parent, new_parent, prop)
+        || !inherited_property_same(old_child, old_parent, prop)
+    {
+        return;
+    }
+    copy_property_from_style(style, new_parent, prop);
+}
+
+fn inherited_property_same(a: &ComputedStyle, b: &ComputedStyle, prop: &str) -> bool {
+    match prop {
+        "color" => a.color == b.color,
+        "font-size" => a.font_size == b.font_size,
+        "font-weight" => a.font_weight == b.font_weight,
+        "font-style" => a.font_style == b.font_style,
+        "font-family" => a.font_family == b.font_family,
+        "line-height" => a.line_height == b.line_height,
+        "letter-spacing" => a.letter_spacing == b.letter_spacing,
+        "word-spacing" => a.word_spacing == b.word_spacing,
+        "text-indent" => a.text_indent == b.text_indent,
+        "text-transform" => a.text_transform == b.text_transform,
+        "visibility" => a.visibility == b.visibility,
+        "cursor" => a.cursor == b.cursor,
+        _ => false,
+    }
+}
+
 /// Apply a single CSS property/value pair to a ComputedStyle.
 /// Copy a single CSS property from parent's computed style into `style`.
 /// Used when a rule declares `property: inherit` and must override a lower-specificity

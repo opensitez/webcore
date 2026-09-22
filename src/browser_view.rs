@@ -430,6 +430,17 @@ impl BrowserView {
         self.wake = Some(Arc::new(wake));
     }
 
+    pub fn register_trait_component(
+        &mut self,
+        tag: &str,
+        component: impl crate::types::Component + 'static,
+    ) {
+        self.renderer.register_trait_component(tag, component);
+        if let Some(frame) = self.stream_frame.as_mut() {
+            frame.engine.component_registry = self.renderer.component_registry.clone();
+        }
+    }
+
     fn wake(&self) {
         if let Some(wake) = self.wake.as_ref() {
             wake();
@@ -443,6 +454,17 @@ impl BrowserView {
             .or(self.doc.as_ref())
     }
 
+    fn flush_dirty_active_layout(&mut self) -> bool {
+        if self
+            .active_doc()
+            .is_some_and(|doc| doc.style_dirty || doc.has_dirty_layout())
+        {
+            self.layout_active()
+        } else {
+            false
+        }
+    }
+
     fn active_doc_mut(&mut self) -> Option<&mut Document> {
         if let Some(frame) = self.stream_frame.as_mut() {
             Some(&mut frame.doc)
@@ -454,6 +476,7 @@ impl BrowserView {
     fn feed_streaming_chunk(&mut self, url: &str, html: &str) {
         if self.stream_frame.is_none() {
             let mut frame = EngineFrame::empty(self.width, self.height);
+            frame.engine.component_registry = self.renderer.component_registry.clone();
             frame.set_cache_dir(self.options.cache_dir.clone());
             frame.set_resource_wake(self.wake.clone());
             frame.start_streaming(url);
@@ -516,6 +539,9 @@ impl BrowserView {
             let update = frame.update_frame_detailed_with_scroll_priority(scroll_priority);
             let mut visual_changed = update.changed;
             if update.paint_only_display_list_rebuild {
+                let image_visible = self
+                    .renderer
+                    .invalidate_paint_rects(update.paint_rects.iter().copied());
                 let non_transform_visible = self
                     .renderer
                     .invalidate_non_transform_animation_paint_rects(
@@ -527,8 +553,9 @@ impl BrowserView {
                     &frame.doc,
                     self.width,
                     self.height,
-                ) || non_transform_visible;
-                if non_transform_visible {
+                ) || non_transform_visible
+                    || image_visible;
+                if non_transform_visible || image_visible {
                     self.renderer.invalidate_paint_only_display_list();
                 }
             } else if update.rebuild_display_list {
@@ -553,47 +580,6 @@ impl BrowserView {
         true
     }
 
-    fn ensure_streamed_paint_layout(&mut self) {
-        if !self.stream_paint_ready {
-            return;
-        }
-        if !self.stream_needs_layout {
-            return;
-        }
-        self.wire_streamed_font_resources();
-        let Some(frame) = self.stream_frame.as_mut() else {
-            return;
-        };
-        frame.set_viewport(self.width, self.height);
-        let scroll_priority = std::mem::take(&mut self.scroll_priority_frame);
-        let update = frame.update_frame_detailed_with_scroll_priority(scroll_priority);
-        let mut visual_changed = update.changed;
-        if update.paint_only_display_list_rebuild {
-            let non_transform_visible =
-                self.renderer
-                    .invalidate_non_transform_animation_paint_rects(
-                        &frame.doc,
-                        self.width,
-                        self.height,
-                    );
-            visual_changed = self
-                .renderer
-                .invalidate_animation_paint_rects(&frame.doc, self.width, self.height)
-                || non_transform_visible;
-            if non_transform_visible {
-                self.renderer.invalidate_paint_only_display_list();
-            }
-        } else if update.rebuild_display_list {
-            self.renderer.invalidate_display_list();
-        } else if update.changed {
-            visual_changed =
-                self.renderer
-                    .invalidate_animation_paint_rects(&frame.doc, self.width, self.height);
-        }
-        self.stream_needs_layout = false;
-        let _ = visual_changed;
-    }
-
     fn update_streamed_frame_before_paint(&mut self) -> bool {
         if !self.stream_paint_ready {
             return false;
@@ -607,18 +593,22 @@ impl BrowserView {
         let update = frame.update_frame_detailed_with_scroll_priority(scroll_priority);
         let mut visual_changed = update.changed;
         if update.paint_only_display_list_rebuild {
-            let non_transform_visible =
-                self.renderer
-                    .invalidate_non_transform_animation_paint_rects(
-                        &frame.doc,
-                        self.width,
-                        self.height,
-                    );
-            visual_changed = self
+            let image_visible = self
                 .renderer
-                .invalidate_animation_paint_rects(&frame.doc, self.width, self.height)
-                || non_transform_visible;
-            if non_transform_visible {
+                .invalidate_paint_rects(update.paint_rects.iter().copied());
+            let non_transform_visible = self
+                .renderer
+                .invalidate_non_transform_animation_paint_rects(
+                    &frame.doc,
+                    self.width,
+                    self.height,
+                );
+            visual_changed =
+                self.renderer
+                    .invalidate_animation_paint_rects(&frame.doc, self.width, self.height)
+                    || non_transform_visible
+                    || image_visible;
+            if non_transform_visible || image_visible {
                 self.renderer.invalidate_paint_only_display_list();
             }
         } else if update.rebuild_display_list {
@@ -630,6 +620,20 @@ impl BrowserView {
         }
         self.stream_needs_layout = false;
         visual_changed
+    }
+
+    fn ensure_streamed_layout_current(&mut self) -> bool {
+        let needs_update = self.stream_paint_ready
+            && self
+                .stream_frame
+                .as_ref()
+                .is_some_and(|frame| self.stream_needs_layout || frame.needs_render());
+        if needs_update {
+            self.update_streamed_frame_before_paint()
+        } else {
+            self.wire_streamed_font_resources();
+            false
+        }
     }
 
     fn wire_streamed_font_resources(&mut self) {
@@ -667,6 +671,7 @@ impl BrowserView {
     }
 
     pub fn document_and_renderer_mut(&mut self) -> Option<(&mut Document, &mut Renderer)> {
+        self.ensure_streamed_layout_current();
         if let Some(frame) = self.stream_frame.as_mut() {
             return Some((&mut frame.doc, &mut self.renderer));
         }
@@ -889,6 +894,7 @@ impl BrowserView {
         self.doc = None;
         self.stream_frame = Some(EngineFrame::empty(self.width, self.height));
         if let Some(frame) = self.stream_frame.as_mut() {
+            frame.engine.component_registry = self.renderer.component_registry.clone();
             frame.set_cache_dir(self.options.cache_dir.clone());
             frame.set_resource_wake(self.wake.clone());
             frame.start_streaming(&url);
@@ -930,6 +936,9 @@ impl BrowserView {
         loop {
             changed |= self.poll();
             if self.active_doc().is_some() && !self.loading {
+                self.stream_paint_ready = true;
+                self.stream_needs_layout = true;
+                self.ensure_streamed_layout_current();
                 return true;
             }
             if std::time::Instant::now() >= deadline {
@@ -1019,19 +1028,29 @@ impl BrowserView {
     }
 
     pub fn drive_idle(&mut self, event_loop: &ActiveEventLoop) -> bool {
-        let changed = self.poll();
+        let scroll_priority = self.scroll_priority_frame;
+        let changed = if scroll_priority { false } else { self.poll() };
         let nav_changed = self.drain_pending_navigation();
-        let stream_layout_changed = self.update_streamed_frame_before_paint();
+        let stream_layout_changed = if scroll_priority {
+            false
+        } else {
+            self.update_streamed_frame_before_paint()
+        };
         let needs_redraw = if self.stream_frame.is_some() {
             let (stream_needs_wake, stream_needs_redraw) = self.stream_idle_state();
-            if stream_needs_wake {
+            if scroll_priority {
+                self.scroll_priority_frame = false;
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    std::time::Instant::now() + std::time::Duration::from_millis(1),
+                ));
+            } else if stream_needs_wake {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(
                     std::time::Instant::now() + std::time::Duration::from_millis(16),
                 ));
             } else {
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
-            stream_layout_changed || stream_needs_redraw
+            scroll_priority || stream_layout_changed || stream_needs_redraw
         } else {
             self.renderer.drive_document_idle(
                 event_loop,
@@ -1046,6 +1065,31 @@ impl BrowserView {
         changed || nav_changed || stream_layout_changed || needs_redraw
     }
 
+    #[cfg(test)]
+    fn drive_idle_for_test(&mut self) -> bool {
+        let scroll_priority = self.scroll_priority_frame;
+        let changed = if scroll_priority { false } else { self.poll() };
+        let nav_changed = self.drain_pending_navigation();
+        let stream_layout_changed = if scroll_priority {
+            false
+        } else {
+            self.update_streamed_frame_before_paint()
+        };
+        let needs_redraw = if self.stream_frame.is_some() {
+            let (_, stream_needs_redraw) = self.stream_idle_state();
+            if scroll_priority {
+                self.scroll_priority_frame = false;
+            }
+            scroll_priority || stream_layout_changed || stream_needs_redraw
+        } else {
+            false
+        };
+        if needs_redraw {
+            self.invalidate_backing();
+        }
+        changed || nav_changed || stream_layout_changed || needs_redraw
+    }
+
     fn stream_idle_state(&self) -> (bool, bool) {
         let Some(frame) = self.stream_frame.as_ref() else {
             return (false, false);
@@ -1053,20 +1097,20 @@ impl BrowserView {
         let pending_resources = frame.doc.pending_images.is_some()
             || frame.doc.pending_stylesheets.is_some()
             || frame.engine.has_pending_fonts();
-        let frame_needs_render = frame.needs_render();
+        let frame_needs_work = frame.needs_render();
+        let frame_needs_redraw = frame.needs_visible_render();
         let has_animations = frame.has_animations();
         let needs_wake = self.loading
             || pending_resources
-            || frame_needs_render
+            || frame_needs_work
             || has_animations
             || self.stream_needs_layout;
-        let needs_redraw = frame_needs_render || has_animations || self.stream_needs_layout;
+        let needs_redraw = frame_needs_redraw || self.stream_needs_layout;
         (needs_wake, needs_redraw)
     }
 
     pub fn paint_into(&mut self, target: &mut Pixmap, x: i32, y: i32, scale: f32) {
-        self.wire_streamed_font_resources();
-        self.ensure_streamed_paint_layout();
+        self.ensure_streamed_layout_current();
         let width_px = target.width().max(1);
         let height_px = target.height().max(1);
         let view_w = ((self.width * scale).ceil() as u32).max(1).min(width_px);
@@ -1114,27 +1158,40 @@ impl BrowserView {
     pub fn handle_mouse_move(&mut self, x: f32, y: f32) -> bool {
         let width = self.width;
         let height = self.height;
-        let Some(doc) = self.active_doc_mut() else {
-            return false;
+        let (redraw, needs_style) = {
+            let Some(doc) = self.active_doc_mut() else {
+                return false;
+            };
+            let old_scroll_y = doc.scroll_y;
+            if doc.process_scrollbar_event(HtmlEventType::MouseMove, x, y, width, height)
+                && (doc.scroll_y - old_scroll_y).abs() >= 0.5
+            {
+                self.scroll_priority_frame = true;
+                self.wake();
+                return true;
+            }
+            let doc_pt = (x, y + doc.scroll_y);
+            let mut redraw = doc.process_mouse_event(HtmlEventType::MouseMove, doc_pt, 0);
+            redraw |= doc.process_mouse_event(HtmlEventType::PointerMove, doc_pt, 0);
+            let needs_style = doc.hover_changed
+                && crate::css::hover_change_requires_style(
+                    &doc.root,
+                    &doc.stylesheet,
+                    doc.prev_hovered_box,
+                    doc.hovered_box,
+                    &doc.hover_sensitive_nodes,
+                );
+            if !needs_style && doc.hover_changed {
+                doc.hover_changed = false;
+                doc.prev_hovered_box = doc.hovered_box;
+            }
+            (redraw, needs_style)
         };
-        let old_scroll_y = doc.scroll_y;
-        if doc.process_scrollbar_event(HtmlEventType::MouseMove, x, y, width, height)
-            && (doc.scroll_y - old_scroll_y).abs() >= 0.5
-        {
-            self.scroll_priority_frame = true;
-            self.wake();
-            return true;
-        }
-        let redraw = doc.process_mouse_event(HtmlEventType::MouseMove, (x, y + doc.scroll_y), 0);
-        let needs_style = doc.hover_changed
-            && (doc.hover_sensitive_nodes.contains(&doc.hovered_box)
-                || doc.hover_sensitive_nodes.contains(&doc.prev_hovered_box));
-        if !needs_style && doc.hover_changed {
-            doc.hover_changed = false;
-            doc.prev_hovered_box = doc.hovered_box;
-        }
         if needs_style {
-            self.renderer.invalidate_display_list();
+            // Pointer motion can arrive far faster than the display refresh
+            // rate. Do not do cascade/layout synchronously here; leave the
+            // hover change on the document and let `drive_idle` coalesce it
+            // into the next frame with other pending work.
             self.invalidate_backing();
             self.wake();
         } else if redraw {
@@ -1158,9 +1215,26 @@ impl BrowserView {
             self.wake();
             return true;
         }
-        let changed = doc.process_mouse_event(kind, (x, y + doc.scroll_y), button);
+        let doc_pt = (x, y + doc.scroll_y);
+        let mut changed = doc.process_mouse_event(kind, doc_pt, button);
+        let pointer_kind = match kind {
+            HtmlEventType::MouseDown => Some(HtmlEventType::PointerDown),
+            HtmlEventType::MouseUp => Some(HtmlEventType::PointerUp),
+            _ => None,
+        };
+        if let Some(pointer_kind) = pointer_kind {
+            changed |= doc.process_mouse_event(pointer_kind, doc_pt, button);
+        }
+        if button == 2 && matches!(kind, HtmlEventType::MouseUp) {
+            changed |= doc.process_mouse_event(HtmlEventType::ContextMenu, doc_pt, button);
+        }
         if matches!(kind, HtmlEventType::MouseUp) {
             self.handle_activation_at(x, y);
+        }
+        if changed {
+            self.flush_dirty_active_layout();
+            self.invalidate_backing();
+            self.wake();
         }
         changed
     }
@@ -1170,6 +1244,13 @@ impl BrowserView {
         let Some(doc) = self.active_doc_mut() else {
             return false;
         };
+        let mut wheel = crate::dom::HtmlEvent::new(HtmlEventType::Wheel);
+        wheel.client_pos = (0.0, 0.0);
+        wheel.doc_pos = (doc.scroll_x, doc.scroll_y);
+        wheel.delta_x = dx;
+        wheel.delta_y = dy;
+        wheel.target = doc.hovered_box;
+        let mut changed = doc.dispatch_input_event(wheel).0;
         let max_y = (Document::scroll_height(&doc.root) - height).max(0.0);
         let old_y = doc.scroll_y;
         doc.scroll_x = (doc.scroll_x + dx).max(0.0);
@@ -1177,10 +1258,15 @@ impl BrowserView {
         if (doc.scroll_y - old_y).abs() >= 0.5 {
             self.scroll_priority_frame = true;
             self.wake();
-            true
-        } else {
-            false
+            changed = true;
         }
+        if changed {
+            self.flush_dirty_active_layout();
+            self.invalidate_backing();
+        } else {
+            return false;
+        }
+        true
     }
 
     pub fn scroll_by(&mut self, dx: f32, dy: f32) -> bool {
@@ -1241,6 +1327,7 @@ impl BrowserView {
             doc.process_key_event(event_type, key_code, ch, ctrl, shift, alt, meta)
         });
         if changed {
+            self.flush_dirty_active_layout();
             self.invalidate_backing();
         }
         changed
@@ -1275,22 +1362,28 @@ impl BrowserView {
             let Some(node) = doc.get_box_by_id(hit.node_id) else {
                 return;
             };
-            let form_action = find_parent_form_action(&doc.root, hit.node_id);
             if matches!(node.tag.as_str(), "button" | "input") {
                 let input_type = node
                     .attributes
                     .get("type")
                     .map(|s| s.to_ascii_lowercase())
                     .unwrap_or_default();
-                if node.tag == "button" || input_type == "submit" {
+                let is_submit = if node.tag == "button" {
+                    input_type.is_empty() || input_type == "submit"
+                } else {
+                    input_type == "submit"
+                };
+                if is_submit {
+                    let Some(form) = find_containing_form(&doc.root, hit.node_id) else {
+                        return;
+                    };
+                    let form_action = form.attributes.get("action").cloned().unwrap_or_default();
                     let target = if form_action.is_empty() {
                         current_url.clone()
                     } else {
                         resolve_browser_target(&form_action, &current_url, &view_url)
                     };
-                    let data = find_containing_form(&doc.root, hit.node_id)
-                        .map(collect_form_data)
-                        .unwrap_or_default();
+                    let data = collect_form_data(form);
                     let url = build_form_submit_url(&target, "get", &data);
                     self.navigate(url);
                 }
@@ -1372,12 +1465,20 @@ fn streamed_tree_can_paint(root: &WebCore) -> bool {
 }
 
 fn resolve_browser_target(raw: &str, document_base_url: &str, view_url: &str) -> String {
+    if raw.starts_with("file://") {
+        return raw.to_string();
+    }
     let base = if document_base_url.is_empty() {
         view_url
     } else {
         document_base_url
     };
-    resolve_url(raw, base)
+    let resolved = resolve_url(raw, base);
+    if base.starts_with("file://") && resolved.starts_with('/') {
+        format!("file://{resolved}")
+    } else {
+        resolved
+    }
 }
 
 fn fill_placeholder(target: &mut Pixmap, x: i32, y: i32, w: u32, h: u32) {
@@ -1437,6 +1538,63 @@ fn blit_viewport_from_backing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_document_relative_links_stay_file_urls() {
+        let target = resolve_browser_target(
+            "overflow.html",
+            "file:///tmp/webcore/examples/html/demo.html",
+            "file:///tmp/webcore/examples/html/demo.html",
+        );
+        assert_eq!(target, "file:///tmp/webcore/examples/html/overflow.html");
+
+        let explicit = resolve_browser_target(
+            "file:///tmp/webcore/examples/html/forms_demo.html",
+            "file:///tmp/webcore/examples/html/demo.html",
+            "file:///tmp/webcore/examples/html/demo.html",
+        );
+        assert_eq!(
+            explicit,
+            "file:///tmp/webcore/examples/html/forms_demo.html"
+        );
+    }
+
+    #[test]
+    fn right_mouse_button_dispatches_contextmenu_with_button_two() {
+        let seen = Arc::new(Mutex::new(None::<u8>));
+        let mut doc = crate::parse_html(
+            r#"<html><body style="margin:0"><div id="target" style="width:120px;height:80px"></div></body></html>"#,
+        );
+        let target = doc.get_element_by_id("target").unwrap();
+        let seen_listener = seen.clone();
+        doc.add_event_listener(
+            target,
+            "contextmenu",
+            Box::new(move |evt, _doc| {
+                *seen_listener.lock().unwrap() = Some(evt.button);
+            }),
+            crate::dom::events::ListenerOptions::default(),
+        );
+
+        let mut view = BrowserView::new(240.0, 160.0, PageLoadOptions::default());
+        view.doc = Some(doc);
+        view.layout_active();
+        let rect = view
+            .doc
+            .as_ref()
+            .unwrap()
+            .get_box_by_id(target)
+            .unwrap()
+            .layout
+            .border_rect;
+        let x = rect.x + rect.w * 0.5;
+        let y = rect.y + rect.h * 0.5;
+
+        view.handle_mouse_button(HtmlEventType::MouseDown, x, y, 2);
+        view.handle_mouse_button(HtmlEventType::MouseUp, x, y, 2);
+
+        assert_eq!(*seen.lock().unwrap(), Some(2));
+    }
 
     #[test]
     fn browser_view_feeds_html_chunks_into_streaming_frame() {
@@ -1509,6 +1667,10 @@ mod tests {
             .h;
         assert!(before <= 0.0 || before.is_nan());
 
+        assert!(
+            view.update_streamed_frame_before_paint(),
+            "browser update/idle should prepare the streamed frame before paint"
+        );
         let mut target = Pixmap::new(480, 320).unwrap();
         view.paint_into(&mut target, 0, 0, 1.0);
 
@@ -1523,12 +1685,12 @@ mod tests {
             .h;
         assert!(
             after > 0.0,
-            "first streamed paint must consume UA/inline/current CSS through layout before rendering"
+            "first streamed update must consume UA/inline/current CSS through layout before rendering"
         );
     }
 
     #[test]
-    fn browser_view_first_paint_drives_frame_resource_scheduler() {
+    fn browser_view_update_drives_frame_resource_scheduler() {
         let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
         let base = "https://example.test/";
         view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
@@ -1538,8 +1700,10 @@ mod tests {
             "<!doctype html><html><head><style>.logo{display:block;width:16px;height:16px;background-image:url(/logo.png)}</style></head><body><div class='logo'></div>",
         );
 
-        let mut target = Pixmap::new(480, 320).unwrap();
-        view.paint_into(&mut target, 0, 0, 1.0);
+        assert!(
+            view.update_streamed_frame_before_paint(),
+            "browser update/idle should discover CSS background dependencies"
+        );
 
         assert!(
             view.stream_frame
@@ -1561,6 +1725,7 @@ mod tests {
         view.feed_streaming_chunk(base, "<!doctype html><body><p>Ready</p>");
 
         let mut target = Pixmap::new(480, 320).unwrap();
+        assert!(view.update_streamed_frame_before_paint());
         view.paint_into(&mut target, 0, 0, 1.0);
         assert!(!view.stream_needs_layout);
 
@@ -1590,6 +1755,81 @@ mod tests {
         assert!(
             view.update_streamed_frame_before_paint(),
             "the browser idle/update loop should consume pending resources"
+        );
+    }
+
+    #[test]
+    fn browser_view_scroll_priority_defers_streamed_resource_update() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+        view.feed_streaming_chunk(
+            base,
+            "<!doctype html><body><div style='height:2000px'>Ready</div>",
+        );
+        assert!(view.update_streamed_frame_before_paint());
+        assert!(view.handle_wheel(0.0, 80.0));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut sheet = crate::css::Stylesheet::default();
+        sheet.parse_and_add_author("div{color:red}");
+        tx.send((
+            0,
+            "https://example.test/late.css".to_string(),
+            sheet,
+            String::new(),
+        ))
+        .unwrap();
+        view.stream_frame.as_mut().unwrap().doc.pending_stylesheets = Some(rx);
+
+        let changed = view.drive_idle_for_test();
+        assert!(changed, "scroll-priority idle should request a redraw");
+        assert!(
+            view.stream_frame
+                .as_ref()
+                .unwrap()
+                .doc
+                .pending_stylesheets
+                .is_some(),
+            "scroll-priority idle must not drain resource queues before presenting scroll"
+        );
+    }
+
+    #[test]
+    fn browser_view_scroll_priority_defers_loader_chunks() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/".to_string();
+        view.load_id = 7;
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(&base);
+        view.feed_streaming_chunk(
+            &base,
+            "<!doctype html><body><div style='height:2000px'>Ready</div>",
+        );
+        assert!(view.update_streamed_frame_before_paint());
+        let before_len = view.streamed_html_len;
+        assert!(view.handle_wheel(0.0, 80.0));
+
+        view.tx
+            .send(BrowserViewLoadResult::HtmlChunk {
+                load_id: 7,
+                url: base,
+                html: "<p>late</p>".to_string(),
+            })
+            .unwrap();
+
+        let changed = view.drive_idle_for_test();
+        assert!(changed, "scroll-priority idle should request a redraw");
+        assert_eq!(
+            view.streamed_html_len, before_len,
+            "scroll-priority idle must present scroll before ingesting queued HTML"
+        );
+
+        assert!(view.drive_idle_for_test());
+        assert!(
+            view.streamed_html_len > before_len,
+            "the following idle turn should resume normal progressive HTML ingestion"
         );
     }
 
@@ -1662,10 +1902,40 @@ mod tests {
         view.stream_frame.as_mut().unwrap().doc.pending_stylesheets = Some(rx);
 
         let (needs_wake, needs_redraw) = view.stream_idle_state();
-        assert!(needs_wake, "pending resources should keep the browser loop alive");
+        assert!(
+            needs_wake,
+            "pending resources should keep the browser loop alive"
+        );
         assert!(
             !needs_redraw,
             "queued resources alone should not discard a valid painted frame"
+        );
+    }
+
+    #[test]
+    fn streamed_animation_clock_wakes_without_unconditional_repaint() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+        view.feed_streaming_chunk(base, "<!doctype html><body><p>Ready</p>");
+        assert!(view.update_streamed_frame_before_paint());
+        assert!(!view.stream_needs_layout);
+
+        view.stream_frame
+            .as_mut()
+            .unwrap()
+            .doc
+            .needs_animation_frame = true;
+
+        let (needs_wake, needs_redraw) = view.stream_idle_state();
+        assert!(
+            needs_wake,
+            "active animations should keep the browser clock alive"
+        );
+        assert!(
+            !needs_redraw,
+            "the animation clock alone should not repaint a clean streamed frame"
         );
     }
 
@@ -1743,6 +2013,184 @@ mod tests {
         let hero_id = doc.get_element_by_id("hero").unwrap();
         let hero = doc.get_box_by_id(hero_id).unwrap();
         assert_eq!(hero.resolved_src, "https://cdn.example.test/wide.webp");
+    }
+
+    #[test]
+    fn browser_view_mouse_move_recascades_ancestor_hover_dropdowns() {
+        fn find<'a>(node: &'a WebCore, id: &str) -> Option<&'a WebCore> {
+            if node.attributes.get("id").map(String::as_str) == Some(id) {
+                return Some(node);
+            }
+            node.children.iter().find_map(|child| find(child, id))
+        }
+
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let doc = view.renderer.load_html(
+            r#"<style>
+               body { margin: 0 }
+               ul, li { margin: 0; padding: 0 }
+               li { display: block; width: 180px; height: 40px }
+               a { display: block; width: 180px; height: 40px }
+               .panel { display: block; position: absolute; width: 200px; max-height: 0; overflow: hidden }
+               .panel p { height: 60px; margin: 0 }
+               li:hover .panel { max-height: 80px }
+               </style>
+               <ul><li id="item"><a id="trigger">Products</a><div id="panel" class="panel"><p>Firefox</p></div></li></ul>"#,
+            480.0,
+        );
+        view.doc = Some(doc);
+
+        let trigger_id = view
+            .document()
+            .unwrap()
+            .get_element_by_id("trigger")
+            .expect("trigger");
+        let trigger_rect = view
+            .document()
+            .unwrap()
+            .get_bounding_client_rect(trigger_id)
+            .expect("trigger rect");
+        assert!(
+            find(&view.document().unwrap().root, "panel")
+                .unwrap()
+                .layout
+                .border_rect
+                .h
+                < 1.0
+        );
+
+        assert!(
+            view.handle_mouse_move(trigger_rect.x + 8.0, trigger_rect.y + 8.0),
+            "moving over a child of an ancestor-hover trigger must request style work"
+        );
+        view.relayout();
+
+        assert!(
+            find(&view.document().unwrap().root, "panel")
+                .unwrap()
+                .layout
+                .border_rect
+                .h
+                > 50.0,
+            "real BrowserView mouse movement must open li:hover descendant panels"
+        );
+    }
+
+    #[test]
+    fn browser_view_mouse_move_prepares_hover_transition_frame_before_redraw() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let doc = view.renderer.load_html(
+            r#"<style>
+               body { margin: 0 }
+               #outline {
+                 display: block;
+                 width: 120px;
+                 height: 40px;
+                 background-color: transparent;
+                 color: #7c6af7;
+                 transition: background-color 250ms linear, color 250ms linear;
+               }
+               #outline:hover {
+                 background-color: #7c6af7;
+                 color: white;
+               }
+               </style>
+               <div id="outline">Outline</div>"#,
+            480.0,
+        );
+        view.doc = Some(doc);
+
+        assert!(
+            view.handle_mouse_move(10.0, 10.0),
+            "hovering a transitioning element must request redraw"
+        );
+
+        let doc = view.document().unwrap();
+        let id = doc.get_element_by_id("outline").expect("outline");
+        assert!(
+            !doc.hover_changed,
+            "BrowserView should consume hover style work before the requested redraw"
+        );
+        let states = doc
+            .transition_states
+            .get(&id)
+            .expect("hover transition states");
+        assert!(
+            states
+                .iter()
+                .any(|state| state.property == "background-color"
+                    && state.to_value == "rgba(124,106,247,1.0000)"),
+            "background transition should target hovered purple"
+        );
+        assert!(
+            states
+                .iter()
+                .any(|state| state.property == "color"
+                    && state.to_value == "rgba(255,255,255,1.0000)"),
+            "text color transition should target hovered white"
+        );
+        let first_frame = doc
+            .animation_overrides
+            .get(&id)
+            .expect("first transition frame");
+        assert!(
+            first_frame
+                .iter()
+                .any(|(prop, value)| prop == "color" && value == "rgba(124,106,247,1.0000)"),
+            "first requested redraw should paint the transition start, not stale hover/fallback text"
+        );
+    }
+
+    #[test]
+    fn streamed_browser_view_mouse_move_dirties_renderer_after_hover_transition_layout() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+        view.feed_streaming_chunk(
+            base,
+            r#"<html><head><style>
+               body { margin: 0 }
+               #outline {
+                 display: block;
+                 width: 120px;
+                 height: 40px;
+                 background-color: transparent;
+                 color: #7c6af7;
+                 transition: background-color 250ms linear, color 250ms linear;
+               }
+               #outline:hover {
+                 background-color: #7c6af7;
+                 color: white;
+               }
+               </style></head><body><div id="outline">Outline</div>"#,
+        );
+        view.stream_paint_ready = true;
+        view.stream_needs_layout = true;
+        assert!(view.update_streamed_frame_before_paint());
+
+        let mut target = Pixmap::new(480, 320).unwrap();
+        view.paint_into(&mut target, 0, 0, 1.0);
+        assert!(
+            !view.renderer.display_list_dirty_for_test(),
+            "initial paint should consume the display-list dirty flag"
+        );
+
+        assert!(
+            view.handle_mouse_move(10.0, 10.0),
+            "hovering a streamed transitioning element must request redraw"
+        );
+
+        let doc = view.document().unwrap();
+        let id = doc.get_element_by_id("outline").expect("outline");
+        assert!(
+            doc.transition_states.contains_key(&id),
+            "streamed hover should create transition states immediately"
+        );
+        assert!(
+            view.renderer.display_list_dirty_for_test(),
+            "streamed hover layout must dirty the renderer so the requested redraw cannot reuse stale paint"
+        );
     }
 
     #[test]

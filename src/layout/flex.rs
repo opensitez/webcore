@@ -50,6 +50,95 @@ fn collect_inner(node: &WebCore, path: &mut Vec<usize>, result: &mut Vec<Vec<usi
     }
 }
 
+fn flex_item_participates(child: &WebCore) -> bool {
+    if matches!(child.style.display, Display::None) {
+        return false;
+    }
+    if matches!(child.style.position, Position::Absolute | Position::Fixed) {
+        return false;
+    }
+    !(child.tag == "#text" && child.text.chars().all(|c| c.is_ascii_whitespace()))
+}
+
+fn has_rendered_flex_sibling(
+    node: &WebCore,
+    child_paths: &[Vec<usize>],
+    from: usize,
+    forward: bool,
+) -> bool {
+    if forward {
+        child_paths
+            .iter()
+            .skip(from + 1)
+            .map(|path| child_ref(node, path))
+            .any(flex_item_participates)
+    } else {
+        child_paths
+            .iter()
+            .take(from)
+            .rev()
+            .map(|path| child_ref(node, path))
+            .any(flex_item_participates)
+    }
+}
+
+fn collapsed_boundary_space_main_size(
+    engine: &LayoutEngine,
+    node: &WebCore,
+    child_paths: &[Vec<usize>],
+    index: usize,
+    font_px: f32,
+    root_font_px: f32,
+) -> f32 {
+    let child = child_ref(node, &child_paths[index]);
+    if child.tag != "#text"
+        || child.text.is_empty()
+        || matches!(
+            child.style.white_space,
+            WhiteSpace::Pre | WhiteSpace::PreWrap
+        )
+    {
+        return 0.0;
+    }
+
+    let starts_with_space = child
+        .text
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_whitespace());
+    let ends_with_space = child
+        .text
+        .chars()
+        .next_back()
+        .is_some_and(|ch| ch.is_ascii_whitespace());
+    let needs_leading =
+        starts_with_space && has_rendered_flex_sibling(node, child_paths, index, false);
+    let needs_trailing =
+        ends_with_space && has_rendered_flex_sibling(node, child_paths, index, true);
+    if !needs_leading && !needs_trailing {
+        return 0.0;
+    }
+
+    let child_font = child.style.font_size_px(font_px, root_font_px);
+    let space = engine.measure_text_cached(
+        " ",
+        child_font,
+        child.style.font_weight,
+        child.style.font_style,
+        &child.style.font_family,
+    );
+    let letter_spacing = child
+        .style
+        .letter_spacing
+        .resolve(child_font, 0.0, root_font_px);
+    let word_spacing = child
+        .style
+        .word_spacing
+        .resolve(child_font, 0.0, root_font_px);
+    let count = needs_leading as u8 as f32 + needs_trailing as u8 as f32;
+    count * (space + letter_spacing + word_spacing)
+}
+
 /// The content height an item takes when nothing forces its main size — the
 /// measurement behind a content-based flex base size and the column
 /// content-based minimum.
@@ -288,7 +377,15 @@ pub fn layout_flex(
     let mut items: Vec<FlexItem> = Vec::new();
     let child_paths = collect_flex_children(node);
 
-    for path in &child_paths {
+    for (path_idx, path) in child_paths.iter().enumerate() {
+        let boundary_space_main = collapsed_boundary_space_main_size(
+            engine,
+            node,
+            &child_paths,
+            path_idx,
+            font_px,
+            root_font_px,
+        );
         let child = child_mut(node, path);
         if matches!(child.style.display, Display::None) {
             clear_layout_subtree(child);
@@ -468,7 +565,7 @@ pub fn layout_flex(
             }
         });
 
-        let basis_main: f32 = if let Some(kind) = intrinsic_basis {
+        let mut basis_main: f32 = if let Some(kind) = intrinsic_basis {
             if is_row {
                 match kind {
                     CssLength::MinContent => {
@@ -593,6 +690,9 @@ pub fn layout_flex(
                 )
             }
         };
+        if is_row {
+            basis_main += boundary_space_main;
+        }
 
         // Apply min/max constraints on main axis.
         // For border-box items, min/max refer to the border box; convert to content-box.
@@ -703,7 +803,10 @@ pub fn layout_flex(
                 // overflow: hidden/scroll/auto → automatic minimum is 0
                 0.0
             } else {
-                auto_min_main(engine.min_content_width_of_content(child, font_px, root_font_px))
+                auto_min_main(
+                    engine.min_content_width_of_content(child, font_px, root_font_px)
+                        + boundary_space_main,
+                )
             }
         } else {
             if !child.style.min_height.is_auto() {
@@ -1129,6 +1232,8 @@ pub fn layout_flex(
         };
         if let Some(cs) = definite_cross {
             lines[0].cross_size = cs;
+        } else if is_row && flex_min_h > lines[0].cross_size {
+            lines[0].cross_size = flex_min_h.min(flex_max_h);
         }
     }
 

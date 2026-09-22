@@ -103,6 +103,41 @@ fn push_background_image_paint(
     });
 }
 
+fn background_gradient_rect(
+    size: BackgroundSize,
+    size_w: &CssLength,
+    size_h: &CssLength,
+    position_x: &CssLength,
+    position_y: &CssLength,
+    font_px: f32,
+    root_font_px: f32,
+    bg_origin_rect: Rect,
+) -> Rect {
+    let ow = bg_origin_rect.w;
+    let oh = bg_origin_rect.h;
+    let (draw_w, draw_h) = match size {
+        BackgroundSize::Cover | BackgroundSize::Contain | BackgroundSize::Auto => (ow, oh),
+        BackgroundSize::Explicit => {
+            let w_auto = size_w.is_auto();
+            let h_auto = size_h.is_auto();
+            let draw_w = if w_auto {
+                ow
+            } else {
+                size_w.resolve(font_px, ow, root_font_px)
+            };
+            let draw_h = if h_auto {
+                oh
+            } else {
+                size_h.resolve(font_px, oh, root_font_px)
+            };
+            (draw_w, draw_h)
+        }
+    };
+    let x = bg_origin_rect.x + position_x.resolve(font_px, ow - draw_w, root_font_px);
+    let y = bg_origin_rect.y + position_y.resolve(font_px, oh - draw_h, root_font_px);
+    Rect::new(x, y, draw_w.max(0.0), draw_h.max(0.0))
+}
+
 /// Build a display list from a laid-out box tree.
 pub fn build_display_list(root: &WebCore, viewport_w: f32, viewport_h: f32) -> DisplayList {
     let visited = std::collections::HashSet::new();
@@ -123,6 +158,7 @@ pub fn build_display_list(root: &WebCore, viewport_w: f32, viewport_h: f32) -> D
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         paint_clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         suppress_deferred_z_descendants: false,
+        font_system: None,
         transform_ctx: crate::types::TransformCtx {
             // The root box's font size IS the root font size — `rem`.
             font_px: root.style.font_size_px(16.0, 16.0),
@@ -148,6 +184,32 @@ pub fn build_display_list_full(
     visited_hrefs: &std::collections::HashSet<String>,
     base_url: &str,
 ) -> DisplayList {
+    build_display_list_full_with_font_system(
+        root,
+        viewport_w,
+        viewport_h,
+        scroll_x,
+        scroll_y,
+        hovered_id,
+        active_id,
+        visited_hrefs,
+        base_url,
+        None,
+    )
+}
+
+pub fn build_display_list_full_with_font_system(
+    root: &WebCore,
+    viewport_w: f32,
+    viewport_h: f32,
+    scroll_x: f32,
+    scroll_y: f32,
+    hovered_id: u32,
+    active_id: u32,
+    visited_hrefs: &std::collections::HashSet<String>,
+    base_url: &str,
+    font_system: Option<*mut cosmic_text::FontSystem>,
+) -> DisplayList {
     let doc_h = crate::types::Document::scroll_height(root).max(viewport_h);
     let ctx = BuildContext {
         // ⛔ The list is built in DOCUMENT coordinates so replay can translate
@@ -166,6 +228,7 @@ pub fn build_display_list_full(
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         paint_clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         suppress_deferred_z_descendants: false,
+        font_system,
         transform_ctx: crate::types::TransformCtx {
             // The root box's font size IS the root font size — `rem`.
             font_px: root.style.font_size_px(16.0, 16.0),
@@ -192,28 +255,16 @@ pub fn build_display_list_full(
         clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
         paint_clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
         suppress_deferred_z_descendants: false,
+        font_system: ctx.font_system,
         transform_ctx: ctx.transform_ctx,
     };
-    let mut fixed_ids = Vec::new();
-    collect_fixed_elements(root, &mut fixed_ids);
-    for fid in fixed_ids {
-        fn find_node(node: &WebCore, id: u32) -> Option<&WebCore> {
-            if node.node_id == id {
-                return Some(node);
-            }
-            for child in &node.children {
-                if let Some(found) = find_node(child, id) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-        if let Some(node) = find_node(root, fid) {
-            // Into a list of its own — see `DisplayList::fixed_commands`.
-            let mut fixed = DisplayList::new();
-            build_for_box(node, &mut fixed, &fixed_ctx);
-            list.fixed_commands.extend(fixed.commands);
-        }
+    let mut fixed_nodes = Vec::new();
+    collect_fixed_elements(root, &mut fixed_nodes);
+    for node in fixed_nodes {
+        // Into a list of its own — see `DisplayList::fixed_commands`.
+        let mut fixed = DisplayList::new();
+        build_for_box(node, &mut fixed, &fixed_ctx);
+        list.fixed_commands.extend(fixed.commands);
     }
 
     list
@@ -236,6 +287,36 @@ pub fn build_display_list_viewport(
     active_id: u32,
     visited_hrefs: &std::collections::HashSet<String>,
     base_url: &str,
+) -> DisplayList {
+    build_display_list_viewport_with_font_system(
+        root,
+        viewport_w,
+        viewport_h,
+        scroll_x,
+        scroll_y,
+        paint_top,
+        paint_bottom,
+        hovered_id,
+        active_id,
+        visited_hrefs,
+        base_url,
+        None,
+    )
+}
+
+pub fn build_display_list_viewport_with_font_system(
+    root: &WebCore,
+    viewport_w: f32,
+    viewport_h: f32,
+    scroll_x: f32,
+    scroll_y: f32,
+    paint_top: f32,
+    paint_bottom: f32,
+    hovered_id: u32,
+    active_id: u32,
+    visited_hrefs: &std::collections::HashSet<String>,
+    base_url: &str,
+    font_system: Option<*mut cosmic_text::FontSystem>,
 ) -> DisplayList {
     let doc_h = crate::types::Document::scroll_height(root).max(viewport_h);
     let paint_top = paint_top.max(0.0);
@@ -260,6 +341,7 @@ pub fn build_display_list_viewport(
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         paint_clip,
         suppress_deferred_z_descendants: false,
+        font_system,
         transform_ctx: crate::types::TransformCtx {
             font_px: root.style.font_size_px(16.0, 16.0),
             root_font_px: root.style.font_size_px(16.0, 16.0),
@@ -284,27 +366,15 @@ pub fn build_display_list_viewport(
         clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
         paint_clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
         suppress_deferred_z_descendants: false,
+        font_system: ctx.font_system,
         transform_ctx: ctx.transform_ctx,
     };
-    let mut fixed_ids = Vec::new();
-    collect_fixed_elements(root, &mut fixed_ids);
-    for fid in fixed_ids {
-        fn find_node(node: &WebCore, id: u32) -> Option<&WebCore> {
-            if node.node_id == id {
-                return Some(node);
-            }
-            for child in &node.children {
-                if let Some(found) = find_node(child, id) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-        if let Some(node) = find_node(root, fid) {
-            let mut fixed = DisplayList::new();
-            build_for_box(node, &mut fixed, &fixed_ctx);
-            list.fixed_commands.extend(fixed.commands);
-        }
+    let mut fixed_nodes = Vec::new();
+    collect_fixed_elements(root, &mut fixed_nodes);
+    for node in fixed_nodes {
+        let mut fixed = DisplayList::new();
+        build_for_box(node, &mut fixed, &fixed_ctx);
+        list.fixed_commands.extend(fixed.commands);
     }
 
     list
@@ -349,10 +419,31 @@ struct BuildContext<'a> {
     clip: Rect,
     paint_clip: Rect,
     suppress_deferred_z_descendants: bool,
+    font_system: Option<*mut cosmic_text::FontSystem>,
     /// What a `transform` needs to resolve `vw`/`vh` and `rem`. Carried on the
     /// context because the element's own box is not enough: a transform length
     /// can name the viewport.
     transform_ctx: crate::types::TransformCtx,
+}
+
+fn measure_paint_text_width(
+    ctx: &BuildContext<'_>,
+    text: &str,
+    font_px: f32,
+    weight: crate::types::FontWeight,
+    style: crate::types::FontStyle,
+    font_family: &str,
+) -> f32 {
+    let font_system = ctx.font_system.map(|ptr| unsafe { &mut *ptr });
+    crate::layout::inline_layout::measure_text_width_weighted(
+        text,
+        font_px,
+        font_system,
+        weight,
+        style,
+        1.0,
+        font_family,
+    )
 }
 
 fn encode_filter_ops(filters: &crate::types::CssFilters) -> Vec<(u8, f32, f32, f32, Color)> {
@@ -525,6 +616,14 @@ fn inline_relative_visual_offset(root: &WebCore, path: &[usize], root_font_px: f
     (dx, dy)
 }
 
+fn node_at_relative_path<'a>(root: &'a WebCore, path: &[usize]) -> Option<&'a WebCore> {
+    let mut cur = root;
+    for &idx in path {
+        cur = cur.children.get(idx)?;
+    }
+    Some(cur)
+}
+
 fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     // ── Early exits (same as render_box) ─────────────────────────────────────
     if matches!(node.style.display, Display::None) {
@@ -541,7 +640,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     }
 
     if node.tag == "#text" {
-        build_laid_out_text_node(node, list, ctx.scroll_x, ctx.scroll_y, ctx.paint_clip);
+        build_laid_out_text_node(node, list, ctx, ctx.scroll_x, ctx.scroll_y, ctx.paint_clip);
         return;
     }
 
@@ -1030,27 +1129,37 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 (Color::rgba(s.color.r, s.color.g, s.color.b, a), s.position)
             })
             .collect();
+        let gradient_rect = background_gradient_rect(
+            node.style.background_size,
+            &node.style.background_size_w,
+            &node.style.background_size_h,
+            &node.style.background_position_x,
+            &node.style.background_position_y,
+            font_px,
+            ctx.transform_ctx.root_font_px,
+            bg_origin_rect,
+        );
         let radial_center_x = node.style.gradient_radial_position_x.resolve(
             font_px,
-            bg_origin_rect.w,
+            gradient_rect.w,
             ctx.transform_ctx.root_font_px,
         );
         let radial_center_y = node.style.gradient_radial_position_y.resolve(
             font_px,
-            bg_origin_rect.h,
+            gradient_rect.h,
             ctx.transform_ctx.root_font_px,
         );
         let (radial_radius_x, radial_radius_y) = radial_gradient_used_radii(
             &node.style,
-            bg_origin_rect.w,
-            bg_origin_rect.h,
+            gradient_rect.w,
+            gradient_rect.h,
             radial_center_x,
             radial_center_y,
             font_px,
             ctx.transform_ctx.root_font_px,
         );
         list.push(PaintCmd::Gradient {
-            rect: bg_origin_rect,
+            rect: gradient_rect,
             clip: bg_clip_rect,
             repeat_x_mode: bg_repeat_x_mode,
             repeat_y_mode: bg_repeat_y_mode,
@@ -1087,14 +1196,26 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                         (Color::rgba(s.color.r, s.color.g, s.color.b, a), s.position)
                     })
                     .collect();
+                let layer_clip_rect = background_box(layer.clip);
+                let layer_origin_rect = background_box(layer.origin);
+                let gradient_rect = background_gradient_rect(
+                    layer.size,
+                    &layer.size_w,
+                    &layer.size_h,
+                    &layer.position_x,
+                    &layer.position_y,
+                    font_px,
+                    ctx.transform_ctx.root_font_px,
+                    layer_origin_rect,
+                );
                 let radial_center_x = layer.gradient_radial_position_x.resolve(
                     font_px,
-                    bg_origin_rect.w,
+                    gradient_rect.w,
                     ctx.transform_ctx.root_font_px,
                 );
                 let radial_center_y = layer.gradient_radial_position_y.resolve(
                     font_px,
-                    bg_origin_rect.h,
+                    gradient_rect.h,
                     ctx.transform_ctx.root_font_px,
                 );
                 let mut temp_style = ComputedStyle::default();
@@ -1104,8 +1225,8 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 temp_style.gradient_radial_radius_y = layer.gradient_radial_radius_y.clone();
                 let (radial_radius_x, radial_radius_y) = radial_gradient_used_radii(
                     &temp_style,
-                    bg_origin_rect.w,
-                    bg_origin_rect.h,
+                    gradient_rect.w,
+                    gradient_rect.h,
                     radial_center_x,
                     radial_center_y,
                     font_px,
@@ -1113,8 +1234,8 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 );
                 let (layer_repeat_x_mode, layer_repeat_y_mode) = layer.repeat.axis_modes();
                 list.push(PaintCmd::Gradient {
-                    rect: bg_origin_rect,
-                    clip: bg_clip_rect,
+                    rect: gradient_rect,
+                    clip: layer_clip_rect,
                     repeat_x_mode: layer_repeat_x_mode,
                     repeat_y_mode: layer_repeat_y_mode,
                     gradient_type: grad_type_u8,
@@ -1128,7 +1249,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                     radii: radii_arr,
                     radii_y: radii_y_arr,
                     opacity,
-                    blend_mode: background_blend_mode_to_u8(&eff_style.background_blend_mode),
+                    blend_mode: background_blend_mode_to_u8(&layer.blend_mode),
                 });
             }
         }
@@ -1170,6 +1291,8 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             let Some(Some(bg_image)) = node.additional_bg_images.get(layer_index) else {
                 continue;
             };
+            let layer_clip_rect = background_box(layer.clip);
+            let layer_origin_rect = background_box(layer.origin);
             push_background_image_paint(
                 list,
                 BackgroundImagePaint {
@@ -1186,11 +1309,11 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 },
                 font_px,
                 ctx.transform_ctx.root_font_px,
-                bg_origin_rect,
-                bg_clip_rect,
+                layer_origin_rect,
+                layer_clip_rect,
                 radii_arr,
                 radii_y_arr,
-                background_blend_mode_to_u8(&eff_style.background_blend_mode),
+                background_blend_mode_to_u8(&layer.blend_mode),
             );
         }
     }
@@ -1280,6 +1403,17 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                         painted_border_image = true;
                     }
                 }
+            }
+            if !painted_border_image
+                && paint_gradient_border_image_fallback(
+                    list,
+                    border_rect,
+                    bw,
+                    &eff_style.border_image_source,
+                    eff_style.opacity,
+                )
+            {
+                painted_border_image = true;
             }
             if !painted_border_image {
                 list.push(PaintCmd::Border {
@@ -1417,6 +1551,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         clip: child_clip,
         paint_clip: ctx.paint_clip,
         suppress_deferred_z_descendants: suppress_z,
+        font_system: ctx.font_system,
         transform_ctx: ctx.transform_ctx,
     };
 
@@ -1467,6 +1602,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 node,
                 eff_style,
                 list,
+                ctx,
                 child_sx,
                 child_sy,
                 is_hovered,
@@ -1969,10 +2105,11 @@ fn build_inline_text(
     node: &WebCore,
     eff_style: &ComputedStyle,
     list: &mut DisplayList,
+    ctx: &BuildContext<'_>,
     sx: f32,
     sy: f32,
-    is_hovered: bool,
-    is_active: bool,
+    _is_hovered: bool,
+    _is_active: bool,
     paint_clip: Rect,
 ) {
     let flat = crate::layout::inline_layout::collect_flat_text(node);
@@ -2038,7 +2175,16 @@ fn build_inline_text(
         let mut chunks: Vec<Chunk> = Vec::new();
 
         let has_rtl_visual_segments = line.visual_segments.iter().any(|vs| (vs.level & 1) != 0);
-        if has_rtl_visual_segments && !node.layout.inline_runs.is_empty() {
+        let touched_inline_runs = node
+            .layout
+            .inline_runs
+            .iter()
+            .filter(|run| run.text_offset < line_end && run.text_offset + run.length > line_start)
+            .count();
+        let use_bidi_visual_segments = has_rtl_visual_segments
+            && touched_inline_runs <= 1
+            && !node.layout.inline_runs.is_empty();
+        if use_bidi_visual_segments {
             // BiDi: use visual segment order
             for vs in &line.visual_segments {
                 let seg_s = vs.logical_start;
@@ -2162,6 +2308,12 @@ fn build_inline_text(
                 };
 
             let style_ref: &ComputedStyle = run_style.unwrap_or(&node.style);
+            let paint_style_ref: &ComputedStyle = chunk
+                .run_idx
+                .and_then(|ri| node.layout.inline_runs.get(ri))
+                .and_then(|run| node_at_relative_path(node, &run.path))
+                .map(|source| source.style.as_ref())
+                .unwrap_or(style_ref);
             let (relative_dx, relative_dy) = chunk
                 .run_idx
                 .and_then(|ri| node.layout.inline_runs.get(ri))
@@ -2181,10 +2333,6 @@ fn build_inline_text(
                 seg_text
             };
             let collapsed_text;
-            let raw_starts_with_space = seg_text_for_draw
-                .chars()
-                .next()
-                .is_some_and(char::is_whitespace);
             let text_for_transform = if collapses_spaces_for_paint(style_ref.white_space) {
                 let (collapsed, ended_with_space) =
                     collapse_spaces_for_paint(seg_text_for_draw, previous_collapsible_space);
@@ -2196,38 +2344,73 @@ fn build_inline_text(
                 seg_text_for_draw
             };
             let mut draw_text = apply_text_transform(text_for_transform, style_ref.text_transform);
-
-            let collapsed_leading_space =
-                raw_starts_with_space && !text_for_transform.starts_with(' ');
+            let mut leading_draw_advance = 0.0f32;
+            if !chunk.rtl && collapses_spaces_for_paint(style_ref.white_space) {
+                if let Some(visible_start) = draw_text
+                    .char_indices()
+                    .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx))
+                {
+                    if visible_start > 0 {
+                        let leading = &draw_text[..visible_start];
+                        leading_draw_advance = measure_paint_text_width(
+                            ctx,
+                            leading,
+                            run_font_px,
+                            style_ref.font_weight,
+                            style_ref.font_style,
+                            &style_ref.font_family,
+                        ) + run_letter_spc * leading.chars().count() as f32
+                            + run_word_spc * leading.chars().filter(|&c| c == ' ').count() as f32
+                            + line.extra_space_per_word
+                                * leading.chars().filter(|&c| c == ' ').count() as f32;
+                        draw_text = draw_text[visible_start..].to_string();
+                    }
+                } else if !draw_text.is_empty() {
+                    draw_text.clear();
+                }
+            }
             if !chunk.rtl
                 && collapses_spaces_for_paint(style_ref.white_space)
-                && !draw_text.starts_with(' ')
-                && (collapsed_leading_space || previous_logical_end.is_some())
+                && should_insert_missing_inline_gap(&draw_text)
+                && let Some(prev_end) = previous_logical_end
             {
-                let explicit_gap = if let Some(prev_end) = previous_logical_end {
-                    let gap_start = floor_cb(&flat, prev_end.min(flat.len()));
-                    if gap_start < s {
-                        let gap = &flat[gap_start..s];
-                        !gap.is_empty() && gap.chars().all(char::is_whitespace)
-                    } else {
-                        false
+                let gap_start = floor_cb(&flat, prev_end.min(flat.len()));
+                if gap_start < s {
+                    let gap = &flat[gap_start..s];
+                    if !gap.is_empty() && gap.chars().all(char::is_whitespace) {
+                        let char_gap = if !line.char_x.is_empty() {
+                            let start_off = gap_start.saturating_sub(line_start);
+                            let end_off = s.saturating_sub(line_start);
+                            if start_off < line.char_x.len() && end_off < line.char_x.len() {
+                                let start = line.char_x[start_off];
+                                let end = line.char_x[end_off];
+                                if start.is_finite() && end.is_finite() {
+                                    (end - start).max(0.0)
+                                } else {
+                                    0.0
+                                }
+                            } else {
+                                0.0
+                            }
+                        } else {
+                            0.0
+                        };
+                        let gap_w = if char_gap > 0.1 {
+                            char_gap
+                        } else {
+                            measure_paint_text_width(
+                                ctx,
+                                " ",
+                                run_font_px,
+                                style_ref.font_weight,
+                                style_ref.font_style,
+                                &style_ref.font_family,
+                            ) + run_letter_spc
+                                + run_word_spc
+                                + line.extra_space_per_word
+                        };
+                        cursor_x += gap_w;
                     }
-                } else {
-                    false
-                };
-                if collapsed_leading_space || explicit_gap {
-                    let gap_w = crate::layout::inline_layout::measure_text_width_weighted(
-                        " ",
-                        run_font_px,
-                        None,
-                        style_ref.font_weight,
-                        style_ref.font_style,
-                        1.0,
-                        &style_ref.font_family,
-                    ) + run_letter_spc
-                        + run_word_spc
-                        + line.extra_space_per_word;
-                    cursor_x += gap_w;
                 }
             }
 
@@ -2267,13 +2450,12 @@ fn build_inline_text(
                 }
             }
 
-            let measured_advance = crate::layout::inline_layout::measure_text_width_weighted(
+            let measured_advance = measure_paint_text_width(
+                ctx,
                 &draw_text,
                 run_font_px,
-                None,
                 style_ref.font_weight,
                 style_ref.font_style,
-                1.0,
                 &style_ref.font_family,
             ) + run_letter_spc * draw_text.chars().count() as f32
                 + run_word_spc * draw_text.chars().filter(|&c| c == ' ').count() as f32;
@@ -2328,7 +2510,7 @@ fn build_inline_text(
             } else {
                 (x_pos, ly + v_shift)
             };
-            let x_pos = x_pos + relative_dx;
+            let x_pos = x_pos + leading_draw_advance + relative_dx;
             let y_pos = y_pos + relative_dy;
             let is_final_chunk = chunk_idx + 1 == chunks.len();
             let line_clamp_marker = line.has_clamped_continuation && is_final_chunk;
@@ -2351,14 +2533,23 @@ fn build_inline_text(
                     continue;
                 }
                 let available = (content_right - x_pos).max(0.0);
-                let marker_width = crate::layout::inline_layout::measure_text_width(
+                let marker_width = measure_paint_text_width(
+                    ctx,
                     overflow_marker,
                     run_font_px,
-                    None,
+                    style_ref.font_weight,
+                    style_ref.font_style,
+                    &style_ref.font_family,
                 );
                 let budget = (available - marker_width).max(0.0);
-                let full_width =
-                    crate::layout::inline_layout::measure_text_width(&draw_text, run_font_px, None);
+                let full_width = measure_paint_text_width(
+                    ctx,
+                    &draw_text,
+                    run_font_px,
+                    style_ref.font_weight,
+                    style_ref.font_style,
+                    &style_ref.font_family,
+                );
                 if line_clamp_marker && full_width <= budget {
                     draw_text.push_str(overflow_marker);
                 } else {
@@ -2392,10 +2583,13 @@ fn build_inline_text(
                             let next = s + rel + ch.len_utf8();
                             let candidate =
                                 apply_text_transform(&flat[s..next], style_ref.text_transform);
-                            let width = crate::layout::inline_layout::measure_text_width(
+                            let width = measure_paint_text_width(
+                                ctx,
                                 &candidate,
                                 run_font_px,
-                                None,
+                                style_ref.font_weight,
+                                style_ref.font_style,
+                                &style_ref.font_family,
                             );
                             if width <= budget {
                                 cut = next;
@@ -2415,7 +2609,12 @@ fn build_inline_text(
             }
 
             // Run background color
-            if style_ref.background_color.a > 0 {
+            let run_background = if paint_style_ref.background_color.a > 0 {
+                paint_style_ref.background_color
+            } else {
+                style_ref.background_color
+            };
+            if run_background.a > 0 {
                 let run_w = if !line.char_x.is_empty() {
                     let start_off = s - line_start;
                     let end_off = e - line_start;
@@ -2438,20 +2637,13 @@ fn build_inline_text(
                 };
                 list.push(PaintCmd::FillRect {
                     rect: Rect::new(x_pos, y_pos, run_w, line.height),
-                    color: style_ref.background_color,
+                    color: run_background,
                     radius: [0.0; 4],
                     radius_y: [0.0; 4],
                 });
             }
 
-            // Text color: use effective style color when run inherits from node
-            let run_color = if std::ptr::eq(style_ref as *const _, node.style.as_ref() as *const _)
-                || ((is_hovered || is_active) && style_ref.color == node.style.color)
-            {
-                eff_style.color
-            } else {
-                style_ref.color
-            };
+            let run_color = paint_style_ref.color;
             let alpha = ((run_color.a as f32) * opacity) as u8;
             let text_color = Color::rgba(run_color.r, run_color.g, run_color.b, alpha);
 
@@ -2958,12 +3150,23 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32) 
 fn build_laid_out_text_node(
     node: &WebCore,
     list: &mut DisplayList,
+    ctx: &BuildContext<'_>,
     sx: f32,
     sy: f32,
     paint_clip: Rect,
 ) {
     if !node.layout.line_cache.is_empty() {
-        build_inline_text(node, &node.style, list, sx, sy, false, false, paint_clip);
+        build_inline_text(
+            node,
+            &node.style,
+            list,
+            ctx,
+            sx,
+            sy,
+            false,
+            false,
+            paint_clip,
+        );
         return;
     }
 
@@ -3271,6 +3474,64 @@ fn floor_cb(s: &str, idx: usize) -> usize {
         i -= 1;
     }
     i
+}
+
+fn paint_gradient_border_image_fallback(
+    list: &mut DisplayList,
+    rect: Rect,
+    widths: [f32; 4],
+    source: &str,
+    opacity: f32,
+) -> bool {
+    let src = source.trim();
+    if src.eq_ignore_ascii_case("none") || !src.to_ascii_lowercase().contains("gradient(") {
+        return false;
+    }
+
+    let Some(color) = gradient_border_image_color(src) else {
+        return true;
+    };
+    if color.a == 0 {
+        return true;
+    }
+    let color = Color::rgba(
+        color.r,
+        color.g,
+        color.b,
+        ((color.a as f32) * opacity.clamp(0.0, 1.0)).round() as u8,
+    );
+
+    if widths[0] > 0.0 {
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(rect.x, rect.y, rect.w, widths[0]),
+            color,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+    }
+    if widths[2] > 0.0 {
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(rect.x, rect.y + rect.h - widths[2], rect.w, widths[2]),
+            color,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+    }
+    true
+}
+
+fn gradient_border_image_color(source: &str) -> Option<Color> {
+    for token in source.split(|ch: char| ch == ',' || ch.is_whitespace()) {
+        let token = token
+            .trim()
+            .trim_matches(|ch| ch == '(' || ch == ')' || ch == ';');
+        if let Some(color) = crate::css::parse_color(token) {
+            if color.a != 0 {
+                return Some(color);
+            }
+        }
+    }
+    None
 }
 
 fn bstyle(s: crate::types::BorderStyle) -> u8 {
@@ -3807,6 +4068,30 @@ fn collapse_spaces_for_paint(text: &str, mut previous_space: bool) -> (String, b
     (out, previous_space)
 }
 
+fn should_insert_missing_inline_gap(text: &str) -> bool {
+    let Some(ch) = text.chars().find(|ch| !ch.is_whitespace()) else {
+        return false;
+    };
+    !matches!(
+        ch,
+        ',' | '.'
+            | ';'
+            | ':'
+            | '!'
+            | '?'
+            | ')'
+            | ']'
+            | '}'
+            | '›'
+            | '»'
+            | '、'
+            | '。'
+            | '，'
+            | '؟'
+            | '؛'
+    )
+}
+
 fn vertical_align_y_shift(vertical_align: &crate::types::VerticalAlign, font_px: f32) -> f32 {
     let shift =
         crate::layout::inline_layout::vertical_align_shift(vertical_align, font_px, font_px);
@@ -3857,12 +4142,12 @@ fn format_list_marker(lst: ListStyleType, index: i32) -> String {
     format!("{}.", crate::css::format_counter_value(index, style))
 }
 
-fn collect_fixed_elements(node: &WebCore, out: &mut Vec<u32>) {
+fn collect_fixed_elements<'a>(node: &'a WebCore, out: &mut Vec<&'a WebCore>) {
     if matches!(node.style.display, Display::None) {
         return;
     }
     if node.style.position == Position::Fixed && node.node_id != 0 {
-        out.push(node.node_id);
+        out.push(node);
     }
     for child in &node.children {
         collect_fixed_elements(child, out);

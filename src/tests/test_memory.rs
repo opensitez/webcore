@@ -1193,6 +1193,29 @@ fn full_repaint_clears_animation_dirty_rects() {
     );
 }
 
+#[test]
+fn offscreen_paint_damage_is_clipped_before_redraw() {
+    let mut r = crate::Renderer::new();
+    let mut doc = r.load_html(
+        r#"<style>body{margin:0}.top{height:100px;background:red}.far{margin-top:4000px;width:80px;height:80px;background:blue}</style><div class="top"></div><div class="far"></div>"#,
+        320.0,
+    );
+    let mut pm = tiny_skia::Pixmap::new(320, 240).unwrap();
+    r.render(&mut doc, &mut pm, 1.0);
+
+    let visible = r.invalidate_paint_rects([crate::types::Rect::new(0.0, 4100.0, 80.0, 80.0)]);
+
+    assert!(
+        !visible,
+        "offscreen image/animation paint damage should wake loaders without forcing a visible repaint"
+    );
+    assert_eq!(
+        r.dirty_paint_rect_count_for_test(),
+        0,
+        "offscreen damage should be clipped out of the retained viewport damage list"
+    );
+}
+
 /// ⛔ Every positioning scheme must survive the scroll-cached display list.
 ///
 /// The list is built once in DOCUMENT coordinates and translated by the scroll

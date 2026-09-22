@@ -599,8 +599,9 @@ pub fn layout_block_with_fc(
     c: &Constraints,
     parent_fc: Option<&mut FloatContext>,
 ) -> f32 {
-    let containing_w = c.available_width;
-    let x = c.x;
+    let is_bfc = c.force_independent_formatting_context || establishes_bfc(&node.style);
+    let mut containing_w = c.available_width;
+    let mut x = c.x;
     let y = c.y;
     let font_px = c.parent_font_px;
     let root_font_px = c.root_font_px;
@@ -627,6 +628,29 @@ pub fn layout_block_with_fc(
         Some(h) => Constraints::with_height(available_width, h, cx, cy, font_px, root_font_px),
         None => Constraints::new(available_width, cx, cy, font_px, root_font_px),
     };
+
+    if is_bfc && matches!(node.style.float, Float::None) && rbox.content_width.is_none() {
+        if let Some(fc) = parent_fc.as_ref() {
+            let mut fc_left = 0.0;
+            let mut fc_right = containing_w;
+            let local_x = x - fc.origin_x;
+            let local_y = y + rbox.margin_top - fc.origin_y;
+            fc.available_width_in(
+                local_x,
+                local_y,
+                font_px * 1.2,
+                containing_w,
+                &mut fc_left,
+                &mut fc_right,
+            );
+            let float_limited_w = (fc_right - fc_left).max(0.0);
+            if float_limited_w > 0.0 && float_limited_w + 0.5 < containing_w {
+                x += fc_left;
+                containing_w = float_limited_w;
+            }
+        }
+    }
+
     // Content width: respect box-sizing (already resolved in rbox via resolve_box).
     let raw_w = match rbox.content_width {
         Some(w) => w,
@@ -788,8 +812,6 @@ pub fn layout_block_with_fc(
     } else {
         (rbox.margin_left, rbox.margin_right)
     };
-
-    let is_bfc = c.force_independent_formatting_context || establishes_bfc(&node.style);
 
     let content_x = x
         + margin_left
@@ -1127,9 +1149,10 @@ pub fn layout_block_with_fc(
                 // list — a float overflowing an `overflow: visible` block
                 // stopped affecting everything after it.
                 if child_is_bfc_pre {
-                    engine.layout_box(
+                    engine.layout_box_with_fc(
                         grid_child_mut(node, path),
                         &child_c(child_content_w, content_x, content_y + child_y),
+                        Some(&mut *fc),
                     );
                 } else {
                     engine.layout_box_with_fc(

@@ -4178,7 +4178,7 @@ fn apply_border_image_source(s: &mut ComputedStyle, v: &str) {
         || value.starts_with("url(")
         || value.starts_with("image-set(")
         || value.starts_with("-webkit-image-set(")
-        || value.ends_with("-gradient)")
+        || value.to_ascii_lowercase().contains("gradient(")
     {
         s.border_image_source = value.to_string();
     }
@@ -5267,6 +5267,10 @@ fn apply_background(s: &mut ComputedStyle, v: &str) {
                         size_w: layer.background_size_w.clone(),
                         size_h: layer.background_size_h.clone(),
                         repeat: layer.background_repeat,
+                        attachment: layer.background_attachment,
+                        origin: layer.background_origin,
+                        clip: layer.background_clip,
+                        blend_mode: layer.background_blend_mode.clone(),
                     })
                     .collect();
                 s.rare_mut().additional_background_layers = additional;
@@ -5333,6 +5337,7 @@ fn copy_background_layer_fields(dst: &mut ComputedStyle, src: &ComputedStyle) {
     dst.background_attachment = src.background_attachment;
     dst.background_origin = src.background_origin;
     dst.background_clip = src.background_clip;
+    dst.background_blend_mode = src.background_blend_mode.clone();
 }
 
 fn background_layer_color(layer: &str) -> Option<Color> {
@@ -5362,23 +5367,64 @@ fn background_layer_color(layer: &str) -> Option<Color> {
         .next()
 }
 
+fn remove_top_level_function(value: &str, marker: &str) -> Option<(String, String)> {
+    let lower = value.to_ascii_lowercase();
+    let marker_start = lower.find(marker)?;
+    let mut start = marker_start;
+    while start > 0 {
+        let Some(prev) = value[..start].chars().next_back() else {
+            break;
+        };
+        if prev.is_ascii_alphabetic() || prev == '-' {
+            start -= prev.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    let open = value[start..].find('(').map(|idx| start + idx)?;
+    let mut depth = 0usize;
+    let mut end = value.len();
+    for (idx, ch) in value[open..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    end = open + idx + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if end <= open {
+        return None;
+    }
+
+    let function = value[start..end].trim().to_string();
+    let rest = format!("{} {}", &value[..start], &value[end..]);
+    Some((function, rest))
+}
+
 fn apply_background_single_layer(s: &mut ComputedStyle, v: &str) {
     reset_background_fields(s);
-    // Handle gradient functions first
-    if v.to_ascii_lowercase().contains("gradient") {
-        super::apply_gradient(s, v);
-        return;
+    let mut v_without_image = v.to_string();
+    if let Some((gradient, rest)) = remove_top_level_function(v, "gradient(") {
+        super::apply_gradient(s, &gradient);
+        v_without_image = rest;
     }
+
     // Extract url() first
-    if let Some(url) = super::extract_url(v) {
+    if let Some(url) = super::extract_url(&v_without_image) {
         s.background_image_url = url;
     }
     // Strip url(...) from value before splitting
-    let v_no_url = if let Some(start) = v.find("url(") {
+    let v_no_url = if let Some(start) = v_without_image.find("url(") {
         let depth_start = start;
         let mut depth = 0;
-        let mut end = v.len();
-        for (i, ch) in v[depth_start..].char_indices() {
+        let mut end = v_without_image.len();
+        for (i, ch) in v_without_image[depth_start..].char_indices() {
             if ch == '(' {
                 depth += 1;
             }
@@ -5390,9 +5436,13 @@ fn apply_background_single_layer(s: &mut ComputedStyle, v: &str) {
                 }
             }
         }
-        format!("{} {}", &v[..depth_start], &v[end..])
+        format!(
+            "{} {}",
+            &v_without_image[..depth_start],
+            &v_without_image[end..]
+        )
     } else {
-        v.to_string()
+        v_without_image
     };
     let v_rest = v_no_url.trim();
     let (pos_part, size_part) = if let Some(slash) = find_top_level_char(v_rest, '/') {
@@ -5638,6 +5688,10 @@ fn apply_background_image(s: &mut ComputedStyle, v: &str) {
                         size_w: layer.background_size_w.clone(),
                         size_h: layer.background_size_h.clone(),
                         repeat: layer.background_repeat,
+                        attachment: layer.background_attachment,
+                        origin: layer.background_origin,
+                        clip: layer.background_clip,
+                        blend_mode: layer.background_blend_mode.clone(),
                     })
                     .collect();
                 s.rare_mut().additional_background_layers = additional;
@@ -5979,51 +6033,149 @@ fn apply_background_repeat_tokens(s: &mut ComputedStyle, tokens: &[&str]) {
         layer.repeat = repeat;
     }
 }
-fn apply_background_clip(s: &mut ComputedStyle, v: &str) {
-    s.background_clip = match v.to_ascii_lowercase().as_str() {
+fn parse_background_clip_value(v: &str) -> BackgroundClip {
+    match v.to_ascii_lowercase().as_str() {
         "padding-box" => BackgroundClip::PaddingBox,
         "content-box" => BackgroundClip::ContentBox,
         "text" => BackgroundClip::Text,
         _ => BackgroundClip::BorderBox,
-    };
+    }
 }
-fn apply_background_origin(s: &mut ComputedStyle, v: &str) {
-    s.background_origin = match v.to_ascii_lowercase().as_str() {
+
+fn parse_background_origin_value(v: &str) -> BackgroundClip {
+    match v.to_ascii_lowercase().as_str() {
         "border-box" => BackgroundClip::BorderBox,
         "content-box" => BackgroundClip::ContentBox,
         _ => BackgroundClip::PaddingBox,
-    };
+    }
 }
-fn apply_background_attachment(s: &mut ComputedStyle, v: &str) {
-    s.background_attachment = match v.to_ascii_lowercase().as_str() {
+
+fn parse_background_attachment_value(v: &str) -> BackgroundAttachment {
+    match v.to_ascii_lowercase().as_str() {
         "fixed" => BackgroundAttachment::Fixed,
         "local" => BackgroundAttachment::Local,
         _ => BackgroundAttachment::Scroll,
+    }
+}
+
+fn apply_background_clip(s: &mut ComputedStyle, v: &str) {
+    let layers = crate::css::value_parse::split_top_level_commas(v);
+    let layer_values: Vec<&str> = if layers.is_empty() {
+        vec![v]
+    } else {
+        layers.iter().copied().collect()
     };
+    s.background_clip = parse_background_clip_value(layer_values[0].trim());
+    let fallback = layer_values.last().copied().unwrap_or(v).trim();
+    for (idx, layer) in s
+        .rare_mut()
+        .additional_background_layers
+        .iter_mut()
+        .enumerate()
+    {
+        let value = layer_values
+            .get(idx + 1)
+            .copied()
+            .unwrap_or(fallback)
+            .trim();
+        layer.clip = parse_background_clip_value(value);
+    }
+}
+fn apply_background_origin(s: &mut ComputedStyle, v: &str) {
+    let layers = crate::css::value_parse::split_top_level_commas(v);
+    let layer_values: Vec<&str> = if layers.is_empty() {
+        vec![v]
+    } else {
+        layers.iter().copied().collect()
+    };
+    s.background_origin = parse_background_origin_value(layer_values[0].trim());
+    let fallback = layer_values.last().copied().unwrap_or(v).trim();
+    for (idx, layer) in s
+        .rare_mut()
+        .additional_background_layers
+        .iter_mut()
+        .enumerate()
+    {
+        let value = layer_values
+            .get(idx + 1)
+            .copied()
+            .unwrap_or(fallback)
+            .trim();
+        layer.origin = parse_background_origin_value(value);
+    }
+}
+fn apply_background_attachment(s: &mut ComputedStyle, v: &str) {
+    let layers = crate::css::value_parse::split_top_level_commas(v);
+    let layer_values: Vec<&str> = if layers.is_empty() {
+        vec![v]
+    } else {
+        layers.iter().copied().collect()
+    };
+    s.background_attachment = parse_background_attachment_value(layer_values[0].trim());
+    let fallback = layer_values.last().copied().unwrap_or(v).trim();
+    for (idx, layer) in s
+        .rare_mut()
+        .additional_background_layers
+        .iter_mut()
+        .enumerate()
+    {
+        let value = layer_values
+            .get(idx + 1)
+            .copied()
+            .unwrap_or(fallback)
+            .trim();
+        layer.attachment = parse_background_attachment_value(value);
+    }
 }
 fn apply_background_blend_mode(s: &mut ComputedStyle, v: &str) {
-    apply_comma_keyword_list(
-        &mut s.background_blend_mode,
-        v,
-        &[
-            "normal",
-            "multiply",
-            "screen",
-            "overlay",
-            "darken",
-            "lighten",
-            "color-dodge",
-            "color-burn",
-            "hard-light",
-            "soft-light",
-            "difference",
-            "exclusion",
-            "hue",
-            "saturation",
-            "color",
-            "luminosity",
-        ],
-    );
+    const ALLOWED: &[&str] = &[
+        "normal",
+        "multiply",
+        "screen",
+        "overlay",
+        "darken",
+        "lighten",
+        "color-dodge",
+        "color-burn",
+        "hard-light",
+        "soft-light",
+        "difference",
+        "exclusion",
+        "hue",
+        "saturation",
+        "color",
+        "luminosity",
+    ];
+    let old = s.background_blend_mode.clone();
+    apply_comma_keyword_list(&mut s.background_blend_mode, v, ALLOWED);
+    if s.background_blend_mode == old && s.background_blend_mode != v.trim() {
+        return;
+    }
+    let layers = crate::css::value_parse::split_top_level_commas(&s.background_blend_mode);
+    let layer_values: Vec<String> = if layers.is_empty() {
+        vec![s.background_blend_mode.clone()]
+    } else {
+        layers.iter().map(|layer| (*layer).to_string()).collect()
+    };
+    let fallback = layer_values
+        .last()
+        .map(String::as_str)
+        .unwrap_or(s.background_blend_mode.as_str())
+        .trim()
+        .to_string();
+    for (idx, layer) in s
+        .rare_mut()
+        .additional_background_layers
+        .iter_mut()
+        .enumerate()
+    {
+        layer.blend_mode = layer_values
+            .get(idx + 1)
+            .map(String::as_str)
+            .unwrap_or(fallback.as_str())
+            .trim()
+            .to_string();
+    }
 }
 
 fn copy_background_image(d: &mut ComputedStyle, s: &ComputedStyle) {
@@ -6044,25 +6196,134 @@ fn copy_background_size(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.background_size = s.background_size;
     d.background_size_w = s.background_size_w.clone();
     d.background_size_h = s.background_size_h.clone();
+    let fallback = s.rare().additional_background_layers.last();
+    for (idx, layer) in d
+        .rare_mut()
+        .additional_background_layers
+        .iter_mut()
+        .enumerate()
+    {
+        let src = s.rare().additional_background_layers.get(idx).or(fallback);
+        if let Some(src) = src {
+            layer.size = src.size;
+            layer.size_w = src.size_w.clone();
+            layer.size_h = src.size_h.clone();
+        } else {
+            layer.size = s.background_size;
+            layer.size_w = s.background_size_w.clone();
+            layer.size_h = s.background_size_h.clone();
+        }
+    }
 }
 fn copy_background_position(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.background_position_x = s.background_position_x.clone();
     d.background_position_y = s.background_position_y.clone();
+    let fallback = s.rare().additional_background_layers.last();
+    for (idx, layer) in d
+        .rare_mut()
+        .additional_background_layers
+        .iter_mut()
+        .enumerate()
+    {
+        let src = s.rare().additional_background_layers.get(idx).or(fallback);
+        if let Some(src) = src {
+            layer.position_x = src.position_x.clone();
+            layer.position_y = src.position_y.clone();
+        } else {
+            layer.position_x = s.background_position_x.clone();
+            layer.position_y = s.background_position_y.clone();
+        }
+    }
 }
 fn copy_background_repeat(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.background_repeat = s.background_repeat;
+    let fallback = s.rare().additional_background_layers.last();
+    for (idx, layer) in d
+        .rare_mut()
+        .additional_background_layers
+        .iter_mut()
+        .enumerate()
+    {
+        layer.repeat = s
+            .rare()
+            .additional_background_layers
+            .get(idx)
+            .or(fallback)
+            .map(|src| src.repeat)
+            .unwrap_or(s.background_repeat);
+    }
 }
 fn copy_background_clip(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.background_clip = s.background_clip;
+    let fallback = s.rare().additional_background_layers.last();
+    for (idx, layer) in d
+        .rare_mut()
+        .additional_background_layers
+        .iter_mut()
+        .enumerate()
+    {
+        layer.clip = s
+            .rare()
+            .additional_background_layers
+            .get(idx)
+            .or(fallback)
+            .map(|src| src.clip)
+            .unwrap_or(s.background_clip);
+    }
 }
 fn copy_background_origin(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.background_origin = s.background_origin;
+    let fallback = s.rare().additional_background_layers.last();
+    for (idx, layer) in d
+        .rare_mut()
+        .additional_background_layers
+        .iter_mut()
+        .enumerate()
+    {
+        layer.origin = s
+            .rare()
+            .additional_background_layers
+            .get(idx)
+            .or(fallback)
+            .map(|src| src.origin)
+            .unwrap_or(s.background_origin);
+    }
 }
 fn copy_background_attachment(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.background_attachment = s.background_attachment;
+    let fallback = s.rare().additional_background_layers.last();
+    for (idx, layer) in d
+        .rare_mut()
+        .additional_background_layers
+        .iter_mut()
+        .enumerate()
+    {
+        layer.attachment = s
+            .rare()
+            .additional_background_layers
+            .get(idx)
+            .or(fallback)
+            .map(|src| src.attachment)
+            .unwrap_or(s.background_attachment);
+    }
 }
 fn copy_background_blend_mode(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.background_blend_mode = s.background_blend_mode.clone();
+    let fallback = s.rare().additional_background_layers.last();
+    for (idx, layer) in d
+        .rare_mut()
+        .additional_background_layers
+        .iter_mut()
+        .enumerate()
+    {
+        layer.blend_mode = s
+            .rare()
+            .additional_background_layers
+            .get(idx)
+            .or(fallback)
+            .map(|src| src.blend_mode.clone())
+            .unwrap_or_else(|| s.background_blend_mode.clone());
+    }
 }
 
 fn apply_mask(s: &mut ComputedStyle, v: &str) {

@@ -825,6 +825,157 @@ impl FloatItem {
     }
 }
 
+fn text_starts_with_collapsible_space(text: &str, style: &ComputedStyle) -> bool {
+    matches!(style.white_space, WhiteSpace::Normal | WhiteSpace::Nowrap)
+        && text
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_whitespace())
+}
+
+fn text_ends_with_collapsible_space(text: &str, style: &ComputedStyle) -> bool {
+    matches!(style.white_space, WhiteSpace::Normal | WhiteSpace::Nowrap)
+        && text
+            .chars()
+            .last()
+            .is_some_and(|ch| ch.is_ascii_whitespace())
+}
+
+fn inline_subtree_starts_with_collapsible_space(node: &WebCore) -> bool {
+    if matches!(node.style.display, Display::None)
+        || matches!(node.style.position, Position::Absolute | Position::Fixed)
+    {
+        return false;
+    }
+    if !node.style.before_content.is_empty() {
+        let style = node.style.before_style.as_deref().unwrap_or(&node.style);
+        return text_starts_with_collapsible_space(&node.style.before_content, style);
+    }
+    if !node.text.is_empty() {
+        return text_starts_with_collapsible_space(&node.text, &node.style);
+    }
+    for child in node.effective_children() {
+        if inline_subtree_has_non_whitespace_text(child) {
+            return inline_subtree_starts_with_collapsible_space(child);
+        }
+        if inline_subtree_starts_with_collapsible_space(child) {
+            return true;
+        }
+    }
+    if !node.style.after_content.is_empty() {
+        let style = node.style.after_style.as_deref().unwrap_or(&node.style);
+        return text_starts_with_collapsible_space(&node.style.after_content, style);
+    }
+    false
+}
+
+fn inline_subtree_ends_with_collapsible_space(node: &WebCore) -> bool {
+    if matches!(node.style.display, Display::None)
+        || matches!(node.style.position, Position::Absolute | Position::Fixed)
+    {
+        return false;
+    }
+    if !node.style.after_content.is_empty() {
+        let style = node.style.after_style.as_deref().unwrap_or(&node.style);
+        return text_ends_with_collapsible_space(&node.style.after_content, style);
+    }
+    for child in node.effective_children().into_iter().rev() {
+        if inline_subtree_has_non_whitespace_text(child) {
+            return inline_subtree_ends_with_collapsible_space(child);
+        }
+        if inline_subtree_ends_with_collapsible_space(child) {
+            return true;
+        }
+    }
+    if !node.text.is_empty() {
+        return text_ends_with_collapsible_space(&node.text, &node.style);
+    }
+    if !node.style.before_content.is_empty() {
+        let style = node.style.before_style.as_deref().unwrap_or(&node.style);
+        return text_ends_with_collapsible_space(&node.style.before_content, style);
+    }
+    false
+}
+
+fn inline_subtree_has_non_whitespace_text(node: &WebCore) -> bool {
+    if matches!(node.style.display, Display::None)
+        || matches!(node.style.position, Position::Absolute | Position::Fixed)
+    {
+        return false;
+    }
+    if !node.style.before_content.trim().is_empty()
+        || !node.text.trim().is_empty()
+        || !node.style.after_content.trim().is_empty()
+    {
+        return true;
+    }
+    node.effective_children()
+        .into_iter()
+        .any(inline_subtree_has_non_whitespace_text)
+}
+
+fn inline_items_max_content_advance(items: &[inline_layout::InlineItem]) -> f32 {
+    let mut max_width = 0.0f32;
+    let mut line_width = 0.0f32;
+    let mut trailing_collapsible_space = 0.0f32;
+    let mut line_has_content = false;
+
+    for item in items {
+        if matches!(item.kind, inline_layout::InlineItemKind::Break) {
+            max_width = max_width.max((line_width - trailing_collapsible_space).max(0.0));
+            line_width = 0.0;
+            trailing_collapsible_space = 0.0;
+            line_has_content = false;
+            continue;
+        }
+        if item.is_space {
+            if line_has_content {
+                line_width += item.advance;
+                trailing_collapsible_space += item.advance;
+            }
+            continue;
+        }
+        line_width += item.advance;
+        trailing_collapsible_space = 0.0;
+        line_has_content = true;
+    }
+
+    max_width.max((line_width - trailing_collapsible_space).max(0.0))
+}
+
+fn inline_items_min_content_advance(items: &[inline_layout::InlineItem]) -> f32 {
+    let mut max_width = 0.0f32;
+    let mut segment_width = 0.0f32;
+
+    for item in items {
+        if matches!(item.kind, inline_layout::InlineItemKind::Break) {
+            max_width = max_width.max(segment_width);
+            segment_width = 0.0;
+            continue;
+        }
+
+        if item.is_space && item.breakable {
+            max_width = max_width.max(segment_width);
+            segment_width = 0.0;
+            continue;
+        }
+
+        if item.breakable && segment_width > 0.0 {
+            max_width = max_width.max(segment_width);
+            segment_width = 0.0;
+        }
+
+        segment_width += item.advance;
+
+        if item.breakable && matches!(item.kind, inline_layout::InlineItemKind::Atomic { .. }) {
+            max_width = max_width.max(segment_width);
+            segment_width = 0.0;
+        }
+    }
+
+    max_width.max(segment_width)
+}
+
 fn shape_exclusion_x(
     shape: &FloatShape,
     rect: Rect,
@@ -1475,6 +1626,30 @@ impl LayoutEngine {
         )
     }
 
+    fn text_control_intrinsic_content_width(
+        &self,
+        node: &WebCore,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> Option<f32> {
+        if node.tag != "input" || !crate::types::is_text_input(node) {
+            return None;
+        }
+        if let Some(w) = self.field_sizing_content_width(node, font_px) {
+            return Some(w);
+        }
+        let border_box_w = node
+            .attributes
+            .get("size")
+            .and_then(|size| size.trim().parse::<f32>().ok())
+            .filter(|chars| *chars > 0.0)
+            .map(|chars| font_px * (chars * 0.6 + 0.5))
+            .unwrap_or(200.0);
+        let rb = self.res_box(&node.style, font_px, 0.0, root_font_px);
+        let edges = rb.padding_left + rb.padding_right + rb.border_left + rb.border_right;
+        Some((border_box_w - edges).max(0.0))
+    }
+
     fn field_sizing_content_height(
         &self,
         node: &WebCore,
@@ -1851,6 +2026,10 @@ impl LayoutEngine {
             return w;
         }
 
+        if let Some(w) = self.text_control_intrinsic_content_width(node, font_px, root_font_px) {
+            return w;
+        }
+
         // Custom component: use cached dimensions (like a replaced element)
         if self.component_registry.get_component(&node.tag).is_some()
             || self.component_registry.map.contains_key(&node.tag)
@@ -1988,6 +2167,14 @@ impl LayoutEngine {
             return total;
         }
 
+        if matches!(node.style.white_space, WhiteSpace::Nowrap | WhiteSpace::Pre) {
+            return self.max_content_width_of_content(node, font_px, root_font_px);
+        }
+
+        if let Some(w) = self.inline_items_min_content_width(node, font_px, root_font_px) {
+            return w;
+        }
+
         // For containers: max of children's min-content widths
         let mut max_w = generated_inline_w.max(own_text_w);
         for ch in &node.children {
@@ -2072,6 +2259,10 @@ impl LayoutEngine {
 
         // Replaced elements: the size they are shown at, ratio included.
         if let Some(w) = self.replaced_intrinsic_width(node, font_px, root_font_px) {
+            return w;
+        }
+
+        if let Some(w) = self.text_control_intrinsic_content_width(node, font_px, root_font_px) {
             return w;
         }
 
@@ -2173,6 +2364,10 @@ impl LayoutEngine {
                     &node.style.font_family,
                 )
             };
+            return w;
+        }
+
+        if let Some(w) = self.inline_items_max_content_width(node, font_px, root_font_px) {
             return w;
         }
 
@@ -2310,7 +2505,9 @@ impl LayoutEngine {
                 continue;
             }
             if ch.style.is_inline_level() {
-                if pending_collapsed_space && cw > 0.0 {
+                let starts_with_space = inline_subtree_starts_with_collapsible_space(ch);
+                let ends_with_space = inline_subtree_ends_with_collapsible_space(ch);
+                if (pending_collapsed_space || (starts_with_space && run > 0.0)) && cw > 0.0 {
                     run += self.measure_text_cached(
                         " ",
                         font_px,
@@ -2321,6 +2518,9 @@ impl LayoutEngine {
                 }
                 pending_collapsed_space = false;
                 run += cw;
+                if ends_with_space && run > 0.0 {
+                    pending_collapsed_space = true;
+                }
             } else {
                 // A block-level child ends the current line and owns its own.
                 if run > max_w {
@@ -2338,6 +2538,205 @@ impl LayoutEngine {
         }
         // Container must be wide enough for both floats and normal flow
         max_w.max(float_sum)
+    }
+
+    fn inline_items_max_content_width(
+        &self,
+        node: &WebCore,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> Option<f32> {
+        if matches!(
+            node.style.display,
+            Display::Flex
+                | Display::InlineFlex
+                | Display::Grid
+                | Display::InlineGrid
+                | Display::Table
+                | Display::TableRow
+                | Display::TableRowGroup
+                | Display::TableHeaderGroup
+                | Display::TableFooterGroup
+                | Display::TableColumnGroup
+                | Display::TableColumn
+        ) {
+            return None;
+        }
+        if !self.inline_subtree_can_use_item_intrinsic(node, font_px, root_font_px, true) {
+            return None;
+        }
+        if matches!(node.style.display, Display::InlineBlock)
+            && (!node.text.is_empty()
+                || !node.style.before_content.is_empty()
+                || !node.style.after_content.is_empty())
+        {
+            return None;
+        }
+
+        let mut items = Vec::new();
+        let mut runs = Vec::new();
+        let mut text_offset = 0usize;
+        let mut previous_collapsible_space = false;
+        if matches!(node.style.display, Display::InlineBlock) {
+            for (idx, child) in node.children.iter().enumerate() {
+                inline_layout::collect_items_continuing(
+                    self,
+                    child,
+                    font_px,
+                    root_font_px,
+                    &mut items,
+                    &mut runs,
+                    &mut text_offset,
+                    idx,
+                    true,
+                    &[],
+                    &mut previous_collapsible_space,
+                );
+            }
+        } else {
+            inline_layout::collect_items_continuing(
+                self,
+                node,
+                font_px,
+                root_font_px,
+                &mut items,
+                &mut runs,
+                &mut text_offset,
+                0,
+                false,
+                &[],
+                &mut previous_collapsible_space,
+            );
+        }
+
+        if items.is_empty() {
+            return None;
+        }
+        Some(inline_items_max_content_advance(&items))
+    }
+
+    fn inline_items_min_content_width(
+        &self,
+        node: &WebCore,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> Option<f32> {
+        if matches!(
+            node.style.display,
+            Display::Flex
+                | Display::InlineFlex
+                | Display::Grid
+                | Display::InlineGrid
+                | Display::Table
+                | Display::TableRow
+                | Display::TableRowGroup
+                | Display::TableHeaderGroup
+                | Display::TableFooterGroup
+                | Display::TableColumnGroup
+                | Display::TableColumn
+        ) {
+            return None;
+        }
+        if !self.inline_subtree_can_use_item_intrinsic(node, font_px, root_font_px, true) {
+            return None;
+        }
+        if matches!(node.style.display, Display::InlineBlock)
+            && (!node.text.is_empty()
+                || !node.style.before_content.is_empty()
+                || !node.style.after_content.is_empty())
+        {
+            return None;
+        }
+
+        let mut items = Vec::new();
+        let mut runs = Vec::new();
+        let mut text_offset = 0usize;
+        let mut previous_collapsible_space = false;
+        if matches!(node.style.display, Display::InlineBlock) {
+            for (idx, child) in node.children.iter().enumerate() {
+                inline_layout::collect_items_continuing(
+                    self,
+                    child,
+                    font_px,
+                    root_font_px,
+                    &mut items,
+                    &mut runs,
+                    &mut text_offset,
+                    idx,
+                    true,
+                    &[],
+                    &mut previous_collapsible_space,
+                );
+            }
+        } else {
+            inline_layout::collect_items_continuing(
+                self,
+                node,
+                font_px,
+                root_font_px,
+                &mut items,
+                &mut runs,
+                &mut text_offset,
+                0,
+                false,
+                &[],
+                &mut previous_collapsible_space,
+            );
+        }
+
+        if items.is_empty() {
+            return None;
+        }
+        Some(inline_items_min_content_advance(&items))
+    }
+
+    fn inline_subtree_can_use_item_intrinsic(
+        &self,
+        node: &WebCore,
+        font_px: f32,
+        root_font_px: f32,
+        is_root: bool,
+    ) -> bool {
+        if matches!(node.style.display, Display::None)
+            || matches!(node.style.position, Position::Absolute | Position::Fixed)
+        {
+            return true;
+        }
+        if !matches!(node.style.float, Float::None) {
+            return false;
+        }
+        if !is_root && self.is_atomic_inline_for_intrinsic(node, font_px, root_font_px) {
+            return false;
+        }
+        if !is_root
+            && !node.is_text_node()
+            && !node.style.is_inline_level()
+            && !matches!(node.style.display, Display::Contents)
+        {
+            return false;
+        }
+        node.children.iter().all(|child| {
+            self.inline_subtree_can_use_item_intrinsic(child, font_px, root_font_px, false)
+        })
+    }
+
+    fn is_atomic_inline_for_intrinsic(
+        &self,
+        node: &WebCore,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> bool {
+        matches!(
+            node.style.display,
+            Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+        ) || node.is_image_element()
+            || matches!(
+                node.tag.as_str(),
+                "svg" | "canvas" | "video" | "iframe" | "input" | "select" | "textarea" | "button"
+            )
+            || self
+                .replaced_intrinsic_width(node, font_px, root_font_px)
+                .is_some()
     }
 
     fn generated_inline_content_width(
@@ -3637,7 +4036,8 @@ impl LayoutEngine {
                             && !matches!(c.style.position, Position::Absolute | Position::Fixed)
                             && !matches!(c.style.float, Float::None)
                     });
-                if block::establishes_column_context(&node.style)
+                if matches!(effective_display, Display::FlowRoot)
+                    || block::establishes_column_context(&node.style)
                     || has_block_children(node)
                     || has_only_floats
                 {
@@ -3649,6 +4049,16 @@ impl LayoutEngine {
                 }
             }
         };
+
+        if establishes_positioned_containing_block(&node.style) {
+            relayout_nested_abs_descendants_against_final_cb(
+                self,
+                node,
+                node.layout.padding_rect,
+                font_px,
+                root_font_px,
+            );
+        }
 
         self.pos_cb.set(old_pos_cb);
         self.fixed_cb.set(old_fixed_cb);
@@ -3773,6 +4183,67 @@ pub fn layout_positioned(
         None,
         None,
     );
+}
+
+fn relayout_nested_abs_descendants_against_final_cb(
+    engine: &LayoutEngine,
+    node: &mut WebCore,
+    containing_rect: Rect,
+    font_px: f32,
+    root_font_px: f32,
+) {
+    relayout_nested_abs_descendants_against_final_cb_impl(
+        engine,
+        node,
+        containing_rect,
+        font_px,
+        root_font_px,
+        true,
+    );
+}
+
+fn relayout_nested_abs_descendants_against_final_cb_impl(
+    engine: &LayoutEngine,
+    node: &mut WebCore,
+    containing_rect: Rect,
+    font_px: f32,
+    root_font_px: f32,
+    direct_child_of_cb: bool,
+) {
+    for child in node.effective_children_mut() {
+        if matches!(child.style.display, Display::None) {
+            continue;
+        }
+
+        let child_font_px = child.style.font_size_px(font_px, root_font_px);
+        if child.style.position == Position::Absolute {
+            if !direct_child_of_cb {
+                layout_positioned_static(
+                    engine,
+                    child,
+                    containing_rect,
+                    font_px,
+                    root_font_px,
+                    None,
+                    None,
+                );
+            }
+            continue;
+        }
+
+        if establishes_positioned_containing_block(&child.style) {
+            continue;
+        }
+
+        relayout_nested_abs_descendants_against_final_cb_impl(
+            engine,
+            child,
+            containing_rect,
+            child_font_px,
+            root_font_px,
+            false,
+        );
+    }
 }
 
 /// Layout an absolutely/fixed positioned element, with optional static position.
@@ -4083,6 +4554,10 @@ pub fn shift_rects(node: &mut WebCore, dx: f32, dy: f32) {
     node.layout.border_rect.y += dy;
     node.layout.margin_rect.x += dx;
     node.layout.margin_rect.y += dy;
+    for segment in &mut node.layout.collapsed_border_segments {
+        segment.rect.x += dx;
+        segment.rect.y += dy;
+    }
     for line in &mut node.layout.line_cache {
         line.x += dx;
         line.y += dy;

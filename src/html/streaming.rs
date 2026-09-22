@@ -175,12 +175,8 @@ impl StreamingParser {
                     title: self.title.clone(),
                 });
                 self.in_title = false;
-            } else if !text.trim().is_empty() {
-                mutations.push(DomMutation::AppendText {
-                    parent_path: self.current_parent_path(),
-                    text: crate::html::decode_entities(&text),
-                });
-                self.bump_child_count();
+            } else {
+                self.push_text_mutation(&mut mutations, crate::html::decode_entities(&text));
             }
         }
         mutations
@@ -218,11 +214,10 @@ impl StreamingParser {
         let mut mutations = Vec::new();
 
         loop {
-            // Skip leading whitespace in some contexts
             let buf = if self.in_style || self.in_script || self.in_title {
                 self.buffer.clone()
             } else {
-                self.buffer.trim_start().to_string()
+                self.buffer.clone()
             };
             if buf.is_empty() {
                 break;
@@ -294,13 +289,7 @@ impl StreamingParser {
             self.buffer = buf[complete.end..].to_string();
             match complete.token {
                 crate::html::tokenizer::Token::Text(text) => {
-                    if !text.is_empty() {
-                        mutations.push(DomMutation::AppendText {
-                            parent_path: self.current_parent_path(),
-                            text,
-                        });
-                        self.bump_child_count();
-                    }
+                    self.push_text_mutation(&mut mutations, text);
                 }
                 crate::html::tokenizer::Token::Comment(_)
                 | crate::html::tokenizer::Token::Doctype(_) => {}
@@ -374,6 +363,32 @@ impl StreamingParser {
         }
 
         mutations
+    }
+
+    fn push_text_mutation(&mut self, mutations: &mut Vec<DomMutation>, text: String) {
+        if text.is_empty() {
+            return;
+        }
+
+        if text.trim().is_empty() && self.is_structural_whitespace_context() {
+            return;
+        }
+
+        mutations.push(DomMutation::AppendText {
+            parent_path: self.current_parent_path(),
+            text,
+        });
+        self.bump_child_count();
+    }
+
+    fn is_structural_whitespace_context(&self) -> bool {
+        let Some(parent) = self.stack.last() else {
+            return true;
+        };
+        matches!(
+            parent.tag.as_str(),
+            "html" | "head" | "table" | "thead" | "tbody" | "tfoot" | "tr" | "colgroup"
+        )
     }
 
     fn close_matching_element(&mut self, tag: &str) -> bool {
@@ -671,6 +686,39 @@ mod tests {
             .collect();
         assert_eq!(text, "ab");
         assert!(!text.contains("-->"));
+    }
+
+    #[test]
+    fn streaming_preserves_inline_space_between_elements() {
+        let mut parser = StreamingParser::new("");
+        let mutations =
+            parser.feed_str("<p><a href='/one'>Misti</a> is a <a href='/two'>volcano</a></p>");
+        let text: String = mutations
+            .iter()
+            .filter_map(|m| match m {
+                DomMutation::AppendText { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(text, "Misti is a volcano");
+    }
+
+    #[test]
+    fn streaming_preserves_inline_space_after_chunk_boundary() {
+        let mut parser = StreamingParser::new("");
+        let first = parser.feed_str("<p><a href='/one'>football</a>");
+        let second = parser.feed_str(" <a href='/two'>defensive end</a></p>");
+        let text: String = first
+            .iter()
+            .chain(second.iter())
+            .filter_map(|m| match m {
+                DomMutation::AppendText { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(text, "football defensive end");
     }
 
     #[test]

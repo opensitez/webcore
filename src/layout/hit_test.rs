@@ -359,7 +359,7 @@ pub(crate) fn to_local(node: &WebCore, pt: (f32, f32)) -> (f32, f32) {
 }
 
 fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitResult> {
-    if matches!(node.style.display, Display::None) {
+    if !subtree_visible_for_hit(node) {
         return None;
     }
     // `inert` blocks pointer interaction for the whole subtree (HTML §6.7).
@@ -383,49 +383,35 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
 
     let children_are_clipped = children_clipped_at(node, px, py);
     if !children_are_clipped {
-        // Pass 0: positioned children with z-index > 0 (highest z-index first).
-        // These paint on top of everything else and should receive hits first.
-        // This handles CSS dropdowns (z-index:99999) that overlap sibling content.
-        {
-            let mut zi_children: Vec<(i32, usize)> = Vec::new();
-            for (i, child) in node.children.iter().enumerate() {
-                if child.attributes.contains_key("inert") {
-                    continue;
-                }
-                if child.style.is_positioned() && child.style.z_index > 0 {
-                    zi_children.push((child.style.z_index, i));
-                }
+        let mut z_descendants = Vec::new();
+        for child in node.effective_children() {
+            let child_pt = to_local(child, (px, py));
+            collect_deferred_z_descendants_for_hit(child, child_pt, &mut z_descendants);
+        }
+        z_descendants.retain(|(child, _)| {
+            is_hit_renderable(child) && (child.style.z_index_is_auto || child.style.z_index >= 0)
+        });
+        z_descendants.sort_by_key(|(child, _)| z_order_key(child));
+        for (child, child_pt) in z_descendants.into_iter().rev() {
+            if is_non_atomic_inline_box(child) {
+                continue;
             }
-            if !zi_children.is_empty() {
-                // Highest z-index first
-                zi_children.sort_by(|a, b| b.0.cmp(&a.0));
-                for &(_, idx) in &zi_children {
-                    let child = &node.children[idx];
-                    if child.tag == "::before" || child.tag == "::after" {
-                        continue;
-                    }
-                    if child.layout.border_rect.h <= 0.0
-                        && matches!(
-                            child.style.overflow_y,
-                            crate::types::Overflow::Hidden | crate::types::Overflow::Clip
-                        )
-                    {
-                        continue;
-                    }
-                    let (cx, cy) = to_local(child, (px, py));
-                    let b = &child.layout.border_rect;
-                    if cx >= b.x && cx < b.x + b.w && cy >= b.y && cy < b.y + b.h {
-                        if let Some(r) = hit_test_impl(child, (cx, cy), _button) {
-                            return Some(r);
-                        }
-                        if point_inside_clip_path(child, cx, cy) {
-                            return Some(HitResult {
-                                node_id: child.node_id,
-                                local_offset: 0,
-                            });
-                        }
-                    }
-                }
+            let b = &child.layout.border_rect;
+            let in_border = child_pt.0 >= b.x
+                && child_pt.0 < b.x + b.w
+                && child_pt.1 >= b.y
+                && child_pt.1 < b.y + b.h;
+            if let Some(r) = hit_test_impl(child, child_pt, _button) {
+                return Some(r);
+            }
+            if in_border
+                && accepts_pointer_events(child)
+                && point_inside_clip_path(child, child_pt.0, child_pt.1)
+            {
+                return Some(HitResult {
+                    node_id: child.node_id,
+                    local_offset: 0,
+                });
             }
         }
 
@@ -435,6 +421,12 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
             // back to `return Some(child.node_id)` when the recursion finds nothing
             // deeper, so a child that refused the hit would be returned anyway.
             if child.attributes.contains_key("inert") {
+                continue;
+            }
+            if is_explicit_z_positioned(child) || !subtree_visible_for_hit(child) {
+                continue;
+            }
+            if is_non_atomic_inline_box(child) {
                 continue;
             }
             // display:contents elements are transparent — recurse into their children directly
@@ -464,7 +456,10 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
                 if let Some(r) = hit_test_impl(child, (cx, cy), _button) {
                     return Some(r);
                 }
-                if in_border && point_inside_clip_path(child, cx, cy) {
+                if in_border
+                    && accepts_pointer_events(child)
+                    && point_inside_clip_path(child, cx, cy)
+                {
                     return Some(HitResult {
                         node_id: child.node_id,
                         local_offset: 0,
@@ -479,6 +474,12 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
             // back to `return Some(child.node_id)` when the recursion finds nothing
             // deeper, so a child that refused the hit would be returned anyway.
             if child.attributes.contains_key("inert") {
+                continue;
+            }
+            if is_explicit_z_positioned(child) || !subtree_visible_for_hit(child) {
+                continue;
+            }
+            if is_non_atomic_inline_box(child) {
                 continue;
             }
             let (cx, cy) = to_local(child, (px, py));
@@ -503,6 +504,12 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
             if child.attributes.contains_key("inert") {
                 continue;
             }
+            if is_explicit_z_positioned(child) || !subtree_visible_for_hit(child) {
+                continue;
+            }
+            if is_non_atomic_inline_box(child) {
+                continue;
+            }
             let (cx, cy) = to_local(child, (px, py));
             let m = &child.layout.margin_rect;
             let in_margin = cx >= m.x && cx < m.x + m.w && cy >= m.y && cy < m.y + m.h;
@@ -520,7 +527,7 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
 
     // Fallback: If no children hit, but this node contains the point
     let b = &node.layout.border_rect;
-    if px >= b.x && px < b.x + b.w && py >= b.y && py < b.y + b.h {
+    if accepts_pointer_events(node) && px >= b.x && px < b.x + b.w && py >= b.y && py < b.y + b.h {
         // If this node has inline content, return the inline hit offset
         // (caret/text hit). Otherwise select the node itself.
         if !node.layout.line_cache.is_empty() {
@@ -539,6 +546,136 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
     }
 
     None
+}
+
+fn subtree_visible_for_hit(node: &WebCore) -> bool {
+    !matches!(node.style.display, Display::None)
+        && node.style.visibility
+        && node.style.opacity > 0.0
+}
+
+fn accepts_pointer_events(node: &WebCore) -> bool {
+    !matches!(node.style.pointer_events, PointerEvents::None)
+}
+
+fn is_non_atomic_inline_box(node: &WebCore) -> bool {
+    if node.style.display != Display::Inline {
+        return false;
+    }
+    if matches!(
+        node.tag.as_str(),
+        "br" | "img" | "input" | "select" | "textarea" | "video" | "canvas" | "iframe"
+    ) {
+        return false;
+    }
+    !node
+        .children
+        .iter()
+        .any(|child| child.style.is_block_level())
+}
+
+fn inline_hit_target(node: &WebCore, px: f32, py: f32) -> Option<(u32, usize)> {
+    let line = node
+        .layout
+        .line_cache
+        .iter()
+        .find(|line| py >= line.y && py < line.y + line.height)?;
+    if px < line.x || px >= line.x + line.width {
+        return None;
+    }
+    let flat = collect_flat_text(node);
+    let off = get_offset_from_x(&flat, &node.layout.inline_runs, line, px);
+    let run = inline_run_at_offset(&node.layout.inline_runs, off)?;
+    let target = inline_element_id_for_path(node, &run.path).unwrap_or(node.node_id);
+    Some((target, off))
+}
+
+fn inline_run_at_offset(runs: &[InlineRun], off: usize) -> Option<&InlineRun> {
+    runs.iter()
+        .find(|run| off >= run.text_offset && off < run.text_offset + run.length)
+        .or_else(|| {
+            runs.iter()
+                .rev()
+                .find(|run| off == run.text_offset + run.length)
+        })
+}
+
+fn inline_element_id_for_path(root: &WebCore, path: &[usize]) -> Option<u32> {
+    let mut node = root;
+    let mut best = None;
+    for &idx in path {
+        node = node.children.get(idx)?;
+        if node.tag != "#text"
+            && node.style.display == Display::Inline
+            && accepts_pointer_events(node)
+        {
+            best = Some(node.node_id);
+        }
+    }
+    best
+}
+
+fn is_hit_renderable(node: &WebCore) -> bool {
+    subtree_visible_for_hit(node)
+        && !node.attributes.contains_key("inert")
+        && node.style.position != Position::Fixed
+        && node.tag != "::before"
+        && node.tag != "::after"
+        && !(node.layout.border_rect.h <= 0.0
+            && matches!(node.style.overflow_y, Overflow::Hidden | Overflow::Clip))
+}
+
+fn z_order_key(node: &WebCore) -> i32 {
+    if node.style.z_index_is_auto {
+        0
+    } else {
+        node.style.z_index
+    }
+}
+
+fn creates_hit_stacking_context(node: &WebCore) -> bool {
+    let style = &node.style;
+    (style.is_positioned() && !style.z_index_is_auto)
+        || style.opacity < 1.0
+        || !style.css_transform.ops.is_empty()
+        || !style.css_filter.ops.is_empty()
+        || !style.rare().backdrop_filter.is_empty()
+        || style.will_change_transform
+        || style.isolation
+        || style.mix_blend_mode != MixBlendMode::Normal
+        || matches!(style.position, Position::Fixed | Position::Sticky)
+}
+
+fn is_explicit_z_positioned(node: &WebCore) -> bool {
+    node.style.position != Position::Fixed
+        && (node.style.position == Position::Absolute
+            || (node.style.is_positioned() && !node.style.z_index_is_auto))
+}
+
+fn collect_deferred_z_descendants_for_hit<'a>(
+    node: &'a WebCore,
+    pt: (f32, f32),
+    out: &mut Vec<(&'a WebCore, (f32, f32))>,
+) {
+    if !is_hit_renderable(node) {
+        return;
+    }
+    if is_explicit_z_positioned(node) {
+        out.push((node, pt));
+        return;
+    }
+    if creates_hit_stacking_context(node) {
+        return;
+    }
+    let px = pt.0 + node.layout.scroll_left;
+    let py = pt.1 + node.layout.scroll_top;
+    if children_clipped_at(node, px, py) {
+        return;
+    }
+    for child in node.effective_children() {
+        let child_pt = to_local(child, (px, py));
+        collect_deferred_z_descendants_for_hit(child, child_pt, out);
+    }
 }
 
 fn children_clipped_at(node: &WebCore, px: f32, py: f32) -> bool {
@@ -871,7 +1008,10 @@ pub fn hit_test_box_at(root: &WebCore, doc_pt: (f32, f32), button: u8) -> u32 {
 }
 
 fn deepest_box_at(node: &WebCore, pt: (f32, f32), _button: u8) -> Option<u32> {
-    if matches!(node.style.display, Display::None) {
+    if !subtree_visible_for_hit(node) {
+        return None;
+    }
+    if node.attributes.contains_key("inert") {
         return None;
     }
     if !point_inside_clip_path(node, pt.0, pt.1) {
@@ -889,11 +1029,45 @@ fn deepest_box_at(node: &WebCore, pt: (f32, f32), _button: u8) -> Option<u32> {
     if children_clipped_at(node, px, py) {
         return None;
     }
+    let mut z_descendants = Vec::new();
+    for child in node.effective_children() {
+        let child_pt = to_local(child, (px, py));
+        collect_deferred_z_descendants_for_hit(child, child_pt, &mut z_descendants);
+    }
+    z_descendants.retain(|(child, _)| {
+        is_hit_renderable(child) && (child.style.z_index_is_auto || child.style.z_index >= 0)
+    });
+    z_descendants.sort_by_key(|(child, _)| z_order_key(child));
+    for (child, child_pt) in z_descendants.into_iter().rev() {
+        if is_non_atomic_inline_box(child) {
+            continue;
+        }
+        let b = &child.layout.border_rect;
+        let in_border = child_pt.0 >= b.x
+            && child_pt.0 < b.x + b.w
+            && child_pt.1 >= b.y
+            && child_pt.1 < b.y + b.h;
+        if let Some(r) = deepest_box_at(child, child_pt, _button) {
+            return Some(r);
+        }
+        if in_border
+            && accepts_pointer_events(child)
+            && point_inside_clip_path(child, child_pt.0, child_pt.1)
+        {
+            return Some(child.node_id);
+        }
+    }
     for child in node.children.iter().rev() {
         // ⛔ Skipped HERE, not by the recursive call: each of these loops falls
         // back to `return Some(child.node_id)` when the recursion finds nothing
         // deeper, so a child that refused the hit would be returned anyway.
         if child.attributes.contains_key("inert") {
+            continue;
+        }
+        if is_explicit_z_positioned(child) || !subtree_visible_for_hit(child) {
+            continue;
+        }
+        if is_non_atomic_inline_box(child) {
             continue;
         }
         // The second walker needs the same mapping — see `to_local`.
@@ -904,9 +1078,21 @@ fn deepest_box_at(node: &WebCore, pt: (f32, f32), _button: u8) -> Option<u32> {
             if let Some(r) = deepest_box_at(child, (cx, cy), _button) {
                 return Some(r);
             }
-            if in_margin {
+            if in_margin && accepts_pointer_events(child) {
                 return Some(child.node_id);
             }
+        }
+    }
+    let b = &node.layout.border_rect;
+    if accepts_pointer_events(node)
+        && px >= b.x
+        && px < b.x + b.w
+        && py >= b.y
+        && py < b.y + b.h
+        && !node.layout.line_cache.is_empty()
+    {
+        if let Some((target, _)) = inline_hit_target(node, px, py) {
+            return Some(target);
         }
     }
     None

@@ -4705,6 +4705,28 @@ mod tests {
     }
 
     #[test]
+    fn native_rasterizer_preserves_viewbox_empty_space_for_inline_icon() {
+        let data = rasterize_svg_to_rgba(
+            r#"<svg width="20" height="20" viewBox="0 0 20 20"><path d="M7.16016 13.825L10.9768 10L7.16016 6.175L8.33516 5L13.3352 10L8.33516 15L7.16016 13.825Z"/></svg>"#,
+            18,
+            18,
+        )
+        .unwrap();
+        let mut left_alpha = 0u32;
+        let mut right_alpha = 0u32;
+        for y in 0..18usize {
+            for x in 0..6usize {
+                left_alpha += data[(y * 18 + x) * 4 + 3] as u32;
+            }
+            for x in 7..18usize {
+                right_alpha += data[(y * 18 + x) * 4 + 3] as u32;
+            }
+        }
+        assert_eq!(left_alpha, 0, "viewBox left bearing was cropped away");
+        assert!(right_alpha > 0, "chevron path did not paint");
+    }
+
+    #[test]
     fn native_rasterizer_paints_filled_child_under_group_clip_when_root_fill_none() {
         let data = rasterize_svg_to_rgba(
             r##"<svg fill="none" viewBox="0 0 20 10">

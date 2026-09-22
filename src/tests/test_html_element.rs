@@ -392,3 +392,176 @@ fn an_inert_positioned_overlay_is_skipped_by_the_z_index_pass_too() {
         "an inert overlay is skipped by the z-index pass"
     );
 }
+
+#[test]
+fn transformed_z_index_dropdown_hits_where_it_is_painted() {
+    use crate::layout::hit_test::{hit_test_box_at, hit_test_link};
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+          * { margin: 0; padding: 0; }
+          nav { position: relative; height: 40px; }
+          .item { position: relative; width: 100px; height: 40px; }
+          .panel {
+            position: absolute;
+            left: 50%;
+            top: 40px;
+            width: 200px;
+            height: 100px;
+            transform: translateX(-50%);
+            z-index: 1000;
+            background: white;
+          }
+          .panel a, .hero a { display: block; width: 100%; height: 100%; }
+          .hero { height: 240px; background: #ddd; }
+        </style>
+        <nav><div class="item">Products<div id="panel" class="panel">
+          <a id="menu-link" href="http://example.com/menu">Firefox</a>
+        </div></div></nav>
+        <div class="hero"><a id="hero-link" href="http://example.com/hero">Hero</a></div>
+        "#,
+        800.0,
+    );
+    let menu = doc.get_element_by_id("menu-link").unwrap();
+    let pt = (20.0, 64.0);
+    assert_eq!(
+        hit_test_link(&doc.root, pt, 0).as_deref(),
+        Some("http://example.com/menu"),
+        "the painted, transformed dropdown link should beat the hero underneath"
+    );
+    assert_eq!(
+        hit_test_box_at(&doc.root, pt, 0),
+        menu,
+        "debug hit testing should report the dropdown link too"
+    );
+}
+
+#[test]
+fn abs_descendant_top_percent_uses_final_positioned_ancestor_height() {
+    use crate::layout::hit_test::hit_test_link;
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+          * { box-sizing: border-box; margin: 0; padding: 0; }
+          nav {
+            position: relative;
+            padding: 8px 0 0;
+            width: 800px;
+            background: white;
+          }
+          ul {
+            display: flex;
+            height: 39px;
+            list-style: none;
+          }
+          li { position: static; padding: 0 24px 16px; }
+          .panel {
+            position: absolute;
+            left: 50%;
+            top: 100%;
+            width: 420px;
+            height: 120px;
+            transform: translateX(-50%);
+            z-index: 1000;
+            background: white;
+          }
+          .panel a { display: block; height: 100%; }
+          .hero { height: 400px; background: #111; }
+          .hero a { display: block; height: 100%; }
+        </style>
+        <nav>
+          <ul>
+            <li>
+              Products
+              <div id="panel" class="panel">
+                <a href="http://example.com/menu">Firefox</a>
+              </div>
+            </li>
+          </ul>
+        </nav>
+        <section class="hero"><a href="http://example.com/hero">Hero</a></section>
+        "#,
+        800.0,
+    );
+
+    let panel = doc.get_element_by_id("panel").unwrap();
+    let panel_rect = doc
+        .get_bounding_client_rect(panel)
+        .expect("panel should be laid out");
+    assert!(
+        panel_rect.y < 80.0,
+        "top:100% should resolve against the nav's final height, not the viewport: {panel_rect:?}"
+    );
+    assert_eq!(
+        hit_test_link(&doc.root, (400.0, panel_rect.y + 16.0), 0).as_deref(),
+        Some("http://example.com/menu"),
+        "the dropdown link should receive hits at the corrected painted position"
+    );
+}
+
+#[test]
+fn z_indexed_descendant_outside_ancestor_bounds_receives_hits() {
+    use crate::layout::hit_test::hit_test_link;
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+          * { margin: 0; padding: 0; }
+          #holder { position: relative; width: 40px; height: 40px; }
+          #floating {
+            display: block;
+            position: absolute;
+            left: 200px;
+            top: 60px;
+            width: 120px;
+            height: 60px;
+            z-index: 10;
+          }
+          #under {
+            display: block;
+            position: absolute;
+            left: 0;
+            top: 40px;
+            width: 400px;
+            height: 200px;
+          }
+        </style>
+        <div id="holder"><a id="floating" href="http://example.com/floating">Floating</a></div>
+        <a id="under" href="http://example.com/under">Under</a>
+        "#,
+        800.0,
+    );
+    assert_eq!(
+        hit_test_link(&doc.root, (220.0, 80.0), 0).as_deref(),
+        Some("http://example.com/floating"),
+        "a deferred z descendant should be hittable outside its ancestor border"
+    );
+}
+
+#[test]
+fn pointer_events_none_overlay_passes_hits_through() {
+    use crate::layout::hit_test::hit_test_link;
+    let mut renderer = crate::Renderer::new();
+    let under = "<a id=under href='http://example.com/under' \
+                    style='display:block;position:absolute;left:0;top:0;width:200px;height:100px'>under</a>";
+    let over_auto = "<a id=over href='http://example.com/over' \
+                       style='display:block;position:absolute;left:0;top:0;width:200px;height:100px;z-index:5'>over</a>";
+    let over_none = "<a id=over href='http://example.com/over' \
+                       style='display:block;position:absolute;left:0;top:0;width:200px;height:100px;z-index:5;pointer-events:none'>over</a>";
+
+    let doc = renderer.load_html(&format!("{under}{over_auto}"), 400.0);
+    assert_eq!(
+        hit_test_link(&doc.root, (20.0, 20.0), 0).as_deref(),
+        Some("http://example.com/over"),
+        "a normal overlay captures the hit"
+    );
+
+    let doc = renderer.load_html(&format!("{under}{over_none}"), 400.0);
+    assert_eq!(
+        hit_test_link(&doc.root, (20.0, 20.0), 0).as_deref(),
+        Some("http://example.com/under"),
+        "pointer-events:none lets the lower link receive the hit"
+    );
+}

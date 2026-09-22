@@ -125,56 +125,29 @@ impl Document {
     }
 
     /// Detect CSS property changes caused by the cascade and start transitions.
-    /// `cascade_ran`: true when the full cascade just ran (node.style is clean).
-    /// When false (hover-only change), base values are read from `cascade_styles`
-    /// so animation-overridden node.style values don't pollute change detection.
+    /// `cascade_ran`: true when the full cascade just ran.
     pub fn sync_transitions(&mut self, now: std::time::Instant, cascade_ran: bool) {
-        let hovered = self.hovered_box;
         let mut current: Vec<(u32, Vec<ParsedTransition>, HashMap<String, String>)> = Vec::new();
         let mut started_events: Vec<(u32, bool)> = Vec::new();
         let mut cancelled_events: Vec<u32> = Vec::new();
         fn collect(
             node: &WebCore,
-            hovered: u32,
-            cascade_ran: bool,
-            cascade_styles: &HashMap<u32, HashMap<String, String>>,
             out: &mut Vec<(u32, Vec<ParsedTransition>, HashMap<String, String>)>,
         ) {
             let id = node.node_id;
             if !node.style.rare().transitions.is_empty() {
-                // Base values: use the clean cascade snapshot when available, so that
-                // animation_overrides applied to node.style don't corrupt detection.
-                let base = if cascade_ran {
-                    extract_transitionable(node)
-                } else {
-                    cascade_styles
-                        .get(&id)
-                        .cloned()
-                        .unwrap_or_else(|| extract_transitionable(node))
-                };
-                let mut vals = base.clone();
-                // When hovered, overlay hover_style to get the "target" state.
-                if hovered != 0 && subtree_contains_id(node, hovered) {
-                    if let Some(hs) = &node.style.hover_style {
-                        let hover_vals = extract_transitionable_style(hs);
-                        for (k, v) in hover_vals {
-                            vals.insert(k, v);
-                        }
-                    }
-                }
+                // `node.style` is already the active cascade target. Hover
+                // invalidation swaps `style` and `hover_style`, so `hover_style`
+                // stores the inactive side; overlaying it here reverses hover
+                // transitions and leaves stale target values behind.
+                let vals = extract_transitionable(node);
                 out.push((id, node.style.rare().transitions.clone(), vals));
             }
             for child in &node.children {
-                collect(child, hovered, cascade_ran, cascade_styles, out);
+                collect(child, out);
             }
         }
-        collect(
-            &self.root,
-            hovered,
-            cascade_ran,
-            &self.cascade_styles,
-            &mut current,
-        );
+        collect(&self.root, &mut current);
 
         // When cascade ran, save the clean base styles for hover-only frames.
         if cascade_ran {

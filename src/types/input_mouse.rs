@@ -254,6 +254,8 @@ impl Document {
                         // Always recascade when focus changes so :focus/:focus-visible update.
                         self.stylesheet.rebuild_index();
                         let target_id = self.fragment_target_id();
+                        let hover_chain =
+                            crate::css::build_hover_chain(&self.root, self.hovered_box);
                         crate::css::apply_cascade_vp_hover_target_url(
                             &mut self.root,
                             &self.stylesheet,
@@ -263,7 +265,7 @@ impl Document {
                             self.viewport_h,
                             self.focused_box,
                             false,
-                            &std::collections::HashSet::new(),
+                            &hover_chain,
                             target_id,
                             &self.base_url,
                         );

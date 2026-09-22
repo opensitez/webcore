@@ -1,4 +1,5 @@
 use crate::layout::LayoutEngine;
+use crate::layout::hit_test::hit_test_box_at;
 use crate::types::*;
 use crate::{Document, parse_html};
 
@@ -45,6 +46,18 @@ fn find_descendant_tag<'a>(node: &'a WebCore, tag: &str) -> Option<&'a WebCore> 
             return Some(child);
         }
         if let Some(found) = find_descendant_tag(child, tag) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_text_descendant(node: &WebCore) -> Option<&WebCore> {
+    for child in &node.children {
+        if child.is_text_node() {
+            return Some(child);
+        }
+        if let Some(found) = find_text_descendant(child) {
             return Some(found);
         }
     }
@@ -236,6 +249,37 @@ fn hover_self_changes_color() {
     recascade_with_hover(&mut doc, "btn");
     let btn = find_by_id(&doc.root, "btn").unwrap();
     assert_eq!(btn.style.color, Color::rgb(255, 0, 0), "after hover: red");
+}
+
+#[test]
+fn hover_color_updates_inherited_text_descendant_style() {
+    let mut doc = layout_html(
+        r#"
+        <style>
+            #btn {
+                color: #7c6af7;
+                background: transparent;
+            }
+            #btn:hover {
+                color: #fff;
+                background: #7c6af7;
+            }
+        </style>
+        <div id="btn"><span>Outline</span></div>
+    "#,
+        800.0,
+    );
+
+    recascade_with_hover(&mut doc, "btn");
+
+    let btn = find_by_id(&doc.root, "btn").unwrap();
+    assert_eq!(btn.style.color, Color::rgb(255, 255, 255));
+    let text = find_text_descendant(btn).unwrap();
+    assert_eq!(
+        text.style.color,
+        Color::rgb(255, 255, 255),
+        "hover-swapped inherited color must reach cached text-node styles"
+    );
 }
 
 // ── Parent:hover child — the CSS dropdown pattern ────────────────────────
@@ -882,6 +926,152 @@ fn hover_does_not_collapse_a_flow_root_flex_item() {
     );
 }
 
+#[test]
+fn hover_relayout_preserves_flex_item_percent_input_width() {
+    let mut doc = parse_html(
+        r#"
+        <style>
+            * { box-sizing: border-box; }
+            body { margin: 0; }
+            #header { display: flex; width: 1278px; }
+            #start { flex: 0 0 auto; width: 171px; }
+            #end { display: flex; flex: 1 1 auto; }
+            #p-search { flex: 1 1 auto; }
+            #container { width: 500px; margin-right: 12px; }
+            #typeahead { margin-left: 26px; }
+            form { display: flex; height: 34px; border: 1px solid black; }
+            #wrap { flex: 1 1 auto; margin: -1px; position: relative; }
+            #inner { position: relative; overflow: hidden; }
+            #search {
+                display: block;
+                width: 100%;
+                height: 32px;
+                padding: 4px 8px 4px 34px;
+                border: 1px solid black;
+            }
+            button { display: flex; flex: 0 0 auto; width: 74.6px; margin: -1px -1px -1px 0; padding: 1px 11px; border: 1px solid black; }
+            #hover { margin-top: 40px; }
+            #hover:hover { color: green; }
+        </style>
+        <div id="header">
+            <div id="start"></div>
+            <div id="end">
+                <div id="p-search">
+                    <div id="container">
+                        <div id="typeahead">
+                            <form id="searchform">
+                                <div id="wrap">
+                                    <div id="inner">
+                                        <input id="search">
+                                        <span id="icon"></span>
+                                    </div>
+                                    <input type="hidden">
+                                </div>
+                                <button>Search</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <p id="hover">hover me</p>
+    "#,
+    );
+    let mut eng = LayoutEngine::new();
+    eng.viewport_h = 900.0;
+    eng.layout(&mut doc, 800.0);
+
+    let before = find_by_id(&doc.root, "search").unwrap().layout.border_rect;
+    let hover_id = find_by_id(&doc.root, "hover").unwrap().node_id;
+    doc.hovered_box = hover_id;
+    doc.hover_changed = true;
+    eng.layout(&mut doc, 800.0);
+
+    let after = find_by_id(&doc.root, "search").unwrap().layout.border_rect;
+    assert!(
+        (after.w - before.w).abs() < 0.5,
+        "hover relayout changed search input width: before={} after={}",
+        before.w,
+        after.w
+    );
+}
+
+#[test]
+fn hover_relayout_rebuilds_later_inline_lines_with_dirty_descendant() {
+    let mut doc = parse_html(
+        r#"
+        <style>
+            p { width: 170px; margin: 0; font: 16px sans-serif; line-height: 20px; }
+            a { color: blue; text-decoration: none; }
+            a:hover { font-size: 32px; line-height: 40px; text-decoration: underline; }
+        </style>
+        <p id="para">This first line stays stable before <a id="target">hovered link</a> after text.</p>
+    "#,
+    );
+    let mut eng = LayoutEngine::new();
+    eng.viewport_h = 900.0;
+    eng.layout(&mut doc, 800.0);
+
+    let before = find_by_id(&doc.root, "target").unwrap().layout.border_rect;
+    let target_id = find_by_id(&doc.root, "target").unwrap().node_id;
+    doc.hovered_box = target_id;
+    doc.hover_changed = true;
+    eng.layout(&mut doc, 800.0);
+
+    let after = find_by_id(&doc.root, "target").unwrap().layout.border_rect;
+    assert!(
+        after.h > before.h + 8.0,
+        "hovered inline on later line kept stale geometry: before={:?} after={:?}",
+        before,
+        after
+    );
+}
+
+#[test]
+fn hover_hit_testing_ignores_wrapped_inline_union_gaps() {
+    let doc = layout_html(
+        r#"
+        <style>
+            p { width: 145px; margin: 0; font: 16px sans-serif; line-height: 20px; }
+            a { color: blue; }
+            a:hover { text-decoration: underline; }
+        </style>
+        <p id="para"><a id="target">alpha beta gamma delta epsilon</a></p>
+    "#,
+        800.0,
+    );
+    let para = find_by_id(&doc.root, "para").unwrap();
+    let target = find_by_id(&doc.root, "target").unwrap();
+    let target_id = target.node_id;
+    let right_gap_x = target.layout.border_rect.x + target.layout.border_rect.w - 1.0;
+    let gap_line = para
+        .layout
+        .line_cache
+        .iter()
+        .find(|line| right_gap_x > line.x + line.width + 1.0)
+        .expect("wrapped inline should leave a horizontal gap inside its union rect");
+    let gap_hit = hit_test_box_at(
+        &doc.root,
+        (right_gap_x, gap_line.y + gap_line.height * 0.5),
+        0,
+    );
+    assert_ne!(
+        gap_hit, target_id,
+        "empty area inside a wrapped inline union rect must not hover the link"
+    );
+
+    let text_line = para.layout.line_cache.first().unwrap();
+    let text_hit = hit_test_box_at(
+        &doc.root,
+        (text_line.x + 2.0, text_line.y + text_line.height * 0.5),
+        0,
+    );
+    assert_eq!(
+        text_hit, target_id,
+        "actual link text should still hover the link"
+    );
+}
+
 /// absent from hit testing entirely at the place it is drawn.
 #[test]
 fn hit_testing_maps_the_point_through_the_transform() {
@@ -906,5 +1096,124 @@ fn hit_testing_maps_the_point_through_the_transform() {
     assert!(
         miss.map_or(true, |h| h.node_id != want),
         "the box's pre-transform position must no longer hit it"
+    );
+}
+
+#[test]
+fn mozilla_shaped_hover_dropdown_hits_and_activates_panel_link() {
+    let mut doc = layout_html(
+        r##"
+        <style>
+          * { box-sizing: border-box; }
+          body { margin: 0; font: 16px Arial, sans-serif; }
+          nav { position: relative; height: 72px; background: white; z-index: 10; }
+          .m24-c-menu-category-list { list-style: none; margin: 0; padding: 16px 80px; display: flex; gap: 28px; }
+          .m24-c-menu-category { position: relative; }
+          .m24-c-menu-title { display: block; width: 120px; height: 40px; padding: 10px 12px; }
+          .m24-c-menu-panel {
+            display: none;
+            position: absolute;
+            left: 50%;
+            top: 48px;
+            width: 420px;
+            padding: 18px;
+            background: white;
+            transform: translateX(-50%);
+            z-index: 1000;
+          }
+          .m24-c-menu-category:hover .m24-c-menu-panel { display: block; }
+          .m24-c-menu-panel ul { list-style: none; margin: 0; padding: 0; }
+          .m24-c-menu-panel li { border-bottom: 1px solid #ddd; }
+          .m24-c-menu-item-link { display: block; min-height: 54px; padding: 14px 16px; }
+          .m24-c-flag { min-height: 360px; padding: 96px 80px; background: #111; color: white; }
+        </style>
+        <nav>
+          <ul class="m24-c-menu-category-list">
+            <li id="products" class="m24-c-menu-category mzp-has-drop-down">
+              <a id="products-title" class="m24-c-menu-title" href="#products">Products</a>
+              <div id="products-panel" class="m24-c-menu-panel">
+                <ul>
+                  <li><a id="first-product" class="m24-c-menu-item-link" href="https://example.test/firefox">Firefox browsers</a></li>
+                  <li><a class="m24-c-menu-item-link" href="#vpn">Mozilla VPN</a></li>
+                </ul>
+              </div>
+            </li>
+            <li id="about" class="m24-c-menu-category mzp-has-drop-down">
+              <a id="about-title" class="m24-c-menu-title" href="#about">About us</a>
+              <div id="about-panel" class="m24-c-menu-panel">
+                <ul><li><a class="m24-c-menu-item-link" href="#about-mozilla">About Mozilla</a></li></ul>
+              </div>
+            </li>
+          </ul>
+        </nav>
+        <section class="m24-c-flag"><h1>Welcome to Mozilla</h1></section>
+        "##,
+        800.0,
+    );
+
+    assert!(
+        find_by_id(&doc.root, "about-title").is_some(),
+        "About us exists"
+    );
+    assert!(matches!(
+        find_by_id(&doc.root, "products-panel")
+            .unwrap()
+            .style
+            .display,
+        Display::None
+    ));
+
+    let title_rect = find_by_id(&doc.root, "products-title")
+        .unwrap()
+        .layout
+        .border_rect;
+    assert!(doc.process_mouse_event(
+        crate::dom::HtmlEventType::MouseMove,
+        (
+            title_rect.x + title_rect.w / 2.0,
+            title_rect.y + title_rect.h / 2.0
+        ),
+        0,
+    ));
+    let mut eng = LayoutEngine::new();
+    eng.viewport_h = 900.0;
+    eng.layout(&mut doc, 800.0);
+
+    let panel = find_by_id(&doc.root, "products-panel").unwrap();
+    assert!(matches!(panel.style.display, Display::Block));
+
+    let first_product = find_by_id(&doc.root, "first-product").unwrap();
+    let target_id = first_product.node_id;
+    let panel_rect = panel.layout.border_rect;
+    let hit_pt = (
+        panel_rect.x - panel_rect.w / 2.0 + 32.0,
+        panel_rect.y + 32.0,
+    );
+    let hit = crate::layout::hit_test::point_to_hit(&doc.root, hit_pt, 0)
+        .expect("painted dropdown coordinate should hit the panel link");
+    assert_eq!(
+        hit.node_id, target_id,
+        "hit testing should return the dropdown link, not the hero underneath"
+    );
+    assert_eq!(
+        crate::layout::hit_test::hit_test_link(&doc.root, hit_pt, 0).as_deref(),
+        Some("https://example.test/firefox")
+    );
+
+    let navigated = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let captured = navigated.clone();
+    doc.on_navigate = Some(Box::new(move |href| {
+        *captured.lock().unwrap() = Some(href.to_string());
+        true
+    }));
+    assert!(doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, hit_pt, 0));
+    assert_eq!(
+        crate::layout::hit_test::hit_test_link(&doc.root, hit_pt, 0).as_deref(),
+        Some("https://example.test/firefox")
+    );
+    assert!(doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, hit_pt, 0));
+    assert_eq!(
+        navigated.lock().unwrap().as_deref(),
+        Some("https://example.test/firefox")
     );
 }

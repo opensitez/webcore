@@ -1169,7 +1169,11 @@ pub fn debug_match_report_for_node(
                 matched_rule_indices: sets.matched.iter().map(|(_, idx, _)| *idx).collect(),
                 hover_rule_indices: sets.hover_matched.iter().map(|(_, idx, _)| *idx).collect(),
                 active_rule_indices: sets.active_matched.iter().map(|(_, idx, _)| *idx).collect(),
-                visited_rule_indices: sets.visited_matched.iter().map(|(_, idx, _)| *idx).collect(),
+                visited_rule_indices: sets
+                    .visited_matched
+                    .iter()
+                    .map(|(_, idx, _)| *idx)
+                    .collect(),
                 before_rule_indices: sets.before_matched.iter().map(|(_, idx, _)| *idx).collect(),
                 after_rule_indices: sets.after_matched.iter().map(|(_, idx, _)| *idx).collect(),
             });
@@ -2609,7 +2613,10 @@ pub(crate) fn apply_cascade_inner(
         // parent and not the other. Sharing across those parents hands later
         // nodes a cached style from the wrong selector context, which makes
         // loaded CSS appear to vanish on large streamed pages.
-        let parent_node_id = ancestors.last().map(|ancestor| ancestor.node_id).unwrap_or(0);
+        let parent_node_id = ancestors
+            .last()
+            .map(|ancestor| ancestor.node_id)
+            .unwrap_or(0);
         let parent_id = parent_node_id as usize;
         for i in 0..n_children {
             let (_before, rest) = children.split_at_mut(i);

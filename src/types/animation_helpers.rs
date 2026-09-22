@@ -45,18 +45,6 @@ pub fn find_link_node_id(root: &WebCore, href: &str) -> Option<u32> {
     None
 }
 
-pub(crate) fn subtree_contains_id(node: &WebCore, target_id: u32) -> bool {
-    if node.node_id == target_id {
-        return true;
-    }
-    for child in &node.children {
-        if subtree_contains_id(child, target_id) {
-            return true;
-        }
-    }
-    false
-}
-
 pub(crate) fn extract_transitionable(node: &WebCore) -> HashMap<String, String> {
     extract_transitionable_style(&node.style)
 }
@@ -753,10 +741,9 @@ impl Document {
             self.event_targets.sweep_removed();
             return handled;
         }
+        let path = crate::dom::events::EventTargetMap::propagation_path(&self.root, event.target);
         let map = std::mem::take(&mut self.event_targets);
-        let root = std::mem::replace(&mut self.root, WebCore::new("#placeholder"));
-        let handled = map.dispatch_on_tree(&root, event, self);
-        self.root = root;
+        let handled = map.dispatch_tree_path(event, &path, self);
         let added = std::mem::replace(&mut self.event_targets, map);
         self.event_targets.merge_from(added);
         self.event_targets.sweep_removed();

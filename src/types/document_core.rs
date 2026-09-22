@@ -95,6 +95,20 @@ impl Document {
         }
     }
 
+    pub(crate) fn has_dirty_layout(&self) -> bool {
+        fn walk(node: &WebCore) -> bool {
+            node.layout.layout_dirty
+                || node.has_dirty_layout_descendant
+                || node.children.iter().any(walk)
+                || node
+                    .shadow_root
+                    .as_ref()
+                    .is_some_and(|shadow| shadow.children.iter().any(walk))
+        }
+
+        walk(&self.root)
+    }
+
     pub fn animation_overrides_for(&self, element_id: u32) -> Option<&[(String, String)]> {
         self.animation_overrides.get(&element_id).map(Vec::as_slice)
     }
@@ -429,6 +443,10 @@ impl Document {
                             node.image_data_width = animated.width;
                             node.image_data_height = animated.height;
                             tick.changed_any = true;
+                            let rect = node.layout.border_rect;
+                            if rect.w > 0.0 && rect.h > 0.0 {
+                                tick.paint_rects.push(rect);
+                            }
                         }
                     }
                     if animated.frames.len() > 1 {

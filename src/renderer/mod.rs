@@ -187,6 +187,19 @@ fn rect_intersects(a: Rect, b: Rect) -> bool {
     a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
 }
 
+fn retained_paint_band_for_doc(doc: &Document, viewport_w: f32, viewport_h: f32) -> Rect {
+    let doc_h = Document::scroll_height(&doc.root).max(viewport_h);
+    let overscan = (viewport_h * 8.0).max(6000.0);
+    let top = (doc.scroll_y - overscan).max(0.0);
+    let bottom = (doc.scroll_y + viewport_h + overscan).min(doc_h);
+    Rect::new(
+        doc.scroll_x,
+        top,
+        doc.root.layout.margin_rect.w.max(viewport_w).max(1.0),
+        (bottom - top).max(0.0),
+    )
+}
+
 fn rect_area(rect: Rect) -> f32 {
     rect.w.max(0.0) * rect.h.max(0.0)
 }
@@ -480,7 +493,12 @@ impl Renderer {
         self.paint_only_display_list_dirty
     }
 
-    pub fn invalidate_paint_rects<I>(&mut self, rects: I)
+    #[cfg(test)]
+    pub(crate) fn display_list_dirty_for_test(&self) -> bool {
+        self.display_list_dirty
+    }
+
+    pub fn invalidate_paint_rects<I>(&mut self, rects: I) -> bool
     where
         I: IntoIterator<Item = Rect>,
     {
@@ -490,26 +508,20 @@ impl Renderer {
             }
         }
         if self.dirty_paint_rects.is_empty() {
-            return;
+            return false;
         }
-        if !self.dirty_paint_rects.is_empty() {
-            let (surface_w, surface_h) = self
-                .cached_content_surface
-                .as_ref()
-                .map(|surface| (surface.width(), surface.height()))
-                .unwrap_or((0, 0));
-            let viewport = Rect::new(
-                self.cached_scroll_x,
-                self.cached_scroll_y,
-                surface_w as f32 / self.cached_surface_scale.max(0.001),
-                surface_h as f32 / self.cached_surface_scale.max(0.001),
-            );
-            self.dirty_paint_rects =
-                coalesce_dirty_rects(std::mem::take(&mut self.dirty_paint_rects), viewport);
-        }
-        if self.dirty_paint_rects.is_empty() {
-            return;
-        }
+        let Some(surface) = self.cached_content_surface.as_ref() else {
+            return true;
+        };
+        let viewport = Rect::new(
+            self.cached_scroll_x,
+            self.cached_scroll_y,
+            surface.width() as f32 / self.cached_surface_scale.max(0.001),
+            surface.height() as f32 / self.cached_surface_scale.max(0.001),
+        );
+        self.dirty_paint_rects =
+            coalesce_dirty_rects(std::mem::take(&mut self.dirty_paint_rects), viewport);
+        !self.dirty_paint_rects.is_empty()
     }
 
     pub(crate) fn invalidate_animation_paint_rects(
@@ -529,8 +541,7 @@ impl Renderer {
         if rects.is_empty() {
             return false;
         }
-        self.invalidate_paint_rects(rects);
-        true
+        self.invalidate_paint_rects(rects)
     }
 
     pub(crate) fn invalidate_non_transform_animation_paint_rects(
@@ -555,8 +566,7 @@ impl Renderer {
         if rects.is_empty() {
             return false;
         }
-        self.invalidate_paint_rects(rects);
-        true
+        self.invalidate_paint_rects(rects)
     }
 
     /// Run browser-owned idle work for a document and configure the next event
@@ -593,39 +603,6 @@ impl Renderer {
         }
         if scroll_changed {
             needs_redraw = true;
-            if doc.poll_pending_stylesheets_budgeted(4, std::time::Duration::from_millis(1)) {
-                self.layout_engine().invalidate_cascade();
-                resource_requested_relayout = true;
-                if trace_idle {
-                    trace_reasons.push("stylesheet-scroll-budget");
-                }
-            }
-            let image_poll =
-                doc.poll_pending_images_budgeted(8, std::time::Duration::from_millis(2));
-            if image_poll.loaded_any {
-                resource_requested_relayout |= image_poll.needs_relayout;
-                if !image_poll.needs_relayout {
-                    self.invalidate_paint_rects(image_poll.paint_rects.clone());
-                }
-                if trace_idle {
-                    trace_reasons.push(if image_poll.needs_relayout {
-                        "image-layout-scroll-budget"
-                    } else {
-                        "image-paint-scroll-budget"
-                    });
-                }
-            }
-            if self
-                .layout_engine()
-                .poll_pending_fonts_budgeted(2, std::time::Duration::from_millis(2))
-            {
-                self.layout_engine().invalidate_cascade();
-                doc.style_dirty = true;
-                resource_requested_relayout = true;
-                if trace_idle {
-                    trace_reasons.push("font-scroll-budget");
-                }
-            }
             if trace_idle {
                 trace_reasons.push("scroll-priority");
             }
@@ -641,14 +618,22 @@ impl Renderer {
                 doc.poll_pending_images_budgeted(32, std::time::Duration::from_millis(8));
             if image_poll.loaded_any {
                 resource_requested_relayout |= image_poll.needs_relayout;
+                let mut visible_image_damage = false;
                 if image_poll.needs_relayout {
                     // Intrinsic size changes are folded into the coalesced
                     // resource relayout below. Do not throw away the display
                     // list here for every arriving image.
                 } else {
-                    self.invalidate_paint_rects(image_poll.paint_rects.clone());
+                    let paint_band = retained_paint_band_for_doc(doc, viewport_w, viewport_h);
+                    let visible_rects = image_poll
+                        .paint_rects
+                        .iter()
+                        .copied()
+                        .filter(|rect| rect_intersects(*rect, paint_band))
+                        .collect::<Vec<_>>();
+                    visible_image_damage = self.invalidate_paint_rects(visible_rects);
                 }
-                needs_redraw = true;
+                needs_redraw |= visible_image_damage;
                 if trace_idle {
                     trace_reasons.push(if image_poll.needs_relayout {
                         "image-layout"
@@ -741,8 +726,7 @@ impl Renderer {
                             display_list_has_transform_slots_for_ids(list, &visible_animation_ids)
                         });
                     if can_replay_transform {
-                        self.invalidate_paint_rects(paint_rects);
-                        needs_redraw = true;
+                        needs_redraw |= self.invalidate_paint_rects(paint_rects);
                     } else {
                         // Non-transform paint animations change the sampled
                         // paint commands, so the cached display list cannot be
@@ -750,8 +734,7 @@ impl Renderer {
                         // existing list; render() will rebuild only a clipped
                         // temporary paint list for the animated boxes.
                         self.invalidate_paint_only_display_list();
-                        self.invalidate_paint_rects(paint_rects);
-                        needs_redraw = true;
+                        needs_redraw |= self.invalidate_paint_rects(paint_rects);
                     }
                 }
                 if trace_idle {
@@ -774,8 +757,13 @@ impl Renderer {
             }
         }
         if !scroll_changed && doc.hover_changed {
-            let hover_needs_style = doc.hover_sensitive_nodes.contains(&doc.hovered_box)
-                || doc.hover_sensitive_nodes.contains(&doc.prev_hovered_box);
+            let hover_needs_style = crate::css::hover_change_requires_style(
+                &doc.root,
+                &doc.stylesheet,
+                doc.prev_hovered_box,
+                doc.hovered_box,
+                &doc.hover_sensitive_nodes,
+            );
             if hover_needs_style {
                 needs_relayout = true;
                 self.invalidate_display_list();
@@ -785,6 +773,13 @@ impl Renderer {
             } else {
                 doc.hover_changed = false;
                 doc.prev_hovered_box = doc.hovered_box;
+            }
+        }
+        if !needs_relayout && !scroll_changed && (doc.style_dirty || doc.has_dirty_layout()) {
+            needs_relayout = true;
+            self.invalidate_display_list();
+            if trace_idle {
+                trace_reasons.push("dom-mutation");
             }
         }
         if needs_relayout {
@@ -803,13 +798,15 @@ impl Renderer {
             if image_tick.changed_any {
                 // Image commands carry the decoded pixel buffer captured when
                 // the display list was built. Animated image ticks replace the
-                // node's current frame buffer, so the visible viewport list has
-                // to be rebuilt even when geometry is unchanged.
-                self.invalidate_display_list();
+                // node's current frame buffer, so the visible viewport paint
+                // list has to be rebuilt even when geometry is unchanged. Keep
+                // the stable page surface and limit damage to the image boxes
+                // when the ticker reported them.
                 if image_tick.paint_rects.is_empty() {
-                    // Full display-list invalidation above is enough.
+                    self.invalidate_display_list();
                 } else {
-                    self.invalidate_paint_rects(image_tick.paint_rects);
+                    self.invalidate_paint_only_display_list();
+                    let _ = self.invalidate_paint_rects(image_tick.paint_rects);
                 }
                 needs_redraw = true;
                 if trace_idle {
@@ -1115,6 +1112,10 @@ impl Renderer {
                     };
                     let mut redraw = doc.process_mouse_event(mouse_type, pt, bt);
                     redraw |= doc.process_mouse_event(ptr_type, pt, bt);
+                    if bt == 2 && *state == winit::event::ElementState::Released {
+                        redraw |=
+                            doc.process_mouse_event(crate::dom::HtmlEventType::ContextMenu, pt, bt);
+                    }
                     return redraw;
                 }
                 false
@@ -1516,7 +1517,8 @@ impl Renderer {
             // coordinates. Scrolling inside the band reuses the same list; when
             // the viewport leaves the band we rebuild a new slice instead of
             // traversing and recording the whole page.
-            let list = display_list_builder::build_display_list_viewport(
+            let font_system = Some(&mut self.font_system as *mut _);
+            let list = display_list_builder::build_display_list_viewport_with_font_system(
                 &doc.root,
                 view_w,
                 view_h,
@@ -1528,6 +1530,7 @@ impl Renderer {
                 doc.active_box,
                 &doc.visited_urls,
                 &doc.base_url,
+                font_system,
             );
             if !animation_restore.is_empty() {
                 crate::css::restore_animation_overrides(&mut doc.root, animation_restore);
@@ -1576,19 +1579,22 @@ impl Renderer {
                         let overrides = doc.animation_overrides.clone();
                         crate::css::apply_animation_overrides_scoped(&mut doc.root, &overrides)
                     };
-                    let paint_list = display_list_builder::build_display_list_viewport(
-                        &doc.root,
-                        view_w,
-                        view_h,
-                        doc.scroll_x,
-                        doc.scroll_y,
-                        clip_top,
-                        clip_bottom,
-                        doc.hovered_box,
-                        doc.active_box,
-                        &doc.visited_urls,
-                        &doc.base_url,
-                    );
+                    let font_system = Some(&mut self.font_system as *mut _);
+                    let paint_list =
+                        display_list_builder::build_display_list_viewport_with_font_system(
+                            &doc.root,
+                            view_w,
+                            view_h,
+                            doc.scroll_x,
+                            doc.scroll_y,
+                            clip_top,
+                            clip_bottom,
+                            doc.hovered_box,
+                            doc.active_box,
+                            &doc.visited_urls,
+                            &doc.base_url,
+                            font_system,
+                        );
                     if !animation_restore.is_empty() {
                         crate::css::restore_animation_overrides(&mut doc.root, animation_restore);
                     }
@@ -1900,7 +1906,9 @@ impl Renderer {
             page_content_repainted = true;
             replay_ms = replay_start.elapsed().as_millis();
         }
-        if page_content_repainted && !transform_only_animation_frame {
+        let should_cache_content_surface =
+            page_content_repainted && (!transform_only_animation_frame || !used_dirty_surface);
+        if should_cache_content_surface {
             self.cache_content_surface(pixmap);
             self.cached_surface_scale = scale;
             self.cached_surface_zoom = zoom;

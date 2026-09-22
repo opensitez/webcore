@@ -812,6 +812,45 @@ fn decoded_svg_image_uses_isolated_svg_document_color() {
 }
 
 #[test]
+fn data_svg_background_decodes_before_first_paint() {
+    let mut renderer = Renderer::new();
+    let doc = renderer.load_html(
+        r##"
+        <style>
+        body { margin: 0; }
+        #icon {
+            width: 18px;
+            height: 18px;
+            background-image: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20" fill="%23000"><path d="M8 1a7 7 0 015.605 11.191l5.102 5.102-1.414 1.414-5.102-5.102A7 7 0 118 1m0 2a5 5 0 100 10A5 5 0 008 3"/></svg>');
+            background-repeat: no-repeat;
+            background-position: center;
+            background-size: max(calc(0.875rem + 4px), 10px);
+        }
+        </style>
+        <div id="icon"></div>
+        "##,
+        800.0,
+    );
+    let icon = crate::tests::harness::find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "icon")
+    })
+    .expect("icon");
+    assert!(
+        icon.bg_image_data.is_some(),
+        "data: SVG CSS backgrounds should decode synchronously for first paint"
+    );
+
+    let list = build_display_list(&doc.root, 800.0, 600.0);
+    let bg = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::BackgroundImage { draw_w, draw_h, .. } => Some((*draw_w, *draw_h)),
+        _ => None,
+    });
+    let (draw_w, draw_h) = bg.expect("decoded background should produce a paint command");
+    assert!((draw_w - 18.0).abs() < 0.5, "draw_w={draw_w}");
+    assert!((draw_h - 18.0).abs() < 0.5, "draw_h={draw_h}");
+}
+
+#[test]
 fn text_node_produces_text_command() {
     let (_, list) = build("<p>Hello World</p>");
     let has_text = list
@@ -1202,15 +1241,12 @@ fn hover_style_applied_in_display_list() {
     </style></head><body>
         <div class="btn" id="btn">Click</div>
     </body></html>"#;
-    let doc = parse_html(html);
-    let mut f = EngineFrame::new(doc, 800.0, 600.0);
-    f.update_frame();
-
-    let btn_id = f.doc.get_element_by_id("btn").unwrap();
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(html, 800.0);
 
     // Without hover
     let list_no_hover = build_display_list_full(
-        &f.doc.root,
+        &doc.root,
         800.0,
         600.0,
         0.0,
@@ -1221,14 +1257,23 @@ fn hover_style_applied_in_display_list() {
         "",
     );
 
-    // With hover on button
+    let btn_id = doc.get_element_by_id("btn").unwrap();
+    let rect = doc.get_bounding_client_rect(btn_id).unwrap();
+    doc.process_mouse_event(
+        crate::dom::HtmlEventType::MouseMove,
+        (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0),
+        0,
+    );
+    renderer.layout_engine().layout(&mut doc, 800.0);
+
+    // With hover applied by cascade/layout.
     let list_hover = build_display_list_full(
-        &f.doc.root,
+        &doc.root,
         800.0,
         600.0,
         0.0,
         0.0,
-        btn_id,
+        0,
         0,
         &std::collections::HashSet::new(),
         "",
@@ -1255,6 +1300,94 @@ fn hover_style_applied_in_display_list() {
         "hover should add a red background: no_hover={} hover={}",
         red_no_hover,
         red_hover
+    );
+}
+
+#[test]
+fn hover_inherited_text_color_repaints_from_current_source_style() {
+    let html = r#"<html><head><style>
+        .btn {
+            color: #7c6af7;
+            background: transparent;
+            width: 100px;
+            height: 40px;
+        }
+        .btn:hover {
+            color: #fff;
+            background: #7c6af7;
+        }
+    </style></head><body>
+        <div class="btn" id="btn"><span>Outline</span></div>
+    </body></html>"#;
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(html, 800.0);
+
+    let btn_id = doc.get_element_by_id("btn").unwrap();
+    let rect = doc.get_bounding_client_rect(btn_id).unwrap();
+    doc.process_mouse_event(
+        crate::dom::HtmlEventType::MouseMove,
+        (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0),
+        0,
+    );
+    renderer.layout_engine().layout(&mut doc, 800.0);
+
+    let list = build_display_list_full(
+        &doc.root,
+        800.0,
+        600.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+
+    let outline_color = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Text { text, color, .. } if text == "Outline" => Some(*color),
+        _ => None,
+    });
+    assert_eq!(
+        outline_color,
+        Some(Color::rgb(255, 255, 255)),
+        "hover text paint must use current inherited source-node color"
+    );
+}
+
+#[test]
+fn animated_inherited_text_color_repaints_from_scoped_override() {
+    let html = r#"<div id="btn" style="color:#7c6af7"><span>Outline</span></div>"#;
+    let mut frame = EngineFrame::new(parse_html(html), 800.0, 600.0);
+    frame.update_frame();
+
+    let btn_id = frame.doc.get_element_by_id("btn").unwrap();
+    frame.doc.animation_overrides.insert(
+        btn_id,
+        vec![("color".to_string(), "rgb(255,255,255)".to_string())],
+    );
+    let overrides = frame.doc.animation_overrides.clone();
+    let restore = crate::css::apply_animation_overrides_scoped(&mut frame.doc.root, &overrides);
+    let list = build_display_list_full(
+        &frame.doc.root,
+        800.0,
+        600.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+    crate::css::restore_animation_overrides(&mut frame.doc.root, restore);
+
+    let outline_color = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Text { text, color, .. } if text == "Outline" => Some(*color),
+        _ => None,
+    });
+    assert_eq!(
+        outline_color,
+        Some(Color::rgb(255, 255, 255)),
+        "animated inherited color must repaint cached inline text runs"
     );
 }
 
@@ -1371,6 +1504,58 @@ fn replay_scrolls_background_image_clips_with_the_image() {
         (white.red(), white.green(), white.blue(), white.alpha()),
         (255, 255, 255, 255),
         "background-image must remain clipped after scroll"
+    );
+}
+
+#[test]
+fn replay_transforms_background_image_clip_with_the_image() {
+    let mut list = DisplayList::new();
+    list.push(PaintCmd::PushTransform {
+        node_id: 9,
+        transform: [1.0, 0.0, 0.0, 1.0, 0.0, -9.0],
+    });
+    list.push(PaintCmd::BackgroundImage {
+        container: Rect::new(20.0, 20.0, 18.0, 18.0),
+        clip: Rect::new(20.0, 20.0, 18.0, 18.0),
+        data: ImageRef::Owned(vec![255, 0, 0, 255], 1, 1),
+        size_mode: 3,
+        draw_w: 18.0,
+        draw_h: 18.0,
+        pos_x: 20.0,
+        pos_y: 20.0,
+        repeat_x_mode: 0,
+        repeat_y_mode: 0,
+        radii: [0.0; 4],
+        radii_y: [0.0; 4],
+        blend_mode: 0,
+    });
+    list.push(PaintCmd::PopTransform);
+
+    let mut pixmap = tiny_skia::Pixmap::new(80, 80).unwrap();
+    pixmap.fill(tiny_skia::Color::WHITE);
+    replay(&list, &mut pixmap, 1.0);
+
+    let top = pixmap
+        .pixel(25, 12)
+        .expect("sample inside transformed image");
+    assert_eq!(
+        (top.red(), top.green(), top.blue(), top.alpha()),
+        (255, 0, 0, 255),
+        "background-image clip must move with a CSS transform"
+    );
+
+    let old_clip_only = pixmap
+        .pixel(25, 35)
+        .expect("sample below transformed image");
+    assert_eq!(
+        (
+            old_clip_only.red(),
+            old_clip_only.green(),
+            old_clip_only.blue(),
+            old_clip_only.alpha()
+        ),
+        (255, 255, 255, 255),
+        "the untransformed clip area must not mask/draw stale pixels"
     );
 }
 
@@ -1987,6 +2172,46 @@ fn render_display_list_text_clipped_by_overflow_hidden() {
 }
 
 #[test]
+fn replay_clip_inside_transform_moves_with_transformed_content() {
+    let mut list = DisplayList::new();
+    list.push(PaintCmd::PushTransform {
+        node_id: 1,
+        transform: [1.0, 0.0, 0.0, 1.0, -80.0, 0.0],
+    });
+    list.push(PaintCmd::PushClip {
+        rect: Rect::new(100.0, 20.0, 60.0, 40.0),
+        radius: [0.0; 4],
+        radius_y: [0.0; 4],
+    });
+    list.push(PaintCmd::FillRect {
+        rect: Rect::new(100.0, 20.0, 60.0, 40.0),
+        color: Color::rgba(255, 0, 0, 255),
+        radius: [0.0; 4],
+        radius_y: [0.0; 4],
+    });
+    list.push(PaintCmd::PopClip);
+    list.push(PaintCmd::PopTransform);
+
+    let mut pixmap = tiny_skia::Pixmap::new(200, 100).unwrap();
+    pixmap.fill(tiny_skia::Color::WHITE);
+    replay(&list, &mut pixmap, 1.0);
+
+    let data = pixmap.data();
+    let moved_idx = (30 * 200 + 30) * 4;
+    assert_eq!(
+        &data[moved_idx..moved_idx + 4],
+        &[255, 0, 0, 255],
+        "transformed clip should expose the transformed fill"
+    );
+    let unmoved_idx = (30 * 200 + 110) * 4;
+    assert_eq!(
+        &data[unmoved_idx..unmoved_idx + 4],
+        &[255, 255, 255, 255],
+        "clip must not stay behind in the untransformed location"
+    );
+}
+
+#[test]
 fn render_display_list_border_visible() {
     let doc = parse_html(
         r#"<div style="border: 3px solid green; width: 100px; height: 50px; position: absolute; left: 50px; top: 50px">x</div>"#,
@@ -2301,6 +2526,39 @@ fn radial_gradient_geometry(list: &DisplayList) -> Option<(f32, f32, f32, f32)> 
     })
 }
 
+fn gradient_paints(list: &DisplayList) -> Vec<(Rect, Rect, u8, u8)> {
+    list.commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Gradient {
+                rect,
+                clip,
+                repeat_x_mode,
+                repeat_y_mode,
+                ..
+            } => Some((*rect, *clip, *repeat_x_mode, *repeat_y_mode)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn gradient_paints_with_blend(list: &DisplayList) -> Vec<(Rect, Rect, u8, u8, u8)> {
+    list.commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Gradient {
+                rect,
+                clip,
+                repeat_x_mode,
+                repeat_y_mode,
+                blend_mode,
+                ..
+            } => Some((*rect, *clip, *repeat_x_mode, *repeat_y_mode, *blend_mode)),
+            _ => None,
+        })
+        .collect()
+}
+
 fn fill_rect_of(list: &DisplayList, r: u8, g: u8, b: u8) -> Option<crate::types::Rect> {
     list.commands.iter().find_map(|cmd| match cmd {
         PaintCmd::FillRect { rect, color, .. } if color.r == r && color.g == g && color.b == b => {
@@ -2308,6 +2566,146 @@ fn fill_rect_of(list: &DisplayList, r: u8, g: u8, b: u8) -> Option<crate::types:
         }
         _ => None,
     })
+}
+
+#[test]
+fn additional_background_layers_use_their_own_origin_clip_and_blend() {
+    let (_, list) = build(
+        r#"<body style="margin:0">
+             <div style="width:100px;height:50px;padding:10px;border:5px solid transparent;
+                         background-image:linear-gradient(red, red), linear-gradient(blue, blue);
+                         background-origin:border-box, content-box;
+                         background-clip:border-box, content-box;
+                         background-blend-mode:multiply, screen"></div>
+           </body>"#,
+    );
+    let paints = gradient_paints_with_blend(&list);
+    assert_eq!(paints.len(), 2, "expected two gradients, got {paints:?}");
+
+    let (first_rect, first_clip, _, _, first_blend) = paints[0];
+    assert_eq!(first_blend, 1, "primary layer should use multiply");
+    assert!(
+        first_rect.x.abs() < 0.01
+            && first_rect.y.abs() < 0.01
+            && (first_rect.w - 130.0).abs() < 0.01
+            && (first_rect.h - 80.0).abs() < 0.01,
+        "primary origin should be the border box, got {first_rect:?}"
+    );
+    assert!(
+        first_clip.x.abs() < 0.01
+            && first_clip.y.abs() < 0.01
+            && (first_clip.w - 130.0).abs() < 0.01
+            && (first_clip.h - 80.0).abs() < 0.01,
+        "primary clip should be the border box, got {first_clip:?}"
+    );
+
+    let (second_rect, second_clip, _, _, second_blend) = paints[1];
+    assert_eq!(second_blend, 2, "second layer should use screen");
+    assert!(
+        (second_rect.x - 15.0).abs() < 0.01
+            && (second_rect.y - 15.0).abs() < 0.01
+            && (second_rect.w - 100.0).abs() < 0.01
+            && (second_rect.h - 50.0).abs() < 0.01,
+        "second layer origin should be the content box, got {second_rect:?}"
+    );
+    assert!(
+        (second_clip.x - 15.0).abs() < 0.01
+            && (second_clip.y - 15.0).abs() < 0.01
+            && (second_clip.w - 100.0).abs() < 0.01
+            && (second_clip.h - 50.0).abs() < 0.01,
+        "second layer clip should be the content box, got {second_clip:?}"
+    );
+}
+
+#[test]
+fn gradient_background_respects_size_and_position_for_underlines() {
+    let (_, list) = build(
+        r#"<body style="margin:0">
+             <div style="width:100px;height:35px;
+                         background-image:linear-gradient(to right, black 0, black 33%, transparent 33%, transparent 66%, black 66%, black 100%);
+                         background-repeat:no-repeat;
+                         background-size:400% 2px;
+                         background-position:100% 100%"></div>
+           </body>"#,
+    );
+    let paints = gradient_paints(&list);
+    assert_eq!(paints.len(), 1, "expected one gradient, got {paints:?}");
+    let (rect, clip, repeat_x, repeat_y) = paints[0];
+
+    assert_eq!((repeat_x, repeat_y), (0, 0));
+    assert!(
+        (clip.w - 100.0).abs() < 0.01 && (clip.h - 35.0).abs() < 0.01,
+        "the gradient clips to the element box, got {clip:?}"
+    );
+    assert!(
+        (rect.w - 400.0).abs() < 0.01 && (rect.h - 2.0).abs() < 0.01,
+        "background-size should produce a 400px by 2px image, got {rect:?}"
+    );
+    assert!(
+        (rect.x + 300.0).abs() < 0.01 && (rect.y - 33.0).abs() < 0.01,
+        "background-position:100% 100% should align the sized gradient at the lower right, got {rect:?}"
+    );
+}
+
+#[test]
+fn background_shorthand_gradient_keeps_size_position_and_repeat() {
+    let (_, list) = build(
+        r#"<body style="margin:0">
+             <div style="width:100px;height:35px;
+                         background:linear-gradient(to right, black, transparent) 100% 100% / 400% 2px no-repeat"></div>
+           </body>"#,
+    );
+    let paints = gradient_paints(&list);
+    assert_eq!(paints.len(), 1, "expected one gradient, got {paints:?}");
+    let (rect, _, repeat_x, repeat_y) = paints[0];
+
+    assert_eq!((repeat_x, repeat_y), (0, 0));
+    assert!(
+        (rect.w - 400.0).abs() < 0.01 && (rect.h - 2.0).abs() < 0.01,
+        "background shorthand should keep / background-size, got {rect:?}"
+    );
+    assert!(
+        (rect.x + 300.0).abs() < 0.01 && (rect.y - 33.0).abs() < 0.01,
+        "background shorthand should keep background-position, got {rect:?}"
+    );
+}
+
+#[test]
+fn background_shorthand_multiple_gradient_layers_keep_independent_options() {
+    let (_, list) = build(
+        r#"<body style="margin:0">
+             <div style="width:100px;height:50px;
+                         background:
+                           linear-gradient(red, red) 100% 100% / 400% 2px no-repeat,
+                           linear-gradient(blue, blue) 0 0 / 10px 4px repeat-x"></div>
+           </body>"#,
+    );
+    let paints = gradient_paints(&list);
+    assert_eq!(paints.len(), 2, "expected two gradients, got {paints:?}");
+
+    let (first_rect, first_clip, first_repeat_x, first_repeat_y) = paints[0];
+    assert_eq!((first_repeat_x, first_repeat_y), (0, 0));
+    assert!(
+        (first_clip.w - 100.0).abs() < 0.01 && (first_clip.h - 50.0).abs() < 0.01,
+        "first layer clips to the element box, got {first_clip:?}"
+    );
+    assert!(
+        (first_rect.w - 400.0).abs() < 0.01
+            && (first_rect.h - 2.0).abs() < 0.01
+            && (first_rect.x + 300.0).abs() < 0.01
+            && (first_rect.y - 48.0).abs() < 0.01,
+        "first layer should keep its underline geometry, got {first_rect:?}"
+    );
+
+    let (second_rect, _, second_repeat_x, second_repeat_y) = paints[1];
+    assert_eq!((second_repeat_x, second_repeat_y), (1, 0));
+    assert!(
+        (second_rect.w - 10.0).abs() < 0.01
+            && (second_rect.h - 4.0).abs() < 0.01
+            && second_rect.x.abs() < 0.01
+            && second_rect.y.abs() < 0.01,
+        "second layer should keep its own tile geometry, got {second_rect:?}"
+    );
 }
 
 #[test]
@@ -3309,6 +3707,158 @@ fn collapsed_table_borders_resolve_per_spanning_edge_segment() {
 }
 
 #[test]
+fn collapsed_table_borders_follow_late_layout_shifts() {
+    let (frame, list) = build(
+        r#"
+        <style>
+        body { margin: 0; }
+        .wrap { display: flex; padding-left: 200px; }
+        table { border-collapse: collapse; border-spacing: 0; }
+        td { padding: 0; width: 40px; height: 30px; border: 1px solid #a2a9b1; }
+        </style>
+        <div class="wrap">
+          <table><tr><td id="cell"></td><td></td></tr><tr><td></td><td></td></tr></table>
+        </div>
+    "#,
+    );
+
+    let cell = crate::tests::harness::find_box(&frame.doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "cell")
+    })
+    .expect("cell");
+    let cell_left = cell.layout.border_rect.x;
+
+    let left_border_x = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Border {
+                rect,
+                widths,
+                colors,
+                ..
+            } if widths[3] > 0.0 && colors[3] == Color::rgb(162, 169, 177) => Some(rect.x),
+            _ => None,
+        })
+        .min_by(|a, b| a.partial_cmp(b).unwrap())
+        .expect("collapsed left border should paint");
+
+    assert!(
+        (left_border_x - (cell_left - 0.5)).abs() < 0.75,
+        "collapsed border should move with shifted cell: border_x={left_border_x}, cell_left={cell_left}"
+    );
+}
+
+#[test]
+fn auto_table_keeps_columns_at_min_content_even_when_container_is_narrow() {
+    let (frame, _list) = build(
+        r#"
+        <style>
+        body { margin: 0; }
+        .wrap { width: 120px; }
+        table { border-collapse: collapse; }
+        td { padding: 0; border: 1px solid #a2a9b1; white-space: normal; }
+        .nowrap { white-space: nowrap; }
+        </style>
+        <div class="wrap">
+          <table><tr><td><span class="nowrap">abc def ghi</span></td><td><span class="nowrap">jkl mno pqr</span></td></tr></table>
+        </div>
+        "#,
+    );
+
+    let table = find_node_by_tag(&frame.doc.root, "table").expect("table");
+    assert!(
+        table.layout.border_rect.w > 150.0,
+        "auto table should overflow the container rather than squeeze columns below min-content: {:?}",
+        table.layout.border_rect
+    );
+    let cells = crate::tests::harness::find_all_boxes(&frame.doc.root, &|node| node.tag == "td");
+    assert_eq!(cells.len(), 2);
+    assert!(
+        cells[0].layout.border_rect.w > 70.0 && cells[1].layout.border_rect.w > 70.0,
+        "nowrap inline descendants should contribute their full unbreakable width to each column: {:?} {:?}",
+        cells[0].layout.border_rect,
+        cells[1].layout.border_rect
+    );
+}
+
+#[test]
+fn direct_text_around_inline_links_keeps_collapsed_space_advances() {
+    let (_frame, list) = build_full(
+        r#"<body style="margin:0">
+             <p style="margin:0;font:16px sans-serif">A <a>B</a> C</p>
+           </body>"#,
+    );
+
+    let mut painted = Vec::new();
+    for cmd in &list.commands {
+        if let PaintCmd::Text { text, x, .. } = cmd {
+            painted.push((text.clone(), *x));
+        }
+    }
+    let first = painted
+        .iter()
+        .find(|(text, _)| text.contains('A'))
+        .expect("first A")
+        .1;
+    let link = painted
+        .iter()
+        .find(|(text, _)| text == "B")
+        .expect("link B")
+        .1;
+    let trailing = painted
+        .iter()
+        .rev()
+        .find(|(text, _)| text.contains('C'))
+        .expect("trailing C")
+        .1;
+    let first_gap = link - first;
+    let second_gap = trailing - link;
+    assert!(
+        first_gap > 11.0 && second_gap > 11.0,
+        "spaces between direct text/link/direct text fragments should advance paint positions: {painted:?}"
+    );
+}
+
+#[test]
+fn right_float_line_breaks_before_entering_float_edge() {
+    let (frame, _list) = build(
+        r#"
+        <style>
+        body { margin: 0; font: 16px sans-serif; }
+        .wrap { width: 520px; }
+        .float { float: right; width: 180px; height: 120px; }
+        p { margin: 0; }
+        </style>
+        <div class="wrap">
+          <div class="float"></div>
+          <p id="p">alpha beta gamma delta epsilon zeta eta theta iota kappa lambda</p>
+        </div>
+        "#,
+    );
+
+    let para = crate::tests::harness::find_box(&frame.doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "p")
+    })
+    .expect("paragraph");
+    let float = crate::tests::harness::find_box(&frame.doc.root, &|node| {
+        node.attributes
+            .get("class")
+            .is_some_and(|class| class == "float")
+    })
+    .expect("float");
+    let float_left = float.layout.margin_rect.x;
+
+    for line in &para.layout.line_cache {
+        assert!(
+            line.x + line.width <= float_left + 0.05,
+            "line must not overlap right float: line={:?}, float_left={float_left}",
+            line
+        );
+    }
+}
+
+#[test]
 fn disclosure_open_and_closed_markers_paint_distinct_glyphs() {
     let (_, list) = build(
         r#"
@@ -3772,6 +4322,89 @@ fn border_image_paints_only_the_border_ring() {
         alpha_at(12, 12),
         0,
         "border-image paint must not fill the content box"
+    );
+}
+
+#[test]
+fn gradient_border_image_does_not_fall_back_to_black_box_border() {
+    let (_frame, list) = build_full(
+        r#"<body style="margin:0">
+             <a style="display:block;width:100px;height:20px;color:black;
+                       border-style:solid;
+                       border-top-width:2px;
+                       border-bottom-width:2px;
+                       border-image-slice:2;
+                       border-image-source:linear-gradient(90deg, transparent 10px, #ededf0 10px, #ededf0 90px, transparent 90px)">
+               row
+             </a>
+           </body>"#,
+    );
+
+    assert!(
+        list.commands.iter().any(|cmd| {
+            matches!(
+                cmd,
+                PaintCmd::FillRect { rect, color, .. }
+                    if rect.h == 2.0 && color.r == 237 && color.g == 237 && color.b == 240
+            )
+        }),
+        "gradient border-image should paint separator strips"
+    );
+    assert!(
+        !list.commands.iter().any(|cmd| {
+            matches!(
+                cmd,
+                PaintCmd::Border { widths, colors, .. }
+                    if (widths[1] > 0.0 || widths[3] > 0.0)
+                        && colors.iter().any(|color| *color == Color::BLACK)
+            )
+        }),
+        "gradient border-image must not fall back to black side borders"
+    );
+}
+
+#[test]
+fn zero_width_border_sides_do_not_paint_rectangles() {
+    let list = DisplayList {
+        commands: vec![PaintCmd::Border {
+            rect: Rect::new(2.0, 2.0, 20.0, 20.0),
+            widths: [1.0, 0.0, 0.0, 0.0],
+            colors: [
+                Color::rgba(0, 200, 0, 255),
+                Color::rgba(0, 0, 0, 255),
+                Color::rgba(0, 0, 0, 255),
+                Color::rgba(0, 0, 0, 255),
+            ],
+            styles: [1, 1, 1, 1],
+            radii: [0.0; 4],
+            radii_y: [0.0; 4],
+            opacity: 1.0,
+        }],
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(28, 28).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let data = pixmap.data();
+    let pixel = |x: usize, y: usize| {
+        let i = (y * 28 + x) * 4;
+        (data[i], data[i + 1], data[i + 2], data[i + 3])
+    };
+
+    assert!(pixel(10, 2).1 > 150, "the non-zero top border should paint");
+    assert_eq!(
+        pixel(21, 10).3,
+        0,
+        "the zero-width right border must not paint its black color"
+    );
+    assert_eq!(
+        pixel(10, 21).3,
+        0,
+        "the zero-width bottom border must not paint its black color"
+    );
+    assert_eq!(
+        pixel(2, 10).3,
+        0,
+        "the zero-width left border must not paint its black color"
     );
 }
 

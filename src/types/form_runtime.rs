@@ -276,8 +276,11 @@ pub fn handle_form_click(
                     }),
                     element: target,
                 });
-                // Submit buttons trigger form submission
-                if btn_type == "submit" {
+                // Submit buttons trigger form submission only when they have a
+                // form owner. A standalone demo toolbar `<button>` still has
+                // a missing-value default type of submit, but it has no form
+                // to submit and must not navigate the current document.
+                if btn_type == "submit" && has_parent_form(root, target) {
                     let action = find_parent_form_action(root, target);
                     cb(&FormEvent {
                         tag: "form".into(),
@@ -364,6 +367,17 @@ pub(crate) fn find_form_parent_id(root: &WebCore, target_id: u32) -> u32 {
         None
     }
     walk(root, target_id).unwrap_or(target_id)
+}
+
+fn has_parent_form(root: &WebCore, target_id: u32) -> bool {
+    fn contains(node: &WebCore, target_id: u32) -> bool {
+        node.node_id == target_id || node.children.iter().any(|child| contains(child, target_id))
+    }
+    fn walk(node: &WebCore, target_id: u32) -> bool {
+        node.tag == "form" && node.children.iter().any(|child| contains(child, target_id))
+            || node.children.iter().any(|child| walk(child, target_id))
+    }
+    walk(root, target_id)
 }
 
 /// Find the action URL of the nearest ancestor <form> element.
@@ -657,5 +671,50 @@ pub fn apply_autofocus(doc: &mut Document) {
     }
     if let Some(id) = find_autofocus(&doc.root) {
         doc.focused_box = id;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn standalone_button_does_not_submit_current_page() {
+        let mut doc = crate::parse_html("<button id='dark'>☽</button>");
+        let button = doc.get_element_by_id("dark").unwrap();
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured = events.clone();
+        let mut callback: Option<FormEventCallback> = Some(Box::new(move |event| {
+            let name = match &event.kind {
+                FormEventKind::Click(_) => "click",
+                FormEventKind::Submit(_) => "submit",
+                _ => "other",
+            };
+            captured.lock().unwrap().push(name.to_string());
+        }));
+
+        assert!(handle_form_click(&mut doc.root, button, &mut callback).is_some());
+        assert_eq!(events.lock().unwrap().as_slice(), ["click"]);
+    }
+
+    #[test]
+    fn submit_button_inside_form_still_submits() {
+        let mut doc =
+            crate::parse_html("<form action='/send'><button id='send'>Send</button></form>");
+        let button = doc.get_element_by_id("send").unwrap();
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured = events.clone();
+        let mut callback: Option<FormEventCallback> = Some(Box::new(move |event| {
+            let name = match &event.kind {
+                FormEventKind::Click(_) => "click".to_string(),
+                FormEventKind::Submit(action) => format!("submit:{action}"),
+                _ => "other".to_string(),
+            };
+            captured.lock().unwrap().push(name);
+        }));
+
+        assert!(handle_form_click(&mut doc.root, button, &mut callback).is_some());
+        assert_eq!(events.lock().unwrap().as_slice(), ["click", "submit:/send"]);
     }
 }

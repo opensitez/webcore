@@ -1440,6 +1440,150 @@ fn transition_state_starts_on_style_change() {
 }
 
 #[test]
+fn hover_transition_targets_active_hover_style() {
+    let html = r#"<html><head><style>
+        #box {
+            background-color: black;
+            color: rebeccapurple;
+            transform: none;
+            transition:
+                background-color 1000ms linear,
+                color 1000ms linear,
+                transform 1000ms linear;
+        }
+        #box:hover {
+            background-color: white;
+            color: white;
+            transform: translateX(20px) scale(1.2);
+        }
+    </style></head><body><div id="box">Outline</div></body></html>"#;
+
+    let mut doc = parse_html(html);
+    let mut engine = LayoutEngine::new();
+    engine.layout(&mut doc, 800.0);
+
+    let id = doc.get_element_by_id("box").expect("box id");
+    doc.hovered_box = id;
+    doc.hover_changed = true;
+    engine.layout(&mut doc, 800.0);
+
+    let states = doc.transition_states.get(&id).expect("hover transitions");
+    let target = |prop: &str| {
+        states
+            .iter()
+            .find(|state| state.property == prop)
+            .map(|state| state.to_value.as_str())
+    };
+    assert_eq!(target("background-color"), Some("rgba(255,255,255,1.0000)"));
+    assert_eq!(target("color"), Some("rgba(255,255,255,1.0000)"));
+    assert_eq!(target("transform"), Some("translateX(20px) scale(1.2)"));
+
+    let initial_overrides = doc
+        .animation_overrides
+        .get(&id)
+        .expect("first transition frame overrides");
+    let initial = |prop: &str| {
+        initial_overrides
+            .iter()
+            .find(|(name, _)| name == prop)
+            .map(|(_, value)| value.as_str())
+    };
+    assert_eq!(
+        initial("background-color"),
+        Some("rgba(0,0,0,1.0000)"),
+        "hover paint must start from the base background, not jump to hover"
+    );
+    assert_eq!(
+        initial("color"),
+        Some("rgba(102,51,153,1.0000)"),
+        "hover paint must start from the base text color, not jump to hover"
+    );
+    assert_eq!(initial("transform"), Some("translateX(0px) scale(1)"));
+
+    let start = states
+        .iter()
+        .find(|state| state.property == "transform")
+        .expect("transform transition")
+        .start_time;
+    doc.tick_animations(start + Duration::from_millis(500));
+    let overrides = doc
+        .animation_overrides
+        .get(&id)
+        .expect("mid-frame overrides");
+    let transform = overrides
+        .iter()
+        .find(|(prop, _)| prop == "transform")
+        .map(|(_, value)| value.as_str())
+        .expect("transform override");
+    assert_eq!(transform, "translateX(10px) scale(1.1)");
+}
+
+#[test]
+fn hover_transition_reverses_to_base_style_from_current_sample() {
+    let html = r#"<html><head><style>
+        #box {
+            background-color: black;
+            color: black;
+            transition: background-color 1000ms linear, color 1000ms linear;
+        }
+        #box:hover {
+            background-color: white;
+            color: white;
+        }
+    </style></head><body><div id="box">Move between swatches</div></body></html>"#;
+
+    let mut doc = parse_html(html);
+    let mut engine = LayoutEngine::new();
+    engine.layout(&mut doc, 800.0);
+
+    let id = doc.get_element_by_id("box").expect("box id");
+    doc.hovered_box = id;
+    doc.hover_changed = true;
+    engine.layout(&mut doc, 800.0);
+
+    let start = doc
+        .transition_states
+        .get(&id)
+        .and_then(|states| {
+            states
+                .iter()
+                .find(|state| state.property == "background-color")
+        })
+        .expect("hover-in background transition")
+        .start_time;
+    doc.tick_animations(start + Duration::from_millis(500));
+    let sampled = doc
+        .animation_overrides
+        .get(&id)
+        .and_then(|props| props.iter().find(|(prop, _)| prop == "background-color"))
+        .map(|(_, value)| value.clone())
+        .expect("sampled background color");
+
+    doc.hovered_box = 0;
+    doc.hover_changed = true;
+    engine.layout(&mut doc, 800.0);
+
+    let reverse = doc
+        .transition_states
+        .get(&id)
+        .and_then(|states| {
+            states
+                .iter()
+                .find(|state| state.property == "background-color")
+        })
+        .expect("hover-out background transition");
+    assert_eq!(reverse.from_value, sampled);
+    assert_eq!(reverse.to_value, "rgba(0,0,0,1.0000)");
+
+    let color_reverse = doc
+        .transition_states
+        .get(&id)
+        .and_then(|states| states.iter().find(|state| state.property == "color"))
+        .expect("hover-out color transition");
+    assert_eq!(color_reverse.to_value, "rgba(0,0,0,1.0000)");
+}
+
+#[test]
 fn sync_transitions_dispatches_transitionrun_and_transitionstart_when_created() {
     let mut doc = parse_html("<div id='box'></div>");
     let id = doc.get_element_by_id("box").unwrap();

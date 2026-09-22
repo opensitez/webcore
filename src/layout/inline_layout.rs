@@ -1882,6 +1882,35 @@ pub fn collect_items(
     );
 }
 
+pub fn collect_items_continuing(
+    engine: &LayoutEngine,
+    node: &WebCore,
+    parent_font_px: f32,
+    root_font_px: f32,
+    items: &mut Vec<InlineItem>,
+    runs: &mut Vec<InlineRun>,
+    text_offset: &mut usize,
+    box_idx: usize,
+    is_direct_child: bool,
+    ancestor_path: &[usize],
+    previous_collapsible_space: &mut bool,
+) {
+    collect_items_inner(
+        engine,
+        node,
+        parent_font_px,
+        root_font_px,
+        items,
+        runs,
+        text_offset,
+        box_idx,
+        is_direct_child,
+        ancestor_path,
+        None,
+        previous_collapsible_space,
+    );
+}
+
 fn collect_items_inner(
     engine: &LayoutEngine,
     node: &WebCore,
@@ -2497,9 +2526,11 @@ fn tokenize_text(
         let is_space = ch.is_some_and(|c| !is_nl && c.is_ascii_whitespace());
 
         if (at_end || is_space || is_nl) && i > word_start {
-            *previous_collapsible_space = false;
             // Emit word — use cached measurement to avoid redundant font shaping
             let word = &text[word_start..i];
+            let break_before_word = (word_start > 0 || *previous_collapsible_space)
+                && !matches!(white_space, WhiteSpace::Nowrap | WhiteSpace::Pre);
+            *previous_collapsible_space = false;
             let break_inside_word = matches!(word_break, WordBreak::BreakAll);
             let has_subword_breaks = word.chars().any(|ch| {
                 (ch == '\u{00ad}' && hyphens != Hyphens::None)
@@ -2526,12 +2557,12 @@ fn tokenize_text(
                         descent,
                         height: line_h,
                         is_space: false,
-                        breakable: word_start > 0 || rel > 0,
+                        breakable: break_before_word || rel > 0,
                     });
                 }
             } else if has_subword_breaks {
                 let mut segment_start = 0usize;
-                let mut starts_after_break = word_start > 0;
+                let mut starts_after_break = break_before_word;
                 for (rel, ch) in word.char_indices() {
                     let next_rel = rel + ch.len_utf8();
                     if ch == '\u{00ad}' && hyphens != Hyphens::None {
@@ -2631,7 +2662,7 @@ fn tokenize_text(
                     descent,
                     height: line_h,
                     is_space: false,
-                    breakable: word_start > 0,
+                    breakable: break_before_word,
                 });
             }
         }
@@ -2701,7 +2732,7 @@ fn tokenize_text(
                 descent,
                 height: line_h,
                 is_space: !preserve_spaces,
-                breakable: !matches!(white_space, WhiteSpace::Pre),
+                breakable: !matches!(white_space, WhiteSpace::Nowrap | WhiteSpace::Pre),
             });
             *previous_collapsible_space = collapsible_space;
             i += ch_len; // consume exactly one space character
@@ -2726,7 +2757,7 @@ fn break_one_line(
     start_idx: usize,
     avail_w: f32,
 ) -> (usize, usize, usize, bool) {
-    const LINE_BREAK_EPSILON: f32 = 2.0;
+    const LINE_BREAK_EPSILON: f32 = 0.01;
     // Skip leading spaces
     let mut i = start_idx;
     while i < items.len() && items[i].is_space {
@@ -3361,7 +3392,6 @@ pub fn measure_text_width_fs_attrs(
     let phys_px = font_px * size_adjust * scale.max(1.0);
     let inv = if scale > 1.0 { 1.0 / scale } else { 1.0 };
     let metrics = Metrics::new(phys_px, phys_px * 1.2);
-    let mut buffer = Buffer::new(fs, metrics);
     let mut attrs = Attrs::new().weight(weight).style(style);
     // Set the correct font family so monospace/serif/etc. are measured accurately
     let resolved;
@@ -3369,16 +3399,64 @@ pub fn measure_text_width_fs_attrs(
         resolved = resolve_css_family(fs, font_family);
         attrs = attrs.family(resolved.as_family());
     }
-    buffer.set_text(fs, text, &attrs, Shaping::Advanced, None);
-    buffer.shape_until_scroll(fs, false);
 
-    let mut max_w = 0.0f32;
-    for run in buffer.layout_runs() {
-        if run.line_w > max_w {
-            max_w = run.line_w;
+    let measure_shaped = |fs: &mut cosmic_text::FontSystem, sample: &str, attrs: &Attrs| -> f32 {
+        if sample.is_empty() {
+            return 0.0;
         }
-    }
-    let width = max_w * inv;
+        let mut buffer = Buffer::new(fs, metrics);
+        buffer.set_text(fs, sample, attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(fs, false);
+
+        let mut max_w = 0.0f32;
+        for run in buffer.layout_runs() {
+            if run.line_w > max_w {
+                max_w = run.line_w;
+            }
+        }
+        max_w * inv
+    };
+
+    let width = if text.starts_with(char::is_whitespace) || text.ends_with(char::is_whitespace) {
+        let space_width = {
+            let measured = measure_shaped(fs, "n n", &attrs) - measure_shaped(fs, "nn", &attrs);
+            if measured > 0.1 {
+                measured
+            } else {
+                font_px * size_adjust * 0.25
+            }
+        };
+        let whitespace_advance = |ch: char| {
+            if ch == '\t' {
+                space_width * 4.0
+            } else {
+                space_width
+            }
+        };
+        if let Some(core_start) = text
+            .char_indices()
+            .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx))
+        {
+            let core_end = text
+                .char_indices()
+                .rev()
+                .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx + ch.len_utf8()))
+                .unwrap_or(core_start);
+            let leading = text[..core_start]
+                .chars()
+                .map(whitespace_advance)
+                .sum::<f32>();
+            let trailing = text[core_end..]
+                .chars()
+                .map(whitespace_advance)
+                .sum::<f32>();
+            leading + measure_shaped(fs, &text[core_start..core_end], &attrs) + trailing
+        } else {
+            text.chars().map(whitespace_advance).sum()
+        }
+    } else {
+        measure_shaped(fs, text, &attrs)
+    };
     MEASURED_TEXT_WIDTHS.with(|cell| {
         let mut cache = cell.borrow_mut();
         if cache.1.len() > 16384 {
@@ -3753,13 +3831,28 @@ pub fn fill_char_x_for_line(
                 adjustment += word_s + extra;
             }
         }
-        let end_idx = e - line_start;
-        if end_idx < positions.len() && positions[end_idx].is_finite() {
-            positions[end_idx] += adjustment;
-        }
         let n_spc = seg_text.chars().filter(|&c| c == ' ').count() as f32;
         let n_chars = seg_text.chars().count() as f32;
-        seg_advance + n_spc * (word_s + extra) + n_chars * letter_s
+        let final_advance = seg_advance + n_spc * (word_s + extra) + n_chars * letter_s;
+        let end_idx = e - line_start;
+        if end_idx < positions.len() {
+            let end_x = cursor_x + final_advance;
+            if positions[end_idx].is_finite() {
+                positions[end_idx] += adjustment;
+                if positions[end_idx] < end_x {
+                    positions[end_idx] = end_x;
+                }
+            } else {
+                positions[end_idx] = end_x;
+            }
+        }
+        if s >= line_start {
+            let start_idx = s - line_start;
+            if start_idx < positions.len() && positions[start_idx].is_nan() {
+                positions[start_idx] = cursor_x;
+            }
+        }
+        final_advance
     };
 
     let mut cursor_x = 0.0f32;
@@ -3905,7 +3998,7 @@ fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {
     } else {
         generated_content
     };
-    if !rendered_text.is_empty() && (is_root || node.children.is_empty()) {
+    if !rendered_text.is_empty() {
         out.push_str(rendered_text);
     }
     if !generated_content.is_empty() {

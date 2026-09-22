@@ -607,7 +607,7 @@ impl EventTargetMap {
     /// The walk descends into shadow roots, which it did not before: a node
     /// inside a shadow tree was unreachable, so an event targeting one found no
     /// path and never dispatched at all.
-    fn propagation_path(root: &crate::types::WebCore, target: u32) -> Vec<(u32, u32)> {
+    pub(crate) fn propagation_path(root: &crate::types::WebCore, target: u32) -> Vec<(u32, u32)> {
         fn walk(
             node: &crate::types::WebCore,
             target: u32,
@@ -694,6 +694,15 @@ impl EventTargetMap {
         let handled = self.dispatch_with_path_inner(event, &ids, doc, &retarget);
         event.target = original_target;
         handled
+    }
+
+    pub(crate) fn dispatch_tree_path(
+        &self,
+        event: &mut DomEvent,
+        path: &[(u32, u32)],
+        doc: &mut crate::types::Document,
+    ) -> bool {
+        self.dispatch_with_path_retargeting(event, path, doc)
     }
 
     /// Dispatch along a root-to-target path the caller already collected.

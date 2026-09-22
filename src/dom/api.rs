@@ -1389,7 +1389,14 @@ impl Document {
     /// simple-selector matcher, which returned false for any selector with a
     /// combinator — and `closest()`, which is built on this, inherited that.
     pub fn matches(&self, id: u32, selectors: &str) -> bool {
-        id != 0 && self.query_selector_all(selectors).contains(&id)
+        if id == 0 {
+            return false;
+        }
+        if self.query_selector_all(selectors).contains(&id) {
+            return true;
+        }
+        self.find_webcore(id).is_some()
+            && crate::dom::query_selector_all_ids(&self.root, selectors).contains(&id)
     }
 
     /// `element.closest(selectors)` — the nearest ancestor-or-self that
@@ -1406,6 +1413,36 @@ impl Document {
                 return Some(current);
             }
             current = self.parent_node(current);
+        }
+        if self.find_webcore(id).is_some() {
+            let hits: std::collections::HashSet<u32> =
+                crate::dom::query_selector_all_ids(&self.root, selectors)
+                    .into_iter()
+                    .collect();
+            let mut path = Vec::new();
+            fn collect_path(
+                node: &crate::types::WebCore,
+                target: u32,
+                path: &mut Vec<u32>,
+            ) -> bool {
+                path.push(node.node_id);
+                if node.node_id == target {
+                    return true;
+                }
+                for child in &node.children {
+                    if collect_path(child, target, path) {
+                        return true;
+                    }
+                }
+                path.pop();
+                false
+            }
+            if collect_path(&self.root, id, &mut path) {
+                return path
+                    .into_iter()
+                    .rev()
+                    .find(|node_id| hits.contains(node_id));
+            }
         }
         None
     }
@@ -2032,6 +2069,7 @@ impl Document {
                 self.notify_select_changed(select);
             }
         }
+        self.style_dirty = true;
     }
 
     /// The `<select>` an option belongs to, if any.
@@ -2071,6 +2109,8 @@ impl Document {
         self.arena.remove_attribute(NodeId(id), key);
         if let Some(node) = self.find_webcore_mut(id) {
             node.attributes.remove(key);
+            node.layout.layout_dirty = true;
+            node.layout.intrinsic_dirty = true;
             // The other half of the same sentence: "when the `checked` content
             // attribute is removed, if the control does not have dirty
             // checkedness, the user agent must set the checkedness of the
@@ -2079,6 +2119,7 @@ impl Document {
                 node.checkedness = false;
             }
         }
+        self.style_dirty = true;
     }
 
     /// Set the text content of a node, replacing all children.
@@ -2163,6 +2204,9 @@ impl Document {
         if let Some(node) = self.find_webcore_mut(id) {
             node.children = new_children;
             node.text.clear();
+            node.layout.layout_dirty = true;
+            node.layout.intrinsic_dirty = true;
+            node.has_dirty_layout_descendant = true;
         }
 
         // Rebuild arena for new children — split borrow: &mut self.arena + &mut self.root
@@ -2171,6 +2215,7 @@ impl Document {
                 crate::html::rebuild_arena_recursive_pub(&mut self.arena, child, NodeId(id));
             }
         }
+        self.style_dirty = true;
     }
 
     // ── classList ──
