@@ -1,6 +1,6 @@
 [package]
 name = "webcore"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 description = "HTML/CSS editor and renderer in Rust using tiny-skia"
 license = "GPL-3.0-or-later OR LicenseRef-Commercial"
@@ -52,6 +52,10 @@ path = "examples/transform_filter_demo.rs"
 [[example]]
 name = "event_playground"
 path = "examples/event_playground.rs"
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
 
 [features]
 accessibility = ["dep:accesskit", "dep:accesskit_winit"]

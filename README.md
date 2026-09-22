@@ -18,7 +18,7 @@ Add `webcore` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-webcore = "0.3.1"
+webcore = "0.3.3"
 ```
 
 ## Minimal Example
