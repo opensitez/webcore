@@ -52,6 +52,7 @@ fn main() {
 
 The repository includes several examples demonstrating the capabilities of `webcore`. You can run them using `cargo run --example <name>`:
 
+- `demo`: Combined local demo browser with a `Demos` menu for switching pages
 - `animation_demo`: CSS animations
 - `transitions_demo`: CSS transitions
 - `contenteditable_demo`: Interactive text editing
@@ -64,6 +65,18 @@ The repository includes several examples demonstrating the capabilities of `webc
 
 ```bash
 cargo run --example contenteditable_demo
+```
+
+Run the combined demo browser from the workspace root:
+
+```bash
+cargo run --manifest-path crates/webcore/Cargo.toml --example demo
+```
+
+Or from this `crates/webcore` directory:
+
+```bash
+cargo run --example demo
 ```
 
 ## Copyright
