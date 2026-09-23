@@ -680,6 +680,7 @@ pub fn layout_inline_block(
     let mut item_idx = 0usize;
     let mut line_cache: Vec<LayoutLine> = Vec::new();
     let mut atomic_pos: Vec<(Vec<usize>, f32, f32)> = Vec::new(); // (path, x, y)
+    let mut out_of_flow_static_pos: Vec<(Vec<usize>, f32, f32)> = Vec::new(); // (path, x, y)
     let mut inline_fragment_rects: std::collections::HashMap<Vec<usize>, Vec<Rect>> =
         std::collections::HashMap::new();
     let mut old_line_idx = 0usize;
@@ -755,7 +756,7 @@ pub fn layout_inline_block(
             // until it fits or no more floats constrict the width (CSS 2.1 §9.5).
             let first_item = items[item_idx..]
                 .iter()
-                .find(|it| !it.is_space && !matches!(it.kind, InlineItemKind::Float { .. }));
+                .find(|it| inline_item_has_visible_flow_content(it));
             if let Some(item) = first_item {
                 let check_h = est_line_h.max(item.height);
                 let mut avail = (fc_right - fc_left).max(0.0);
@@ -910,10 +911,10 @@ pub fn layout_inline_block(
         // Find the first and last non-space, non-break items.
         let first_content = line_items
             .iter()
-            .position(|it| !it.is_space && !matches!(it.kind, InlineItemKind::Break));
+            .position(inline_item_has_visible_flow_content);
         let last_content = line_items
             .iter()
-            .rposition(|it| !it.is_space && !matches!(it.kind, InlineItemKind::Break));
+            .rposition(inline_item_has_visible_flow_content);
         let content_line_w: f32 = match (first_content, last_content) {
             (Some(f), Some(l)) => line_items[f..=l].iter().map(|it| it.advance).sum(),
             _ => 0.0,
@@ -1119,6 +1120,9 @@ pub fn layout_inline_block(
                             add_inline_fragment(&mut inline_fragment_rects, p, ar);
                         }
                         seen_atomic_before_text = true;
+                    }
+                    InlineItemKind::OutOfFlow { path } => {
+                        out_of_flow_static_pos.push((path.clone(), atomic_x, cursor_y));
                     }
                     InlineItemKind::Text { path, .. } => {
                         let text_x = if is_rtl && seen_atomic_before_text {
@@ -1409,6 +1413,14 @@ pub fn layout_inline_block(
             let dx = ax - target.layout.margin_rect.x;
             let dy = ay - target.layout.margin_rect.y;
             crate::layout::shift_rects(target, dx, dy);
+        }
+    }
+
+    // ── 6a. Static positions for absolute/fixed inline descendants ──────────
+    for (path, sx, sy) in out_of_flow_static_pos {
+        if let Some(target) = resolve_path_mut(node, &path) {
+            target.layout.abs_static_x = Some(sx);
+            target.layout.abs_static_y = Some(sy);
         }
     }
 
@@ -1899,6 +1911,10 @@ pub enum InlineItemKind {
     /// the block container down to the actual node (e.g. [2, 0, 0] means
     /// node.children[2].children[0].children[0]).
     Atomic { path: Vec<usize>, display: Display },
+    /// An out-of-flow inline descendant. It consumes no line advance, but the
+    /// inline formatter records the static position that absolute/fixed layout
+    /// needs when all inset offsets are auto.
+    OutOfFlow { path: Vec<usize> },
     /// Forced line break (<br>).
     Break,
     /// A floated child. `path` is rooted at the inline formatting context.
@@ -1914,6 +1930,14 @@ pub struct InlineItem {
     pub height: f32,
     pub is_space: bool,
     pub breakable: bool,
+}
+
+fn inline_item_has_visible_flow_content(item: &InlineItem) -> bool {
+    !item.is_space
+        && !matches!(
+            item.kind,
+            InlineItemKind::Break | InlineItemKind::Float { .. } | InlineItemKind::OutOfFlow { .. }
+        )
 }
 
 // ─── Collect inline items ────────────────────────────────────────────────────
@@ -2003,13 +2027,19 @@ fn collect_items_inner(
     let mut current_path = ancestor_path.to_vec();
     current_path.push(box_idx);
 
-    // Absolutely/fixed positioned elements are out of flow — skip them here;
-    // they are laid out separately by layout_positioned.
-    // Record the static position so deeply nested abs elements can use it.
+    // Absolutely/fixed positioned elements are out of flow, but an inline
+    // formatting context still establishes their static position when all
+    // inset offsets are auto. Keep a zero-width marker at the insertion point.
     if matches!(node.style.position, Position::Absolute | Position::Fixed) {
-        // Note: we don't have cursor_y here, but the parent's content_y is available
-        // through the node's parent position. We'll set abs_static_x/y in layout_inline_block
-        // after items are collected.
+        items.push(InlineItem {
+            kind: InlineItemKind::OutOfFlow { path: current_path },
+            advance: 0.0,
+            ascent: 0.0,
+            descent: 0.0,
+            height: 0.0,
+            is_space: false,
+            breakable: false,
+        });
         return;
     }
 
@@ -2928,7 +2958,7 @@ fn balanced_wrap_width(items: &[InlineItem], max_w: f32) -> f32 {
 
     let min_w = items
         .iter()
-        .filter(|item| !item.is_space && !matches!(item.kind, InlineItemKind::Break))
+        .filter(|item| inline_item_has_visible_flow_content(item))
         .map(|item| item.advance)
         .fold(1.0_f32, f32::max)
         .min(max_w);
@@ -2999,19 +3029,15 @@ fn line_stats_for_width(items: &[InlineItem], width: f32) -> LineStats {
 }
 
 fn trimmed_line_word_count(items: &[InlineItem]) -> usize {
-    let first = items
-        .iter()
-        .position(|it| !it.is_space && !matches!(it.kind, InlineItemKind::Break));
-    let last = items
-        .iter()
-        .rposition(|it| !it.is_space && !matches!(it.kind, InlineItemKind::Break));
+    let first = items.iter().position(inline_item_has_visible_flow_content);
+    let last = items.iter().rposition(inline_item_has_visible_flow_content);
     let Some((f, l)) = first.zip(last) else {
         return 0;
     };
     let mut words = 0usize;
     let mut in_word = false;
     for item in &items[f..=l] {
-        if item.is_space || matches!(item.kind, InlineItemKind::Break) {
+        if !inline_item_has_visible_flow_content(item) {
             in_word = false;
         } else if !in_word {
             words += 1;
@@ -3022,12 +3048,8 @@ fn trimmed_line_word_count(items: &[InlineItem]) -> usize {
 }
 
 fn trimmed_line_width(items: &[InlineItem]) -> f32 {
-    let first = items
-        .iter()
-        .position(|it| !it.is_space && !matches!(it.kind, InlineItemKind::Break));
-    let last = items
-        .iter()
-        .rposition(|it| !it.is_space && !matches!(it.kind, InlineItemKind::Break));
+    let first = items.iter().position(inline_item_has_visible_flow_content);
+    let last = items.iter().rposition(inline_item_has_visible_flow_content);
     match (first, last) {
         (Some(f), Some(l)) => items[f..=l].iter().map(|it| it.advance).sum(),
         _ => 0.0,

@@ -2055,8 +2055,13 @@ fn state_for_node(
     ancestors: &[&SvgNode],
     dom_node: Option<&WebCore>,
 ) -> PaintState {
+    let mut own_fill = false;
+    let mut own_stroke = false;
     for attr in &node.attributes {
         if attr.namespace.is_none() && attr.name != "style" {
+            let name = attr.name.trim();
+            own_fill |= name.eq_ignore_ascii_case("fill");
+            own_stroke |= name.eq_ignore_ascii_case("stroke");
             apply_paint_attr(&mut state, &attr.name, &attr.value);
         }
     }
@@ -2074,7 +2079,10 @@ fn state_for_node(
     if let Some(style) = node.attr("style") {
         for decl in style.split(';') {
             if let Some((name, value)) = decl.split_once(':') {
-                apply_paint_attr(&mut state, name.trim(), value.trim());
+                let name = name.trim();
+                own_fill |= name.eq_ignore_ascii_case("fill");
+                own_stroke |= name.eq_ignore_ascii_case("stroke");
+                apply_paint_attr(&mut state, name, value.trim());
             }
         }
     }
@@ -2082,13 +2090,27 @@ fn state_for_node(
         apply_declarations(&mut state, &rule.important_declarations);
     }
     if let Some(dom) = dom_node {
-        apply_dom_computed_style(&mut state, node, dom, ancestors.is_empty());
+        apply_dom_computed_style(
+            &mut state,
+            node,
+            dom,
+            ancestors.is_empty(),
+            own_fill,
+            own_stroke,
+        );
     }
     apply_animated_paint_attrs(&mut state, node);
     state
 }
 
-fn apply_dom_computed_style(state: &mut PaintState, _svg: &SvgNode, node: &WebCore, is_root: bool) {
+fn apply_dom_computed_style(
+    state: &mut PaintState,
+    _svg: &SvgNode,
+    node: &WebCore,
+    is_root: bool,
+    own_fill: bool,
+    own_stroke: bool,
+) {
     let style = node.style.as_ref();
     let font_px = style.font_size_px(state.font_size, 16.0);
     let specified_svg_paint = style.rare().specified_svg_paint_props;
@@ -2100,7 +2122,7 @@ fn apply_dom_computed_style(state: &mut PaintState, _svg: &SvgNode, node: &WebCo
         } else {
             state.fill = None;
         }
-    } else if is_root && style.svg_fill.is_none() {
+    } else if is_root && style.svg_fill.is_none() && !own_fill {
         state.fill = None;
     }
     if specified_svg_paint & SPECIFIED_SVG_STROKE != 0 {
@@ -2109,7 +2131,7 @@ fn apply_dom_computed_style(state: &mut PaintState, _svg: &SvgNode, node: &WebCo
         } else {
             state.stroke = None;
         }
-    } else if is_root && style.svg_stroke.is_none() {
+    } else if is_root && style.svg_stroke.is_none() && !own_stroke {
         state.stroke = None;
     }
     state.custom_props = style.custom_props.clone();

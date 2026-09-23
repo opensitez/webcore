@@ -1027,7 +1027,7 @@ pub(crate) fn resolve_content_value_with_context(
     attrs: Option<&crate::dom::attrs::AttrMap>,
     quotes: Option<&[String]>,
 ) -> String {
-    let v = v.trim();
+    let v = visible_content_value(v.trim()).trim();
     match v {
         "none" | "normal" => String::new(),
         "open-quote" => quote_string(quotes, true),
@@ -1082,6 +1082,32 @@ pub(crate) fn resolve_content_value_with_context(
             out
         }
     }
+}
+
+fn visible_content_value(value: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut escape = false;
+    let mut depth = 0usize;
+    for (index, ch) in value.char_indices() {
+        if let Some(q) = quote {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '/' if depth == 0 => return &value[..index],
+            _ => {}
+        }
+    }
+    value
 }
 
 fn quote_string(quotes: Option<&[String]>, open: bool) -> String {

@@ -494,7 +494,12 @@ fn replay_commands_inner(
                 let uniform_color =
                     colors[0] == colors[1] && colors[1] == colors[2] && colors[2] == colors[3];
 
-                if max_r > 0.5 && uniform_width && uniform_color && widths[0] > 0.0 {
+                if max_r > 0.5
+                    && uniform_width
+                    && uniform_color
+                    && widths[0] > 0.0
+                    && colors[0].a != 0
+                {
                     let bw = widths[0];
                     let half = bw / 2.0;
                     // Inset the path by half the border width so the stroke straddles the edge
@@ -557,13 +562,13 @@ fn replay_commands_inner(
                 } else {
                     // Fallback: draw borders as filled rectangles (no rounding)
                     let mut paint = Paint::default();
-                    if widths[0] > 0.0 {
+                    if widths[0] > 0.0 && colors[0].a != 0 {
                         paint.set_color(to_sk_color(&apply_opacity(&colors[0], alpha)));
                         if let Some(r) = SkRect::from_xywh(rect.x, rect.y, rect.w, widths[0]) {
                             target.fill_rect(r, &paint, ts, clip_mask);
                         }
                     }
-                    if widths[2] > 0.0 {
+                    if widths[2] > 0.0 && colors[2].a != 0 {
                         paint.set_color(to_sk_color(&apply_opacity(&colors[2], alpha)));
                         if let Some(r) = SkRect::from_xywh(
                             rect.x,
@@ -574,13 +579,13 @@ fn replay_commands_inner(
                             target.fill_rect(r, &paint, ts, clip_mask);
                         }
                     }
-                    if widths[3] > 0.0 {
+                    if widths[3] > 0.0 && colors[3].a != 0 {
                         paint.set_color(to_sk_color(&apply_opacity(&colors[3], alpha)));
                         if let Some(r) = SkRect::from_xywh(rect.x, rect.y, widths[3], rect.h) {
                             target.fill_rect(r, &paint, ts, clip_mask);
                         }
                     }
-                    if widths[1] > 0.0 {
+                    if widths[1] > 0.0 && colors[1].a != 0 {
                         paint.set_color(to_sk_color(&apply_opacity(&colors[1], alpha)));
                         if let Some(r) = SkRect::from_xywh(
                             rect.x + rect.w - widths[1],

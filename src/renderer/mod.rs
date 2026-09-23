@@ -1445,6 +1445,14 @@ impl Renderer {
         let scroll_outside_cached_band = self.cached_display_list.is_none()
             || doc.scroll_y < self.cached_paint_top
             || doc.scroll_y + view_h > self.cached_paint_bottom;
+        let scroll_changed_since_surface =
+            (self.cached_surface_scroll_x - doc.scroll_x).abs() >= 0.5
+                || (self.cached_surface_scroll_y - doc.scroll_y).abs() >= 0.5;
+        let sticky_scroll_changed = scroll_changed_since_surface
+            && self
+                .cached_display_list
+                .as_ref()
+                .is_some_and(|list| list.has_scroll_dependent_sticky);
         let _scroll_only = !layout_changed
             && !hover_changed
             && !self.display_list_dirty
@@ -1461,6 +1469,7 @@ impl Renderer {
             && !layout_changed
             && !hover_changed
             && !scroll_outside_cached_band
+            && !sticky_scroll_changed
             && !self.display_list_dirty
             && self.cached_display_list.is_some()
             && dirty_base_surface.is_some_and(|surface| {
@@ -1477,6 +1486,7 @@ impl Renderer {
             && !layout_changed
             && !hover_changed
             && !scroll_outside_cached_band
+            && !sticky_scroll_changed
             && self.cached_display_list.is_some()
             && dirty_base_surface.is_some_and(|surface| {
                 surface.width() == pixmap.width()
@@ -1497,6 +1507,7 @@ impl Renderer {
                 || self.cached_display_list.is_none()
                 || layout_changed
                 || hover_changed
+                || sticky_scroll_changed
                 || scroll_outside_cached_band);
         let scroll_band_rebuild_only = scroll_outside_cached_band
             && !self.display_list_dirty

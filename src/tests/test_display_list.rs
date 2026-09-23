@@ -710,6 +710,148 @@ fn inline_svg_preserves_current_color_path_over_default_fill() {
 }
 
 #[test]
+fn inline_svg_root_stroke_current_color_survives_dom_style() {
+    let (_, list) = build(
+        r#"<style>svg.search { color: rgb(164, 206, 254); }</style>
+           <svg class="search" style="width:24px;height:24px" viewBox="0 0 24 24"
+                fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+             <circle cx="11" cy="11" r="8"/>
+             <path d="m21 21-4.3-4.3"/>
+           </svg>"#,
+    );
+
+    let (data, w, h) =
+        first_image_data(&list).expect("inline SVG should rasterize to an image command");
+    assert_eq!((w, h), (24, 24));
+    let painted = data.chunks_exact(4).filter(|px| px[3] > 0).count();
+    assert!(
+        painted > 20,
+        "stroke-only currentColor SVG should not rasterize transparent; painted={painted}"
+    );
+}
+
+#[test]
+fn inline_external_after_icon_sits_after_text() {
+    let (frame, _list) = build(
+        r#"<style>
+             body { margin: 0; font: 16px/24px sans-serif; }
+             a.external::after {
+               content: "";
+               display: inline-block;
+               width: 16px;
+               height: 16px;
+               margin-left: 2px;
+               background: currentColor;
+             }
+           </style>
+           <a class="external">Fix internal links</a>"#,
+    );
+
+    let link = find_node_by_tag(&frame.doc.root, "a").expect("external link");
+    let icon = link
+        .children
+        .iter()
+        .find(|child| child.tag == "::after")
+        .expect("materialized external-link pseudo icon");
+    let text = link
+        .children
+        .iter()
+        .find(|child| child.is_text_node())
+        .expect("link text");
+    let text_right = text.layout.margin_rect.x + text.layout.margin_rect.w;
+    assert!(
+        icon.layout.border_rect.x >= text_right + 1.0,
+        "external-link icon paint box should be positioned after text; text={:?} icon={:?}",
+        text.layout.margin_rect,
+        icon.layout.margin_rect
+    );
+}
+
+#[test]
+fn relative_inline_external_after_icon_sits_after_text() {
+    let (frame, _list) = build(
+        r#"<style>
+             body { margin: 0; font: 16px/24px sans-serif; }
+             a.external { position: relative; padding-right: 18px; }
+             a.external::after {
+               content: "\200b" / "(external)";
+               position: relative;
+               top: 2px;
+               display: inline-block;
+               width: 16px;
+               height: 16px;
+               margin-left: 2px;
+               background: currentColor;
+             }
+           </style>
+           <a class="external">Fix internal links</a>"#,
+    );
+
+    let link = find_node_by_tag(&frame.doc.root, "a").expect("external link");
+    let icon = link
+        .children
+        .iter()
+        .find(|child| child.tag == "::after")
+        .expect("materialized external-link pseudo icon");
+    let text = link
+        .children
+        .iter()
+        .find(|child| child.is_text_node())
+        .expect("link text");
+    let text_right = text.layout.margin_rect.x + text.layout.margin_rect.w;
+    assert!(
+        matches!(icon.style.display, crate::types::Display::InlineBlock),
+        "relative inline pseudo should not be blockified"
+    );
+    assert!(
+        icon.layout.border_rect.x >= text_right + 1.0,
+        "relative external-link icon should be positioned after text; text={:?} icon={:?}",
+        text.layout.margin_rect,
+        icon.layout.margin_rect
+    );
+}
+
+#[test]
+fn absolute_inline_external_after_icon_uses_static_inline_position() {
+    let (frame, _list) = build(
+        r#"<style>
+             body { margin: 0; font: 16px/24px sans-serif; }
+             a.external { position: relative; padding-right: 18px; }
+             a.external::after {
+               content: "\200b" / "(external)";
+               position: absolute;
+               display: inline-block;
+               width: 16px;
+               height: 16px;
+               margin-left: 2px;
+               background: currentColor;
+             }
+           </style>
+           <a class="external">Fix internal links</a>"#,
+    );
+
+    let link = find_node_by_tag(&frame.doc.root, "a").expect("external link");
+    let icon = link
+        .children
+        .iter()
+        .find(|child| child.tag == "::after")
+        .expect("materialized external-link pseudo icon");
+    let text = link
+        .children
+        .iter()
+        .find(|child| child.is_text_node())
+        .expect("link text");
+    let text_right = text.layout.margin_rect.x + text.layout.margin_rect.w;
+    assert!(
+        icon.layout.border_rect.x >= text_right + 1.0,
+        "absolute external-link icon should use inline static position after text; text={:?} icon={:?}",
+        text.layout.margin_rect,
+        icon.layout.margin_rect
+    );
+}
+
+#[test]
 fn inline_svg_uses_css_animated_fill_when_rasterized() {
     let (_, list) = build(
         r#"<style>
@@ -2371,6 +2513,10 @@ fn sticky_position_creates_a_stacking_context() {
             .iter()
             .any(|cmd| matches!(cmd, PaintCmd::BeginStackingContext { .. })),
         "position: sticky should establish a stacking context"
+    );
+    assert!(
+        list.has_scroll_dependent_sticky,
+        "display lists with sticky content must be rebuilt when scroll changes"
     );
 }
 
@@ -4793,6 +4939,7 @@ fn list_style_image_marker_decodes_and_paints_resolved_image() {
             font_style: 0,
             line_height: 20.0,
         }],
+        has_scroll_dependent_sticky: false,
         fixed_commands: Vec::new(),
     };
     let mut pixmap = tiny_skia::Pixmap::new(24, 24).unwrap();
@@ -4821,6 +4968,7 @@ fn circle_list_marker_paints_a_hollow_circle() {
             font_style: 0,
             line_height: 20.0,
         }],
+        has_scroll_dependent_sticky: false,
         fixed_commands: Vec::new(),
     };
     let mut pixmap = tiny_skia::Pixmap::new(30, 30).unwrap();
@@ -4868,6 +5016,7 @@ fn mask_layer_applies_to_nested_paint_commands() {
             },
             PaintCmd::PopMask,
         ],
+        has_scroll_dependent_sticky: false,
         fixed_commands: Vec::new(),
     };
     let mut pixmap = tiny_skia::Pixmap::new(24, 12).unwrap();
@@ -4899,6 +5048,7 @@ fn mask_layer_uses_alpha_for_black_svg_icons() {
             },
             PaintCmd::PopMask,
         ],
+        has_scroll_dependent_sticky: false,
         fixed_commands: Vec::new(),
     };
     let mut pixmap = tiny_skia::Pixmap::new(12, 12).unwrap();
@@ -4922,6 +5072,7 @@ fn border_image_paints_only_the_border_ring() {
             fill_center: false,
             data: ImageRef::Owned([0, 220, 0, 255].repeat(9), 3, 3),
         }],
+        has_scroll_dependent_sticky: false,
         fixed_commands: Vec::new(),
     };
     let mut pixmap = tiny_skia::Pixmap::new(24, 24).unwrap();
@@ -4954,6 +5105,7 @@ fn border_image_repeat_tiles_edge_segments() {
             fill_center: false,
             data: ImageRef::Owned(data, 5, 3),
         }],
+        has_scroll_dependent_sticky: false,
         fixed_commands: Vec::new(),
     };
     let mut pixmap = tiny_skia::Pixmap::new(12, 4).unwrap();
@@ -5077,6 +5229,7 @@ fn zero_width_border_sides_do_not_paint_rectangles() {
             radii_y: [0.0; 4],
             opacity: 1.0,
         }],
+        has_scroll_dependent_sticky: false,
         fixed_commands: Vec::new(),
     };
     let mut pixmap = tiny_skia::Pixmap::new(28, 28).unwrap();
@@ -5102,6 +5255,78 @@ fn zero_width_border_sides_do_not_paint_rectangles() {
         pixel(2, 10).3,
         0,
         "the zero-width left border must not paint its black color"
+    );
+}
+
+#[test]
+fn transparent_borders_do_not_enter_the_display_list() {
+    let html = r#"
+        <div id="menu" style="
+            width: 120px;
+            height: 32px;
+            border: 1px solid transparent;
+            border-bottom: none;
+            background: #123456;
+        "></div>
+    "#;
+    let doc = parse_html(html);
+    let mut frame = EngineFrame::new(doc, 320.0, 200.0);
+    frame.update_frame();
+
+    let list = build_display_list_full(
+        &frame.doc.root,
+        320.0,
+        200.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+
+    assert!(
+        !list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Border { .. })),
+        "transparent author borders must affect layout but not paint artifacts"
+    );
+}
+
+#[test]
+fn pending_css_mask_does_not_paint_unmasked_background() {
+    let html = r#"
+        <div style="
+            width: 24px;
+            height: 24px;
+            background: white;
+            mask-image: url('/missing-icon.svg');
+            mask-size: contain;
+        "></div>
+    "#;
+    let doc = parse_html(html);
+    let mut frame = EngineFrame::new(doc, 120.0, 80.0);
+    frame.update_frame();
+
+    let list = build_display_list_full(
+        &frame.doc.root,
+        120.0,
+        80.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+
+    assert!(
+        !list.commands.iter().any(|cmd| {
+            matches!(
+                cmd,
+                PaintCmd::FillRect { rect, color, .. }
+                    if rect.w == 24.0 && rect.h == 24.0 && color.a > 0
+            )
+        }),
+        "a pending CSS mask must be transparent instead of flashing a raw rectangle"
     );
 }
 

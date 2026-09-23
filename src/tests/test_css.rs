@@ -91,6 +91,14 @@ fn leading_space_after_inline_link_is_preserved_in_paint_text() {
 }
 
 #[test]
+fn generated_content_slash_alt_text_is_not_visible() {
+    assert_eq!(
+        resolve_content_value(r#""\200b" / "(external)""#),
+        "\u{200b}"
+    );
+}
+
+#[test]
 fn mixed_direction_inline_links_paint_as_separate_runs() {
     let html = r#"<style>
              body { margin: 0; font: 16px/20px sans-serif; }
@@ -11231,5 +11239,68 @@ fn inline_line_break_at_hyphen_and_cjk() {
     assert!(
         cjk_lines > 1,
         "CJK ideographs should wrap across multiple lines without spaces in narrow container, lines: {cjk_lines}"
+    );
+}
+
+#[test]
+fn anonymous_text_flex_item_wraps_inside_nowrap_row() {
+    let mut r = crate::Renderer::new();
+    let d = r.load_html(
+        r#"<style>
+             body { margin: 0; font: 16px/20px sans-serif; }
+             #q { display: flex; flex-wrap: nowrap; width: 180px; }
+             #q::before { content: ""; display: block; flex: 0 0 16px; height: 16px; }
+           </style>
+           <blockquote id="q">MDN closely follows W3C standards which helps me keep up with important topics.</blockquote>"#,
+        400.0,
+    );
+    let q = d.get_element_by_id("q").unwrap();
+    let rect = d.get_bounding_client_rect(q).unwrap();
+
+    assert!(
+        rect.h >= 60.0,
+        "anonymous flex text should wrap and grow cross size, got {rect:?}"
+    );
+}
+
+#[test]
+fn block_before_pseudo_on_inline_anchor_materializes_icon_box() {
+    let mut r = crate::Renderer::new();
+    let d = r.load_html(
+        r##"<style>
+             .footer__socials { display: flex; list-style: none; margin: 0; padding: 0; }
+             :is(.footer__socials a)::before {
+               content: "";
+               display: block;
+               width: 24px;
+               height: 24px;
+               background: currentColor;
+             }
+             [data-icon=github]:is(.footer__socials a)::before {
+               background: rgb(1, 2, 3);
+             }
+           </style>
+           <ul class="footer__socials"><li><a id="social" data-icon="github" href="#"></a></li></ul>"##,
+        400.0,
+    );
+    let a_id = d.get_element_by_id("social").unwrap();
+    let a = d.get_node(a_id).unwrap();
+    let before = a
+        .children
+        .iter()
+        .find(|child| child.tag == "::before")
+        .expect("block ::before on an inline anchor should create a generated icon box");
+
+    assert_eq!(before.layout.content_rect.w.round() as i32, 24);
+    assert_eq!(before.layout.content_rect.h.round() as i32, 24);
+    assert_eq!(
+        before.style.background_color,
+        crate::types::Color {
+            r: 1,
+            g: 2,
+            b: 3,
+            a: 255
+        },
+        "attribute + :is(...) pseudo selector should cascade onto the generated icon"
     );
 }

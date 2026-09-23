@@ -320,6 +320,9 @@ pub enum ImageRef {
 #[derive(Clone, Debug, Default)]
 pub struct DisplayList {
     pub commands: Vec<PaintCmd>,
+    /// True when `commands` contains a `position: sticky` element whose
+    /// recorded position depends on the current scroll offset.
+    pub has_scroll_dependent_sticky: bool,
     /// `position: fixed` content, in VIEWPORT coordinates.
     ///
     /// ⛔ Separate because `commands` is in DOCUMENT coordinates and replay
@@ -334,6 +337,7 @@ impl DisplayList {
     pub fn new() -> Self {
         Self {
             commands: Vec::new(),
+            has_scroll_dependent_sticky: false,
             fixed_commands: Vec::new(),
         }
     }
@@ -344,6 +348,7 @@ impl DisplayList {
 
     pub fn clear(&mut self) {
         self.commands.clear();
+        self.has_scroll_dependent_sticky = false;
     }
 
     pub fn is_empty(&self) -> bool {

@@ -796,6 +796,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
 
     // ── Sticky positioning ───────────────────────────────────────────────────
     let (px, py) = if node.style.position == Position::Sticky {
+        list.has_scroll_dependent_sticky = true;
         let (viewport_left, viewport_top, viewport_right, viewport_bottom) =
             if let Some(sc) = ctx.sticky_scroll_container {
                 (
@@ -924,6 +925,16 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         }
     }
 
+    let mask_image_requested = !eff_style.rare().mask_image_url.trim().is_empty();
+    let has_mask_layer = node.mask_image_data.is_some()
+        && node.mask_image_width > 0
+        && node.mask_image_height > 0
+        && pw > 0.0
+        && ph > 0.0;
+    if paint_self && mask_image_requested && !has_mask_layer {
+        return;
+    }
+
     // ── Stacking context ─────────────────────────────────────────────────────
     let blend = blend_mode_to_u8(eff_style.mix_blend_mode);
     let stacking = (eff_style.is_positioned() && !eff_style.z_index_is_auto)
@@ -1048,11 +1059,6 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         }
     }
 
-    let has_mask_layer = node.mask_image_data.is_some()
-        && node.mask_image_width > 0
-        && node.mask_image_height > 0
-        && pw > 0.0
-        && ph > 0.0;
     if has_mask_layer {
         if let Some(mask_data) = node.mask_image_data.as_ref() {
             list.push(PaintCmd::PushMask {
@@ -1358,7 +1364,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         ];
         if paint_self && !node.layout.collapsed_border_segments.is_empty() {
             for segment in &node.layout.collapsed_border_segments {
-                if segment.width <= 0.0 || segment.style == BorderStyle::None {
+                if segment.width <= 0.0 || segment.style == BorderStyle::None || segment.color.a == 0 {
                     continue;
                 }
                 let rect = Rect::new(
@@ -1452,25 +1458,39 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 painted_border_image = true;
             }
             if !painted_border_image {
-                list.push(PaintCmd::Border {
-                    rect: border_rect,
-                    widths: bw,
-                    colors: [
-                        eff_style.border_top_color,
-                        eff_style.border_right_color,
-                        eff_style.border_bottom_color,
-                        eff_style.border_left_color,
-                    ],
-                    styles: [
-                        bstyle(eff_style.border_top_style),
-                        bstyle(eff_style.border_right_style),
-                        bstyle(eff_style.border_bottom_style),
-                        bstyle(eff_style.border_left_style),
-                    ],
-                    radii: radii_arr,
-                    radii_y: radii_y_arr,
-                    opacity: eff_style.opacity,
-                });
+                let mut border_widths = bw;
+                let border_colors = [
+                    eff_style.border_top_color,
+                    eff_style.border_right_color,
+                    eff_style.border_bottom_color,
+                    eff_style.border_left_color,
+                ];
+                let mut border_styles = [
+                    bstyle(eff_style.border_top_style),
+                    bstyle(eff_style.border_right_style),
+                    bstyle(eff_style.border_bottom_style),
+                    bstyle(eff_style.border_left_style),
+                ];
+                for side in 0..4 {
+                    if border_widths[side] <= 0.0
+                        || border_colors[side].a == 0
+                        || border_styles[side] == 0
+                    {
+                        border_widths[side] = 0.0;
+                        border_styles[side] = 0;
+                    }
+                }
+                if border_widths.iter().any(|width| *width > 0.0) {
+                    list.push(PaintCmd::Border {
+                        rect: border_rect,
+                        widths: border_widths,
+                        colors: border_colors,
+                        styles: border_styles,
+                        radii: radii_arr,
+                        radii_y: radii_y_arr,
+                        opacity: eff_style.opacity,
+                    });
+                }
             }
         }
     }

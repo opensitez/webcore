@@ -1144,13 +1144,6 @@ pub fn layout_flex(
             (content_w, None, Some(item.main_used))
         };
 
-        let saved_white_space = if is_row && !can_wrap && child.tag == "#text" {
-            let saved = child.style.white_space;
-            std::sync::Arc::make_mut(&mut child.style).white_space = WhiteSpace::Nowrap;
-            Some(saved)
-        } else {
-            None
-        };
         engine.layout_box(
             child,
             &item_constraints(
@@ -1164,9 +1157,6 @@ pub fn layout_flex(
                 forced_h,
             ),
         );
-        if let Some(saved) = saved_white_space {
-            std::sync::Arc::make_mut(&mut child.style).white_space = saved;
-        }
 
         item.cross_size = if is_row {
             child.layout.margin_rect.h

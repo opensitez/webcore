@@ -1465,6 +1465,13 @@ pub(crate) fn build_pseudo_style_shared(
             }
         }
     }
+    // Pseudo-elements use this detached cascade path, so they need the same
+    // post-cascade fixups normal elements receive below. Without this,
+    // `background-color: currentColor` on generated mask icons computes as
+    // transparent, leaving menus/search controls with empty icon boxes until a
+    // later recascade happens to repaint them.
+    crate::css::finalize_current_color(&mut ps);
+    crate::css::finalize_logical(&mut ps);
     Some((content_value, Box::new(ps)))
 }
 
@@ -1522,20 +1529,28 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         root.style.display,
         Display::Grid | Display::InlineGrid | Display::Flex | Display::InlineFlex
     );
-    let has_pseudo_containing_box = !matches!(root.style.display, Display::Inline);
+    let pseudo_needs_inline_box = |style: Option<&Box<ComputedStyle>>| {
+        style.as_ref().is_some_and(|ps| {
+            matches!(
+                ps.display,
+                Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+            )
+        })
+    };
+    let pseudo_needs_block_box =
+        |style: Option<&Box<ComputedStyle>>| style.as_ref().is_some_and(|ps| ps.is_block_level());
     let before_is_positioned = root.style.before_style.as_ref().map_or(false, |ps| {
         matches!(ps.position, Position::Absolute | Position::Fixed)
     });
-    let before_is_block = root
-        .style
-        .before_style
-        .as_ref()
-        .map_or(false, |ps| has_pseudo_containing_box && ps.is_block_level());
+    let before_is_block = pseudo_needs_block_box(root.style.before_style.as_ref());
     // `before_style` is Some only when `content` generated the pseudo-element,
     // so it — not the generated TEXT, which is empty for `content: ""` — is
     // what says the box may exist.
     let before_generated = root.style.before_style.is_some();
-    if before_generated && (is_grid_or_flex || before_is_positioned || before_is_block) {
+    let before_is_atomic_inline = pseudo_needs_inline_box(root.style.before_style.as_ref());
+    if before_generated
+        && (is_grid_or_flex || before_is_positioned || before_is_block || before_is_atomic_inline)
+    {
         let existing = root.children.iter().position(|c| c.tag == "::before");
         let existing_node = existing.and_then(|idx| root.children.get(idx));
         let existing_node_id = existing_node.map(|node| node.node_id).filter(|id| *id != 0);
@@ -1547,7 +1562,10 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         if let Some(ref ps) = root.style.before_style {
             pseudo_box.style = std::sync::Arc::new(*ps.clone());
         }
-        if pseudo_box.style.is_positioned() {
+        if matches!(
+            pseudo_box.style.position,
+            Position::Absolute | Position::Fixed
+        ) {
             blockify_out_of_flow(std::sync::Arc::make_mut(&mut pseudo_box.style));
         }
         if is_grid_or_flex
@@ -1574,13 +1592,12 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
     let after_is_positioned = root.style.after_style.as_ref().map_or(false, |ps| {
         matches!(ps.position, Position::Absolute | Position::Fixed)
     });
-    let after_is_block = root
-        .style
-        .after_style
-        .as_ref()
-        .map_or(false, |ps| has_pseudo_containing_box && ps.is_block_level());
+    let after_is_block = pseudo_needs_block_box(root.style.after_style.as_ref());
     let after_generated = root.style.after_style.is_some();
-    if after_generated && (is_grid_or_flex || after_is_positioned || after_is_block) {
+    let after_is_atomic_inline = pseudo_needs_inline_box(root.style.after_style.as_ref());
+    if after_generated
+        && (is_grid_or_flex || after_is_positioned || after_is_block || after_is_atomic_inline)
+    {
         let existing = root.children.iter().position(|c| c.tag == "::after");
         let existing_node = existing.and_then(|idx| root.children.get(idx));
         let existing_node_id = existing_node.map(|node| node.node_id).filter(|id| *id != 0);
@@ -1592,7 +1609,10 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         if let Some(ref ps) = root.style.after_style {
             pseudo_box.style = std::sync::Arc::new(*ps.clone());
         }
-        if pseudo_box.style.is_positioned() {
+        if matches!(
+            pseudo_box.style.position,
+            Position::Absolute | Position::Fixed
+        ) {
             blockify_out_of_flow(std::sync::Arc::make_mut(&mut pseudo_box.style));
         }
         if is_grid_or_flex
