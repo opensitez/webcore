@@ -18,6 +18,13 @@ pub fn resolve_url(src: &str, base_url: &str) -> String {
     if let Some(path) = src.strip_prefix("file://") {
         return path.to_string();
     }
+    if base_url.starts_with("http://") || base_url.starts_with("https://") {
+        if let Some(base) = crate::dom::url::parse(base_url, None)
+            && let Some(url) = crate::dom::url::parse(src, Some(&base))
+        {
+            return url.href();
+        }
+    }
     if src.contains("://") {
         return src.to_string();
     }
@@ -451,7 +458,7 @@ where
                 &buffer,
                 frame_width,
                 frame_height,
-                image::imageops::FilterType::Triangle,
+                image::imageops::FilterType::Lanczos3,
             )
         } else {
             buffer

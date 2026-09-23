@@ -19,7 +19,8 @@ use crate::loading::{PageLoadEvent, PageLoadOptions, spawn_page_load};
 use crate::renderer::Renderer;
 use crate::types::{
     CSSCursor, DecodedBackgroundImage, Document, FormEvent, FormEventKind, WebCore,
-    build_form_submit_url, collect_form_data, find_parent_form_action,
+    build_form_submit_url, collect_form_data_for_form, encode_form_urlencoded, find_form_parent_id,
+    find_parent_form_action, form_owner_id, submitter_form_method,
 };
 
 enum BrowserViewLoadResult {
@@ -31,6 +32,7 @@ enum BrowserViewLoadResult {
     Complete {
         load_id: usize,
         url: String,
+        html: String,
     },
 }
 
@@ -91,6 +93,14 @@ pub struct BrowserMemoryStats {
 
 fn string_bytes(value: &str) -> usize {
     value.len()
+}
+
+fn fallback_title_from_url(url: &str) -> String {
+    url.split('/')
+        .filter(|part| !part.is_empty())
+        .next_back()
+        .unwrap_or("Untitled")
+        .to_string()
 }
 
 fn node_string_bytes(node: &WebCore) -> usize {
@@ -260,6 +270,11 @@ fn style_bytes(style: &crate::types::ComputedStyle) -> usize {
     boxed_style!(marker_style);
     boxed_style!(backdrop_style);
     boxed_style!(file_selector_button_style);
+    boxed_style!(details_content_style);
+    boxed_style!(spelling_error_style);
+    boxed_style!(grammar_error_style);
+    boxed_style!(first_line_style);
+    boxed_style!(first_letter_style);
     boxed_style!(hover_style);
     boxed_style!(active_style);
     boxed_style!(visited_style);
@@ -401,8 +416,9 @@ fn add_arc_bytes_ref(
 }
 
 impl BrowserView {
-    pub fn new(width: f32, height: f32, options: PageLoadOptions) -> Self {
+    pub fn new(width: f32, height: f32, mut options: PageLoadOptions) -> Self {
         let (tx, rx) = mpsc::channel();
+        ensure_cookie_jar(&mut options);
         Self {
             renderer: Renderer::new(),
             doc: None,
@@ -508,20 +524,10 @@ impl BrowserView {
     }
 
     fn install_form_navigation_handler(&mut self, base_url: &str) {
-        let pending_navigate = self.pending_navigate.clone();
-        let wake = self.wake.clone();
-        let base_url = base_url.to_string();
+        let _ = base_url;
         let handler = Box::new(move |event: &FormEvent| {
             if let FormEventKind::Submit(action) = &event.kind {
-                let target = if action.is_empty() {
-                    base_url.clone()
-                } else {
-                    resolve_url(action, &base_url)
-                };
-                *pending_navigate.lock().unwrap() = Some(target);
-                if let Some(wake) = wake.as_ref() {
-                    wake();
-                }
+                let _ = action;
             }
         });
         if let Some(frame) = self.stream_frame.as_mut() {
@@ -659,6 +665,11 @@ impl BrowserView {
     }
 
     pub fn set_options(&mut self, options: PageLoadOptions) {
+        let mut options = options;
+        if options.cookie_jar.is_none() {
+            options.cookie_jar = self.options.cookie_jar.clone();
+        }
+        ensure_cookie_jar(&mut options);
         self.options = options;
     }
 
@@ -836,6 +847,13 @@ impl BrowserView {
     }
 
     pub fn relayout(&mut self) -> bool {
+        if self
+            .stream_frame
+            .as_ref()
+            .is_some_and(|frame| !self.stream_needs_layout && !frame.needs_render())
+        {
+            return false;
+        }
         if !self.layout_active() {
             return false;
         }
@@ -888,6 +906,10 @@ impl BrowserView {
     }
 
     pub fn navigate(&mut self, url: String) {
+        self.navigate_with_options(url, self.options.clone());
+    }
+
+    fn navigate_with_options(&mut self, url: String, options: PageLoadOptions) {
         self.url = url.clone();
         self.title = "Loading...".to_string();
         self.loading = true;
@@ -908,7 +930,7 @@ impl BrowserView {
         let tx = self.tx.clone();
         let wake = self.wake.clone();
         let loader_wake = wake.clone();
-        let mut load_options = self.options.clone();
+        let mut load_options = options;
         load_options.emit_preview = true;
         spawn_page_load(url, load_options, move |event| match event {
             PageLoadEvent::Chunk { url, html } => {
@@ -917,8 +939,8 @@ impl BrowserView {
                     wake();
                 }
             }
-            PageLoadEvent::Complete { url } => {
-                let _ = tx.send(BrowserViewLoadResult::Complete { load_id, url });
+            PageLoadEvent::Complete { url, html } => {
+                let _ = tx.send(BrowserViewLoadResult::Complete { load_id, url, html });
                 if let Some(wake) = loader_wake.as_ref() {
                     wake();
                 }
@@ -926,6 +948,34 @@ impl BrowserView {
         });
         if let Some(wake) = wake.as_ref() {
             wake();
+        }
+    }
+
+    fn navigate_form_submission(
+        &mut self,
+        target: String,
+        method: &str,
+        data: Vec<(String, String)>,
+    ) {
+        let (url, options) = self.form_submission_request(target, method, data);
+        self.navigate_with_options(url, options);
+    }
+
+    fn form_submission_request(
+        &self,
+        target: String,
+        method: &str,
+        data: Vec<(String, String)>,
+    ) -> (String, PageLoadOptions) {
+        if method.eq_ignore_ascii_case("post") {
+            let mut options = self.options.clone();
+            options.request_method = "POST".to_string();
+            options.request_body = Some(encode_form_urlencoded(&data).into_bytes());
+            options.request_content_type = Some("application/x-www-form-urlencoded".to_string());
+            (target, options)
+        } else {
+            let url = build_form_submit_url(&target, method, &data);
+            (url, self.options.clone())
         }
     }
 
@@ -950,7 +1000,7 @@ impl BrowserView {
 
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
-        let mut completed_url = None::<String>;
+        let mut completed = None::<(String, String)>;
         let start = std::time::Instant::now();
         let mut html_chunks = 0usize;
         let mut budget_exhausted = false;
@@ -974,34 +1024,29 @@ impl BrowserView {
                     html_chunks += 1;
                     changed = true;
                 }
-                BrowserViewLoadResult::Complete { load_id, url } if load_id == self.load_id => {
-                    completed_url = Some(url);
+                BrowserViewLoadResult::Complete { load_id, url, html }
+                    if load_id == self.load_id =>
+                {
+                    completed = Some((url, html));
                 }
                 _ => {}
             }
         }
-        if let Some(url) = completed_url {
+        if let Some((url, _html)) = completed {
             self.url = url.clone();
             if let Some(frame) = self.stream_frame.as_mut() {
                 frame.finish_loading();
                 self.stream_paint_ready = true;
                 self.stream_needs_layout = true;
-                self.title = if frame.doc.title.is_empty() {
-                    url.split('/')
-                        .filter(|part| !part.is_empty())
-                        .next_back()
-                        .unwrap_or("Untitled")
-                        .to_string()
+            }
+            if let Some(doc) = self.active_doc() {
+                self.title = if doc.title.is_empty() {
+                    fallback_title_from_url(&url)
                 } else {
-                    frame.doc.title.clone()
+                    doc.title.clone()
                 };
             } else {
-                self.title = url
-                    .split('/')
-                    .filter(|part| !part.is_empty())
-                    .next_back()
-                    .unwrap_or("Untitled")
-                    .to_string();
+                self.title = fallback_title_from_url(&url);
             }
             self.loading = false;
             self.install_form_navigation_handler(&url);
@@ -1110,7 +1155,13 @@ impl BrowserView {
     }
 
     pub fn paint_into(&mut self, target: &mut Pixmap, x: i32, y: i32, scale: f32) {
-        self.ensure_streamed_layout_current();
+        // Painting must not synchronously drain network/resources, but it does
+        // have to consume already-queued interaction style work. Otherwise a
+        // hover/focus change can set stream_needs_layout and then render the
+        // stale display list forever until an unrelated resource tick happens.
+        if self.stream_needs_layout {
+            self.ensure_streamed_layout_current();
+        }
         let width_px = target.width().max(1);
         let height_px = target.height().max(1);
         let view_w = ((self.width * scale).ceil() as u32).max(1).min(width_px);
@@ -1181,6 +1232,16 @@ impl BrowserView {
                     doc.hovered_box,
                     &doc.hover_sensitive_nodes,
                 );
+            if needs_style {
+                // Hover selectors can be nested inside modern selector forms
+                // (`:is()`, `:where()`, `:not()`) and inside projected custom
+                // element content. The incremental hover pass is still too
+                // narrow for that surface and can leave stale/projection boxes
+                // in flow. Use the normal full style pass for live browser
+                // interaction so menus recascade like the initial/forced-state
+                // paths until the incremental engine can prove equivalence.
+                doc.style_dirty = true;
+            }
             if !needs_style && doc.hover_changed {
                 doc.hover_changed = false;
                 doc.prev_hovered_box = doc.hovered_box;
@@ -1188,10 +1249,11 @@ impl BrowserView {
             (redraw, needs_style)
         };
         if needs_style {
-            // Pointer motion can arrive far faster than the display refresh
-            // rate. Do not do cascade/layout synchronously here; leave the
-            // hover change on the document and let `drive_idle` coalesce it
-            // into the next frame with other pending work.
+            if self.stream_frame.is_some() {
+                self.stream_needs_layout = true;
+            } else {
+                self.layout_active();
+            }
             self.invalidate_backing();
             self.wake();
         } else if redraw {
@@ -1261,7 +1323,12 @@ impl BrowserView {
             changed = true;
         }
         if changed {
-            self.flush_dirty_active_layout();
+            if self
+                .active_doc()
+                .is_some_and(|doc| doc.style_dirty || doc.has_dirty_layout())
+            {
+                self.stream_needs_layout = true;
+            }
             self.invalidate_backing();
         } else {
             return false;
@@ -1359,76 +1426,124 @@ impl BrowserView {
             return;
         }
         if let Some(hit) = crate::layout::hit_test::point_to_hit(&doc.root, pt, 0) {
-            let Some(node) = doc.get_box_by_id(hit.node_id) else {
+            let control_id = find_form_parent_id(&doc.root, hit.node_id);
+            let Some(node) = doc.get_box_by_id(control_id) else {
                 return;
             };
             if matches!(node.tag.as_str(), "button" | "input") {
                 let input_type = node
                     .attributes
                     .get("type")
-                    .map(|s| s.to_ascii_lowercase())
-                    .unwrap_or_default();
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .unwrap_or_else(|| {
+                        if node.tag == "button" {
+                            "submit".to_string()
+                        } else {
+                            "text".to_string()
+                        }
+                    });
                 let is_submit = if node.tag == "button" {
-                    input_type.is_empty() || input_type == "submit"
+                    !matches!(input_type.as_str(), "button" | "reset")
                 } else {
-                    input_type == "submit"
+                    matches!(input_type.as_str(), "submit" | "image")
                 };
                 if is_submit {
-                    let Some(form) = find_containing_form(&doc.root, hit.node_id) else {
+                    let Some(form_id) = form_owner_id(&doc.root, control_id) else {
                         return;
                     };
-                    let form_action = form.attributes.get("action").cloned().unwrap_or_default();
-                    let target = if form_action.is_empty() {
+                    let mut submit_event = crate::dom::events::DomEvent::new("submit", form_id);
+                    doc.dispatch_dom_event(&mut submit_event);
+                    if submit_event.default_prevented() {
+                        *self.pending_navigate.lock().unwrap() = None;
+                        return;
+                    }
+                    let action = find_parent_form_action(&doc.root, control_id);
+                    let method = submitter_form_method(&doc.root, control_id);
+                    if method == "dialog" {
+                        return;
+                    }
+                    let target = if action.is_empty() {
                         current_url.clone()
                     } else {
-                        resolve_browser_target(&form_action, &current_url, &view_url)
+                        resolve_browser_target(&action, &current_url, &view_url)
                     };
-                    let data = collect_form_data(form);
-                    let url = build_form_submit_url(&target, "get", &data);
-                    self.navigate(url);
+                    let data = collect_form_data_for_form(&doc.root, form_id);
+                    *self.pending_navigate.lock().unwrap() = None;
+                    self.navigate_form_submission(target, &method, data);
                 }
             }
         }
     }
 
     fn submit_focused_text_control(&mut self) -> bool {
-        let Some(doc) = self.active_doc() else {
-            return false;
-        };
-        let focused = doc.focused_box;
-        if focused == 0 {
-            return false;
-        }
-        let Some(node) = doc.get_box_by_id(focused) else {
-            return false;
-        };
-        if node.tag != "input" {
-            return false;
-        }
-        let input_type = node
-            .attributes
-            .get("type")
-            .map(|s| s.as_str())
-            .unwrap_or("text");
-        if !matches!(input_type, "text" | "password" | "email" | "search") {
-            return false;
-        }
-        let action = find_parent_form_action(&doc.root, focused);
-        let data = find_containing_form(&doc.root, focused)
-            .map(collect_form_data)
-            .unwrap_or_default();
-        let target = if action.is_empty() {
-            self.url.clone()
-        } else {
-            let base_url = if doc.base_url.is_empty() {
-                self.url.as_str()
-            } else {
-                doc.base_url.as_str()
+        let view_url = self.url.clone();
+        let submit = {
+            let Some(doc) = self.active_doc_mut() else {
+                return false;
             };
-            resolve_browser_target(&action, base_url, &self.url)
+            let focused = doc.focused_box;
+            if focused == 0 {
+                return false;
+            }
+            let Some(node) = doc.get_box_by_id(focused) else {
+                return false;
+            };
+            if node.tag != "input" {
+                return false;
+            }
+            let input_type = node
+                .attributes
+                .get("type")
+                .map(|s| s.as_str())
+                .unwrap_or("text");
+            let input_type = input_type.trim().to_ascii_lowercase();
+            if !matches!(
+                input_type.as_str(),
+                "text"
+                    | "password"
+                    | "email"
+                    | "search"
+                    | "url"
+                    | "tel"
+                    | "number"
+                    | "date"
+                    | "month"
+                    | "week"
+                    | "time"
+                    | "datetime-local"
+            ) {
+                return false;
+            }
+            let Some(form_id) = form_owner_id(&doc.root, focused) else {
+                return false;
+            };
+            let mut submit_event = crate::dom::events::DomEvent::new("submit", form_id);
+            doc.dispatch_dom_event(&mut submit_event);
+            if submit_event.default_prevented() {
+                *self.pending_navigate.lock().unwrap() = None;
+                return true;
+            }
+            let action = find_parent_form_action(&doc.root, focused);
+            let method = submitter_form_method(&doc.root, focused);
+            if method == "dialog" {
+                return true;
+            }
+            let data = collect_form_data_for_form(&doc.root, form_id);
+            let target = if action.is_empty() {
+                view_url.clone()
+            } else {
+                let base_url = if doc.base_url.is_empty() {
+                    view_url.as_str()
+                } else {
+                    doc.base_url.as_str()
+                };
+                resolve_browser_target(&action, base_url, &view_url)
+            };
+            (target, method, data)
         };
-        let url = build_form_submit_url(&target, "get", &data);
-        self.navigate(url);
+        *self.pending_navigate.lock().unwrap() = None;
+        let (target, method, data) = submit;
+        self.navigate_form_submission(target, &method, data);
         true
     }
 
@@ -1439,20 +1554,10 @@ impl BrowserView {
     }
 }
 
-fn find_containing_form(root: &WebCore, target_id: u32) -> Option<&WebCore> {
-    fn contains(node: &WebCore, target_id: u32) -> bool {
-        node.node_id == target_id || node.children.iter().any(|child| contains(child, target_id))
+fn ensure_cookie_jar(options: &mut PageLoadOptions) {
+    if options.cookie_jar.is_none() {
+        options.cookie_jar = Some(Arc::new(Mutex::new(crate::loading::CookieJar::default())));
     }
-
-    if root.tag == "form" && contains(root, target_id) {
-        return Some(root);
-    }
-    for child in &root.children {
-        if let Some(form) = find_containing_form(child, target_id) {
-            return Some(form);
-        }
-    }
-    None
 }
 
 fn streamed_tree_can_paint(root: &WebCore) -> bool {
@@ -1465,20 +1570,15 @@ fn streamed_tree_can_paint(root: &WebCore) -> bool {
 }
 
 fn resolve_browser_target(raw: &str, document_base_url: &str, view_url: &str) -> String {
-    if raw.starts_with("file://") {
-        return raw.to_string();
-    }
     let base = if document_base_url.is_empty() {
         view_url
     } else {
         document_base_url
     };
-    let resolved = resolve_url(raw, base);
-    if base.starts_with("file://") && resolved.starts_with('/') {
-        format!("file://{resolved}")
-    } else {
-        resolved
-    }
+    let base_url = crate::dom::url::parse(base, None);
+    crate::dom::url::parse(raw, base_url.as_ref())
+        .map(|url| url.href())
+        .unwrap_or_else(|| resolve_url(raw, base))
 }
 
 fn fill_placeholder(target: &mut Pixmap, x: i32, y: i32, w: u32, h: u32) {
@@ -1594,6 +1694,139 @@ mod tests {
         view.handle_mouse_button(HtmlEventType::MouseUp, x, y, 2);
 
         assert_eq!(*seen.lock().unwrap(), Some(2));
+    }
+
+    #[test]
+    fn browser_view_submit_button_navigates_with_successful_controls() {
+        let doc = crate::parse_html(
+            r#"<html><body style="margin:0">
+                <form action="https://example.test/login" method="get">
+                    <input id="user" name="user" value="Youness">
+                    <button id="submit" type="submit">Go</button>
+                </form>
+            </body></html>"#,
+        );
+        let submit_id = doc.get_element_by_id("submit").unwrap();
+
+        let mut view = BrowserView::new(360.0, 180.0, PageLoadOptions::default());
+        view.url = "https://example.test/form".to_string();
+        view.doc = Some(doc);
+        view.layout_active();
+
+        let rect = view
+            .doc
+            .as_ref()
+            .unwrap()
+            .get_box_by_id(submit_id)
+            .unwrap()
+            .layout
+            .border_rect;
+        let x = rect.x + rect.w * 0.5;
+        let y = rect.y + rect.h * 0.5;
+
+        view.handle_mouse_button(HtmlEventType::MouseDown, x, y, 0);
+        view.handle_mouse_button(HtmlEventType::MouseUp, x, y, 0);
+
+        assert_eq!(view.url, "https://example.test/login?user=Youness");
+    }
+
+    #[test]
+    fn browser_view_post_submit_sends_successful_controls_in_body() {
+        let view = BrowserView::new(360.0, 180.0, PageLoadOptions::default());
+        let (url, options) = view.form_submission_request(
+            "https://example.test/submit".to_string(),
+            "post",
+            vec![
+                ("csrf_token".to_string(), "abc 123".to_string()),
+                ("login".to_string(), "youness".to_string()),
+                ("password".to_string(), "secret".to_string()),
+            ],
+        );
+
+        assert_eq!(url, "https://example.test/submit");
+        assert_eq!(options.request_method, "POST");
+        assert_eq!(
+            options.request_content_type.as_deref(),
+            Some("application/x-www-form-urlencoded")
+        );
+        assert_eq!(
+            options.request_body.as_deref(),
+            Some("csrf_token=abc+123&login=youness&password=secret".as_bytes())
+        );
+    }
+
+    #[test]
+    fn browser_view_collects_hidden_csrf_control_from_form_dom() {
+        let doc = crate::parse_html(
+            r#"<form id="login" method="post">
+                <input type="hidden" name="csrf_token" value="abc 123">
+                <input name="login" value="youness">
+                <button type="submit">Connecter</button>
+            </form>"#,
+        );
+        let form_id = doc.get_element_by_id("login").unwrap();
+
+        let data = collect_form_data_for_form(&doc.root, form_id);
+
+        assert_eq!(
+            data,
+            vec![
+                ("csrf_token".to_string(), "abc 123".to_string()),
+                ("login".to_string(), "youness".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn browser_view_collects_table_login_controls_with_hidden_csrf() {
+        let doc = crate::parse_html(
+            r#"<table>
+                <form id="login" method="post">
+                    <input type="hidden" name="csrf_token" value="abc123">
+                    <tr>
+                        <td><label>Login</label></td>
+                        <td><input name="username" value="admin"></td>
+                    </tr>
+                    <tr>
+                        <td><label>Password</label></td>
+                        <td><input type="password" name="password" value="admin"></td>
+                    </tr>
+                    <tr>
+                        <td colspan="2"><button type="submit">Connecter</button></td>
+                    </tr>
+                </form>
+            </table>"#,
+        );
+        let form_id = doc.get_element_by_id("login").unwrap();
+
+        let data = collect_form_data_for_form(&doc.root, form_id);
+
+        assert_eq!(
+            data,
+            vec![
+                ("csrf_token".to_string(), "abc123".to_string()),
+                ("username".to_string(), "admin".to_string()),
+                ("password".to_string(), "admin".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn browser_view_set_options_preserves_cookie_jar_by_default() {
+        let mut view = BrowserView::new(360.0, 180.0, PageLoadOptions::default());
+        let jar = view.options.cookie_jar.clone().expect("browser cookie jar");
+
+        view.set_options(PageLoadOptions {
+            cache_dir: Some("cache".to_string()),
+            ..Default::default()
+        });
+
+        let after = view
+            .options
+            .cookie_jar
+            .clone()
+            .expect("preserved cookie jar");
+        assert!(Arc::ptr_eq(&jar, &after));
     }
 
     #[test]
@@ -1759,6 +1992,65 @@ mod tests {
     }
 
     #[test]
+    fn browser_view_paint_consumes_streamed_hover_style_work() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+        view.feed_streaming_chunk(
+            base,
+            r#"
+            <!doctype html><html><head><style>
+              body { margin: 0; }
+              mdn-dropdown { display: contents; }
+              .menu { display: flex; }
+              .menu__tab-button {
+                display: flex;
+                align-items: center;
+                padding: 8px 12px;
+                background: rgb(0, 0, 0);
+                color: white;
+              }
+              .menu__tab-button:is([aria-expanded=true], :hover) {
+                background: rgb(0, 96, 223);
+              }
+            </style></head><body>
+              <nav class="menu">
+                <mdn-dropdown>
+                  <button id="tab" class="menu__tab-button">HTML</button>
+                </mdn-dropdown>
+              </nav>
+            "#,
+        );
+        assert!(view.update_streamed_frame_before_paint());
+
+        let tab_id = view.document().unwrap().get_element_by_id("tab").unwrap();
+        let rect = view
+            .document()
+            .unwrap()
+            .get_node(tab_id)
+            .unwrap()
+            .layout
+            .border_rect;
+        assert!(view.handle_mouse_move(rect.x + rect.w * 0.5, rect.y + rect.h * 0.5));
+        assert!(
+            view.stream_needs_layout,
+            "streamed hover should queue style/layout work for the browser frame"
+        );
+
+        let mut target = Pixmap::new(480, 320).unwrap();
+        view.paint_into(&mut target, 0, 0, 1.0);
+        assert!(
+            !view.stream_needs_layout,
+            "paint should consume queued interaction layout without polling resources"
+        );
+        let tab = view.document().unwrap().get_node(tab_id).unwrap();
+        assert_eq!(tab.style.background_color.r, 0);
+        assert_eq!(tab.style.background_color.g, 96);
+        assert_eq!(tab.style.background_color.b, 223);
+    }
+
+    #[test]
     fn browser_view_scroll_priority_defers_streamed_resource_update() {
         let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
         let base = "https://example.test/";
@@ -1793,6 +2085,34 @@ mod tests {
                 .pending_stylesheets
                 .is_some(),
             "scroll-priority idle must not drain resource queues before presenting scroll"
+        );
+    }
+
+    #[test]
+    fn browser_view_wheel_does_not_synchronously_flush_dirty_stream_layout() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+        view.feed_streaming_chunk(
+            base,
+            "<!doctype html><body><div style='height:2000px'>Ready</div>",
+        );
+        assert!(view.update_streamed_frame_before_paint());
+
+        let doc = &mut view.stream_frame.as_mut().unwrap().doc;
+        doc.style_dirty = true;
+        view.stream_needs_layout = false;
+
+        assert!(view.handle_wheel(0.0, 80.0));
+        let doc = &view.stream_frame.as_ref().unwrap().doc;
+        assert!(
+            doc.style_dirty,
+            "wheel scrolling must not run a blocking recascade/layout inline"
+        );
+        assert!(
+            view.stream_needs_layout,
+            "dirty work should be scheduled for the browser frame loop"
         );
     }
 
@@ -1946,15 +2266,16 @@ mod tests {
         view.load_id = 42;
 
         for idx in 0..12 {
+            let html = if idx == 0 {
+                "<!doctype html><body><p>0</p>".to_string()
+            } else {
+                format!("<p>{idx}</p>")
+            };
             view.tx
                 .send(BrowserViewLoadResult::HtmlChunk {
                     load_id: 42,
                     url: base.clone(),
-                    html: if idx == 0 {
-                        "<!doctype html><body><p>0</p>".to_string()
-                    } else {
-                        format!("<p>{idx}</p>")
-                    },
+                    html,
                 })
                 .unwrap();
         }
@@ -1980,6 +2301,29 @@ mod tests {
             assert!(view.poll());
         }
         assert_eq!(view.streamed_html_len, total_len);
+    }
+
+    #[test]
+    fn browser_view_feeds_delta_chunks_without_chopping_tag_boundaries() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+
+        view.feed_streaming_chunk(base, "<html><body><svg viewB");
+        view.feed_streaming_chunk(
+            base,
+            r#"ox="0 0 24 24"><path d="M0 0h24v24H0z"/></svg><main><article>Post</article></main>"#,
+        );
+
+        let html = crate::html::serialize_html(&view.stream_frame.as_ref().unwrap().doc);
+        assert!(
+            html.contains("<article>Post</article>"),
+            "delta chunks must advance the streamed body: {html}"
+        );
+        assert_eq!(
+            html.matches("ox=&quot;0 0 24 24&quot;&gt;").count(),
+            0,
+            "split attributes must remain inside the tag, not leak as text: {html}"
+        );
     }
 
     #[test]
@@ -2180,12 +2524,20 @@ mod tests {
             view.handle_mouse_move(10.0, 10.0),
             "hovering a streamed transitioning element must request redraw"
         );
+        assert!(
+            view.stream_needs_layout,
+            "streamed hover should queue style/layout work for the browser frame loop"
+        );
+        assert!(
+            view.update_streamed_frame_before_paint(),
+            "the browser frame loop should consume queued hover style work"
+        );
 
         let doc = view.document().unwrap();
         let id = doc.get_element_by_id("outline").expect("outline");
         assert!(
             doc.transition_states.contains_key(&id),
-            "streamed hover should create transition states immediately"
+            "streamed hover should create transition states during the next frame update"
         );
         assert!(
             view.renderer.display_list_dirty_for_test(),
@@ -2257,6 +2609,21 @@ mod tests {
         assert_eq!(
             resolve_browser_target("", base, view_url),
             "https://www.bbc.co.uk/news/"
+        );
+    }
+
+    #[test]
+    fn browser_navigation_preserves_php_query_links_in_same_directory() {
+        let base = "http://localhost/genie/";
+        let view_url = "http://localhost/genie/";
+
+        assert_eq!(
+            resolve_browser_target("index.php?page=individuals", base, view_url),
+            "http://localhost/genie/index.php?page=individuals"
+        );
+        assert_eq!(
+            resolve_browser_target("?page=individuals", base, view_url),
+            "http://localhost/genie/?page=individuals"
         );
     }
 

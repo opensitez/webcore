@@ -563,6 +563,44 @@ fn font_face_preserves_standard_descriptors() {
 }
 
 #[test]
+fn font_face_unicode_range_matches_ranges_and_wildcards() {
+    use crate::css::font_face::unicode_range_intersects_text;
+
+    assert!(unicode_range_intersects_text(Some("U+0041"), "A"));
+    assert!(!unicode_range_intersects_text(Some("U+0041"), "B"));
+    assert!(unicode_range_intersects_text(Some("U+0370-03FF"), "Ω"));
+    assert!(!unicode_range_intersects_text(Some("U+0370-03FF"), "A"));
+    assert!(unicode_range_intersects_text(Some("U+4??"), "Ӓ"));
+    assert!(!unicode_range_intersects_text(Some("U+4??"), "A"));
+    assert!(unicode_range_intersects_text(
+        Some("U+0600-06FF, U+1F600"),
+        "😀"
+    ));
+}
+
+#[test]
+fn font_face_font_display_accepts_only_standard_keywords() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add_with_base(
+        r#"@font-face {
+            font-family: ValidDisplay;
+            src: url("valid.woff2");
+            font-display: SWAP;
+        }
+        @font-face {
+            font-family: InvalidDisplay;
+            src: url("invalid.woff2");
+            font-display: instant;
+        }"#,
+        "",
+    );
+
+    assert_eq!(sheet.font_faces.len(), 2);
+    assert_eq!(sheet.font_faces[0].display.as_deref(), Some("swap"));
+    assert_eq!(sheet.font_faces[1].display, None);
+}
+
+#[test]
 fn font_face_source_tech_filters_unsupported_requirements() {
     let sources = crate::css::font_face::parse_font_face_sources(
         r#"url("variable.woff2") format("woff2") tech(variations),
@@ -1178,6 +1216,105 @@ fn background_shorthand_keeps_parenthesized_function_tokens_intact() {
 }
 
 #[test]
+fn background_position_keeps_env_fallback_tokens_intact() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "background-image",
+        "linear-gradient(red, red), linear-gradient(blue, blue)",
+    );
+    apply_property(
+        &mut style,
+        "background-position",
+        "env(--bg-x, 12px) env(--bg-y, calc(100% - 8px)), env(safe-area-inset-left, 20px) bottom",
+    );
+
+    assert_eq!(style.background_position_x, CssLength::Px(12.0));
+    assert_eq!(
+        style
+            .background_position_y
+            .resolve_vp(16.0, 100.0, 16.0, 0.0, 0.0),
+        92.0
+    );
+    let layer = &style.rare().additional_background_layers[0];
+    assert_eq!(layer.position_x, CssLength::Zero);
+    assert_eq!(layer.position_y, CssLength::Percent(100.0));
+}
+
+#[test]
+fn env_fallback_tokens_survive_property_specific_whitespace_parsers() {
+    let mut style = ComputedStyle::default();
+
+    apply_property(
+        &mut style,
+        "border-radius",
+        "env(--r1, calc(4px + 2px)) env(--r2, 8px) / env(--ry1, 10px) env(--ry2, 12px)",
+    );
+    assert_eq!(style.border_top_left_radius, CssLength::Px(6.0));
+    assert_eq!(style.border_top_right_radius, CssLength::Px(8.0));
+    assert_eq!(style.border_top_left_radius_y, CssLength::Px(10.0));
+    assert_eq!(style.border_top_right_radius_y, CssLength::Px(12.0));
+
+    apply_property(
+        &mut style,
+        "border-top-left-radius",
+        "env(--corner-x, 14px) env(--corner-y, calc(10px + 6px))",
+    );
+    assert_eq!(style.border_top_left_radius, CssLength::Px(14.0));
+    assert_eq!(style.border_top_left_radius_y, CssLength::Px(16.0));
+
+    apply_property(
+        &mut style,
+        "border-spacing",
+        "env(--gap-x, calc(4px + 2px)) env(--gap-y, 10px)",
+    );
+    assert_eq!(style.border_spacing_h, CssLength::Px(6.0));
+    assert_eq!(style.border_spacing_v, CssLength::Px(10.0));
+
+    apply_property(
+        &mut style,
+        "object-position",
+        "env(--obj-x, calc(100% - 8px)) env(--obj-y, 12px)",
+    );
+    assert_eq!(
+        style
+            .object_position_x
+            .resolve_vp(16.0, 100.0, 16.0, 0.0, 0.0),
+        92.0
+    );
+    assert_eq!(style.object_position_y, CssLength::Px(12.0));
+}
+
+#[test]
+fn env_fallback_tokens_survive_shadow_and_border_image_shorthands() {
+    let mut style = ComputedStyle::default();
+
+    apply_property(
+        &mut style,
+        "box-shadow",
+        "env(--shadow-x, calc(4px + 2px)) env(--shadow-y, 8px) env(--shadow-blur, 10px) env(--shadow-spread, calc(2px + 3px)) rgb(1 2 3)",
+    );
+    assert_eq!(style.box_shadow.len(), 1);
+    let shadow = &style.box_shadow[0];
+    assert_eq!(shadow.offset_x, 6.0);
+    assert_eq!(shadow.offset_y, 8.0);
+    assert_eq!(shadow.blur, 10.0);
+    assert_eq!(shadow.spread, 5.0);
+    assert_eq!(shadow.color, Color::rgb(1, 2, 3));
+
+    apply_property(
+        &mut style,
+        "border-image",
+        "url(border.png) env(--slice, calc(20 + 5)) / env(--width, calc(4px + 2px)) / env(--outset, calc(1px + 3px)) round",
+    );
+    assert_eq!(style.border_image_source, "url(border.png)");
+    assert_eq!(style.border_image_slice, "env(--slice, calc(20 + 5))");
+    assert_eq!(style.border_image_width, "env(--width, calc(4px + 2px))");
+    assert_eq!(style.border_image_outset, "env(--outset, calc(1px + 3px))");
+    assert_eq!(style.border_image_repeat, "round");
+}
+
+#[test]
 fn background_size_longhand_uses_shared_size_parser() {
     let mut style = ComputedStyle::default();
 
@@ -1507,6 +1644,7 @@ fn font_shorthand_resolves_nested_custom_property_token() {
         600.0,
         0,
         false,
+        &std::collections::HashSet::new(),
         &std::collections::HashSet::new(),
         0,
         "",
@@ -4110,13 +4248,178 @@ fn standards_known_pseudo_elements_do_not_drop_rules() {
     assert!(
         ss.rules
             .iter()
+            .any(|r| r.pseudo_element == PseudoElement::DetailsContent)
+    );
+    assert!(
+        ss.rules
+            .iter()
+            .any(|r| r.pseudo_element == PseudoElement::SpellingError)
+    );
+    assert!(
+        ss.rules
+            .iter()
+            .any(|r| r.pseudo_element == PseudoElement::GrammarError)
+    );
+    assert!(
+        ss.rules
+            .iter()
+            .any(|r| r.pseudo_element == PseudoElement::FirstLine)
+    );
+    assert!(
+        ss.rules
+            .iter()
+            .any(|r| r.pseudo_element == PseudoElement::FirstLetter)
+    );
+    assert!(
+        ss.rules
+            .iter()
             .filter(|r| {
                 !matches!(
                     r.pseudo_element,
-                    PseudoElement::Backdrop | PseudoElement::FileSelectorButton
+                    PseudoElement::Backdrop
+                        | PseudoElement::FileSelectorButton
+                        | PseudoElement::DetailsContent
+                        | PseudoElement::SpellingError
+                        | PseudoElement::GrammarError
+                        | PseudoElement::FirstLine
+                        | PseudoElement::FirstLetter
                 )
             })
             .all(|r| r.pseudo_element == PseudoElement::Ignored)
+    );
+}
+
+#[test]
+fn first_line_and_first_letter_pseudo_styles_are_cascaded_and_readable() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        r#"<style>
+             p::first-line { color: rgb(11, 22, 33); font-size: 19px; }
+             p::first-letter { color: rgb(44, 55, 66); font-weight: 700; }
+           </style>
+           <p id="p">First line text wraps eventually.</p>"#,
+        400.0,
+    );
+    let p = d.get_element_by_id("p").unwrap();
+    assert_eq!(
+        d.computed_style_pseudo_property(p, "::first-line", "color"),
+        "rgb(11, 22, 33)"
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(p, "::first-line", "font-size"),
+        "19px"
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(p, "::first-letter", "color"),
+        "rgb(44, 55, 66)"
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(p, "::first-letter", "font-weight"),
+        "700"
+    );
+}
+
+#[test]
+fn first_letter_pseudo_style_reaches_text_paint() {
+    let mut r = crate::Renderer::new();
+    let d = r.load_html(
+        r#"<style>
+             p { color: rgb(1, 2, 3); font-weight: 400; }
+             p::first-letter { color: rgb(44, 55, 66); font-weight: 700; }
+           </style>
+           <p id="p">Alpha beta</p>"#,
+        400.0,
+    );
+    let list = build_display_list(&d.root, 400.0, 200.0);
+    let texts: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Text {
+                text,
+                color,
+                font_weight,
+                ..
+            } => Some((text.as_str(), *color, *font_weight)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts.iter().any(|(text, color, font_weight)| *text == "A"
+            && color.r == 44
+            && color.g == 55
+            && color.b == 66
+            && *font_weight == 700),
+        "first letter should paint with its pseudo style; got {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|(text, color, font_weight)| *text == "lpha beta"
+                && color.r == 1
+                && color.g == 2
+                && color.b == 3
+                && *font_weight == 400),
+        "remaining text should keep the originating element style; got {texts:?}"
+    );
+}
+
+#[test]
+fn spelling_and_grammar_error_pseudo_styles_are_cascaded_and_readable() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        r#"<style>
+             p::spelling-error { color: rgb(1, 2, 3); background-color: rgb(4, 5, 6); }
+             p::grammar-error { color: rgb(7, 8, 9); background-color: rgb(10, 11, 12); }
+           </style>
+           <p id="p">Text</p>"#,
+        400.0,
+    );
+    let p = d.get_element_by_id("p").unwrap();
+    assert_eq!(
+        d.computed_style_pseudo_property(p, "::spelling-error", "color"),
+        "rgb(1, 2, 3)"
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(p, "::spelling-error", "background-color"),
+        "rgb(4, 5, 6)"
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(p, "::grammar-error", "color"),
+        "rgb(7, 8, 9)"
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(p, "::grammar-error", "background-color"),
+        "rgb(10, 11, 12)"
+    );
+}
+
+#[test]
+fn details_content_pseudo_styles_are_cascaded_and_readable() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        r#"<style>
+             details::details-content {
+               color: rgb(10, 20, 30);
+               background-color: rgb(40, 50, 60);
+               font-size: 21px;
+             }
+           </style>
+           <details id="d" open><summary>Summary</summary><p>Body</p></details>"#,
+        400.0,
+    );
+    let details = d.get_element_by_id("d").unwrap();
+    assert_eq!(
+        d.computed_style_pseudo_property(details, "::details-content", "color"),
+        "rgb(10, 20, 30)"
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(details, "::details-content", "background-color"),
+        "rgb(40, 50, 60)"
+    );
+    assert_eq!(
+        d.computed_style_pseudo_property(details, "::details-content", "font-size"),
+        "21px"
     );
 }
 
@@ -4598,6 +4901,89 @@ fn css_var_inherited_from_root() {
         p.style.color,
         Color::rgb(255, 0, 0),
         "var(--main-color) should resolve to red"
+    );
+}
+
+#[test]
+fn css_bootstrap_rgb_triplet_vars_resolve_in_important_utilities() {
+    let doc = parse_and_layout(
+        r#"<html><head><style>
+        :root { --bs-light-rgb: 248, 249, 250; --bs-dark-rgb: 33, 37, 41; }
+        .badge { display: inline-block; padding: .35em .65em; font-size: .75em; }
+        .bg-light { --bs-bg-opacity: 1; background-color: rgba(var(--bs-light-rgb), var(--bs-bg-opacity)) !important; }
+        .text-dark { --bs-text-opacity: 1; color: rgba(var(--bs-dark-rgb), var(--bs-text-opacity)) !important; }
+    </style></head><body><span class="badge bg-light text-dark">2542 members</span></body></html>"#,
+        800.0,
+    );
+    let badge = find_box(&doc.root, &|b| {
+        b.tag == "span"
+            && b.attributes
+                .get("class")
+                .is_some_and(|class| class.contains("badge"))
+    })
+    .unwrap();
+    assert_eq!(
+        badge.style.background_color,
+        Color::rgb(248, 249, 250),
+        "Bootstrap rgba(var(--rgb-triplet), var(--opacity)) background should resolve"
+    );
+    assert_eq!(
+        badge.style.color,
+        Color::rgb(33, 37, 41),
+        "Bootstrap text color utility should resolve"
+    );
+}
+
+#[test]
+fn css_bootstrap_root_selector_list_vars_resolve() {
+    let doc = parse_and_layout(
+        r#"<html><head><style>
+        :root,[data-bs-theme=light] { --bs-light-rgb: 248, 249, 250; --bs-dark-rgb: 33, 37, 41; }
+        .bg-light { --bs-bg-opacity: 1; background-color: rgba(var(--bs-light-rgb), var(--bs-bg-opacity)) !important; }
+        .text-dark { --bs-text-opacity: 1; color: rgba(var(--bs-dark-rgb), var(--bs-text-opacity)) !important; }
+    </style></head><body><span class="bg-light text-dark">2542 members</span></body></html>"#,
+        800.0,
+    );
+    let badge = find_box(&doc.root, &|b| b.tag == "span").unwrap();
+    assert_eq!(
+        badge.style.background_color,
+        Color::rgb(248, 249, 250),
+        "Bootstrap :root,[data-bs-theme=light] variables should be visible to utilities"
+    );
+    assert_eq!(badge.style.color, Color::rgb(33, 37, 41));
+}
+
+#[test]
+fn css_badge_background_shorthand_with_rgba_paints_bubble() {
+    let doc = parse_and_layout(
+        r#"<html><head><style>
+        .tree-card-header .badge {
+          display: inline-block;
+          padding: .35em .65em;
+          border-radius: 999px;
+          background: rgba(255,255,255,.2) !important;
+          color: white !important;
+        }
+    </style></head><body><div class="tree-card-header"><span class="badge">2542 members</span></div></body></html>"#,
+        800.0,
+    );
+    let badge = find_box(&doc.root, &|b| {
+        b.tag == "span"
+            && b.attributes
+                .get("class")
+                .is_some_and(|class| class.contains("badge"))
+    })
+    .unwrap();
+    assert_eq!(
+        badge.style.background_color,
+        Color::rgba(255, 255, 255, 51),
+        "badge background shorthand with rgba() should compute to a visible bubble"
+    );
+    assert_eq!(badge.style.color, Color::WHITE);
+    assert_ne!(
+        badge.style.border_radius,
+        CssLength::Zero,
+        "rounded pill badge should preserve its radius"
     );
 }
 
@@ -5117,6 +5503,10 @@ fn computed_style_exposes_stored_longhands() {
                 flex-direction: column;
                 justify-content: space-between;
                 align-items: center;
+                align-content: space-around;
+                align-self: flex-end;
+                justify-items: baseline;
+                justify-self: stretch;
                 row-gap: 8px;
                 flex-grow: 2;
                 order: 4;
@@ -5153,6 +5543,12 @@ fn computed_style_exposes_stored_longhands() {
                 scrollbar-color: CanvasText Canvas;
                 scrollbar-width: thin;
                 scrollbar-gutter: stable both-edges;
+                caret-color: rgb(7, 8, 9);
+                pointer-events: none;
+                user-select: all;
+                resize: vertical;
+                tab-size: 4;
+                hyphens: auto;
                 scroll-snap-stop: always;
                 scroll-margin: 1px 2px 3px 4px;
                 caption-side: block-end;
@@ -5289,6 +5685,16 @@ fn computed_style_exposes_stored_longhands() {
         "space-between"
     );
     assert_eq!(d.computed_style_property(box_id, "align-items"), "center");
+    assert_eq!(
+        d.computed_style_property(box_id, "align-content"),
+        "space-around"
+    );
+    assert_eq!(d.computed_style_property(box_id, "align-self"), "flex-end");
+    assert_eq!(
+        d.computed_style_property(box_id, "justify-items"),
+        "baseline"
+    );
+    assert_eq!(d.computed_style_property(box_id, "justify-self"), "stretch");
     assert_eq!(d.computed_style_property(box_id, "row-gap"), "8px");
     assert_eq!(d.computed_style_property(box_id, "flex-grow"), "2");
     assert_eq!(d.computed_style_property(box_id, "order"), "4");
@@ -5479,6 +5885,15 @@ fn computed_style_exposes_stored_longhands() {
         d.computed_style_property(box_id, "scrollbar-gutter"),
         "stable both-edges"
     );
+    assert_eq!(
+        d.computed_style_property(box_id, "caret-color"),
+        "rgb(7, 8, 9)"
+    );
+    assert_eq!(d.computed_style_property(box_id, "pointer-events"), "none");
+    assert_eq!(d.computed_style_property(box_id, "user-select"), "all");
+    assert_eq!(d.computed_style_property(box_id, "resize"), "vertical");
+    assert_eq!(d.computed_style_property(box_id, "tab-size"), "4");
+    assert_eq!(d.computed_style_property(box_id, "hyphens"), "auto");
     assert_eq!(
         d.computed_style_property(box_id, "scroll-snap-stop"),
         "always"
@@ -7489,6 +7904,86 @@ fn display_table_wraps_direct_table_cells_in_anonymous_row() {
 }
 
 #[test]
+fn orphan_table_cells_are_wrapped_in_anonymous_table_and_row() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>
+         body{margin:0}
+         #host{width:400px}
+         .c{display:table-cell;width:40px;height:20px}
+         </style>
+         <div id=host><div id=a class=c></div><div id=b class=c></div></div>",
+        900.0,
+    );
+    let host = d.get_element_by_id("host").unwrap();
+    let a = d.get_element_by_id("a").unwrap();
+    let b = d.get_element_by_id("b").unwrap();
+    let hr = d.get_bounding_client_rect(host).unwrap();
+    let ar = d.get_bounding_client_rect(a).unwrap();
+    let br = d.get_bounding_client_rect(b).unwrap();
+
+    assert!((hr.h - 20.0).abs() < 0.5, "host height got {}", hr.h);
+    assert!((ar.x - 0.0).abs() < 0.5, "first cell x got {}", ar.x);
+    assert!((br.x - 40.0).abs() < 0.5, "second cell x got {}", br.x);
+    assert!((ar.y - br.y).abs() < 0.5, "cells should share a row");
+}
+
+#[test]
+fn orphan_table_rows_are_wrapped_in_anonymous_table() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>
+         body{margin:0}
+         #host{width:400px}
+         .r{display:table-row}
+         .c{display:table-cell;width:40px;height:20px}
+         </style>
+         <div id=host>
+           <div id=row1 class=r><div id=a class=c></div></div>
+           <div id=row2 class=r><div id=b class=c></div></div>
+         </div>",
+        900.0,
+    );
+    let host = d.get_element_by_id("host").unwrap();
+    let a = d.get_element_by_id("a").unwrap();
+    let b = d.get_element_by_id("b").unwrap();
+    let hr = d.get_bounding_client_rect(host).unwrap();
+    let ar = d.get_bounding_client_rect(a).unwrap();
+    let br = d.get_bounding_client_rect(b).unwrap();
+
+    assert!((hr.h - 40.0).abs() < 0.5, "host height got {}", hr.h);
+    assert!((ar.x - br.x).abs() < 0.5, "rows should share column x");
+    assert!((br.y - 20.0).abs() < 0.5, "second row y got {}", br.y);
+}
+
+#[test]
+fn table_row_groups_wrap_direct_table_cells_in_anonymous_rows() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>
+         body{margin:0}
+         #t{display:table}
+         #g{display:table-row-group}
+         .c{display:table-cell;width:40px;height:20px}
+         </style>
+         <div id=t><div id=g><div id=a class=c></div><div id=b class=c></div></div></div>",
+        900.0,
+    );
+    let table = d.get_element_by_id("t").unwrap();
+    let a = d.get_element_by_id("a").unwrap();
+    let b = d.get_element_by_id("b").unwrap();
+    let tr = d.get_bounding_client_rect(table).unwrap();
+    let ar = d.get_bounding_client_rect(a).unwrap();
+    let br = d.get_bounding_client_rect(b).unwrap();
+
+    assert!((tr.w - 80.0).abs() < 0.5, "table width got {}", tr.w);
+    assert!((tr.h - 20.0).abs() < 0.5, "table height got {}", tr.h);
+    assert!((ar.x - 0.0).abs() < 0.5, "first child x got {}", ar.x);
+    assert!((br.x - 40.0).abs() < 0.5, "second child x got {}", br.x);
+    assert!((ar.y - br.y).abs() < 0.5, "cells should share a row");
+}
+
+#[test]
 fn table_colspan_contributes_to_auto_column_widths() {
     let mut r = crate::Renderer::new();
     let mut d = r.load_html(
@@ -8480,6 +8975,38 @@ fn clip_path_inset_and_circle_affect_hit_testing() {
         d.element_from_point(outside_poly.0, outside_poly.1),
         Some(id) if id == polygon || id == polygon_child
     ));
+}
+
+#[test]
+fn clip_path_keeps_nested_env_and_calc_tokens_intact() {
+    let mut style = ComputedStyle::default();
+
+    crate::css::apply_property(
+        &mut style,
+        "clip-path",
+        "inset(env(--top, calc(4px + 2px)) env(--right, 8px) 0 0)",
+    );
+    assert_eq!(style.clip_path.kind, ClipPathKind::Inset);
+    assert!((style.clip_path.inset_top.resolve(16.0, 100.0, 16.0) - 6.0).abs() < 0.1);
+    assert!((style.clip_path.inset_right.resolve(16.0, 100.0, 16.0) - 8.0).abs() < 0.1);
+
+    crate::css::apply_property(
+        &mut style,
+        "clip-path",
+        "circle(env(--r, calc(10px + 5px)) at env(--cx, 40%) env(--cy, calc(20px + 5px)))",
+    );
+    assert_eq!(style.clip_path.kind, ClipPathKind::Circle);
+    assert!((style.clip_path.circle_radius.resolve(16.0, 100.0, 16.0) - 15.0).abs() < 0.1);
+    assert!((style.clip_path.center_x.resolve(16.0, 200.0, 16.0) - 80.0).abs() < 0.1);
+    assert!((style.clip_path.center_y.resolve(16.0, 100.0, 16.0) - 25.0).abs() < 0.1);
+
+    crate::css::apply_property(
+        &mut style,
+        "clip-path",
+        "polygon(env(--x1, 0px) env(--y1, 0px), 100% 0, 0 100%)",
+    );
+    assert_eq!(style.clip_path.kind, ClipPathKind::Polygon);
+    assert_eq!(style.clip_path.points.len(), 3);
 }
 
 #[test]
@@ -9937,6 +10464,52 @@ fn font_face_descriptors_register_css_family_weight_and_style() {
 }
 
 #[test]
+fn font_face_unicode_range_filters_font_loading_until_text_intersects() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data/wpt/fonts/kinter.woff2");
+    let Ok(data) = std::fs::read(&path) else {
+        eprintln!("no woff2 sample at {} — skipping", path.display());
+        return;
+    };
+    if crate::woff::woff2::decode(&data).is_none() {
+        eprintln!("woff2 sample is not supported by this decoder — skipping");
+        return;
+    }
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+    let html = |text: &str| {
+        format!(
+            "<style>@font-face {{
+                font-family: 'Greek Range Face';
+                src: url(data:font/woff2;base64,{encoded});
+                unicode-range: U+0370-03FF;
+            }} #t {{ font-family: 'Greek Range Face'; }}</style>
+            <div id=t>{text}</div>"
+        )
+    };
+    let query = fontdb::Query {
+        families: &[fontdb::Family::Name("Greek Range Face")],
+        weight: fontdb::Weight::NORMAL,
+        stretch: fontdb::Stretch::Normal,
+        style: fontdb::Style::Normal,
+    };
+
+    let mut latin = crate::Renderer::new();
+    let _ = latin.load_html(&html("Latin only"), 400.0);
+    assert!(
+        latin.font_system.db().query(&query).is_none(),
+        "a Greek-only @font-face should not load for Latin-only document text"
+    );
+
+    let mut greek = crate::Renderer::new();
+    let _ = greek.load_html(&html("Ω"), 400.0);
+    assert!(
+        greek.font_system.db().query(&query).is_some(),
+        "a Greek-only @font-face should load once document text intersects its unicode-range"
+    );
+}
+
+#[test]
 fn font_face_metric_overrides_feed_normal_line_height() {
     let mut fs = cosmic_text::FontSystem::new();
     let Some(mut alias) = fs.db().faces().next().cloned() else {
@@ -10477,6 +11050,32 @@ fn unsupported_transform_function_invalidates_the_declaration() {
     );
     assert_eq!(style.css_transform.ops.len(), 1);
     assert_eq!(style.transform, "rotate(45deg)");
+}
+
+#[test]
+fn transform_parser_keeps_nested_env_and_calc_arguments_intact() {
+    use crate::types::{CssLength, TransformOp};
+
+    let transform = crate::css::parse_css_transform_checked(
+        "translate(env(--tx, calc(4px + 2px)), env(--ty, 8px)) rotate(1turn)",
+    )
+    .expect("nested functions in transform arguments should parse");
+    assert_eq!(transform.ops.len(), 2);
+    match &transform.ops[0] {
+        TransformOp::Translate(x, y) => {
+            assert!((x.resolve_vp(16.0, 100.0, 16.0, 800.0, 600.0) - 6.0).abs() < 0.1);
+            assert!((y.resolve_vp(16.0, 100.0, 16.0, 800.0, 600.0) - 8.0).abs() < 0.1);
+        }
+        other => panic!("expected translate op, got {other:?}"),
+    }
+    match transform.ops[1] {
+        TransformOp::Rotate(deg) => assert!((deg - 360.0).abs() < 0.1),
+        ref other => panic!("expected rotate op, got {other:?}"),
+    }
+
+    let (x, y) = crate::css::parse_transform_origin("env(--ox, calc(4px + 2px)) top");
+    assert!((x.resolve_vp(16.0, 100.0, 16.0, 800.0, 600.0) - 6.0).abs() < 0.1);
+    assert_eq!(y, CssLength::Percent(0.0));
 }
 
 #[test]

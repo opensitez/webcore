@@ -4833,11 +4833,27 @@ impl Document {
     /// `element.getClientRects()`.
     ///
     /// One rect per box the element generates. A wrapped inline should report
-    /// one per line; until the line boxes are addressable from here it reports
-    /// the single border box, which is the correct answer for every element
-    /// that generates one box and an under-count for the rest.
+    /// one per line fragment; block containers with owned text lines return
+    /// those line fragments, and ordinary one-box elements fall back to their
+    /// bounding border box.
     pub fn get_client_rects(&self, id: u32) -> Vec<Rect> {
         if let Some(node) = self.get_node(id) {
+            if !node.layout.inline_client_rects.is_empty() {
+                return node
+                    .layout
+                    .inline_client_rects
+                    .iter()
+                    .filter(|rect| rect.w > 0.0 && rect.h > 0.0)
+                    .map(|rect| {
+                        Rect::new(
+                            rect.x - self.scroll_x,
+                            rect.y - self.scroll_y,
+                            rect.w,
+                            rect.h,
+                        )
+                    })
+                    .collect();
+            }
             if !node.layout.line_cache.is_empty() {
                 return node
                     .layout

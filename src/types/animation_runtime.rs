@@ -70,6 +70,46 @@ fn keyframes_with_synthesized_endpoints(
     out
 }
 
+fn compose_animation_properties(
+    properties: Vec<(String, String)>,
+    underlying: &HashMap<String, String>,
+    composition: &AnimationComposition,
+) -> Vec<(String, String)> {
+    if matches!(composition, AnimationComposition::Replace) {
+        return properties;
+    }
+    properties
+        .into_iter()
+        .map(|(prop, value)| {
+            let composed = compose_animation_property(&prop, &value, underlying, composition)
+                .unwrap_or_else(|| value.clone());
+            (prop, composed)
+        })
+        .collect()
+}
+
+fn compose_animation_property(
+    prop: &str,
+    value: &str,
+    underlying: &HashMap<String, String>,
+    composition: &AnimationComposition,
+) -> Option<String> {
+    if !matches!(
+        prop,
+        "opacity" | "fill-opacity" | "stroke-opacity" | "stop-opacity"
+    ) {
+        return None;
+    }
+    let underlying = underlying.get(prop)?;
+    let base = parse_css_alpha(underlying)?;
+    let effect = parse_css_alpha(value)?;
+    let composed = match composition {
+        AnimationComposition::Replace => return None,
+        AnimationComposition::Add | AnimationComposition::Accumulate => base + effect,
+    };
+    Some(format_css_number(composed.clamp(0.0, 1.0)))
+}
+
 impl Document {
     /// Walk the tree and ensure an `AnimState` exists for every element that
     /// currently has an `animation` property.  Call this after each cascade pass.
@@ -103,12 +143,40 @@ impl Document {
                     element_id: *id,
                     animation: anim.clone(),
                     start_time: now,
+                    paused_at: anim.play_state_paused.then_some(now),
                     last_iteration_event: 0,
                 });
                 if anim.delay_ms <= 0.0 {
                     started_events.push(*id);
                 }
             }
+        }
+
+        for state in &mut self.active_animations {
+            let Some((_, current_anim)) = current
+                .iter()
+                .find(|(id, anim)| *id == state.element_id && anim.name == state.animation.name)
+            else {
+                continue;
+            };
+            let was_paused = state.animation.play_state_paused;
+            let is_paused = current_anim.play_state_paused;
+            match (was_paused, is_paused, state.paused_at) {
+                (false, true, _) => {
+                    state.paused_at = Some(now);
+                }
+                (true, false, Some(paused_at)) => {
+                    if let Some(paused_duration) = now.checked_duration_since(paused_at) {
+                        state.start_time += paused_duration;
+                    }
+                    state.paused_at = None;
+                }
+                (true, true, None) => {
+                    state.paused_at = Some(now);
+                }
+                _ => {}
+            }
+            state.animation = current_anim.clone();
         }
 
         // Remove animations whose element no longer carries that animation name.
@@ -280,25 +348,13 @@ impl Document {
         // ── CSS Animations ───────────────────────────────────────────────────
         let mut done: Vec<usize> = Vec::new();
         for (idx, state) in self.active_animations.iter_mut().enumerate() {
-            if state.animation.play_state_paused {
-                if matches!(
-                    state.animation.fill_mode,
-                    FillMode::Backwards | FillMode::Both
-                ) {
-                    if let Some(kf) = keyframes.get(&state.animation.name) {
-                        if let Some(first) = kf.first() {
-                            let entry = self
-                                .animation_overrides
-                                .entry(state.element_id)
-                                .or_default();
-                            entry.extend(first.properties.clone());
-                        }
-                    }
-                }
-                continue;
-            }
-
-            let elapsed_ms = now.duration_since(state.start_time).as_secs_f32() * 1000.0;
+            let paused = state.animation.play_state_paused;
+            let sample_now = if paused {
+                state.paused_at.unwrap_or(now)
+            } else {
+                now
+            };
+            let elapsed_ms = sample_now.duration_since(state.start_time).as_secs_f32() * 1000.0;
             let delayed_ms = elapsed_ms - state.animation.delay_ms;
 
             if delayed_ms < 0.0 {
@@ -317,7 +373,9 @@ impl Document {
                         }
                     }
                 }
-                still_running = true;
+                if !paused {
+                    still_running = true;
+                }
                 continue;
             }
 
@@ -374,7 +432,11 @@ impl Document {
                                 }
                             }
                         };
-                        let props = interpolate_keyframe_stops(&stops, final_t);
+                        let props = compose_animation_properties(
+                            interpolate_keyframe_stops(&stops, final_t),
+                            &underlying,
+                            &state.animation.composition,
+                        );
                         let entry = self
                             .animation_overrides
                             .entry(state.element_id)
@@ -382,12 +444,16 @@ impl Document {
                         entry.extend(props);
                     }
                 }
-                finished_events.push(("animationend", state.element_id));
-                done.push(idx);
+                if !paused {
+                    finished_events.push(("animationend", state.element_id));
+                    done.push(idx);
+                }
                 continue;
             }
-            still_running = true;
-            if completed_iterations > state.last_iteration_event {
+            if !paused {
+                still_running = true;
+            }
+            if !paused && completed_iterations > state.last_iteration_event {
                 for _ in state.last_iteration_event..completed_iterations {
                     iteration_events.push(state.element_id);
                 }
@@ -428,7 +494,11 @@ impl Document {
                     .map(|node| extract_transitionable_style(&node.style))
                     .unwrap_or_default();
                 let stops = keyframes_with_synthesized_endpoints(kf, &underlying);
-                let props = interpolate_keyframe_stops(&stops, eased);
+                let props = compose_animation_properties(
+                    interpolate_keyframe_stops(&stops, eased),
+                    &underlying,
+                    &state.animation.composition,
+                );
                 let entry = self
                     .animation_overrides
                     .entry(state.element_id)

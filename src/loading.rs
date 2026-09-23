@@ -140,6 +140,41 @@ fn raw_cache_key(cache_dir: &str, url: &str) -> String {
     format!("{cache_dir}\n{url}")
 }
 
+fn should_bypass_snapshot_cache(url: &str) -> bool {
+    let Some(parsed) = crate::dom::url::parse(url, None) else {
+        return false;
+    };
+    if !matches!(parsed.scheme.as_str(), "http" | "https") {
+        return false;
+    }
+    let host = parsed
+        .hostname
+        .trim_matches(['[', ']'])
+        .to_ascii_lowercase();
+    if host.is_empty() {
+        return false;
+    }
+    if host == "localhost" || host == "::1" || host.ends_with(".localhost") {
+        return true;
+    }
+    if host == "127.0.0.1" || host.starts_with("127.") {
+        return true;
+    }
+    if host.starts_with("10.") || host.starts_with("192.168.") {
+        return true;
+    }
+    if let Some(rest) = host.strip_prefix("172.")
+        && let Some(first) = rest
+            .split('.')
+            .next()
+            .and_then(|part| part.parse::<u8>().ok())
+        && (16..=31).contains(&first)
+    {
+        return true;
+    }
+    !host.contains('.')
+}
+
 fn raw_cache_get(key: &str) -> Option<Arc<Vec<u8>>> {
     RAW_RESOURCE_CACHE
         .lock()
@@ -185,12 +220,170 @@ fn should_emit_early_preview(html: &str, sent_preview: bool) -> bool {
 }
 
 #[derive(Clone, Debug)]
+pub struct CookieJar {
+    cookies: Vec<CookieEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct CookieEntry {
+    name: String,
+    value: String,
+    domain: String,
+    host_only: bool,
+    path: String,
+    secure: bool,
+}
+
+impl CookieJar {
+    pub fn new() -> Self {
+        Self {
+            cookies: Vec::new(),
+        }
+    }
+
+    fn cookie_header(&self, url: &str) -> Option<String> {
+        let parsed = reqwest::Url::parse(url).ok()?;
+        let host = parsed.host_str()?.to_ascii_lowercase();
+        let path = parsed.path();
+        let is_https = parsed.scheme().eq_ignore_ascii_case("https");
+        let values = self
+            .cookies
+            .iter()
+            .filter(|cookie| {
+                (!cookie.secure || is_https)
+                    && cookie_domain_matches(cookie, &host)
+                    && cookie_path_matches(cookie, path)
+            })
+            .map(|cookie| format!("{}={}", cookie.name, cookie.value))
+            .collect::<Vec<_>>();
+        if values.is_empty() {
+            None
+        } else {
+            Some(values.join("; "))
+        }
+    }
+
+    fn store_from_headers(&mut self, url: &str, headers: &reqwest::header::HeaderMap) {
+        for value in headers.get_all(reqwest::header::SET_COOKIE) {
+            let Ok(text) = value.to_str() else {
+                continue;
+            };
+            if let Some(cookie) = parse_set_cookie(url, text) {
+                self.cookies.retain(|old| {
+                    !(old.name == cookie.name
+                        && old.domain == cookie.domain
+                        && old.path == cookie.path)
+                });
+                if !cookie.value.is_empty() {
+                    self.cookies.push(cookie);
+                }
+            }
+        }
+    }
+}
+
+impl Default for CookieJar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn parse_set_cookie(url: &str, header: &str) -> Option<CookieEntry> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    let mut parts = header.split(';');
+    let name_value = parts.next()?.trim();
+    let (name, value) = name_value.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let mut domain = host.clone();
+    let mut host_only = true;
+    let mut path = default_cookie_path(parsed.path());
+    let mut secure = false;
+    let mut remove = false;
+    for attr in parts {
+        let attr = attr.trim();
+        let (key, value) = attr.split_once('=').unwrap_or((attr, ""));
+        match key.trim().to_ascii_lowercase().as_str() {
+            "domain" => {
+                let candidate = value.trim().trim_start_matches('.').to_ascii_lowercase();
+                if !candidate.is_empty()
+                    && (host == candidate || host.ends_with(&format!(".{candidate}")))
+                {
+                    domain = candidate;
+                    host_only = false;
+                }
+            }
+            "path" => {
+                let candidate = value.trim();
+                if candidate.starts_with('/') {
+                    path = candidate.to_string();
+                }
+            }
+            "secure" => secure = true,
+            "max-age" => {
+                if value.trim().parse::<i64>().ok().is_some_and(|age| age <= 0) {
+                    remove = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(CookieEntry {
+        name: name.to_string(),
+        value: if remove {
+            String::new()
+        } else {
+            value.trim().to_string()
+        },
+        domain,
+        host_only,
+        path,
+        secure,
+    })
+}
+
+fn default_cookie_path(path: &str) -> String {
+    if !path.starts_with('/') {
+        return "/".to_string();
+    }
+    match path.rfind('/') {
+        Some(0) | None => "/".to_string(),
+        Some(idx) => path[..idx].to_string(),
+    }
+}
+
+fn cookie_domain_matches(cookie: &CookieEntry, host: &str) -> bool {
+    if cookie.host_only {
+        host == cookie.domain
+    } else {
+        host == cookie.domain || host.ends_with(&format!(".{}", cookie.domain))
+    }
+}
+
+fn cookie_path_matches(cookie: &CookieEntry, path: &str) -> bool {
+    path == cookie.path
+        || (path.starts_with(&cookie.path)
+            && (cookie.path.ends_with('/')
+                || path
+                    .as_bytes()
+                    .get(cookie.path.len())
+                    .is_some_and(|b| *b == b'/')))
+}
+
+#[derive(Clone, Debug)]
 pub struct PageLoadOptions {
     pub cache_dir: Option<String>,
     pub emit_preview: bool,
     pub preview_after_bytes: usize,
     pub preview_interval_bytes: usize,
     pub load_images: bool,
+    pub request_method: String,
+    pub request_body: Option<Vec<u8>>,
+    pub request_content_type: Option<String>,
+    pub cookie_jar: Option<Arc<Mutex<CookieJar>>>,
 }
 
 impl Default for PageLoadOptions {
@@ -201,6 +394,10 @@ impl Default for PageLoadOptions {
             preview_after_bytes: 16 * 1024,
             preview_interval_bytes: 128 * 1024,
             load_images: true,
+            request_method: "GET".to_string(),
+            request_body: None,
+            request_content_type: None,
+            cookie_jar: None,
         }
     }
 }
@@ -321,7 +518,7 @@ impl PageSession {
 #[derive(Clone, Debug)]
 pub enum PageLoadEvent {
     Chunk { url: String, html: String },
-    Complete { url: String },
+    Complete { url: String, html: String },
 }
 
 pub fn spawn_page_load<F>(url: String, options: PageLoadOptions, mut on_event: F)
@@ -332,13 +529,20 @@ where
         let event = match load_document_streaming_chunks(&url, &options, |url, html| {
             on_event(PageLoadEvent::Chunk { url, html });
         }) {
-            Ok((_html, final_url)) => PageLoadEvent::Complete { url: final_url },
+            Ok((html, final_url)) => PageLoadEvent::Complete {
+                url: final_url,
+                html,
+            },
             Err(e) => {
+                let html = error_page(&url, &e);
                 on_event(PageLoadEvent::Chunk {
                     url: url.clone(),
-                    html: error_page(&url, &e),
+                    html: html.clone(),
                 });
-                PageLoadEvent::Complete { url: url.clone() }
+                PageLoadEvent::Complete {
+                    url: url.clone(),
+                    html,
+                }
             }
         };
         on_event(event);
@@ -363,7 +567,11 @@ where
             std::fs::File::open(path).map_err(|e| format!("failed to read file {path}: {e}"))?;
         return stream_document_reader(file, url.to_string(), options, on_chunk);
     }
-    if let Some(cache_dir) = options.cache_dir.as_deref() {
+    if options.request_body.is_none()
+        && options.request_method.eq_ignore_ascii_case("get")
+        && let Some(cache_dir) = options.cache_dir.as_deref()
+        && !should_bypass_snapshot_cache(url)
+    {
         return cached_fetch_document_streaming_chunks(url, cache_dir, options, on_chunk);
     }
     fetch_document_streaming_chunks(url, options, on_chunk)
@@ -468,6 +676,10 @@ where
             preview_after_bytes: options.preview_after_bytes,
             preview_interval_bytes: options.preview_interval_bytes,
             load_images: options.load_images,
+            request_method: options.request_method.clone(),
+            request_body: options.request_body.clone(),
+            request_content_type: options.request_content_type.clone(),
+            cookie_jar: options.cookie_jar.clone(),
         },
         &mut on_chunk,
     )?;
@@ -494,8 +706,10 @@ where
     let mut do_fetch = |client: &reqwest::blocking::Client,
                         on_chunk: &mut dyn FnMut(String, String)|
      -> Result<(String, String, bool), (String, bool)> {
-        let resp = client
-            .get(url)
+        let method = reqwest::Method::from_bytes(options.request_method.as_bytes())
+            .unwrap_or(reqwest::Method::GET);
+        let mut req = client
+            .request(method, url)
             .header(
                 "Accept",
                 "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -504,11 +718,30 @@ where
             .header("Sec-Fetch-Mode", "navigate")
             .header("Sec-Fetch-Site", "none")
             .header("Sec-Fetch-User", "?1")
-            .header("Upgrade-Insecure-Requests", "1")
-            .send()
-            .map_err(|e| (e.to_string(), false))?;
+            .header("Upgrade-Insecure-Requests", "1");
+        if let Some(content_type) = options.request_content_type.as_deref() {
+            req = req.header("Content-Type", content_type);
+        }
+        if let Some(cookie_header) = options
+            .cookie_jar
+            .as_ref()
+            .and_then(|jar| jar.lock().ok())
+            .and_then(|jar| jar.cookie_header(url))
+        {
+            req = req.header(reqwest::header::COOKIE, cookie_header);
+        }
+        if let Some(body) = options.request_body.clone() {
+            req = req.body(body);
+        }
+        let resp = req.send().map_err(|e| (e.to_string(), false))?;
         let final_url = resp.url().to_string();
         let status = resp.status();
+        let headers = resp.headers().clone();
+        if let Some(cookie_jar) = options.cookie_jar.as_ref()
+            && let Ok(mut jar) = cookie_jar.lock()
+        {
+            jar.store_from_headers(&final_url, &headers);
+        }
         if !status.is_success() {
             return Err((format!("HTTP {status} loading {final_url}"), false));
         }
@@ -712,7 +945,9 @@ where
 }
 
 pub fn fetch_text_resource(url: &str, cache_dir: Option<&str>) -> Result<String, String> {
-    if let Some(cache_dir) = cache_dir {
+    if let Some(cache_dir) = cache_dir
+        && !should_bypass_snapshot_cache(url)
+    {
         let key = raw_cache_key(cache_dir, url);
         if let Some(data) = raw_cache_get(&key) {
             return Ok(decode_body(&data));
@@ -745,7 +980,9 @@ where
     F: FnMut(&str),
 {
     let mut decoder = encoding_rs::UTF_8.new_decoder();
-    if let Some(cache_dir) = cache_dir {
+    if let Some(cache_dir) = cache_dir
+        && !should_bypass_snapshot_cache(url)
+    {
         let key = raw_cache_key(cache_dir, url);
         if let Some(data) = raw_cache_get(&key) {
             for chunk in data.chunks(16 * 1024) {
@@ -826,6 +1063,9 @@ pub fn cached_fetch_bytes_arc(url: &str, cache_dir: &str) -> Result<Arc<Vec<u8>>
         return crate::html::image_data_url_bytes(url)
             .map(Arc::new)
             .ok_or_else(|| format!("invalid data URL bytes: {url}"));
+    }
+    if should_bypass_snapshot_cache(url) {
+        return fetch_bytes(url).map(Arc::new);
     }
     let key = format!("{cache_dir}\n{url}");
     let state = {
@@ -1289,6 +1529,24 @@ mod tests {
             "hot cache should emit an early chunk preview instead of waiting for the complete document"
         );
         assert!(previews[0].contains("body{color:rgb(4,5,6)}"));
+    }
+
+    #[test]
+    fn snapshot_cache_bypasses_local_and_intranet_urls() {
+        for url in [
+            "http://localhost/genie/",
+            "http://127.0.0.1/genie/",
+            "http://192.168.1.5/app/",
+            "http://172.16.4.2/app/",
+            "http://10.0.0.2/app/",
+            "http://hermes/tdc/",
+        ] {
+            assert!(
+                should_bypass_snapshot_cache(url),
+                "local app URL must not replay stale snapshot cache: {url}"
+            );
+        }
+        assert!(!should_bypass_snapshot_cache("https://finance.yahoo.com/"));
     }
 
     #[test]

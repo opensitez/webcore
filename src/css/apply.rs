@@ -812,6 +812,107 @@ pub fn resolve_var_references(val: &str, variables: &HashMap<String, String>) ->
     result
 }
 
+pub(crate) fn resolve_var_references_for_color_scheme(
+    val: &str,
+    variables: &HashMap<String, String>,
+    color_scheme: &str,
+) -> String {
+    let resolved = resolve_var_references(val, variables);
+    resolve_light_dark_functions(&resolved, color_scheme)
+}
+
+pub(crate) fn resolve_light_dark_functions(val: &str, color_scheme: &str) -> String {
+    if !val.contains("light-dark(") {
+        return val.to_string();
+    }
+    let prefer_dark = color_scheme
+        .split_ascii_whitespace()
+        .next()
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("dark"));
+    let mut out = String::new();
+    let mut rest = val;
+    while let Some(start) = rest.find("light-dark(") {
+        out.push_str(&rest[..start]);
+        let args_start = start + "light-dark(".len();
+        let args = &rest[args_start..];
+        let Some((inner, consumed)) = take_function_args(args) else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        if let Some((light, dark)) = split_top_level_comma(inner) {
+            out.push_str(if prefer_dark {
+                dark.trim()
+            } else {
+                light.trim()
+            });
+        } else {
+            out.push_str(&rest[start..args_start + consumed]);
+        }
+        rest = &args[consumed..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn take_function_args(s: &str) -> Option<(&str, usize)> {
+    let mut depth = 1usize;
+    let mut quote: Option<u8> = None;
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+        } else if b == b'"' || b == b'\'' {
+            quote = Some(b);
+        } else if b == b'(' {
+            depth += 1;
+        } else if b == b')' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some((&s[..i], i + 1));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn split_top_level_comma(s: &str) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+        } else if b == b'"' || b == b'\'' {
+            quote = Some(b);
+        } else if b == b'(' {
+            depth += 1;
+        } else if b == b')' {
+            depth = depth.saturating_sub(1);
+        } else if b == b',' && depth == 0 {
+            return Some((&s[..i], &s[i + 1..]));
+        }
+        i += 1;
+    }
+    None
+}
+
 pub(crate) fn resolve_var_pass(val: &str, variables: &HashMap<String, String>) -> String {
     if !val.contains("var(") {
         return val.to_string();
@@ -1721,6 +1822,8 @@ pub fn parse_shadow_value(v: &str) -> (f32, f32, f32, Color) {
         }
         if let Some(c) = parse_color(t) {
             color = c;
+        } else if let Some(len) = parse_length_checked(t) {
+            nums.push(len.resolve_vp(16.0, 0.0, 16.0, 0.0, 0.0));
         } else if let Ok(n) = t.trim_end_matches("px").parse::<f32>() {
             nums.push(n);
         }

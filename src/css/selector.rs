@@ -140,24 +140,11 @@ pub struct CssSelector {
 impl CssSelector {
     /// Create a selector with pre-computed state pseudo-class flags.
     pub fn new(parts: Vec<SelectorPart>) -> Self {
-        let has_hover = parts
-            .iter()
-            .any(|p| matches!(p, SelectorPart::PseudoClass(n) if n == "hover"));
-        let has_active = parts
-            .iter()
-            .any(|p| matches!(p, SelectorPart::PseudoClass(n) if n == "active"));
-        let has_visited = parts
-            .iter()
-            .any(|p| matches!(p, SelectorPart::PseudoClass(n) if n == "visited"));
+        let has_hover = selector_parts_have_state(&parts, "hover");
+        let has_active = selector_parts_have_state(&parts, "active");
+        let has_visited = selector_parts_have_state(&parts, "visited");
         let base_parts = if has_hover || has_active || has_visited {
-            parts
-                .iter()
-                .filter(|p| {
-                    !matches!(p, SelectorPart::PseudoClass(n)
-                    if matches!(n.as_str(), "hover" | "active" | "visited"))
-                })
-                .cloned()
-                .collect()
+            strip_state_pseudos_from_parts(&parts)
         } else {
             Vec::new()
         };
@@ -238,6 +225,7 @@ impl CssSelector {
     /// Match against `b` without ancestor context (for tests / simple selectors).
     pub fn matches_box(&self, b: &WebCore) -> bool {
         let empty_hover = std::collections::HashSet::new();
+        let empty_focus = std::collections::HashSet::new();
         let ctx = MatchContext {
             focused_box: 0,
             keyboard_focus: false,
@@ -245,6 +233,7 @@ impl CssSelector {
             type_sibling_count: 1,
             html_box: Some(b),
             hover_chain: &empty_hover,
+            focus_within_chain: &empty_focus,
             element_id: b.node_id,
             scope_root_id: 0,
             target_id: 0,
@@ -265,6 +254,7 @@ impl CssSelector {
         ancestors: &[AncestorInfo],
     ) -> bool {
         let empty_hover = std::collections::HashSet::new();
+        let empty_focus = std::collections::HashSet::new();
         let ctx = MatchContext {
             focused_box: 0,
             keyboard_focus: false,
@@ -272,6 +262,7 @@ impl CssSelector {
             type_sibling_count: 1,
             html_box: Some(b),
             hover_chain: &empty_hover,
+            focus_within_chain: &empty_focus,
             element_id: b.node_id,
             scope_root_id: 0,
             target_id: 0,
@@ -330,5 +321,85 @@ impl CssSelector {
             ancestors,
             ctx,
         )
+    }
+}
+
+pub(crate) fn selector_has_state(sel: &CssSelector, state: &str) -> bool {
+    selector_parts_have_state(&sel.parts, state)
+}
+
+pub(crate) fn selector_parts_have_state(parts: &[SelectorPart], state: &str) -> bool {
+    parts.iter().any(|p| selector_part_has_state(p, state))
+}
+
+pub(crate) fn selector_part_has_state(part: &SelectorPart, state: &str) -> bool {
+    match part {
+        SelectorPart::PseudoClass(name) => name == state,
+        SelectorPart::Not(inner) => selector_has_state(inner, state),
+        SelectorPart::Is(list) | SelectorPart::Where(list) | SelectorPart::Has(list) => {
+            list.iter().any(|sel| selector_has_state(sel, state))
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn strip_state_pseudos_from_parts(parts: &[SelectorPart]) -> Vec<SelectorPart> {
+    parts
+        .iter()
+        .filter_map(strip_state_pseudos_from_part)
+        .collect()
+}
+
+fn strip_state_pseudos_from_part(part: &SelectorPart) -> Option<SelectorPart> {
+    match part {
+        SelectorPart::PseudoClass(name)
+            if matches!(name.as_str(), "hover" | "active" | "visited") =>
+        {
+            None
+        }
+        SelectorPart::Not(inner)
+            if selector_has_state(inner, "hover")
+                || selector_has_state(inner, "active")
+                || selector_has_state(inner, "visited") =>
+        {
+            None
+        }
+        SelectorPart::Is(list) => {
+            strip_state_pseudos_from_selector_list(list).map(SelectorPart::Is)
+        }
+        SelectorPart::Where(list) => {
+            strip_state_pseudos_from_selector_list(list).map(SelectorPart::Where)
+        }
+        SelectorPart::Has(list)
+            if list.iter().any(|sel| {
+                selector_has_state(sel, "hover")
+                    || selector_has_state(sel, "active")
+                    || selector_has_state(sel, "visited")
+            }) =>
+        {
+            None
+        }
+        SelectorPart::Has(list) => {
+            strip_state_pseudos_from_selector_list(list).map(SelectorPart::Has)
+        }
+        _ => Some(part.clone()),
+    }
+}
+
+fn strip_state_pseudos_from_selector_list(list: &[CssSelector]) -> Option<Vec<CssSelector>> {
+    let mut stripped = Vec::with_capacity(list.len());
+    for sel in list {
+        let parts = strip_state_pseudos_from_parts(&sel.parts);
+        if parts.is_empty() {
+            return None;
+        }
+        let mut next = CssSelector::new(parts);
+        next.valid = sel.valid;
+        stripped.push(next);
+    }
+    if stripped.is_empty() {
+        None
+    } else {
+        Some(stripped)
     }
 }

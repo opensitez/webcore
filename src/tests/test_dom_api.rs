@@ -113,6 +113,27 @@ fn img_srcset_current_source_is_resolved_with_viewport_without_mutating_src() {
 }
 
 #[test]
+fn img_srcset_resolution_can_be_resolved_for_host_device_pixel_ratio() {
+    let mut node = crate::types::WebCore::new("img");
+    node.attributes
+        .insert("src".to_string(), "fallback.jpg".to_string());
+    node.attributes.insert(
+        "srcset".to_string(),
+        "hero.png 1x, hero@2x.png 2x, hero@3x.png 3x".to_string(),
+    );
+
+    crate::html::resolve_img_source_for_device_pixel_ratio(
+        &mut node,
+        "https://example.test/news/index.html",
+        800.0,
+        600.0,
+        2.0,
+    );
+
+    assert_eq!(node.resolved_src, "https://example.test/news/hero@2x.png");
+}
+
+#[test]
 fn img_lazy_data_src_is_normalized_as_fallback_source() {
     let mut renderer = crate::Renderer::new();
     let doc = renderer.load_html_with_base(
@@ -282,6 +303,27 @@ fn get_client_rects_returns_one_rect_per_owned_line_fragment() {
     assert!(
         rects.iter().all(|r| r.w > 0.0 && r.h > 0.0),
         "client rect fragments should be non-empty: {rects:?}"
+    );
+}
+
+#[test]
+fn get_client_rects_returns_fragments_for_wrapped_inline_descendant() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        "<style>body{margin:0} #p{width:45px;font-size:16px;font-family:sans-serif}</style>\
+         <p id=p><span id=s>alpha beta gamma</span></p>",
+        800.0,
+    );
+    let span = doc.get_element_by_id("s").expect("span");
+    let rects = doc.get_client_rects(span);
+
+    assert!(
+        rects.len() >= 2,
+        "wrapped inline descendant should expose one client rect per line fragment, got {rects:?}"
+    );
+    assert!(
+        rects.iter().all(|r| r.w > 0.0 && r.h > 0.0),
+        "inline descendant fragments should be non-empty: {rects:?}"
     );
 }
 
@@ -2383,6 +2425,58 @@ fn document_query_selector_has_url_state_pseudo_classes() {
 }
 
 #[test]
+fn document_query_selector_has_media_state_pseudo_classes() {
+    let mut doc = parse_html(
+        "<video id=movie src=clip.mp4></video>\
+         <audio id=sound src=tone.ogg></audio>",
+    );
+    let video = doc.get_element_by_id("movie").unwrap();
+    let audio = doc.get_element_by_id("sound").unwrap();
+
+    assert_eq!(doc.query_selector("video:paused"), Some(video));
+    assert_eq!(doc.query_selector("video:playing"), None);
+
+    assert!(doc.media_play(video));
+    assert_eq!(doc.query_selector("video:playing"), Some(video));
+    assert_eq!(doc.query_selector("video:paused"), None);
+
+    assert!(doc.media_pause(video));
+    assert_eq!(doc.query_selector("video:paused"), Some(video));
+
+    assert_eq!(doc.query_selector("audio:muted"), None);
+    assert!(doc.media_set_muted(audio, true));
+    assert_eq!(doc.query_selector("audio:muted"), Some(audio));
+}
+
+#[test]
+fn media_state_pseudo_classes_recascade_after_state_changes() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<style>
+           video:paused { color: rgb(1, 2, 3); }
+           video:playing { color: rgb(4, 5, 6); }
+           video:muted { background-color: rgb(7, 8, 9); }
+         </style>
+         <video id=movie src=clip.mp4></video>",
+        400.0,
+    );
+    let video = doc.get_element_by_id("movie").unwrap();
+
+    assert_eq!(doc.computed_style_property(video, "color"), "rgb(1, 2, 3)");
+
+    assert!(doc.media_play(video));
+    crate::layout::LayoutEngine::new().layout(&mut doc, 400.0);
+    assert_eq!(doc.computed_style_property(video, "color"), "rgb(4, 5, 6)");
+
+    assert!(doc.media_set_muted(video, true));
+    crate::layout::LayoutEngine::new().layout(&mut doc, 400.0);
+    assert_eq!(
+        doc.computed_style_property(video, "background-color"),
+        "rgb(7, 8, 9)"
+    );
+}
+
+#[test]
 fn svg_animation_dom_controls_target_projected_animation_node() {
     let mut doc = parse_html(
         r#"<svg id="icon" viewBox="0 0 10 10">
@@ -3026,6 +3120,10 @@ fn svg_pointer_and_mouse_edge_events_start_matching_smil_animation() {
 }
 
 fn tiny_animated_gif() -> Vec<u8> {
+    tiny_animated_gif_with_delay(20)
+}
+
+fn tiny_animated_gif_with_delay(delay_ms: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
     {
         let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
@@ -3039,7 +3137,7 @@ fn tiny_animated_gif() -> Vec<u8> {
                 red,
                 0,
                 0,
-                image::Delay::from_numer_denom_ms(20, 1),
+                image::Delay::from_numer_denom_ms(delay_ms, 1),
             ))
             .unwrap();
         encoder
@@ -3047,7 +3145,7 @@ fn tiny_animated_gif() -> Vec<u8> {
                 blue,
                 0,
                 0,
-                image::Delay::from_numer_denom_ms(20, 1),
+                image::Delay::from_numer_denom_ms(delay_ms, 1),
             ))
             .unwrap();
     }
@@ -3102,9 +3200,10 @@ fn animated_image_tick_advances_rendered_pixels_without_layout() {
 
     let mut doc = crate::types::Document::new();
     doc.root.children.push(node);
+    let start = doc.root.children[0].animated_image_last_tick.unwrap();
+    assert!(doc.tick_animated_images(start));
     let start_pixels = doc.root.children[0].image_data.clone().unwrap();
-    let now = doc.root.children[0].animated_image_last_tick.unwrap()
-        + std::time::Duration::from_millis(25);
+    let now = start + std::time::Duration::from_millis(25);
 
     assert!(doc.tick_animated_images(now));
     let next_pixels = doc.root.children[0].image_data.clone().unwrap();
@@ -3112,6 +3211,30 @@ fn animated_image_tick_advances_rendered_pixels_without_layout() {
     assert_eq!(&next_pixels[..4], &[0, 0, 255, 255]);
     assert!(doc.has_animated_images());
     assert!(!doc.needs_animation_frame);
+}
+
+#[test]
+fn animated_image_tick_respects_declared_frame_delay() {
+    let decoded = crate::html::decode_image_bytes_ex(&tiny_animated_gif_with_delay(250)).unwrap();
+    let mut node = crate::types::WebCore::new("img");
+    crate::html::set_decoded_image_on_node(&mut node, decoded);
+    node.animated_image_last_tick = Some(std::time::Instant::now());
+
+    let mut doc = crate::types::Document::new();
+    doc.root.children.push(node);
+    let start = doc.root.children[0].animated_image_last_tick.unwrap();
+    assert!(doc.tick_animated_images(start));
+    let start_pixels = doc.root.children[0].image_data.clone().unwrap();
+
+    assert!(!doc.tick_animated_images(start + std::time::Duration::from_millis(100)));
+    assert_eq!(
+        doc.root.children[0].image_data.clone().unwrap().as_slice(),
+        start_pixels.as_slice()
+    );
+
+    assert!(doc.tick_animated_images(start + std::time::Duration::from_millis(250)));
+    let next_pixels = doc.root.children[0].image_data.clone().unwrap();
+    assert_eq!(&next_pixels[..4], &[0, 0, 255, 255]);
 }
 
 #[test]

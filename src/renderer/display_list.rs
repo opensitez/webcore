@@ -41,6 +41,8 @@ pub enum PaintCmd {
         rect: Rect,
         widths: [f32; 4],
         slices: [f32; 4],
+        repeat_x_mode: u8, // 0=stretch, 1=repeat, 2=space, 3=round
+        repeat_y_mode: u8, // 0=stretch, 1=repeat, 2=space, 3=round
         fill_center: bool,
         data: ImageRef,
     },

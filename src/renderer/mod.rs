@@ -1704,7 +1704,21 @@ impl Renderer {
                 }
             }
         }
-        if !self.use_tiles && !used_dirty_surface && (!needs_rebuild || scroll_band_rebuild_only) {
+        // Do not shift the previous viewport bitmap as a scroll shortcut.
+        //
+        // The display list is already cached in document coordinates, so a
+        // scroll can be replayed without rebuilding layout or re-recording the
+        // list. Shifting the last viewport surface and repainting only the
+        // exposed strip was faster on simple pages, but it made any stale clip,
+        // text paint ownership, image/font update, or newly applied style stick
+        // to the scrolled pixels. Real pages then looked correct on first paint
+        // but lost/overlapped text after scrolling away and back.
+        const ENABLE_SCROLL_SURFACE_SHIFT: bool = false;
+        if ENABLE_SCROLL_SURFACE_SHIFT
+            && !self.use_tiles
+            && !used_dirty_surface
+            && (!needs_rebuild || scroll_band_rebuild_only)
+        {
             if let (Some(surface), Some(list)) = (
                 self.cached_content_surface.as_ref(),
                 self.cached_display_list.as_ref(),

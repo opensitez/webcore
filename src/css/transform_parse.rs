@@ -34,15 +34,9 @@ pub fn parse_css_transform_checked(v: &str) -> Option<crate::types::CssTransform
             None => return None,
         };
         let func = rest[..paren_pos].trim().to_ascii_lowercase();
-        let after_paren = &rest[paren_pos + 1..];
-        // Find matching closing paren
-        let close = after_paren.find(')')?;
-        let args_str = &after_paren[..close];
-        rest = if close + 1 < after_paren.len() {
-            &after_paren[close + 1..]
-        } else {
-            ""
-        };
+        let after_paren = &rest[paren_pos..];
+        let (args_str, after_func) = consume_parenthesized(after_paren)?;
+        rest = after_func;
 
         // ⛔ The arguments are kept as STRINGS and converted per FUNCTION,
         // because a transform's arguments are not all the same kind of value.
@@ -54,10 +48,7 @@ pub fn parse_css_transform_checked(v: &str) -> Option<crate::types::CssTransform
         //  * an ANGLE had its unit REMOVED rather than converted, so
         //    `rotate(1turn)` was read as 1 DEGREE instead of 360, and
         //    `rotate(1rad)` as 1 degree instead of 57.3.
-        let raw: Vec<&str> = args_str
-            .split(|c: char| c == ',' || c.is_whitespace())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let raw = split_transform_args(args_str);
 
         // A `<length-percentage>`, kept UNRESOLVED — see `TransformOp`.
         let len = |i: usize| -> CssLength {
@@ -173,7 +164,7 @@ pub fn parse_transform_origin(v: &str) -> (CssLength, CssLength) {
     let mut y: Option<CssLength> = None;
     let mut positional: Vec<CssLength> = Vec::new();
     // A third component is the z offset, which this engine does not use.
-    for tok in v.split_whitespace().take(2) {
+    for tok in split_top_level_whitespace(v).into_iter().take(2) {
         match tok.to_ascii_lowercase().as_str() {
             "left" => x = Some(CssLength::Percent(0.0)),
             "right" => x = Some(CssLength::Percent(100.0)),
@@ -197,4 +188,99 @@ pub fn parse_transform_origin(v: &str) -> (CssLength, CssLength) {
         x.unwrap_or(CssLength::Percent(50.0)),
         y.unwrap_or(CssLength::Percent(50.0)),
     )
+}
+
+fn consume_parenthesized(src: &str) -> Option<(&str, &str)> {
+    if !src.starts_with('(') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escape = false;
+    for (i, ch) in src.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' {
+            escape = true;
+            continue;
+        }
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some((&src[1..i], &src[i + 1..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_transform_args(src: &str) -> Vec<&str> {
+    split_top_level(src, |ch| ch == ',' || ch.is_whitespace())
+}
+
+fn split_top_level_whitespace(src: &str) -> Vec<&str> {
+    split_top_level(src, char::is_whitespace)
+}
+
+fn split_top_level<F>(src: &str, mut is_separator: F) -> Vec<&str>
+where
+    F: FnMut(char) -> bool,
+{
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut start: Option<usize> = None;
+    let mut escape = false;
+    for (i, ch) in src.char_indices() {
+        if start.is_none() && !is_separator(ch) {
+            start = Some(i);
+        }
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' {
+            escape = true;
+            continue;
+        }
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && is_separator(ch) => {
+                if let Some(s) = start.take() {
+                    if s < i {
+                        out.push(src[s..i].trim());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        let tail = src[s..].trim();
+        if !tail.is_empty() {
+            out.push(tail);
+        }
+    }
+    out
 }

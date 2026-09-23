@@ -364,6 +364,16 @@ pub struct ComputedStyle {
     pub backdrop_style: Option<Box<ComputedStyle>>,
     /// Style for the native button part of `<input type=file>`.
     pub file_selector_button_style: Option<Box<ComputedStyle>>,
+    /// Style for the anonymous contents box of `<details>`.
+    pub details_content_style: Option<Box<ComputedStyle>>,
+    /// Style for spelling-error highlights.
+    pub spelling_error_style: Option<Box<ComputedStyle>>,
+    /// Style for grammar-error highlights.
+    pub grammar_error_style: Option<Box<ComputedStyle>>,
+    /// Style for the first formatted line pseudo-element.
+    pub first_line_style: Option<Box<ComputedStyle>>,
+    /// Style for the first formatted letter pseudo-element.
+    pub first_letter_style: Option<Box<ComputedStyle>>,
 
     // Caret and scrollbar theming
     pub caret_color: Option<Color>,

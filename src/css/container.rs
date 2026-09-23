@@ -84,6 +84,7 @@ fn apply_container_cascade_inner(
     // Apply matching container rules to this element
     if !container_stack.is_empty() {
         let empty_hover = std::collections::HashSet::new();
+        let empty_focus = std::collections::HashSet::new();
         let match_ctx = MatchContext {
             focused_box,
             keyboard_focus,
@@ -91,6 +92,7 @@ fn apply_container_cascade_inner(
             type_sibling_count,
             html_box: Some(node),
             hover_chain: &empty_hover,
+            focus_within_chain: &empty_focus,
             element_id: node.node_id,
             scope_root_id: 0,
             target_id: 0,

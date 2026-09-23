@@ -866,7 +866,7 @@ fn parse_stylesheet_inner(
             if sel_str.is_empty() {
                 return true;
             }
-            let (sel_for_match, _) = strip_pseudo_element(sel_str);
+            let (sel_for_match, _, _, _) = strip_pseudo_element(sel_str);
             parse_selector(&sel_for_match).valid
         });
         if !list_is_valid {
@@ -893,16 +893,13 @@ fn parse_stylesheet_inner(
                 let original_selector = sel_str.to_string();
 
                 // Detect ::before / ::after pseudo-elements, strip from selector for matching
-                let (sel_for_match, pseudo_elem) = strip_pseudo_element(sel_str);
+                let (sel_for_match, pseudo_elem, is_slotted, slotted_slot_selector) =
+                    strip_pseudo_element(sel_str);
 
                 let sel = parse_selector(&sel_for_match);
                 let sp = sel.specificity();
 
-                // Detect :hover in selector parts
-                let is_hover = sel
-                    .parts
-                    .iter()
-                    .any(|p| matches!(p, SelectorPart::PseudoClass(name) if name == "hover"));
+                let is_hover = sel.has_hover;
 
                 let mut rule = CssRule::default();
                 rule.selectors = vec![sel];
@@ -913,6 +910,8 @@ fn parse_stylesheet_inner(
                 rule.original_selector = original_selector;
                 rule.is_hover = is_hover;
                 rule.pseudo_element = pseudo_elem;
+                rule.is_slotted = is_slotted;
+                rule.slotted_slot_selector = slotted_slot_selector;
                 rules.push(rule);
             }
         }
@@ -1064,9 +1063,9 @@ pub fn find_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
     None
 }
 
-/// Detect and strip `::before` / `::after` (and CSS2 `:before`/`:after`) from
-/// a selector string.  Returns (cleaned_selector, PseudoElement).
-fn strip_pseudo_element(sel: &str) -> (String, PseudoElement) {
+/// Detect and strip pseudo-elements from a selector string.
+/// Returns (cleaned_selector, PseudoElement, is_slotted, slotted_slot_selector).
+fn strip_pseudo_element(sel: &str) -> (String, PseudoElement, bool, Option<CssSelector>) {
     // :: double-colon pseudo-elements
     if let Some(pos) = find_unescaped(sel, "::") {
         let pe_str = sel[pos + 2..].to_ascii_lowercase();
@@ -1079,28 +1078,49 @@ fn strip_pseudo_element(sel: &str) -> (String, PseudoElement) {
         } else if pe_str.starts_with("marker") {
             (6, PseudoElement::Marker)
         } else if pe_str.starts_with("first-line") {
-            (10, PseudoElement::Ignored)
+            (10, PseudoElement::FirstLine)
         } else if pe_str.starts_with("first-letter") {
-            (12, PseudoElement::Ignored)
+            (12, PseudoElement::FirstLetter)
         } else if pe_str.starts_with("placeholder") {
             (11, PseudoElement::Placeholder)
         } else if pe_str.starts_with("file-selector-button") {
             (20, PseudoElement::FileSelectorButton)
         } else if pe_str.starts_with("details-content") {
-            (15, PseudoElement::Ignored)
+            (15, PseudoElement::DetailsContent)
         } else if pe_str.starts_with("spelling-error") {
-            (14, PseudoElement::Ignored)
+            (14, PseudoElement::SpellingError)
         } else if pe_str.starts_with("grammar-error") {
-            (13, PseudoElement::Ignored)
+            (13, PseudoElement::GrammarError)
         } else if pe_str.starts_with("backdrop") {
             (8, PseudoElement::Backdrop)
         } else if let Some(len) = pseudo_function_len(&pe_str, "part") {
             (len, PseudoElement::Ignored)
         } else if let Some(len) = pseudo_function_len(&pe_str, "slotted") {
-            (len, PseudoElement::Ignored)
+            let original = &sel[pos + 2..pos + 2 + len];
+            let inner = original
+                .strip_prefix("slotted(")
+                .or_else(|| original.strip_prefix("SLOTTED("))
+                .or_else(|| original.get(8..))
+                .unwrap_or("")
+                .strip_suffix(')')
+                .unwrap_or("")
+                .trim();
+            let clean = if inner.is_empty() {
+                "*".to_string()
+            } else {
+                inner.to_string()
+            };
+            let prefix = sel[..pos].trim();
+            let slot_selector = if prefix.is_empty() {
+                None
+            } else {
+                let parsed = parse_selector(prefix);
+                if parsed.valid { Some(parsed) } else { None }
+            };
+            return (clean, PseudoElement::None, true, slot_selector);
         } else {
             // Unknown vendor or other pseudo-element — ignore rule entirely
-            return (String::new(), PseudoElement::Ignored);
+            return (String::new(), PseudoElement::Ignored, false, None);
         };
         let clean = format!("{}{}", &sel[..pos], &sel[pos + 2 + kw_len..])
             .trim()
@@ -1110,7 +1130,7 @@ fn strip_pseudo_element(sel: &str) -> (String, PseudoElement) {
         } else {
             clean
         };
-        return (clean, pe);
+        return (clean, pe, false, None);
     }
     // CSS2 single-colon :before / :after (not preceded by another colon)
     let sel_lower = sel.to_ascii_lowercase();
@@ -1130,10 +1150,10 @@ fn strip_pseudo_element(sel: &str) -> (String, PseudoElement) {
             } else {
                 clean
             };
-            return (clean, pe.clone());
+            return (clean, pe.clone(), false, None);
         }
     }
-    (sel.to_string(), PseudoElement::None)
+    (sel.to_string(), PseudoElement::None, false, None)
 }
 
 fn find_unescaped(haystack: &str, needle: &str) -> Option<usize> {

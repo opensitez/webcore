@@ -308,8 +308,11 @@ fn parse_html_full(
     // Wire arena parent-child relationships to mirror the WebCore tree.
     wire_arena_children(&mut parser.arena, &mut html_box);
 
-    // Build combined stylesheet (UA + author)
+    // Build combined stylesheet (UA + document defaults + author)
     let mut stylesheet = ua_stylesheet();
+    if let Some(meta_color_scheme) = parser.meta_color_scheme.as_deref() {
+        stylesheet.parse_and_add(&format!("html {{ color-scheme: {meta_color_scheme}; }}"));
+    }
     // Author rules must always win over UA rules regardless of selector
     // specificity — see `css::AUTHOR_ORIGIN_BOOST`.
     stylesheet.push_author_rules(parser.stylesheet.rules);

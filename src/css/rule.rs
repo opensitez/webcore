@@ -18,7 +18,12 @@ pub enum PseudoElement {
     Marker,   // ::marker
     Backdrop, // ::backdrop
     FileSelectorButton,
-    Ignored, // ::first-line, ::first-letter, unknown vendor pseudo-elements
+    DetailsContent,
+    SpellingError,
+    GrammarError,
+    FirstLine,
+    FirstLetter,
+    Ignored, // unknown vendor pseudo-elements and unsupported functional pseudos
 }
 
 impl Default for PseudoElement {
@@ -188,6 +193,17 @@ pub struct CssRule {
     /// True if any declaration value contains `var(` — needs slow-path resolution.
     pub has_var_refs: bool,
     pub pseudo_element: PseudoElement,
+    /// True for `::slotted(...)` rules from a shadow stylesheet.
+    ///
+    /// Slotted rules are not ordinary descendant selectors: they apply to the
+    /// projected light-DOM element itself while leaving its descendants under
+    /// the document cascade. The cascade handles that as a narrow overlay when
+    /// it sees a projected slot clone.
+    pub is_slotted: bool,
+    /// Optional selector before `::slotted(...)`, matched against the `<slot>`
+    /// element that receives the projection. Example:
+    /// `slot[name=menu]::slotted(.item)`.
+    pub slotted_slot_selector: Option<CssSelector>,
 }
 
 impl Default for CssRule {
@@ -211,6 +227,8 @@ impl Default for CssRule {
             is_hover: false,
             has_var_refs: false,
             pseudo_element: PseudoElement::None,
+            is_slotted: false,
+            slotted_slot_selector: None,
         }
     }
 }

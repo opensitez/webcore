@@ -138,6 +138,12 @@ pub struct MatchContext<'a> {
     /// Set of node IDs on the hover chain (hovered element + all ancestors).
     /// When non-empty, :hover pseudo-class matches elements in this set.
     pub hover_chain: &'a std::collections::HashSet<u32>,
+    /// Set of node IDs on the focus-within chain (focused element + all ancestors).
+    ///
+    /// Combinator matching often checks an ancestor through an `AncestorInfo`
+    /// snapshot, where `html_box` is intentionally unavailable. Stateful
+    /// pseudo-classes still need to answer for that ancestor.
+    pub focus_within_chain: &'a std::collections::HashSet<u32>,
     /// Node ID of the element currently being matched (for :hover on ancestors).
     pub element_id: u32,
     /// Node ID of the selector scope root for `:scope` (0 = no scoped query).
@@ -210,6 +216,7 @@ pub fn matches_selector_with_ancestors(
                             type_sibling_count: anc.type_sibling_count,
                             html_box: None,
                             hover_chain: ctx.hover_chain,
+                            focus_within_chain: ctx.focus_within_chain,
                             element_id: anc.node_id,
                             scope_root_id: ctx.scope_root_id,
                             target_id: ctx.target_id,
@@ -243,6 +250,7 @@ pub fn matches_selector_with_ancestors(
                             type_sibling_count: parent.type_sibling_count,
                             html_box: None,
                             hover_chain: ctx.hover_chain,
+                            focus_within_chain: ctx.focus_within_chain,
                             element_id: parent.node_id,
                             scope_root_id: ctx.scope_root_id,
                             target_id: ctx.target_id,
@@ -340,6 +348,7 @@ fn matches_sibling(
         // pseudo-classes must not answer for the sibling from it.
         html_box: None,
         hover_chain: ctx.hover_chain,
+        focus_within_chain: ctx.focus_within_chain,
         element_id: sib.node_id,
         scope_root_id: ctx.scope_root_id,
         target_id: ctx.target_id,
@@ -498,7 +507,7 @@ pub(crate) fn matches_part_with_context(
                         if let Some(b) = ctx.html_box {
                             b.node_id != 0 && b.node_id == ctx.focused_box
                         } else {
-                            false
+                            ctx.element_id != 0 && ctx.element_id == ctx.focused_box
                         }
                     } else {
                         false
@@ -530,7 +539,7 @@ pub(crate) fn matches_part_with_context(
                             (b.node_id != 0 && b.node_id == ctx.focused_box)
                                 || is_or_contains_focused(b, ctx.focused_box)
                         } else {
-                            false
+                            ctx.element_id != 0 && ctx.focus_within_chain.contains(&ctx.element_id)
                         }
                     } else {
                         false
@@ -563,6 +572,20 @@ pub(crate) fn matches_part_with_context(
                         && !attrs.contains_key("open")
                         && ctx.html_box.and_then(|b| b.top_layer_kind).is_none()
                 }
+                "playing" => {
+                    is_media_element_tag(tag)
+                        && ctx
+                            .html_box
+                            .is_some_and(|b| !b.media_paused && !b.media_ended)
+                }
+                "paused" => {
+                    is_media_element_tag(tag) && ctx.html_box.is_some_and(|b| b.media_paused)
+                }
+                "seeking" => {
+                    is_media_element_tag(tag) && ctx.html_box.is_some_and(|b| b.media_seeking)
+                }
+                "muted" => is_media_element_tag(tag) && ctx.html_box.is_some_and(|b| b.media_muted),
+                "buffering" | "stalled" | "volume-locked" => false,
                 "checked" => {
                     // The BOX's state when the matcher was given one; the
                     // attribute is the fallback for the paths that match
@@ -794,10 +817,10 @@ pub(crate) fn matches_part_with_context(
                         return dir == want;
                     }
                     if pc == "host" {
-                        return ctx.html_box.is_none() && !ancestors.is_empty();
+                        return ctx.html_box.is_none();
                     }
                     if let Some(arg) = pc.strip_prefix("host(").and_then(|s| s.strip_suffix(')')) {
-                        if ctx.html_box.is_some() || ancestors.is_empty() {
+                        if ctx.html_box.is_some() {
                             return false;
                         }
                         let parsed = parse_selector(arg.trim());
@@ -817,7 +840,7 @@ pub(crate) fn matches_part_with_context(
                         .strip_prefix("host-context(")
                         .and_then(|s| s.strip_suffix(')'))
                     {
-                        if ctx.html_box.is_some() || ancestors.is_empty() {
+                        if ctx.html_box.is_some() {
                             return false;
                         }
                         let parsed = parse_selector(arg.trim());
@@ -842,6 +865,7 @@ pub(crate) fn matches_part_with_context(
                                 type_sibling_count: anc.type_sibling_count,
                                 html_box: None,
                                 hover_chain: ctx.hover_chain,
+                                focus_within_chain: ctx.focus_within_chain,
                                 element_id: anc.node_id,
                                 scope_root_id: ctx.scope_root_id,
                                 target_id: ctx.target_id,
@@ -875,8 +899,8 @@ pub(crate) fn matches_part_with_context(
                     }
 
                     // Everything left is a pseudo-class this engine recognises
-                    // but has no state for — `:fullscreen` and the media-resource
-                    // ones. They do not match.
+                    // but has no state for — for example `:fullscreen`. It does
+                    // not match.
                     //
                     // This used to `return true` "for forward compat", which
                     // meant `:target` matched EVERY element and any typo styled
@@ -900,6 +924,10 @@ fn is_form_control(tag: &str) -> bool {
         tag,
         "input" | "button" | "select" | "textarea" | "fieldset" | "optgroup" | "option"
     )
+}
+
+fn is_media_element_tag(tag: &str) -> bool {
+    matches!(tag, "audio" | "video")
 }
 
 /// Is this element disabled, counting a disabled `<fieldset>` ancestor?
@@ -1138,6 +1166,7 @@ fn has_descendant_matching(
             Combinator::Child => {
                 let rest = &sel.parts[1..];
                 let empty_hover = std::collections::HashSet::new();
+                let empty_focus = std::collections::HashSet::new();
                 return node
                     .children
                     .iter()
@@ -1150,6 +1179,7 @@ fn has_descendant_matching(
                             type_sibling_count: 1,
                             html_box: Some(child),
                             hover_chain: &empty_hover,
+                            focus_within_chain: &empty_focus,
                             element_id: child.node_id,
                             scope_root_id: 0,
                             target_id: 0,
@@ -1183,6 +1213,7 @@ fn has_descendant_matching(
         }
     }
     let empty_hover = std::collections::HashSet::new();
+    let empty_focus = std::collections::HashSet::new();
     for child in &node.children {
         let ctx = MatchContext {
             focused_box,
@@ -1191,6 +1222,7 @@ fn has_descendant_matching(
             type_sibling_count: 1,
             html_box: Some(child),
             hover_chain: &empty_hover,
+            focus_within_chain: &empty_focus,
             element_id: child.node_id,
             scope_root_id: 0,
             target_id: 0,
@@ -1224,6 +1256,7 @@ fn matches_element_or_descendant(
     ctx: &MatchContext,
 ) -> bool {
     let empty_hover = std::collections::HashSet::new();
+    let empty_focus = std::collections::HashSet::new();
     let elem_ctx = MatchContext {
         focused_box: ctx.focused_box,
         keyboard_focus: false,
@@ -1231,6 +1264,7 @@ fn matches_element_or_descendant(
         type_sibling_count: 1,
         html_box: Some(elem),
         hover_chain: &empty_hover,
+        focus_within_chain: &empty_focus,
         element_id: elem.node_id,
         scope_root_id: 0,
         target_id: 0,
@@ -1298,6 +1332,7 @@ fn has_relative_matching(
             Combinator::Child => {
                 let rest = &sel.parts[1..];
                 let empty_hover = std::collections::HashSet::new();
+                let empty_focus = std::collections::HashSet::new();
                 return node
                     .children
                     .iter()
@@ -1310,6 +1345,7 @@ fn has_relative_matching(
                             type_sibling_count: 1,
                             html_box: Some(child),
                             hover_chain: &empty_hover,
+                            focus_within_chain: &empty_focus,
                             element_id: child.node_id,
                             scope_root_id: 0,
                             target_id: 0,

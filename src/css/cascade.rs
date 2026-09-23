@@ -134,7 +134,8 @@ fn apply_css_value_with_cascade_context(
             }
         }
         CssValue::Raw(s) => {
-            let resolved = resolve_var_references(s, local_vars);
+            let resolved =
+                resolve_var_references_for_color_scheme(s, local_vars, &style.color_scheme);
             if s.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var(")) {
                 return;
             }
@@ -177,6 +178,59 @@ fn apply_resolved_property_with_cascade_context(
     } else {
         apply_property_by_id_str(style, id, value);
     }
+}
+
+fn prescan_color_scheme(
+    base: &ComputedStyle,
+    rules: &[CssRule],
+    matched: &[(u32, usize, Option<u32>)],
+    local_vars: &HashMap<String, String>,
+    important: bool,
+    author_pass: Option<bool>,
+) -> String {
+    let mut probe = base.clone();
+    for &(sp, ri, _) in matched {
+        if let Some(author) = author_pass {
+            if is_author_origin(sp) != author {
+                continue;
+            }
+        }
+        let rule = &rules[ri];
+        if important {
+            if let Some(val) = rule.important_declarations.get("color-scheme") {
+                let resolved =
+                    resolve_var_references_for_color_scheme(val, local_vars, &probe.color_scheme);
+                if !resolved.trim().is_empty() && !resolved.contains("var(") {
+                    apply_property(&mut probe, "color-scheme", &resolved);
+                }
+                continue;
+            }
+            if let Some((_, val)) = rule
+                .compiled_important
+                .iter()
+                .find(|(id, _)| *id == properties::PropertyId::ColorScheme)
+            {
+                apply_css_value(&mut probe, properties::PropertyId::ColorScheme, val);
+            }
+        } else {
+            if let Some(val) = rule.declarations.get("color-scheme") {
+                let resolved =
+                    resolve_var_references_for_color_scheme(val, local_vars, &probe.color_scheme);
+                if !resolved.trim().is_empty() && !resolved.contains("var(") {
+                    apply_property(&mut probe, "color-scheme", &resolved);
+                }
+                continue;
+            }
+            if let Some((_, val)) = rule
+                .compiled_decls
+                .iter()
+                .find(|(id, _)| *id == properties::PropertyId::ColorScheme)
+            {
+                apply_css_value(&mut probe, properties::PropertyId::ColorScheme, val);
+            }
+        }
+    }
+    probe.color_scheme.clone()
 }
 
 fn apply_state_matched_rules(
@@ -236,6 +290,479 @@ fn apply_state_matched_rules(
                 );
             }
         }
+    }
+}
+
+fn projected_rule_targets_assigned_node(sel: &CssSelector) -> bool {
+    fn part_has_slot_attr(part: &SelectorPart) -> bool {
+        match part {
+            SelectorPart::Attribute { name, .. } => name.eq_ignore_ascii_case("slot"),
+            SelectorPart::Not(sel) => sel.parts.iter().any(part_has_slot_attr),
+            SelectorPart::Is(list) | SelectorPart::Where(list) | SelectorPart::Has(list) => list
+                .iter()
+                .any(|sel| sel.parts.iter().any(part_has_slot_attr)),
+            _ => false,
+        }
+    }
+
+    sel.parts
+        .iter()
+        .any(|part| matches!(part, SelectorPart::Combinator(_)))
+        && sel.parts.iter().any(part_has_slot_attr)
+}
+
+pub(crate) fn projected_ancestor_info(node: &WebCore) -> AncestorInfo {
+    AncestorInfo {
+        tag: node.tag.clone(),
+        attributes: node.attributes.clone(),
+        child_index: 0,
+        sibling_count: 1,
+        type_child_index: 0,
+        type_sibling_count: 1,
+        node_id: node.node_id,
+    }
+}
+
+pub(crate) fn apply_host_projected_rules_to_projected(
+    node: &mut crate::types::WebCore,
+    host_node: Option<&crate::types::WebCore>,
+    stylesheet: &Stylesheet,
+    parent_style: Option<&ComputedStyle>,
+    vw: f32,
+    vh: f32,
+    candidates_buf: &mut Vec<usize>,
+) {
+    let Some(host_node) = host_node else {
+        return;
+    };
+    if !node.is_element() || !crate::types::is_projected_slot_subtree(node) {
+        return;
+    }
+
+    let ancestors = [projected_ancestor_info(host_node)];
+    let empty_hover = std::collections::HashSet::new();
+    let empty_focus = std::collections::HashSet::new();
+    apply_host_projected_rules_with_ancestors(
+        node,
+        &ancestors,
+        stylesheet,
+        parent_style,
+        vw,
+        vh,
+        0,
+        false,
+        &empty_hover,
+        &empty_focus,
+        "",
+        candidates_buf,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_host_projected_rules_with_ancestors(
+    node: &mut crate::types::WebCore,
+    ancestors: &[AncestorInfo],
+    stylesheet: &Stylesheet,
+    parent_style: Option<&ComputedStyle>,
+    vw: f32,
+    vh: f32,
+    focused_box: u32,
+    keyboard_focus: bool,
+    hover_chain: &std::collections::HashSet<u32>,
+    focus_within_chain: &std::collections::HashSet<u32>,
+    document_url: &str,
+    candidates_buf: &mut Vec<usize>,
+) {
+    if ancestors.is_empty() || !node.is_element() || !crate::types::is_projected_slot_subtree(node)
+    {
+        return;
+    }
+
+    let id = node.attributes.get("id").map(|s| s.as_str());
+    let class_attr = node
+        .attributes
+        .get("class")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let classes: Vec<&str> = class_attr.split_whitespace().collect();
+    stylesheet.candidate_rules(&node.tag, id, &classes, candidates_buf);
+    for (rule_idx, rule) in stylesheet.rules.iter().enumerate() {
+        if rule
+            .selectors
+            .iter()
+            .any(projected_rule_targets_assigned_node)
+            && !candidates_buf.contains(&rule_idx)
+        {
+            candidates_buf.push(rule_idx);
+        }
+    }
+
+    let ctx = MatchContext {
+        focused_box,
+        keyboard_focus,
+        type_child_index: 0,
+        type_sibling_count: 1,
+        html_box: Some(node),
+        hover_chain,
+        focus_within_chain,
+        element_id: node.node_id,
+        scope_root_id: 0,
+        target_id: 0,
+        document_url,
+        prev_siblings: &[],
+        next_siblings: &[],
+        next_sibling_nodes: &[],
+    };
+    let mut matched = Vec::new();
+    for &rule_idx in candidates_buf.iter() {
+        let rule = &stylesheet.rules[rule_idx];
+        if rule.is_slotted || rule.pseudo_element != PseudoElement::None {
+            continue;
+        }
+        if !rule.media_condition.is_empty() && !evaluate_media(&rule.media_condition, vw, vh) {
+            continue;
+        }
+        if !rule.container_condition.is_empty() {
+            continue;
+        }
+        let Some(scope_proximity) = rule_matches_scope(rule, node, &ancestors, 0, 1, &ctx) else {
+            continue;
+        };
+        if rule.selectors.iter().any(|sel| {
+            projected_rule_targets_assigned_node(sel)
+                && sel.matches_with_ancestors_ctx(node, 0, 1, &ancestors, &ctx)
+        }) {
+            matched.push((rule.specificity, rule_idx, scope_proximity));
+        }
+    }
+    candidates_buf.clear();
+    if matched.is_empty() {
+        return;
+    }
+
+    matched.sort_by(|&a, &b| normal_cascade_cmp(&stylesheet.rules, a, b));
+    let mut style = (*node.style).clone();
+    let mut local_vars = stylesheet.variables.clone();
+    local_vars.extend(style.custom_props.clone());
+    let has_vars = !local_vars.is_empty();
+    let mut current_layer: Option<(bool, u32)> = None;
+    let mut layer_start_style = style.clone();
+    for &(sp, ri, _) in &matched {
+        let rule = &stylesheet.rules[ri];
+        let layer_key = (is_author_origin(sp), rule.layer_rank);
+        if current_layer != Some(layer_key) {
+            current_layer = Some(layer_key);
+            layer_start_style = style.clone();
+        }
+        if has_vars && rule.has_var_refs {
+            for (prop, val) in &rule.declarations {
+                if prop.starts_with("--") {
+                    continue;
+                }
+                let resolved =
+                    resolve_var_references_for_color_scheme(val, &local_vars, &style.color_scheme);
+                if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var("))
+                {
+                    continue;
+                }
+                let id = properties::resolve(prop);
+                apply_resolved_property_with_cascade_context(
+                    &mut style,
+                    prop,
+                    id,
+                    &resolved,
+                    parent_style,
+                    None,
+                    &layer_start_style,
+                );
+            }
+        } else {
+            for &(id, ref val) in &rule.compiled_decls {
+                apply_css_value_with_cascade_context(
+                    &mut style,
+                    id,
+                    val,
+                    &local_vars,
+                    parent_style,
+                    None,
+                    &layer_start_style,
+                );
+            }
+        }
+    }
+
+    let mut important = matched;
+    important.sort_by(|&a, &b| important_cascade_cmp(&stylesheet.rules, a, b));
+    for author_pass in [true, false] {
+        let mut current_layer: Option<(bool, u32)> = None;
+        let mut layer_start_style = style.clone();
+        for &(sp, ri, _) in &important {
+            if is_author_origin(sp) != author_pass {
+                continue;
+            }
+            let rule = &stylesheet.rules[ri];
+            let layer_key = (is_author_origin(sp), rule.layer_rank);
+            if current_layer != Some(layer_key) {
+                current_layer = Some(layer_key);
+                layer_start_style = style.clone();
+            }
+            if has_vars && rule.has_var_refs {
+                for (prop, val) in &rule.important_declarations {
+                    if prop.starts_with("--") {
+                        continue;
+                    }
+                    let resolved = resolve_var_references_for_color_scheme(
+                        val,
+                        &local_vars,
+                        &style.color_scheme,
+                    );
+                    if val.contains("var(")
+                        && (resolved.trim().is_empty() || resolved.contains("var("))
+                    {
+                        continue;
+                    }
+                    let id = properties::resolve(prop);
+                    apply_resolved_property_with_cascade_context(
+                        &mut style,
+                        prop,
+                        id,
+                        &resolved,
+                        parent_style,
+                        None,
+                        &layer_start_style,
+                    );
+                }
+            } else {
+                for &(id, ref val) in &rule.compiled_important {
+                    apply_css_value_with_cascade_context(
+                        &mut style,
+                        id,
+                        val,
+                        &local_vars,
+                        parent_style,
+                        None,
+                        &layer_start_style,
+                    );
+                }
+            }
+        }
+    }
+
+    let old_display = node.style.display;
+    let new_display = style.display;
+    node.style = std::sync::Arc::new(style);
+    node.layout.layout_dirty = true;
+    if old_display != new_display
+        && matches!(old_display, Display::None) != matches!(new_display, Display::None)
+    {
+        mark_layout_subtree_dirty(node);
+    }
+}
+
+pub(crate) fn apply_slotted_rules_to_projected(
+    node: &mut crate::types::WebCore,
+    slot_node: Option<&crate::types::WebCore>,
+    stylesheet: &Stylesheet,
+    parent_style: Option<&ComputedStyle>,
+    vw: f32,
+    vh: f32,
+    candidates_buf: &mut Vec<usize>,
+) {
+    if !node.is_element() || !crate::types::is_projected_slot_subtree(node) {
+        return;
+    }
+
+    let id = node.attributes.get("id").map(|s| s.as_str());
+    let class_attr = node
+        .attributes
+        .get("class")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let classes: Vec<&str> = class_attr.split_whitespace().collect();
+    stylesheet.candidate_rules(&node.tag, id, &classes, candidates_buf);
+
+    let empty_hover = std::collections::HashSet::new();
+    let empty_focus = std::collections::HashSet::new();
+    let ctx = MatchContext {
+        focused_box: 0,
+        keyboard_focus: false,
+        type_child_index: 0,
+        type_sibling_count: 1,
+        html_box: Some(node),
+        hover_chain: &empty_hover,
+        focus_within_chain: &empty_focus,
+        element_id: node.node_id,
+        scope_root_id: 0,
+        target_id: 0,
+        document_url: "",
+        prev_siblings: &[],
+        next_siblings: &[],
+        next_sibling_nodes: &[],
+    };
+    let mut matched = Vec::new();
+    for &rule_idx in candidates_buf.iter() {
+        let rule = &stylesheet.rules[rule_idx];
+        if !rule.is_slotted {
+            continue;
+        }
+        if let Some(slot_selector) = &rule.slotted_slot_selector {
+            let Some(slot_node) = slot_node else {
+                continue;
+            };
+            let slot_ctx = MatchContext {
+                focused_box: 0,
+                keyboard_focus: false,
+                type_child_index: 0,
+                type_sibling_count: 1,
+                html_box: Some(slot_node),
+                hover_chain: &empty_hover,
+                focus_within_chain: &empty_focus,
+                element_id: slot_node.node_id,
+                scope_root_id: 0,
+                target_id: 0,
+                document_url: "",
+                prev_siblings: &[],
+                next_siblings: &[],
+                next_sibling_nodes: &[],
+            };
+            if !slot_selector.matches_with_ancestors_ctx(slot_node, 0, 1, &[], &slot_ctx) {
+                continue;
+            }
+        }
+        if !rule.media_condition.is_empty() && !evaluate_media(&rule.media_condition, vw, vh) {
+            continue;
+        }
+        if !rule.container_condition.is_empty() {
+            continue;
+        }
+        if rule
+            .selectors
+            .iter()
+            .any(|sel| sel.matches_with_ancestors_ctx(node, 0, 1, &[], &ctx))
+        {
+            matched.push((rule.specificity, rule_idx, None));
+        }
+    }
+    candidates_buf.clear();
+    if matched.is_empty() {
+        return;
+    }
+
+    matched.sort_by(|&a, &b| normal_cascade_cmp(&stylesheet.rules, a, b));
+    let mut style = (*node.style).clone();
+    let local_vars = style.custom_props.clone();
+    let has_vars = !local_vars.is_empty();
+    let mut current_layer: Option<(bool, u32)> = None;
+    let mut layer_start_style = style.clone();
+    for &(sp, ri, _) in &matched {
+        let rule = &stylesheet.rules[ri];
+        let layer_key = (is_author_origin(sp), rule.layer_rank);
+        if current_layer != Some(layer_key) {
+            current_layer = Some(layer_key);
+            layer_start_style = style.clone();
+        }
+        if has_vars && rule.has_var_refs {
+            for (prop, val) in &rule.declarations {
+                if prop.starts_with("--") {
+                    continue;
+                }
+                let resolved =
+                    resolve_var_references_for_color_scheme(val, &local_vars, &style.color_scheme);
+                if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var("))
+                {
+                    continue;
+                }
+                let id = properties::resolve(prop);
+                apply_resolved_property_with_cascade_context(
+                    &mut style,
+                    prop,
+                    id,
+                    &resolved,
+                    parent_style,
+                    None,
+                    &layer_start_style,
+                );
+            }
+        } else {
+            for &(id, ref val) in &rule.compiled_decls {
+                apply_css_value_with_cascade_context(
+                    &mut style,
+                    id,
+                    val,
+                    &local_vars,
+                    parent_style,
+                    None,
+                    &layer_start_style,
+                );
+            }
+        }
+    }
+
+    let mut important = matched;
+    important.sort_by(|&a, &b| important_cascade_cmp(&stylesheet.rules, a, b));
+    for author_pass in [true, false] {
+        let mut current_layer: Option<(bool, u32)> = None;
+        let mut layer_start_style = style.clone();
+        for &(sp, ri, _) in &important {
+            if is_author_origin(sp) != author_pass {
+                continue;
+            }
+            let rule = &stylesheet.rules[ri];
+            let layer_key = (is_author_origin(sp), rule.layer_rank);
+            if current_layer != Some(layer_key) {
+                current_layer = Some(layer_key);
+                layer_start_style = style.clone();
+            }
+            if has_vars && rule.has_var_refs {
+                for (prop, val) in &rule.important_declarations {
+                    if prop.starts_with("--") {
+                        continue;
+                    }
+                    let resolved = resolve_var_references_for_color_scheme(
+                        val,
+                        &local_vars,
+                        &style.color_scheme,
+                    );
+                    if val.contains("var(")
+                        && (resolved.trim().is_empty() || resolved.contains("var("))
+                    {
+                        continue;
+                    }
+                    let id = properties::resolve(prop);
+                    apply_resolved_property_with_cascade_context(
+                        &mut style,
+                        prop,
+                        id,
+                        &resolved,
+                        parent_style,
+                        None,
+                        &layer_start_style,
+                    );
+                }
+            } else {
+                for &(id, ref val) in &rule.compiled_important {
+                    apply_css_value_with_cascade_context(
+                        &mut style,
+                        id,
+                        val,
+                        &local_vars,
+                        parent_style,
+                        None,
+                        &layer_start_style,
+                    );
+                }
+            }
+        }
+    }
+
+    let old_display = node.style.display;
+    let new_display = style.display;
+    node.style = std::sync::Arc::new(style);
+    node.layout.layout_dirty = true;
+    if old_display != new_display
+        && matches!(old_display, Display::None) != matches!(new_display, Display::None)
+    {
+        mark_layout_subtree_dirty(node);
     }
 }
 
@@ -357,9 +884,11 @@ pub fn apply_cascade_vp_hover_target_url(
     target_id: u32,
     document_url: &str,
 ) {
+    let focus_within_chain = crate::css::build_hover_chain(root, focused_box);
     // Use parallel cascade when the stylesheet is large enough to justify the overhead.
     if stylesheet.rules.len() > 1000
         && std::env::var_os("WEBCORE_DISABLE_PARALLEL_CASCADE").is_none()
+        && !tree_has_duplicate_node_ids(root)
     {
         apply_cascade_parallel(
             root,
@@ -371,6 +900,7 @@ pub fn apply_cascade_vp_hover_target_url(
             focused_box,
             keyboard_focus,
             hover_chain,
+            &focus_within_chain,
             target_id,
             document_url,
         );
@@ -403,6 +933,7 @@ pub fn apply_cascade_vp_hover_target_url(
         &mut candidates_buf,
         &mut counters,
         hover_chain,
+        &focus_within_chain,
         &[],
         &[],
         &[],
@@ -881,7 +1412,7 @@ pub(crate) fn build_pseudo_style_shared(
             normal_layer_start_style = ps.clone();
         }
         for (prop, val) in &rule.declarations {
-            let resolved = resolve_var_references(val, vars);
+            let resolved = resolve_var_references_for_color_scheme(val, vars, &ps.color_scheme);
             if prop == "content" {
                 content_value = pseudo_content_value(&resolved);
             } else {
@@ -916,7 +1447,7 @@ pub(crate) fn build_pseudo_style_shared(
                 important_layer_start_style = ps.clone();
             }
             for (prop, val) in &rule.important_declarations {
-                let resolved = resolve_var_references(val, vars);
+                let resolved = resolve_var_references_for_color_scheme(val, vars, &ps.color_scheme);
                 if prop == "content" {
                     content_value = pseudo_content_value(&resolved);
                 } else {
@@ -945,6 +1476,48 @@ pub(crate) fn build_pseudo_style_shared(
 /// debug build does not reuse stack slots between sibling scopes. Only a
 /// real function boundary pops them (`arenaplan.md` item 3).
 pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
+    fn mark_pseudo_layout_dirty(node: &mut crate::types::WebCore) {
+        node.layout.layout_dirty = true;
+        node.layout.intrinsic_dirty = true;
+        node.layout.paint_dirty = true;
+        node.has_dirty_layout_descendant = true;
+        node.layout.cached_intrinsic_w.set(f32::NAN);
+    }
+
+    fn preserve_loaded_pseudo_resources(
+        pseudo_box: &mut crate::types::WebCore,
+        existing: Option<&crate::types::WebCore>,
+    ) {
+        let Some(existing) = existing else {
+            return;
+        };
+        fn background_layer_urls_match(
+            a: &[crate::types::BackgroundLayer],
+            b: &[crate::types::BackgroundLayer],
+        ) -> bool {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|(left, right)| left.image_url == right.image_url)
+        }
+        if pseudo_box.style.background_image_url == existing.style.background_image_url {
+            pseudo_box.bg_image_data = existing.bg_image_data.clone();
+            pseudo_box.bg_image_width = existing.bg_image_width;
+            pseudo_box.bg_image_height = existing.bg_image_height;
+        }
+        if background_layer_urls_match(
+            &pseudo_box.style.rare().additional_background_layers,
+            &existing.style.rare().additional_background_layers,
+        ) {
+            pseudo_box.additional_bg_images = existing.additional_bg_images.clone();
+        }
+        if pseudo_box.style.rare().mask_image_url == existing.style.rare().mask_image_url {
+            pseudo_box.mask_image_data = existing.mask_image_data.clone();
+            pseudo_box.mask_image_width = existing.mask_image_width;
+            pseudo_box.mask_image_height = existing.mask_image_height;
+        }
+    }
+
     let is_grid_or_flex = matches!(
         root.style.display,
         Display::Grid | Display::InlineGrid | Display::Flex | Display::InlineFlex
@@ -964,7 +1537,11 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
     let before_generated = root.style.before_style.is_some();
     if before_generated && (is_grid_or_flex || before_is_positioned || before_is_block) {
         let existing = root.children.iter().position(|c| c.tag == "::before");
+        let existing_node = existing.and_then(|idx| root.children.get(idx));
+        let existing_node_id = existing_node.map(|node| node.node_id).filter(|id| *id != 0);
         let mut pseudo_box = crate::types::WebCore::new("::before");
+        pseudo_box.node_id =
+            existing_node_id.unwrap_or_else(crate::dom::arena::next_shadow_node_id);
         pseudo_box.text = root.style.before_content.clone();
         pseudo_box.tag = "::before".to_string();
         if let Some(ref ps) = root.style.before_style {
@@ -979,15 +1556,19 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         {
             std::sync::Arc::make_mut(&mut pseudo_box.style).display = Display::Block;
         }
+        preserve_loaded_pseudo_resources(&mut pseudo_box, existing_node);
+        mark_pseudo_layout_dirty(&mut pseudo_box);
         if let Some(idx) = existing {
             root.children[idx] = pseudo_box;
         } else {
             root.children.insert(0, pseudo_box);
         }
+        mark_pseudo_layout_dirty(root);
         std::sync::Arc::make_mut(&mut root.style).before_content = String::new();
     } else {
         if let Some(idx) = root.children.iter().position(|c| c.tag == "::before") {
             root.children.remove(idx);
+            mark_pseudo_layout_dirty(root);
         }
     }
     let after_is_positioned = root.style.after_style.as_ref().map_or(false, |ps| {
@@ -1001,7 +1582,11 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
     let after_generated = root.style.after_style.is_some();
     if after_generated && (is_grid_or_flex || after_is_positioned || after_is_block) {
         let existing = root.children.iter().position(|c| c.tag == "::after");
+        let existing_node = existing.and_then(|idx| root.children.get(idx));
+        let existing_node_id = existing_node.map(|node| node.node_id).filter(|id| *id != 0);
         let mut pseudo_box = crate::types::WebCore::new("::after");
+        pseudo_box.node_id =
+            existing_node_id.unwrap_or_else(crate::dom::arena::next_shadow_node_id);
         pseudo_box.text = root.style.after_content.clone();
         pseudo_box.tag = "::after".to_string();
         if let Some(ref ps) = root.style.after_style {
@@ -1016,15 +1601,19 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         {
             std::sync::Arc::make_mut(&mut pseudo_box.style).display = Display::Block;
         }
+        preserve_loaded_pseudo_resources(&mut pseudo_box, existing_node);
+        mark_pseudo_layout_dirty(&mut pseudo_box);
         if let Some(idx) = existing {
             root.children[idx] = pseudo_box;
         } else {
             root.children.push(pseudo_box);
         }
+        mark_pseudo_layout_dirty(root);
         std::sync::Arc::make_mut(&mut root.style).after_content = String::new();
     } else {
         if let Some(idx) = root.children.iter().position(|c| c.tag == "::after") {
             root.children.remove(idx);
+            mark_pseudo_layout_dirty(root);
         }
     }
 }
@@ -1065,6 +1654,11 @@ pub(crate) struct MatchSets {
     pub marker_matched: Vec<(u32, usize, Option<u32>)>,
     pub backdrop_matched: Vec<(u32, usize, Option<u32>)>,
     pub file_selector_button_matched: Vec<(u32, usize, Option<u32>)>,
+    pub details_content_matched: Vec<(u32, usize, Option<u32>)>,
+    pub spelling_error_matched: Vec<(u32, usize, Option<u32>)>,
+    pub grammar_error_matched: Vec<(u32, usize, Option<u32>)>,
+    pub first_line_matched: Vec<(u32, usize, Option<u32>)>,
+    pub first_letter_matched: Vec<(u32, usize, Option<u32>)>,
 }
 
 /// Precomputed match results, keyed by `node_id`.
@@ -1118,6 +1712,7 @@ pub fn debug_match_report_for_node(
         focused_box: u32,
         keyboard_focus: bool,
         hover_chain: &std::collections::HashSet<u32>,
+        focus_within_chain: &std::collections::HashSet<u32>,
         fragment_target_id: u32,
         document_url: &str,
         ancestors: &mut Vec<AncestorInfo>,
@@ -1153,6 +1748,7 @@ pub fn debug_match_report_for_node(
                 focused_box,
                 keyboard_focus,
                 hover_chain,
+                focus_within_chain,
                 fragment_target_id,
                 document_url,
                 prev_siblings,
@@ -1192,9 +1788,9 @@ pub fn debug_match_report_for_node(
             node_id: node.node_id,
         });
 
-        let n_children = node.children.len();
-        let child_tags: Vec<String> = node
-            .children
+        let children = node.effective_children();
+        let n_children = children.len();
+        let child_tags: Vec<String> = children
             .iter()
             .map(|c| c.tag.to_ascii_lowercase())
             .collect();
@@ -1212,10 +1808,9 @@ pub fn debug_match_report_for_node(
             .iter()
             .map(|tag| *type_running.get(tag.as_str()).unwrap_or(&0))
             .collect();
-        let n_elem_children = node.children.iter().filter(|c| c.is_element()).count();
+        let n_elem_children = children.iter().filter(|c| c.is_element()).count();
         let mut elem_pos = 0usize;
-        let elem_indices: Vec<usize> = node
-            .children
+        let elem_indices: Vec<usize> = children
             .iter()
             .map(|c| {
                 if !c.is_element() {
@@ -1227,14 +1822,13 @@ pub fn debug_match_report_for_node(
                 }
             })
             .collect();
-        let child_siblings = node
-            .children
+        let child_siblings = children
             .iter()
             .filter(|c| c.is_element())
             .map(SiblingInfo::from_node)
             .collect::<Vec<_>>();
-        let child_nodes = node.children.iter().collect::<Vec<_>>();
-        for (i, child) in node.children.iter().enumerate() {
+        let child_nodes = children.iter().collect::<Vec<_>>();
+        for (i, child) in children.iter().enumerate() {
             let (ci, ns) = if !child.is_element() {
                 (i, n_children)
             } else {
@@ -1264,6 +1858,7 @@ pub fn debug_match_report_for_node(
                 focused_box,
                 keyboard_focus,
                 hover_chain,
+                focus_within_chain,
                 fragment_target_id,
                 document_url,
                 ancestors,
@@ -1284,6 +1879,7 @@ pub fn debug_match_report_for_node(
     }
 
     let mut ancestors = Vec::new();
+    let focus_within_chain = crate::css::build_hover_chain(root, focused_box);
     walk(
         root,
         stylesheet,
@@ -1293,6 +1889,7 @@ pub fn debug_match_report_for_node(
         focused_box,
         keyboard_focus,
         hover_chain,
+        &focus_within_chain,
         fragment_target_id,
         document_url,
         &mut ancestors,
@@ -1323,6 +1920,7 @@ pub(crate) fn match_rules(
     focused_box: u32,
     keyboard_focus: bool,
     hover_chain: &std::collections::HashSet<u32>,
+    focus_within_chain: &std::collections::HashSet<u32>,
     target_id: u32,
     document_url: &str,
     prev_siblings: &[SiblingInfo],
@@ -1341,6 +1939,7 @@ pub(crate) fn match_rules(
         type_sibling_count,
         html_box: Some(node),
         hover_chain,
+        focus_within_chain,
         element_id: node.node_id,
         scope_root_id: 0,
         target_id,
@@ -1466,6 +2065,30 @@ pub(crate) fn match_rules(
                             .push((rule.specificity, rule_idx, scope_proximity))
                     }
                     PseudoElement::FileSelectorButton => sets.file_selector_button_matched.push((
+                        rule.specificity,
+                        rule_idx,
+                        scope_proximity,
+                    )),
+                    PseudoElement::DetailsContent => sets.details_content_matched.push((
+                        rule.specificity,
+                        rule_idx,
+                        scope_proximity,
+                    )),
+                    PseudoElement::SpellingError => sets.spelling_error_matched.push((
+                        rule.specificity,
+                        rule_idx,
+                        scope_proximity,
+                    )),
+                    PseudoElement::GrammarError => sets.grammar_error_matched.push((
+                        rule.specificity,
+                        rule_idx,
+                        scope_proximity,
+                    )),
+                    PseudoElement::FirstLine => {
+                        sets.first_line_matched
+                            .push((rule.specificity, rule_idx, scope_proximity))
+                    }
+                    PseudoElement::FirstLetter => sets.first_letter_matched.push((
                         rule.specificity,
                         rule_idx,
                         scope_proximity,
@@ -1651,6 +2274,7 @@ fn selector_matches_ancestor(
         type_sibling_count: ancestor.type_sibling_count,
         html_box: None,
         hover_chain: match_ctx.hover_chain,
+        focus_within_chain: match_ctx.focus_within_chain,
         element_id: ancestor.node_id,
         scope_root_id: match_ctx.scope_root_id,
         target_id: match_ctx.target_id,
@@ -1668,6 +2292,115 @@ fn selector_matches_ancestor(
         ancestors_above,
         &ancestor_ctx,
     )
+}
+
+fn layout_affecting_style_changed(old: &ComputedStyle, new: &ComputedStyle) -> bool {
+    old.display != new.display
+        || old.position != new.position
+        || old.float != new.float
+        || old.clear != new.clear
+        || old.box_sizing != new.box_sizing
+        || old.width != new.width
+        || old.height != new.height
+        || old.min_width != new.min_width
+        || old.max_width != new.max_width
+        || old.min_height != new.min_height
+        || old.max_height != new.max_height
+        || old.margin_top != new.margin_top
+        || old.margin_right != new.margin_right
+        || old.margin_bottom != new.margin_bottom
+        || old.margin_left != new.margin_left
+        || old.padding_top != new.padding_top
+        || old.padding_right != new.padding_right
+        || old.padding_bottom != new.padding_bottom
+        || old.padding_left != new.padding_left
+        || old.border_top_width != new.border_top_width
+        || old.border_right_width != new.border_right_width
+        || old.border_bottom_width != new.border_bottom_width
+        || old.border_left_width != new.border_left_width
+        || old.border_top_style != new.border_top_style
+        || old.border_right_style != new.border_right_style
+        || old.border_bottom_style != new.border_bottom_style
+        || old.border_left_style != new.border_left_style
+        || old.top != new.top
+        || old.right != new.right
+        || old.bottom != new.bottom
+        || old.left != new.left
+        || old.font_family != new.font_family
+        || old.font_size != new.font_size
+        || old.font_weight != new.font_weight
+        || old.font_style != new.font_style
+        || old.line_height != new.line_height
+        || old.letter_spacing != new.letter_spacing
+        || old.word_spacing != new.word_spacing
+        || old.text_align != new.text_align
+        || old.vertical_align != new.vertical_align
+        || old.text_indent != new.text_indent
+        || old.white_space != new.white_space
+        || old.text_transform != new.text_transform
+        || old.word_break != new.word_break
+        || old.overflow_wrap != new.overflow_wrap
+        || old.direction != new.direction
+        || old.flex_direction != new.flex_direction
+        || old.flex_wrap != new.flex_wrap
+        || old.justify_content != new.justify_content
+        || old.align_items != new.align_items
+        || old.align_self != new.align_self
+        || old.align_content != new.align_content
+        || old.flex_grow != new.flex_grow
+        || old.flex_shrink != new.flex_shrink
+        || old.flex_basis != new.flex_basis
+        || old.order != new.order
+        || old.gap != new.gap
+        || old.row_gap != new.row_gap
+        || old.column_gap != new.column_gap
+        || old.grid_column_start != new.grid_column_start
+        || old.grid_column_end != new.grid_column_end
+        || old.grid_row_start != new.grid_row_start
+        || old.grid_row_end != new.grid_row_end
+        || old.justify_items != new.justify_items
+        || old.justify_self != new.justify_self
+        || old.visibility != new.visibility
+}
+
+fn mark_layout_subtree_dirty(node: &mut crate::types::WebCore) {
+    node.layout.layout_dirty = true;
+    node.layout.intrinsic_dirty = true;
+    node.layout.line_cache.clear();
+    node.layout.cached_intrinsic_w.set(f32::NAN);
+    node.has_dirty_layout_descendant = true;
+    for child in &mut node.children {
+        mark_layout_subtree_dirty(child);
+    }
+    if let Some(shadow) = node.shadow_root.as_mut() {
+        for child in &mut shadow.children {
+            mark_layout_subtree_dirty(child);
+        }
+    }
+}
+
+fn tree_has_duplicate_node_ids(root: &crate::types::WebCore) -> bool {
+    fn walk(node: &crate::types::WebCore, seen: &mut HashSet<u32>) -> bool {
+        if node.node_id != 0 && !seen.insert(node.node_id) {
+            return true;
+        }
+        for child in &node.children {
+            if walk(child, seen) {
+                return true;
+            }
+        }
+        if let Some(shadow) = node.shadow_root.as_ref() {
+            for child in &shadow.children {
+                if walk(child, seen) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    let mut seen = HashSet::new();
+    walk(root, &mut seen)
 }
 
 pub(crate) fn apply_cascade_inner(
@@ -1692,6 +2425,7 @@ pub(crate) fn apply_cascade_inner(
     candidates_buf: &mut Vec<usize>,
     counters: &mut HashMap<String, Vec<i32>>,
     hover_chain: &std::collections::HashSet<u32>,
+    focus_within_chain: &std::collections::HashSet<u32>,
     prev_siblings: &[SiblingInfo],
     next_siblings: &[SiblingInfo],
     next_sibling_nodes: &[&crate::types::WebCore],
@@ -1770,6 +2504,7 @@ pub(crate) fn apply_cascade_inner(
             focused_box,
             keyboard_focus,
             hover_chain,
+            focus_within_chain,
             target_id,
             document_url,
             prev_siblings,
@@ -1790,6 +2525,11 @@ pub(crate) fn apply_cascade_inner(
         mut marker_matched,
         mut backdrop_matched,
         mut file_selector_button_matched,
+        mut details_content_matched,
+        mut spelling_error_matched,
+        mut grammar_error_matched,
+        mut first_line_matched,
+        mut first_letter_matched,
     } = sets;
     matched.sort_by(|&a, &b| normal_cascade_cmp(&stylesheet.rules, a, b));
     // Build variable scope: inherited from parent + any --custom-properties from matched rules.
@@ -1853,6 +2593,9 @@ pub(crate) fn apply_cascade_inner(
     let mut current_normal_layer: Option<(bool, u32)> = None;
     let mut normal_layer_start_style = style.clone();
     let mut hints_applied = false;
+    let normal_color_scheme =
+        prescan_color_scheme(&style, &stylesheet.rules, &matched, local_vars, false, None);
+    style.color_scheme = normal_color_scheme;
     for &(sp, ri, _) in &matched {
         if is_author_origin(sp) && pre_author_normal_style.is_none() {
             apply_presentational_hints(&mut style, root, ancestors);
@@ -1874,12 +2617,21 @@ pub(crate) fn apply_cascade_inner(
         // Fast path: use pre-compiled declarations (PropertyId dispatch, no string matching).
         // Only fall back to raw declarations when var() resolution is needed.
         if has_vars && rule.has_var_refs {
+            if let Some(val) = rule.declarations.get("color-scheme") {
+                let resolved =
+                    resolve_var_references_for_color_scheme(val, local_vars, &style.color_scheme);
+                if !resolved.trim().is_empty() && !resolved.contains("var(") {
+                    clear_inherit_tracking_for_property(&mut inherit_props, "color-scheme");
+                    apply_property(&mut style, "color-scheme", &resolved);
+                }
+            }
             // Slow path: var() references need string-based resolution
             for (prop, val) in &rule.declarations {
                 if prop.starts_with("--") {
                     continue;
                 }
-                let resolved = resolve_var_references(val, &local_vars);
+                let resolved =
+                    resolve_var_references_for_color_scheme(val, local_vars, &style.color_scheme);
                 if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var("))
                 {
                     continue;
@@ -1896,13 +2648,34 @@ pub(crate) fn apply_cascade_inner(
                         apply_property(&mut style, prop, "initial");
                     }
                 } else {
+                    if prop == "color-scheme" {
+                        continue;
+                    }
                     clear_inherit_tracking_for_property(&mut inherit_props, prop);
                     apply_property(&mut style, prop, &resolved);
                 }
             }
         } else {
             // Fast path: no var() — use compiled declarations directly
+            if let Some(&(id, ref val)) = rule
+                .compiled_decls
+                .iter()
+                .find(|(id, _)| *id == properties::PropertyId::ColorScheme)
+            {
+                apply_css_value_with_cascade_context(
+                    &mut style,
+                    id,
+                    val,
+                    local_vars,
+                    parent_style,
+                    revert_base,
+                    revert_layer_base,
+                );
+            }
             for &(id, ref val) in &rule.compiled_decls {
+                if id == properties::PropertyId::ColorScheme {
+                    continue;
+                }
                 if matches!(val, crate::types::CssValue::Inherit) {
                     let name = property_defs::get(id).name;
                     inherit_props.insert(name.to_string());
@@ -1921,7 +2694,11 @@ pub(crate) fn apply_cascade_inner(
                     // (the rule has var refs but no variables are defined in scope).
                     // Resolve var() with empty vars — triggers fallback values.
                     if s.contains("var(") {
-                        let resolved = resolve_var_references(s, &local_vars);
+                        let resolved = resolve_var_references_for_color_scheme(
+                            s,
+                            local_vars,
+                            &style.color_scheme,
+                        );
                         if !resolved.trim().is_empty() && !resolved.contains("var(") {
                             let trimmed = resolved.trim();
                             let name = property_defs::get(id).name;
@@ -1988,6 +2765,15 @@ pub(crate) fn apply_cascade_inner(
     let mut important_matched = matched.clone();
     important_matched.sort_by(|&a, &b| important_cascade_cmp(&stylesheet.rules, a, b));
     for author_pass in [true, false] {
+        let important_color_scheme = prescan_color_scheme(
+            &style,
+            &stylesheet.rules,
+            &important_matched,
+            local_vars,
+            true,
+            Some(author_pass),
+        );
+        style.color_scheme = important_color_scheme;
         let mut current_important_layer: Option<(bool, u32)> = None;
         let mut important_layer_start_style = style.clone();
         for &(sp, ri, _) in &important_matched {
@@ -2006,14 +2792,39 @@ pub(crate) fn apply_cascade_inner(
                 None
             };
             if has_vars && rule.has_var_refs {
+                if let Some(val) = rule.important_declarations.get("color-scheme") {
+                    let resolved = resolve_var_references_for_color_scheme(
+                        val,
+                        local_vars,
+                        &style.color_scheme,
+                    );
+                    if !resolved.trim().is_empty() && !resolved.contains("var(") {
+                        apply_resolved_property_with_cascade_context(
+                            &mut style,
+                            "color-scheme",
+                            properties::PropertyId::ColorScheme,
+                            &resolved,
+                            parent_style,
+                            revert_base,
+                            &important_layer_start_style,
+                        );
+                    }
+                }
                 for (prop, val) in &rule.important_declarations {
                     if prop.starts_with("--") {
                         continue;
                     }
-                    let resolved = resolve_var_references(val, &local_vars);
+                    let resolved = resolve_var_references_for_color_scheme(
+                        val,
+                        local_vars,
+                        &style.color_scheme,
+                    );
                     if val.contains("var(")
                         && (resolved.trim().is_empty() || resolved.contains("var("))
                     {
+                        continue;
+                    }
+                    if prop == "color-scheme" {
                         continue;
                     }
                     let id = properties::resolve(prop);
@@ -2111,14 +2922,16 @@ pub(crate) fn apply_cascade_inner(
             }
             // Inline hover-* properties: hover-background-color → background-color on hover
             if let Some(real_prop) = prop.strip_prefix("hover-") {
-                let resolved = resolve_var_references(val, local_vars);
+                let resolved =
+                    resolve_var_references_for_color_scheme(val, local_vars, &style.color_scheme);
                 if val.contains("var(") && resolved.contains("var(") {
                     continue;
                 }
                 inline_hover_props.push((real_prop.to_string(), resolved));
                 continue;
             }
-            let resolved = resolve_var_references(val, local_vars);
+            let resolved =
+                resolve_var_references_for_color_scheme(val, local_vars, &style.color_scheme);
             if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var(")) {
                 continue;
             } else if resolved.trim() == "inherit" {
@@ -2186,7 +2999,8 @@ pub(crate) fn apply_cascade_inner(
     }
     let inline_important_start_style = style.clone();
     for (prop, val) in &inline_important {
-        let resolved = resolve_var_references(val, &local_vars);
+        let resolved =
+            resolve_var_references_for_color_scheme(val, local_vars, &style.color_scheme);
         if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var(")) {
             continue;
         }
@@ -2284,6 +3098,8 @@ pub(crate) fn apply_cascade_inner(
     // footnote says the serializer it counted with "emits a subset of
     // properties, so styles differing in an unserialized property collide".
     // Compared losslessly the styles on a real page are nearly all distinct.
+    let old_display = root.style.display;
+    let new_display = style.display;
     root.style = std::sync::Arc::new(style);
     // Store matched CSS rules for inspector (only when enabled).
     if stylesheet.inspect_mode {
@@ -2312,6 +3128,11 @@ pub(crate) fn apply_cascade_inner(
     // re-layout this element.  Cleared by the individual layout algorithms after
     // they have computed the final geometry.
     root.layout.layout_dirty = true;
+    if old_display != new_display
+        && matches!(old_display, Display::None) != matches!(new_display, Display::None)
+    {
+        mark_layout_subtree_dirty(root);
+    }
 
     // <form> inside table elements: browsers treat it as transparent (display:contents)
     // so it doesn't break table row grouping. Check if any ancestor is a table element.
@@ -2512,6 +3333,51 @@ pub(crate) fn apply_cascade_inner(
     ) {
         std::sync::Arc::make_mut(&mut root.style).file_selector_button_style = Some(ps);
     }
+    if let Some((_, ps)) = build_pseudo_style_shared(
+        &mut details_content_matched,
+        &root.style,
+        &local_vars,
+        &root.attributes,
+        &stylesheet.rules,
+    ) {
+        std::sync::Arc::make_mut(&mut root.style).details_content_style = Some(ps);
+    }
+    if let Some((_, ps)) = build_pseudo_style_shared(
+        &mut spelling_error_matched,
+        &root.style,
+        &local_vars,
+        &root.attributes,
+        &stylesheet.rules,
+    ) {
+        std::sync::Arc::make_mut(&mut root.style).spelling_error_style = Some(ps);
+    }
+    if let Some((_, ps)) = build_pseudo_style_shared(
+        &mut grammar_error_matched,
+        &root.style,
+        &local_vars,
+        &root.attributes,
+        &stylesheet.rules,
+    ) {
+        std::sync::Arc::make_mut(&mut root.style).grammar_error_style = Some(ps);
+    }
+    if let Some((_, ps)) = build_pseudo_style_shared(
+        &mut first_line_matched,
+        &root.style,
+        &local_vars,
+        &root.attributes,
+        &stylesheet.rules,
+    ) {
+        std::sync::Arc::make_mut(&mut root.style).first_line_style = Some(ps);
+    }
+    if let Some((_, ps)) = build_pseudo_style_shared(
+        &mut first_letter_matched,
+        &root.style,
+        &local_vars,
+        &root.attributes,
+        &stylesheet.rules,
+    ) {
+        std::sync::Arc::make_mut(&mut root.style).first_letter_style = Some(ps);
+    }
 
     {
         let authored_content = root.style.rare().content.clone();
@@ -2557,8 +3423,10 @@ pub(crate) fn apply_cascade_inner(
         candidates_buf: &mut Vec<usize>,
         counters: &mut HashMap<String, Vec<i32>>,
         hover_chain: &std::collections::HashSet<u32>,
+        focus_within_chain: &std::collections::HashSet<u32>,
         share_cache: &mut ShareCache,
         precomputed: Option<&MatchMap>,
+        projected_document_stylesheet: Option<&Stylesheet>,
     ) {
         let n_children = children.len();
         if n_children == 0 {
@@ -2622,6 +3490,12 @@ pub(crate) fn apply_cascade_inner(
             let (_before, rest) = children.split_at_mut(i);
             let (child, after) = rest.split_first_mut().unwrap();
             let after_nodes: Vec<&crate::types::WebCore> = after.iter().collect();
+            let is_projected_child = crate::types::is_projected_slot_subtree(child);
+            let cascade_stylesheet = if is_projected_child {
+                projected_document_stylesheet.unwrap_or(stylesheet)
+            } else {
+                stylesheet
+            };
             if matches!(child.tag.as_str(), "::before" | "::after") {
                 if matches!(
                     parent_style.display,
@@ -2681,13 +3555,15 @@ pub(crate) fn apply_cascade_inner(
                 .map(|s| s.as_str())
                 .unwrap_or("");
             let classes: Vec<&str> = class_attr.split_whitespace().collect();
-            stylesheet.candidate_rules(&child.tag, id, &classes, candidates_buf);
-            let child_has_sibling_sensitive_candidates = stylesheet.has_sibling_sensitive_rules
-                && stylesheet.candidate_rules_are_sibling_sensitive(candidates_buf);
+            cascade_stylesheet.candidate_rules(&child.tag, id, &classes, candidates_buf);
+            let child_has_sibling_sensitive_candidates = cascade_stylesheet
+                .has_sibling_sensitive_rules
+                && cascade_stylesheet.candidate_rules_are_sibling_sensitive(candidates_buf);
             let child_has_context_sensitive_candidates =
-                stylesheet.candidate_rules_need_selector_context(candidates_buf);
+                cascade_stylesheet.candidate_rules_need_selector_context(candidates_buf);
             let can_share = child.is_element()
                 && child.tag != "::before" && child.tag != "::after"
+                && !is_projected_child
                 && parent_node_id != 0
                 && !child.attributes.contains_key("id")
                 && !child.attributes.contains_key("style")
@@ -2711,14 +3587,27 @@ pub(crate) fn apply_cascade_inner(
                 if let Some(cached) = share_cache.get(&share_key) {
                     // ⛔ THE point of item 1: a shared style is a refcount
                     // bump, not a 2.3 KB memcpy. `cached` is already an `Arc`.
+                    let old_display = child.style.display;
+                    let new_display = cached.display;
+                    if layout_affecting_style_changed(&child.style, cached) {
+                        child.layout.layout_dirty = true;
+                        child.layout.intrinsic_dirty = true;
+                        child.layout.line_cache.clear();
+                    }
                     child.style = cached.clone();
+                    if old_display != new_display
+                        && matches!(old_display, Display::None)
+                            != matches!(new_display, Display::None)
+                    {
+                        mark_layout_subtree_dirty(child);
+                    }
                     continue;
                 }
             }
 
             apply_cascade_inner(
                 child,
-                stylesheet,
+                cascade_stylesheet,
                 Some(parent_style),
                 root_font_px,
                 ancestors,
@@ -2736,17 +3625,47 @@ pub(crate) fn apply_cascade_inner(
                 candidates_buf,
                 counters,
                 hover_chain,
+                focus_within_chain,
                 prev_for_child,
                 next_for_child,
                 &after_nodes,
                 share_cache,
-                precomputed,
+                if is_projected_child {
+                    None
+                } else {
+                    precomputed
+                },
             );
             if matches!(
                 parent_style.display,
                 Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid
             ) {
                 blockify_flex_or_grid_item(std::sync::Arc::make_mut(&mut child.style));
+            }
+            if is_projected_child {
+                apply_host_projected_rules_with_ancestors(
+                    child,
+                    ancestors,
+                    stylesheet,
+                    Some(parent_style),
+                    vw,
+                    vh,
+                    focused_box,
+                    keyboard_focus,
+                    hover_chain,
+                    focus_within_chain,
+                    document_url,
+                    candidates_buf,
+                );
+                apply_slotted_rules_to_projected(
+                    child,
+                    None,
+                    stylesheet,
+                    Some(parent_style),
+                    vw,
+                    vh,
+                    candidates_buf,
+                );
             }
             // Cache style for sharing with future siblings
             if can_share && !share_cache.contains_key(&share_key) {
@@ -2755,48 +3674,19 @@ pub(crate) fn apply_cascade_inner(
         }
     }
 
-    // Shadow DOM: cascade shadow children with the shadow's scoped stylesheet,
-    // and also cascade light DOM children with the document stylesheet.
+    // Shadow DOM: cascade light DOM children with the document stylesheet, then
+    // cascade shadow children with the shadow's scoped stylesheet.
+    //
+    // Slot projection clones light DOM children into shadow `<slot>` nodes
+    // before layout. Those projected nodes must carry their document-cascaded
+    // styles; otherwise slotted dropdown/menu content has matched author rules
+    // in the light tree but zero/default boxes in the composed tree.
     // CSS custom properties cross the shadow boundary via inherited_vars.
     // ⛔ The parent style for the children comes from the ARC now, not from a
     // 2.3 KB local held alive across the recursion. This is the frame shrink:
     // what crosses the recursive call is a pointer.
     let parent_for_children = root.style.clone();
     if root.shadow_root.is_some() {
-        // Take shadow root temporarily to satisfy borrow checker
-        let mut sr = root.shadow_root.take().unwrap();
-        sr.stylesheet.rebuild_index();
-        // `:host` — the shadow stylesheet styling its own host. The matcher
-        // cannot answer it (it has no idea whose shadow tree a rule came from),
-        // so it is applied HERE, where the host and its shadow stylesheet are
-        // both in hand. `:host` rules were returning false unconditionally,
-        // which made the single most common shadow-CSS rule inert.
-        apply_host_rules(root, &sr.stylesheet, &local_vars, ancestors);
-        // ⛔ `None`, not the map: pass 1 walks the LIGHT tree only, and the map
-        // is keyed globally by `node_id`. A shadow child that happened to carry
-        // an id from the light pass would be handed rules matched against the
-        // DOCUMENT sheet instead of its own scoped one.
-        cascade_children(
-            &mut sr.children,
-            &sr.stylesheet,
-            &parent_for_children,
-            root_font_px,
-            ancestors,
-            vw,
-            vh,
-            focused_box,
-            keyboard_focus,
-            target_id,
-            document_url,
-            &local_vars,
-            candidates_buf,
-            counters,
-            hover_chain,
-            share_cache,
-            None,
-        );
-        root.shadow_root = Some(sr);
-        // Also cascade light DOM children (they need document styles for ::slotted)
         cascade_children(
             &mut root.children,
             stylesheet,
@@ -2813,9 +3703,49 @@ pub(crate) fn apply_cascade_inner(
             candidates_buf,
             counters,
             hover_chain,
+            focus_within_chain,
             share_cache,
             precomputed,
+            None,
         );
+        // Take shadow root temporarily to satisfy borrow checker
+        let mut sr = root.shadow_root.take().unwrap();
+        sr.stylesheet.inspect_mode = stylesheet.inspect_mode;
+        sr.stylesheet.rebuild_index();
+        // `:host` — the shadow stylesheet styling its own host. The matcher
+        // cannot answer it (it has no idea whose shadow tree a rule came from),
+        // so it is applied HERE, where the host and its shadow stylesheet are
+        // both in hand. `:host` rules were returning false unconditionally,
+        // which made the single most common shadow-CSS rule inert.
+        apply_host_rules(root, &sr.stylesheet, &local_vars, ancestors);
+        // ⛔ `None`, not the map: pass 1 walks the LIGHT tree only, and the map
+        // is keyed globally by `node_id`. A shadow child that happened to carry
+        // an id from the light pass would be handed rules matched against the
+        // DOCUMENT sheet instead of its own scoped one.
+        let mut shadow_ancestors = ancestors.clone();
+        shadow_ancestors.push(projected_ancestor_info(root));
+        cascade_children(
+            &mut sr.children,
+            &sr.stylesheet,
+            &parent_for_children,
+            root_font_px,
+            &mut shadow_ancestors,
+            vw,
+            vh,
+            focused_box,
+            keyboard_focus,
+            target_id,
+            document_url,
+            &local_vars,
+            candidates_buf,
+            counters,
+            hover_chain,
+            focus_within_chain,
+            share_cache,
+            None,
+            Some(stylesheet),
+        );
+        root.shadow_root = Some(sr);
     } else {
         cascade_children(
             &mut root.children,
@@ -2833,8 +3763,10 @@ pub(crate) fn apply_cascade_inner(
             candidates_buf,
             counters,
             hover_chain,
+            focus_within_chain,
             share_cache,
             precomputed,
+            None,
         );
     }
 

@@ -186,7 +186,7 @@ input[type=hidden i] { display: none !important; }
    gives it, which squashed every image into a field-shaped strip. `width`
    and `height` on the element still win, as they do on an `<img>`. */
 input[type=image] { display: inline-block; width: auto; height: auto; border: none; padding: 0; background-color: transparent; }
-input[type=radio], input[type=checkbox] { display: inline-block; width: 16px; height: 16px; vertical-align: middle; margin: 0 6px 0 2px; border: none; padding: 0; background: transparent; flex-shrink: 0; }
+input[type=radio], input[type=checkbox] { display: inline-block; width: 16px; height: 16px; min-height: 0; vertical-align: middle; margin: 0 6px 0 2px; border: none; padding: 0; background: transparent; flex-shrink: 0; }
 label { display: inline-block; }
 input { display: inline-block; width: 200px; min-height: 2.2em; padding: 0 6px; border: 1px solid #ababab; border-radius: 3px; box-sizing: border-box; vertical-align: middle; background-color: #ffffff; color: #000000; }
 /* A button input's height is its LABEL's line box plus the padding and border
@@ -345,6 +345,7 @@ fn matches_bare(
         type_sibling_count: 1,
         html_box: node,
         hover_chain: &empty,
+        focus_within_chain: &empty,
         element_id: node.map(|n| n.node_id).unwrap_or(0),
         scope_root_id: 0,
         target_id: 0,

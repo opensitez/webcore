@@ -33,6 +33,13 @@ pub struct LayoutBox {
 
     // Cached line breaks for inline content
     pub line_cache: Vec<LayoutLine>,
+    /// Fragment rectangles for inline boxes split across line boxes.
+    ///
+    /// `border_rect` remains the union used by layout/paint. CSSOM View's
+    /// `getClientRects()` needs the individual fragments, so inline layout
+    /// records them here while it is the only code that still has per-line
+    /// fragment boundaries in hand.
+    pub inline_client_rects: Vec<Rect>,
 
     // Inline runs (set by CSS cascade pass)
     pub inline_runs: Vec<InlineRun>,
@@ -95,6 +102,7 @@ impl Default for LayoutBox {
             margin_rect: Rect::default(),
             baseline: 0.0,
             line_cache: Vec::new(),
+            inline_client_rects: Vec::new(),
             inline_runs: Vec::new(),
             collapsed_margin_top: 0.0,
             collapsed_margin_bottom: 0.0,

@@ -598,6 +598,8 @@ fn replay_commands_inner(
                 rect,
                 widths,
                 slices,
+                repeat_x_mode,
+                repeat_y_mode,
                 fill_center,
                 data,
             } => {
@@ -620,6 +622,8 @@ fn replay_commands_inner(
                     rect,
                     widths,
                     slices,
+                    *repeat_x_mode,
+                    *repeat_y_mode,
                     *fill_center,
                     ts,
                     clip_mask,
@@ -642,14 +646,11 @@ fn replay_commands_inner(
                         .last_mut()
                         .map(|l| &mut l.pixmap)
                         .unwrap_or(pixmap);
-                    target.draw_pixmap(
-                        0,
-                        0,
-                        img_pixmap,
-                        &tiny_skia::PixmapPaint::default(),
-                        img_ts,
-                        clip_mask,
-                    );
+                    let paint = tiny_skia::PixmapPaint {
+                        quality: tiny_skia::FilterQuality::Bilinear,
+                        ..tiny_skia::PixmapPaint::default()
+                    };
+                    target.draw_pixmap(0, 0, img_pixmap, &paint, img_ts, clip_mask);
                 }
             }
 
@@ -1001,7 +1002,18 @@ fn replay_commands_inner(
                 radii_y,
             } => {
                 let alpha = 1.0;
-                if !inset {
+                if *inset {
+                    let c = apply_opacity(color, alpha);
+                    let target = layer_stack
+                        .last_mut()
+                        .map(|l| &mut l.pixmap)
+                        .unwrap_or(pixmap);
+                    let mut paint = Paint::default();
+                    paint.set_color(to_sk_color(&c));
+                    fill_inset_box_shadow_shape(
+                        target, *rect, *offset_x, *offset_y, *blur, *spread, &paint, ts, clip_mask,
+                    );
+                } else {
                     let sr = Rect::new(
                         rect.x + offset_x - spread,
                         rect.y + offset_y - spread,
@@ -2012,6 +2024,11 @@ fn replay_commands_inner(
                     | ("input", "search")
                     | ("input", "url")
                     | ("input", "number")
+                    | ("input", "date")
+                    | ("input", "month")
+                    | ("input", "week")
+                    | ("input", "time")
+                    | ("input", "datetime-local")
                     | ("textarea", _) => {
                         // Draw value or placeholder text.
                         //
@@ -2396,7 +2413,10 @@ fn replay_commands_inner(
                 };
                 let bg_clip_ref = bg_clip.as_ref().or(clip_mask);
                 if let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(rgba, iw, ih) {
-                    let paint = tiny_skia::PixmapPaint::default();
+                    let paint = tiny_skia::PixmapPaint {
+                        quality: tiny_skia::FilterQuality::Bilinear,
+                        ..tiny_skia::PixmapPaint::default()
+                    };
                     let mut blend_layer = if *blend_mode != 0 {
                         Pixmap::new(pw, ph)
                     } else {
@@ -2529,6 +2549,8 @@ fn draw_border_image_stretch(
     rect: &Rect,
     widths: &[f32; 4],
     slices: &[f32; 4],
+    repeat_x_mode: u8,
+    repeat_y_mode: u8,
     fill_center: bool,
     ts: Transform,
     clip_mask: Option<&tiny_skia::Mask>,
@@ -2576,8 +2598,140 @@ fn draw_border_image_stretch(
                 dx[col + 1] - dx[col],
                 dy[row + 1] - dy[row],
             );
-            draw_rgba_patch(target, rgba, iw, ih, src, dst, ts, clip_mask);
+            let repeat_mode = match (row, col) {
+                (0 | 2, 1) => repeat_x_mode,
+                (1, 0 | 2) => repeat_y_mode,
+                _ => 0,
+            };
+            let horizontal = row != 1;
+            draw_border_image_patch(
+                target,
+                rgba,
+                iw,
+                ih,
+                src,
+                dst,
+                repeat_mode,
+                horizontal,
+                ts,
+                clip_mask,
+            );
         }
+    }
+}
+
+fn draw_border_image_patch(
+    target: &mut Pixmap,
+    rgba: &[u8],
+    iw: u32,
+    ih: u32,
+    src: Rect,
+    dst: Rect,
+    repeat_mode: u8,
+    horizontal: bool,
+    ts: Transform,
+    clip_mask: Option<&tiny_skia::Mask>,
+) {
+    if repeat_mode == 0 {
+        draw_rgba_patch(target, rgba, iw, ih, src, dst, ts, clip_mask);
+        return;
+    }
+
+    let perpendicular_scale = if horizontal {
+        if src.h <= 0.0 {
+            return;
+        }
+        dst.h / src.h
+    } else {
+        if src.w <= 0.0 {
+            return;
+        }
+        dst.w / src.w
+    };
+    let natural_main = if horizontal {
+        src.w * perpendicular_scale
+    } else {
+        src.h * perpendicular_scale
+    };
+    if natural_main <= 0.0 {
+        return;
+    }
+
+    let main_start = if horizontal { dst.x } else { dst.y };
+    let main_len = if horizontal { dst.w } else { dst.h };
+    for (tile_start, tile_len) in
+        border_image_axis_tiles(repeat_mode, main_start, main_len, natural_main)
+    {
+        let visible_start = tile_start.max(main_start);
+        let visible_end = (tile_start + tile_len).min(main_start + main_len);
+        let visible_len = visible_end - visible_start;
+        if visible_len <= 0.0 {
+            continue;
+        }
+        let tile_offset = visible_start - tile_start;
+        let src_fraction_start = (tile_offset / tile_len).clamp(0.0, 1.0);
+        let src_fraction_len = (visible_len / tile_len).clamp(0.0, 1.0 - src_fraction_start);
+
+        let (tile_src, tile_dst) = if horizontal {
+            (
+                Rect::new(
+                    src.x + src.w * src_fraction_start,
+                    src.y,
+                    src.w * src_fraction_len,
+                    src.h,
+                ),
+                Rect::new(visible_start, dst.y, visible_len, dst.h),
+            )
+        } else {
+            (
+                Rect::new(
+                    src.x,
+                    src.y + src.h * src_fraction_start,
+                    src.w,
+                    src.h * src_fraction_len,
+                ),
+                Rect::new(dst.x, visible_start, dst.w, visible_len),
+            )
+        };
+        draw_rgba_patch(target, rgba, iw, ih, tile_src, tile_dst, ts, clip_mask);
+    }
+}
+
+fn border_image_axis_tiles(mode: u8, start: f32, len: f32, tile: f32) -> Vec<(f32, f32)> {
+    if tile <= 0.0 || len <= 0.0 {
+        return Vec::new();
+    }
+    match mode {
+        1 => {
+            let mut out = Vec::new();
+            let mut cursor = start;
+            while cursor < start + len {
+                out.push((cursor, tile));
+                cursor += tile;
+            }
+            out
+        }
+        2 => {
+            if tile >= len {
+                return vec![(start + (len - tile) / 2.0, tile)];
+            }
+            let count = (len / tile).floor().max(1.0) as usize;
+            if count <= 1 {
+                return vec![(start + (len - tile) / 2.0, tile)];
+            }
+            let gap = (len - tile * count as f32) / (count - 1) as f32;
+            (0..count)
+                .map(|i| (start + i as f32 * (tile + gap), tile))
+                .collect()
+        }
+        3 => {
+            let count = (len / tile).round().max(1.0) as usize;
+            let rounded = len / count as f32;
+            (0..count)
+                .map(|i| (start + i as f32 * rounded, rounded))
+                .collect()
+        }
+        _ => vec![(start, len)],
     }
 }
 
@@ -3432,6 +3586,79 @@ fn fill_outer_box_shadow_shape(
         iy0,
         shadow_right - ix1,
         iy1 - iy0,
+        paint,
+        transform,
+        clip_mask,
+    );
+}
+
+fn fill_inset_box_shadow_shape(
+    target: &mut Pixmap,
+    rect: Rect,
+    offset_x: f32,
+    offset_y: f32,
+    blur: f32,
+    spread: f32,
+    paint: &Paint,
+    transform: Transform,
+    clip_mask: Option<&tiny_skia::Mask>,
+) {
+    fn fill_piece(
+        target: &mut Pixmap,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        paint: &Paint,
+        transform: Transform,
+        clip_mask: Option<&tiny_skia::Mask>,
+    ) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        if let Some(rect) = SkRect::from_xywh(x, y, w, h) {
+            target.fill_rect(rect, paint, transform, clip_mask);
+        }
+    }
+
+    let blur_extent = blur.max(0.0) * 2.0;
+    let top = (offset_y.max(0.0) + spread + blur_extent)
+        .max(0.0)
+        .min(rect.h);
+    let bottom = ((-offset_y).max(0.0) + spread + blur_extent)
+        .max(0.0)
+        .min(rect.h);
+    let left = (offset_x.max(0.0) + spread + blur_extent)
+        .max(0.0)
+        .min(rect.w);
+    let right = ((-offset_x).max(0.0) + spread + blur_extent)
+        .max(0.0)
+        .min(rect.w);
+
+    fill_piece(
+        target, rect.x, rect.y, rect.w, top, paint, transform, clip_mask,
+    );
+    fill_piece(
+        target,
+        rect.x,
+        rect.bottom() - bottom,
+        rect.w,
+        bottom,
+        paint,
+        transform,
+        clip_mask,
+    );
+    let vertical_y = rect.y + top;
+    let vertical_h = (rect.h - top - bottom).max(0.0);
+    fill_piece(
+        target, rect.x, vertical_y, left, vertical_h, paint, transform, clip_mask,
+    );
+    fill_piece(
+        target,
+        rect.right() - right,
+        vertical_y,
+        right,
+        vertical_h,
         paint,
         transform,
         clip_mask,

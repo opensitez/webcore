@@ -3,7 +3,7 @@
 use crate::css::apply_cascade_vp;
 use crate::html::parse_html;
 use crate::layout::LayoutEngine;
-use crate::types::BorderStyle;
+use crate::types::{BorderStyle, Display};
 use crate::types::{Color, Document};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -325,6 +325,270 @@ fn author_can_suppress_focus_outline() {
         btn.style.outline_style,
         BorderStyle::None,
         "author outline:none must suppress the UA focus outline"
+    );
+}
+
+#[test]
+fn focus_within_matches_custom_element_ancestor_across_siblings() {
+    let mut doc = parse_and_layout(
+        r#"<html><head><style>
+            x-menu:not([loaded], :focus-within) [slot=dropdown] { display: none; }
+        </style></head><body>
+            <x-menu id="menu">
+                <button id="trigger">HTML</button>
+                <div id="panel" slot="dropdown">Panel</div>
+            </x-menu>
+        </body></html>"#,
+    );
+
+    let panel = crate::dom::query_selector(&doc.root, "#panel").unwrap();
+    assert_eq!(
+        panel.style.display,
+        Display::None,
+        "unfocused custom menu fallback should hide its dropdown"
+    );
+
+    let trigger_id = crate::dom::query_selector(&doc.root, "#trigger")
+        .map(|n| n.node_id)
+        .unwrap();
+    doc.focused_box = trigger_id;
+    doc.keyboard_focus = false;
+    doc.stylesheet.rebuild_index();
+    apply_cascade_vp(
+        &mut doc.root,
+        &doc.stylesheet,
+        None,
+        16.0,
+        doc.viewport_w,
+        doc.viewport_h,
+        doc.focused_box,
+        false,
+    );
+
+    let panel = crate::dom::query_selector(&doc.root, "#panel").unwrap();
+    assert_ne!(
+        panel.style.display,
+        Display::None,
+        "focused sibling should make the custom-element ancestor match :focus-within"
+    );
+}
+
+#[test]
+fn focus_within_revealed_absolute_child_under_display_contents_gets_layout() {
+    let mut doc = parse_and_layout(
+        r#"<html><head><style>
+            .tab { position: relative; width: 320px; height: 40px; }
+            x-menu { display: contents; }
+            x-menu:not([loaded], :focus-within) [slot=dropdown] { display: none; }
+            [slot=dropdown] {
+                position: absolute;
+                top: 24px;
+                left: 0;
+                width: 180px;
+                height: 48px;
+                display: block;
+            }
+        </style></head><body>
+            <div class="tab">
+                <x-menu>
+                    <button id="trigger">HTML</button>
+                    <div id="panel" slot="dropdown">Panel</div>
+                </x-menu>
+            </div>
+        </body></html>"#,
+    );
+
+    let trigger_id = crate::dom::query_selector(&doc.root, "#trigger")
+        .map(|n| n.node_id)
+        .unwrap();
+    doc.focused_box = trigger_id;
+    doc.keyboard_focus = false;
+    doc.stylesheet.rebuild_index();
+    apply_cascade_vp(
+        &mut doc.root,
+        &doc.stylesheet,
+        None,
+        16.0,
+        doc.viewport_w,
+        doc.viewport_h,
+        doc.focused_box,
+        false,
+    );
+    crate::dom::mark_layout_dirty(&mut doc.root);
+    let mut engine = LayoutEngine::new();
+    engine.viewport_w = 800.0;
+    engine.viewport_h = 600.0;
+    engine.layout(&mut doc, 800.0);
+
+    let panel = crate::dom::query_selector(&doc.root, "#panel").unwrap();
+    assert_eq!(panel.style.display, Display::Block);
+    assert!(
+        panel.layout.border_rect.w >= 179.0 && panel.layout.border_rect.h >= 47.0,
+        "revealed absolute dropdown should have non-zero layout, got {:?}",
+        panel.layout.border_rect
+    );
+}
+
+#[test]
+fn abspos_stretch_dropdown_under_display_contents_sizes_from_content() {
+    let mut doc = parse_and_layout(
+        r#"<html><head><style>
+            .tab { position: relative; width: 360px; min-height: 40px; }
+            x-menu { display: contents; }
+            x-menu:not([loaded], :focus-within) [slot=dropdown] { display: none; }
+            [slot=dropdown] {
+                position: absolute;
+                left: 0;
+                right: 0;
+                margin-top: -1px;
+                display: block;
+                background: #111;
+            }
+            .content { display: grid; grid-template-columns: repeat(3, 1fr); padding: 16px; gap: 16px; }
+        </style></head><body>
+            <div class="tab">
+                <x-menu>
+                    <button id="trigger">HTML</button>
+                    <div id="panel" slot="dropdown">
+                        <p><a>HTML: Markup language</a></p>
+                        <div class="content"><dl><dt>HTML reference</dt><dd>Elements</dd></dl></div>
+                    </div>
+                </x-menu>
+            </div>
+        </body></html>"#,
+    );
+
+    let trigger_id = crate::dom::query_selector(&doc.root, "#trigger")
+        .map(|n| n.node_id)
+        .unwrap();
+    doc.focused_box = trigger_id;
+    doc.keyboard_focus = false;
+    doc.stylesheet.rebuild_index();
+    apply_cascade_vp(
+        &mut doc.root,
+        &doc.stylesheet,
+        None,
+        16.0,
+        doc.viewport_w,
+        doc.viewport_h,
+        doc.focused_box,
+        false,
+    );
+    crate::dom::mark_layout_dirty(&mut doc.root);
+    let mut engine = LayoutEngine::new();
+    engine.viewport_w = 800.0;
+    engine.viewport_h = 600.0;
+    engine.layout(&mut doc, 800.0);
+
+    let panel = crate::dom::query_selector(&doc.root, "#panel").unwrap();
+    assert_eq!(panel.style.display, Display::Block);
+    assert!(
+        panel.layout.border_rect.w >= 350.0,
+        "left/right abspos stretch should use containing width, got {:?}",
+        panel.layout.border_rect
+    );
+    assert!(
+        panel.layout.border_rect.h > 20.0,
+        "auto-height abspos dropdown should size from content, got {:?}",
+        panel.layout.border_rect
+    );
+}
+
+#[test]
+fn focused_display_contents_dropdown_relayouts_incrementally() {
+    let mut doc = parse_and_layout(
+        r#"<html><head><style>
+            .nav { width: 500px; }
+            .tab { position: relative; width: 240px; min-height: 32px; }
+            x-menu { display: contents; }
+            x-menu:not(:focus-within) [slot=dropdown] { display: none; }
+            button { display: block; width: 80px; height: 24px; }
+            [slot=dropdown] {
+                position: absolute;
+                left: 0;
+                right: 0;
+                top: 24px;
+                display: block;
+                padding: 12px;
+                border: 1px solid black;
+            }
+            .panel-content { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+        </style></head><body>
+            <div class="nav">
+                <div class="tab">
+                    <x-menu>
+                        <button id="trigger">HTML</button>
+                        <div id="panel" slot="dropdown">
+                            <div id="content" class="panel-content">
+                                <p>HTML reference</p><p>Markup languages</p>
+                            </div>
+                        </div>
+                    </x-menu>
+                </div>
+            </div>
+        </body></html>"#,
+    );
+
+    let trigger_id = crate::dom::query_selector(&doc.root, "#trigger")
+        .map(|n| n.node_id)
+        .unwrap();
+    doc.focused_box = trigger_id;
+    doc.keyboard_focus = false;
+    doc.stylesheet.rebuild_index();
+    apply_cascade_vp(
+        &mut doc.root,
+        &doc.stylesheet,
+        None,
+        16.0,
+        doc.viewport_w,
+        doc.viewport_h,
+        doc.focused_box,
+        false,
+    );
+
+    let mut engine = LayoutEngine::new();
+    engine.viewport_w = 800.0;
+    engine.viewport_h = 600.0;
+    engine.layout(&mut doc, 800.0);
+
+    let panel = crate::dom::query_selector(&doc.root, "#panel").unwrap();
+    let content = crate::dom::query_selector(&doc.root, "#content").unwrap();
+    assert_eq!(panel.style.display, Display::Block);
+    assert!(
+        panel.layout.border_rect.w >= 230.0 && panel.layout.border_rect.h > 24.0,
+        "incrementally revealed dropdown should be laid out, got {:?}",
+        panel.layout.border_rect
+    );
+    assert!(
+        content.layout.border_rect.w > 0.0 && content.layout.border_rect.h > 0.0,
+        "revealed dropdown descendants should not keep stale zero boxes, got {:?}",
+        content.layout.border_rect
+    );
+}
+
+#[test]
+fn empty_content_after_pseudo_with_size_gets_layout_box() {
+    let doc = parse_and_layout(
+        r#"<html><head><style>
+            button::after {
+                content: "";
+                display: inline-block;
+                width: 20px;
+                height: 12px;
+            }
+        </style></head><body><button id="trigger">HTML</button></body></html>"#,
+    );
+
+    let button = crate::dom::query_selector(&doc.root, "#trigger").unwrap();
+    let after = button
+        .children
+        .iter()
+        .find(|child| child.tag == "::after")
+        .expect("button should have an ::after pseudo box");
+    assert!(
+        after.layout.border_rect.w >= 19.0 && after.layout.border_rect.h >= 11.0,
+        "sized empty-content pseudo should create a box, got {:?}",
+        after.layout.border_rect
     );
 }
 

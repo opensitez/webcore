@@ -1642,6 +1642,52 @@ fn form_inside_table_works() {
 }
 
 #[test]
+fn multi_row_form_inside_table_keeps_rows_and_controls_sized() {
+    let doc = layout_html(
+        r#"<table class="loginform">
+             <form method="POST" action="">
+               <input type="hidden" name="csrf_token" value="token">
+               <tr><td><label>Identifiant</label></td><td><input type="text" name="login"></td></tr>
+               <tr><td><label>Mot de passe</label></td><td><input type="password" name="password"></td></tr>
+               <tr class="trailer"><td colspan="2">Mot de Passe Requis</td></tr>
+               <tr><td colspan="2" align="right"><button type="submit">Connecter</button></td></tr>
+             </form>
+           </table>"#,
+        500.0,
+    );
+    let table = find_by_tag(&doc.root, "table").unwrap();
+    assert!(
+        table
+            .children
+            .iter()
+            .all(|child| child.tag != "anonymous-table-cell"),
+        "display:contents form rows must not be wrapped into a single anonymous cell"
+    );
+
+    let mut inputs = Vec::new();
+    find_all_by_tag(&doc.root, "input", &mut inputs);
+    let visible_inputs: Vec<_> = inputs
+        .into_iter()
+        .filter(|input| !matches!(input.style.display, Display::None))
+        .collect();
+    assert_eq!(visible_inputs.len(), 2);
+    for input in visible_inputs {
+        assert!(
+            input.layout.content_rect.w > 100.0 && input.layout.content_rect.h > 10.0,
+            "visible input should keep UA/control sizing, got {:?}",
+            input.layout.content_rect
+        );
+    }
+
+    let button = find_by_tag(&doc.root, "button").unwrap();
+    assert!(
+        button.layout.content_rect.w > 40.0 && button.layout.content_rect.h > 10.0,
+        "submit button should keep intrinsic/control sizing, got {:?}",
+        button.layout.content_rect
+    );
+}
+
+#[test]
 fn form_inside_table_is_contents() {
     let doc = layout_html(r#"<table><form><tr><td>X</td></tr></form></table>"#, 400.0);
     let form = find_by_tag(&doc.root, "form").unwrap();
@@ -1895,6 +1941,57 @@ fn submit_input_fires_click_and_submit() {
     assert!(
         events.iter().any(|e| matches!(e, FormEventKind::Click(_))),
         "should fire Click"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, FormEventKind::Submit(_))),
+        "should fire Submit"
+    );
+}
+
+#[test]
+fn prevent_default_on_click_stops_submit_default_action() {
+    let mut doc = layout_html(
+        r#"<form action="/login"><input id="go" type="submit" value="Go"></form>"#,
+        400.0,
+    );
+    let events_ref = std::sync::Arc::new(std::sync::Mutex::new(Vec::<FormEventKind>::new()));
+    let events_clone = events_ref.clone();
+    doc.on_form_event = Some(Box::new(move |e: &FormEvent| {
+        events_clone.lock().unwrap().push(e.kind.clone());
+    }));
+    let submitter_id = find_by_id(&doc.root, "go").unwrap().node_id;
+    doc.add_event_listener(
+        submitter_id,
+        "click",
+        Box::new(|event, _doc: &mut crate::Document| event.prevent_default()),
+        crate::dom::events::ListenerOptions::default(),
+    );
+    let rect = find_by_id(&doc.root, "go").unwrap().layout.border_rect;
+    click_at(&mut doc, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+
+    let events = events_ref.lock().unwrap();
+    assert!(
+        !events.iter().any(|e| matches!(e, FormEventKind::Submit(_))),
+        "canceling click must stop submit default action"
+    );
+}
+
+#[test]
+fn prevent_default_on_click_stops_checkbox_toggle() {
+    let mut doc = layout_html(r#"<input id="agree" type="checkbox">"#, 400.0);
+    let checkbox_id = find_by_id(&doc.root, "agree").unwrap().node_id;
+    doc.add_event_listener(
+        checkbox_id,
+        "click",
+        Box::new(|event, _doc: &mut crate::Document| event.prevent_default()),
+        crate::dom::events::ListenerOptions::default(),
+    );
+    let rect = find_by_id(&doc.root, "agree").unwrap().layout.border_rect;
+    click_at(&mut doc, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+
+    assert!(
+        !find_by_id(&doc.root, "agree").unwrap().checkedness,
+        "canceling click must stop checkbox default action"
     );
 }
 
@@ -2351,6 +2448,93 @@ fn collect_form_data_no_name_excluded() {
     let data = crate::types::collect_form_data(form);
     assert_eq!(data.len(), 1);
     assert_eq!(submitted_one(&data, "named"), Some("ok"));
+}
+
+#[test]
+fn collect_form_data_for_form_includes_form_attribute_controls() {
+    let doc = layout_html(
+        r#"<input id="external" form="f" name="outside" value="yes">
+        <form id="f"><input name="inside" value="ok"></form>
+        <input form="other" name="wrong" value="no">"#,
+        400.0,
+    );
+    let form_id = find_by_id(&doc.root, "f").unwrap().node_id;
+    let data = crate::types::collect_form_data_for_form(&doc.root, form_id);
+    assert_eq!(submitted_one(&data, "outside"), Some("yes"));
+    assert_eq!(submitted_one(&data, "inside"), Some("ok"));
+    assert!(submitted_one(&data, "wrong").is_none());
+}
+
+#[test]
+fn disabled_fieldset_excludes_controls_except_first_legend_descendants() {
+    let doc = layout_html(
+        r#"<form id="f">
+            <fieldset disabled>
+                <legend><input name="legend" value="yes"></legend>
+                <input name="body" value="no">
+            </fieldset>
+        </form>"#,
+        400.0,
+    );
+    let form = find_by_id(&doc.root, "f").unwrap();
+    let data = crate::types::collect_form_data(form);
+    assert_eq!(submitted_one(&data, "legend"), Some("yes"));
+    assert!(submitted_one(&data, "body").is_none());
+}
+
+#[test]
+fn disabled_optgroup_options_do_not_submit() {
+    let doc = layout_html(
+        r#"<form id="f">
+            <select name="pick" multiple>
+                <optgroup disabled>
+                    <option value="blocked" selected>Blocked</option>
+                </optgroup>
+                <option value="ok" selected>OK</option>
+            </select>
+        </form>"#,
+        400.0,
+    );
+    let form = find_by_id(&doc.root, "f").unwrap();
+    let data = crate::types::collect_form_data(form);
+    assert_eq!(submitted(&data, "pick"), vec!["ok"]);
+}
+
+#[test]
+fn reset_form_resets_form_attribute_controls_too() {
+    let mut doc = layout_html(
+        r#"<form id="f"></form>
+        <input id="external" form="f" name="q" value="original">"#,
+        400.0,
+    );
+    let input_id = find_by_id(&doc.root, "external").unwrap().node_id;
+    doc.set_value(input_id, "changed");
+    assert_eq!(doc.value(input_id), "changed");
+
+    let form_id = find_by_id(&doc.root, "f").unwrap().node_id;
+    crate::types::reset_form(&mut doc.root, form_id);
+
+    let input = find_by_id(&doc.root, "external").unwrap();
+    assert_eq!(input_value(input), "original");
+}
+
+#[test]
+fn submitter_overrides_action_and_method() {
+    let doc = layout_html(
+        r#"<form id="f" action="/default" method="get">
+            <button id="go" type="submit" formaction="/override" formmethod="post">Go</button>
+        </form>"#,
+        400.0,
+    );
+    let submitter = find_by_id(&doc.root, "go").unwrap().node_id;
+    assert_eq!(
+        crate::types::find_parent_form_action(&doc.root, submitter),
+        "/override"
+    );
+    assert_eq!(
+        crate::types::submitter_form_method(&doc.root, submitter),
+        "post"
+    );
 }
 
 #[test]
@@ -3897,5 +4081,70 @@ fn a_form_submits_what_the_user_did_not_what_the_markup_said() {
     assert!(
         level > 50.0,
         "the form submitted the range's default, {level}"
+    );
+}
+
+#[test]
+fn date_family_inputs_are_editable_text_controls() {
+    for (input_type, start, ch, expected) in [
+        ("date", "2026-09-2", '2', "2026-09-22"),
+        ("month", "2026-0", '9', "2026-09"),
+        ("week", "2026-W0", '4', "2026-W04"),
+        ("time", "12:3", '4', "12:34"),
+        ("datetime-local", "2026-09-22T12:3", '4', "2026-09-22T12:34"),
+    ] {
+        let mut doc = layout_html(
+            &format!(
+                r#"<form id="f"><input id="x" name="x" type="{input_type}" value="{start}"></form>"#
+            ),
+            500.0,
+        );
+        let rect = find_by_id(&doc.root, "x").unwrap().layout.border_rect;
+        let center = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+        click_at(&mut doc, center.0, center.1);
+
+        doc.process_key_event(
+            crate::dom::HtmlEventType::KeyDown,
+            ch as u32,
+            Some(ch),
+            false,
+            false,
+            false,
+            false,
+        );
+
+        let input = find_by_id(&doc.root, "x").unwrap();
+        assert_eq!(
+            input_value(input),
+            expected,
+            "input type={input_type} did not accept typing"
+        );
+        let form = find_by_id(&doc.root, "f").unwrap();
+        assert_eq!(
+            submitted_one(&crate::types::collect_form_data(form), "x"),
+            Some(expected),
+            "input type={input_type} did not submit its live value"
+        );
+    }
+}
+
+#[test]
+fn input_type_matching_is_ascii_case_insensitive_for_editing() {
+    let mut doc = layout_html(r#"<input id="x" type="DATE" value="2026-09-2">"#, 400.0);
+    let rect = find_by_id(&doc.root, "x").unwrap().layout.border_rect;
+    click_at(&mut doc, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        '2' as u32,
+        Some('2'),
+        false,
+        false,
+        false,
+        false,
+    );
+
+    assert_eq!(
+        input_value(find_by_id(&doc.root, "x").unwrap()),
+        "2026-09-22"
     );
 }

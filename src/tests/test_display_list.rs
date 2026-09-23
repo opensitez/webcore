@@ -4,7 +4,9 @@ use crate::Renderer;
 use crate::frame::EngineFrame;
 use crate::html::{parse_html, parse_html_with_base};
 use crate::renderer::display_list::{DisplayList, ImageRef, PaintCmd};
-use crate::renderer::display_list_builder::{build_display_list, build_display_list_full};
+use crate::renderer::display_list_builder::{
+    build_display_list, build_display_list_full, build_display_list_full_with_font_system,
+};
 use crate::renderer::display_list_replay::{
     reduce_corner_radii, replay, replay_with_scroll, replay_with_scroll_and_transform_overrides,
 };
@@ -34,6 +36,20 @@ fn build_full(html: &str) -> (EngineFrame, DisplayList) {
         "",
     );
     (f, list)
+}
+
+fn first_image_data(list: &DisplayList) -> Option<(&[u8], u32, u32)> {
+    list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Image {
+            data: ImageRef::Owned(data, w, h),
+            ..
+        } => Some((data.as_slice(), *w, *h)),
+        PaintCmd::Image {
+            data: ImageRef::Shared(data, w, h),
+            ..
+        } => Some((data.as_ref(), *w, *h)),
+        _ => None,
+    })
 }
 
 #[test]
@@ -211,6 +227,115 @@ fn flex_anchor_direct_text_child_emits_text_command() {
             .iter()
             .any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == "أخبار")),
         "blockified direct text children in flex anchors must paint"
+    );
+}
+
+#[test]
+fn empty_generated_flex_icon_contributes_declared_width() {
+    let (frame, list) = build_full(
+        r#"<style>
+             body { margin: 0 }
+             button { display: flex; align-items: center; column-gap: 2px; padding: 0; font: 16px/20px sans-serif; }
+             button::after { content: ""; display: block; width: 20px; height: 20px; background: currentColor; }
+           </style>
+           <button id="b">HTML</button>"#,
+    );
+    let button_id = frame.doc.get_element_by_id("b").expect("button");
+    let button = frame.doc.get_node(button_id).expect("button node");
+    let after = button
+        .children
+        .iter()
+        .find(|child| child.tag == "::after")
+        .expect("empty generated ::after should be materialized");
+
+    assert!(
+        after.layout.content_rect.w >= 19.0,
+        "empty generated icon should keep its declared width, got {:.1}",
+        after.layout.content_rect.w
+    );
+    assert!(
+        button.layout.content_rect.w >= after.layout.content_rect.w + 35.0,
+        "button content width should include text plus generated icon; button={:.1} after={:.1}",
+        button.layout.content_rect.w,
+        after.layout.content_rect.w
+    );
+    assert!(
+        list.commands.iter().any(
+            |cmd| matches!(cmd, PaintCmd::FillRect { rect, .. } if rect.w >= 19.0 && rect.h >= 19.0)
+        ),
+        "generated icon should paint at its declared box size"
+    );
+}
+
+#[test]
+fn empty_generated_flex_icon_survives_display_contents_wrapper() {
+    let (frame, list) = build_full(
+        r#"<style>
+             body { margin: 0 }
+             *,:before,:after { box-sizing: border-box; }
+             mdn-dropdown { display: contents; }
+             .navigation { display: flex; }
+             .navigation__popup { display: block; }
+             .navigation__menu { display: flex; }
+             .menu { display: flex; }
+             .menu__tab { display: block; }
+             .menu__tab-button {
+               align-items: center;
+               border: 1px solid transparent;
+               border-bottom: none;
+               column-gap: .125rem;
+               color: white;
+               display: flex;
+               font: inherit;
+               line-height: 1.25;
+               margin: 0;
+               padding: .5rem .6875rem;
+               white-space: nowrap;
+             }
+             .menu__tab-button:after,
+             .menu__tab-button:before {
+               background-color: currentcolor;
+               height: 1.25rem;
+               mask-size: cover;
+               width: 1.25rem;
+             }
+             .menu__tab-button:after {
+               content: "";
+               mask-image: url('/static/client/chevron-down.svg');
+             }
+           </style>
+           <nav class="navigation">
+             <div class="navigation__popup">
+               <div class="navigation__menu">
+                 <nav class="menu">
+                   <div class="menu__tab">
+                     <mdn-dropdown><button id="b" class="menu__tab-button"><span class="menu__tab-label">HTML</span></button></mdn-dropdown>
+                   </div>
+                 </nav>
+               </div>
+             </div>
+           </nav>"#,
+    );
+    let button_id = frame.doc.get_element_by_id("b").expect("button");
+    let button = frame.doc.get_node(button_id).expect("button node");
+    let after = button
+        .children
+        .iter()
+        .find(|child| child.tag == "::after")
+        .expect("empty generated ::after should be materialized");
+
+    assert!(
+        after.layout.content_rect.w >= 19.0 && after.layout.content_rect.h >= 19.0,
+        "empty generated icon should keep declared geometry through display:contents wrapper, got {:.1}x{:.1}",
+        after.layout.content_rect.w,
+        after.layout.content_rect.h
+    );
+    assert!(
+        list.commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::FillRect { rect, color, .. }
+                if rect.w >= 19.0 && rect.h >= 19.0 && color.a > 200)),
+        "generated mask icon should paint its currentColor background into its own box"
     );
 }
 
@@ -512,14 +637,8 @@ fn inline_svg_uses_cascaded_fill_color_when_rasterized() {
     assert_eq!(svg.style.color, Color::rgb(255, 0, 0));
     assert_eq!(svg.style.svg_fill, Some(Color::rgb(255, 0, 0)));
 
-    let image = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::Image {
-            data: ImageRef::Owned(data, w, h),
-            ..
-        } => Some((data, *w, *h)),
-        _ => None,
-    });
-    let (data, w, h) = image.expect("inline SVG should rasterize to an image command");
+    let (data, w, h) =
+        first_image_data(&list).expect("inline SVG should rasterize to an image command");
     assert_eq!((w, h), (20, 20));
     let idx = ((10 * w + 10) * 4) as usize;
     assert!(
@@ -541,14 +660,8 @@ fn inline_svg_uses_black_current_color_when_rasterized() {
            </svg>"#,
     );
 
-    let image = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::Image {
-            data: ImageRef::Owned(data, w, h),
-            ..
-        } => Some((data, *w, *h)),
-        _ => None,
-    });
-    let (data, w, h) = image.expect("inline SVG should rasterize to an image command");
+    let (data, w, h) =
+        first_image_data(&list).expect("inline SVG should rasterize to an image command");
     assert_eq!((w, h), (20, 20));
     let idx = ((10 * w + 10) * 4) as usize;
     assert!(
@@ -571,14 +684,8 @@ fn inline_svg_preserves_current_color_path_over_default_fill() {
            </svg>"#,
     );
 
-    let image = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::Image {
-            data: ImageRef::Owned(data, w, h),
-            ..
-        } => Some((data, *w, *h)),
-        _ => None,
-    });
-    let (data, w, h) = image.expect("inline SVG should rasterize to an image command");
+    let (data, w, h) =
+        first_image_data(&list).expect("inline SVG should rasterize to an image command");
     assert_eq!((w, h), (13, 13));
 
     let corner = ((1 * w + 1) * 4) as usize;
@@ -614,14 +721,8 @@ fn inline_svg_uses_css_animated_fill_when_rasterized() {
            </svg>"#,
     );
 
-    let image = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::Image {
-            data: ImageRef::Owned(data, w, h),
-            ..
-        } => Some((data, *w, *h)),
-        _ => None,
-    });
-    let (data, w, h) = image.expect("inline SVG should rasterize to an image command");
+    let (data, w, h) =
+        first_image_data(&list).expect("inline SVG should rasterize to an image command");
     assert_eq!((w, h), (20, 20));
     let idx = ((10 * w + 10) * 4) as usize;
     assert!(
@@ -644,14 +745,8 @@ fn inline_svg_uses_native_animate_fill_when_rasterized() {
            </svg>"#,
     );
 
-    let image = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::Image {
-            data: ImageRef::Owned(data, w, h),
-            ..
-        } => Some((data, *w, *h)),
-        _ => None,
-    });
-    let (data, w, h) = image.expect("inline SVG should rasterize to an image command");
+    let (data, w, h) =
+        first_image_data(&list).expect("inline SVG should rasterize to an image command");
     assert_eq!((w, h), (20, 20));
     let idx = ((10 * w + 10) * 4) as usize;
     assert!(
@@ -674,14 +769,8 @@ fn inline_svg_resolves_inherited_custom_property_paint() {
            </div>"#,
     );
 
-    let image = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::Image {
-            data: ImageRef::Owned(data, w, h),
-            ..
-        } => Some((data, *w, *h)),
-        _ => None,
-    });
-    let (data, w, _) = image.expect("inline SVG should rasterize to an image command");
+    let (data, w, _) =
+        first_image_data(&list).expect("inline SVG should rasterize to an image command");
     let idx = ((7 * w + 10) * 4) as usize;
     assert!(
         data[idx] < 50 && data[idx + 1] > 80 && data[idx + 2] > 180 && data[idx + 3] > 200,
@@ -702,14 +791,8 @@ fn inline_svg_child_selector_style_reaches_native_paint() {
            </svg>"#,
     );
 
-    let image = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::Image {
-            data: ImageRef::Owned(data, w, h),
-            ..
-        } => Some((data, *w, *h)),
-        _ => None,
-    });
-    let (data, w, h) = image.expect("inline SVG should rasterize to an image command");
+    let (data, w, h) =
+        first_image_data(&list).expect("inline SVG should rasterize to an image command");
     assert_eq!((w, h), (20, 20));
     let idx = ((10 * w + 10) * 4) as usize;
     assert!(
@@ -723,6 +806,406 @@ fn inline_svg_child_selector_style_reaches_native_paint() {
 }
 
 #[test]
+fn inline_svg_text_path_uses_dom_cascaded_svg_paint() {
+    let (_, list) = build(
+        r##"<style>
+             .mandala { color: rgb(255, 255, 255); }
+             .mandala svg > text { fill: currentColor; }
+             .mandala textPath[href="#circle1"] { font-size: 20px; }
+           </style>
+           <div class="mandala" style="background:#222">
+             <svg style="width:140px;height:60px" viewBox="0 0 140 60" fill="none">
+               <defs><path id="circle1" d="M10 42 H130"/></defs>
+               <text><textPath href="#circle1"><tspan>MDN</tspan></textPath></text>
+             </svg>
+           </div>"##,
+    );
+
+    let (data, w, h) =
+        first_image_data(&list).expect("inline SVG should rasterize to an image command");
+    assert_eq!((w, h), (140, 60));
+    let white_pixels = data
+        .chunks_exact(4)
+        .filter(|px| px[0] > 180 && px[1] > 180 && px[2] > 180 && px[3] > 120)
+        .count();
+    assert!(
+        white_pixels > 20,
+        "textPath should use DOM-cascaded fill instead of root fill=none, white_pixels={white_pixels}"
+    );
+}
+
+#[test]
+fn inline_svg_circular_text_path_uses_dom_cascaded_svg_paint() {
+    let (_, list) = build(
+        r##"<style>
+             .mandala { color: rgb(255, 255, 255); }
+             .mandala svg > text { fill: currentColor; }
+             .mandala textPath[href="#circle1"] { font-size: 20px; }
+           </style>
+           <div class="mandala" style="background:#222">
+             <svg style="width:120px;height:120px" viewBox="0 0 120 120" fill="none">
+               <defs>
+                 <path id="circle1" d="M60,60 m-44,0 a44,44 0 1,1 88,0 a44,44 0 1,1 -88,0"/>
+               </defs>
+               <text><textPath textLength="276" href="#circle1"><tspan>MDN SVG TEXT PATH</tspan></textPath></text>
+             </svg>
+           </div>"##,
+    );
+
+    let (data, w, h) =
+        first_image_data(&list).expect("inline SVG should rasterize to an image command");
+    assert_eq!((w, h), (120, 120));
+    let white_pixels = data
+        .chunks_exact(4)
+        .filter(|px| px[0] > 180 && px[1] > 180 && px[2] > 180 && px[3] > 120)
+        .count();
+    assert!(
+        white_pixels > 20,
+        "circular textPath should use DOM-cascaded fill instead of root fill=none, white_pixels={white_pixels}"
+    );
+}
+
+#[test]
+fn inline_svg_text_path_uses_dom_cascaded_var_fill() {
+    let (_, list) = build(
+        r##"<style>
+             .mandala { --color-border-primary: rgb(255, 255, 255); }
+             .mandala svg > text { fill: var(--color-border-primary); }
+             .mandala textPath[href="#circle1"] { font-size: 20px; }
+           </style>
+           <div class="mandala" style="background:#222">
+             <svg style="width:120px;height:120px" viewBox="0 0 120 120" fill="none">
+               <defs>
+                 <path id="circle1" d="M60,60 m-44,0 a44,44 0 1,1 88,0 a44,44 0 1,1 -88,0"/>
+               </defs>
+               <text><textPath textLength="276" href="#circle1"><tspan>MDN SVG TEXT PATH</tspan></textPath></text>
+             </svg>
+           </div>"##,
+    );
+
+    let (data, w, h) =
+        first_image_data(&list).expect("inline SVG should rasterize to an image command");
+    assert_eq!((w, h), (120, 120));
+    let white_pixels = data
+        .chunks_exact(4)
+        .filter(|px| px[0] > 180 && px[1] > 180 && px[2] > 180 && px[3] > 120)
+        .count();
+    assert!(
+        white_pixels > 20,
+        "textPath should resolve DOM-cascaded var() fill, white_pixels={white_pixels}"
+    );
+}
+
+#[test]
+fn inline_svg_text_path_text_length_does_not_collapse_to_path_end() {
+    let repeated = "/".repeat(120);
+    let html = format!(
+        r##"<style>
+             .mandala {{ --color-border-primary: rgb(255, 255, 255); }}
+             .mandala svg > text {{ fill: var(--color-border-primary); }}
+             .mandala textPath[href="#circle1"] {{ font-size: 24px; }}
+           </style>
+           <div class="mandala" style="background:#222">
+             <svg style="width:560px;height:560px" viewBox="50 50 575 575" fill="none">
+               <defs>
+                 <path id="circle1" d="M337.5,337.5 m-320,0 a320,320 0 1,1 640,0 a320,320 0 1,1 -640,0"/>
+               </defs>
+               <text><textPath textLength="2010" href="#circle1">{repeated}</textPath></text>
+             </svg>
+           </div>"##
+    );
+    let doc = parse_html(&html);
+    let mut frame = EngineFrame::new(doc, 1366.0, 688.0);
+    frame.update_frame();
+    let list = build_display_list_full(
+        &frame.doc.root,
+        1366.0,
+        688.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+    let (data, w, h) =
+        first_image_data(&list).expect("inline SVG should rasterize to an image command");
+    assert_eq!((w, h), (560, 560));
+
+    let white = |px: &[u8]| px[0] > 180 && px[1] > 180 && px[2] > 180 && px[3] > 120;
+    let total_white = data.chunks_exact(4).filter(|px| white(px)).count();
+    let right_edge_white = data
+        .chunks_exact(4)
+        .enumerate()
+        .filter(|(i, px)| {
+            let x = (*i as u32) % w;
+            x > w - 12 && white(px)
+        })
+        .count();
+    assert!(
+        total_white > 80,
+        "MDN-shaped textPath should paint visible text, total_white={total_white}"
+    );
+    assert!(
+        right_edge_white * 3 < total_white,
+        "textPath glyphs should be distributed around the arc, not clamped at the right edge: right_edge_white={right_edge_white}, total_white={total_white}"
+    );
+}
+
+#[test]
+fn inline_svg_mdn_style_tspan_text_path_uses_dom_styles() {
+    let repeated = (0..48).map(|_| "/<tspan>/</tspan>").collect::<String>();
+    let html = format!(
+        r##"<style>
+             .homepage--dark {{ --color-border-primary: rgb(255, 255, 255); }}
+             .mandala svg > text {{ fill: var(--color-border-primary); }}
+             .mandala textPath[href="#circle1"] {{ font-size: 24px; }}
+           </style>
+           <div class="homepage--dark">
+             <div class="mandala" style="background:#222">
+               <svg style="width:560px;height:560px" viewBox="50 50 575 575" fill="none">
+                 <defs>
+                   <path id="circle1" d="M337.5,337.5 m-320,0 a320,320 0 1,1 640,0 a320,320 0 1,1 -640,0"/>
+                 </defs>
+                 <text dy="70" textlength="2010">
+                   <textpath textlength="2010" href="#circle1">{repeated}</textpath>
+                 </text>
+               </svg>
+             </div>
+           </div>"##
+    );
+    let doc = parse_html(&html);
+    let mut frame = EngineFrame::new(doc, 1366.0, 688.0);
+    frame.update_frame();
+    let list = build_display_list_full(
+        &frame.doc.root,
+        1366.0,
+        688.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+    let (data, w, h) =
+        first_image_data(&list).expect("inline SVG should rasterize to an image command");
+    assert_eq!((w, h), (560, 560));
+
+    let white = |px: &[u8]| px[0] > 180 && px[1] > 180 && px[2] > 180 && px[3] > 120;
+    let mut min_x = w;
+    let mut min_y = h;
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut total_white = 0usize;
+    for (i, px) in data.chunks_exact(4).enumerate() {
+        if white(px) {
+            let x = (i as u32) % w;
+            let y = (i as u32) / w;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+            total_white += 1;
+        }
+    }
+    assert!(
+        total_white > 80,
+        "expected visible SVG text, total_white={total_white}"
+    );
+    assert!(
+        min_x < 80 && max_x > 470 && min_y < 120 && max_y > 430,
+        "DOM-styled MDN-like textPath should be distributed around the circle, bounds=({min_x},{min_y},{max_x},{max_y}), total_white={total_white}"
+    );
+}
+
+#[test]
+fn replay_paints_offset_inline_svg_inside_overflow_clip() {
+    let repeated = (0..48).map(|_| "/<tspan>/</tspan>").collect::<String>();
+    let html = format!(
+        r##"<style>
+             body {{ margin: 0; }}
+             .hero {{ width: 560px; height: 320px; overflow: hidden; background: #111; }}
+             .mandala {{ width: 560px; height: 560px; margin-top: -140px; }}
+             .mandala svg {{ width: 560px; height: 560px; }}
+             .mandala svg > text {{ fill: rgb(255, 255, 255); }}
+             .mandala textPath[href="#circle1"] {{ font-size: 24px; }}
+           </style>
+           <div class="hero">
+             <div class="mandala">
+               <svg viewBox="50 50 575 575" fill="none">
+                 <defs>
+                   <path id="circle1" d="M337.5,337.5 m-320,0 a320,320 0 1,1 640,0 a320,320 0 1,1 -640,0"/>
+                 </defs>
+                 <text dy="70" textlength="2010">
+                   <textpath textlength="2010" href="#circle1">{repeated}</textpath>
+                 </text>
+               </svg>
+             </div>
+           </div>"##
+    );
+    let doc = parse_html(&html);
+    let mut frame = EngineFrame::new(doc, 1366.0, 688.0);
+    frame.update_frame();
+    let mut font_system = cosmic_text::FontSystem::new();
+    let list = build_display_list_full_with_font_system(
+        &frame.doc.root,
+        1366.0,
+        688.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+        Some(&mut font_system as *mut _),
+    );
+    let (image_data, image_w, image_h) =
+        first_image_data(&list).expect("inline SVG should rasterize before replay");
+    assert_eq!((image_w, image_h), (560, 560));
+    let image_white = image_data
+        .chunks_exact(4)
+        .filter(|px| px[0] > 180 && px[1] > 180 && px[2] > 180 && px[3] > 120)
+        .count();
+    assert!(
+        image_white > 80,
+        "inline SVG raster should contain visible text before replay, image_white={image_white}"
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(560, 320).expect("pixmap");
+    pixmap.fill(tiny_skia::Color::TRANSPARENT);
+    replay(&list, &mut pixmap, 1.0);
+
+    let mut total_white = 0usize;
+    let mut min_x = 560u32;
+    let mut max_x = 0u32;
+    for (i, px) in pixmap.data().chunks_exact(4).enumerate() {
+        if px[0] > 180 && px[1] > 180 && px[2] > 180 && px[3] > 120 {
+            let x = (i as u32) % 560;
+            total_white += 1;
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+        }
+    }
+    assert!(
+        total_white > 40,
+        "offset inline SVG should paint through its overflow clip, total_white={total_white}"
+    );
+    assert!(
+        min_x < 120 && max_x > 440,
+        "clipped offset SVG should not collapse to the right edge, bounds=({min_x},{max_x}), total_white={total_white}"
+    );
+}
+
+#[test]
+fn inline_svg_mdn_homepage_mandala_rings_use_dom_styles() {
+    let slashes = (0..42)
+        .map(|_| "/      <tspan>\n/      </tspan>\n")
+        .collect::<String>();
+    let pluses = (0..21)
+        .map(|_| "+      <tspan>\n+      </tspan>\n")
+        .collect::<String>();
+    let braces = (0..12)
+        .map(|_| "{      <tspan>\n}      </tspan>\n")
+        .collect::<String>();
+    let tags = (0..16)
+        .map(|_| "<tspan>\n&lt;&gt;      </tspan>\n&lt;/&gt;      ")
+        .collect::<String>();
+    let dummy_rules = (0..1100)
+        .map(|i| format!(".unused{i} {{ color: rgb(1, 2, 3); }}\n"))
+        .collect::<String>();
+    let html = format!(
+        r##"<style>
+             {dummy_rules}
+             body {{ margin: 0; }}
+             .homepage--dark {{ --color-border-primary: rgb(81, 86, 93); }}
+             .hero {{ width: 560px; height: 320px; overflow: hidden; background: rgb(33, 36, 38); }}
+             .mandala {{ width: 560px; height: 560px; margin-top: -140px; }}
+             .mandala svg {{ width: 560px; height: 560px; }}
+             .mandala svg > text {{ fill: var(--color-border-primary); }}
+             .mandala textpath[href="#circle1"] {{ font-size: 24px; }}
+             .mandala textpath[href="#circle2"] {{ font-size: 20.8px; }}
+             .mandala textpath[href="#circle3"] {{ font-size: 19.2px; }}
+             .mandala textpath[href="#circle4"] {{ font-size: 17.6px; }}
+             .mandala textpath[href="#circle5"] {{ font-size: 16px; }}
+           </style>
+           <div class="homepage--dark">
+             <div class="hero">
+               <div class="mandala">
+                 <svg viewbox="50 50 575 575" fill="none" xmlns="http://www.w3.org/2000/svg" class="mandala">
+                   <defs>
+                     <path d="M337.5,337.5 m-320,0 a320,320 0 1,1 640,0 a320,320 0 1,1 -640,0" id="circle1"/>
+                     <path d="M337.5,337.5 m-280,0 a280,280 0 1,1 560,0 a280,280 0 1,1 -560,0" id="circle2"/>
+                     <path d="M337.5,337.5 m-240,0 a240,240 0 1,1 480,0 a240,240 0 1,1 -480,0" id="circle3"/>
+                     <path d="M337.5,337.5 m-200,0 a200,200 0 1,1 400,0 a200,200 0 1,1 -400,0" id="circle4"/>
+                     <path d="M337.5,337.5 m-160,0 a160,160 0 1,1 320,0 a160,160 0 1,1 -320,0" id="circle5"/>
+                   </defs>
+                   <text dy="70" textlength="2010"><textpath textlength="2010" href="#circle1">{slashes}</textpath></text>
+                   <text dy="70" textlength="1760"><textpath textlength="1760" href="#circle2">{pluses}</textpath></text>
+                   <text dy="70" textlength="1507"><textpath textlength="1507" href="#circle3">{braces}</textpath></text>
+                   <text dy="70" textlength="1257"><textpath textlength="1257" href="#circle4">../../    ../../    ../../    ../../    ../../    ../../    ../../</textpath></text>
+                   <text dy="70" textlength="1005"><textpath textlength="1005" href="#circle5">{tags}</textpath></text>
+                 </svg>
+               </div>
+             </div>
+           </div>"##
+    );
+    let (_, list) = build(&html);
+    let (image_data, image_w, image_h) =
+        first_image_data(&list).expect("inline SVG should rasterize to an image");
+    assert_eq!((image_w, image_h), (560, 560));
+    let mut min_x = image_w;
+    let mut min_y = image_h;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut colored = 0usize;
+    for (i, px) in image_data.chunks_exact(4).enumerate() {
+        if px[3] > 120 && px[0] > 55 && px[1] > 55 && px[2] > 55 {
+            let x = (i as u32) % image_w;
+            let y = (i as u32) / image_w;
+            colored += 1;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+    assert!(
+        colored > 80,
+        "DOM-styled MDN mandala should paint visible gray rings, colored={colored}"
+    );
+    assert!(
+        min_x < 80 && max_x > 470 && min_y < 120 && max_y > 430,
+        "DOM-styled MDN mandala should be distributed around the circles, bounds=({min_x},{min_y},{max_x},{max_y}), colored={colored}"
+    );
+
+    let mut pixmap = tiny_skia::Pixmap::new(560, 320).expect("pixmap");
+    pixmap.fill(tiny_skia::Color::TRANSPARENT);
+    replay(&list, &mut pixmap, 1.0);
+    let bg = (33i16, 36i16, 38i16);
+    let mut visible = 0usize;
+    let mut min_visible_x = 560u32;
+    let mut max_visible_x = 0u32;
+    for (i, px) in pixmap.data().chunks_exact(4).enumerate() {
+        let d =
+            (px[0] as i16 - bg.0).abs() + (px[1] as i16 - bg.1).abs() + (px[2] as i16 - bg.2).abs();
+        if px[3] > 120 && d > 20 {
+            let x = (i as u32) % 560;
+            visible += 1;
+            min_visible_x = min_visible_x.min(x);
+            max_visible_x = max_visible_x.max(x);
+        }
+    }
+    assert!(
+        visible > 40,
+        "replayed clipped MDN mandala should visibly differ from its dark background, visible={visible}"
+    );
+    assert!(
+        min_visible_x < 120 && max_visible_x > 440,
+        "replayed clipped MDN mandala should remain distributed, bounds=({min_visible_x},{max_visible_x}), visible={visible}"
+    );
+}
+
+#[test]
 fn decoded_svg_image_uses_parsed_native_svg_tree_when_rasterized() {
     fn find_img_mut(node: &mut crate::WebCore) -> Option<&mut crate::WebCore> {
         if node.tag == "img" {
@@ -731,8 +1214,9 @@ fn decoded_svg_image_uses_parsed_native_svg_tree_when_rasterized() {
         node.children.iter_mut().find_map(find_img_mut)
     }
 
-    let doc = parse_html(r#"<img style="width:20px;height:20px">"#);
+    let doc = parse_html(r#"<img src="x.svg" style="width:20px;height:20px">"#);
     let mut frame = EngineFrame::new(doc, 800.0, 600.0);
+    frame.update_frame();
     let img = find_img_mut(&mut frame.doc.root).expect("img node");
     crate::html::set_decoded_image_on_node(
         img,
@@ -747,13 +1231,16 @@ fn decoded_svg_image_uses_parsed_native_svg_tree_when_rasterized() {
         img.svg_document.is_some(),
         "decoded SVG images should keep a parsed native SVG tree for browser paint"
     );
-    frame.update_frame();
     let list = build_display_list(&frame.doc.root, 800.0, 600.0);
     let image = list.commands.iter().find_map(|cmd| match cmd {
         PaintCmd::Image {
             data: ImageRef::Owned(data, w, h),
             ..
         } => Some((data, *w, *h)),
+        PaintCmd::Image {
+            data: ImageRef::Shared(data, w, h),
+            ..
+        } => Some((data.as_ref(), *w, *h)),
         _ => None,
     });
     let (data, w, h) = image.expect("decoded SVG image should rasterize to an image command");
@@ -778,8 +1265,9 @@ fn decoded_svg_image_uses_isolated_svg_document_color() {
         node.children.iter_mut().find_map(find_img_mut)
     }
 
-    let doc = parse_html(r#"<img style="width:20px;height:20px;color:white">"#);
+    let doc = parse_html(r#"<img src="x.svg" style="width:20px;height:20px;color:white">"#);
     let mut frame = EngineFrame::new(doc, 800.0, 600.0);
+    frame.update_frame();
     let img = find_img_mut(&mut frame.doc.root).expect("img node");
     crate::html::set_decoded_image_on_node(
         img,
@@ -790,13 +1278,16 @@ fn decoded_svg_image_uses_isolated_svg_document_color() {
             20.0,
         ),
     );
-    frame.update_frame();
     let list = build_display_list(&frame.doc.root, 800.0, 600.0);
     let image = list.commands.iter().find_map(|cmd| match cmd {
         PaintCmd::Image {
             data: ImageRef::Owned(data, w, h),
             ..
         } => Some((data, *w, *h)),
+        PaintCmd::Image {
+            data: ImageRef::Shared(data, w, h),
+            ..
+        } => Some((data.as_ref(), *w, *h)),
         _ => None,
     });
     let (data, w, _) = image.expect("decoded SVG image should rasterize to an image command");
@@ -848,6 +1339,64 @@ fn data_svg_background_decodes_before_first_paint() {
     let (draw_w, draw_h) = bg.expect("decoded background should produce a paint command");
     assert!((draw_w - 18.0).abs() < 0.5, "draw_w={draw_w}");
     assert!((draw_h - 18.0).abs() < 0.5, "draw_h={draw_h}");
+}
+
+#[test]
+fn background_position_keyword_offsets_resolve_from_far_edge() {
+    fn find_by_id_mut<'a>(
+        node: &'a mut crate::WebCore,
+        id: &str,
+    ) -> Option<&'a mut crate::WebCore> {
+        if node.attributes.get("id").map(String::as_str) == Some(id) {
+            return Some(node);
+        }
+        node.children
+            .iter_mut()
+            .find_map(|child| find_by_id_mut(child, id))
+    }
+
+    let doc = parse_html(
+        r#"
+        <style>body{margin:0}</style>
+        <div id="box" style="
+            width: 100px;
+            height: 60px;
+            background-image: url(sprite.svg);
+            background-repeat: no-repeat;
+            background-position: right 8px bottom 6px;
+        "></div>
+        "#,
+    );
+    let mut frame = EngineFrame::new(doc, 800.0, 600.0);
+    frame.update_frame();
+    let node = find_by_id_mut(&mut frame.doc.root, "box").expect("box node");
+    node.bg_image_data = Some(std::sync::Arc::new(vec![255; 20 * 10 * 4]));
+    node.bg_image_width = 20;
+    node.bg_image_height = 10;
+    node.bg_image_ratio_only = false;
+
+    let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+    let bg = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::BackgroundImage {
+            pos_x,
+            pos_y,
+            draw_w,
+            draw_h,
+            ..
+        } => Some((*pos_x, *pos_y, *draw_w, *draw_h)),
+        _ => None,
+    });
+    let (x, y, w, h) = bg.expect("background image should paint");
+    assert!((w - 20.0).abs() < 0.1, "draw_w={w}");
+    assert!((h - 10.0).abs() < 0.1, "draw_h={h}");
+    assert!(
+        (x - 72.0).abs() < 0.1,
+        "right 8px should paint at x=72, got {x}"
+    );
+    assert!(
+        (y - 44.0).abs() < 0.1,
+        "bottom 6px should paint at y=44, got {y}"
+    );
 }
 
 #[test]
@@ -1205,6 +1754,68 @@ fn inline_text_produces_text_commands() {
     assert!(
         !text_cmds.is_empty(),
         "paragraph text should produce Text commands"
+    );
+}
+
+#[test]
+fn flex_container_does_not_repaint_child_button_text_from_line_cache() {
+    let (_, list) = build(
+        r#"<div style="display:flex;justify-content:flex-end;width:400px">
+              <button style="background:#0d6efd;color:white;padding:6px 12px">Add Tree</button>
+           </div>"#,
+    );
+    let add_tree_texts = list
+        .commands
+        .iter()
+        .filter(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text.trim() == "Add Tree"))
+        .count();
+    assert_eq!(
+        add_tree_texts, 1,
+        "flex container must not also paint a stale aggregate line-cache copy of child text"
+    );
+}
+
+#[test]
+fn flex_end_button_background_keeps_bootstrap_padding() {
+    let (_, list) = build(
+        r#"<style>
+             .d-flex { display:flex; }
+             .justify-content-end { justify-content:flex-end; }
+             .btn { display:inline-block; padding:6px 12px; border:1px solid transparent; }
+             .btn-primary { color:white; background-color:#0d6efd; }
+           </style>
+           <div class="d-flex justify-content-end" style="width:400px">
+             <button class="btn btn-primary">Add Tree</button>
+           </div>"#,
+    );
+    let blue_button_width = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::FillRect { rect, color, .. } if *color == Color::rgb(13, 110, 253) => {
+                Some(rect.w)
+            }
+            _ => None,
+        })
+        .expect("button should paint a primary background");
+    assert!(
+        blue_button_width >= 74.0,
+        "button background should include text plus Bootstrap horizontal padding; got width {blue_button_width}"
+    );
+}
+
+#[test]
+fn inline_block_badge_paints_its_background_bubble() {
+    let (_, list) = build(
+        r#"<span style="display:inline-block;background:rgb(248,249,250);color:rgb(33,37,41);padding:6px 12px;border-radius:999px">2542 members</span>"#,
+    );
+    assert!(
+        list.commands.iter().any(|cmd| matches!(
+            cmd,
+            PaintCmd::FillRect { color, radius, .. }
+                if *color == Color::rgb(248, 249, 250) && radius.iter().any(|r| *r > 0.0)
+        )),
+        "inline-block badge background should paint as a rounded bubble"
     );
 }
 
@@ -4306,6 +4917,8 @@ fn border_image_paints_only_the_border_ring() {
             rect: Rect::new(2.0, 2.0, 20.0, 20.0),
             widths: [4.0, 4.0, 4.0, 4.0],
             slices: [1.0, 1.0, 1.0, 1.0],
+            repeat_x_mode: 0,
+            repeat_y_mode: 0,
             fill_center: false,
             data: ImageRef::Owned([0, 220, 0, 255].repeat(9), 3, 3),
         }],
@@ -4323,6 +4936,90 @@ fn border_image_paints_only_the_border_ring() {
         0,
         "border-image paint must not fill the content box"
     );
+}
+
+#[test]
+fn border_image_repeat_tiles_edge_segments() {
+    let mut data = vec![0; 5 * 3 * 4];
+    let top_middle_red = (1usize) * 4;
+    data[top_middle_red] = 255;
+    data[top_middle_red + 3] = 255;
+    let list = DisplayList {
+        commands: vec![PaintCmd::BorderImage {
+            rect: Rect::new(0.0, 0.0, 11.0, 3.0),
+            widths: [1.0, 1.0, 0.0, 1.0],
+            slices: [1.0, 1.0, 1.0, 1.0],
+            repeat_x_mode: 1,
+            repeat_y_mode: 0,
+            fill_center: false,
+            data: ImageRef::Owned(data, 5, 3),
+        }],
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(12, 4).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let pixels = pixmap.data();
+    let red_at = |x: usize, y: usize| pixels[(y * 12 + x) * 4];
+
+    assert!(
+        red_at(7, 0) > 200,
+        "repeat should restart the top edge source pattern across the border"
+    );
+}
+
+#[test]
+fn border_image_repeat_modes_reach_display_list() {
+    let (_frame, list) = build_full(
+        r#"<body style="margin:0">
+             <div style="width:40px;height:20px;border:4px solid transparent;
+                         border-image-source:url('data:image/svg+xml,%3Csvg%20viewBox=%220%200%203%203%22%20xmlns=%22http://www.w3.org/2000/svg%22%3E%3Crect%20width=%223%22%20height=%223%22%20fill=%22red%22/%3E%3C/svg%3E');
+                         border-image-slice:1;
+                         border-image-repeat:round space"></div>
+           </body>"#,
+    );
+
+    let border_image = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::BorderImage {
+                repeat_x_mode,
+                repeat_y_mode,
+                ..
+            } => Some((*repeat_x_mode, *repeat_y_mode)),
+            _ => None,
+        })
+        .expect("expected border-image display command");
+
+    assert_eq!(border_image, (3, 2));
+}
+
+#[test]
+fn border_image_width_and_outset_reach_display_list_geometry() {
+    let (_frame, list) = build_full(
+        r#"<body style="margin:0">
+             <div style="width:40px;height:20px;border:2px solid transparent;
+                         border-image-source:url('data:image/svg+xml,%3Csvg%20viewBox=%220%200%203%203%22%20xmlns=%22http://www.w3.org/2000/svg%22%3E%3Crect%20width=%223%22%20height=%223%22%20fill=%22red%22/%3E%3C/svg%3E');
+                         border-image-slice:1;
+                         border-image-width:8px 6px 4px 2px;
+                         border-image-outset:3px 5px"></div>
+           </body>"#,
+    );
+
+    let (rect, widths) = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::BorderImage { rect, widths, .. } => Some((*rect, *widths)),
+            _ => None,
+        })
+        .expect("expected border-image display command");
+
+    assert_eq!(widths, [8.0, 6.0, 4.0, 2.0]);
+    assert_eq!(rect.x, -5.0);
+    assert_eq!(rect.y, -3.0);
+    assert_eq!(rect.w, 54.0);
+    assert_eq!(rect.h, 30.0);
 }
 
 #[test]

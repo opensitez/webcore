@@ -6,27 +6,19 @@ use crate::layout::{
 use crate::types::*;
 
 /// Resolve a child by path through `display: contents` wrappers.
-// Depth 0 goes through `effective_children`, so a shadow host's items are its
-// SHADOW tree. Below that it is ordinary children, matching grid's resolver.
+// Paths are collected through `effective_children()` at every display:contents
+// depth, so dereference them in the same coordinate space.
 fn child_ref<'a>(node: &'a WebCore, path: &[usize]) -> &'a WebCore {
     let mut n = node;
-    for (depth, &i) in path.iter().enumerate() {
-        n = if depth == 0 {
-            &n.effective_children()[i]
-        } else {
-            &n.children[i]
-        };
+    for &i in path {
+        n = &n.effective_children()[i];
     }
     n
 }
 fn child_mut<'a>(node: &'a mut WebCore, path: &[usize]) -> &'a mut WebCore {
     let mut n = node;
-    for (depth, &i) in path.iter().enumerate() {
-        n = if depth == 0 {
-            &mut n.effective_children_mut()[i]
-        } else {
-            &mut n.children[i]
-        };
+    for &i in path {
+        n = &mut n.effective_children_mut()[i];
     }
     n
 }

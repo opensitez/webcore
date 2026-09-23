@@ -662,3 +662,21 @@ fn arc_segment_to_cubic(
     let (x, y) = map(p.0, p.1);
     b.cubic_to(x1, y1, x2, y2, x, y);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_arc_circle_path_has_expected_length() {
+        let data = "M337.5,337.5 m-320,0 a320,320 0 1,1 640,0 a320,320 0 1,1 -640,0";
+        let path = parse_path_data(data).expect("circle path parses");
+        let points = flatten_path_points(&path);
+        let length = path_polyline_length(&points);
+        let expected = std::f32::consts::TAU * 320.0;
+        assert!(
+            (length - expected).abs() < 20.0,
+            "length {length} should be close to circumference {expected}"
+        );
+    }
+}

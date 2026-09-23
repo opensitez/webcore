@@ -331,6 +331,8 @@ impl WebCore {
             media_duration: None,
             media_paused: true,
             media_ended: false,
+            media_seeking: false,
+            media_muted: false,
 
             bg_image_data: None,
             mask_image_data: None,
@@ -381,6 +383,7 @@ impl WebCore {
         self.shadow_root = Some(Box::new(ShadowRoot {
             children,
             stylesheet,
+            document_stylesheets: Vec::new(),
             mode,
             node_id,
             delegates_focus: false,
@@ -564,8 +567,14 @@ impl WebCore {
             return;
         }
         let light_children = self.children.clone();
+        let host_for_selector = self.clone();
         let sr = self.shadow_root.as_mut().unwrap();
-        resolve_slots_inner(&mut sr.children, &light_children);
+        resolve_slots_inner(
+            Some(&host_for_selector),
+            &mut sr.children,
+            &light_children,
+            Some(&sr.stylesheet),
+        );
     }
 
     /// Collect all text content recursively.

@@ -145,6 +145,12 @@ struct TextCtx<'a> {
     swash_cache: &'a mut SwashCache,
 }
 
+fn text_transform_scale(transform: Transform) -> f32 {
+    let sx = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
+    let sy = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
+    ((sx + sy) * 0.5).max(0.0001)
+}
+
 #[derive(Clone, Debug)]
 pub struct PaintState {
     pub fill: CanvasPaint,
@@ -662,7 +668,7 @@ impl<'a> Canvas for TinySkiaCanvas<'a> {
         // the renderer's compositing loop — the same one `draw_text_cmd` uses
         // for element text, so canvas text and page text are blitted by one
         // piece of code rather than two that can disagree about alpha.
-        let scale = self.state.transform.sx;
+        let scale = text_transform_scale(self.state.transform);
         let size = self.state.font.size;
         let metrics = Metrics::new(size, size * 1.3).scale(scale);
         let mut buf = shape_text(tc, &self.state, text, scale);
@@ -716,7 +722,7 @@ impl<'a> Canvas for TinySkiaCanvas<'a> {
         let Some(mut owned_tc) = self.text_ctx.take() else {
             return;
         };
-        let scale = self.state.transform.sx;
+        let scale = text_transform_scale(self.state.transform);
         let size = self.state.font.size;
         let metrics = Metrics::new(size, size * 1.3).scale(scale);
         let buf = shape_text(&mut owned_tc, &self.state, text, scale);

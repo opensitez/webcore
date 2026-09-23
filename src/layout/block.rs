@@ -1128,6 +1128,7 @@ pub fn layout_block_with_fc(
             // Just reposition them at the current child_y.
             let can_skip = !child.layout.layout_dirty
                 && !child.has_dirty_descendant
+                && !child.has_dirty_layout_descendant
                 && child.layout.last_containing_width > 0.0
                 && (child.layout.last_containing_width - child_content_w).abs() < 0.01
                 && child.layout.margin_rect.h > 0.0;

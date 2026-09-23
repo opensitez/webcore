@@ -416,7 +416,9 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
         }
 
         // Pass 1: deepest child whose borderRect (absolute) contains the point
-        for child in node.children.iter().rev() {
+        let effective_children = node.effective_children();
+
+        for child in effective_children.iter().rev() {
             // ⛔ Skipped HERE, not by the recursive call: each of these loops falls
             // back to `return Some(child.node_id)` when the recursion finds nothing
             // deeper, so a child that refused the hit would be returned anyway.
@@ -469,7 +471,7 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
         }
 
         // Pass 2: children whose marginRect contains the point (gap / margin areas)
-        for child in node.children.iter().rev() {
+        for child in effective_children.iter().rev() {
             // ⛔ Skipped HERE, not by the recursive call: each of these loops falls
             // back to `return Some(child.node_id)` when the recursion finds nothing
             // deeper, so a child that refused the hit would be returned anyway.
@@ -497,7 +499,7 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
         }
 
         // Pass 3: X-range only — handles margin-collapse overflow
-        for child in node.children.iter().rev() {
+        for child in effective_children.iter().rev() {
             // ⛔ Skipped HERE, not by the recursive call: each of these loops falls
             // back to `return Some(child.node_id)` when the recursion finds nothing
             // deeper, so a child that refused the hit would be returned anyway.

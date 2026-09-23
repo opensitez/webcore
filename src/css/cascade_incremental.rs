@@ -165,7 +165,14 @@ pub fn hover_change_requires_style(
         return true;
     }
 
-    if hover_sensitive.is_empty() && stylesheet.rules.iter().any(|rule| rule.is_hover) {
+    // A false negative here makes the browser visibly broken: the input layer
+    // clears `hover_changed`, so menu hover backgrounds, disclosure arrows and
+    // dropdowns never get a chance to recascade. The hover-sensitive set is a
+    // performance hint built from the previous cascade; modern selectors such
+    // as `:is(..., :hover)` and descendant menu rules can still be missed by
+    // that hint while the rule matcher itself supports them. If the chain
+    // changed and the sheet has hover rules, recascade conservatively.
+    if stylesheet.rules.iter().any(|rule| rule.is_hover) {
         return true;
     }
 
@@ -254,6 +261,7 @@ fn hover_descendant_anchor_matches(
     type_sibling_count: usize,
 ) -> bool {
     let empty_hover = std::collections::HashSet::new();
+    let empty_focus = std::collections::HashSet::new();
     let ctx = MatchContext {
         focused_box: 0,
         keyboard_focus: false,
@@ -261,6 +269,7 @@ fn hover_descendant_anchor_matches(
         type_sibling_count,
         html_box: Some(node),
         hover_chain: &empty_hover,
+        focus_within_chain: &empty_focus,
         element_id: node.node_id,
         scope_root_id: 0,
         target_id: 0,
@@ -283,17 +292,10 @@ fn hover_descendant_anchor_matches(
                 continue;
             };
             let prefix = &sel.parts[..pos];
-            if !prefix
-                .iter()
-                .any(|p| matches!(p, SelectorPart::PseudoClass(pc) if pc == "hover"))
-            {
+            if !selector_parts_have_state(prefix, "hover") {
                 continue;
             }
-            let stripped: Vec<SelectorPart> = prefix
-                .iter()
-                .filter(|p| !matches!(p, SelectorPart::PseudoClass(pc) if pc == "hover"))
-                .cloned()
-                .collect();
+            let stripped = strip_state_pseudos_from_parts(prefix);
             if stripped.is_empty() {
                 return true;
             }
@@ -365,6 +367,7 @@ pub fn apply_cascade_incremental(
     let mut ancestors: Vec<AncestorInfo> = Vec::new();
     let mut candidates_buf: Vec<usize> = Vec::new();
     let mut counters: HashMap<String, Vec<i32>> = HashMap::new();
+    let focus_within_chain = build_hover_chain(root, focused_box);
     apply_cascade_incremental_walk(
         root,
         stylesheet,
@@ -383,6 +386,7 @@ pub fn apply_cascade_incremental(
         &mut candidates_buf,
         &mut counters,
         hover_chain,
+        &focus_within_chain,
     );
 }
 
@@ -404,6 +408,7 @@ fn apply_cascade_incremental_walk(
     candidates_buf: &mut Vec<usize>,
     counters: &mut HashMap<String, Vec<i32>>,
     hover_chain: &std::collections::HashSet<u32>,
+    focus_within_chain: &std::collections::HashSet<u32>,
 ) {
     const CSS_INITIAL_ROOT_FONT_PX: f32 = 16.0;
     // SKIP: neither this node nor any descendant needs work
@@ -441,6 +446,7 @@ fn apply_cascade_incremental_walk(
             candidates_buf,
             counters,
             hover_chain,
+            focus_within_chain,
             &[],
             &[],
             &[],
@@ -499,6 +505,7 @@ fn apply_cascade_incremental_walk(
             candidates_buf,
             counters,
             hover_chain,
+            focus_within_chain,
         );
     }
 
@@ -519,14 +526,17 @@ pub fn build_hover_chain(
         if node.node_id != 0 && node.node_id == target {
             return true;
         }
-        for child in &node.children {
+        for child in node.effective_children() {
             if walk(child, target, path) {
                 return true;
             }
         }
-        // Also search shadow tree
-        if let Some(ref sr) = node.shadow_root {
-            for child in &sr.children {
+        // A shadow host renders its effective children, but its light DOM is
+        // still part of the document and may hold the original node ids for
+        // slotted content. Hit testing and layout use effective children; this
+        // fallback keeps :hover state aligned with document identity too.
+        if node.shadow_root.is_some() {
+            for child in &node.children {
                 if walk(child, target, path) {
                     return true;
                 }
@@ -609,6 +619,21 @@ fn swap_hover_inner(
             let cur_backdrop_style = std::sync::Arc::make_mut(&mut node.style)
                 .backdrop_style
                 .take();
+            let cur_details_content_style = std::sync::Arc::make_mut(&mut node.style)
+                .details_content_style
+                .take();
+            let cur_spelling_error_style = std::sync::Arc::make_mut(&mut node.style)
+                .spelling_error_style
+                .take();
+            let cur_grammar_error_style = std::sync::Arc::make_mut(&mut node.style)
+                .grammar_error_style
+                .take();
+            let cur_first_line_style = std::sync::Arc::make_mut(&mut node.style)
+                .first_line_style
+                .take();
+            let cur_first_letter_style = std::sync::Arc::make_mut(&mut node.style)
+                .first_letter_style
+                .take();
 
             let cur_style = std::mem::replace(&mut node.style, std::sync::Arc::new(*other));
             // Store the old style as the new hover_style (for swapping back)
@@ -631,6 +656,11 @@ fn swap_hover_inner(
             stored.marker_content = cur_marker_content;
             stored.placeholder_style = cur_placeholder_style;
             stored.backdrop_style = cur_backdrop_style;
+            stored.details_content_style = cur_details_content_style;
+            stored.spelling_error_style = cur_spelling_error_style;
+            stored.grammar_error_style = cur_grammar_error_style;
+            stored.first_line_style = cur_first_line_style;
+            stored.first_letter_style = cur_first_letter_style;
             let old_inherited_style = (*stored).clone();
 
             std::sync::Arc::make_mut(&mut node.style).hover_style = Some(stored);

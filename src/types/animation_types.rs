@@ -116,6 +116,7 @@ pub struct AnimState {
     pub element_id: u32,
     pub animation: ParsedAnimation,
     pub start_time: std::time::Instant,
+    pub paused_at: Option<std::time::Instant>,
     pub last_iteration_event: u32,
 }
 

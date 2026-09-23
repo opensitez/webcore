@@ -110,20 +110,23 @@ pub fn handle_form_click(
     };
     let target = effective_target;
 
-    // Disabled elements don't respond to clicks
+    // Disabled elements don't respond to clicks, including controls disabled
+    // by a containing fieldset except through its first legend.
     let target_node = find_ref(root, target)?;
-    if target_node.attributes.contains_key("disabled") {
+    if is_actually_disabled(root, target) {
         return None;
     }
 
     // Read target info before mutation
     let (tag, input_type, name, id, value) = {
         let tag = target_node.tag.clone();
-        let input_type = target_node
-            .attributes
-            .get("type")
-            .map(|ty| ty.trim().to_ascii_lowercase())
-            .unwrap_or_default();
+        let input_type = normalize_input_type(
+            target_node
+                .attributes
+                .get("type")
+                .map(|ty| ty.as_str())
+                .unwrap_or("text"),
+        );
         let name = target_node
             .attributes
             .get("name")
@@ -179,9 +182,15 @@ pub fn handle_form_click(
                 "radio" => {
                     // Uncheck other radios with the same name, check this one
                     if !name.is_empty() {
-                        fn uncheck_radios(node: &mut WebCore, name: &str, except_id: u32) {
-                            if node.tag == "input"
-                                && node.attributes.get("type").map(|s| s.as_str()) == Some("radio")
+                        let owner = form_owner_id(root, target);
+                        let same_owner_ids = radio_ids_with_owner(root, owner);
+                        fn uncheck_radios_by_id(
+                            node: &mut WebCore,
+                            name: &str,
+                            ids: &HashSet<u32>,
+                            except_id: u32,
+                        ) {
+                            if ids.contains(&node.node_id)
                                 && node.attributes.get("name").map(|s| s.as_str()) == Some(name)
                                 && node.node_id != except_id
                             {
@@ -189,10 +198,10 @@ pub fn handle_form_click(
                                 node.dirty_checked = true;
                             }
                             for child in &mut node.children {
-                                uncheck_radios(child, name, except_id);
+                                uncheck_radios_by_id(child, name, ids, except_id);
                             }
                         }
-                        uncheck_radios(root, &name, target);
+                        uncheck_radios_by_id(root, &name, &same_owner_ids, target);
                     }
                     let node = find_mut(root, target)?;
                     node.checkedness = true;
@@ -208,31 +217,10 @@ pub fn handle_form_click(
                     }
                     Some(true)
                 }
-                "submit" | "button" | "reset" => {
+                "submit" | "button" | "reset" | "image" => {
                     // Reset button: reset the parent form
                     if input_type == "reset" {
-                        let _form_action = find_parent_form_action(root, target);
-                        // Find and reset the parent form
-                        fn find_form_for_reset(node: &WebCore, target_id: u32) -> Option<u32> {
-                            if node.tag == "form" {
-                                fn contains(n: &WebCore, t: u32) -> bool {
-                                    if n.node_id == t {
-                                        return true;
-                                    }
-                                    n.children.iter().any(|c| contains(c, t))
-                                }
-                                if contains(node, target_id) {
-                                    return Some(node.node_id);
-                                }
-                            }
-                            for child in &node.children {
-                                if let Some(f) = find_form_for_reset(child, target_id) {
-                                    return Some(f);
-                                }
-                            }
-                            None
-                        }
-                        if let Some(form_id) = find_form_for_reset(root, target) {
+                        if let Some(form_id) = form_owner_id(root, target) {
                             reset_form(root, form_id);
                         }
                     }
@@ -244,10 +232,23 @@ pub fn handle_form_click(
                             kind: FormEventKind::Click(value),
                             element: target,
                         });
+                        if matches!(input_type.as_str(), "submit" | "image")
+                            && form_owner_id(root, target).is_some()
+                        {
+                            let action = submitter_form_action(root, target);
+                            cb(&FormEvent {
+                                tag: "form".into(),
+                                id: String::new(),
+                                name: String::new(),
+                                kind: FormEventKind::Submit(action),
+                                element: target,
+                            });
+                        }
                     }
-                    Some(false)
+                    Some(input_type == "reset")
                 }
-                "text" | "password" | "email" | "search" | "url" | "tel" | "number" => {
+                "text" | "password" | "email" | "search" | "url" | "tel" | "number" | "date"
+                | "month" | "week" | "time" | "datetime-local" => {
                     // Text input clicked — set cursor to end of value
                     let node = find_mut(root, target)?;
                     let len = input_value(node).chars().count();
@@ -255,14 +256,26 @@ pub fn handle_form_click(
                     node.input_sel_anchor = len;
                     Some(true)
                 }
-                _ => None,
+                "hidden" => None,
+                "range" | "color" | "file" => None,
+                _ => {
+                    // Unknown input types are in the Text state.
+                    let node = find_mut(root, target)?;
+                    let len = input_value(node).chars().count();
+                    node.input_cursor = len;
+                    node.input_sel_anchor = len;
+                    Some(true)
+                }
             }
         }
         "button" => {
             let target_node2 = find_ref(root, target);
-            let btn_type = target_node2
-                .and_then(|n| n.attributes.get("type").cloned())
-                .unwrap_or_else(|| "submit".to_string());
+            let btn_type = normalize_button_type(
+                target_node2
+                    .and_then(|n| n.attributes.get("type").cloned())
+                    .as_deref()
+                    .unwrap_or("submit"),
+            );
             if let Some(cb) = callback {
                 let text = target_node2.map(|n| n.text.clone()).unwrap_or_default();
                 cb(&FormEvent {
@@ -280,8 +293,8 @@ pub fn handle_form_click(
                 // form owner. A standalone demo toolbar `<button>` still has
                 // a missing-value default type of submit, but it has no form
                 // to submit and must not navigate the current document.
-                if btn_type == "submit" && has_parent_form(root, target) {
-                    let action = find_parent_form_action(root, target);
+                if btn_type == "submit" && form_owner_id(root, target).is_some() {
+                    let action = submitter_form_action(root, target);
                     cb(&FormEvent {
                         tag: "form".into(),
                         id: String::new(),
@@ -293,26 +306,7 @@ pub fn handle_form_click(
             }
             // Reset buttons reset the form
             if btn_type == "reset" {
-                fn find_form_id(node: &WebCore, target_id: u32) -> Option<u32> {
-                    if node.tag == "form" {
-                        fn has(n: &WebCore, t: u32) -> bool {
-                            if n.node_id == t {
-                                return true;
-                            }
-                            n.children.iter().any(|c| has(c, t))
-                        }
-                        if has(node, target_id) {
-                            return Some(node.node_id);
-                        }
-                    }
-                    for c in &node.children {
-                        if let Some(f) = find_form_id(c, target_id) {
-                            return Some(f);
-                        }
-                    }
-                    None
-                }
-                if let Some(fid) = find_form_id(root, target) {
+                if let Some(fid) = form_owner_id(root, target) {
                     reset_form(root, fid);
                 }
             }
@@ -325,6 +319,197 @@ pub fn handle_form_click(
         // along its track, and a drop-down opens its popup.
         "select" => None,
         _ => None,
+    }
+}
+
+fn normalize_input_type(raw: &str) -> String {
+    let ty = raw.trim().to_ascii_lowercase();
+    match ty.as_str() {
+        "hidden" | "text" | "search" | "tel" | "url" | "email" | "password" | "date" | "month"
+        | "week" | "time" | "datetime-local" | "number" | "range" | "color" | "checkbox"
+        | "radio" | "file" | "submit" | "image" | "reset" | "button" => ty,
+        _ => "text".to_string(),
+    }
+}
+
+fn normalize_button_type(raw: &str) -> String {
+    let ty = raw.trim().to_ascii_lowercase();
+    match ty.as_str() {
+        "button" | "reset" | "submit" => ty,
+        _ => "submit".to_string(),
+    }
+}
+
+fn form_associated(node: &WebCore) -> bool {
+    matches!(
+        node.tag.as_str(),
+        "button" | "fieldset" | "input" | "object" | "output" | "select" | "textarea" | "img"
+    )
+}
+
+fn listed_element(node: &WebCore) -> bool {
+    matches!(
+        node.tag.as_str(),
+        "button" | "fieldset" | "input" | "object" | "output" | "select" | "textarea"
+    )
+}
+
+fn find_node(root: &WebCore, target_id: u32) -> Option<&WebCore> {
+    if root.node_id == target_id {
+        return Some(root);
+    }
+    for child in &root.children {
+        if let Some(found) = find_node(child, target_id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_node_mut(root: &mut WebCore, target_id: u32) -> Option<&mut WebCore> {
+    if root.node_id == target_id {
+        return Some(root);
+    }
+    for child in &mut root.children {
+        if let Some(found) = find_node_mut(child, target_id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_by_html_id<'a>(root: &'a WebCore, html_id: &str) -> Option<&'a WebCore> {
+    if root
+        .attributes
+        .get("id")
+        .is_some_and(|value| value == html_id)
+    {
+        return Some(root);
+    }
+    for child in &root.children {
+        if let Some(found) = find_by_html_id(child, html_id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn parent_id(root: &WebCore, target_id: u32) -> Option<u32> {
+    for child in &root.children {
+        if child.node_id == target_id {
+            return Some(root.node_id);
+        }
+        if let Some(found) = parent_id(child, target_id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn ancestor_form_id(root: &WebCore, target_id: u32) -> Option<u32> {
+    let mut cursor = parent_id(root, target_id);
+    while let Some(id) = cursor {
+        let node = find_node(root, id)?;
+        if node.tag == "form" {
+            return Some(id);
+        }
+        cursor = parent_id(root, id);
+    }
+    None
+}
+
+pub fn form_owner_id(root: &WebCore, target_id: u32) -> Option<u32> {
+    let node = find_node(root, target_id)?;
+    if !form_associated(node) {
+        return None;
+    }
+    if let Some(form_id) = node.attributes.get("form") {
+        if let Some(form) = find_by_html_id(root, form_id) {
+            if form.tag == "form" {
+                return Some(form.node_id);
+            }
+        }
+    }
+    ancestor_form_id(root, target_id)
+}
+
+fn first_legend_child_id(fieldset: &WebCore) -> Option<u32> {
+    fieldset
+        .children
+        .iter()
+        .find(|child| child.tag == "legend")
+        .map(|child| child.node_id)
+}
+
+fn is_actually_disabled(root: &WebCore, target_id: u32) -> bool {
+    if find_node(root, target_id).is_some_and(|node| node.attributes.contains_key("disabled")) {
+        return true;
+    }
+    let mut child_id = target_id;
+    let mut cursor = parent_id(root, target_id);
+    while let Some(id) = cursor {
+        let Some(node) = find_node(root, id) else {
+            return false;
+        };
+        if node.tag == "fieldset" && node.attributes.contains_key("disabled") {
+            if first_legend_child_id(node) != Some(child_id) {
+                return true;
+            }
+        }
+        child_id = id;
+        cursor = parent_id(root, id);
+    }
+    false
+}
+
+fn radio_ids_with_owner(root: &WebCore, owner: Option<u32>) -> HashSet<u32> {
+    let mut ids = HashSet::new();
+    fn walk(root: &WebCore, node: &WebCore, owner: Option<u32>, ids: &mut HashSet<u32>) {
+        if node.tag == "input"
+            && normalize_input_type(
+                node.attributes
+                    .get("type")
+                    .map(|s| s.as_str())
+                    .unwrap_or("text"),
+            ) == "radio"
+            && form_owner_id(root, node.node_id) == owner
+        {
+            ids.insert(node.node_id);
+        }
+        for child in &node.children {
+            walk(root, child, owner, ids);
+        }
+    }
+    walk(root, root, owner, &mut ids);
+    ids
+}
+
+fn submitter_form_action(root: &WebCore, submitter_id: u32) -> String {
+    let Some(form_id) = form_owner_id(root, submitter_id) else {
+        return String::new();
+    };
+    if let Some(submitter) = find_node(root, submitter_id) {
+        if let Some(action) = submitter.attributes.get("formaction") {
+            return action.clone();
+        }
+    }
+    find_node(root, form_id)
+        .and_then(|form| form.attributes.get("action").cloned())
+        .unwrap_or_default()
+}
+
+pub fn submitter_form_method(root: &WebCore, submitter_id: u32) -> String {
+    let Some(form_id) = form_owner_id(root, submitter_id) else {
+        return "get".to_string();
+    };
+    let raw = find_node(root, submitter_id)
+        .and_then(|submitter| submitter.attributes.get("formmethod"))
+        .or_else(|| find_node(root, form_id).and_then(|form| form.attributes.get("method")))
+        .map(|method| method.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "get".to_string());
+    match raw.as_str() {
+        "post" | "dialog" => raw,
+        _ => "get".to_string(),
     }
 }
 
@@ -369,46 +554,9 @@ pub(crate) fn find_form_parent_id(root: &WebCore, target_id: u32) -> u32 {
     walk(root, target_id).unwrap_or(target_id)
 }
 
-fn has_parent_form(root: &WebCore, target_id: u32) -> bool {
-    fn contains(node: &WebCore, target_id: u32) -> bool {
-        node.node_id == target_id || node.children.iter().any(|child| contains(child, target_id))
-    }
-    fn walk(node: &WebCore, target_id: u32) -> bool {
-        node.tag == "form" && node.children.iter().any(|child| contains(child, target_id))
-            || node.children.iter().any(|child| walk(child, target_id))
-    }
-    walk(root, target_id)
-}
-
-/// Find the action URL of the nearest ancestor <form> element.
+/// Find the action URL of a submitter's form owner.
 pub fn find_parent_form_action(root: &WebCore, target_id: u32) -> String {
-    fn walk(node: &WebCore, target_id: u32) -> Option<String> {
-        for child in &node.children {
-            if child.node_id == target_id {
-                if node.tag == "form" {
-                    return Some(node.attributes.get("action").cloned().unwrap_or_default());
-                }
-                return None; // found target but parent isn't form — caller keeps looking
-            }
-            if let Some(action) = walk(child, target_id) {
-                return Some(action);
-            }
-            // Check if child contains target and this node is a form
-            if node.tag == "form" {
-                fn contains(node: &WebCore, target_id: u32) -> bool {
-                    if node.node_id == target_id {
-                        return true;
-                    }
-                    node.children.iter().any(|c| contains(c, target_id))
-                }
-                if contains(child, target_id) {
-                    return Some(node.attributes.get("action").cloned().unwrap_or_default());
-                }
-            }
-        }
-        None
-    }
-    walk(root, target_id).unwrap_or_default()
+    submitter_form_action(root, target_id)
 }
 
 /// **Constructing the entry list** (HTML §4.10.21.4) for a `<form>`.
@@ -430,32 +578,133 @@ pub fn find_parent_form_action(root: &WebCore, target_id: u32) -> String {
 /// - Elements without a name contribute nothing
 pub fn collect_form_data(form: &WebCore) -> Vec<(String, String)> {
     let mut data = Vec::new();
-    collect_form_data_inner(form, &mut data);
+    collect_form_data_inner(form, form, &mut data);
     data
 }
 
-fn collect_form_data_inner(node: &WebCore, data: &mut Vec<(String, String)>) {
-    if node.attributes.contains_key("disabled") {
+pub fn collect_form_data_for_form(root: &WebCore, form_id: u32) -> Vec<(String, String)> {
+    let mut data = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(form) = find_node(root, form_id) {
+        collect_form_descendant_data(root, form, &mut seen, &mut data);
+    }
+    collect_explicit_form_data(root, root, form_id, &mut seen, &mut data);
+    collect_following_orphan_form_data(root, form_id, &mut seen, &mut data);
+    data
+}
+
+fn collect_form_descendant_data(
+    root: &WebCore,
+    node: &WebCore,
+    seen: &mut HashSet<u32>,
+    data: &mut Vec<(String, String)>,
+) {
+    if listed_element(node)
+        && !(node.tag == "input"
+            && normalize_input_type(
+                node.attributes
+                    .get("type")
+                    .map(|s| s.as_str())
+                    .unwrap_or("text"),
+            ) == "image")
+        && !is_actually_disabled(root, node.node_id)
+        && seen.insert(node.node_id)
+    {
+        append_successful_control(node, data);
+    }
+    for child in &node.children {
+        collect_form_descendant_data(root, child, seen, data);
+    }
+}
+
+fn collect_explicit_form_data(
+    root: &WebCore,
+    node: &WebCore,
+    form_id: u32,
+    seen: &mut HashSet<u32>,
+    data: &mut Vec<(String, String)>,
+) {
+    if listed_element(node)
+        && !seen.contains(&node.node_id)
+        && node.attributes.contains_key("form")
+        && form_owner_id(root, node.node_id) == Some(form_id)
+        && !is_actually_disabled(root, node.node_id)
+    {
+        seen.insert(node.node_id);
+        append_successful_control(node, data);
+    }
+    for child in &node.children {
+        collect_explicit_form_data(root, child, form_id, seen, data);
+    }
+}
+
+fn collect_following_orphan_form_data(
+    root: &WebCore,
+    form_id: u32,
+    seen: &mut HashSet<u32>,
+    data: &mut Vec<(String, String)>,
+) {
+    fn walk(
+        root: &WebCore,
+        node: &WebCore,
+        form_id: u32,
+        after_form: &mut bool,
+        seen: &mut HashSet<u32>,
+        data: &mut Vec<(String, String)>,
+    ) {
+        if node.node_id == form_id {
+            *after_form = true;
+        } else if *after_form && node.tag == "form" {
+            *after_form = false;
+        } else if *after_form
+            && listed_element(node)
+            && !seen.contains(&node.node_id)
+            && node.attributes.get("form").is_none()
+            && ancestor_form_id(root, node.node_id).is_none()
+            && !is_actually_disabled(root, node.node_id)
+        {
+            seen.insert(node.node_id);
+            append_successful_control(node, data);
+        }
+
+        for child in &node.children {
+            walk(root, child, form_id, after_form, seen, data);
+        }
+    }
+
+    let mut after_form = false;
+    walk(root, root, form_id, &mut after_form, seen, data);
+}
+
+fn collect_form_data_inner(node: &WebCore, root: &WebCore, data: &mut Vec<(String, String)>) {
+    if listed_element(node) && !is_actually_disabled(root, node.node_id) {
+        append_successful_control(node, data);
+    }
+    for child in &node.children {
+        collect_form_data_inner(child, root, data);
+    }
+}
+
+fn append_successful_control(node: &WebCore, data: &mut Vec<(String, String)>) {
+    if matches!(
+        node.tag.as_str(),
+        "button" | "fieldset" | "object" | "output"
+    ) {
         return;
     }
     let name = match node.attributes.get("name") {
         Some(n) if !n.is_empty() => n.clone(),
-        _ => {
-            // No name — recurse into children but don't collect this node
-            for child in &node.children {
-                collect_form_data_inner(child, data);
-            }
-            return;
-        }
+        _ => return,
     };
     match node.tag.as_str() {
         "input" => {
-            let input_type = node
-                .attributes
-                .get("type")
-                .map(|s| s.as_str())
-                .unwrap_or("text");
-            match input_type {
+            let input_type = normalize_input_type(
+                node.attributes
+                    .get("type")
+                    .map(|s| s.as_str())
+                    .unwrap_or("text"),
+            );
+            match input_type.as_str() {
                 "checkbox" => {
                     // What gets SUBMITTED is the current checkedness, not the
                     // author's default — a box the user unticked must not be
@@ -471,7 +720,11 @@ fn collect_form_data_inner(node: &WebCore, data: &mut Vec<(String, String)>) {
                 }
                 "radio" => {
                     if node.checkedness {
-                        let val = node.attributes.get("value").cloned().unwrap_or_default();
+                        let val = node
+                            .attributes
+                            .get("value")
+                            .cloned()
+                            .unwrap_or_else(|| "on".to_string());
                         data.push((name, val));
                     }
                 }
@@ -499,21 +752,19 @@ fn collect_form_data_inner(node: &WebCore, data: &mut Vec<(String, String)>) {
             //
             // One entry PER selected option, which is how a `multiple` select
             // submits several values under one name.
-            for option in crate::html::forms::list_of_options(node) {
-                if option.selectedness && !option.attributes.contains_key("disabled") {
+            crate::html::forms::for_each_option(node, &mut |option, group_disabled| {
+                if option.selectedness
+                    && !crate::html::forms::option_is_disabled(option, group_disabled)
+                {
                     data.push((name.clone(), crate::html::forms::option_value(option)));
                 }
-            }
+            });
         }
         "textarea" => {
             let val = input_value(node);
             data.push((name, val));
         }
-        _ => {
-            for child in &node.children {
-                collect_form_data_inner(child, data);
-            }
-        }
+        _ => {}
     }
 }
 
@@ -522,20 +773,35 @@ fn collect_form_data_inner(node: &WebCore, data: &mut Vec<(String, String)>) {
 /// Checkboxes/radios reset to their initial checked state.
 /// Selects reset to the initially selected option.
 pub fn reset_form(root: &mut WebCore, form_id: u32) {
-    fn find_mut<'a>(n: &'a mut WebCore, t: u32) -> Option<&'a mut WebCore> {
-        if n.node_id == t {
-            return Some(n);
+    let control_ids = form_control_ids(root, form_id);
+    for control_id in control_ids {
+        if let Some(control) = find_node_mut(root, control_id) {
+            reset_control(control);
         }
-        for c in &mut n.children {
-            if let Some(r) = find_mut(c, t) {
-                return Some(r);
-            }
+    }
+}
+
+fn form_control_ids(root: &WebCore, form_id: u32) -> Vec<u32> {
+    let mut ids = Vec::new();
+    fn walk(root: &WebCore, node: &WebCore, form_id: u32, ids: &mut Vec<u32>) {
+        if listed_element(node)
+            && !(node.tag == "input"
+                && normalize_input_type(
+                    node.attributes
+                        .get("type")
+                        .map(|s| s.as_str())
+                        .unwrap_or("text"),
+                ) == "image")
+            && form_owner_id(root, node.node_id) == Some(form_id)
+        {
+            ids.push(node.node_id);
         }
-        None
+        for child in &node.children {
+            walk(root, child, form_id, ids);
+        }
     }
-    if let Some(form) = find_mut(root, form_id) {
-        reset_form_inner(form);
-    }
+    walk(root, root, form_id, &mut ids);
+    ids
 }
 
 /// The **reset algorithm** for one control (HTML §4.10.23).
@@ -543,7 +809,7 @@ pub fn reset_form(root: &mut WebCore, form_id: u32) {
 /// Every arm is now the same sentence: drop the STATE, clear its dirty flag,
 /// and let the content attribute speak again. Nothing is copied anywhere,
 /// because the default was never overwritten in the first place.
-fn reset_form_inner(node: &mut WebCore) {
+fn reset_control(node: &mut WebCore) {
     match node.tag.as_str() {
         "input" => {
             let input_type = node
@@ -600,11 +866,7 @@ fn reset_form_inner(node: &mut WebCore) {
             // the select element run the selectedness setting algorithm."
             crate::html::forms::reset_select(node);
         }
-        _ => {
-            for child in &mut node.children {
-                reset_form_inner(child);
-            }
-        }
+        _ => {}
     }
 }
 

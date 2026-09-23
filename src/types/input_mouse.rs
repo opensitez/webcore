@@ -269,6 +269,8 @@ impl Document {
                             target_id,
                             &self.base_url,
                         );
+                        self.style_dirty = true;
+                        crate::dom::mark_layout_dirty(&mut self.root);
                         redraw = true;
                     }
                 }
@@ -402,6 +404,16 @@ impl Document {
                         if self.dispatch_input_event(click).0 {
                             redraw = true;
                         }
+                        let click_default_allowed = if hit_node_id != 0 {
+                            let mut dom_click =
+                                crate::dom::events::DomEvent::new("click", hit_node_id);
+                            if self.dispatch_dom_event(&mut dom_click) {
+                                redraw = true;
+                            }
+                            !dom_click.default_prevented()
+                        } else {
+                            true
+                        };
 
                         // Form element interactions
                         // The second half of the popup rule: an OPEN DROPDOWN
@@ -409,7 +421,10 @@ impl Document {
                         // same reason the outer one did — a row with no element
                         // beneath it has `hit_node_id == 0`. The form-click call
                         // still needs a real node and keeps its own check.
-                        if (hit_node_id != 0 || self.open_select != 0) && button == 0 {
+                        if (hit_node_id != 0 || self.open_select != 0)
+                            && button == 0
+                            && click_default_allowed
+                        {
                             let form_click = (hit_node_id != 0)
                                 .then(|| {
                                     handle_form_click(

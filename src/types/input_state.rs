@@ -96,11 +96,22 @@ pub fn is_text_input(node: &WebCore) -> bool {
             let t = node
                 .attributes
                 .get("type")
-                .map(|s| s.as_str())
-                .unwrap_or("text");
+                .map(|s| s.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "text".to_string());
             matches!(
-                t,
-                "text" | "password" | "email" | "search" | "url" | "tel" | "number"
+                t.as_str(),
+                "text"
+                    | "password"
+                    | "email"
+                    | "search"
+                    | "url"
+                    | "tel"
+                    | "number"
+                    | "date"
+                    | "month"
+                    | "week"
+                    | "time"
+                    | "datetime-local"
             )
         }
         _ => false,

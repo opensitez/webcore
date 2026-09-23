@@ -67,6 +67,94 @@ pub fn parse_font_face_sources(src: &str) -> Vec<FontFaceSource> {
         .collect()
 }
 
+pub fn unicode_range_intersects_text(range: Option<&str>, text: &str) -> bool {
+    let Some(range) = range else {
+        return true;
+    };
+    let range = range.trim();
+    if range.is_empty() || text.is_empty() {
+        return true;
+    }
+    let ranges = parse_unicode_ranges(range);
+    if ranges.is_empty() {
+        return true;
+    }
+    text.chars().any(|ch| {
+        let cp = ch as u32;
+        ranges.iter().any(|(start, end)| cp >= *start && cp <= *end)
+    })
+}
+
+pub fn parse_font_display(value: &str) -> Option<String> {
+    let keyword = value.trim().to_ascii_lowercase();
+    matches!(
+        keyword.as_str(),
+        "auto" | "block" | "swap" | "fallback" | "optional"
+    )
+    .then_some(keyword)
+}
+
+pub(crate) fn unicode_range_intersects_latin(range: Option<&str>) -> bool {
+    let Some(range) = range else {
+        return true;
+    };
+    let ranges = parse_unicode_ranges(range);
+    ranges.is_empty() || ranges.iter().any(|(start, _end)| *start <= 0x00ff)
+}
+
+fn parse_unicode_ranges(range: &str) -> Vec<(u32, u32)> {
+    range
+        .split(',')
+        .filter_map(|part| parse_unicode_range_part(part.trim()))
+        .collect()
+}
+
+fn parse_unicode_range_part(part: &str) -> Option<(u32, u32)> {
+    let body = part
+        .strip_prefix("U+")
+        .or_else(|| part.strip_prefix("u+"))?
+        .trim();
+    if body.is_empty() {
+        return None;
+    }
+    if body.contains('?') {
+        let mut start = String::with_capacity(body.len());
+        let mut end = String::with_capacity(body.len());
+        for ch in body.chars() {
+            if ch == '?' {
+                start.push('0');
+                end.push('F');
+            } else if ch.is_ascii_hexdigit() {
+                start.push(ch);
+                end.push(ch);
+            } else {
+                return None;
+            }
+        }
+        return parse_codepoint(&start).zip(parse_codepoint(&end));
+    }
+    if let Some((start, end)) = body.split_once('-') {
+        let start = parse_codepoint(start.trim())?;
+        let end = parse_codepoint(end.trim())?;
+        if start <= end {
+            Some((start, end))
+        } else {
+            None
+        }
+    } else {
+        parse_codepoint(body).map(|cp| (cp, cp))
+    }
+}
+
+fn parse_codepoint(hex: &str) -> Option<u32> {
+    let hex = hex.trim();
+    if hex.is_empty() || hex.len() > 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
+    let cp = u32::from_str_radix(hex, 16).ok()?;
+    (cp <= 0x10ffff).then_some(cp)
+}
+
 fn parse_font_face_source(source: &str) -> Option<FontFaceSource> {
     let source = source.trim();
     let (kind, rest) = if let Some((value, rest)) = consume_function(source, "url") {

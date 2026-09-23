@@ -254,6 +254,32 @@ pub fn list_of_options(select: &WebCore) -> Vec<&WebCore> {
     out
 }
 
+/// The same walk, immutable, with the disabled state inherited from an
+/// enclosing `<optgroup>`.
+pub fn for_each_option(select: &WebCore, f: &mut dyn FnMut(&WebCore, bool)) {
+    fn walk(
+        node: &WebCore,
+        in_optgroup: bool,
+        group_disabled: bool,
+        f: &mut dyn FnMut(&WebCore, bool),
+    ) {
+        for child in &node.children {
+            match child.tag.as_str() {
+                "option" => f(child, group_disabled),
+                "select" | "hr" | "datalist" => {}
+                "optgroup" => {
+                    if !in_optgroup {
+                        let disabled = child.attributes.contains_key("disabled");
+                        walk(child, true, disabled, f);
+                    }
+                }
+                _ => walk(child, in_optgroup, group_disabled, f),
+            }
+        }
+    }
+    walk(select, false, false, f);
+}
+
 /// The same walk, yielding `node_id`s — what a caller that needs to MUTATE the
 /// options wants, since it cannot hold borrows across the write.
 pub fn option_ids(select: &WebCore) -> Vec<u32> {

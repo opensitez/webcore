@@ -461,6 +461,7 @@ pub fn layout_inline_block(
 
     // ── 3. Save old lines for early-stop optimization ─────────────────────────
     let old_lines: Vec<LayoutLine> = std::mem::take(&mut node.layout.line_cache);
+    let old_inline_client_rects: Vec<Rect> = std::mem::take(&mut node.layout.inline_client_rects);
 
     if items.is_empty() {
         // Nothing to lay out.
@@ -590,6 +591,7 @@ pub fn layout_inline_block(
         }
         for child in &mut node.children {
             if matches!(child.style.display, Display::Inline) {
+                reset_empty_inline_flow_box(child, content_x, content_y, font_px, root_font_px);
                 let child_font_px = child.style.font_size_px(font_px, root_font_px);
                 let child_cb =
                     if crate::layout::establishes_positioned_containing_block(&child.style) {
@@ -613,10 +615,14 @@ pub fn layout_inline_block(
     {
         // Reuse old lines — just shift to new position
         node.layout.line_cache = old_lines;
+        node.layout.inline_client_rects = old_inline_client_rects;
         let dy = content_y - node.layout.line_cache.first().map_or(content_y, |l| l.y);
         if dy.abs() > 0.01 {
             for line in &mut node.layout.line_cache {
                 line.y += dy;
+            }
+            for rect in &mut node.layout.inline_client_rects {
+                rect.y += dy;
             }
         }
         let bottom = node
@@ -674,7 +680,7 @@ pub fn layout_inline_block(
     let mut item_idx = 0usize;
     let mut line_cache: Vec<LayoutLine> = Vec::new();
     let mut atomic_pos: Vec<(Vec<usize>, f32, f32)> = Vec::new(); // (path, x, y)
-    let mut inline_fragment_rects: std::collections::HashMap<Vec<usize>, Rect> =
+    let mut inline_fragment_rects: std::collections::HashMap<Vec<usize>, Vec<Rect>> =
         std::collections::HashMap::new();
     let mut old_line_idx = 0usize;
     let mut ends_with_break = false;
@@ -1038,6 +1044,7 @@ pub fn layout_inline_block(
                 }
                 node.layout.line_cache = line_cache;
                 node.layout.inline_runs = runs;
+                node.layout.inline_client_rects = old_inline_client_rects;
                 // Update box rects with cached height
                 let bottom = node
                     .layout
@@ -1109,10 +1116,7 @@ pub fn layout_inline_block(
                         let ar = Rect::new(atomic_x, ay, box_w, box_h);
                         for len in 1..path.len() {
                             let p = path[..len].to_vec();
-                            inline_fragment_rects
-                                .entry(p)
-                                .and_modify(|existing| union_rect(existing, &ar))
-                                .or_insert(ar);
+                            add_inline_fragment(&mut inline_fragment_rects, p, ar);
                         }
                         seen_atomic_before_text = true;
                     }
@@ -1125,10 +1129,7 @@ pub fn layout_inline_block(
                         let r = Rect::new(text_x, cursor_y, item.advance, line_h);
                         for len in 1..=path.len() {
                             let p = path[..len].to_vec();
-                            inline_fragment_rects
-                                .entry(p)
-                                .and_modify(|existing| union_rect(existing, &r))
-                                .or_insert(r);
+                            add_inline_fragment(&mut inline_fragment_rects, p, r);
                         }
                     }
                     _ => {}
@@ -1412,7 +1413,7 @@ pub fn layout_inline_block(
     }
 
     // ── 6b. Position non-atomic inline element fragments ─────────────────────
-    for (path, rect) in inline_fragment_rects {
+    for (path, rects) in inline_fragment_rects {
         if let Some(target) = resolve_path_mut(node, &path) {
             if target.style.is_inline_level()
                 && !matches!(
@@ -1420,9 +1421,14 @@ pub fn layout_inline_block(
                     Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
                 )
             {
+                let mut rect = Rect::default();
+                for fragment in &rects {
+                    union_rect(&mut rect, fragment);
+                }
                 let child_font_px = target.style.font_size_px(font_px, root_font_px);
                 let rb = engine.res_box(&target.style, child_font_px, 0.0, root_font_px);
                 target.layout.content_rect = rect;
+                target.layout.inline_client_rects = rects;
                 target.layout.padding_rect = Rect::new(
                     rect.x - rb.padding_left,
                     rect.y - rb.padding_top,
@@ -1514,6 +1520,7 @@ pub fn layout_inline_block(
     // Lay out positioned descendants of inline children (e.g. ::after pseudo-elements on inline <i>)
     for child in &mut node.children {
         if matches!(child.style.display, Display::Inline) {
+            reset_empty_inline_flow_box(child, content_x, content_y, font_px, root_font_px);
             let child_font_px = child.style.font_size_px(font_px, root_font_px);
             let child_cb = if crate::layout::establishes_positioned_containing_block(&child.style) {
                 child.layout.padding_rect
@@ -1527,6 +1534,51 @@ pub fn layout_inline_block(
     node.layout.layout_dirty = false;
     node.layout.last_containing_width = content_w;
     node.layout.margin_rect.h
+}
+
+fn reset_empty_inline_flow_box(
+    node: &mut WebCore,
+    x: f32,
+    y: f32,
+    parent_font_px: f32,
+    root_font_px: f32,
+) {
+    if !is_empty_inline_flow_box(node) {
+        return;
+    }
+
+    node.layout.content_rect = Rect::new(x, y, 0.0, 0.0);
+    node.layout.padding_rect = node.layout.content_rect;
+    node.layout.border_rect = node.layout.content_rect;
+    node.layout.margin_rect = node.layout.content_rect;
+    node.layout.inline_client_rects.clear();
+    node.layout.line_cache.clear();
+    node.layout.inline_runs.clear();
+    node.layout.scroll_width = 0.0;
+    node.layout.scroll_height = 0.0;
+    node.layout.scroll_left = 0.0;
+    node.layout.scroll_top = 0.0;
+    node.layout.layout_dirty = false;
+
+    let child_font_px = node.style.font_size_px(parent_font_px, root_font_px);
+    for child in &mut node.children {
+        reset_empty_inline_flow_box(child, x, y, child_font_px, root_font_px);
+    }
+}
+
+fn is_empty_inline_flow_box(node: &WebCore) -> bool {
+    node.style.display == Display::Inline
+        && !node.is_text_node()
+        && node.tag != "br"
+        && node.text.trim().is_empty()
+        && node.children.iter().all(is_empty_inline_flow_box)
+        && node.style.before_content.is_empty()
+        && node.style.after_content.is_empty()
+        && matches!(
+            node.style.position,
+            Position::Static | Position::Relative | Position::Sticky
+        )
+        && matches!(node.style.float, crate::types::Float::None)
 }
 
 // ─── Path resolution helpers ─────────────────────────────────────────────────
@@ -1686,6 +1738,25 @@ fn measure_metrics(items: &[InlineItem], strut_asc: f32, strut_desc: f32) -> (f3
         return (line_h, line_asc, (line_h - line_asc).max(0.0));
     }
     (max_asc + max_desc, max_asc, max_desc)
+}
+
+fn add_inline_fragment(
+    fragments: &mut std::collections::HashMap<Vec<usize>, Vec<Rect>>,
+    path: Vec<usize>,
+    rect: Rect,
+) {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    let entry = fragments.entry(path).or_default();
+    if let Some(last) = entry.last_mut() {
+        let same_line = (last.y - rect.y).abs() < 0.5 && (last.h - rect.h).abs() < 0.5;
+        if same_line {
+            union_rect(last, &rect);
+            return;
+        }
+    }
+    entry.push(rect);
 }
 
 fn union_rect(a: &mut Rect, b: &Rect) {

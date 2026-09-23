@@ -365,6 +365,7 @@ impl Document {
             return true;
         }
         state.muted = muted;
+        self.sync_media_render_state(id);
         self.fire_media_event(id, "volumechange");
         true
     }
@@ -456,12 +457,25 @@ impl Document {
         let Some(state) = self.media_states.get(&id).cloned() else {
             return;
         };
+        let mut selector_state_changed = false;
         if let Some(node) = self.find_webcore_mut(id) {
+            selector_state_changed = node.media_paused != state.paused
+                || node.media_ended != state.ended
+                || node.media_seeking != state.seeking
+                || node.media_muted != state.muted;
             node.media_current_time = state.current_time;
             node.media_duration = state.duration;
             node.media_paused = state.paused;
             node.media_ended = state.ended;
+            node.media_seeking = state.seeking;
+            node.media_muted = state.muted;
+            if selector_state_changed {
+                node.cascade_dirty = true;
+            }
             node.layout.intrinsic_dirty = true;
+        }
+        if selector_state_changed {
+            self.style_dirty = true;
         }
     }
 

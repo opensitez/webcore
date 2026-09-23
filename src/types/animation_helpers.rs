@@ -56,6 +56,13 @@ pub(crate) fn extract_transitionable_style(s: &ComputedStyle) -> HashMap<String,
         "visibility".into(),
         format!("{:?}", s.visibility).to_ascii_lowercase(),
     );
+    m.insert(
+        "pointer-events".into(),
+        transition_pointer_events(s.pointer_events),
+    );
+    m.insert("cursor".into(), transition_cursor(s.cursor));
+    m.insert("user-select".into(), transition_user_select(s.user_select));
+    m.insert("resize".into(), transition_resize(s.resize));
     m.insert("display".into(), transition_display(s.display));
     m.insert(
         "content-visibility".into(),
@@ -105,6 +112,10 @@ pub(crate) fn extract_transitionable_style(s: &ComputedStyle) -> HashMap<String,
     );
     m.insert("border-color".into(), color_to_rgba(s.border_top_color));
     m.insert("transform".into(), s.transform.clone());
+    m.insert("filter".into(), s.rare().filter.clone());
+    m.insert("backdrop-filter".into(), s.rare().backdrop_filter.clone());
+    m.insert("box-shadow".into(), transition_box_shadow(&s.box_shadow));
+    m.insert("text-shadow".into(), transition_text_shadow(&s.text_shadow));
     m.insert(
         "font-size".into(),
         format!("{}px", s.font_size_px(16.0, 16.0)),
@@ -148,6 +159,64 @@ pub(crate) fn extract_transitionable_style(s: &ComputedStyle) -> HashMap<String,
     );
     m.insert("border-radius".into(), transition_length(&s.border_radius));
     m.insert(
+        "border-top-left-radius".into(),
+        transition_radius_pair(&s.border_top_left_radius, &s.border_top_left_radius_y),
+    );
+    m.insert(
+        "border-top-right-radius".into(),
+        transition_radius_pair(&s.border_top_right_radius, &s.border_top_right_radius_y),
+    );
+    m.insert(
+        "border-bottom-right-radius".into(),
+        transition_radius_pair(
+            &s.border_bottom_right_radius,
+            &s.border_bottom_right_radius_y,
+        ),
+    );
+    m.insert(
+        "border-bottom-left-radius".into(),
+        transition_radius_pair(&s.border_bottom_left_radius, &s.border_bottom_left_radius_y),
+    );
+    m.insert(
+        "outline-width".into(),
+        format!("{}px", format_css_number(s.outline_width)),
+    );
+    m.insert(
+        "outline-offset".into(),
+        format!("{}px", format_css_number(s.outline_offset)),
+    );
+    m.insert(
+        "outline-style".into(),
+        transition_border_style(s.outline_style),
+    );
+    m.insert("outline-color".into(), color_to_rgba(s.outline_color));
+    m.insert(
+        "text-decoration-style".into(),
+        transition_text_decoration_style(s.text_decoration_style),
+    );
+    if let Some(color) = s.text_decoration_color {
+        m.insert("text-decoration-color".into(), color_to_rgba(color));
+    }
+    m.insert(
+        "text-decoration-thickness".into(),
+        transition_length(&s.text_decoration_thickness),
+    );
+    if let Some(color) = s.caret_color {
+        m.insert("caret-color".into(), color_to_rgba(color));
+    }
+    m.insert(
+        "column-rule-width".into(),
+        transition_length(&s.column_rule_width),
+    );
+    m.insert(
+        "column-rule-style".into(),
+        transition_border_style(s.column_rule_style),
+    );
+    m.insert(
+        "column-rule-color".into(),
+        color_to_rgba(s.column_rule_color),
+    );
+    m.insert(
         "letter-spacing".into(),
         transition_length(&s.letter_spacing),
     );
@@ -188,6 +257,77 @@ fn transition_display(display: Display) -> String {
     .to_string()
 }
 
+fn transition_pointer_events(pointer_events: PointerEvents) -> String {
+    match pointer_events {
+        PointerEvents::Auto => "auto",
+        PointerEvents::None => "none",
+        PointerEvents::VisiblePainted => "visiblePainted",
+        PointerEvents::VisibleFill => "visibleFill",
+        PointerEvents::VisibleStroke => "visibleStroke",
+        PointerEvents::Visible => "visible",
+        PointerEvents::Painted => "painted",
+        PointerEvents::Fill => "fill",
+        PointerEvents::Stroke => "stroke",
+        PointerEvents::All => "all",
+    }
+    .to_string()
+}
+
+fn transition_cursor(cursor: CSSCursor) -> String {
+    match cursor {
+        CSSCursor::Auto => "auto",
+        CSSCursor::Default => "default",
+        CSSCursor::Pointer => "pointer",
+        CSSCursor::Text => "text",
+        CSSCursor::Move => "move",
+        CSSCursor::Crosshair => "crosshair",
+        CSSCursor::Wait => "wait",
+        CSSCursor::Help => "help",
+        CSSCursor::NotAllowed => "not-allowed",
+        CSSCursor::Grab => "grab",
+        CSSCursor::Grabbing => "grabbing",
+        CSSCursor::Copy => "copy",
+        CSSCursor::Cell => "cell",
+        CSSCursor::ContextMenu => "context-menu",
+        CSSCursor::AllScroll => "all-scroll",
+        CSSCursor::ZoomIn => "zoom-in",
+        CSSCursor::ZoomOut => "zoom-out",
+        CSSCursor::ColResize => "col-resize",
+        CSSCursor::RowResize => "row-resize",
+        CSSCursor::NResize => "n-resize",
+        CSSCursor::EResize => "e-resize",
+        CSSCursor::SResize => "s-resize",
+        CSSCursor::WResize => "w-resize",
+        CSSCursor::NEResize => "ne-resize",
+        CSSCursor::NWResize => "nw-resize",
+        CSSCursor::SEResize => "se-resize",
+        CSSCursor::SWResize => "sw-resize",
+        CSSCursor::None => "none",
+    }
+    .to_string()
+}
+
+fn transition_user_select(user_select: UserSelect) -> String {
+    match user_select {
+        UserSelect::Auto => "auto",
+        UserSelect::None => "none",
+        UserSelect::Text => "text",
+        UserSelect::All => "all",
+        UserSelect::Contain => "contain",
+    }
+    .to_string()
+}
+
+fn transition_resize(resize: Resize) -> String {
+    match resize {
+        Resize::None => "none",
+        Resize::Both => "both",
+        Resize::Horizontal => "horizontal",
+        Resize::Vertical => "vertical",
+    }
+    .to_string()
+}
+
 fn transition_length(v: &CssLength) -> String {
     match v {
         CssLength::Px(n) => format!("{n}px"),
@@ -218,6 +358,74 @@ fn transition_length(v: &CssLength) -> String {
 
 fn color_to_rgba(c: Color) -> String {
     format!("rgba({},{},{},{:.4})", c.r, c.g, c.b, c.a as f32 / 255.0)
+}
+
+fn transition_box_shadow(shadows: &[BoxShadow]) -> String {
+    if shadows.is_empty() {
+        return "none".to_string();
+    }
+    shadows
+        .iter()
+        .map(|shadow| {
+            let inset = if shadow.inset { "inset " } else { "" };
+            format!(
+                "{}{}px {}px {}px {}px {}",
+                inset,
+                format_css_number(shadow.offset_x),
+                format_css_number(shadow.offset_y),
+                format_css_number(shadow.blur),
+                format_css_number(shadow.spread),
+                color_to_rgba(shadow.color)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn transition_text_shadow(shadow: &Option<TextShadow>) -> String {
+    match shadow {
+        Some(shadow) => format!(
+            "{}px {}px {}px {}",
+            format_css_number(shadow.offset_x),
+            format_css_number(shadow.offset_y),
+            format_css_number(shadow.blur),
+            color_to_rgba(shadow.color)
+        ),
+        None => "none".to_string(),
+    }
+}
+
+fn transition_radius_pair(x: &CssLength, y: &CssLength) -> String {
+    let x = transition_length(x);
+    let y = transition_length(y);
+    if x == y { x } else { format!("{x} {y}") }
+}
+
+fn transition_border_style(style: BorderStyle) -> String {
+    match style {
+        BorderStyle::None => "none",
+        BorderStyle::Hidden => "hidden",
+        BorderStyle::Solid => "solid",
+        BorderStyle::Dashed => "dashed",
+        BorderStyle::Dotted => "dotted",
+        BorderStyle::Double => "double",
+        BorderStyle::Groove => "groove",
+        BorderStyle::Ridge => "ridge",
+        BorderStyle::Inset => "inset",
+        BorderStyle::Outset => "outset",
+    }
+    .to_string()
+}
+
+fn transition_text_decoration_style(style: TextDecorationStyle) -> String {
+    match style {
+        TextDecorationStyle::Solid => "solid",
+        TextDecorationStyle::Double => "double",
+        TextDecorationStyle::Dotted => "dotted",
+        TextDecorationStyle::Dashed => "dashed",
+        TextDecorationStyle::Wavy => "wavy",
+    }
+    .to_string()
 }
 
 /// Find the two surrounding keyframe stops for `t` and return interpolated properties.
@@ -310,7 +518,18 @@ pub(crate) fn interpolate_property_value(prop: &str, from: &str, to: &str, t: f3
 }
 
 pub(crate) fn is_discrete_transition_property(prop: &str) -> bool {
-    matches!(prop, "display" | "content-visibility")
+    matches!(
+        prop,
+        "display"
+            | "content-visibility"
+            | "pointer-events"
+            | "cursor"
+            | "user-select"
+            | "resize"
+            | "outline-style"
+            | "column-rule-style"
+            | "text-decoration-style"
+    )
 }
 
 pub(crate) fn discrete_transition_value(prop: &str, from: &str, to: &str, t: f32) -> String {
@@ -496,7 +715,7 @@ fn interpolate_numeric(from: &str, to: &str, t: f32) -> String {
     result
 }
 
-fn parse_css_alpha(value: &str) -> Option<f32> {
+pub(crate) fn parse_css_alpha(value: &str) -> Option<f32> {
     let value = value.trim();
     if let Some(percent) = value.strip_suffix('%') {
         percent.trim().parse::<f32>().ok().map(|v| v / 100.0)
@@ -505,7 +724,7 @@ fn parse_css_alpha(value: &str) -> Option<f32> {
     }
 }
 
-fn format_css_number(value: f32) -> String {
+pub(crate) fn format_css_number(value: f32) -> String {
     if !value.is_finite() {
         return "0".to_string();
     }

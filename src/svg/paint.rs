@@ -708,6 +708,7 @@ fn paint_node<'a>(
                 ids,
                 styles,
                 ancestors,
+                dom_node,
             );
             return;
         }
@@ -806,6 +807,7 @@ fn paint_text<'a>(
     ids: &HashMap<String, &'a SvgNode>,
     styles: &[CssRule],
     ancestors: &mut Vec<&'a SvgNode>,
+    dom_node: Option<&WebCore>,
 ) {
     if !has_text_content(node) {
         return;
@@ -833,6 +835,7 @@ fn paint_text<'a>(
             &mut cursor,
             &mut font_system,
             &mut swash_cache,
+            dom_node,
         );
         let pp = PixmapPaint::default();
         pixmap.draw_pixmap(0, 0, layer.as_ref(), &pp, Transform::identity(), Some(clip));
@@ -848,6 +851,7 @@ fn paint_text<'a>(
             &mut cursor,
             &mut font_system,
             &mut swash_cache,
+            dom_node,
         );
     }
 }
@@ -868,6 +872,7 @@ fn paint_text_tree<'a>(
     cursor: &mut TextCursor,
     font_system: &mut cosmic_text::FontSystem,
     swash_cache: &mut cosmic_text::SwashCache,
+    dom_node: Option<&WebCore>,
 ) {
     if !node.text.is_empty() {
         let target_length = attr_length(node, "textLength", LengthAxis::X, state);
@@ -904,14 +909,15 @@ fn paint_text_tree<'a>(
     }
 
     ancestors.push(node);
-    for child in &node.children {
+    for (index, child) in node.children.iter().enumerate() {
         if !matches!(
             child.kind,
             SvgElementKind::Text | SvgElementKind::Tspan | SvgElementKind::TextPath
         ) {
             continue;
         }
-        let child_state = state_for_node(child, state.clone(), styles, ancestors, None);
+        let child_dom = dom_node.and_then(|dom| svg_dom_child(dom, index));
+        let child_state = state_for_node(child, state.clone(), styles, ancestors, child_dom);
         if matches!(child.kind, SvgElementKind::TextPath) {
             cursor.x += paint_text_path(
                 child,
@@ -947,6 +953,7 @@ fn paint_text_tree<'a>(
             cursor,
             font_system,
             swash_cache,
+            child_dom,
         );
         if child.attr("x").is_some() || child.attr("y").is_some() {
             cursor.y = old_cursor.y;
@@ -1079,12 +1086,14 @@ fn paint_text_path(
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("stretch"));
     let target_length = attr_length(node, "textLength", LengthAxis::X, state)
         .or_else(|| method_stretch.then_some((total_len - start_offset).max(0.0)));
+    let scaled_target_length = target_length.filter(|v| v.is_finite() && *v >= 0.0);
     let length_adjust = node
         .attr_ascii_case_insensitive("lengthAdjust")
         .unwrap_or("spacing")
         .trim();
-    let extra_letter_spacing = if length_adjust.eq_ignore_ascii_case("spacing")
-        || length_adjust.eq_ignore_ascii_case("spacingAndGlyphs")
+    let extra_letter_spacing = if scaled_target_length.is_none()
+        && (length_adjust.eq_ignore_ascii_case("spacing")
+            || length_adjust.eq_ignore_ascii_case("spacingAndGlyphs"))
     {
         text_length_extra_spacing(&text, natural_advance, target_length)
     } else {
@@ -1097,11 +1106,21 @@ fn paint_text_path(
         TextAlign::End | TextAlign::Right => -natural_advance,
         TextAlign::Start | TextAlign::Left => 0.0,
     };
+    let mut unscaled_distance = 0.0f32;
 
     for ch in text.chars() {
         let s = ch.to_string();
         let char_advance = canvas.measure_text(&s).width;
-        let mid = distance + char_advance / 2.0;
+        let mid = if let Some(target) = scaled_target_length {
+            let scale = if natural_advance > f32::EPSILON {
+                target / natural_advance
+            } else {
+                1.0
+            };
+            start_offset + (unscaled_distance + char_advance / 2.0) * scale
+        } else {
+            distance + char_advance / 2.0
+        };
         if let Some((mut x, mut y, angle)) = point_at_path_distance(&samples, mid) {
             if side_right {
                 let offset = state.font_size.max(1.0);
@@ -1125,25 +1144,62 @@ fn paint_text_path(
                 }
             }
         }
-        distance += char_advance + total_letter_spacing;
-        if ch.is_whitespace() {
-            distance += state.word_spacing;
+        unscaled_distance += char_advance;
+        if scaled_target_length.is_none() {
+            distance += char_advance + total_letter_spacing;
+            if ch.is_whitespace() {
+                distance += state.word_spacing;
+            }
+        } else if ch.is_whitespace() {
+            unscaled_distance += state.word_spacing;
         }
     }
     natural_advance
 }
 
 fn collect_svg_text(node: &SvgNode) -> String {
+    let text = collect_svg_text_raw(node);
+    if svg_text_preserves_space(node) {
+        text
+    } else {
+        collapse_svg_text_whitespace(&text)
+    }
+}
+
+fn collect_svg_text_raw(node: &SvgNode) -> String {
     let mut text = node.text.clone();
     for child in &node.children {
         if matches!(
             child.kind,
             SvgElementKind::Text | SvgElementKind::Tspan | SvgElementKind::TextPath
         ) {
-            text.push_str(&collect_svg_text(child));
+            text.push_str(&collect_svg_text_raw(child));
         }
     }
     text
+}
+
+fn svg_text_preserves_space(node: &SvgNode) -> bool {
+    node.attr_ascii_case_insensitive("xml:space")
+        .or_else(|| node.attr_ascii_case_insensitive("space"))
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("preserve"))
+}
+
+fn collapse_svg_text_whitespace(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut pending_space = false;
+    for ch in text.chars() {
+        if ch.is_ascii_whitespace() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn svg_directional_text(text: &str, direction: Direction) -> Cow<'_, str> {
@@ -2096,14 +2152,36 @@ fn apply_animated_paint_attrs(state: &mut PaintState, node: &SvgNode) {
 }
 
 fn svg_dom_child(parent: &WebCore, svg_child_index: usize) -> Option<&WebCore> {
-    let parent_path = parent.svg_tree_path.as_ref()?;
-    parent.children.iter().find(|child| {
-        child.svg_tree_path.as_ref().is_some_and(|path| {
-            path.len() == parent_path.len() + 1
-                && path.starts_with(parent_path)
-                && path.last() == Some(&svg_child_index)
-        })
-    })
+    if let Some(parent_path) = parent.svg_tree_path.as_ref() {
+        let mut target = parent_path.clone();
+        target.push(svg_child_index);
+        if let Some(found) = svg_dom_descendant_by_path(parent, &target) {
+            return Some(found);
+        }
+    }
+
+    // Inline SVG can also arrive as real parsed DOM children rather than the
+    // projected helper subtree used by older parser paths. The SVG parser's
+    // child list contains element children; text is stored on the parent node,
+    // so map by element-child order when no projected path is present.
+    parent
+        .children
+        .iter()
+        .filter(|child| child.is_element())
+        .nth(svg_child_index)
+}
+
+fn svg_dom_descendant_by_path<'a>(node: &'a WebCore, target: &[usize]) -> Option<&'a WebCore> {
+    if node
+        .svg_tree_path
+        .as_ref()
+        .is_some_and(|path| path.as_slice() == target)
+    {
+        return Some(node);
+    }
+    node.children
+        .iter()
+        .find_map(|child| svg_dom_descendant_by_path(child, target))
 }
 
 fn apply_declarations(state: &mut PaintState, declarations: &Declarations) {
@@ -5214,6 +5292,26 @@ mod tests {
     }
 
     #[test]
+    fn native_rasterizer_collapses_indented_text_path_whitespace() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="160" height="40">
+                <defs><path id="baseline" d="M10 28 H150"/></defs>
+                <text fill="black" font-size="20"><textPath href="#baseline">
+                    X
+                </textPath></text>
+            </svg>"##,
+            160,
+            40,
+        )
+        .unwrap();
+        let bounds = painted_bounds(&data, 160).expect("indented textPath should paint");
+        assert!(
+            bounds.0 < 40,
+            "default SVG text whitespace should collapse before textPath layout, bounds={bounds:?}"
+        );
+    }
+
+    #[test]
     fn native_rasterizer_applies_text_path_side_right() {
         let left = rasterize_svg_to_rgba(
             r##"<svg width="130" height="70">
@@ -5266,6 +5364,65 @@ mod tests {
         assert!(
             adjusted_bounds.2 > normal_bounds.2 + 30,
             "textPath textLength should widen painted text, normal={normal_bounds:?} adjusted={adjusted_bounds:?}"
+        );
+    }
+
+    #[test]
+    fn native_rasterizer_distributes_mdn_style_text_path_tspans() {
+        let repeated = (0..48).map(|_| "/<tspan>/</tspan>").collect::<String>();
+        let svg = format!(
+            r##"<svg width="560" height="560" viewBox="50 50 575 575" fill="none">
+                <defs>
+                    <path id="circle1" d="M337.5,337.5 m-320,0 a320,320 0 1,1 640,0 a320,320 0 1,1 -640,0"/>
+                </defs>
+                <text dy="70" textLength="2010" fill="white" font-size="24">
+                    <textPath textLength="2010" href="#circle1">{repeated}</textPath>
+                </text>
+            </svg>"##
+        );
+        let data = rasterize_svg_to_rgba(&svg, 560, 560).unwrap();
+        let bounds = painted_bounds(&data, 560).expect("MDN-like textPath should paint");
+        assert!(
+            bounds.0 < 80 && bounds.2 > 470 && bounds.1 < 120 && bounds.3 > 430,
+            "MDN-like textPath glyphs should be distributed around the circle, bounds={bounds:?}"
+        );
+    }
+
+    #[test]
+    fn native_rasterizer_distributes_mdn_homepage_mandala_rings() {
+        let slashes = (0..42)
+            .map(|_| "/      <tspan>\n/      </tspan>\n")
+            .collect::<String>();
+        let pluses = (0..21)
+            .map(|_| "+      <tspan>\n+      </tspan>\n")
+            .collect::<String>();
+        let braces = (0..12)
+            .map(|_| "{      <tspan>\n}      </tspan>\n")
+            .collect::<String>();
+        let tags = (0..16)
+            .map(|_| "<tspan>\n&lt;&gt;      </tspan>\n&lt;/&gt;      ")
+            .collect::<String>();
+        let svg = format!(
+            r##"<svg viewbox="50 50 575 575" fill="none" xmlns="http://www.w3.org/2000/svg" class="mandala">
+                <defs>
+                    <path d="M337.5,337.5 m-320,0 a320,320 0 1,1 640,0 a320,320 0 1,1 -640,0" id="circle1"/>
+                    <path d="M337.5,337.5 m-280,0 a280,280 0 1,1 560,0 a280,280 0 1,1 -560,0" id="circle2"/>
+                    <path d="M337.5,337.5 m-240,0 a240,240 0 1,1 480,0 a240,240 0 1,1 -480,0" id="circle3"/>
+                    <path d="M337.5,337.5 m-200,0 a200,200 0 1,1 400,0 a200,200 0 1,1 -400,0" id="circle4"/>
+                    <path d="M337.5,337.5 m-160,0 a160,160 0 1,1 320,0 a160,160 0 1,1 -320,0" id="circle5"/>
+                </defs>
+                <text dy="70" textlength="2010" fill="white" font-size="24"><textpath textlength="2010" href="#circle1">{slashes}</textpath></text>
+                <text dy="70" textlength="1760" fill="white" font-size="20.8"><textpath textlength="1760" href="#circle2">{pluses}</textpath></text>
+                <text dy="70" textlength="1507" fill="white" font-size="19.2"><textpath textlength="1507" href="#circle3">{braces}</textpath></text>
+                <text dy="70" textlength="1257" fill="white" font-size="17.6"><textpath textlength="1257" href="#circle4">../../    ../../    ../../    ../../    ../../    ../../    ../../</textpath></text>
+                <text dy="70" textlength="1005" fill="white" font-size="16"><textpath textlength="1005" href="#circle5">{tags}</textpath></text>
+            </svg>"##
+        );
+        let data = rasterize_svg_to_rgba(&svg, 560, 560).unwrap();
+        let bounds = painted_bounds(&data, 560).expect("MDN mandala rings should paint");
+        assert!(
+            bounds.0 < 80 && bounds.2 > 470 && bounds.1 < 120 && bounds.3 > 430,
+            "MDN mandala rings should be distributed around the circles, bounds={bounds:?}"
         );
     }
 

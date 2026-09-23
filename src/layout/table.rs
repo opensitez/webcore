@@ -82,6 +82,379 @@ struct RowRef {
     grandchild_idx: Option<usize>, // None = direct row, Some(j) = row inside row group
 }
 
+fn is_table_cell_display(display: Display) -> bool {
+    matches!(display, Display::TableCell | Display::TableHeaderCell)
+}
+
+fn is_table_row_group_display(display: Display) -> bool {
+    matches!(
+        display,
+        Display::TableRowGroup | Display::TableHeaderGroup | Display::TableFooterGroup
+    )
+}
+
+fn is_valid_table_child(display: Display) -> bool {
+    matches!(
+        display,
+        Display::TableRow
+            | Display::TableCaption
+            | Display::TableColumn
+            | Display::TableColumnGroup
+            | Display::TableRowGroup
+            | Display::TableHeaderGroup
+            | Display::TableFooterGroup
+    )
+}
+
+fn is_orphan_table_internal_display(display: Display) -> bool {
+    matches!(
+        display,
+        Display::TableRow
+            | Display::TableCell
+            | Display::TableHeaderCell
+            | Display::TableRowGroup
+            | Display::TableHeaderGroup
+            | Display::TableFooterGroup
+            | Display::TableColumnGroup
+            | Display::TableColumn
+            | Display::TableCaption
+    )
+}
+
+fn is_ignorable_table_whitespace(node: &WebCore) -> bool {
+    node.is_text_node() && node.text.chars().all(|ch| ch.is_ascii_whitespace())
+}
+
+fn display_contents_has_only_table_rows(node: &WebCore) -> bool {
+    matches!(node.style.display, Display::Contents)
+        && node.children.iter().all(|child| {
+            is_ignorable_table_whitespace(child)
+                || matches!(child.style.display, Display::None)
+                || matches!(child.style.position, Position::Absolute | Position::Fixed)
+                || matches!(child.style.display, Display::TableRow)
+                || (is_table_row_group_display(child.style.display)
+                    && child.children.iter().all(|row| {
+                        is_ignorable_table_whitespace(row)
+                            || matches!(row.style.display, Display::None)
+                            || matches!(row.style.position, Position::Absolute | Position::Fixed)
+                            || matches!(row.style.display, Display::TableRow)
+                    }))
+        })
+}
+
+fn display_contents_has_only_table_cells(node: &WebCore) -> bool {
+    matches!(node.style.display, Display::Contents)
+        && node.children.iter().all(|child| {
+            is_ignorable_table_whitespace(child)
+                || matches!(child.style.display, Display::None)
+                || matches!(child.style.position, Position::Absolute | Position::Fixed)
+                || is_table_cell_display(child.style.display)
+        })
+}
+
+fn anonymous_table_box(parent: &WebCore, tag: &str, display: Display) -> WebCore {
+    let mut anon = WebCore::new(tag);
+    let mut style = (*parent.style).clone();
+    style.display = display;
+    style.margin_top = CssLength::Px(0.0);
+    style.margin_right = CssLength::Px(0.0);
+    style.margin_bottom = CssLength::Px(0.0);
+    style.margin_left = CssLength::Px(0.0);
+    style.padding_top = CssLength::Px(0.0);
+    style.padding_right = CssLength::Px(0.0);
+    style.padding_bottom = CssLength::Px(0.0);
+    style.padding_left = CssLength::Px(0.0);
+    style.border_top_width = CssLength::Px(0.0);
+    style.border_right_width = CssLength::Px(0.0);
+    style.border_bottom_width = CssLength::Px(0.0);
+    style.border_left_width = CssLength::Px(0.0);
+    style.background_color = Color::TRANSPARENT;
+    style.box_shadow = Vec::new();
+    style.position = Position::Static;
+    style.float = Float::None;
+    style.clear = Clear::None;
+    style.width = CssLength::Auto;
+    style.height = CssLength::Auto;
+    style.min_width = CssLength::Auto;
+    style.min_height = CssLength::Auto;
+    style.max_width = CssLength::None;
+    style.max_height = CssLength::None;
+    anon.style = std::sync::Arc::new(style);
+    anon.node_id = 0;
+    anon.layout.layout_dirty = true;
+    anon
+}
+
+fn anonymous_table(parent: &WebCore) -> WebCore {
+    anonymous_table_box(parent, "anonymous-table", Display::Table)
+}
+
+fn anonymous_table_row(parent: &WebCore) -> WebCore {
+    anonymous_table_box(parent, "anonymous-table-row", Display::TableRow)
+}
+
+fn anonymous_table_cell(parent: &WebCore) -> WebCore {
+    anonymous_table_box(parent, "anonymous-table-cell", Display::TableCell)
+}
+
+fn append_unwrapped_anonymous_table_child(child: WebCore, out: &mut Vec<WebCore>) {
+    match child.tag.as_str() {
+        "anonymous-table" => {
+            for table_child in child.children {
+                append_unwrapped_anonymous_table_child(table_child, out);
+            }
+        }
+        "anonymous-table-row" => {
+            out.extend(child.children);
+        }
+        _ => out.push(child),
+    }
+}
+
+fn unwrap_anonymous_outer_tables(node: &mut WebCore) {
+    for child in &mut node.children {
+        unwrap_anonymous_outer_tables(child);
+    }
+    if node.children.iter().any(|child| {
+        matches!(
+            child.tag.as_str(),
+            "anonymous-table" | "anonymous-table-row"
+        )
+    }) {
+        let old_children = std::mem::take(&mut node.children);
+        let mut new_children = Vec::with_capacity(old_children.len());
+        for child in old_children {
+            append_unwrapped_anonymous_table_child(child, &mut new_children);
+        }
+        node.children = new_children;
+    }
+}
+
+fn unwrap_anonymous_table_row_cells(row: &mut WebCore) {
+    for child in &mut row.children {
+        unwrap_anonymous_table_row_cells(child);
+    }
+    if row
+        .children
+        .iter()
+        .any(|child| child.tag == "anonymous-table-cell")
+    {
+        let old_children = std::mem::take(&mut row.children);
+        for child in old_children {
+            if child.tag == "anonymous-table-cell" {
+                row.children.extend(child.children);
+            } else {
+                row.children.push(child);
+            }
+        }
+    }
+}
+
+fn wrap_row_children_in_anonymous_cells(row: &mut WebCore) {
+    unwrap_anonymous_table_row_cells(row);
+
+    if row.children.iter().all(|child| {
+        is_ignorable_table_whitespace(child)
+            || matches!(child.style.display, Display::None)
+            || matches!(child.style.position, Position::Absolute | Position::Fixed)
+            || is_table_cell_display(child.style.display)
+            || display_contents_has_only_table_cells(child)
+    }) {
+        return;
+    }
+
+    let old_children = std::mem::take(&mut row.children);
+    let mut out = Vec::with_capacity(old_children.len());
+    let mut current_cell: Option<WebCore> = None;
+    for child in old_children {
+        if is_ignorable_table_whitespace(&child) {
+            continue;
+        }
+        if matches!(child.style.display, Display::None)
+            || matches!(child.style.position, Position::Absolute | Position::Fixed)
+            || is_table_cell_display(child.style.display)
+            || display_contents_has_only_table_cells(&child)
+        {
+            if let Some(cell) = current_cell.take() {
+                out.push(cell);
+            }
+            out.push(child);
+        } else {
+            let cell = current_cell.get_or_insert_with(|| anonymous_table_cell(row));
+            cell.children.push(child);
+        }
+    }
+    if let Some(cell) = current_cell {
+        out.push(cell);
+    }
+    row.children = out;
+}
+
+fn wrap_children_in_anonymous_rows(container: &mut WebCore) {
+    if container.children.iter().all(|child| {
+        is_ignorable_table_whitespace(child)
+            || matches!(child.style.display, Display::None)
+            || matches!(child.style.position, Position::Absolute | Position::Fixed)
+            || matches!(child.style.display, Display::TableRow)
+            || display_contents_has_only_table_rows(child)
+    }) {
+        return;
+    }
+
+    let old_children = std::mem::take(&mut container.children);
+    let mut out = Vec::with_capacity(old_children.len());
+    let mut current_row: Option<WebCore> = None;
+    for child in old_children {
+        if is_ignorable_table_whitespace(&child) {
+            continue;
+        }
+        if matches!(child.style.display, Display::None)
+            || matches!(child.style.position, Position::Absolute | Position::Fixed)
+            || matches!(child.style.display, Display::TableRow)
+            || display_contents_has_only_table_rows(&child)
+        {
+            if let Some(row) = current_row.take() {
+                out.push(row);
+            }
+            out.push(child);
+        } else {
+            let row = current_row.get_or_insert_with(|| anonymous_table_row(container));
+            if is_table_cell_display(child.style.display) {
+                row.children.push(child);
+            } else {
+                let mut cell = anonymous_table_cell(row);
+                cell.children.push(child);
+                row.children.push(cell);
+            }
+        }
+    }
+    if let Some(row) = current_row {
+        out.push(row);
+    }
+    container.children = out;
+}
+
+fn fixup_table_subtree(table: &mut WebCore) {
+    for child in &mut table.children {
+        if is_table_row_group_display(child.style.display) {
+            wrap_children_in_anonymous_rows(child);
+            for row in &mut child.children {
+                if matches!(row.style.display, Display::TableRow) {
+                    wrap_row_children_in_anonymous_cells(row);
+                }
+            }
+        } else if matches!(child.style.display, Display::TableRow) {
+            wrap_row_children_in_anonymous_cells(child);
+        }
+    }
+    wrap_table_children_in_anonymous_rows(table);
+    for child in &mut table.children {
+        if matches!(child.style.display, Display::TableRow) {
+            wrap_row_children_in_anonymous_cells(child);
+        }
+    }
+}
+
+fn wrap_table_children_in_anonymous_rows(table: &mut WebCore) {
+    if table.children.iter().all(|child| {
+        is_ignorable_table_whitespace(child)
+            || matches!(child.style.display, Display::None)
+            || matches!(child.style.position, Position::Absolute | Position::Fixed)
+            || is_valid_table_child(child.style.display)
+            || display_contents_has_only_table_rows(child)
+    }) {
+        return;
+    }
+
+    let old_children = std::mem::take(&mut table.children);
+    let mut out: Vec<WebCore> = Vec::with_capacity(old_children.len());
+    let mut row: Option<WebCore> = None;
+    for child in old_children {
+        if is_ignorable_table_whitespace(&child) {
+            continue;
+        }
+        if matches!(child.style.display, Display::None)
+            || matches!(child.style.position, Position::Absolute | Position::Fixed)
+            || is_valid_table_child(child.style.display)
+            || display_contents_has_only_table_rows(&child)
+        {
+            if let Some(row) = row.take() {
+                out.push(row);
+            }
+            out.push(child);
+        } else {
+            let current_row = row.get_or_insert_with(|| anonymous_table_row(table));
+            if is_table_cell_display(child.style.display) {
+                current_row.children.push(child);
+            } else {
+                let mut cell = anonymous_table_cell(current_row);
+                cell.children.push(child);
+                current_row.children.push(cell);
+            }
+        }
+    }
+    if let Some(row) = row {
+        out.push(row);
+    }
+    table.children = out;
+}
+
+pub fn wrap_orphan_table_boxes_in_anonymous_tables(node: &mut WebCore) {
+    unwrap_anonymous_outer_tables(node);
+
+    if matches!(node.style.display, Display::Table)
+        || node.children.iter().all(|child| {
+            matches!(child.style.display, Display::None)
+                || matches!(child.style.position, Position::Absolute | Position::Fixed)
+                || !is_orphan_table_internal_display(child.style.display)
+        })
+    {
+        return;
+    }
+
+    let old_children = std::mem::take(&mut node.children);
+    let mut out: Vec<WebCore> = Vec::with_capacity(old_children.len());
+    let mut current_table: Option<WebCore> = None;
+    let mut current_row: Option<WebCore> = None;
+    for child in old_children {
+        if matches!(child.style.display, Display::None)
+            || matches!(child.style.position, Position::Absolute | Position::Fixed)
+            || !is_orphan_table_internal_display(child.style.display)
+        {
+            if let Some(row) = current_row.take() {
+                if let Some(table) = &mut current_table {
+                    table.children.push(row);
+                }
+            }
+            if let Some(table) = current_table.take() {
+                out.push(table);
+            }
+            out.push(child);
+            continue;
+        }
+
+        let table = current_table.get_or_insert_with(|| anonymous_table(node));
+        if is_table_cell_display(child.style.display) {
+            let row = current_row.get_or_insert_with(|| anonymous_table_row(table));
+            row.children.push(child);
+        } else {
+            if let Some(row) = current_row.take() {
+                table.children.push(row);
+            }
+            table.children.push(child);
+        }
+    }
+    if let Some(row) = current_row {
+        if let Some(table) = &mut current_table {
+            table.children.push(row);
+        }
+    }
+    if let Some(table) = current_table {
+        out.push(table);
+    }
+    node.children = out;
+}
+
 fn collect_rows(
     table: &WebCore,
     abs_children: &mut Vec<usize>,
@@ -187,43 +560,6 @@ fn collect_rows(
     all
 }
 
-fn wrap_direct_table_cells_in_anonymous_rows(table: &mut WebCore) {
-    if !table.children.iter().any(|c| {
-        matches!(
-            c.style.display,
-            Display::TableCell | Display::TableHeaderCell
-        )
-    }) {
-        return;
-    }
-
-    let children = std::mem::take(&mut table.children);
-    let mut out: Vec<WebCore> = Vec::with_capacity(children.len());
-    let mut row: Option<WebCore> = None;
-    for child in children {
-        if matches!(
-            child.style.display,
-            Display::TableCell | Display::TableHeaderCell
-        ) {
-            let r = row.get_or_insert_with(|| {
-                let mut n = WebCore::new("anonymous-table-row");
-                std::sync::Arc::make_mut(&mut n.style).display = Display::TableRow;
-                n
-            });
-            r.children.push(child);
-        } else {
-            if let Some(r) = row.take() {
-                out.push(r);
-            }
-            out.push(child);
-        }
-    }
-    if let Some(r) = row {
-        out.push(r);
-    }
-    table.children = out;
-}
-
 fn distribute_spanned_width(
     widths: &mut [f32],
     start_col: usize,
@@ -263,6 +599,18 @@ fn cell_intrinsic_outer_width(
     let rb = engine.res_box(&cell.style, font_px, containing_w, root_font_px);
     let outer = rb.h_space();
     (sizes.min_content + outer, sizes.max_content + outer)
+}
+
+fn cell_min_content_outer_width(
+    engine: &LayoutEngine,
+    cell: &WebCore,
+    font_px: f32,
+    containing_w: f32,
+    root_font_px: f32,
+) -> f32 {
+    let min_content = engine.min_content_width_of_content(cell, font_px, root_font_px);
+    let rb = engine.res_box(&cell.style, font_px, containing_w, root_font_px);
+    min_content + rb.h_space()
 }
 
 /// Get a reference to a row box given a RowRef.
@@ -358,10 +706,9 @@ pub fn layout_table(
         }
     }
 
-    // CSS table fixup: a table-cell cannot be a direct child of a table box.
-    // Real HTML `<table><td>` is normalized by the tree builder; CSS display
-    // tables need the same anonymous row box here in layout.
-    wrap_direct_table_cells_in_anonymous_rows(node);
+    // CSS table fixup: internal table boxes with invalid parents/children get
+    // anonymous table/row/cell wrappers, matching the CSS table model.
+    fixup_table_subtree(node);
 
     // ── Collect rows ─────────────────────────────────────────────────────────
     let mut abs_children: Vec<usize> = Vec::new();
@@ -474,7 +821,7 @@ pub fn layout_table(
                     let (mn, cw) = if !cell.style.width.is_auto() {
                         let w =
                             engine.res_len(&cell.style.width, font_px, containing_w, root_font_px);
-                        let (min_outer, _) = cell_intrinsic_outer_width(
+                        let min_outer = cell_min_content_outer_width(
                             engine,
                             cell,
                             font_px,
@@ -643,10 +990,13 @@ pub fn layout_table(
                     continue;
                 }
                 if let Some((row_idx, ci)) = slot.box_path {
+                    if c > 0 && grid[r][c - 1].box_path == Some((row_idx, ci)) {
+                        continue;
+                    }
                     let cell = &row_ref(node, &row_refs[row_idx]).children[ci];
                     if !cell.style.width.is_auto() {
                         let w = engine.res_len(&cell.style.width, font_px, cell_area, root_font_px);
-                        let (min_outer, _) = cell_intrinsic_outer_width(
+                        let min_outer = cell_min_content_outer_width(
                             engine,
                             cell,
                             font_px,
@@ -794,7 +1144,6 @@ pub fn layout_table(
             }
         }
     }
-
     // Column X positions
     let col_x: Vec<f32> = {
         let mut xs = Vec::with_capacity(num_cols);

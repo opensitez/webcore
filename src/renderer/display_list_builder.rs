@@ -490,6 +490,18 @@ fn inline_box_has_edges(node: &WebCore) -> bool {
         || node.layout.border_rect.h > node.layout.padding_rect.h + 0.5
 }
 
+fn direct_child_element_has_owned_inline_text_paint(node: &WebCore) -> bool {
+    for child in node.effective_children() {
+        if child.style.display == Display::None || child.style.position == Position::Fixed {
+            continue;
+        }
+        if child.tag != "#text" && !child.layout.line_cache.is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
 fn background_clip_rect_for_node(node: &WebCore, sx: f32, sy: f32) -> Rect {
     match node.style.background_clip {
         BackgroundClip::ContentBox => {
@@ -1380,20 +1392,44 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             let bx = br.x - eff_sx;
             let by = br.y - eff_sy;
             let border_rect = Rect::new(bx, by, br.w, br.h);
+            let border_image_outsets = border_image_side_values(
+                &eff_style.border_image_outset,
+                bw,
+                border_rect,
+                font_px,
+                false,
+            );
+            let border_image_rect = Rect::new(
+                border_rect.x - border_image_outsets[3],
+                border_rect.y - border_image_outsets[0],
+                border_rect.w + border_image_outsets[1] + border_image_outsets[3],
+                border_rect.h + border_image_outsets[0] + border_image_outsets[2],
+            );
+            let border_image_widths = border_image_side_values(
+                &eff_style.border_image_width,
+                bw,
+                border_image_rect,
+                font_px,
+                true,
+            );
             let mut painted_border_image = false;
             if let Some(src) = crate::css::extract_url(&eff_style.border_image_source) {
                 if let Some((data, w, h)) =
                     crate::html::load_paint_image_from_src(&src, ctx.base_url)
                 {
                     if w > 0 && h > 0 {
+                        let (repeat_x_mode, repeat_y_mode) =
+                            border_image_repeat_modes(&eff_style.border_image_repeat);
                         list.push(PaintCmd::BorderImage {
-                            rect: border_rect,
-                            widths: bw,
+                            rect: border_image_rect,
+                            widths: border_image_widths,
                             slices: border_image_slices(
                                 &eff_style.border_image_slice,
                                 w as f32,
                                 h as f32,
                             ),
+                            repeat_x_mode,
+                            repeat_y_mode,
                             fill_center: eff_style
                                 .border_image_slice
                                 .split_whitespace()
@@ -1407,8 +1443,8 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             if !painted_border_image
                 && paint_gradient_border_image_fallback(
                     list,
-                    border_rect,
-                    bw,
+                    border_image_rect,
+                    border_image_widths,
                     &eff_style.border_image_source,
                     eff_style.opacity,
                 )
@@ -1589,7 +1625,19 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         }
 
         // ── (k) Inline text content (line_cache) ─────────────────────────────
-        if paint_self && !node.layout.line_cache.is_empty() {
+        //
+        // Flex/grid containers usually lay out children as independent items,
+        // but some inline descendant trees are represented by the container's
+        // own line cache. Suppress the container cache only when a direct child
+        // element has its own line cache to paint; otherwise real page text can
+        // disappear while avoiding duplicate button/link labels.
+        let is_flex_or_grid = matches!(
+            node.style.display,
+            Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid
+        );
+        let paints_own_inline_text =
+            !is_flex_or_grid || !direct_child_element_has_owned_inline_text_paint(node);
+        if paint_self && paints_own_inline_text && !node.layout.line_cache.is_empty() {
             push_inline_descendant_box_backgrounds(
                 node,
                 list,
@@ -2282,6 +2330,7 @@ fn build_inline_text(
         let mut cursor_x = lx + line.text_x_offset;
         let mut previous_collapsible_space = false;
         let mut previous_logical_end: Option<usize> = None;
+        let mut first_letter_painted = false;
 
         for (chunk_idx, chunk) in chunks.iter().enumerate() {
             let s = floor_cb(&flat, chunk.s);
@@ -2669,7 +2718,6 @@ fn build_inline_text(
             }
 
             // Main text
-            let effective_font_style = style_ref.font_style;
             let deco_t = style_ref
                 .text_decoration_thickness
                 .resolve(run_font_px, 0.0, 16.0);
@@ -2691,48 +2739,142 @@ fn build_inline_text(
                 run_word_spc,
             );
 
-            list.push(PaintCmd::Text {
-                x: x_pos,
-                y: y_pos,
-                text: draw_text.clone(),
-                font_family: style_ref.font_family.clone(),
-                font_size: run_font_px,
-                font_weight: style_ref.font_weight.value(),
-                font_style: match effective_font_style {
-                    FontStyle::Italic => 1,
-                    FontStyle::Oblique => 2,
-                    _ => 0,
-                },
-                font_stretch: style_ref.font_stretch,
-                line_height: run_line_h,
-                color: text_color,
-                decoration: TextDecoration {
-                    underline: style_ref.text_decoration.underline,
-                    overline: style_ref.text_decoration.overline,
-                    strikethrough: style_ref.text_decoration.strikethrough,
-                    color: style_ref.text_decoration_color.unwrap_or(text_color),
-                    style: match style_ref.text_decoration_style {
-                        TextDecorationStyle::Double => 1,
-                        TextDecorationStyle::Dotted => 2,
-                        TextDecorationStyle::Dashed => 3,
-                        TextDecorationStyle::Wavy => 4,
+            let mut emit_text_run = |text: String,
+                                     x: f32,
+                                     style: &ComputedStyle,
+                                     font_px: f32,
+                                     line_h: f32,
+                                     color: Color,
+                                     letter_spacing: f32,
+                                     word_spacing: f32| {
+                list.push(PaintCmd::Text {
+                    x,
+                    y: y_pos,
+                    text,
+                    font_family: style.font_family.clone(),
+                    font_size: font_px,
+                    font_weight: style.font_weight.value(),
+                    font_style: match style.font_style {
+                        FontStyle::Italic => 1,
+                        FontStyle::Oblique => 2,
                         _ => 0,
                     },
-                    thickness: if deco_t > 0.0 {
-                        deco_t
-                    } else {
-                        (run_font_px / 12.0).max(1.0)
+                    font_stretch: style.font_stretch,
+                    line_height: line_h,
+                    color,
+                    decoration: TextDecoration {
+                        underline: style.text_decoration.underline,
+                        overline: style.text_decoration.overline,
+                        strikethrough: style.text_decoration.strikethrough,
+                        color: style.text_decoration_color.unwrap_or(color),
+                        style: match style.text_decoration_style {
+                            TextDecorationStyle::Double => 1,
+                            TextDecorationStyle::Dotted => 2,
+                            TextDecorationStyle::Dashed => 3,
+                            TextDecorationStyle::Wavy => 4,
+                            _ => 0,
+                        },
+                        thickness: if deco_t > 0.0 {
+                            deco_t
+                        } else {
+                            (font_px / 12.0).max(1.0)
+                        },
+                        underline_offset,
+                        underline_position: style.text_underline_position,
+                        skip_ink: !style.text_decoration_skip_ink.eq_ignore_ascii_case("none"),
                     },
-                    underline_offset,
-                    underline_position: style_ref.text_underline_position,
-                    skip_ink: !style_ref
-                        .text_decoration_skip_ink
-                        .eq_ignore_ascii_case("none"),
-                },
-                letter_spacing: letter_sp,
-                word_spacing: run_word_spc,
-                small_caps: style_ref.small_caps,
-            });
+                    letter_spacing,
+                    word_spacing,
+                    small_caps: style.small_caps,
+                });
+            };
+
+            if !first_letter_painted
+                && !chunk.rtl
+                && let Some(first_style) = node.style.first_letter_style.as_deref()
+                && let Some((first_start, first_ch)) =
+                    draw_text.char_indices().find(|(_, ch)| !ch.is_whitespace())
+            {
+                first_letter_painted = true;
+                let first_end = first_start + first_ch.len_utf8();
+                let leading = &draw_text[..first_start];
+                let first = &draw_text[first_start..first_end];
+                let trailing = &draw_text[first_end..];
+                let mut letter_x = x_pos;
+                if !leading.is_empty() {
+                    emit_text_run(
+                        leading.to_string(),
+                        x_pos,
+                        style_ref,
+                        run_font_px,
+                        run_line_h,
+                        text_color,
+                        letter_sp,
+                        run_word_spc,
+                    );
+                    letter_x += measure_paint_text_width(
+                        ctx,
+                        leading,
+                        run_font_px,
+                        style_ref.font_weight,
+                        style_ref.font_style,
+                        &style_ref.font_family,
+                    ) + letter_sp * leading.chars().count() as f32
+                        + run_word_spc * leading.chars().filter(|&c| c == ' ').count() as f32;
+                }
+                let first_font_px = first_style.font_size_px(16.0, 16.0).max(1.0);
+                let first_line_h = first_style
+                    .line_height
+                    .resolve(first_font_px, 0.0, 16.0)
+                    .max(first_font_px * 1.2);
+                let first_color = first_style.color;
+                let first_alpha = ((first_color.a as f32) * opacity) as u8;
+                let first_text_color =
+                    Color::rgba(first_color.r, first_color.g, first_color.b, first_alpha);
+                let first_letter_sp = first_style.letter_spacing.resolve(first_font_px, 0.0, 16.0);
+                let first_word_sp = first_style.word_spacing.resolve(first_font_px, 0.0, 16.0);
+                emit_text_run(
+                    first.to_string(),
+                    letter_x,
+                    first_style,
+                    first_font_px,
+                    first_line_h,
+                    first_text_color,
+                    first_letter_sp,
+                    first_word_sp,
+                );
+                if !trailing.is_empty() {
+                    let first_w = measure_paint_text_width(
+                        ctx,
+                        first,
+                        first_font_px,
+                        first_style.font_weight,
+                        first_style.font_style,
+                        &first_style.font_family,
+                    ) + first_letter_sp;
+                    emit_text_run(
+                        trailing.to_string(),
+                        letter_x + first_w,
+                        style_ref,
+                        run_font_px,
+                        run_line_h,
+                        text_color,
+                        letter_sp,
+                        run_word_spc,
+                    );
+                }
+            } else {
+                emit_text_run(
+                    draw_text.clone(),
+                    x_pos,
+                    style_ref,
+                    run_font_px,
+                    run_line_h,
+                    text_color,
+                    letter_sp,
+                    run_word_spc,
+                );
+            }
 
             // Advance cursor using char_x if available and sane. Some relayout
             // paths can leave byte-offset caret positions collapsed at a run
@@ -3581,6 +3723,79 @@ fn border_image_slices(value: &str, image_w: f32, image_h: f32) -> [f32; 4] {
         right.clamp(0.0, image_w),
         bottom.clamp(0.0, image_h),
         left.clamp(0.0, image_w),
+    ]
+}
+
+fn border_image_repeat_modes(value: &str) -> (u8, u8) {
+    fn mode(token: &str) -> u8 {
+        match token.to_ascii_lowercase().as_str() {
+            "repeat" => 1,
+            "space" => 2,
+            "round" => 3,
+            _ => 0,
+        }
+    }
+
+    let tokens: Vec<&str> = value.split_whitespace().collect();
+    let horizontal = tokens.first().copied().map(mode).unwrap_or(0);
+    let vertical = tokens.get(1).copied().map(mode).unwrap_or(horizontal);
+    (horizontal, vertical)
+}
+
+fn border_image_side_values(
+    value: &str,
+    border_widths: [f32; 4],
+    rect: Rect,
+    font_px: f32,
+    width_value: bool,
+) -> [f32; 4] {
+    let tokens: Vec<&str> = value
+        .split_whitespace()
+        .filter(|token| !token.eq_ignore_ascii_case("auto"))
+        .collect();
+    if tokens.is_empty() {
+        return if width_value { border_widths } else { [0.0; 4] };
+    }
+    let refs = [rect.h, rect.w, rect.h, rect.w];
+    let parse_side = |token: &str, side: usize| -> f32 {
+        if let Ok(multiplier) = token.parse::<f32>() {
+            return (border_widths[side] * multiplier).max(0.0);
+        }
+        crate::css::parse_length_checked(token)
+            .map(|length| length.resolve(font_px, refs[side], 16.0).max(0.0))
+            .unwrap_or_else(|| {
+                if width_value {
+                    border_widths[side]
+                } else {
+                    0.0
+                }
+            })
+    };
+    let pick = |idx: usize| -> &str {
+        tokens
+            .get(idx)
+            .copied()
+            .or_else(|| {
+                if idx == 2 {
+                    tokens.first().copied()
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                if idx == 3 {
+                    tokens.get(1).copied().or_else(|| tokens.first().copied())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(tokens[0])
+    };
+    [
+        parse_side(pick(0), 0),
+        parse_side(pick(1), 1),
+        parse_side(pick(2), 2),
+        parse_side(pick(3), 3),
     ]
 }
 

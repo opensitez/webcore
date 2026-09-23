@@ -99,6 +99,8 @@ impl Document {
             target_id,
             &self.base_url,
         );
+        self.style_dirty = true;
+        crate::dom::mark_layout_dirty(&mut self.root);
         true
     }
 }

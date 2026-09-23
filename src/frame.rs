@@ -246,28 +246,31 @@ impl EngineFrame {
         scroll_priority: bool,
     ) -> FrameUpdate {
         let mut update = FrameUpdate::default();
-        if self.doc.style_dirty {
-            self.needs_style = true;
-            self.needs_layout = true;
-            self.needs_paint = true;
-        } else if self.doc.has_dirty_layout() {
-            self.needs_layout = true;
-            self.needs_paint = true;
-        }
+        let style_dirty_before_resource_poll = self.doc.style_dirty;
         // 1. Poll for async stylesheets/images/fonts
         let now = std::time::Instant::now();
         let mut resource_requested_relayout = false;
         if !scroll_priority {
             if self
                 .doc
-                .poll_pending_stylesheets_budgeted(32, std::time::Duration::from_millis(6))
+                .poll_pending_stylesheets_budgeted(8, std::time::Duration::from_millis(2))
             {
+                if !style_dirty_before_resource_poll {
+                    // Stylesheet workers can deliver many fragments/sheets for
+                    // a large page. `poll_pending_stylesheets_budgeted` marks
+                    // the document dirty for the standalone Document API, but
+                    // the frame scheduler already coalesces resource-triggered
+                    // style/layout below. Leaving this bit set bypasses that
+                    // throttle on the next frame and repeatedly full-cascades
+                    // thousands of nodes while the page is still loading.
+                    self.doc.style_dirty = false;
+                }
                 self.engine.invalidate_cascade();
                 resource_requested_relayout = true;
             }
             let image_poll = self
                 .doc
-                .poll_pending_images_budgeted(32, std::time::Duration::from_millis(8));
+                .poll_pending_images_budgeted(8, std::time::Duration::from_millis(2));
             if image_poll.loaded_any {
                 if image_poll.needs_relayout {
                     resource_requested_relayout = true;
@@ -290,7 +293,7 @@ impl EngineFrame {
             }
             if self
                 .engine
-                .poll_pending_fonts_budgeted(8, std::time::Duration::from_millis(8))
+                .poll_pending_fonts_budgeted(2, std::time::Duration::from_millis(2))
             {
                 self.doc.style_dirty = true;
                 resource_requested_relayout = true;
@@ -315,6 +318,14 @@ impl EngineFrame {
                 self.pending_resource_relayout = false;
                 self.last_resource_relayout = Some(now);
             }
+        }
+        if self.doc.style_dirty {
+            self.needs_style = true;
+            self.needs_layout = true;
+            self.needs_paint = true;
+        } else if self.doc.has_dirty_layout() {
+            self.needs_layout = true;
+            self.needs_paint = true;
         }
 
         if !scroll_priority {
@@ -443,13 +454,7 @@ impl EngineFrame {
     /// animation clock as paint damage by itself; `update_frame_detailed`
     /// samples animations and reports visible damage for the current frame.
     pub(crate) fn needs_visible_render(&self) -> bool {
-        self.needs_paint
-            || self.needs_style
-            || self.needs_layout
-            || self.doc.hover_changed
-            || self
-                .doc
-                .has_visible_animated_images(self.doc.scroll_y, self.viewport_h)
+        self.needs_paint || self.needs_style || self.needs_layout || self.doc.hover_changed
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1086,6 +1091,7 @@ impl EngineFrame {
 
     fn schedule_streamed_image(
         &mut self,
+        node_id: u32,
         path: Vec<usize>,
         target: crate::types::PendingImageTarget,
         url: String,
@@ -1101,9 +1107,11 @@ impl EngineFrame {
         {
             match crate::cached_decoded_image_result(url_trimmed, None) {
                 Ok(decoded) => {
-                    if let Some(node) =
+                    if let Some(node) = if node_id != 0 {
+                        self.doc.find_webcore_mut(node_id)
+                    } else {
                         crate::types::find_node_by_path_mut(&mut self.doc.root, &path)
-                    {
+                    } {
                         match target {
                             crate::types::PendingImageTarget::Background => {
                                 let _ = crate::html::set_decoded_bg_image_on_node(node, decoded);
@@ -1132,9 +1140,13 @@ impl EngineFrame {
             }
             return;
         }
-        let node_id = crate::types::find_node_by_path_mut(&mut self.doc.root, &path)
-            .map(|node| node.node_id)
-            .unwrap_or(0);
+        let node_id = if node_id != 0 {
+            node_id
+        } else {
+            crate::types::find_node_by_path_mut(&mut self.doc.root, &path)
+                .map(|node| node.node_id)
+                .unwrap_or(0)
+        };
         let key = if node_id != 0 {
             format!("{target:?}:#{node_id}:{url}")
         } else {
@@ -1240,7 +1252,7 @@ impl EngineFrame {
             Vec::new()
         };
         for (target, url) in requests {
-            self.schedule_streamed_image(path.clone(), target, url);
+            self.schedule_streamed_image(0, path.clone(), target, url);
         }
     }
 
@@ -1291,17 +1303,19 @@ impl EngineFrame {
             viewport_w: f32,
             viewport_h: f32,
             path: &mut Vec<usize>,
-            out: &mut Vec<(Vec<usize>, crate::types::PendingImageTarget, String)>,
+            out: &mut Vec<(u32, Vec<usize>, crate::types::PendingImageTarget, String)>,
         ) {
             if node.is_image_element() && node.image_data.is_none() {
                 if !node.resolved_src.is_empty() {
                     out.push((
+                        node.node_id,
                         path.clone(),
                         crate::types::PendingImageTarget::Element,
                         node.resolved_src.clone(),
                     ));
                 } else if let Some(src) = crate::html::image_fallback_source(node) {
                     out.push((
+                        node.node_id,
                         path.clone(),
                         crate::types::PendingImageTarget::ElementFallback,
                         crate::html::resolve_url(src, base_url),
@@ -1316,6 +1330,7 @@ impl EngineFrame {
                     )
                 {
                     out.push((
+                        node.node_id,
                         path.clone(),
                         crate::types::PendingImageTarget::Element,
                         crate::html::resolve_url(&candidate, base_url),
@@ -1326,6 +1341,7 @@ impl EngineFrame {
                 && let Some(poster) = node.attributes.get("poster")
             {
                 out.push((
+                    node.node_id,
                     path.clone(),
                     crate::types::PendingImageTarget::Element,
                     crate::html::resolve_url(poster, base_url),
@@ -1333,6 +1349,7 @@ impl EngineFrame {
             }
             if node.bg_image_data.is_none() && !node.style.background_image_url.is_empty() {
                 out.push((
+                    node.node_id,
                     path.clone(),
                     crate::types::PendingImageTarget::Background,
                     crate::html::resolve_url(&node.style.background_image_url, base_url),
@@ -1355,6 +1372,7 @@ impl EngineFrame {
                     .is_some();
                 if !loaded {
                     out.push((
+                        node.node_id,
                         path.clone(),
                         crate::types::PendingImageTarget::BackgroundLayer(layer_index),
                         crate::html::resolve_url(&layer.image_url, base_url),
@@ -1363,10 +1381,16 @@ impl EngineFrame {
             }
             if node.mask_image_data.is_none() && !node.style.rare().mask_image_url.is_empty() {
                 out.push((
+                    node.node_id,
                     path.clone(),
                     crate::types::PendingImageTarget::Mask,
                     crate::html::resolve_url(&node.style.rare().mask_image_url, base_url),
                 ));
+            }
+            if let Some(shadow) = node.shadow_root.as_ref() {
+                for child in &shadow.children {
+                    collect(child, base_url, viewport_w, viewport_h, path, out);
+                }
             }
             for (idx, child) in node.children.iter().enumerate() {
                 path.push(idx);
@@ -1384,8 +1408,8 @@ impl EngineFrame {
             &mut Vec::new(),
             &mut requests,
         );
-        for (path, target, url) in requests {
-            self.schedule_streamed_image(path, target, url);
+        for (node_id, path, target, url) in requests {
+            self.schedule_streamed_image(node_id, path, target, url);
         }
     }
 
@@ -1845,6 +1869,38 @@ mod tests {
     }
 
     #[test]
+    fn streaming_frame_inserts_implied_body_for_content_after_head() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<html><head><title>T</title></head><div id="app"><form><input name="u" value="a"></form></div></html>"#,
+        );
+        frame.finish_loading();
+
+        let body = frame
+            .doc
+            .root
+            .children
+            .iter()
+            .find(|child| child.tag == "body")
+            .expect("streamed document should synthesize a body");
+        assert!(
+            body.children.iter().any(|child| {
+                child.tag == "div"
+                    && child
+                        .attributes
+                        .get("id")
+                        .is_some_and(|value| value == "app")
+            }),
+            "content after </head> must be inserted under body, got {:?}",
+            body.children
+                .iter()
+                .map(|child| &child.tag)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn streaming_frame_schedules_stylesheet_without_host_babysitting() {
         let mut frame = EngineFrame::empty(320.0, 240.0);
         frame.start_streaming("https://example.test/");
@@ -2080,6 +2136,160 @@ mod tests {
             "streamed image discovery should wire directly into document pending images"
         );
         assert_eq!(frame.scheduled_images.len(), 1);
+    }
+
+    #[test]
+    fn streaming_frame_schedules_shadow_tree_mask_images() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<html><body><x-menu><template shadowrootmode="open"><span style="display:block;width:10px;height:10px;mask-image:url(/icon.svg)"></span></template></x-menu></body></html>"#,
+        );
+        frame.finish_loading();
+
+        assert!(
+            frame.update_frame(),
+            "first frame should cascade and discover shadow-tree resources"
+        );
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("Mask") && key.contains("https://example.test/icon.svg")),
+            "mask images inside declarative shadow trees must enter the image loader"
+        );
+    }
+
+    #[test]
+    fn streaming_frame_preserves_declarative_shadow_style_scope() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<html><body><mdn-search-button><template shadowroot="open" shadowrootmode="open"><style>.mdn-search-button{display:flex;width:80px;padding-left:12px;background:transparent}</style><button id="search" class="mdn-search-button">Search</button></template></mdn-search-button></body></html>"#,
+        );
+        frame.finish_loading();
+        assert!(
+            frame.update_frame(),
+            "streamed shadow style should recascade"
+        );
+
+        let host = frame
+            .doc
+            .query_selector("mdn-search-button")
+            .and_then(|id| frame.doc.get_node(id))
+            .expect("host");
+        let shadow = host.shadow_root.as_ref().expect("shadow root");
+        assert_eq!(shadow.document_stylesheets.len(), 1);
+        assert!(shadow.stylesheet.rules.len() > crate::css::ua_stylesheet().rules.len());
+
+        fn composed_by_id<'a>(
+            node: &'a crate::types::WebCore,
+            id: &str,
+        ) -> Option<&'a crate::types::WebCore> {
+            if node.attributes.get("id").is_some_and(|value| value == id) {
+                return Some(node);
+            }
+            if let Some(shadow) = node.shadow_root.as_ref() {
+                if let Some(found) = shadow
+                    .children
+                    .iter()
+                    .find_map(|child| composed_by_id(child, id))
+                {
+                    return Some(found);
+                }
+            }
+            node.children
+                .iter()
+                .find_map(|child| composed_by_id(child, id))
+        }
+        let button = composed_by_id(&frame.doc.root, "search").expect("shadow button");
+        assert_eq!(button.style.display, crate::types::Display::Flex);
+        assert_eq!(button.style.width, crate::types::CssLength::Px(80.0));
+        assert_eq!(button.style.padding_left, crate::types::CssLength::Px(12.0));
+    }
+
+    #[test]
+    fn streaming_frame_schedules_generated_pseudo_mask_images_by_node_id() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<html><head><style>.item{display:block;position:relative}.item::after{content:"";display:block;position:absolute;width:10px;height:10px;mask-image:url(/chevron.svg)}</style></head><body><span class="item">Menu</span></body></html>"#,
+        );
+        frame.finish_loading();
+
+        assert!(
+            frame.update_frame(),
+            "first frame should cascade, build pseudo boxes, and discover their resources"
+        );
+        assert!(
+            frame.scheduled_images.iter().any(|key| {
+                key.contains("Mask")
+                    && key.contains('#')
+                    && key.contains("https://example.test/chevron.svg")
+            }),
+            "mask images on generated pseudo-elements must be scheduled by node id; got {:?}",
+            frame.scheduled_images
+        );
+    }
+
+    #[test]
+    fn streaming_frame_preserves_loaded_generated_pseudo_mask_across_recascade() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<html><head><style>.item{display:flex}.item::after{content:"";display:block;width:10px;height:10px;mask-image:url(data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='2' height='2'%3E%3Crect width='2' height='2' fill='black'/%3E%3C/svg%3E)}</style></head><body><span class="item">Menu</span></body></html>"#,
+        );
+        frame.finish_loading();
+
+        assert!(
+            frame.update_frame(),
+            "first frame should build the pseudo mask"
+        );
+        fn find_after(node: &crate::types::WebCore) -> Option<&crate::types::WebCore> {
+            if node.tag == "::after" {
+                return Some(node);
+            }
+            if let Some(shadow) = node.shadow_root.as_ref() {
+                if let Some(found) = shadow.children.iter().find_map(find_after) {
+                    return Some(found);
+                }
+            }
+            node.children.iter().find_map(find_after)
+        }
+        fn find_after_mut(node: &mut crate::types::WebCore) -> Option<&mut crate::types::WebCore> {
+            if node.tag == "::after" {
+                return Some(node);
+            }
+            if let Some(shadow) = node.shadow_root.as_mut() {
+                if let Some(found) = shadow.children.iter_mut().find_map(find_after_mut) {
+                    return Some(found);
+                }
+            }
+            node.children.iter_mut().find_map(find_after_mut)
+        }
+        {
+            let loaded = find_after_mut(&mut frame.doc.root).expect("generated ::after");
+            loaded.mask_image_data = Some(std::sync::Arc::new(vec![255; 16]));
+            loaded.mask_image_width = 2;
+            loaded.mask_image_height = 2;
+        }
+        let loaded = find_after(&frame.doc.root).expect("generated ::after");
+        assert!(
+            loaded.mask_image_data.is_some(),
+            "test setup should attach pseudo mask pixels"
+        );
+        assert_eq!(loaded.mask_image_width, 2);
+        assert_eq!(loaded.mask_image_height, 2);
+
+        frame.mark_style_dirty();
+        assert!(frame.update_frame(), "forced recascade should run");
+        let recascaded = find_after(&frame.doc.root).expect("generated ::after after recascade");
+        assert!(
+            recascaded.mask_image_data.is_some(),
+            "pseudo rebuild must preserve loaded mask pixels"
+        );
+        assert_eq!(recascaded.mask_image_width, 2);
+        assert_eq!(recascaded.mask_image_height, 2);
     }
 
     #[test]

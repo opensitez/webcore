@@ -554,6 +554,11 @@ impl Default for ComputedStyle {
             marker_style: None,
             backdrop_style: None,
             file_selector_button_style: None,
+            details_content_style: None,
+            spelling_error_style: None,
+            grammar_error_style: None,
+            first_line_style: None,
+            first_letter_style: None,
 
             caret_color: None,
             scrollbar_thumb_color: None,

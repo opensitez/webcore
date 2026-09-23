@@ -116,7 +116,18 @@ pub(crate) fn handle_head_tag(
                     });
             }
         }
-        "meta" | "base" => {
+        "meta" => {
+            parser.fire_hook(tag, &attrs);
+            if parser.meta_color_scheme.is_none() {
+                if let (Some(name), Some(content)) = (attrs.get("name"), attrs.get("content")) {
+                    if name.trim().eq_ignore_ascii_case("color-scheme") {
+                        parser.meta_color_scheme = parse_meta_color_scheme(content);
+                    }
+                }
+            }
+            parser.push_head_node(tag, attrs, String::new());
+        }
+        "base" => {
             parser.fire_hook(tag, &attrs);
             parser.push_head_node(tag, attrs, String::new());
         }
@@ -140,4 +151,25 @@ pub(crate) fn handle_head_tag(
         _ => return false,
     }
     true
+}
+
+fn parse_meta_color_scheme(content: &str) -> Option<String> {
+    let tokens: Vec<String> = content
+        .split_ascii_whitespace()
+        .map(|token| token.to_ascii_lowercase())
+        .collect();
+    match tokens.as_slice() {
+        [one] if matches!(one.as_str(), "normal" | "light" | "dark") => Some(one.clone()),
+        [first, second]
+            if matches!(first.as_str(), "light" | "dark")
+                && matches!(second.as_str(), "light" | "dark")
+                && first != second =>
+        {
+            Some(format!("{first} {second}"))
+        }
+        [only, scheme] if only == "only" && matches!(scheme.as_str(), "light" | "dark") => {
+            Some(format!("only {scheme}"))
+        }
+        _ => None,
+    }
 }

@@ -15,6 +15,7 @@ pub(crate) struct HtmlParser {
     pub(crate) base_url: String,
     pub(crate) linked_stylesheets: Vec<(String, String)>, // (href, media)
     pub(crate) document_stylesheets: Vec<DocumentStylesheet>,
+    pub(crate) meta_color_scheme: Option<String>,
     /// Monotonically increasing counter for assigning stable node_ids.
     pub(crate) next_node_id: u32,
     /// Arena-based DOM being built in parallel with the WebCore tree.
@@ -138,6 +139,7 @@ impl HtmlParser {
             base_url: String::new(),
             linked_stylesheets: Vec::new(),
             document_stylesheets: Vec::new(),
+            meta_color_scheme: None,
             next_node_id: 1, // 0 = NodeId::NONE (reserved)
             arena: crate::dom::arena::DomArena::new(),
             on_open_tag: None,
@@ -659,16 +661,37 @@ impl HtmlParser {
                             && !href.is_empty()
                         {
                             let media = attrs.get("media").cloned().unwrap_or_default();
-                            if !self.linked_stylesheets.iter().any(|(h, _)| *h == href) {
-                                self.linked_stylesheets.push((href.clone(), media.clone()));
-                                self.document_stylesheets
-                                    .push(DocumentStylesheet::Linked { href, media });
+                            let cur_parent = stack
+                                .last()
+                                .map(|f| f.parent_tag.as_str())
+                                .unwrap_or(parent_tag);
+                            if cur_parent != "template" {
+                                if !self.linked_stylesheets.iter().any(|(h, _)| *h == href) {
+                                    self.linked_stylesheets.push((href.clone(), media.clone()));
+                                    self.document_stylesheets
+                                        .push(DocumentStylesheet::Linked { href, media });
+                                }
                             }
                         }
                     }
 
                     // Skip non-visual tags entirely
                     if is_non_visual(&tag) {
+                        let cur_parent = stack
+                            .last()
+                            .map(|f| f.parent_tag.as_str())
+                            .unwrap_or(parent_tag);
+                        if tag == "link" && cur_parent == "template" {
+                            let mut link_node = self.new_box("link");
+                            link_node.attributes = attrs;
+                            apply_property(
+                                std::sync::Arc::make_mut(&mut link_node.style),
+                                "display",
+                                "none",
+                            );
+                            stack.last_mut().unwrap().node.children.push(link_node);
+                            continue;
+                        }
                         if !self_closing {
                             self.skip_until_close(&tag);
                         }
@@ -705,7 +728,10 @@ impl HtmlParser {
                                 .push(DocumentStylesheet::Inline { css: css.clone() });
                         }
                         let mut style_node = self.new_box("style");
-                        style_node.text = css;
+                        style_node.text = css.clone();
+                        let mut text = self.new_box("#text");
+                        text.text = css;
+                        style_node.children.push(text);
                         apply_property(
                             std::sync::Arc::make_mut(&mut style_node.style),
                             "display",
@@ -977,7 +1003,10 @@ impl HtmlParser {
             // The element stays in the tree — see the sibling arm in
             // `parse_children_into`.
             let mut style_node = self.new_box("style");
-            style_node.text = css;
+            style_node.text = css.clone();
+            let mut text = self.new_box("#text");
+            text.text = css;
+            style_node.children.push(text);
             apply_property(
                 std::sync::Arc::make_mut(&mut style_node.style),
                 "display",

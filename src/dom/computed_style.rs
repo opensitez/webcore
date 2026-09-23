@@ -190,6 +190,11 @@ impl Document {
                 node.style.file_selector_button_style.as_deref(),
                 &empty_content,
             ),
+            "details-content" => (node.style.details_content_style.as_deref(), &empty_content),
+            "spelling-error" => (node.style.spelling_error_style.as_deref(), &empty_content),
+            "grammar-error" => (node.style.grammar_error_style.as_deref(), &empty_content),
+            "first-line" => (node.style.first_line_style.as_deref(), &empty_content),
+            "first-letter" => (node.style.first_letter_style.as_deref(), &empty_content),
             _ => (None, &empty_content),
         };
         let Some(style) = style else {
@@ -574,6 +579,10 @@ impl Document {
             "flex-direction" => serialize_flex_direction(s.flex_direction),
             "justify-content" => serialize_justify_content(s.justify_content),
             "align-items" => serialize_align_items(s.align_items),
+            "align-content" => serialize_align_content(s.align_content),
+            "align-self" => serialize_align_self(s.align_self),
+            "justify-items" => serialize_align_items(s.justify_items),
+            "justify-self" => serialize_align_self(s.justify_self),
             "row-gap" => len(&s.row_gap),
             "column-gap" => len(&s.column_gap),
             "flex-grow" => trim_f32(s.flex_grow),
@@ -633,6 +642,15 @@ impl Document {
             "scrollbar-width" => s.scrollbar_width.clone(),
             "scrollbar-gutter" => s.scrollbar_gutter.clone(),
             "scrollbar-color" => serialize_scrollbar_color(s),
+            "caret-color" => s
+                .caret_color
+                .map(serialize_color)
+                .unwrap_or_else(|| "auto".to_string()),
+            "pointer-events" => serialize_pointer_events(s.pointer_events),
+            "user-select" => serialize_user_select(s.user_select),
+            "resize" => serialize_resize(s.resize),
+            "tab-size" => s.tab_size.to_string(),
+            "hyphens" => serialize_hyphens(s.hyphens),
             "scroll-snap-stop" => s.scroll_snap_stop.clone(),
             "scroll-margin-top" => len(&s.scroll_margin_top),
             "scroll-margin-right" => len(&s.scroll_margin_right),
@@ -1369,6 +1387,84 @@ fn serialize_align_items(v: crate::types::AlignItems) -> String {
         A::Center => "center",
         A::Baseline => "baseline",
         A::LastBaseline => "last baseline",
+    }
+    .to_string()
+}
+
+fn serialize_align_self(v: crate::types::AlignSelf) -> String {
+    use crate::types::AlignSelf as A;
+    match v {
+        A::Auto => "auto",
+        A::Stretch => "stretch",
+        A::FlexStart => "flex-start",
+        A::FlexEnd => "flex-end",
+        A::Center => "center",
+        A::Baseline => "baseline",
+        A::LastBaseline => "last baseline",
+    }
+    .to_string()
+}
+
+fn serialize_align_content(v: crate::types::AlignContent) -> String {
+    use crate::types::AlignContent as A;
+    match v {
+        A::Stretch => "stretch",
+        A::FlexStart => "flex-start",
+        A::FlexEnd => "flex-end",
+        A::Center => "center",
+        A::SpaceBetween => "space-between",
+        A::SpaceAround => "space-around",
+        A::SpaceEvenly => "space-evenly",
+    }
+    .to_string()
+}
+
+fn serialize_pointer_events(v: crate::types::PointerEvents) -> String {
+    use crate::types::PointerEvents as P;
+    match v {
+        P::Auto => "auto",
+        P::None => "none",
+        P::VisiblePainted => "visiblePainted",
+        P::VisibleFill => "visibleFill",
+        P::VisibleStroke => "visibleStroke",
+        P::Visible => "visible",
+        P::Painted => "painted",
+        P::Fill => "fill",
+        P::Stroke => "stroke",
+        P::All => "all",
+    }
+    .to_string()
+}
+
+fn serialize_user_select(v: crate::types::UserSelect) -> String {
+    use crate::types::UserSelect as U;
+    match v {
+        U::Auto => "auto",
+        U::None => "none",
+        U::Text => "text",
+        U::All => "all",
+        U::Contain => "contain",
+    }
+    .to_string()
+}
+
+fn serialize_resize(v: crate::types::Resize) -> String {
+    use crate::types::Resize as R;
+    match v {
+        R::None => "none",
+        R::Both => "both",
+        R::Horizontal => "horizontal",
+        R::Vertical => "vertical",
+    }
+    .to_string()
+}
+
+fn serialize_hyphens(v: crate::types::Hyphens) -> String {
+    use crate::types::Hyphens as H;
+    match v {
+        H::None => "none",
+        H::Manual => "manual",
+        H::Auto => "auto",
     }
     .to_string()
 }

@@ -276,6 +276,16 @@ pub(crate) fn resolve_picture_source(
     vw: f32,
     vh: f32,
 ) -> bool {
+    resolve_picture_source_for_device_pixel_ratio(picture, base_url, vw, vh, 1.0)
+}
+
+pub(crate) fn resolve_picture_source_for_device_pixel_ratio(
+    picture: &mut WebCore,
+    base_url: &str,
+    vw: f32,
+    vh: f32,
+    device_pixel_ratio: f32,
+) -> bool {
     // Find the first matching <source>. In a <picture> context only `srcset`
     // participates in image candidate selection; `source[src]` is for media
     // elements and must not replace the fallback <img>.
@@ -318,7 +328,7 @@ pub(crate) fn resolve_picture_source(
                         .and_then(|img| img.attributes.get("sizes"))
                         .map(|s| s.as_str())
                 });
-            if let Some(url) = parse_srcset_url_for(srcset, sizes, vw, vh, 1.0) {
+            if let Some(url) = parse_srcset_url_for(srcset, sizes, vw, vh, device_pixel_ratio) {
                 best_url = Some(url);
                 best_width = child
                     .attributes
@@ -388,26 +398,64 @@ fn parse_nonzero_dimension(value: &str) -> Option<u32> {
 
 /// Post-pass: re-resolve `<picture>` elements with real viewport dimensions.
 pub fn resolve_picture_elements(node: &mut WebCore, base_url: &str, vw: f32, vh: f32) {
+    resolve_picture_elements_for_device_pixel_ratio(node, base_url, vw, vh, 1.0);
+}
+
+pub fn resolve_picture_elements_for_device_pixel_ratio(
+    node: &mut WebCore,
+    base_url: &str,
+    vw: f32,
+    vh: f32,
+    device_pixel_ratio: f32,
+) {
     if node.tag == "picture" {
-        let source_matched = resolve_picture_source(node, base_url, vw, vh);
+        let source_matched = resolve_picture_source_for_device_pixel_ratio(
+            node,
+            base_url,
+            vw,
+            vh,
+            device_pixel_ratio,
+        );
         for child in &mut node.children {
             if child.tag != "img" || !source_matched {
-                resolve_picture_elements(child, base_url, vw, vh);
+                resolve_picture_elements_for_device_pixel_ratio(
+                    child,
+                    base_url,
+                    vw,
+                    vh,
+                    device_pixel_ratio,
+                );
             }
         }
         return;
     } else if node.tag == "img" {
-        resolve_img_source(node, base_url, vw, vh);
+        resolve_img_source_for_device_pixel_ratio(node, base_url, vw, vh, device_pixel_ratio);
     }
     for child in &mut node.children {
-        resolve_picture_elements(child, base_url, vw, vh);
+        resolve_picture_elements_for_device_pixel_ratio(
+            child,
+            base_url,
+            vw,
+            vh,
+            device_pixel_ratio,
+        );
     }
 }
 
 pub(crate) fn resolve_img_source(node: &mut WebCore, base_url: &str, vw: f32, vh: f32) {
+    resolve_img_source_for_device_pixel_ratio(node, base_url, vw, vh, 1.0);
+}
+
+pub(crate) fn resolve_img_source_for_device_pixel_ratio(
+    node: &mut WebCore,
+    base_url: &str,
+    vw: f32,
+    vh: f32,
+    device_pixel_ratio: f32,
+) {
     if let Some(srcset) = image_srcset_source(node) {
         let sizes = node.attributes.get("sizes").map(|s| s.as_str());
-        if let Some(best) = parse_srcset_url_for(srcset, sizes, vw, vh, 1.0) {
+        if let Some(best) = parse_srcset_url_for(srcset, sizes, vw, vh, device_pixel_ratio) {
             apply_resolved_image_source(node, &best, base_url, None);
             return;
         }
@@ -477,7 +525,7 @@ impl crate::html::parser::HtmlParser {
             .any(|c| c.tag == "template" && c.attributes.contains_key("shadowrootmode"));
         if has_shadow_template {
             let mut shadow_children = Vec::new();
-            let mut shadow_css = String::new();
+            let mut shadow_stylesheets = Vec::new();
             let mut shadow_mode = crate::types::ShadowMode::Open;
             // Extract the template with shadowrootmode
             node.children.retain(|c| {
@@ -492,10 +540,33 @@ impl crate::html::parser::HtmlParser {
                         for child in &c.children {
                             if child.tag == "style" {
                                 // Extract style text for scoped stylesheet
-                                shadow_css.push_str(&child.text);
-                                for tc in &child.children {
-                                    if tc.tag == "#text" {
-                                        shadow_css.push_str(&tc.text);
+                                let css = if child.text.is_empty() {
+                                    child.text_content()
+                                } else {
+                                    child.text.clone()
+                                };
+                                shadow_stylesheets
+                                    .push(crate::types::DocumentStylesheet::Inline { css });
+                            } else if child.tag == "link"
+                                && child
+                                    .attributes
+                                    .get("rel")
+                                    .is_some_and(|rel| rel.eq_ignore_ascii_case("stylesheet"))
+                                && !child.attributes.contains_key("disabled")
+                            {
+                                if let Some(href) = child.attributes.get("href") {
+                                    if !href.is_empty() {
+                                        let media = child
+                                            .attributes
+                                            .get("media")
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        shadow_stylesheets.push(
+                                            crate::types::DocumentStylesheet::Linked {
+                                                href: href.clone(),
+                                                media,
+                                            },
+                                        );
                                     }
                                 }
                             } else {
@@ -507,17 +578,23 @@ impl crate::html::parser::HtmlParser {
                 }
                 true
             });
-            if !shadow_children.is_empty() || !shadow_css.is_empty() {
+            if !shadow_children.is_empty() || !shadow_stylesheets.is_empty() {
+                for child in &mut shadow_children {
+                    post_process_shadow_subtree(child, base_url);
+                }
                 // Start with UA stylesheet so shadow tree gets default styles
                 let mut stylesheet = crate::css::ua_stylesheet();
-                if !shadow_css.is_empty() {
-                    // Author origin: a shadow root's own `<style>` outranks the
-                    // UA sheet it is layered on, the same as a document's.
-                    stylesheet.parse_and_add_author(&shadow_css);
+                for sheet in &shadow_stylesheets {
+                    if let crate::types::DocumentStylesheet::Inline { css } = sheet {
+                        // Author origin: a shadow root's own `<style>` outranks the
+                        // UA sheet it is layered on, the same as a document's.
+                        stylesheet.parse_and_add_author(css);
+                    }
                 }
                 node.shadow_root = Some(Box::new(crate::types::ShadowRoot {
                     children: shadow_children,
                     stylesheet,
+                    document_stylesheets: shadow_stylesheets,
                     mode: shadow_mode,
                     node_id: crate::dom::arena::next_shadow_node_id(),
                     delegates_focus: false,
@@ -642,4 +719,16 @@ impl crate::html::parser::HtmlParser {
             }
         }
     }
+}
+
+fn post_process_shadow_subtree(node: &mut WebCore, base_url: &str) {
+    for child in &mut node.children {
+        post_process_shadow_subtree(child, base_url);
+    }
+    if let Some(shadow) = node.shadow_root.as_mut() {
+        for child in &mut shadow.children {
+            post_process_shadow_subtree(child, base_url);
+        }
+    }
+    crate::html::parser::HtmlParser::post_process_node(node, base_url);
 }

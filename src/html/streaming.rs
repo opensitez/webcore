@@ -87,6 +87,9 @@ pub struct StreamingParser {
     stack: Vec<OpenElement>,
     /// Number of root-level nodes emitted so far.
     root_child_count: usize,
+    /// Whether body insertion has started, explicitly or by the implied-body
+    /// rule for content after the head.
+    body_started: bool,
     /// Whether we've seen </head> (render-blocking CSS should be loaded by then).
     pub(crate) head_closed: bool,
     /// Render-blocking resources that must load before first paint.
@@ -105,6 +108,10 @@ pub struct StreamingParser {
     in_style: bool,
     /// Accumulated style content.
     style_buffer: String,
+    /// A `<style>` inside `<template>` is shadow-scoped markup, not a document
+    /// stylesheet. Keep its emitted node path so the raw CSS can be attached to
+    /// the template fragment for declarative shadow DOM finalization.
+    style_node_path: Option<Vec<usize>>,
     /// Whether we're inside a <script> raw-text element.
     in_script: bool,
 }
@@ -117,6 +124,7 @@ impl StreamingParser {
             base_url: base_url.to_string(),
             stack: Vec::new(),
             root_child_count: 0,
+            body_started: false,
             head_closed: false,
             render_blocking: Vec::new(),
             loaded_resources: Vec::new(),
@@ -126,6 +134,7 @@ impl StreamingParser {
             in_title: false,
             in_style: false,
             style_buffer: String::new(),
+            style_node_path: None,
             in_script: false,
         }
     }
@@ -134,6 +143,48 @@ impl StreamingParser {
     /// document instead of an empty root.
     pub fn set_root_child_count(&mut self, count: usize) {
         self.root_child_count = count;
+    }
+
+    fn in_document_or_html(&self) -> bool {
+        self.stack.is_empty()
+            || (self.stack.len() == 1
+                && self
+                    .stack
+                    .last()
+                    .is_some_and(|open| open.tag.eq_ignore_ascii_case("html")))
+    }
+
+    fn ensure_body_open(&mut self, mutations: &mut Vec<DomMutation>) {
+        if self.body_started
+            || self
+                .stack
+                .last()
+                .is_some_and(|open| open.tag.eq_ignore_ascii_case("body"))
+        {
+            return;
+        }
+        let parent_path = self
+            .stack
+            .last()
+            .filter(|open| open.tag.eq_ignore_ascii_case("html"))
+            .map(|open| open.path.clone())
+            .unwrap_or_default();
+        let child_index = self.next_child_index();
+        let mut body_path = parent_path.clone();
+        body_path.push(child_index);
+        mutations.push(DomMutation::InsertElement {
+            parent_path,
+            tag: "body".to_string(),
+            attributes: AttrMap::new(),
+        });
+        self.bump_child_count();
+        self.stack.push(OpenElement {
+            tag: "body".to_string(),
+            path: body_path,
+            child_count: 0,
+        });
+        self.body_started = true;
+        self.head_closed = true;
     }
 
     /// Feed a chunk of HTML bytes. Returns DOM mutations to apply.
@@ -162,13 +213,29 @@ impl StreamingParser {
             } else if self.in_style {
                 if !text.trim().is_empty() {
                     self.style_buffer.push_str(&text);
-                    mutations.push(DomMutation::AddStylesheet {
-                        css: std::mem::take(&mut self.style_buffer),
-                        url: String::new(),
-                        media: String::new(),
-                    });
+                    let css = std::mem::take(&mut self.style_buffer);
+                    if let Some(parent_path) = self.style_node_path.take() {
+                        mutations.push(DomMutation::AppendText {
+                            parent_path,
+                            text: css,
+                        });
+                    } else {
+                        mutations.push(DomMutation::AddStylesheet {
+                            css,
+                            url: String::new(),
+                            media: String::new(),
+                        });
+                    }
                 }
                 self.in_style = false;
+                if self
+                    .stack
+                    .last()
+                    .is_some_and(|open| open.tag.eq_ignore_ascii_case("style"))
+                {
+                    self.stack.pop();
+                    mutations.push(DomMutation::CloseElement);
+                }
             } else if self.in_title {
                 self.title.push_str(&crate::html::decode_entities(&text));
                 mutations.push(DomMutation::TitleChanged {
@@ -227,12 +294,28 @@ impl StreamingParser {
                 // Accumulate content until </style>
                 if let Some(end) = buf.to_lowercase().find("</style>") {
                     self.style_buffer.push_str(&buf[..end]);
-                    mutations.push(DomMutation::AddStylesheet {
-                        css: std::mem::take(&mut self.style_buffer),
-                        url: String::new(),
-                        media: String::new(),
-                    });
+                    let css = std::mem::take(&mut self.style_buffer);
+                    if let Some(parent_path) = self.style_node_path.take() {
+                        mutations.push(DomMutation::AppendText {
+                            parent_path,
+                            text: css,
+                        });
+                    } else {
+                        mutations.push(DomMutation::AddStylesheet {
+                            css,
+                            url: String::new(),
+                            media: String::new(),
+                        });
+                    }
                     self.in_style = false;
+                    if self
+                        .stack
+                        .last()
+                        .is_some_and(|open| open.tag.eq_ignore_ascii_case("style"))
+                    {
+                        self.stack.pop();
+                        mutations.push(DomMutation::CloseElement);
+                    }
                     self.buffer = buf[end + 8..].to_string();
                     continue;
                 } else {
@@ -297,6 +380,9 @@ impl StreamingParser {
                     if tag == "head" {
                         self.head_closed = true;
                     }
+                    if tag == "body" {
+                        self.body_started = true;
+                    }
                     if self.close_matching_element(&tag) {
                         mutations.push(DomMutation::CloseElement);
                     }
@@ -309,6 +395,31 @@ impl StreamingParser {
                     self.discover_resources(&tag, &attrs, &mut mutations);
 
                     if tag == "style" && !self_closing {
+                        if self
+                            .stack
+                            .last()
+                            .is_some_and(|open| open.tag.eq_ignore_ascii_case("template"))
+                        {
+                            let parent_path = self.current_parent_path();
+                            let child_index = self.next_child_index();
+                            let mut element_path = parent_path.clone();
+                            element_path.push(child_index);
+                            mutations.push(DomMutation::InsertElement {
+                                parent_path,
+                                tag: tag.clone(),
+                                attributes: attrs,
+                            });
+                            self.bump_child_count();
+                            self.stack.push(OpenElement {
+                                tag,
+                                path: element_path.clone(),
+                                child_count: 0,
+                            });
+                            self.style_node_path = Some(element_path);
+                            self.in_style = true;
+                            self.style_buffer.clear();
+                            continue;
+                        }
                         self.in_style = true;
                         self.style_buffer.clear();
                         continue;
@@ -319,10 +430,7 @@ impl StreamingParser {
                         continue;
                     }
 
-                    if tag.eq_ignore_ascii_case("html")
-                        && self.stack.is_empty()
-                        && self.root_child_count == 0
-                    {
+                    if tag.eq_ignore_ascii_case("html") && self.stack.is_empty() {
                         if !attrs.is_empty() {
                             mutations.push(DomMutation::SetRootAttributes { attributes: attrs });
                         }
@@ -330,10 +438,20 @@ impl StreamingParser {
                             self.stack.push(OpenElement {
                                 tag,
                                 path: Vec::new(),
-                                child_count: 0,
+                                child_count: self.root_child_count,
                             });
                         }
                         continue;
+                    }
+
+                    if tag.eq_ignore_ascii_case("body") {
+                        self.body_started = true;
+                        self.head_closed = true;
+                    } else if self.in_document_or_html()
+                        && !tag.eq_ignore_ascii_case("head")
+                        && !crate::html::is_head_content_tag(&tag)
+                    {
+                        self.ensure_body_open(&mut mutations);
                     }
 
                     let parent_path = self.current_parent_path();
@@ -372,6 +490,10 @@ impl StreamingParser {
 
         if text.trim().is_empty() && self.is_structural_whitespace_context() {
             return;
+        }
+
+        if self.in_document_or_html() {
+            self.ensure_body_open(mutations);
         }
 
         mutations.push(DomMutation::AppendText {

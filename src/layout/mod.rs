@@ -390,16 +390,7 @@ fn parse_font_face_metric_percent(raw: Option<&str>) -> Option<f32> {
 }
 
 pub(crate) fn is_latin_font_face(face: &crate::css::FontFaceDecl) -> bool {
-    if let Some(ref range) = face.unicode_range {
-        let r = range.to_ascii_uppercase();
-        r.contains("U+0000")
-            || r.contains("U+0020")
-            || r.contains("U+0041")
-            || r.contains("U+00-")
-            || r.contains("U+0-")
-    } else {
-        true
-    }
+    crate::css::font_face::unicode_range_intersects_latin(face.unicode_range.as_deref())
 }
 
 fn font_face_metric_override(
@@ -912,6 +903,15 @@ fn inline_subtree_has_non_whitespace_text(node: &WebCore) -> bool {
     node.effective_children()
         .into_iter()
         .any(inline_subtree_has_non_whitespace_text)
+}
+
+fn collect_font_face_text(node: &WebCore, out: &mut String) {
+    if node.tag != "#comment" && !node.text.is_empty() {
+        out.push_str(&node.text);
+    }
+    for child in &node.children {
+        collect_font_face_text(child, out);
+    }
 }
 
 fn inline_items_max_content_advance(items: &[inline_layout::InlineItem]) -> f32 {
@@ -1981,6 +1981,59 @@ impl LayoutEngine {
         self.min_content_width_inner(node, parent_font_px, root_font_px, false)
     }
 
+    fn empty_pseudo_lacks_intrinsic_contribution(
+        &self,
+        node: &WebCore,
+        parent_font_px: f32,
+        root_font_px: f32,
+    ) -> bool {
+        if !node.is_pseudo_element() || !node.text.is_empty() {
+            return false;
+        }
+        if !node.style.width.is_auto() || !node.style.height.is_auto() {
+            return false;
+        }
+        let font_px = node.style.font_size_px(parent_font_px, root_font_px);
+        let rb = self.res_box(&node.style, font_px, 0.0, root_font_px);
+        let edges = rb.padding_left
+            + rb.padding_right
+            + rb.padding_top
+            + rb.padding_bottom
+            + rb.border_left
+            + rb.border_right
+            + rb.border_top
+            + rb.border_bottom
+            + rb.margin_left
+            + rb.margin_right
+            + rb.margin_top
+            + rb.margin_bottom;
+        edges <= 0.0
+    }
+
+    fn explicit_empty_pseudo_intrinsic_width(
+        &self,
+        node: &WebCore,
+        parent_font_px: f32,
+        root_font_px: f32,
+    ) -> Option<f32> {
+        if !node.is_pseudo_element() || !node.text.is_empty() || node.style.width.is_auto() {
+            return None;
+        }
+        if node.style.width.has_percentage() {
+            return None;
+        }
+        let font_px = node.style.font_size_px(parent_font_px, root_font_px);
+        let mut width = self
+            .res_len(&node.style.width, font_px, 0.0, root_font_px)
+            .max(0.0);
+        if node.style.box_sizing == BoxSizing::BorderBox {
+            let rb = self.res_box(&node.style, font_px, 0.0, root_font_px);
+            let edges = rb.padding_left + rb.padding_right + rb.border_left + rb.border_right;
+            width = (width - edges).max(0.0);
+        }
+        Some(width)
+    }
+
     fn min_content_width_inner(
         &self,
         node: &WebCore,
@@ -1993,6 +2046,12 @@ impl LayoutEngine {
         }
 
         let font_px = node.style.font_size_px(parent_font_px, root_font_px);
+
+        if let Some(w) =
+            self.explicit_empty_pseudo_intrinsic_width(node, parent_font_px, root_font_px)
+        {
+            return w;
+        }
 
         // Explicit width → use that directly
         if honor_width && !node.style.width.is_auto() && !node.style.width.has_percentage() {
@@ -2137,14 +2196,14 @@ impl LayoutEngine {
             let gap = self.res_len(&node.style.column_gap, font_px, 0.0, root_font_px);
             let mut total = 0.0f32;
             let mut count = 0usize;
-            for ch in &node.children {
+            for ch in node.effective_children() {
                 if matches!(ch.style.display, Display::None) {
                     continue;
                 }
                 if matches!(ch.style.position, Position::Absolute | Position::Fixed) {
                     continue;
                 }
-                if ch.is_pseudo_element() && ch.text.is_empty() {
+                if self.empty_pseudo_lacks_intrinsic_contribution(ch, font_px, root_font_px) {
                     continue;
                 }
                 if ch.tag == "#text" && ch.text.chars().all(|c| c.is_ascii_whitespace()) {
@@ -2177,14 +2236,14 @@ impl LayoutEngine {
 
         // For containers: max of children's min-content widths
         let mut max_w = generated_inline_w.max(own_text_w);
-        for ch in &node.children {
+        for ch in node.effective_children() {
             if matches!(ch.style.display, Display::None) {
                 continue;
             }
             if matches!(ch.style.position, Position::Absolute | Position::Fixed) {
                 continue;
             }
-            if ch.is_pseudo_element() && ch.text.is_empty() {
+            if self.empty_pseudo_lacks_intrinsic_contribution(ch, font_px, root_font_px) {
                 continue;
             }
             let child_font = ch.style.font_size_px(font_px, root_font_px);
@@ -2233,6 +2292,12 @@ impl LayoutEngine {
         // Explicit width → use that directly (but skip percentages — they can't
         // resolve without a known containing width during intrinsic measurement).
         let font_px = node.style.font_size_px(parent_font_px, root_font_px);
+        if let Some(w) =
+            self.explicit_empty_pseudo_intrinsic_width(node, parent_font_px, root_font_px)
+        {
+            return w;
+        }
+
         if honor_width && !node.style.width.is_auto() && !node.style.width.has_percentage() {
             let w = self.res_len(&node.style.width, font_px, 0.0, root_font_px);
             // ⛔ A `border-box` width ALREADY contains the padding and border,
@@ -2384,14 +2449,14 @@ impl LayoutEngine {
             let mut total = 0.0f32;
             let gap = self.res_len(&node.style.column_gap, font_px, 0.0, root_font_px);
             let mut count = 0usize;
-            for ch in &node.children {
+            for ch in node.effective_children() {
                 if matches!(ch.style.display, Display::None) {
                     continue;
                 }
                 if matches!(ch.style.position, Position::Absolute | Position::Fixed) {
                     continue;
                 }
-                if ch.is_pseudo_element() && ch.text.is_empty() {
+                if self.empty_pseudo_lacks_intrinsic_contribution(ch, font_px, root_font_px) {
                     continue;
                 }
                 if ch.tag == "#text" && ch.text.chars().all(|c| c.is_ascii_whitespace()) {
@@ -2464,14 +2529,14 @@ impl LayoutEngine {
         let mut float_sum = 0.0f32;
         let mut run = generated_inline_w + own_text_w; // the inline run being accumulated
         let mut pending_collapsed_space = false;
-        for ch in &node.children {
+        for ch in node.effective_children() {
             if matches!(ch.style.display, Display::None) {
                 continue;
             }
             if matches!(ch.style.position, Position::Absolute | Position::Fixed) {
                 continue;
             }
-            if ch.is_pseudo_element() && ch.text.is_empty() {
+            if self.empty_pseudo_lacks_intrinsic_contribution(ch, font_px, root_font_px) {
                 continue;
             }
             if ch.tag == "#text" && ch.text.chars().all(|c| c.is_ascii_whitespace()) {
@@ -2578,7 +2643,7 @@ impl LayoutEngine {
         let mut text_offset = 0usize;
         let mut previous_collapsible_space = false;
         if matches!(node.style.display, Display::InlineBlock) {
-            for (idx, child) in node.children.iter().enumerate() {
+            for (idx, child) in node.effective_children().iter().enumerate() {
                 inline_layout::collect_items_continuing(
                     self,
                     child,
@@ -2653,7 +2718,7 @@ impl LayoutEngine {
         let mut text_offset = 0usize;
         let mut previous_collapsible_space = false;
         if matches!(node.style.display, Display::InlineBlock) {
-            for (idx, child) in node.children.iter().enumerate() {
+            for (idx, child) in node.effective_children().iter().enumerate() {
                 inline_layout::collect_items_continuing(
                     self,
                     child,
@@ -2715,7 +2780,7 @@ impl LayoutEngine {
         {
             return false;
         }
-        node.children.iter().all(|child| {
+        node.effective_children().iter().all(|child| {
             self.inline_subtree_can_use_item_intrinsic(child, font_px, root_font_px, false)
         })
     }
@@ -2896,7 +2961,12 @@ impl LayoutEngine {
     /// Kick off non-blocking font loading. Base64 and local fonts are loaded
     /// immediately; remote fonts are fetched in background threads and arrive
     /// via `pending_fonts` channel — polled each `layout()` call.
-    pub fn load_font_faces(&mut self, faces: &[crate::css::FontFaceDecl], base_url: &str) {
+    pub fn load_font_faces(
+        &mut self,
+        faces: &[crate::css::FontFaceDecl],
+        base_url: &str,
+        document_text: &str,
+    ) {
         if let Some(fs_ptr) = self.font_system {
             let fs = unsafe { &mut *fs_ptr };
 
@@ -2907,6 +2977,12 @@ impl LayoutEngine {
             sorted_faces.sort_by_key(|f| if is_latin_font_face(f) { 0 } else { 1 });
 
             for face in &sorted_faces {
+                if !crate::css::font_face::unicode_range_intersects_text(
+                    face.unicode_range.as_deref(),
+                    document_text,
+                ) {
+                    continue;
+                }
                 let mut found = false;
                 let parsed_sources;
                 let sources = if face.sources.is_empty() {
@@ -3159,7 +3235,9 @@ impl LayoutEngine {
 
         // Load @font-face fonts (non-blocking — remote fonts arrive via poll_pending_fonts).
         if !doc.stylesheet.font_faces.is_empty() {
-            self.load_font_faces(&doc.stylesheet.font_faces, &doc.base_url);
+            let mut document_text = String::new();
+            collect_font_face_text(&doc.root, &mut document_text);
+            self.load_font_faces(&doc.stylesheet.font_faces, &doc.base_url, &document_text);
         }
 
         // Cache @media / @container presence so we don't O(n)-scan rules every layout.
@@ -3475,6 +3553,7 @@ impl LayoutEngine {
 
         // Clear descendant dirty flags now that layout is complete
         crate::css::clear_descendant_dirty(&mut doc.root);
+        clear_layout_dirty_flags(&mut doc.root);
 
         // Rebuild O(1) node index (pointers stable until next mutation)
         doc.rebuild_node_index();
@@ -3835,6 +3914,8 @@ impl LayoutEngine {
         if fc.is_none()
             && !c.force_independent_formatting_context
             && !node.layout.layout_dirty
+            && !node.has_dirty_descendant
+            && !node.has_dirty_layout_descendant
             && node.layout.resolved_content_width > 0.0
             && viewport_h_unchanged
         {
@@ -4018,6 +4099,8 @@ impl LayoutEngine {
                 table::layout_table(self, node, &table_rbox, &table_c)
             }
             _ => {
+                table::wrap_orphan_table_boxes_in_anonymous_tables(node);
+
                 // Determine if children are block-level or inline-level.
                 // Also use block layout when ALL non-abs, non-hidden children are
                 // floated (no inline content to lay out). When floats and inline
@@ -4036,10 +4119,24 @@ impl LayoutEngine {
                             && !matches!(c.style.position, Position::Absolute | Position::Fixed)
                             && !matches!(c.style.float, Float::None)
                     });
+                let empty_block_level_box = !matches!(
+                    effective_display,
+                    Display::Inline
+                        | Display::InlineBlock
+                        | Display::InlineFlex
+                        | Display::InlineGrid
+                ) && node.text.is_empty()
+                    && children.iter().all(|c| {
+                        matches!(c.style.display, Display::None)
+                            || matches!(c.style.position, Position::Absolute | Position::Fixed)
+                            || (c.tag == "#text"
+                                && c.text.chars().all(|ch| ch.is_ascii_whitespace()))
+                    });
                 if matches!(effective_display, Display::FlowRoot)
                     || block::establishes_column_context(&node.style)
                     || has_block_children(node)
                     || has_only_floats
+                    || empty_block_level_box
                 {
                     block::layout_block_with_fc(self, node, &rbox, &child_c, fc)
                 } else {
@@ -4134,6 +4231,20 @@ fn clear_display_contents_boxes(node: &mut WebCore) {
     if let Some(shadow_root) = node.shadow_root.as_mut() {
         for child in &mut shadow_root.children {
             clear_display_contents_boxes(child);
+        }
+    }
+}
+
+fn clear_layout_dirty_flags(node: &mut WebCore) {
+    node.layout.layout_dirty = false;
+    node.layout.intrinsic_dirty = false;
+    node.has_dirty_layout_descendant = false;
+    for child in &mut node.children {
+        clear_layout_dirty_flags(child);
+    }
+    if let Some(shadow_root) = node.shadow_root.as_mut() {
+        for child in &mut shadow_root.children {
+            clear_layout_dirty_flags(child);
         }
     }
 }
@@ -4561,6 +4672,10 @@ pub fn shift_rects(node: &mut WebCore, dx: f32, dy: f32) {
     for line in &mut node.layout.line_cache {
         line.x += dx;
         line.y += dy;
+    }
+    for rect in &mut node.layout.inline_client_rects {
+        rect.x += dx;
+        rect.y += dy;
     }
     // `effective_children_mut`, not `children`: a shadow host's subtree lives in
     // `shadow_root.children`, which layout reaches through the accessor. Moving

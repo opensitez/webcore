@@ -8,23 +8,15 @@ use crate::types::*;
 /// Resolve a child by path through `display: contents` wrappers.
 pub fn grid_child_ref<'a>(node: &'a WebCore, path: &[usize]) -> &'a WebCore {
     let mut n = node;
-    for (depth, &i) in path.iter().enumerate() {
-        n = if depth == 0 {
-            &n.effective_children()[i]
-        } else {
-            &n.children[i]
-        };
+    for &i in path {
+        n = &n.effective_children()[i];
     }
     n
 }
 pub fn grid_child_mut<'a>(node: &'a mut WebCore, path: &[usize]) -> &'a mut WebCore {
     let mut n = node;
-    for (depth, &i) in path.iter().enumerate() {
-        n = if depth == 0 {
-            &mut n.effective_children_mut()[i]
-        } else {
-            &mut n.children[i]
-        };
+    for &i in path {
+        n = &mut n.effective_children_mut()[i];
     }
     n
 }
@@ -394,7 +386,18 @@ pub fn layout_grid_subgrid(
 
         let child = grid_child_mut(node, path);
         let cf = child.style.font_size_px(font_px, root_font_px);
+        let eff_justify = effective_justify_self(child, node_justify_items);
         let eff_align = effective_align_self_grid(child, node_align_items);
+        let saved_w = if eff_justify == AlignItems::Stretch && child.style.width.is_auto() {
+            let cr = engine.res_box(&child.style, cf, sw, root_font_px);
+            let css_w = stretched_grid_item_content_width(sw, &cr, child.style.box_sizing);
+            let saved = child.style.width.clone();
+            std::sync::Arc::make_mut(&mut child.style).width = CssLength::Px(css_w);
+            child.layout.layout_dirty = true;
+            Some(saved)
+        } else {
+            None
+        };
         if eff_align == AlignItems::Stretch && child.style.height.is_auto() {
             let cr = engine.res_box(&child.style, cf, sw, root_font_px);
             let css_h = if child.style.box_sizing == BoxSizing::BorderBox {
@@ -416,9 +419,11 @@ pub fn layout_grid_subgrid(
         } else {
             engine.layout_box(child, &Constraints::new(sw, ix, iy, font_px, root_font_px));
         }
+        if let Some(saved) = saved_w {
+            std::sync::Arc::make_mut(&mut child.style).width = saved;
+        }
 
         let cr = engine.res_box(&child.style, cf, sw, root_font_px);
-        let eff_justify = effective_justify_self(child, node_justify_items);
         let cell_w = sw;
         let dx_align = match eff_justify {
             AlignItems::FlexEnd => {
@@ -971,9 +976,28 @@ pub fn layout_grid(
             if extra <= 0.0 {
                 continue;
             }
-            let share = extra / n as f32;
-            for c in cs..ce {
-                widths[c] += share;
+            let flexible: Vec<usize> = (cs..ce)
+                .filter(|&c| {
+                    col_tracks
+                        .get(c)
+                        .map(|track| {
+                            track.kind == GridTrackKind::Fractional
+                                || (track.kind == GridTrackKind::MinMax
+                                    && track.max_kind == GridTrackKind::Fractional)
+                        })
+                        .unwrap_or(false)
+                })
+                .collect();
+            if !flexible.is_empty() {
+                let share = extra / flexible.len() as f32;
+                for c in flexible {
+                    widths[c] += share;
+                }
+            } else {
+                let share = extra / n as f32;
+                for c in cs..ce {
+                    widths[c] += share;
+                }
             }
         }
     }
@@ -1455,6 +1479,15 @@ pub fn layout_grid(
         // Handle justify-self / align-self
         let eff_justify = effective_justify_self(child, node_justify_items);
         let eff_align = effective_align_self_grid(child, node_align_items);
+        let saved_w = if eff_justify == AlignItems::Stretch && child.style.width.is_auto() {
+            let css_w = stretched_grid_item_content_width(span_w, &crbox, child.style.box_sizing);
+            let saved = child.style.width.clone();
+            std::sync::Arc::make_mut(&mut child.style).width = CssLength::Px(css_w);
+            child.layout.layout_dirty = true;
+            Some(saved)
+        } else {
+            None
+        };
 
         // Stretch align-self: set explicit height and re-layout
         if eff_align == AlignItems::Stretch && child.style.height.is_auto() {
@@ -1490,9 +1523,19 @@ pub fn layout_grid(
                 &Constraints::new(span_w, ix, iy, font_px, root_font_px),
             );
         }
+        if let Some(saved) = saved_w {
+            std::sync::Arc::make_mut(&mut child.style).width = saved;
+        }
 
         // Re-read crbox after potential re-layout
         let crbox = engine.res_box(&child.style, child_font, span_w, root_font_px);
+        if eff_justify == AlignItems::Stretch && child.style.width.is_auto() {
+            let target_w = (span_w - crbox.margin_left - crbox.margin_right).max(0.0);
+            let current_w = child.layout.border_rect.w;
+            if current_w > target_w + 0.5 || current_w < target_w - 0.5 {
+                set_grid_item_inline_extent(child, target_w, &crbox);
+            }
+        }
         let cell_w = span_w;
 
         let dx_align = match eff_justify {
@@ -1625,6 +1668,16 @@ fn lookup_named_line(
         return indices.first().copied();
     }
     None
+}
+
+fn set_grid_item_inline_extent(child: &mut WebCore, target_margin_box_w: f32, rbox: &ResolvedBox) {
+    let border_w = (target_margin_box_w - rbox.margin_left - rbox.margin_right).max(0.0);
+    child.layout.margin_rect.w = target_margin_box_w;
+    child.layout.border_rect.w = border_w;
+    child.layout.padding_rect.w = (border_w - rbox.border_left - rbox.border_right).max(0.0);
+    child.layout.content_rect.w =
+        (child.layout.padding_rect.w - rbox.padding_left - rbox.padding_right).max(0.0);
+    child.layout.scroll_width = child.layout.content_rect.w;
 }
 
 /// Resolve a grid line start value to a 0-based column/row index.
@@ -2310,6 +2363,25 @@ fn effective_align_self_grid(child: &WebCore, parent: AlignItems) -> AlignItems 
         AlignSelf::Center => AlignItems::Center,
         AlignSelf::Baseline => AlignItems::Baseline,
         AlignSelf::LastBaseline => AlignItems::LastBaseline,
+    }
+}
+
+fn stretched_grid_item_content_width(
+    area_w: f32,
+    rbox: &ResolvedBox,
+    box_sizing: BoxSizing,
+) -> f32 {
+    let outer = rbox.margin_left + rbox.margin_right;
+    if box_sizing == BoxSizing::BorderBox {
+        (area_w - outer).max(0.0)
+    } else {
+        (area_w
+            - outer
+            - rbox.padding_left
+            - rbox.padding_right
+            - rbox.border_left
+            - rbox.border_right)
+            .max(0.0)
     }
 }
 

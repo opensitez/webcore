@@ -76,6 +76,7 @@ pub fn matching_ids_from_with_state(
     {
         let selectors = parse_comma_selectors(selector);
         let empty_hover = std::collections::HashSet::new();
+        let empty_focus = std::collections::HashSet::new();
         let mut results = Vec::new();
         if root.is_element() && root.node_id != 0 {
             let ctx = crate::css::MatchContext {
@@ -85,6 +86,7 @@ pub fn matching_ids_from_with_state(
                 type_sibling_count: 1,
                 html_box: Some(root),
                 hover_chain: &empty_hover,
+                focus_within_chain: &empty_focus,
                 element_id: root.node_id,
                 scope_root_id: root.node_id,
                 target_id,
@@ -225,6 +227,7 @@ fn query_walk(
     results: &mut Vec<u32>,
 ) -> bool {
     let pos = child_positions(&node.children);
+    let empty_focus = std::collections::HashSet::new();
     // `+` and `~` look BACKWARDS, so this accumulates as the walk moves right.
     let mut prev_siblings: Vec<crate::css::SiblingInfo> = Vec::new();
     let sibling_records: Vec<crate::css::SiblingInfo> = node
@@ -248,6 +251,7 @@ fn query_walk(
             type_sibling_count: pos.type_count[i],
             html_box: Some(child),
             hover_chain,
+            focus_within_chain: &empty_focus,
             element_id: child.node_id,
             scope_root_id,
             target_id,

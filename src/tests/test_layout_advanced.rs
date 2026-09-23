@@ -87,6 +87,57 @@ fn negative_calc_padding_clamps_to_zero_used_value() {
 }
 
 #[test]
+fn empty_inline_custom_element_drops_stale_geometry_when_parent_has_no_items() {
+    fn find_mut<'a>(node: &'a mut WebCore, tag: &str) -> Option<&'a mut WebCore> {
+        if node.tag == tag {
+            return Some(node);
+        }
+        for child in &mut node.children {
+            if let Some(found) = find_mut(child, tag) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    let mut doc = parse_html(
+        r#"<style>
+             body { margin: 0; }
+             #box { display: block; width: 200px; height: auto; }
+           </style>
+           <div id="box"><x-search></x-search></div>"#,
+    );
+    {
+        let custom = find_mut(&mut doc.root, "x-search").expect("custom element");
+        custom.layout.content_rect = Rect::new(25000.0, -8000.0, 0.0, 0.0);
+        custom.layout.padding_rect = custom.layout.content_rect;
+        custom.layout.border_rect = custom.layout.content_rect;
+        custom.layout.margin_rect = custom.layout.content_rect;
+    }
+
+    LayoutEngine::new().layout(&mut doc, 320.0);
+
+    let box_node = find_box(&doc.root, &|b| {
+        b.attributes.get("id") == Some(&"box".to_string())
+    })
+    .expect("parent box");
+    let custom = find_box(&doc.root, &|b| b.tag == "x-search").expect("custom element");
+
+    assert!(
+        (custom.layout.content_rect.x - box_node.layout.content_rect.x).abs() < 0.5,
+        "empty inline custom element should be reset to its current parent x, got child={:?} parent={:?}",
+        custom.layout.content_rect,
+        box_node.layout.content_rect
+    );
+    assert!(
+        (custom.layout.content_rect.y - box_node.layout.content_rect.y).abs() < 0.5,
+        "empty inline custom element should not retain stale far-away y, got child={:?} parent={:?}",
+        custom.layout.content_rect,
+        box_node.layout.content_rect
+    );
+}
+
+#[test]
 fn margin_trim_block_start_removes_first_child_margin() {
     let mut renderer = crate::Renderer::new();
     let doc = renderer.load_html(

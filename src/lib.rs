@@ -772,20 +772,18 @@ where
     let mut emitted = 0usize;
     if let Some(streaming_loader) = streaming_loader {
         let mut buffer = String::new();
+        let mut streamed_text = String::new();
         let streaming_result = streaming_loader(&css_url, &mut |chunk| {
             text_len += chunk.len();
+            streamed_text.push_str(chunk);
             buffer.push_str(chunk);
             if let Some(complete_css) = drain_complete_css_text(&mut buffer) {
                 let mut fragment = crate::css::Stylesheet::default();
                 fragment.parse_and_add_with_base_media(&complete_css, &css_url, &media);
                 if stylesheet_has_content(&fragment) {
                     emitted += 1;
-                    if cache_parsed {
-                        combined.append_fragment(fragment.clone());
-                        emit_fragment(fragment);
-                    } else {
-                        emit_fragment(fragment);
-                    }
+                    combined.append_fragment(fragment.clone());
+                    emit_fragment(fragment);
                 }
             }
         });
@@ -805,6 +803,12 @@ where
                     eprintln!("  CSS failed: {css_url} ({err})");
                 }
             }
+        } else if emitted == 0 && !streamed_text.trim().is_empty() {
+            combined.parse_and_add_with_base_media(&streamed_text, &css_url, &media);
+            if stylesheet_has_content(&combined) {
+                emitted = 1;
+                emit_fragment(combined.clone());
+            }
         }
         let tail = std::mem::take(&mut buffer);
         if !tail.trim().is_empty() {
@@ -812,12 +816,8 @@ where
             fragment.parse_and_add_with_base_media(&tail, &css_url, &media);
             if stylesheet_has_content(&fragment) {
                 emitted += 1;
-                if cache_parsed {
-                    combined.append_fragment(fragment.clone());
-                    emit_fragment(fragment);
-                } else {
-                    emit_fragment(fragment);
-                }
+                combined.append_fragment(fragment.clone());
+                emit_fragment(fragment);
             }
         }
     } else {
@@ -854,6 +854,67 @@ where
         sheet: combined,
         text_len,
         emitted_fragments: emitted,
+    }
+}
+
+#[cfg(test)]
+mod stylesheet_loader_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn streaming_stylesheet_keeps_minified_bootstrap_rules() {
+        let css = r#"@charset "UTF-8";:root{--bs-blue:#0d6efd}.d-flex{display:flex!important}.btn-primary{color:#fff;background-color:#0d6efd}@media (min-width:768px){.row-cols-md-2>*{flex:0 0 auto;width:50%}}"#;
+        let css_owned = css.to_string();
+        let loader: StylesheetLoader = Arc::new({
+            let css_owned = css_owned.clone();
+            move |_| Ok(css_owned.clone())
+        });
+        let streaming_loader: StreamingStylesheetLoader = Arc::new({
+            let css_owned = css_owned.clone();
+            move |_, emit| {
+                for chunk in css_owned.as_bytes().chunks(17) {
+                    emit(std::str::from_utf8(chunk).unwrap());
+                }
+                Ok(())
+            }
+        });
+        let emitted = Arc::new(Mutex::new(Vec::new()));
+        let emitted_for_cb = emitted.clone();
+        let loaded = load_stylesheet_cached(
+            "test-bootstrap-stream\n".to_string(),
+            "https://example.test/bootstrap.min.css".to_string(),
+            String::new(),
+            loader,
+            Some(streaming_loader),
+            false,
+            move |sheet| emitted_for_cb.lock().unwrap().push(sheet),
+        );
+
+        assert!(loaded.emitted_fragments > 0);
+        assert!(
+            loaded
+                .sheet
+                .rules
+                .iter()
+                .any(|rule| rule.original_selector == ".d-flex")
+        );
+        assert!(
+            loaded
+                .sheet
+                .rules
+                .iter()
+                .any(|rule| rule.original_selector == ".btn-primary")
+        );
+        assert!(
+            loaded
+                .sheet
+                .rules
+                .iter()
+                .any(|rule| rule.original_selector == ".row-cols-md-2>*"
+                    && rule.media_condition.contains("min-width"))
+        );
+        assert!(!emitted.lock().unwrap().is_empty());
     }
 }
 
@@ -1152,7 +1213,7 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
                 }
             }
         });
-    doc.preserve_stylesheet_document_order = !css_wait.is_zero();
+    doc.preserve_stylesheet_document_order = true;
     eprintln!("Parse: {:.0}ms", t0.elapsed().as_millis());
     drop(css_tx); // close sender so rx.iter() terminates after all threads finish
 
@@ -1233,6 +1294,7 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
         }
         doc.loaded_stylesheet_slots = fetched_slots;
         doc.loaded_linked_stylesheets = fetched_map;
+        doc.refresh_shadow_linked_stylesheets();
     } else {
         css_results.sort_by_key(|(idx, _, _, _)| *idx);
         for (_, css_url, sheet, media) in &css_results {
@@ -1243,6 +1305,7 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
                 .or_insert_with(|| sheet.clone());
             doc.stylesheet.append_fragment(sheet.clone());
         }
+        doc.refresh_shadow_linked_stylesheets();
     }
     if has_pending_css {
         doc.pending_stylesheets = Some(css_rx);
@@ -1566,6 +1629,11 @@ fn collect_remote_images(
                 types::PendingImageTarget::Mask,
                 url.to_string(),
             ));
+        }
+    }
+    if let Some(shadow) = node.shadow_root.as_ref() {
+        for child in &shadow.children {
+            collect_remote_images(child, base_url, viewport_w, viewport_h, path, pending);
         }
     }
     for (i, child) in node.children.iter().enumerate() {

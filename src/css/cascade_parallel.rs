@@ -197,6 +197,7 @@ pub fn apply_cascade_parallel(
     focused_box: u32,
     keyboard_focus: bool,
     hover_chain: &std::collections::HashSet<u32>,
+    focus_within_chain: &std::collections::HashSet<u32>,
     target_id: u32,
     document_url: &str,
 ) {
@@ -247,6 +248,7 @@ pub fn apply_cascade_parallel(
                     focused_box,
                     keyboard_focus,
                     hover_chain,
+                    focus_within_chain,
                     target_id,
                     document_url,
                     &item.siblings[..item.sibling_pos],
@@ -283,6 +285,7 @@ pub fn apply_cascade_parallel(
         &mut candidates_buf,
         &mut counters,
         hover_chain,
+        focus_within_chain,
         &[],
         &[],
         &[],

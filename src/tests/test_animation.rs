@@ -836,6 +836,27 @@ fn transitionable_style_includes_common_length_and_side_color_properties() {
     crate::css::apply_property(&mut s, "gap", "2em");
     crate::css::apply_property(&mut s, "display", "grid");
     crate::css::apply_property(&mut s, "content-visibility", "hidden");
+    crate::css::apply_property(&mut s, "pointer-events", "none");
+    crate::css::apply_property(&mut s, "cursor", "grab");
+    crate::css::apply_property(&mut s, "user-select", "all");
+    crate::css::apply_property(&mut s, "resize", "vertical");
+    crate::css::apply_property(&mut s, "filter", "blur(4px)");
+    crate::css::apply_property(&mut s, "backdrop-filter", "brightness(0.5)");
+    crate::css::apply_property(&mut s, "box-shadow", "inset 1px 2px 3px 4px red");
+    crate::css::apply_property(&mut s, "text-shadow", "5px 6px 7px blue");
+    crate::css::apply_property(&mut s, "border-top-left-radius", "10px 20px");
+    crate::css::apply_property(&mut s, "border-bottom-right-radius", "25%");
+    crate::css::apply_property(&mut s, "outline-width", "3px");
+    crate::css::apply_property(&mut s, "outline-offset", "4px");
+    crate::css::apply_property(&mut s, "outline-style", "dashed");
+    crate::css::apply_property(&mut s, "outline-color", "green");
+    crate::css::apply_property(&mut s, "text-decoration-style", "wavy");
+    crate::css::apply_property(&mut s, "text-decoration-color", "purple");
+    crate::css::apply_property(&mut s, "text-decoration-thickness", "2px");
+    crate::css::apply_property(&mut s, "caret-color", "orange");
+    crate::css::apply_property(&mut s, "column-rule-width", "5px");
+    crate::css::apply_property(&mut s, "column-rule-style", "double");
+    crate::css::apply_property(&mut s, "column-rule-color", "navy");
 
     let values = extract_transitionable_style(&s);
     assert_eq!(values.get("width").map(String::as_str), Some("10px"));
@@ -845,6 +866,75 @@ fn transitionable_style_includes_common_length_and_side_color_properties() {
     assert_eq!(
         values.get("content-visibility").map(String::as_str),
         Some("hidden")
+    );
+    assert_eq!(
+        values.get("pointer-events").map(String::as_str),
+        Some("none")
+    );
+    assert_eq!(values.get("cursor").map(String::as_str), Some("grab"));
+    assert_eq!(values.get("user-select").map(String::as_str), Some("all"));
+    assert_eq!(values.get("resize").map(String::as_str), Some("vertical"));
+    assert_eq!(values.get("filter").map(String::as_str), Some("blur(4px)"));
+    assert_eq!(
+        values.get("backdrop-filter").map(String::as_str),
+        Some("brightness(0.5)")
+    );
+    assert_eq!(
+        values.get("box-shadow").map(String::as_str),
+        Some("inset 1px 2px 3px 4px rgba(255,0,0,1.0000)")
+    );
+    assert_eq!(
+        values.get("text-shadow").map(String::as_str),
+        Some("5px 6px 7px rgba(0,0,255,1.0000)")
+    );
+    assert_eq!(
+        values.get("border-top-left-radius").map(String::as_str),
+        Some("10px 20px")
+    );
+    assert_eq!(
+        values.get("border-bottom-right-radius").map(String::as_str),
+        Some("25%")
+    );
+    assert_eq!(values.get("outline-width").map(String::as_str), Some("3px"));
+    assert_eq!(
+        values.get("outline-style").map(String::as_str),
+        Some("dashed")
+    );
+    assert_eq!(
+        values.get("outline-color").map(String::as_str),
+        Some("rgba(0,128,0,1.0000)")
+    );
+    assert_eq!(
+        values.get("outline-offset").map(String::as_str),
+        Some("4px")
+    );
+    assert_eq!(
+        values.get("text-decoration-style").map(String::as_str),
+        Some("wavy")
+    );
+    assert_eq!(
+        values.get("text-decoration-color").map(String::as_str),
+        Some("rgba(128,0,128,1.0000)")
+    );
+    assert_eq!(
+        values.get("text-decoration-thickness").map(String::as_str),
+        Some("2px")
+    );
+    assert_eq!(
+        values.get("caret-color").map(String::as_str),
+        Some("rgba(255,165,0,1.0000)")
+    );
+    assert_eq!(
+        values.get("column-rule-width").map(String::as_str),
+        Some("5px")
+    );
+    assert_eq!(
+        values.get("column-rule-style").map(String::as_str),
+        Some("double")
+    );
+    assert_eq!(
+        values.get("column-rule-color").map(String::as_str),
+        Some("rgba(0,0,128,1.0000)")
     );
     assert!(values.contains_key("border-left-color"));
 }
@@ -996,6 +1086,39 @@ fn one_sided_to_keyframe_starts_from_underlying_style() {
     assert!(
         (opacity - 0.5).abs() < 0.05,
         "to-only keyframe should interpolate from underlying opacity 1 to 0, got {opacity}"
+    );
+}
+
+#[test]
+fn animation_composition_add_composes_opacity_with_underlying_style() {
+    let html = r#"<html><head><style>
+        @keyframes alpha-effect {
+            from { opacity: 0; }
+            to { opacity: .4; }
+        }
+        .box {
+            opacity: .25;
+            animation: alpha-effect 1s linear both;
+            animation-composition: add;
+        }
+    </style></head><body><div class="box">hi</div></body></html>"#;
+
+    let mut doc = parse_html(html);
+    let mut engine = LayoutEngine::new();
+    engine.layout(&mut doc, 800.0);
+    let id = doc.active_animations[0].element_id;
+    let start = doc.active_animations[0].start_time;
+    doc.tick_animations(start + Duration::from_millis(500));
+
+    let opacity = doc
+        .animation_overrides
+        .get(&id)
+        .and_then(|props| props.iter().find(|(name, _)| name == "opacity"))
+        .and_then(|(_, value)| value.parse::<f32>().ok())
+        .expect("opacity override");
+    assert!(
+        (opacity - 0.45).abs() < 0.05,
+        "additive opacity composition should add sampled .2 effect to .25 base, got {opacity}"
     );
 }
 
@@ -1300,6 +1423,70 @@ fn paused_animation_does_not_advance_or_request_frames() {
     assert!(
         opacity < 0.05,
         "paused animation should hold at the start, got {opacity}"
+    );
+}
+
+#[test]
+fn paused_animation_resumes_from_paused_position() {
+    let mut doc = doc_with_animation("animation: fade 1s linear both;");
+    let id = doc.active_animations[0].element_id;
+    let start = doc.active_animations[0].start_time;
+
+    let pause_at = start + Duration::from_millis(400);
+    doc.tick_animations(pause_at);
+    let before_pause = doc
+        .animation_overrides
+        .get(&id)
+        .and_then(|props| props.iter().find(|(k, _)| k == "opacity"))
+        .and_then(|(_, v)| v.parse::<f32>().ok())
+        .expect("running opacity before pause");
+    assert!((before_pause - 0.4).abs() < 0.05);
+
+    {
+        let node = doc.get_box_by_id_mut(id).expect("animated node");
+        std::sync::Arc::make_mut(&mut node.style)
+            .rare_mut()
+            .animations[0]
+            .play_state_paused = true;
+    }
+    doc.sync_animations(pause_at);
+
+    let still_paused_at = start + Duration::from_millis(1400);
+    doc.tick_animations(still_paused_at);
+    let while_paused = doc
+        .animation_overrides
+        .get(&id)
+        .and_then(|props| props.iter().find(|(k, _)| k == "opacity"))
+        .and_then(|(_, v)| v.parse::<f32>().ok())
+        .expect("paused opacity should keep sampling");
+    assert!(
+        (while_paused - before_pause).abs() < 0.05,
+        "paused animation should freeze at {before_pause}, got {while_paused}"
+    );
+    assert!(
+        !doc.needs_animation_frame,
+        "paused animation should not request frames"
+    );
+
+    {
+        let node = doc.get_box_by_id_mut(id).expect("animated node");
+        std::sync::Arc::make_mut(&mut node.style)
+            .rare_mut()
+            .animations[0]
+            .play_state_paused = false;
+    }
+    doc.sync_animations(still_paused_at);
+
+    doc.tick_animations(still_paused_at + Duration::from_millis(100));
+    let after_resume = doc
+        .animation_overrides
+        .get(&id)
+        .and_then(|props| props.iter().find(|(k, _)| k == "opacity"))
+        .and_then(|(_, v)| v.parse::<f32>().ok())
+        .expect("resumed opacity");
+    assert!(
+        (after_resume - 0.5).abs() < 0.05,
+        "resume should advance from the paused 40% sample to about 50%, got {after_resume}"
     );
 }
 
@@ -1821,6 +2008,233 @@ fn allow_discrete_display_transition_keeps_box_visible_until_end() {
         .and_then(|props| props.iter().find(|(k, _)| k == "display"))
         .map(|(_, v)| v.as_str());
     assert_eq!(end, Some("none"));
+}
+
+#[test]
+fn allow_discrete_pointer_events_transition_flips_at_halfway() {
+    let mut doc = parse_html("<html><body></body></html>");
+    let elem_id: u32 = 0xD151;
+    let start = Instant::now();
+
+    doc.transition_states.insert(
+        elem_id,
+        vec![TransitionState {
+            property: "pointer-events".to_string(),
+            from_value: "auto".to_string(),
+            to_value: "none".to_string(),
+            reversing_adjusted_start_value: "auto".to_string(),
+            reversing_shortening_factor: 1.0,
+            start_time: start,
+            duration_ms: 1000.0,
+            delay_ms: 0.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: true,
+        }],
+    );
+
+    doc.tick_animations(start + Duration::from_millis(400));
+    let before_half = doc
+        .animation_overrides
+        .get(&elem_id)
+        .and_then(|props| props.iter().find(|(k, _)| k == "pointer-events"))
+        .map(|(_, v)| v.as_str());
+    assert_eq!(before_half, Some("auto"));
+
+    doc.tick_animations(start + Duration::from_millis(600));
+    let after_half = doc
+        .animation_overrides
+        .get(&elem_id)
+        .and_then(|props| props.iter().find(|(k, _)| k == "pointer-events"))
+        .map(|(_, v)| v.as_str());
+    assert_eq!(after_half, Some("none"));
+}
+
+#[test]
+fn allow_discrete_cursor_transition_flips_at_halfway() {
+    let mut doc = parse_html("<html><body></body></html>");
+    let elem_id: u32 = 0xD152;
+    let start = Instant::now();
+
+    doc.transition_states.insert(
+        elem_id,
+        vec![TransitionState {
+            property: "cursor".to_string(),
+            from_value: "auto".to_string(),
+            to_value: "grab".to_string(),
+            reversing_adjusted_start_value: "auto".to_string(),
+            reversing_shortening_factor: 1.0,
+            start_time: start,
+            duration_ms: 1000.0,
+            delay_ms: 0.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: true,
+        }],
+    );
+
+    doc.tick_animations(start + Duration::from_millis(400));
+    let before_half = doc
+        .animation_overrides
+        .get(&elem_id)
+        .and_then(|props| props.iter().find(|(k, _)| k == "cursor"))
+        .map(|(_, v)| v.as_str());
+    assert_eq!(before_half, Some("auto"));
+
+    doc.tick_animations(start + Duration::from_millis(600));
+    let after_half = doc
+        .animation_overrides
+        .get(&elem_id)
+        .and_then(|props| props.iter().find(|(k, _)| k == "cursor"))
+        .map(|(_, v)| v.as_str());
+    assert_eq!(after_half, Some("grab"));
+}
+
+#[test]
+fn allow_discrete_basic_ui_keywords_flip_at_halfway() {
+    let mut doc = parse_html("<html><body></body></html>");
+    let elem_id: u32 = 0xD153;
+    let start = Instant::now();
+
+    doc.transition_states.insert(
+        elem_id,
+        vec![
+            TransitionState {
+                property: "user-select".to_string(),
+                from_value: "auto".to_string(),
+                to_value: "none".to_string(),
+                reversing_adjusted_start_value: "auto".to_string(),
+                reversing_shortening_factor: 1.0,
+                start_time: start,
+                duration_ms: 1000.0,
+                delay_ms: 0.0,
+                timing_fn: EasingFn::Linear,
+                allow_discrete: true,
+            },
+            TransitionState {
+                property: "resize".to_string(),
+                from_value: "none".to_string(),
+                to_value: "both".to_string(),
+                reversing_adjusted_start_value: "none".to_string(),
+                reversing_shortening_factor: 1.0,
+                start_time: start,
+                duration_ms: 1000.0,
+                delay_ms: 0.0,
+                timing_fn: EasingFn::Linear,
+                allow_discrete: true,
+            },
+            TransitionState {
+                property: "outline-style".to_string(),
+                from_value: "none".to_string(),
+                to_value: "dashed".to_string(),
+                reversing_adjusted_start_value: "none".to_string(),
+                reversing_shortening_factor: 1.0,
+                start_time: start,
+                duration_ms: 1000.0,
+                delay_ms: 0.0,
+                timing_fn: EasingFn::Linear,
+                allow_discrete: true,
+            },
+            TransitionState {
+                property: "text-decoration-style".to_string(),
+                from_value: "solid".to_string(),
+                to_value: "wavy".to_string(),
+                reversing_adjusted_start_value: "solid".to_string(),
+                reversing_shortening_factor: 1.0,
+                start_time: start,
+                duration_ms: 1000.0,
+                delay_ms: 0.0,
+                timing_fn: EasingFn::Linear,
+                allow_discrete: true,
+            },
+            TransitionState {
+                property: "column-rule-style".to_string(),
+                from_value: "none".to_string(),
+                to_value: "double".to_string(),
+                reversing_adjusted_start_value: "none".to_string(),
+                reversing_shortening_factor: 1.0,
+                start_time: start,
+                duration_ms: 1000.0,
+                delay_ms: 0.0,
+                timing_fn: EasingFn::Linear,
+                allow_discrete: true,
+            },
+        ],
+    );
+
+    doc.tick_animations(start + Duration::from_millis(400));
+    let before = doc.animation_overrides.get(&elem_id).unwrap();
+    assert_eq!(
+        before
+            .iter()
+            .find(|(k, _)| k == "user-select")
+            .map(|(_, v)| v.as_str()),
+        Some("auto")
+    );
+    assert_eq!(
+        before
+            .iter()
+            .find(|(k, _)| k == "resize")
+            .map(|(_, v)| v.as_str()),
+        Some("none")
+    );
+    assert_eq!(
+        before
+            .iter()
+            .find(|(k, _)| k == "outline-style")
+            .map(|(_, v)| v.as_str()),
+        Some("none")
+    );
+    assert_eq!(
+        before
+            .iter()
+            .find(|(k, _)| k == "text-decoration-style")
+            .map(|(_, v)| v.as_str()),
+        Some("solid")
+    );
+    assert_eq!(
+        before
+            .iter()
+            .find(|(k, _)| k == "column-rule-style")
+            .map(|(_, v)| v.as_str()),
+        Some("none")
+    );
+
+    doc.tick_animations(start + Duration::from_millis(600));
+    let after = doc.animation_overrides.get(&elem_id).unwrap();
+    assert_eq!(
+        after
+            .iter()
+            .find(|(k, _)| k == "user-select")
+            .map(|(_, v)| v.as_str()),
+        Some("none")
+    );
+    assert_eq!(
+        after
+            .iter()
+            .find(|(k, _)| k == "resize")
+            .map(|(_, v)| v.as_str()),
+        Some("both")
+    );
+    assert_eq!(
+        after
+            .iter()
+            .find(|(k, _)| k == "outline-style")
+            .map(|(_, v)| v.as_str()),
+        Some("dashed")
+    );
+    assert_eq!(
+        after
+            .iter()
+            .find(|(k, _)| k == "text-decoration-style")
+            .map(|(_, v)| v.as_str()),
+        Some("wavy")
+    );
+    assert_eq!(
+        after
+            .iter()
+            .find(|(k, _)| k == "column-rule-style")
+            .map(|(_, v)| v.as_str()),
+        Some("double")
+    );
 }
 
 #[test]

@@ -332,7 +332,7 @@ impl Stylesheet {
                 if let Some(pos) = last_comb {
                     // Check if :hover appears in the ancestor part (before the combinator)
                     for part in &sel.parts[..pos] {
-                        if matches!(part, SelectorPart::PseudoClass(pc) if pc == "hover") {
+                        if selector_part_has_state(part, "hover") {
                             self.has_hover_descendant_rules = true;
                             break 'rules;
                         }

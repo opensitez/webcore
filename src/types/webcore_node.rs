@@ -79,6 +79,8 @@ pub struct WebCore {
     pub media_duration: Option<f32>,
     pub media_paused: bool,
     pub media_ended: bool,
+    pub media_seeking: bool,
+    pub media_muted: bool,
 
     // Background image pixel data (RGBA8, row-major)
     pub bg_image_data: Option<std::sync::Arc<Vec<u8>>>,
@@ -209,6 +211,13 @@ pub struct ShadowRoot {
     pub children: Vec<WebCore>,
     /// Scoped stylesheet — only applies inside this shadow tree.
     pub stylesheet: crate::css::Stylesheet,
+    /// Author stylesheets owned by this shadow tree, in source order.
+    ///
+    /// Declarative shadow DOM can contain both `<style>` and
+    /// `<link rel=stylesheet>`. These are scoped to the shadow root, not the
+    /// document, so the shadow cascade needs the same source-order sheet list
+    /// that `Document` keeps for the light DOM.
+    pub document_stylesheets: Vec<crate::types::DocumentStylesheet>,
     /// Open (inspectable) or closed (opaque).
     pub mode: ShadowMode,
     /// The shadow root's own node id.

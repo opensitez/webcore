@@ -51,6 +51,90 @@ fn unresolved_var_in_calc_does_not_poison_previous_declaration() {
 }
 
 #[test]
+fn grid_display_contents_flex_items_stretch_to_track_width() {
+    let html = r#"
+        <style>
+          .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; width: 768px; }
+          .wrap { display: contents; }
+          h3 { display: flex; margin: 0; font: 16px/24px sans-serif; }
+        </style>
+        <div class="grid">
+          <div class="wrap">
+            <h3 id="title"><a>IntroducingTheMDNMCPServerWithoutConvenientBreakpoints</a></h3>
+          </div>
+          <div class="wrap">
+            <h3 id="title2"><a>UnderTheHoodOfMDNsNewFrontendWithoutConvenientBreakpoints</a></h3>
+          </div>
+        </div>
+    "#;
+    let doc = parse_and_layout(html, 900.0);
+    let first = find_by_id(&doc.root, "title").unwrap();
+    let second = find_by_id(&doc.root, "title2").unwrap();
+    let expected_track = (768.0 - 16.0) / 2.0;
+
+    assert!(
+        (first.layout.border_rect.w - expected_track).abs() < 1.0,
+        "first flex grid item should stretch to one track, got {:?}",
+        first.layout.border_rect
+    );
+    assert!(
+        (second.layout.border_rect.w - expected_track).abs() < 1.0,
+        "second flex grid item should stretch to one track, got {:?}",
+        second.layout.border_rect
+    );
+}
+
+#[test]
+fn grid_spanning_item_prefers_flexible_track_over_max_content_track() {
+    let html = r#"
+        <style>
+          .card {
+            display: grid;
+            grid-template-areas:
+              "source date"
+              "title title"
+              "summary summary";
+            grid-template-columns: 1fr max-content;
+            width: 342px;
+            font: 16px/24px sans-serif;
+          }
+          #source { grid-area: source; }
+          #date { grid-area: date; }
+          #title { grid-area: title; display: flex; margin: 0; }
+          #summary { grid-area: summary; margin: 0; }
+        </style>
+        <article class="card">
+          <a id="source">MDN</a>
+          <time id="date">3 months ago</time>
+          <h3 id="title"><a>Introducing the MDN MCP server for every editor</a></h3>
+          <p id="summary">A summary with enough text to wrap inside the card instead of widening it.</p>
+        </article>
+    "#;
+    let doc = parse_and_layout(html, 900.0);
+    let card = find_box(&doc.root, &|b: &WebCore| {
+        b.attributes
+            .get("class")
+            .map(|c| c.split_whitespace().any(|w| w == "card"))
+            .unwrap_or(false)
+    })
+    .unwrap();
+    let title = find_by_id(&doc.root, "title").unwrap();
+    let date = find_by_id(&doc.root, "date").unwrap();
+
+    assert!(
+        title.layout.border_rect.w <= card.layout.content_rect.w + 1.0,
+        "spanning title must stay inside the card, title={:?} card={:?}",
+        title.layout.border_rect,
+        card.layout.content_rect
+    );
+    assert!(
+        date.layout.border_rect.w < 160.0,
+        "max-content date column should size to the date, not absorb title width: {:?}",
+        date.layout.border_rect
+    );
+}
+
+#[test]
 fn grid_column_flow_auto_columns_with_vars_constrains_absolute_ratio_images() {
     let html = r#"
         <style>
@@ -419,6 +503,55 @@ fn grid_repeat_count_can_come_from_same_rule_custom_property() {
         (rail.layout.content_rect.x - 608.0).abs() < 0.5,
         "rail should start after 8 tracks plus 8 gaps: got x={}",
         rail.layout.content_rect.x
+    );
+}
+
+#[test]
+fn grid_named_lines_can_come_from_custom_property_track_list() {
+    let doc = parse_and_layout(
+        r#"<html><body style="margin:0">
+          <style>
+            :root {
+              --page-grid: [full-start] minmax(16px, 1fr)
+                           [content-start] minmax(0, 768px)
+                           [content-end] minmax(16px, 1fr)
+                           [full-end];
+            }
+            .page {
+              display: grid;
+              grid-template-columns: var(--page-grid);
+              width: 1366px;
+            }
+            #content { grid-column: content; height: 10px; }
+            #full { grid-column: full; height: 10px; }
+          </style>
+          <main class="page">
+            <section id="content"></section>
+            <section id="full"></section>
+          </main>
+        </body></html>"#,
+        1366.0,
+    );
+
+    let content = find_by_id(&doc.root, "content").expect("content");
+    let full = find_by_id(&doc.root, "full").expect("full");
+
+    assert!(
+        (content.layout.content_rect.x - 299.0).abs() < 1.0,
+        "named content track should start after the flexible side rail, got x={}",
+        content.layout.content_rect.x
+    );
+    assert!(
+        (content.layout.content_rect.w - 768.0).abs() < 1.0,
+        "named content track should keep its max width, got {}",
+        content.layout.content_rect.w
+    );
+    assert!(
+        (full.layout.content_rect.x - 0.0).abs() < 1.0
+            && (full.layout.content_rect.w - 1366.0).abs() < 1.0,
+        "named full span should cover the full grid, got x={} w={}",
+        full.layout.content_rect.x,
+        full.layout.content_rect.w
     );
 }
 

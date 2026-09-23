@@ -421,11 +421,21 @@ pub(crate) fn extract_root_variables_vp(
                 }
                 continue;
             }
-            // @layer, @supports: recurse into their blocks to find :root variables
+            // @layer always contributes; @supports contributes only when its
+            // condition matches. Recursing into both @supports arms polluted
+            // custom-property maps with mutually exclusive light/dark fallbacks.
             if lower.starts_with("@layer") || lower.starts_with("@supports") {
                 if let Some(brace) = s.find('{') {
                     let (block, rest) = consume_block(&s[brace..]);
-                    extract_root_variables_vp(&block, vars, vw, vh);
+                    let include = if lower.starts_with("@supports") {
+                        let condition = s[9..brace].trim();
+                        crate::css::parser::supports_condition_matches(condition)
+                    } else {
+                        true
+                    };
+                    if include {
+                        extract_root_variables_vp(&block, vars, vw, vh);
+                    }
                     s = rest;
                 } else {
                     break;
@@ -535,19 +545,6 @@ pub(crate) fn pre_resolve_variables(vars: &mut HashMap<String, String>) {
             if resolved.contains("var(") {
                 resolved.clear();
             }
-            // Resolve light-dark() → use light value
-            if resolved.contains("light-dark(") {
-                if let Some(start) = resolved.find("light-dark(") {
-                    let inner = &resolved[start + 11..];
-                    if let Some(comma) = inner.find(',') {
-                        if let Some(end) = inner.rfind(')') {
-                            let light_val = inner[..comma].trim().to_string();
-                            resolved =
-                                format!("{}{}{}", &resolved[..start], light_val, &inner[end + 1..]);
-                        }
-                    }
-                }
-            }
             if resolved != *val {
                 vars.insert(key.clone(), resolved);
             }
@@ -633,7 +630,7 @@ pub(crate) fn extract_font_faces_cleaned(css: &str, faces: &mut Vec<FontFaceDecl
                         face.stretch = Some(value);
                     }
                     "font-display" => {
-                        face.display = Some(value);
+                        face.display = crate::css::font_face::parse_font_display(&value);
                     }
                     "unicode-range" => {
                         face.unicode_range = Some(value);

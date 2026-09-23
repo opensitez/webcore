@@ -394,6 +394,34 @@ fn background_image_image_set_selects_supported_one_x_candidate() {
 }
 
 #[test]
+fn background_image_image_set_selector_honors_device_pixel_ratio() {
+    assert_eq!(
+        crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio(
+            "image-set(url(hero@3x.png) 3x, url(hero@2x.png) 2x, url(hero.png) 1x)",
+            2.0,
+        )
+        .as_deref(),
+        Some("hero@2x.png")
+    );
+    assert_eq!(
+        crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio(
+            "image-set(url(hero@2x.png) 192dpi, url(hero.png) 96dpi)",
+            1.5,
+        )
+        .as_deref(),
+        Some("hero@2x.png")
+    );
+    assert_eq!(
+        crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio(
+            "image-set(url(hero@2x.png) 2x, url(hero.png) 1x)",
+            3.0,
+        )
+        .as_deref(),
+        Some("hero@2x.png")
+    );
+}
+
+#[test]
 fn background_image_image_set_keeps_quoted_data_url_candidate_together() {
     let mut s = crate::types::ComputedStyle::default();
     crate::css::apply_property(
@@ -421,6 +449,86 @@ fn background_image_image_set_works_in_multiple_layers() {
     );
 }
 
+#[test]
+fn background_shorthand_image_set_keeps_image_and_box_tokens() {
+    let mut s = crate::types::ComputedStyle::default();
+    crate::css::apply_property(
+        &mut s,
+        "background",
+        "image-set(url(hero@2x.png) 2x, url(hero.png) 1x) center / cover no-repeat",
+    );
+
+    assert_eq!(s.background_image_url, "hero.png");
+    assert_eq!(s.background_size, crate::types::BackgroundSize::Cover);
+    assert_eq!(
+        s.background_repeat,
+        crate::types::BackgroundRepeat::NoRepeat
+    );
+    assert_eq!(
+        s.background_position_x,
+        crate::types::CssLength::Percent(50.0)
+    );
+    assert_eq!(
+        s.background_position_y,
+        crate::types::CssLength::Percent(50.0)
+    );
+}
+
+#[test]
+fn background_shorthand_image_set_works_in_multiple_layers() {
+    let mut s = crate::types::ComputedStyle::default();
+    crate::css::apply_property(
+        &mut s,
+        "background",
+        "image-set(url(top@2x.png) 2x, url(top.png) 1x) top left / 20px 10px no-repeat, image-set(url(bottom@2x.webp) 2x, url(bottom.webp) 1x) center / cover",
+    );
+
+    assert_eq!(s.background_image_url, "top.png");
+    assert_eq!(s.background_size, crate::types::BackgroundSize::Explicit);
+    assert_eq!(s.background_size_w, crate::types::CssLength::Px(20.0));
+    assert_eq!(s.background_size_h, crate::types::CssLength::Px(10.0));
+    assert_eq!(s.rare().additional_background_layers.len(), 1);
+    assert_eq!(
+        s.rare().additional_background_layers[0].image_url,
+        "bottom.webp"
+    );
+    assert_eq!(
+        s.rare().additional_background_layers[0].size,
+        crate::types::BackgroundSize::Cover
+    );
+}
+
+#[test]
+fn mask_image_image_set_selects_supported_candidate() {
+    let mut s = crate::types::ComputedStyle::default();
+    crate::css::apply_property(
+        &mut s,
+        "mask-image",
+        "image-set(url(mask@2x.png) 2x, url(mask.png) 1x)",
+    );
+
+    assert_eq!(s.rare().mask_image_url, "mask.png");
+}
+
+#[test]
+fn mask_shorthand_image_set_keeps_image_and_mask_tokens() {
+    let mut s = crate::types::ComputedStyle::default();
+    crate::css::apply_property(
+        &mut s,
+        "mask",
+        "image-set(url(mask@2x.png) 2x, url(mask.png) 1x) center / contain no-repeat alpha content-box border-box exclude",
+    );
+
+    assert_eq!(s.rare().mask_image_url, "mask.png");
+    assert_eq!(s.rare().mask_position, "center");
+    assert_eq!(s.rare().mask_size, "contain");
+    assert_eq!(s.rare().mask_repeat, "no-repeat");
+    assert_eq!(s.rare().mask_mode, "alpha");
+    assert_eq!(s.rare().mask_origin, "content-box");
+    assert_eq!(s.rare().mask_clip, "border-box");
+    assert_eq!(s.rare().mask_composite, "exclude");
+}
+
 /// And it must resolve against the document origin, keeping the scheme.
 #[test]
 fn protocol_relative_url_takes_the_base_scheme() {
@@ -429,6 +537,18 @@ fn protocol_relative_url_takes_the_base_scheme() {
         "https://fr.wikipedia.org/wiki/Foo",
     );
     assert_eq!(got, "https://upload.wikimedia.org/a.svg");
+}
+
+#[test]
+fn relative_url_ignores_query_when_resolving_directory() {
+    let got = crate::html::images::resolve_url(
+        "res/vendor/bootstrap/css/bootstrap.min.css",
+        "http://localhost/genie/index.php?page=trees/list",
+    );
+    assert_eq!(
+        got,
+        "http://localhost/genie/res/vendor/bootstrap/css/bootstrap.min.css"
+    );
 }
 
 #[test]

@@ -9,6 +9,34 @@ use crate::html::*;
 use crate::layout::LayoutEngine;
 use std::collections::{HashMap, HashSet};
 
+fn union_rect(a: Rect, b: Rect) -> Rect {
+    if a.w <= 0.0 || a.h <= 0.0 {
+        return b;
+    }
+    if b.w <= 0.0 || b.h <= 0.0 {
+        return a;
+    }
+    let x1 = a.x.min(b.x);
+    let y1 = a.y.min(b.y);
+    let x2 = (a.x + a.w).max(b.x + b.w);
+    let y2 = (a.y + a.h).max(b.y + b.h);
+    Rect::new(x1, y1, x2 - x1, y2 - y1)
+}
+
+fn for_each_webcore_mut_by_id(node: &mut WebCore, id: u32, f: &mut impl FnMut(&mut WebCore)) {
+    if node.node_id == id {
+        f(node);
+    }
+    if let Some(shadow) = node.shadow_root.as_mut() {
+        for child in &mut shadow.children {
+            for_each_webcore_mut_by_id(child, id, f);
+        }
+    }
+    for child in &mut node.children {
+        for_each_webcore_mut_by_id(child, id, f);
+    }
+}
+
 impl Document {
     pub fn new() -> Self {
         Self {
@@ -208,6 +236,7 @@ impl Document {
         self.stylesheet
             .resolve_variables_for_viewport(self.viewport_w, self.viewport_h);
         self.stylesheet.rebuild_index();
+        self.refresh_shadow_linked_stylesheets();
         self.style_dirty = true;
         true
     }
@@ -231,6 +260,68 @@ impl Document {
                 }
             }
         }
+    }
+
+    pub(crate) fn refresh_shadow_linked_stylesheets(&mut self) -> bool {
+        fn signature(sheet: &crate::css::Stylesheet) -> (usize, usize, usize, usize) {
+            (
+                sheet.rules.len(),
+                sheet.font_faces.len(),
+                sheet.keyframes.len(),
+                sheet.raw_sources.len(),
+            )
+        }
+
+        fn refresh_node(
+            node: &mut WebCore,
+            base_url: &str,
+            loaded_linked: &HashMap<String, crate::css::Stylesheet>,
+        ) -> bool {
+            let mut changed = false;
+            if let Some(sr) = node.shadow_root.as_mut() {
+                let needs_rebuild =
+                    !sr.document_stylesheets.is_empty() || !sr.adopted_stylesheets.is_empty();
+                if needs_rebuild {
+                    let before = signature(&sr.stylesheet);
+                    let mut stylesheet = crate::css::ua_stylesheet();
+                    for ds in &sr.document_stylesheets {
+                        match ds {
+                            DocumentStylesheet::Inline { css } => {
+                                stylesheet.parse_and_add_author(css);
+                            }
+                            DocumentStylesheet::Linked { href, .. } => {
+                                let abs = crate::html::resolve_url(href, base_url);
+                                if let Some(sheet) =
+                                    loaded_linked.get(&abs).or_else(|| loaded_linked.get(href))
+                                {
+                                    stylesheet.append_fragment(sheet.clone());
+                                }
+                            }
+                        }
+                    }
+                    for css in &sr.adopted_stylesheets {
+                        stylesheet.parse_and_add_author(css);
+                    }
+                    stylesheet.rebuild_index();
+                    let after = signature(&stylesheet);
+                    if before != after {
+                        changed = true;
+                    }
+                    sr.stylesheet = stylesheet;
+                }
+                for child in &mut sr.children {
+                    changed |= refresh_node(child, base_url, loaded_linked);
+                }
+            }
+            for child in &mut node.children {
+                changed |= refresh_node(child, base_url, loaded_linked);
+            }
+            changed
+        }
+
+        let base_url = self.base_url.clone();
+        let loaded_linked = &self.loaded_linked_stylesheets;
+        refresh_node(&mut self.root, &base_url, loaded_linked)
     }
 
     /// Poll for images that arrived from background fetch threads.
@@ -298,29 +389,28 @@ impl Document {
             let mut paint_rect = None;
             let loaded_path = path.clone();
             let loaded_target_kind = target;
-            if let Some(node) = if node_id != 0 {
-                self.find_webcore_mut(node_id)
-            } else {
-                find_node_by_path_mut(&mut self.root, &path)
-            } {
-                paint_rect = Some(node.layout.border_rect);
+            let mut apply_to_node = |node: &mut WebCore| {
+                paint_rect = Some(match paint_rect {
+                    Some(existing) => union_rect(existing, node.layout.border_rect),
+                    None => node.layout.border_rect,
+                });
                 match target {
                     PendingImageTarget::Element | PendingImageTarget::ElementFallback => {
                         if matches!(target, PendingImageTarget::ElementFallback)
                             && node.image_data.is_some()
                         {
-                            continue;
+                            return;
                         }
                         let old_size = (node.image_width, node.image_height);
                         let intrinsic_size_controls_layout =
                             node.style.width.is_auto() || node.style.height.is_auto();
-                        crate::html::set_decoded_image_on_node(node, decoded);
-                        target_needs_relayout = intrinsic_size_controls_layout
+                        crate::html::set_decoded_image_on_node(node, decoded.clone());
+                        target_needs_relayout |= intrinsic_size_controls_layout
                             && old_size != (node.image_width, node.image_height);
                         loaded_target = true;
                     }
                     PendingImageTarget::Background => {
-                        if crate::html::set_decoded_bg_image_on_node(node, decoded) {
+                        if crate::html::set_decoded_bg_image_on_node(node, decoded.clone()) {
                             loaded_target = true;
                         }
                     }
@@ -328,13 +418,15 @@ impl Document {
                         if crate::html::set_decoded_bg_image_layer_on_node(
                             node,
                             layer_index,
-                            decoded,
+                            decoded.clone(),
                         ) {
                             loaded_target = true;
                         }
                     }
                     PendingImageTarget::Mask => {
-                        if let Some((data, w, h)) = crate::html::decoded_image_pixels_arc(decoded) {
+                        if let Some((data, w, h)) =
+                            crate::html::decoded_image_pixels_arc(decoded.clone())
+                        {
                             node.mask_image_data = Some(data);
                             node.mask_image_width = w;
                             node.mask_image_height = h;
@@ -342,6 +434,14 @@ impl Document {
                         }
                     }
                 }
+            };
+            if node_id != 0 {
+                for_each_webcore_mut_by_id(&mut self.root, node_id, &mut apply_to_node);
+                for pending in self.pending_nodes.values_mut() {
+                    for_each_webcore_mut_by_id(pending, node_id, &mut apply_to_node);
+                }
+            } else if let Some(node) = find_node_by_path_mut(&mut self.root, &path) {
+                apply_to_node(node);
             }
             if loaded_target {
                 self.image_load_errors
@@ -583,6 +683,13 @@ impl Document {
             if node.node_id == id {
                 return Some(node);
             }
+            if let Some(shadow) = node.shadow_root.as_ref() {
+                for child in &shadow.children {
+                    if let Some(f) = walk(child, id) {
+                        return Some(f);
+                    }
+                }
+            }
             for child in &node.children {
                 if let Some(f) = walk(child, id) {
                     return Some(f);
@@ -609,6 +716,13 @@ impl Document {
             if node.node_id == id {
                 return Some(node);
             }
+            if let Some(shadow) = node.shadow_root.as_mut() {
+                for child in &mut shadow.children {
+                    if let Some(f) = walk(child, id) {
+                        return Some(f);
+                    }
+                }
+            }
             for child in &mut node.children {
                 if let Some(f) = walk(child, id) {
                     return Some(f);
@@ -629,6 +743,11 @@ impl Document {
     /// Walk all boxes in depth-first order.
     pub fn walk_all<F: FnMut(&WebCore)>(root: &WebCore, f: &mut F) {
         f(root);
+        if let Some(shadow) = root.shadow_root.as_ref() {
+            for child in &shadow.children {
+                Self::walk_all(child, f);
+            }
+        }
         for child in &root.children {
             Self::walk_all(child, f);
         }
@@ -636,6 +755,11 @@ impl Document {
 
     pub fn walk_all_mut<F: FnMut(&mut WebCore)>(root: &mut WebCore, f: &mut F) {
         f(root);
+        if let Some(shadow) = root.shadow_root.as_mut() {
+            for child in &mut shadow.children {
+                Self::walk_all_mut(child, f);
+            }
+        }
         for child in &mut root.children {
             Self::walk_all_mut(child, f);
         }

@@ -256,6 +256,31 @@ fn the_metadata_members_answer_what_this_crate_can_honestly_say() {
     d.release_events();
 }
 
+#[test]
+fn meta_color_scheme_sets_the_document_default_scheme() {
+    let d = doc(r#"<!doctype html><html><head>
+            <meta name="color-scheme" content="dark light">
+        </head><body></body></html>"#);
+    assert_eq!(d.root.style.color_scheme, "dark light");
+}
+
+#[test]
+fn author_color_scheme_overrides_meta_color_scheme() {
+    let d = doc(r#"<!doctype html><html><head>
+            <meta name="color-scheme" content="dark">
+            <style>html { color-scheme: light; }</style>
+        </head><body></body></html>"#);
+    assert_eq!(d.root.style.color_scheme, "light");
+}
+
+#[test]
+fn invalid_meta_color_scheme_is_ignored() {
+    let d = doc(r#"<!doctype html><html><head>
+            <meta name="color-scheme" content="dark sepia">
+        </head><body></body></html>"#);
+    assert_eq!(d.root.style.color_scheme, "normal");
+}
+
 // ─── the collections ────────────────────────────────────────────────────────
 
 const PAGE: &str = r#"<!DOCTYPE html><html><body>
