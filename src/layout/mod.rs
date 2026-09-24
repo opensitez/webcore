@@ -3216,6 +3216,7 @@ impl LayoutEngine {
 
     /// Main entry point: layout the full document.
     pub fn layout(&mut self, doc: &mut Document, viewport_width: f32) {
+        let trace_start = std::time::Instant::now();
         self.viewport_w = viewport_width;
         // Use the document's viewport_h if it was set during load_html (it knows
         // the real window height); only fall back to the engine default if the
@@ -3399,6 +3400,7 @@ impl LayoutEngine {
         // below the viewport. Full layout runs in a single pass.
         // TODO: implement proper deferred layout with background completion.
         perf::end_cascade();
+        let cascade_end = std::time::Instant::now();
         self.initial_layout_done = true;
         self.layout_geometry(doc, viewport_width, root_font_px);
         self.last_geometry_viewport_h = self.viewport_h;
@@ -3448,6 +3450,15 @@ impl LayoutEngine {
 
         // Detect aria-live region changes and queue announcements.
         doc.check_live_regions();
+        if std::env::var_os("WEBCORE_TRACE_IDLE").is_some() {
+            eprintln!(
+                "[webcore layout] rules={} cascade={}ms geometry={}ms container_queries={}",
+                doc.stylesheet.rules.len(),
+                cascade_end.duration_since(trace_start).as_millis(),
+                cascade_end.elapsed().as_millis(),
+                self.cached_has_container_q,
+            );
+        }
     }
 
     /// Force the next `layout()` call to re-run the full CSS cascade.

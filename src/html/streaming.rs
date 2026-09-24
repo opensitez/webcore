@@ -38,6 +38,7 @@ pub enum DomMutation {
     /// A new element was parsed and should be inserted.
     InsertElement {
         parent_path: Vec<usize>,
+        path: Vec<usize>,
         tag: String,
         attributes: AttrMap,
     },
@@ -174,6 +175,7 @@ impl StreamingParser {
         body_path.push(child_index);
         mutations.push(DomMutation::InsertElement {
             parent_path,
+            path: body_path.clone(),
             tag: "body".to_string(),
             attributes: AttrMap::new(),
         });
@@ -406,6 +408,7 @@ impl StreamingParser {
                             element_path.push(child_index);
                             mutations.push(DomMutation::InsertElement {
                                 parent_path,
+                                path: element_path.clone(),
                                 tag: tag.clone(),
                                 attributes: attrs,
                             });
@@ -460,6 +463,7 @@ impl StreamingParser {
                     element_path.push(child_index);
                     mutations.push(DomMutation::InsertElement {
                         parent_path,
+                        path: element_path.clone(),
                         tag: tag.clone(),
                         attributes: attrs,
                     });

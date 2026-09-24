@@ -554,20 +554,20 @@ impl Document {
                             .animated_image_frame
                             .min(animated.frames.len().saturating_sub(1));
                         let last = node.animated_image_last_tick.unwrap_or(now);
-                        let delay = std::time::Duration::from_millis(
-                            animated.frames[current].duration_ms.max(10) as u64,
-                        );
-                        if now.duration_since(last) >= delay {
-                            let next = (current + 1) % animated.frames.len();
+                        if let Some((next, frame_start)) =
+                            advance_animated_image_frame(animated, current, last, now)
+                        {
                             node.animated_image_frame = next;
-                            node.animated_image_last_tick = Some(now);
-                            node.image_data = Some(animated.frames[next].pixels.clone());
-                            node.image_data_width = animated.width;
-                            node.image_data_height = animated.height;
-                            tick.changed_any = true;
-                            let rect = node.layout.border_rect;
-                            if rect.w > 0.0 && rect.h > 0.0 {
-                                tick.paint_rects.push(rect);
+                            node.animated_image_last_tick = Some(frame_start);
+                            if next != current {
+                                node.image_data = Some(animated.frames[next].pixels.clone());
+                                node.image_data_width = animated.width;
+                                node.image_data_height = animated.height;
+                                tick.changed_any = true;
+                                let rect = node.layout.border_rect;
+                                if rect.w > 0.0 && rect.h > 0.0 {
+                                    tick.paint_rects.push(rect);
+                                }
                             }
                         } else if node.animated_image_last_tick.is_none() {
                             node.animated_image_last_tick = Some(now);
@@ -868,6 +868,43 @@ impl Document {
             .map(|body| locks(&body.style))
             .unwrap_or(false)
     }
+}
+
+fn advance_animated_image_frame(
+    animated: &crate::html::AnimatedImage,
+    current: usize,
+    last: std::time::Instant,
+    now: std::time::Instant,
+) -> Option<(usize, std::time::Instant)> {
+    let frame_count = animated.frames.len();
+    if frame_count < 2 {
+        return None;
+    }
+    let cycle_ms: u64 = animated
+        .frames
+        .iter()
+        .map(|frame| frame.duration_ms.max(10) as u64)
+        .sum();
+    let elapsed_ms = now.saturating_duration_since(last).as_millis();
+    let cycle_ms = cycle_ms as u128;
+    let mut remaining_ms = elapsed_ms % cycle_ms;
+    let mut next = current;
+    let mut advanced = elapsed_ms >= cycle_ms;
+    for _ in 0..frame_count {
+        let delay = animated.frames[next].duration_ms.max(10) as u128;
+        if remaining_ms < delay {
+            break;
+        }
+        remaining_ms -= delay;
+        next = (next + 1) % frame_count;
+        advanced = true;
+    }
+    advanced.then(|| {
+        (
+            next,
+            now - std::time::Duration::from_millis(remaining_ms as u64),
+        )
+    })
 }
 
 fn collapse_node_animation(node: &mut WebCore) -> bool {

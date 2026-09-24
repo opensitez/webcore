@@ -1444,7 +1444,7 @@ pub fn parse_selector(s: &str) -> CssSelector {
     // Selectors §3.1 — an unrecognised simple selector makes the whole complex
     // selector invalid. Recorded rather than acted on here: whether that kills
     // the rule depends on where the selector sits, and only the caller knows.
-    let mut valid = true;
+    let mut valid = !s.trim().is_empty();
     let mut chars = s.chars().peekable();
 
     while let Some(&ch) = chars.peek() {
@@ -1590,6 +1590,9 @@ pub fn parse_selector(s: &str) -> CssSelector {
                                     .map(|s| parse_selector(s.trim()))
                                     .filter(|s| s.valid)
                                     .collect();
+                                if selectors.is_empty() {
+                                    valid = false;
+                                }
                                 parts.push(SelectorPart::Is(selectors));
                             }
                             "where" => {
@@ -1598,6 +1601,9 @@ pub fn parse_selector(s: &str) -> CssSelector {
                                     .map(|s| parse_selector(s.trim()))
                                     .filter(|s| s.valid)
                                     .collect();
+                                if selectors.is_empty() {
+                                    valid = false;
+                                }
                                 parts.push(SelectorPart::Where(selectors));
                             }
                             "has" => {

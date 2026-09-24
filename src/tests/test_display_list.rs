@@ -20,6 +20,24 @@ fn build(html: &str) -> (EngineFrame, DisplayList) {
     (f, list)
 }
 
+#[test]
+fn indented_inline_text_paints_at_the_collapsed_space_position() {
+    fn word_x(html: &str) -> f32 {
+        let (_, list) = build(html);
+        list.commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                PaintCmd::Text { text, x, .. } if text == "followers" => Some(*x),
+                _ => None,
+            })
+            .expect("followers text command")
+    }
+
+    let compact = word_x("<style>body{margin:0;font:14px Arial}</style><div><a><span>6</span> followers</a></div>");
+    let indented = word_x("<style>body{margin:0;font:14px Arial}</style><div><a><span>6</span>\n          followers</a></div>");
+    assert!((compact - indented).abs() < 1.0, "indentation shifted paint from {compact} to {indented}");
+}
+
 fn build_full(html: &str) -> (EngineFrame, DisplayList) {
     let doc = parse_html(html);
     let mut f = EngineFrame::new(doc, 800.0, 600.0);

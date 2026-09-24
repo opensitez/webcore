@@ -680,6 +680,23 @@ fn selector_matching_never_reads_layout() {
 
 // ── Functional pseudo-class argument lists (selectors-4) ────────────────────
 
+#[test]
+fn empty_forgiving_selector_lists_do_not_match_every_element() {
+    assert!(!crate::css::parse_selector("").valid);
+    assert!(!crate::css::parse_selector(":is()").valid);
+    assert!(!crate::css::parse_selector(":where( , )").valid);
+    assert!(!crate::css::parse_selector(":is(:unknown)").valid);
+    assert!(crate::css::parse_selector(":is(body, :unknown)").valid);
+
+    let mut doc = crate::html::parse_html(
+        "<style>:is() { position: absolute; left: 50% } body { position: static }</style><body>x</body>",
+    );
+    let mut engine = crate::layout::LayoutEngine::new();
+    engine.layout(&mut doc, 400.0);
+    let body = doc.root.children.iter().find(|node| node.tag == "body").unwrap();
+    assert_eq!(body.style.position, crate::types::Position::Static);
+}
+
 /// **`:is()`/`:not()`/`:where()` argument lists split on TOP-LEVEL commas only.**
 /// A naive `split(',')` tears a nested list apart at the inner commas, so
 /// `:where(:not(iframe, canvas, img, svg, video))` — the modern-reset idiom —

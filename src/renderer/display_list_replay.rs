@@ -134,8 +134,8 @@ fn transformed_bounds_to_viewport(ts: Transform, rect: Rect, scale: f32) -> Opti
     let mut max_x = f32::NEG_INFINITY;
     let mut max_y = f32::NEG_INFINITY;
     for (x, y) in points {
-        let px = (ts.sx * x + ts.ky * y + ts.tx) * inv_scale;
-        let py = (ts.kx * x + ts.sy * y + ts.ty) * inv_scale;
+        let px = (ts.sx * x + ts.kx * y + ts.tx) * inv_scale;
+        let py = (ts.ky * x + ts.sy * y + ts.ty) * inv_scale;
         min_x = min_x.min(px);
         min_y = min_y.min(py);
         max_x = max_x.max(px);
@@ -145,6 +145,29 @@ fn transformed_bounds_to_viewport(ts: Transform, rect: Rect, scale: f32) -> Opti
         return None;
     }
     Some(Rect::new(min_x, min_y, max_x - min_x, max_y - min_y))
+}
+
+#[cfg(test)]
+mod transform_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn rotated_paint_bounds_follow_tiny_skia_matrix() {
+        let transform = Transform::from_rotate_at(67.0, 843.0, 623.0);
+        let rect = Rect::new(827.0, 607.0, 32.0, 24.0);
+        let bounds = transformed_bounds_to_viewport(transform, rect, 1.0).unwrap();
+        for (x, y) in [
+            (rect.x, rect.y),
+            (rect.right(), rect.y),
+            (rect.x, rect.bottom()),
+            (rect.right(), rect.bottom()),
+        ] {
+            let mut point = tiny_skia::Point::from_xy(x, y);
+            transform.map_point(&mut point);
+            assert!(point.x >= bounds.x - 0.01 && point.x <= bounds.right() + 0.01);
+            assert!(point.y >= bounds.y - 0.01 && point.y <= bounds.bottom() + 0.01);
+        }
+    }
 }
 
 pub fn replay_with_text(
@@ -675,8 +698,8 @@ fn replay_commands_inner(
                 small_caps,
                 decoration,
             } => {
-                let phys_x = ts.sx * *x + ts.ky * *y + ts.tx;
-                let phys_y = ts.kx * *x + ts.sy * *y + ts.ty;
+                let phys_x = ts.sx * *x + ts.kx * *y + ts.tx;
+                let phys_y = ts.ky * *x + ts.sy * *y + ts.ty;
 
                 // Skip text that is wildly off-screen (handles text-indent:-9999px)
                 if phys_x < -20000.0
@@ -1152,7 +1175,9 @@ fn replay_commands_inner(
                     } else {
                         let mut paint = Paint::default();
                         paint.set_color(to_sk_color(&c));
-                        fill_outer_box_shadow_shape(target, sr, *rect, &paint, ts, clip_mask);
+                        fill_outer_box_shadow_shape(
+                            target, sr, *rect, *radii, *radii_y, *spread, &paint, ts, clip_mask,
+                        );
                     }
                 }
             }
@@ -3448,10 +3473,43 @@ fn fill_outer_box_shadow_shape(
     target: &mut Pixmap,
     shadow_rect: Rect,
     border_rect: Rect,
+    radii: [f32; 4],
+    radii_y: [f32; 4],
+    spread: f32,
     paint: &Paint,
     transform: Transform,
     clip_mask: Option<&tiny_skia::Mask>,
 ) {
+    if radii.iter().any(|&radius| radius > 0.5) {
+        let outer_radii = radii.map(|radius| (radius + spread).max(0.0));
+        let outer_radii_y = radii_y.map(|radius| (radius + spread).max(0.0));
+        if let (Some(outer), Some(inner)) = (
+            rounded_rect_path_corners_xy(
+                shadow_rect.x,
+                shadow_rect.y,
+                shadow_rect.w,
+                shadow_rect.h,
+                outer_radii,
+                outer_radii_y,
+            ),
+            rounded_rect_path_corners_xy(
+                border_rect.x,
+                border_rect.y,
+                border_rect.w,
+                border_rect.h,
+                radii,
+                radii_y,
+            ),
+        ) {
+            let mut ring = PathBuilder::new();
+            ring.push_path(&outer);
+            ring.push_path(&inner);
+            if let Some(path) = ring.finish() {
+                target.fill_path(&path, paint, FillRule::EvenOdd, transform, clip_mask);
+            }
+        }
+        return;
+    }
     fn fill_piece(
         target: &mut Pixmap,
         x: f32,
@@ -3897,8 +3955,8 @@ fn transformed_text_origin(ts: &Transform, x: f32, y: f32) -> (f32, f32, f32) {
     let eff_sx = (ts.sx * ts.sx + ts.ky * ts.ky).sqrt();
     let eff_sy = (ts.kx * ts.kx + ts.sy * ts.sy).sqrt();
     let eff_scale = eff_sx.max(eff_sy).max(0.001);
-    let phys_x = ts.sx * x + ts.ky * y + ts.tx;
-    let phys_y = ts.kx * x + ts.sy * y + ts.ty;
+    let phys_x = ts.sx * x + ts.kx * y + ts.tx;
+    let phys_y = ts.ky * x + ts.sy * y + ts.ty;
     (eff_scale, phys_x / eff_scale, phys_y / eff_scale)
 }
 

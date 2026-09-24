@@ -6,6 +6,7 @@
 //! render caching stay inside webcore.
 
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use tiny_skia::{Pixmap, Transform};
 use winit::event::WindowEvent;
@@ -36,6 +37,17 @@ enum BrowserViewLoadResult {
     },
 }
 
+fn next_frame_deadline(previous: Option<Instant>, now: Instant, interval: Duration) -> Instant {
+    let Some(previous) = previous else {
+        return now + interval;
+    };
+    if previous > now {
+        return previous;
+    }
+    let missed = now.duration_since(previous).as_nanos() / interval.as_nanos();
+    previous + interval * (missed.min((u32::MAX - 1) as u128) as u32 + 1)
+}
+
 /// Opaque browser-page area. This is the unit a GUI toolkit should embed.
 pub struct BrowserView {
     renderer: Renderer,
@@ -48,6 +60,7 @@ pub struct BrowserView {
     title: String,
     loading: bool,
     scroll_priority_frame: bool,
+    next_frame_deadline: Option<Instant>,
     width: f32,
     height: f32,
     viewport_pixmap: Option<Pixmap>,
@@ -430,6 +443,7 @@ impl BrowserView {
             title: String::new(),
             loading: false,
             scroll_priority_frame: false,
+            next_frame_deadline: None,
             width,
             height,
             viewport_pixmap: None,
@@ -1005,9 +1019,7 @@ impl BrowserView {
         let mut html_chunks = 0usize;
         let mut budget_exhausted = false;
         loop {
-            if html_chunks >= 8
-                || (html_chunks > 0 && start.elapsed() >= std::time::Duration::from_millis(16))
-            {
+            if html_chunks > 0 && start.elapsed() >= std::time::Duration::from_millis(16) {
                 budget_exhausted = true;
                 break;
             }
@@ -1085,14 +1097,20 @@ impl BrowserView {
             let (stream_needs_wake, stream_needs_redraw) = self.stream_idle_state();
             if scroll_priority {
                 self.scroll_priority_frame = false;
+                self.next_frame_deadline = None;
                 event_loop.set_control_flow(ControlFlow::WaitUntil(
-                    std::time::Instant::now() + std::time::Duration::from_millis(1),
+                    Instant::now() + Duration::from_millis(1),
                 ));
             } else if stream_needs_wake {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(
-                    std::time::Instant::now() + std::time::Duration::from_millis(16),
-                ));
+                let deadline = next_frame_deadline(
+                    self.next_frame_deadline,
+                    Instant::now(),
+                    Duration::from_nanos(16_666_667),
+                );
+                self.next_frame_deadline = Some(deadline);
+                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
             } else {
+                self.next_frame_deadline = None;
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
             scroll_priority || stream_layout_changed || stream_needs_redraw
@@ -1638,6 +1656,23 @@ fn blit_viewport_from_backing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn animation_deadlines_do_not_add_paint_time_to_each_frame() {
+        let start = Instant::now();
+        let interval = Duration::from_nanos(16_666_667);
+        let first = next_frame_deadline(None, start, interval);
+        assert_eq!(first, start + interval);
+        assert_eq!(next_frame_deadline(Some(first), start + Duration::from_millis(8), interval), first);
+        assert_eq!(
+            next_frame_deadline(Some(first), first + Duration::from_millis(8), interval),
+            start + interval * 2,
+        );
+        assert_eq!(
+            next_frame_deadline(Some(first), first + Duration::from_millis(40), interval),
+            start + interval * 4,
+        );
+    }
 
     #[test]
     fn file_document_relative_links_stay_file_urls() {
@@ -2260,7 +2295,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_view_poll_budgets_streamed_html_chunks() {
+    fn browser_view_poll_coalesces_ready_html_chunks() {
         let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
         let base = "https://example.test/".to_string();
         view.load_id = 42;
@@ -2287,20 +2322,10 @@ mod tests {
                 .sum::<usize>();
 
         assert!(view.poll());
-        assert!(
-            view.streamed_html_len < total_len,
-            "one UI tick should ingest a bounded batch, not the whole queued document"
+        assert_eq!(
+            view.streamed_html_len, total_len,
+            "small chunks already in the queue should reach layout together"
         );
-
-        assert!(view.poll());
-        assert!(
-            view.streamed_html_len > first_len,
-            "the next browser tick should continue streaming the remaining chunks"
-        );
-        while view.streamed_html_len < total_len {
-            assert!(view.poll());
-        }
-        assert_eq!(view.streamed_html_len, total_len);
     }
 
     #[test]

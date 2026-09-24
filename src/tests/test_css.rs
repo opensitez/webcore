@@ -5243,6 +5243,23 @@ fn stylesheet_root_variable_extraction_handles_root_pseudos_without_descendants(
 }
 
 #[test]
+fn stylesheet_variables_follow_statement_form_at_rules() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add(
+        "@layer primer-css-base, primer-react; :root { --borderRadius-medium: .375rem; --borderWidth-thin: .0625rem; }",
+    );
+    sheet.resolve_variables_for_viewport(800.0, 600.0);
+    assert_eq!(
+        sheet.variables.get("--borderRadius-medium").map(String::as_str),
+        Some(".375rem")
+    );
+    assert_eq!(
+        sheet.variables.get("--borderWidth-thin").map(String::as_str),
+        Some(".0625rem")
+    );
+}
+
+#[test]
 fn streamed_custom_property_only_root_fragment_is_preserved() {
     let css = ":root{--brand:#434fcf}.button{color:var(--brand)}";
     let loader: crate::StylesheetLoader = std::sync::Arc::new(|_| Ok(String::new()));

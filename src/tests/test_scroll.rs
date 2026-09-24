@@ -190,6 +190,41 @@ fn contents_wrappers_and_blank_text_do_not_inflate_document_scroll_height() {
 }
 
 #[test]
+fn inline_wrapper_with_only_hidden_and_positioned_children_has_no_scroll_extent() {
+    let doc = layout(
+        r#"<style>.sr { position: absolute; width: 1px; height: 1px; }</style>
+        <body><h2>Pinned<span id="wrapper"><svg style="display:none"></svg><span class="sr">Loading</span></span></h2></body>"#,
+    );
+    let wrapper = query(&doc, "#wrapper").unwrap();
+    assert_eq!(wrapper.layout.margin_rect.h, 0.0);
+    assert!(Document::scroll_height(&doc.root) < 1000.0);
+}
+
+#[test]
+fn empty_inline_custom_elements_before_a_block_do_not_shift_it() {
+    let baseline = layout(r#"<body><div><react-partial><div><header style="height:72px"></header></div></react-partial></div></body>"#);
+    let doc = layout(
+        r#"<body><div><react-partial><div></div></react-partial><react-partial><div></div></react-partial><react-partial><div><header style="height:72px"></header></div></react-partial></div></body>"#,
+    );
+    let header = query(&doc, "header").unwrap();
+    let baseline_header = query(&baseline, "header").unwrap();
+    assert_eq!(header.layout.border_rect.y, baseline_header.layout.border_rect.y);
+}
+
+#[test]
+fn responsive_order_inherit_overrides_base_order() {
+    let doc = layout(
+        r#"<style>.items { display:flex; flex-direction:column }
+        .late { order:1 } @media (width >= 300px) { .late { order:inherit !important } }
+        </style><div class="items"><div class="late" id="first">First</div><div id="second">Second</div></div>"#,
+    );
+    let first = query(&doc, "#first").unwrap();
+    let second = query(&doc, "#second").unwrap();
+    assert_eq!(first.style.order, 0);
+    assert!(first.layout.border_rect.y <= second.layout.border_rect.y);
+}
+
+#[test]
 fn stale_anonymous_blocks_can_be_unwrapped_before_flex_or_grid_layout() {
     let mut container = WebCore::new("div");
     std::sync::Arc::make_mut(&mut container.style).display = Display::Flex;

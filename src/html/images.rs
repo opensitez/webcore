@@ -452,19 +452,7 @@ where
         } else {
             ((delay_ms.0 as f64 / delay_ms.1.max(1) as f64).round() as u32).max(10)
         };
-        let buffer = frame.into_buffer();
-        let buffer = if frame_width != width || frame_height != height {
-            image::imageops::resize(
-                &buffer,
-                frame_width,
-                frame_height,
-                image::imageops::FilterType::Lanczos3,
-            )
-        } else {
-            buffer
-        };
-        let mut raw = buffer.into_raw();
-        premultiply_rgba(&mut raw);
+        let raw = resize_animated_frame(frame.into_buffer(), frame_width, frame_height)?;
         out.push(AnimatedImageFrame {
             pixels: std::sync::Arc::new(raw),
             duration_ms,
@@ -489,6 +477,54 @@ where
     })
 }
 
+fn resize_animated_frame(
+    buffer: image::RgbaImage,
+    width: u32,
+    height: u32,
+) -> Option<Vec<u8>> {
+    let (source_width, source_height) = buffer.dimensions();
+    let mut pixels = buffer.into_raw();
+    premultiply_rgba(&mut pixels);
+    if source_width == width && source_height == height {
+        return Some(pixels);
+    }
+    let premultiplied = image::RgbaImage::from_raw(source_width, source_height, pixels)?;
+    let mut resized = image::imageops::resize(
+        &premultiplied,
+        width,
+        height,
+        image::imageops::FilterType::Lanczos3,
+    )
+    .into_raw();
+    for pixel in resized.chunks_exact_mut(4) {
+        pixel[0] = pixel[0].min(pixel[3]);
+        pixel[1] = pixel[1].min(pixel[3]);
+        pixel[2] = pixel[2].min(pixel[3]);
+    }
+    Some(resized)
+}
+
+#[cfg(test)]
+mod animated_resize_tests {
+    use super::resize_animated_frame;
+
+    #[test]
+    fn transparent_gif_edges_do_not_bleed_into_resized_pixels() {
+        let source = image::RgbaImage::from_raw(
+            2,
+            1,
+            vec![255, 0, 0, 255, 255, 255, 255, 0],
+        )
+        .unwrap();
+        let pixels = resize_animated_frame(source, 5, 1).unwrap();
+        assert!(pixels.chunks_exact(4).all(|pixel| {
+            pixel[1] == 0
+                && pixel[2] == 0
+                && pixel[0] <= pixel[3]
+        }));
+    }
+}
+
 pub(crate) fn expand_animated_image_to_size(
     animated: &mut AnimatedImage,
     target_width: u32,
@@ -502,7 +538,10 @@ pub(crate) fn expand_animated_image_to_size(
         return false;
     };
     let target_size = if target_width > 0 && target_height > 0 {
-        Some((target_width, target_height))
+        Some((
+            target_width.max(animated.width),
+            target_height.max(animated.height),
+        ))
     } else {
         None
     };
@@ -551,7 +590,7 @@ fn animated_frame_decode_size(
     height: u32,
     target_size: Option<(u32, u32)>,
 ) -> (u32, u32) {
-    const MAX_ANIMATED_FRAME_PIXELS: u32 = 192 * 192;
+    const MAX_ANIMATED_FRAME_PIXELS: u32 = 128 * 1024;
     if let Some((target_w, target_h)) = target_size {
         let target_w = target_w.max(1).min(width.max(1));
         let target_h = target_h.max(1).min(height.max(1));

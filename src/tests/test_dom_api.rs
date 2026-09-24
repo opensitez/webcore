@@ -3178,6 +3178,37 @@ fn gif_decode_preserves_animation_frames() {
 }
 
 #[test]
+fn animated_gif_keeps_decode_resolution_when_early_layout_is_small() {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+        for color in [[255, 0, 0, 255], [0, 0, 255, 255]] {
+            let frame = image::RgbaImage::from_pixel(100, 20, image::Rgba(color));
+            encoder
+                .encode_frame(image::Frame::from_parts(
+                    frame,
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(30, 1),
+                ))
+                .unwrap();
+        }
+    }
+    let crate::html::DecodedImage::Animated(mut animated) =
+        crate::html::decode_image_bytes_ex(&bytes).unwrap()
+    else {
+        panic!("expected animated GIF");
+    };
+    assert_eq!((animated.width, animated.height), (100, 20));
+    assert!(crate::html::expand_animated_image_to_size(&mut animated, 12, 8));
+    assert_eq!((animated.width, animated.height), (100, 20));
+    assert!(animated
+        .frames
+        .iter()
+        .all(|frame| frame.pixels.len() == 100 * 20 * 4));
+}
+
+#[test]
 fn single_frame_data_gif_decodes_as_raster_image() {
     let decoded = crate::html::load_decoded_image_from_src(
         "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==",
@@ -3235,6 +3266,28 @@ fn animated_image_tick_respects_declared_frame_delay() {
     assert!(doc.tick_animated_images(start + std::time::Duration::from_millis(250)));
     let next_pixels = doc.root.children[0].image_data.clone().unwrap();
     assert_eq!(&next_pixels[..4], &[0, 0, 255, 255]);
+}
+
+#[test]
+fn animated_image_tick_catches_up_without_discarding_elapsed_time() {
+    let decoded = crate::html::decode_image_bytes_ex(&tiny_animated_gif_with_delay(20)).unwrap();
+    let mut node = crate::types::WebCore::new("img");
+    crate::html::set_decoded_image_on_node(&mut node, decoded);
+    let start = std::time::Instant::now();
+    node.animated_image_last_tick = Some(start);
+    let mut doc = crate::types::Document::new();
+    doc.root.children.push(node);
+    assert!(doc.tick_animated_images(start));
+
+    assert!(doc.tick_animated_images(start + std::time::Duration::from_millis(65)));
+    assert_eq!(doc.root.children[0].animated_image_frame, 1);
+    assert_eq!(
+        doc.root.children[0].animated_image_last_tick,
+        Some(start + std::time::Duration::from_millis(60))
+    );
+    assert!(!doc.tick_animated_images(start + std::time::Duration::from_millis(75)));
+    assert!(doc.tick_animated_images(start + std::time::Duration::from_millis(80)));
+    assert_eq!(doc.root.children[0].animated_image_frame, 0);
 }
 
 #[test]

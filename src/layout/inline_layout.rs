@@ -1244,7 +1244,7 @@ pub fn layout_inline_block(
             // The existing early-stop cannot do this job: it needs
             // `old_line_idx > 0` and copies the whole TAIL, so the first line is
             // always re-shaped and a block of one or two lines never benefits.
-            let key = char_x_fingerprint(&flat_text, &runs, &ll, engine.scale);
+            let key = char_x_fingerprint(&flat_text, &runs, &ll, line_items, engine.scale);
             let reused = old_lines.get(old_line_idx).and_then(|ol| {
                 (ol.char_x_key == key && key != 0 && !ol.char_x.is_empty())
                     .then(|| ol.char_x.clone())
@@ -1261,6 +1261,7 @@ pub fn layout_inline_block(
                     if let Some(fs_ptr) = engine.font_system {
                         let fs = unsafe { &mut *fs_ptr };
                         fill_char_x_for_line(fs, &flat_text, &runs, &mut ll, engine.scale);
+                        align_char_x_to_inline_items(&mut ll, line_items);
                         ll.char_x_key = key;
                     }
                 }
@@ -1599,7 +1600,11 @@ fn is_empty_inline_flow_box(node: &WebCore) -> bool {
         && !node.is_text_node()
         && node.tag != "br"
         && node.text.trim().is_empty()
-        && node.children.iter().all(is_empty_inline_flow_box)
+        && node.children.iter().all(|child| {
+            matches!(child.style.display, Display::None)
+                || matches!(child.style.position, Position::Absolute | Position::Fixed)
+                || is_empty_inline_flow_box(child)
+        })
         && node.style.before_content.is_empty()
         && node.style.after_content.is_empty()
         && matches!(
@@ -2196,6 +2201,12 @@ fn collect_items_inner(
         && node.style.is_inline_level()
         && !node.is_text_node()
         && has_in_flow_block_children(node);
+    if is_inline_with_block_children
+        && node.layout.margin_rect.h <= 0.0
+        && node.layout.border_rect.h <= 0.0
+    {
+        return;
+    }
     if matches!(
         node.style.display,
         Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
@@ -3827,6 +3838,7 @@ fn char_x_fingerprint(
     flat: &str,
     runs: &[InlineRun],
     line: &crate::types::LayoutLine,
+    items: &[InlineItem],
     scale: f32,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -3842,7 +3854,12 @@ fn char_x_fingerprint(
     flat[start..end].hash(&mut h);
     line.extra_space_per_word.to_bits().hash(&mut h);
     line.text_x_offset.to_bits().hash(&mut h);
+    line.width.to_bits().hash(&mut h);
     scale.to_bits().hash(&mut h);
+    for item in items {
+        item.advance.to_bits().hash(&mut h);
+        item.is_space.hash(&mut h);
+    }
     for vs in &line.visual_segments {
         vs.logical_start.hash(&mut h);
         vs.length.hash(&mut h);
@@ -3875,6 +3892,51 @@ fn char_x_fingerprint(
     }
     let v = h.finish();
     if v == 0 { 1 } else { v }
+}
+
+fn align_char_x_to_inline_items(line: &mut LayoutLine, items: &[InlineItem]) {
+    if line.char_x.is_empty() || line.visual_segments.iter().any(|seg| seg.level & 1 != 0) {
+        return;
+    }
+    let text_budget = (line.width - line.text_x_offset).max(0.0);
+    if line.char_x.last().is_some_and(|end| *end <= text_budget + 2.0) {
+        return;
+    }
+    let shaped = line.char_x.clone();
+    let mut advance = 0.0;
+    for item in items {
+        let item_advance = item.advance
+            + if item.is_space {
+                line.extra_space_per_word
+            } else {
+                0.0
+            };
+        if let InlineItemKind::Text {
+            text_start,
+            text_len,
+            ..
+        } = &item.kind
+        {
+            let start = text_start.saturating_sub(line.text_start);
+            let end = start.saturating_add(*text_len);
+            if *text_start >= line.text_start
+                && end < line.char_x.len()
+                && end < shaped.len()
+            {
+                let raw_width = shaped[end] - shaped[start];
+                let target_start = advance - line.text_x_offset;
+                for offset in start..=end {
+                    let fraction = if raw_width > 0.001 {
+                        ((shaped[offset] - shaped[start]) / raw_width).clamp(0.0, 1.0)
+                    } else {
+                        (offset - start) as f32 / (end - start).max(1) as f32
+                    };
+                    line.char_x[offset] = target_start + item_advance * fraction;
+                }
+            }
+        }
+        advance += item_advance;
+    }
 }
 
 // ─── Accurate per-character x positions using cosmic_text ────────────────────

@@ -403,6 +403,38 @@ pub(crate) fn extract_root_variables_vp(
             break;
         }
         if s.starts_with('@') {
+            // Statement-form at-rules such as `@layer a, b;` have no block.
+            // Their following rule must not be consumed as the at-rule body.
+            let mut quote = None;
+            let mut depth = 0usize;
+            let mut terminator = None;
+            let mut escaped = false;
+            for (idx, byte) in s.bytes().enumerate() {
+                if let Some(q) = quote {
+                    if escaped {
+                        escaped = false;
+                    } else if byte == b'\\' {
+                        escaped = true;
+                    } else if byte == q {
+                        quote = None;
+                    }
+                    continue;
+                }
+                match byte {
+                    b'\'' | b'"' => quote = Some(byte),
+                    b'(' | b'[' => depth += 1,
+                    b')' | b']' => depth = depth.saturating_sub(1),
+                    b';' | b'{' if depth == 0 => {
+                        terminator = Some((idx, byte));
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some((idx, b';')) = terminator {
+                s = &s[idx + 1..];
+                continue;
+            }
             let prefix = &s[..s.len().min(30)];
             let lower: String = prefix.to_ascii_lowercase();
             if lower.starts_with("@media") {

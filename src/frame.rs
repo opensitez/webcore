@@ -100,6 +100,9 @@ pub struct EngineFrame {
     first_paint_done: bool,
     /// Stateful HTML tokenizer/parser for progressive chunked loading.
     streaming_parser: Option<crate::html::streaming::StreamingParser>,
+    /// Parser paths are source-order cursors, not indices into the layout tree:
+    /// layout may insert anonymous boxes between arriving HTML chunks.
+    stream_node_ids: std::collections::HashMap<Vec<usize>, u32>,
     /// Stylesheet results discovered while streaming HTML.
     stylesheet_tx: Option<std::sync::mpsc::SyncSender<crate::types::PendingStylesheetResult>>,
     scheduled_stylesheets: std::collections::HashSet<String>,
@@ -133,6 +136,7 @@ impl EngineFrame {
             last_scroll_height: 0.0,
             first_paint_done: false,
             streaming_parser: None,
+            stream_node_ids: std::collections::HashMap::new(),
             stylesheet_tx: None,
             scheduled_stylesheets: std::collections::HashSet::new(),
             image_tx: None,
@@ -246,14 +250,16 @@ impl EngineFrame {
         scroll_priority: bool,
     ) -> FrameUpdate {
         let mut update = FrameUpdate::default();
+        let trace_frame = std::env::var_os("WEBCORE_TRACE_IDLE").is_some();
         let style_dirty_before_resource_poll = self.doc.style_dirty;
+        let resource_poll_start = std::time::Instant::now();
         // 1. Poll for async stylesheets/images/fonts
         let now = std::time::Instant::now();
         let mut resource_requested_relayout = false;
         if !scroll_priority {
             if self
                 .doc
-                .poll_pending_stylesheets_budgeted(8, std::time::Duration::from_millis(2))
+                .poll_pending_stylesheets_budgeted(usize::MAX, std::time::Duration::ZERO)
             {
                 if !style_dirty_before_resource_poll {
                     // Stylesheet workers can deliver many fragments/sheets for
@@ -302,6 +308,7 @@ impl EngineFrame {
         if resource_requested_relayout {
             self.pending_resource_relayout = true;
         }
+        let resource_poll_ms = resource_poll_start.elapsed().as_millis();
         if self.pending_resource_relayout && !scroll_priority {
             let pending_resources = self.doc.pending_images.is_some()
                 || self.doc.pending_stylesheets.is_some()
@@ -319,11 +326,12 @@ impl EngineFrame {
                 self.last_resource_relayout = Some(now);
             }
         }
+        let dirty_layout_before = self.doc.has_dirty_layout();
         if self.doc.style_dirty {
             self.needs_style = true;
             self.needs_layout = true;
             self.needs_paint = true;
-        } else if self.doc.has_dirty_layout() {
+        } else if dirty_layout_before {
             self.needs_layout = true;
             self.needs_paint = true;
         }
@@ -354,6 +362,7 @@ impl EngineFrame {
         }
 
         // 3. Check for running animations
+        let mut animation_needs_layout = false;
         if self.doc.needs_animation_frame {
             self.doc.tick_animations(now);
             let css_animations_running = self.doc.needs_animation_frame;
@@ -362,7 +371,7 @@ impl EngineFrame {
             if svg_animations_running {
                 self.doc.needs_animation_frame = true;
             }
-            let animation_needs_layout = self.doc.animation_overrides.values().any(|props| {
+            animation_needs_layout = self.doc.animation_overrides.values().any(|props| {
                 crate::types::animation_runtime::animation_properties_affect_layout(props)
             });
             if animation_needs_layout {
@@ -398,6 +407,7 @@ impl EngineFrame {
         if self.needs_style || self.needs_layout {
             update.rebuild_display_list = true;
             let t0 = std::time::Instant::now();
+            let style_requested = self.needs_style;
             if self.needs_style {
                 self.engine.layout(&mut self.doc, self.viewport_w);
             } else {
@@ -408,6 +418,19 @@ impl EngineFrame {
             self.needs_style = false;
             self.needs_layout = false;
             self.needs_paint = true;
+            if trace_frame {
+                eprintln!(
+                    "[webcore frame] layout={}ms resource_poll={}ms style={} dirty_style={} dirty_layout={} resource={} animation_layout={} dirty_after={}",
+                    t0.elapsed().as_millis(),
+                    resource_poll_ms,
+                    style_requested,
+                    style_dirty_before_resource_poll,
+                    dirty_layout_before,
+                    resource_requested_relayout,
+                    animation_needs_layout,
+                    self.doc.has_dirty_layout(),
+                );
+            }
 
             // Notify host of layout completion
             let duration_ms = t0.elapsed().as_secs_f32() * 1000.0;
@@ -994,6 +1017,8 @@ impl EngineFrame {
         let mut parser = crate::html::streaming::StreamingParser::new(base_url);
         parser.set_root_child_count(self.doc.root.children.len());
         self.streaming_parser = Some(parser);
+        self.stream_node_ids.clear();
+        self.stream_node_ids.insert(Vec::new(), self.doc.root.node_id);
         self.stylesheet_tx = None;
         self.scheduled_stylesheets.clear();
         self.image_tx = None;
@@ -1404,12 +1429,14 @@ impl EngineFrame {
             match mutation {
                 DomMutation::InsertElement {
                     parent_path,
+                    path,
                     tag,
                     attributes,
                 } => {
-                    if let Some(parent_id) = node_id_at_path(&self.doc.root, parent_path) {
+                    if let Some(parent_id) = self.stream_node_ids.get(parent_path).copied() {
                         let child_id = self.doc.create_element(tag);
                         self.doc.append_child(parent_id, child_id);
+                        self.stream_node_ids.insert(path.clone(), child_id);
                         for (name, value) in attributes {
                             self.doc.set_attribute(child_id, name, value);
                         }
@@ -1438,7 +1465,7 @@ impl EngineFrame {
                 }
                 DomMutation::AppendText { parent_path, text } => {
                     if !text.is_empty()
-                        && let Some(parent_id) = node_id_at_path(&self.doc.root, parent_path)
+                        && let Some(parent_id) = self.stream_node_ids.get(parent_path).copied()
                     {
                         let child_id = self.doc.create_text_node(text);
                         self.doc.append_child(parent_id, child_id);
@@ -1493,12 +1520,14 @@ impl EngineFrame {
                 match mutation {
                     crate::html::streaming::DomMutation::InsertElement {
                         parent_path,
+                        path,
                         tag,
                         attributes,
                     } => {
-                        if let Some(parent_id) = node_id_at_path(&self.doc.root, &parent_path) {
+                        if let Some(parent_id) = self.stream_node_ids.get(&parent_path).copied() {
                             let child_id = self.doc.create_element(&tag);
                             self.doc.append_child(parent_id, child_id);
+                            self.stream_node_ids.insert(path, child_id);
                             for (name, value) in &attributes {
                                 self.doc.set_attribute(child_id, &name, &value);
                             }
@@ -1527,7 +1556,7 @@ impl EngineFrame {
                     }
                     crate::html::streaming::DomMutation::AppendText { parent_path, text } => {
                         if !text.is_empty()
-                            && let Some(parent_id) = node_id_at_path(&self.doc.root, &parent_path)
+                            && let Some(parent_id) = self.stream_node_ids.get(&parent_path).copied()
                         {
                             let child_id = self.doc.create_text_node(&text);
                             self.doc.append_child(parent_id, child_id);
@@ -1568,6 +1597,7 @@ impl EngineFrame {
             }
         }
         materialize_streamed_inline_svgs(&mut self.doc.root);
+        self.stream_node_ids.clear();
         post_process_streamed_tree(&mut self.doc.root, &self.doc.base_url);
         crate::html::number_lists(&mut self.doc.root);
         self.stylesheet_tx = None;
@@ -1698,6 +1728,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn queued_stylesheet_fragments_are_applied_in_one_frame() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.load_html("<p>CSS batches</p>");
+        frame.update_frame();
+        let generation = frame.doc.layout_generation;
+        let rules_before = frame.doc.stylesheet.rules.len();
+        let (tx, rx) = std::sync::mpsc::channel();
+        for i in 0..100 {
+            let mut sheet = crate::css::Stylesheet::default();
+            sheet.parse_and_add_author(&format!(".batch-{i} {{ color: red }}"));
+            tx.send((0, String::new(), sheet, String::new())).unwrap();
+        }
+        frame.doc.pending_stylesheets = Some(rx);
+
+        frame.update_frame();
+        assert_eq!(frame.doc.stylesheet.rules.len(), rules_before + 100);
+        assert_eq!(frame.doc.layout_generation, generation + 1);
+    }
+
+    #[test]
     fn streaming_frame_keeps_parser_state_across_chunks() {
         let mut frame = EngineFrame::empty(320.0, 240.0);
         frame.start_streaming("https://example.test/");
@@ -1728,6 +1778,28 @@ mod tests {
         frame.finish_loading();
         let text = crate::dom::get_text_content(&frame.doc.root);
         assert!(text.contains("Hello stream"), "streamed text was {text:?}");
+    }
+
+    #[test]
+    fn streamed_elements_keep_their_parent_after_an_intermediate_layout() {
+        let mut frame = EngineFrame::empty(480.0, 320.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(b"<html><body><main><span>Profile</span><div>Sidebar</div>");
+        frame.update_frame();
+        let main = crate::dom::query_selector(&frame.doc.root, "main").unwrap();
+        assert!(
+            main.children.iter().any(|child| child.tag == "anonymous-block"),
+            "layout must change the child-index structure exercised by this test"
+        );
+        frame.feed_html_chunk(
+            b"<turbo-frame id='late'><h2>Pinned</h2></turbo-frame></main></body></html>",
+        );
+        frame.finish_loading();
+
+        let main = crate::dom::query_selector(&frame.doc.root, "main").unwrap();
+        let late = crate::dom::query_selector(main, "#late").expect("late streamed element");
+        assert_eq!(late.tag, "turbo-frame");
+        assert_eq!(crate::dom::get_text_content(late), "Pinned");
     }
 
     #[test]

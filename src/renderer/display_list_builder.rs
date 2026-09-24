@@ -2574,12 +2574,7 @@ fn build_inline_text(
             }
 
             let x_pos = if let Some((start, _)) = char_x_start_end {
-                let exact_x = lx + line.text_x_offset + start;
-                if (exact_x - cursor_x).abs() <= 1.0 {
-                    exact_x
-                } else {
-                    cursor_x
-                }
+                lx + line.text_x_offset + start
             } else {
                 cursor_x
             };

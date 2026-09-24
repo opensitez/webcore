@@ -460,6 +460,19 @@ fn zero_blur_box_shadow_paints_only_visible_shadow_difference() {
 }
 
 #[test]
+fn zero_blur_rounded_shadow_does_not_paint_square_corners() {
+    let pm = render_html(
+        r#"<style>body{margin:0;background:white}#avatar{margin:40px;width:60px;height:60px;border-radius:50%;box-shadow:0 0 0 2px black}</style><div id="avatar"></div>"#,
+        140,
+        140,
+    );
+    let (cr, cg, cb, _) = pixel(&pm, 40, 40);
+    assert!(cr > 245 && cg > 245 && cb > 245, "rounded shadow painted a square corner");
+    let (tr, tg, tb, _) = pixel(&pm, 70, 39);
+    assert!(tr < 100 && tg < 100 && tb < 100, "rounded shadow is missing at the top edge");
+}
+
+#[test]
 fn leading_space_in_split_text_run_renders_like_unsplit_text() {
     let html = |body: &str| {
         format!(
@@ -2399,6 +2412,51 @@ fn inline_run_boundaries_preserve_collapsed_spaces() {
         against_x + against_w,
         slowing_visible_x
     );
+}
+
+#[test]
+fn indented_inline_links_paint_at_collapsed_layout_positions() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list_full;
+
+    let mut renderer = Renderer::new();
+    let doc = renderer.load_html(
+        r#"<style>* { margin: 0; padding: 0; } #row { width: 296px; font: 14px Arial; }</style>
+        <div id="row"><a><svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg>
+          <span>6</span>
+          followers
+        </a> · <a><span>3</span> following</a></div>"#,
+        500.0,
+    );
+    let list = build_display_list_full(
+        &doc.root,
+        500.0,
+        120.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+    let parts = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Text { x, text, .. }
+                if ["6", "followers", "·", "3", "following"]
+                    .iter()
+                    .any(|part| text.trim() == *part) =>
+            {
+                Some((text.trim().to_owned(), *x))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let positions = ["6", "followers", "·", "3", "following"]
+        .map(|part| parts.iter().find(|(text, _)| text == part).unwrap().1);
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{positions:?}");
+    assert!(positions[4] - positions[0] < 140.0, "{positions:?}");
 }
 
 #[test]

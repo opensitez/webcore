@@ -363,6 +363,14 @@ pub(crate) fn copy_property_from_style(
         "color-scheme" => style.color_scheme = parent.color_scheme.clone(),
         "forced-color-adjust" => style.forced_color_adjust = parent.forced_color_adjust.clone(),
         "text-orientation" => style.text_orientation = parent.text_orientation,
-        _ => {} // Unhandled properties — no-op
+        _ => {
+            let def = property_defs::get(properties::resolve(prop));
+            for &longhand in def.longhands {
+                (property_defs::get(longhand).copy)(style, parent);
+            }
+            if def.longhands.is_empty() {
+                (def.copy)(style, parent);
+            }
+        }
     }
 }

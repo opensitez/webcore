@@ -618,6 +618,7 @@ pub(crate) fn animation_property_affects_layout(prop: &str) -> bool {
             | "background-position"
             | "background-position-x"
             | "background-position-y"
+            | "clip-path"
             | "border-color"
             | "border-top-color"
             | "border-right-color"
@@ -637,4 +638,16 @@ pub(crate) fn animation_property_affects_layout(prop: &str) -> bool {
             | "stop-color"
             | "stop-opacity"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::animation_property_affects_layout;
+
+    #[test]
+    fn clip_path_animation_only_changes_paint() {
+        assert!(!animation_property_affects_layout("clip-path"));
+        assert!(!animation_property_affects_layout("transform"));
+        assert!(animation_property_affects_layout("width"));
+    }
 }
