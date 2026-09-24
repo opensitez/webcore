@@ -201,15 +201,16 @@ fn apply_container_cascade_inner(
     }
 
     // Push this element as an ancestor for children (mirrors apply_cascade_inner).
-    ancestors.push(AncestorInfo {
-        tag: node.tag.clone(),
-        attributes: node.attributes.clone(),
-        child_index,
-        sibling_count,
-        type_child_index,
-        type_sibling_count,
-        node_id: node.node_id,
-    });
+	    ancestors.push(AncestorInfo {
+	        tag: node.tag.clone(),
+	        attributes: node.attributes.clone(),
+	        child_index,
+	        sibling_count,
+	        type_child_index,
+	        type_sibling_count,
+	        node_id: node.node_id,
+	        prev_siblings: Vec::new(),
+	    });
 
     // O(n) type counting (was O(n²) with per-child filter passes).
     let child_tags: Vec<String> = node

@@ -99,15 +99,16 @@ fn flatten_tree_for_cascade<'a>(
         });
     }
 
-    ancestors.push(AncestorInfo {
-        tag: node.tag.clone(),
-        attributes: node.attributes.clone(),
-        child_index,
-        sibling_count,
-        type_child_index,
-        type_sibling_count,
-        node_id: node.node_id,
-    });
+	    ancestors.push(AncestorInfo {
+	        tag: node.tag.clone(),
+	        attributes: node.attributes.clone(),
+	        child_index,
+	        sibling_count,
+	        type_child_index,
+	        type_sibling_count,
+	        node_id: node.node_id,
+	        prev_siblings: siblings[..sibling_pos].to_vec(),
+	    });
 
     let n_children = node.children.len();
     if n_children > 0 {

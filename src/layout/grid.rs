@@ -388,7 +388,10 @@ pub fn layout_grid_subgrid(
         let cf = child.style.font_size_px(font_px, root_font_px);
         let eff_justify = effective_justify_self(child, node_justify_items);
         let eff_align = effective_align_self_grid(child, node_align_items);
-        let saved_w = if eff_justify == AlignItems::Stretch && child.style.width.is_auto() {
+        let saved_w = if eff_justify == AlignItems::Stretch
+            && child.style.width.is_auto()
+            && child.style.width.intrinsic().is_none()
+        {
             let cr = engine.res_box(&child.style, cf, sw, root_font_px);
             let css_w = stretched_grid_item_content_width(sw, &cr, child.style.box_sizing);
             let saved = child.style.width.clone();
@@ -398,7 +401,10 @@ pub fn layout_grid_subgrid(
         } else {
             None
         };
-        if eff_align == AlignItems::Stretch && child.style.height.is_auto() {
+        if eff_align == AlignItems::Stretch
+            && child.style.height.is_auto()
+            && child.style.height.intrinsic().is_none()
+        {
             let cr = engine.res_box(&child.style, cf, sw, root_font_px);
             let css_h = if child.style.box_sizing == BoxSizing::BorderBox {
                 (cell_h - cr.margin_top - cr.margin_bottom).max(0.0)
@@ -926,7 +932,7 @@ pub fn layout_grid(
         let child = grid_child_ref(node, path);
         // intrinsic_sizes (unified) rather than layout_box(10000), which would
         // leak the dummy width into the child's cached layout.
-        let sz = engine.intrinsic_sizes(child, font_px, root_font_px);
+        let sz = engine.intrinsic_sizes_with_width_basis(child, font_px, root_font_px, content_w);
         col_spans.push((
             cs.min(n_measured_cols),
             ce.min(n_measured_cols),
@@ -1479,7 +1485,10 @@ pub fn layout_grid(
         // Handle justify-self / align-self
         let eff_justify = effective_justify_self(child, node_justify_items);
         let eff_align = effective_align_self_grid(child, node_align_items);
-        let saved_w = if eff_justify == AlignItems::Stretch && child.style.width.is_auto() {
+        let saved_w = if eff_justify == AlignItems::Stretch
+            && child.style.width.is_auto()
+            && child.style.width.intrinsic().is_none()
+        {
             let css_w = stretched_grid_item_content_width(span_w, &crbox, child.style.box_sizing);
             let saved = child.style.width.clone();
             std::sync::Arc::make_mut(&mut child.style).width = CssLength::Px(css_w);
@@ -1490,7 +1499,10 @@ pub fn layout_grid(
         };
 
         // Stretch align-self: set explicit height and re-layout
-        if eff_align == AlignItems::Stretch && child.style.height.is_auto() {
+        if eff_align == AlignItems::Stretch
+            && child.style.height.is_auto()
+            && child.style.height.intrinsic().is_none()
+        {
             // Compute the height value to assign to child.style.height.
             // resolve_box will later interpret this through box-sizing:
             //   border-box → subtracts padding+border from the assigned value
@@ -1529,7 +1541,10 @@ pub fn layout_grid(
 
         // Re-read crbox after potential re-layout
         let crbox = engine.res_box(&child.style, child_font, span_w, root_font_px);
-        if eff_justify == AlignItems::Stretch && child.style.width.is_auto() {
+        if eff_justify == AlignItems::Stretch
+            && child.style.width.is_auto()
+            && child.style.width.intrinsic().is_none()
+        {
             let target_w = (span_w - crbox.margin_left - crbox.margin_right).max(0.0);
             let current_w = child.layout.border_rect.w;
             if current_w > target_w + 0.5 || current_w < target_w - 0.5 {

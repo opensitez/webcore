@@ -909,6 +909,15 @@ fn html_noscript_content_suppressed() {
 }
 
 #[test]
+fn body_noscript_content_renders_when_scripting_is_disabled() {
+    let doc = parse(r#"<html><body><noscript><p>Fallback</p></noscript></body></html>"#);
+    assert!(doc_text(&doc).contains("Fallback"));
+    let noscript = find_box(&doc.root, &|b: &WebCore| b.tag == "noscript")
+        .expect("<noscript> should remain in the body tree");
+    assert!(!matches!(noscript.style.display, crate::types::Display::None));
+}
+
+#[test]
 fn html_meta_charset_does_not_create_box() {
     let doc = parse(r#"<html><head><meta charset="utf-8"></head><body><p>Text</p></body></html>"#);
     // `<meta>` is an ELEMENT in the head (HTML §13.2.6.4.4) with no box.

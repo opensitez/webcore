@@ -433,6 +433,7 @@ fn measure_paint_text_width(
     weight: crate::types::FontWeight,
     style: crate::types::FontStyle,
     font_family: &str,
+    font_stretch: f32,
 ) -> f32 {
     let font_system = ctx.font_system.map(|ptr| unsafe { &mut *ptr });
     crate::layout::inline_layout::measure_text_width_weighted(
@@ -443,6 +444,7 @@ fn measure_paint_text_width(
         style,
         1.0,
         font_family,
+        font_stretch,
     )
 }
 
@@ -1919,9 +1921,11 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             let mut normal_ctx = child_ctx;
             normal_ctx.suppress_deferred_z_descendants = suppress_z || !deferred_z.is_empty();
 
-            for child in eff_children {
-                if is_renderable(child) {
-                    build_for_box(child, list, &normal_ctx);
+            if !matches!(node.tag.as_str(), "input" | "select" | "textarea" | "progress" | "meter") {
+                for child in eff_children {
+                    if is_renderable(child) {
+                        build_for_box(child, list, &normal_ctx);
+                    }
                 }
             }
 
@@ -2421,17 +2425,20 @@ fn build_inline_text(
                 {
                     if visible_start > 0 {
                         let leading = &draw_text[..visible_start];
-                        leading_draw_advance = measure_paint_text_width(
-                            ctx,
-                            leading,
-                            run_font_px,
-                            style_ref.font_weight,
-                            style_ref.font_style,
-                            &style_ref.font_family,
-                        ) + run_letter_spc * leading.chars().count() as f32
-                            + run_word_spc * leading.chars().filter(|&c| c == ' ').count() as f32
-                            + line.extra_space_per_word
-                                * leading.chars().filter(|&c| c == ' ').count() as f32;
+                        if previous_logical_end.is_some() {
+                            leading_draw_advance = measure_paint_text_width(
+                                ctx,
+                                leading,
+                                run_font_px,
+                                style_ref.font_weight,
+                                style_ref.font_style,
+                                &style_ref.font_family,
+                                style_ref.font_stretch,
+                            ) + run_letter_spc * leading.chars().count() as f32
+                                + run_word_spc * leading.chars().filter(|&c| c == ' ').count() as f32
+                                + line.extra_space_per_word
+                                    * leading.chars().filter(|&c| c == ' ').count() as f32;
+                        }
                         draw_text = draw_text[visible_start..].to_string();
                     }
                 } else if !draw_text.is_empty() {
@@ -2474,6 +2481,7 @@ fn build_inline_text(
                                 style_ref.font_weight,
                                 style_ref.font_style,
                                 &style_ref.font_family,
+                                style_ref.font_stretch,
                             ) + run_letter_spc
                                 + run_word_spc
                                 + line.extra_space_per_word
@@ -2526,6 +2534,7 @@ fn build_inline_text(
                 style_ref.font_weight,
                 style_ref.font_style,
                 &style_ref.font_family,
+                style_ref.font_stretch,
             ) + run_letter_spc * draw_text.chars().count() as f32
                 + run_word_spc * draw_text.chars().filter(|&c| c == ' ').count() as f32;
 
@@ -2557,14 +2566,16 @@ fn build_inline_text(
             };
 
             if draw_text.is_empty() {
-                cursor_x += chunk_advance;
-                previous_logical_end = Some(e);
+                if previous_logical_end.is_some() {
+                    cursor_x += chunk_advance;
+                    previous_logical_end = Some(e);
+                }
                 continue;
             }
 
             let x_pos = if let Some((start, _)) = char_x_start_end {
                 let exact_x = lx + line.text_x_offset + start;
-                if exact_x + 0.5 >= cursor_x {
+                if (exact_x - cursor_x).abs() <= 1.0 {
                     exact_x
                 } else {
                     cursor_x
@@ -2609,6 +2620,7 @@ fn build_inline_text(
                     style_ref.font_weight,
                     style_ref.font_style,
                     &style_ref.font_family,
+                    style_ref.font_stretch,
                 );
                 let budget = (available - marker_width).max(0.0);
                 let full_width = measure_paint_text_width(
@@ -2618,6 +2630,7 @@ fn build_inline_text(
                     style_ref.font_weight,
                     style_ref.font_style,
                     &style_ref.font_family,
+                    style_ref.font_stretch,
                 );
                 if line_clamp_marker && full_width <= budget {
                     draw_text.push_str(overflow_marker);
@@ -2659,6 +2672,7 @@ fn build_inline_text(
                                 style_ref.font_weight,
                                 style_ref.font_style,
                                 &style_ref.font_family,
+                                style_ref.font_stretch,
                             );
                             if width <= budget {
                                 cut = next;
@@ -2718,6 +2732,8 @@ fn build_inline_text(
 
             // Text shadow
             if let Some(ref ts) = style_ref.text_shadow {
+                let shadow_alpha = ((ts.color.a as f32) * opacity).round().clamp(0.0, 255.0) as u8;
+                let shadow_color = Color::rgba(ts.color.r, ts.color.g, ts.color.b, shadow_alpha);
                 list.push(PaintCmd::TextShadow {
                     x: x_pos + ts.offset_x,
                     y: y_pos + ts.offset_y,
@@ -2732,8 +2748,11 @@ fn build_inline_text(
                     },
                     font_stretch: style_ref.font_stretch,
                     line_height: run_line_h,
-                    color: ts.color,
+                    color: shadow_color,
                     blur: ts.blur,
+                    letter_spacing: run_letter_spc,
+                    word_spacing: run_word_spc,
+                    small_caps: style_ref.small_caps,
                 });
             }
 
@@ -2839,6 +2858,7 @@ fn build_inline_text(
                         style_ref.font_weight,
                         style_ref.font_style,
                         &style_ref.font_family,
+                        style_ref.font_stretch,
                     ) + letter_sp * leading.chars().count() as f32
                         + run_word_spc * leading.chars().filter(|&c| c == ' ').count() as f32;
                 }
@@ -2871,6 +2891,7 @@ fn build_inline_text(
                         first_style.font_weight,
                         first_style.font_style,
                         &first_style.font_family,
+                        first_style.font_stretch,
                     ) + first_letter_sp;
                     emit_text_run(
                         trailing.to_string(),
@@ -3188,6 +3209,23 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32) 
 
     let cr = node.layout.content_rect;
     let font_px = node.style.font_size_px(16.0, 16.0).max(1.0);
+    let mut value_color = node.style.color;
+    let background = node.style.background_color;
+    if matches!(tag, "input" | "textarea")
+        && value_color.a == 255
+        && background.a == 255
+        && (value_color.r, value_color.g, value_color.b)
+            == (background.r, background.g, background.b)
+    {
+        let brightness = 299u32 * background.r as u32
+            + 587u32 * background.g as u32
+            + 114u32 * background.b as u32;
+        value_color = if brightness < 128_000 {
+            Color::WHITE
+        } else {
+            Color::BLACK
+        };
+    }
     let value = if tag == "select" {
         // The shown text is "the label of an option of which selectedness is
         // set to true" (HTML §15.5.16) — SELECTEDNESS, not the `selected`
@@ -3249,7 +3287,7 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32) 
         font_size: font_px,
         font_weight: node.style.font_weight.value(),
         font_family: node.style.font_family.clone(),
-        color: node.style.color,
+        color: value_color,
         placeholder_color: node
             .style
             .placeholder_style

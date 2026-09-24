@@ -892,7 +892,7 @@ impl Default for Editor {
             last_blink: Instant::now(),
             mouse_down: false,
             has_focus: false,
-            read_only: false,
+            read_only: true,
             caret_at_line_start: false,
         }
     }
@@ -1020,6 +1020,14 @@ impl Editor {
                 self.mouse_down = true;
                 self.has_focus = true;
                 if let Some(hit) = point_to_hit(root, doc_pt, button) {
+                    if !is_in_contenteditable_by_id(root, hit.node_id) {
+                        self.mouse_down = false;
+                        self.caret_box = None;
+                        self.sel_anchor = 0;
+                        self.sel_start = 0;
+                        self.sel_end = 0;
+                        return false;
+                    }
                     if !user_select_allows_selection(root, hit.node_id) {
                         self.mouse_down = false;
                         return false;

@@ -72,6 +72,30 @@ fn collapsible_space_across_inline_boundaries_is_not_measured_or_painted_twice()
 }
 
 #[test]
+fn indented_inline_link_after_atomic_box_paints_at_its_layout_position() {
+    let html = r#"<style>
+        body { margin: 0; font: 18px/24px sans-serif; }
+        .book { display: inline-block; padding: 0 10px; }
+        .cover { display: inline-block; width: 27px; height: 40px; }
+    </style>
+    <div class="book"><span class="cover"></span>
+        <a id="link">
+            French Anthology on Amazon
+        </a>
+    </div>"#;
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(html, 800.0);
+    let link = doc.get_element_by_id("link").unwrap();
+    let link_x = doc.get_bounding_client_rect(link).unwrap().x;
+    let list = build_display_list(&doc.root, 800.0, 600.0);
+    let text_x = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Text { x, text, .. } if text.contains("French Anthology") => Some(*x),
+        _ => None,
+    }).expect("link text paint command");
+    assert!((text_x - link_x).abs() < 2.0, "paint x {text_x}, layout x {link_x}");
+}
+
+#[test]
 fn leading_space_after_inline_link_is_preserved_in_paint_text() {
     let texts = build_display_texts(
         r#"<style>
@@ -3825,6 +3849,31 @@ fn css_selector_hex_escape_consumes_optional_trailing_space() {
 }
 
 #[test]
+fn escaped_arbitrary_class_custom_property_feeds_mask_image_var() {
+    let html = r#"
+        <style>
+            .icon {
+                display: inline-block;
+                width: 24px;
+                height: 24px;
+                mask-image: var(--icon-url);
+                -webkit-mask-image: var(--icon-url);
+            }
+            .\[--icon-url\:url\(\'\/leo-icons\/search\.svg\'\)\] {
+                --icon-url: url('/leo-icons/search.svg');
+            }
+        </style>
+        <span id="i" class="icon [--icon-url:url('/leo-icons/search.svg')]"></span>
+    "#;
+    let mut doc = crate::load_html(html, 200.0);
+    let id = doc.get_element_by_id("i").expect("icon span");
+    assert_eq!(
+        doc.computed_style_property(id, "mask-image"),
+        "url(\"/leo-icons/search.svg\")"
+    );
+}
+
+#[test]
 fn css_escaped_before_class_is_not_stripped_as_pseudo_element() {
     let mut ss = Stylesheet::default();
     ss.parse_and_add(".before\\:block { display: block; }");
@@ -3869,6 +3918,143 @@ fn compound_class_selector_overrides_single_class_width() {
         (target.layout.content_rect.w - 584.0).abs() < 1.0,
         "compound class rule should override single class width; got {}",
         target.layout.content_rect.w
+    );
+}
+
+#[test]
+fn fit_content_flex_ignores_absolute_generated_decoration() {
+    let doc = parse_and_layout(
+        r#"<style>
+             body { margin: 0; font: 16px/20px sans-serif; }
+             .leoButton {
+               display: flex;
+               align-items: center;
+               justify-content: center;
+               box-sizing: border-box;
+               padding: 16px;
+               width: fit-content;
+               position: relative;
+             }
+             .leoButton.isHero:not(:disabled:not(.isLoading))::before,
+             .leoButton.isHero:not(:disabled:not(.isLoading))::after {
+               content: "";
+               display: block;
+               position: absolute;
+               inset: 0;
+               width: 100%;
+               height: 100%;
+             }
+             .content { padding: 0 8px; }
+             .icon { width: 24px; height: 24px; }
+           </style>
+           <a id="button" class="leoButton isHero">
+             <span class="content">Get Brave</span><span class="icon"></span>
+           </a>"#,
+        600.0,
+    );
+    let button = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(String::as_str) == Some("button")
+    })
+    .expect("button");
+    assert!(
+        button.layout.margin_rect.w < 220.0,
+        "absolute generated decoration must not make fit-content fill the container: {:?}",
+        button.layout.margin_rect
+    );
+    assert!(
+        button.layout.margin_rect.w > 120.0,
+        "button should still include text, icon and padding: {:?}",
+        button.layout.margin_rect
+    );
+}
+
+#[test]
+fn fit_content_flex_child_does_not_stretch_in_column_parent() {
+    let doc = parse_and_layout(
+        r#"<style>
+             body { margin: 0; font: 16px/20px sans-serif; }
+             .hero {
+               display: flex;
+               flex-direction: column;
+               align-items: stretch;
+               width: 600px;
+             }
+             .leoButton {
+               display: flex;
+               align-items: center;
+               justify-content: center;
+               box-sizing: border-box;
+               padding: 16px;
+               width: fit-content;
+               position: relative;
+             }
+             .leoButton::before,
+             .leoButton::after {
+               content: "";
+               display: block;
+               position: absolute;
+               inset: 0;
+               width: 100%;
+               height: 100%;
+             }
+             .content { padding: 0 8px; }
+             .icon { width: 24px; height: 24px; }
+           </style>
+           <div class="hero">
+             <a id="button" class="leoButton">
+               <span class="content">Get Brave</span><span class="icon"></span>
+             </a>
+           </div>"#,
+        800.0,
+    );
+    let button = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(String::as_str) == Some("button")
+    })
+    .expect("button");
+    assert!(
+        button.layout.margin_rect.w < 220.0,
+        "fit-content flex item must not be stretched as auto width: {:?}",
+        button.layout.margin_rect
+    );
+    assert!(
+        button.layout.margin_rect.w > 120.0,
+        "button should still include text, icon and padding: {:?}",
+        button.layout.margin_rect
+    );
+}
+
+#[test]
+fn flex_container_max_width_max_content_clamps_auto_width() {
+    let doc = parse_and_layout(
+        r#"<style>
+             body { margin: 0; font: 14px/20px sans-serif; }
+             .card { width: 360px; }
+             .button {
+               display: flex;
+               box-sizing: border-box;
+               max-width: max-content;
+               padding: 11px 16px;
+               border: 1px solid black;
+             }
+           </style>
+           <div class="card">
+             <div id="button" class="button">Firewall + VPN</div>
+           </div>"#,
+        800.0,
+    );
+    let button = find_box(&doc.root, &|b| {
+        b.attributes.get("id").map(String::as_str) == Some("button")
+    })
+    .expect("button");
+    assert!(
+        button.layout.margin_rect.w < 180.0,
+        "max-width:max-content should clamp flex container auto width: {:?}",
+        button.layout.margin_rect
+    );
+    assert!(
+        button.layout.margin_rect.w > 100.0,
+        "button should still include its text and padding: {:?}",
+        button.layout.margin_rect
     );
 }
 
@@ -4959,6 +5145,132 @@ fn css_bootstrap_root_selector_list_vars_resolve() {
         "Bootstrap :root,[data-bs-theme=light] variables should be visible to utilities"
     );
     assert_eq!(badge.style.color, Color::rgb(33, 37, 41));
+}
+
+#[test]
+fn adjacent_var_substitutions_in_border_shorthand_keep_token_boundaries() {
+    let doc = parse_and_layout(
+        r#"<html><head><style>
+        :root {
+          --brand: rgb(251, 84, 43);
+          --nested-brand: var(--brand);
+          --on-brand: white;
+        }
+        .leoButton {
+          --primary-color: var(--missing-button-color, var(--nested-brand));
+          --mixed-primary-color: var(--primary-color);
+          --border-width: 0px;
+          --border-color: transparent;
+          --bg: transparent;
+          --color: black;
+          border: solid var(--border-width,1px)var(--border-color,transparent);
+          background: var(--bg);
+          color: var(--color);
+        }
+        .leoButton.isFilled {
+          --bg: var(--mixed-primary-color);
+          --color: var(--on-brand);
+        }
+    </style></head><body><a class="leoButton isFilled">Download Brave</a></body></html>"#,
+        800.0,
+    );
+    let button = find_box(&doc.root, &|b| {
+        b.tag == "a"
+            && b.attributes
+                .get("class")
+                .is_some_and(|class| class.contains("leoButton"))
+    })
+    .unwrap();
+    assert_eq!(
+        button.style.border_top_width,
+        CssLength::Px(0.0),
+        "adjacent var() values in border shorthand must remain distinct tokens"
+    );
+    assert_eq!(button.style.border_top_color, Color::TRANSPARENT);
+    assert_eq!(button.style.background_color, Color::rgb(251, 84, 43));
+    assert_eq!(button.style.color, Color::WHITE);
+}
+
+#[test]
+fn custom_property_color_mix_chain_resolves_before_border_shorthand() {
+    let doc = parse_and_layout(
+        r#"<html data-theme="light"><head><style>
+        :root {
+          --leo-color-button-background: #434fcf;
+        }
+        .leoButton {
+          --background: transparent;
+          --primary-color: var(--leo-button-color, var(--leo-color-button-background));
+          --border-width: 1px;
+          --border-color: color-mix(in srgb, var(--primary-color), var(--background) 30%);
+          border: solid var(--border-width,1px)var(--border-color,transparent);
+        }
+    </style></head><body><a class="leoButton">Search the Web</a></body></html>"#,
+        800.0,
+    );
+    let button = find_box(&doc.root, &|b| {
+        b.tag == "a"
+            && b.attributes
+                .get("class")
+                .is_some_and(|class| class.contains("leoButton"))
+    })
+    .unwrap();
+    assert_eq!(button.style.border_top_width, CssLength::Px(1.0));
+    assert_eq!(
+        button.style.border_top_color,
+        Color::rgba(47, 55, 145, 179),
+        "nested custom-property fallback and color-mix should resolve before border parses"
+    );
+}
+
+#[test]
+fn stylesheet_root_variable_extraction_handles_root_pseudos_without_descendants() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add(
+        r#"
+        :root[data-theme=light] { --brand: #434fcf; }
+        :root * { --scoped-only: red; }
+        html:where(.theme) { --accent: #fb542b; }
+        "#,
+    );
+    sheet.resolve_variables_for_viewport(800.0, 600.0);
+    assert_eq!(sheet.variables.get("--brand").map(String::as_str), Some("#434fcf"));
+    assert_eq!(sheet.variables.get("--accent").map(String::as_str), Some("#fb542b"));
+    assert!(
+        !sheet.variables.contains_key("--scoped-only"),
+        "descendant-scoped custom properties must not be promoted to stylesheet globals"
+    );
+}
+
+#[test]
+fn streamed_custom_property_only_root_fragment_is_preserved() {
+    let css = ":root{--brand:#434fcf}.button{color:var(--brand)}";
+    let loader: crate::StylesheetLoader = std::sync::Arc::new(|_| Ok(String::new()));
+    let streaming_loader: crate::StreamingStylesheetLoader =
+        std::sync::Arc::new(move |_, emit| {
+            emit(css);
+            Ok(())
+        });
+    let loaded = crate::load_stylesheet_cached(
+        "test-streamed-root-vars".to_string(),
+        "https://example.test/app.css".to_string(),
+        "".to_string(),
+        loader,
+        Some(streaming_loader),
+        false,
+        |_| {},
+    );
+    let mut sheet = loaded.sheet;
+    sheet.resolve_variables_for_viewport(800.0, 600.0);
+    assert_eq!(
+        sheet.variables.get("--brand").map(String::as_str),
+        Some("#434fcf"),
+        "streaming must not drop custom-property-only root fragments"
+    );
+    assert_eq!(
+        crate::css::resolve_var_references("var(--brand)", &sheet.variables),
+        "#434fcf"
+    );
 }
 
 #[test]
@@ -7507,6 +7819,24 @@ fn a_percentage_cross_size_resolves_against_the_flex_container() {
     let b = d.get_bounding_client_rect(e).unwrap();
     assert!((b.w - 150.0).abs() < 0.5, "50% of 300, got {}", b.w);
     assert!((b.h - 30.0).abs() < 0.5, "50% of 60, got {}", b.h);
+}
+
+#[test]
+fn a_percentage_cross_size_resolves_against_aspect_ratio_flex_container() {
+    let mut r = crate::Renderer::new();
+    let mut d = r.load_html(
+        "<style>body{margin:0}.card{display:flex;align-items:center;justify-content:center;width:128px;aspect-ratio:1/1}</style>\
+         <div class=card><i id=a style='display:block;width:62.5%;height:62.5%'></i></div>",
+        900.0,
+    );
+    let e = d.get_element_by_id("a").unwrap();
+    let b = d.get_bounding_client_rect(e).unwrap();
+    assert!((b.w - 80.0).abs() < 0.5, "62.5% of 128, got {}", b.w);
+    assert!(
+        (b.h - 80.0).abs() < 0.5,
+        "62.5% should resolve against the aspect-ratio-derived flex height, got {}",
+        b.h
+    );
 }
 
 /// A column flex item that shrinks to its intrinsic width keeps the main size
@@ -10580,6 +10910,7 @@ fn font_face_size_adjust_scales_text_measurement() {
         FontStyle::Normal,
         1.0,
         "Size Adjust Face",
+        100.0,
     );
     crate::layout::inline_layout::set_font_metric_override(
         "Size Adjust Face",
@@ -10598,6 +10929,7 @@ fn font_face_size_adjust_scales_text_measurement() {
         FontStyle::Normal,
         1.0,
         "Size Adjust Face",
+        100.0,
     );
 
     assert!(

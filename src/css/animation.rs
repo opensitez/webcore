@@ -468,11 +468,10 @@ pub(crate) fn extract_root_variables_vp(
                 s == ":root"
                     || s == "html"
                     || s == "*"
-                    || s.starts_with(":root ")
-                    || s.starts_with(":root,")
-                    || s.starts_with("html ")
-                    || s.starts_with("html,")
+                    || s.starts_with(":root[")
+                    || s.starts_with(":root:")
                     || s.starts_with("html[")
+                    || s.starts_with("html:")
             });
             if is_root && block.contains("--") {
                 for decl in block.split(';') {

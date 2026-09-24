@@ -666,6 +666,14 @@ fn collect_deferred_z_descendants_for_hit<'a>(
         out.push((node, pt));
         return;
     }
+    // Floats paint as an atomic object above later in-flow block backgrounds
+    // in the same stacking context. Without deferring them, a following block
+    // whose border box overlaps the float's visual position can steal pointer
+    // events from visible controls inside the float.
+    if !matches!(node.style.float, Float::None) {
+        out.push((node, pt));
+        return;
+    }
     if creates_hit_stacking_context(node) {
         return;
     }

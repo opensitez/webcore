@@ -129,6 +129,24 @@ pub(crate) fn clear_layout_subtree(node: &mut WebCore) {
     }
 }
 
+fn clear_layout_children(node: &mut WebCore) {
+    for child in &mut node.children {
+        clear_layout_subtree(child);
+    }
+    if let Some(shadow) = node.shadow_root.as_mut() {
+        for child in &mut shadow.children {
+            clear_layout_subtree(child);
+        }
+    }
+}
+
+fn is_native_replaced_control(node: &WebCore) -> bool {
+    matches!(
+        node.tag.as_str(),
+        "input" | "select" | "textarea" | "progress" | "meter"
+    )
+}
+
 pub(crate) fn establishes_positioned_containing_block(style: &ComputedStyle) -> bool {
     let transform = style.transform.trim();
     let has_active_transform = !transform.is_empty() && !transform.eq_ignore_ascii_case("none");
@@ -1533,6 +1551,23 @@ impl LayoutEngine {
         style: FontStyle,
         font_family: &str,
     ) -> f32 {
+        self.measure_text_cached_with_stretch(text, font_px, weight, style, font_family, 100.0)
+    }
+
+    /// Measure text width with all font attributes that affect shaping.
+    ///
+    /// Keep this in lockstep with display-list replay: paint shapes with
+    /// weight/style/family/stretch, so layout must include the same attributes
+    /// or shrink-to-fit and wrapping will size one face and draw another.
+    pub fn measure_text_cached_with_stretch(
+        &self,
+        text: &str,
+        font_px: f32,
+        weight: FontWeight,
+        style: FontStyle,
+        font_family: &str,
+        font_stretch: f32,
+    ) -> f32 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
@@ -1543,6 +1578,7 @@ impl LayoutEngine {
         weight.value().hash(&mut hasher);
         (style as u8).hash(&mut hasher);
         font_family.hash(&mut hasher);
+        font_stretch.to_bits().hash(&mut hasher);
         self.scale.to_bits().hash(&mut hasher);
         let font_state = self.font_system.map(|fs_ptr| {
             let fs = unsafe { &*fs_ptr };
@@ -1572,6 +1608,7 @@ impl LayoutEngine {
                 style,
                 self.scale,
                 font_family,
+                font_stretch,
             )
         } else {
             crate::layout::inline_layout::measure_text_width_ts(text, font_px, 8)
@@ -1585,6 +1622,28 @@ impl LayoutEngine {
             cache.insert(key, w);
         }
         w
+    }
+
+    fn measure_text_with_css_spacing(
+        &self,
+        text: &str,
+        font_px: f32,
+        style: &ComputedStyle,
+        root_font_px: f32,
+    ) -> f32 {
+        let shaped = self.measure_text_cached_with_stretch(
+            text,
+            font_px,
+            style.font_weight,
+            style.font_style,
+            &style.font_family,
+            style.font_stretch,
+        );
+        let letter_spacing = style.letter_spacing.resolve(font_px, 0.0, root_font_px);
+        let word_spacing = style.word_spacing.resolve(font_px, 0.0, root_font_px);
+        let letters = text.chars().count() as f32;
+        let words = text.chars().filter(|ch| ch.is_ascii_whitespace()).count() as f32;
+        shaped + letter_spacing * letters + word_spacing * words
     }
 
     fn field_sizing_content_width(&self, node: &WebCore, font_px: f32) -> Option<f32> {
@@ -1737,6 +1796,31 @@ impl LayoutEngine {
         }
     }
 
+    pub(crate) fn intrinsic_sizes_with_width_basis(
+        &self,
+        node: &WebCore,
+        parent_font_px: f32,
+        root_font_px: f32,
+        width_basis: f32,
+    ) -> IntrinsicSizes {
+        IntrinsicSizes {
+            min_content: self.min_content_width_inner(
+                node,
+                parent_font_px,
+                root_font_px,
+                true,
+                Some(width_basis),
+            ),
+            max_content: self.max_content_width_inner(
+                node,
+                parent_font_px,
+                root_font_px,
+                true,
+                Some(width_basis),
+            ),
+        }
+    }
+
     /// Intrinsic dimensions of a replaced element: the decoded image/canvas
     /// bitmap, else the `width`/`height` content attributes, else an `<svg>`
     /// viewBox. Media elements use their HTML fallback dimensions until a
@@ -1838,7 +1922,7 @@ impl LayoutEngine {
     /// Compute the min-content width of a node (the smallest width it can take
     /// without overflowing).  For text, this is the width of the longest word.
     pub fn min_content_width(&self, node: &WebCore, parent_font_px: f32, root_font_px: f32) -> f32 {
-        self.min_content_width_inner(node, parent_font_px, root_font_px, true)
+        self.min_content_width_inner(node, parent_font_px, root_font_px, true, None)
     }
 
     /// Min-content width with the element's own `width` ignored. This is the
@@ -1978,7 +2062,7 @@ impl LayoutEngine {
         parent_font_px: f32,
         root_font_px: f32,
     ) -> f32 {
-        self.min_content_width_inner(node, parent_font_px, root_font_px, false)
+        self.min_content_width_inner(node, parent_font_px, root_font_px, false, None)
     }
 
     fn empty_pseudo_lacks_intrinsic_contribution(
@@ -2040,6 +2124,7 @@ impl LayoutEngine {
         parent_font_px: f32,
         root_font_px: f32,
         honor_width: bool,
+        width_basis: Option<f32>,
     ) -> f32 {
         if matches!(node.style.display, Display::None) {
             return 0.0;
@@ -2054,8 +2139,12 @@ impl LayoutEngine {
         }
 
         // Explicit width → use that directly
-        if honor_width && !node.style.width.is_auto() && !node.style.width.has_percentage() {
-            let w = self.res_len(&node.style.width, font_px, 0.0, root_font_px);
+        if honor_width
+            && !node.style.width.is_auto()
+            && (!node.style.width.has_percentage() || width_basis.is_some())
+        {
+            let basis = width_basis.unwrap_or(0.0);
+            let w = self.res_len(&node.style.width, font_px, basis, root_font_px);
             // ⛔ A `border-box` width ALREADY contains the padding and border,
             // and every caller adds those again on top of what we return — the
             // contract here is a CONTENT width. Handing back the raw value made
@@ -2133,28 +2222,12 @@ impl LayoutEngine {
                     &text,
                     node.style.text_transform,
                 );
-                let letter_spacing = node
-                    .style
-                    .letter_spacing
-                    .resolve(font_px, 0.0, root_font_px);
-                let word_spacing = node.style.word_spacing.resolve(font_px, 0.0, root_font_px);
-                return if letter_spacing != 0.0 || word_spacing != 0.0 {
-                    text::measure_text_with_spacing(
-                        &text,
-                        font_px,
-                        letter_spacing,
-                        word_spacing,
-                        None,
-                    )
-                } else {
-                    self.measure_text_cached(
-                        &text,
-                        font_px,
-                        node.style.font_weight,
-                        node.style.font_style,
-                        &node.style.font_family,
-                    )
-                };
+                return self.measure_text_with_css_spacing(
+                    &text,
+                    font_px,
+                    &node.style,
+                    root_font_px,
+                );
             }
             let mut max_word = 0.0f32;
             for word in text.split(|c: char| c.is_ascii_whitespace()) {
@@ -2165,12 +2238,11 @@ impl LayoutEngine {
                     word,
                     node.style.text_transform,
                 );
-                let w = self.measure_text_cached(
+                let w = self.measure_text_with_css_spacing(
                     &word,
                     font_px,
-                    node.style.font_weight,
-                    node.style.font_style,
-                    &node.style.font_family,
+                    &node.style,
+                    root_font_px,
                 );
                 if w > max_word {
                     max_word = w;
@@ -2263,7 +2335,7 @@ impl LayoutEngine {
     }
 
     pub fn max_content_width(&self, node: &WebCore, parent_font_px: f32, root_font_px: f32) -> f32 {
-        self.max_content_width_inner(node, parent_font_px, root_font_px, true)
+        self.max_content_width_inner(node, parent_font_px, root_font_px, true, None)
     }
 
     /// Max-content width with the element's own `width` ignored, which is what
@@ -2275,7 +2347,7 @@ impl LayoutEngine {
         parent_font_px: f32,
         root_font_px: f32,
     ) -> f32 {
-        self.max_content_width_inner(node, parent_font_px, root_font_px, false)
+        self.max_content_width_inner(node, parent_font_px, root_font_px, false, None)
     }
 
     fn max_content_width_inner(
@@ -2284,6 +2356,7 @@ impl LayoutEngine {
         parent_font_px: f32,
         root_font_px: f32,
         honor_width: bool,
+        width_basis: Option<f32>,
     ) -> f32 {
         if matches!(node.style.display, Display::None) {
             return 0.0;
@@ -2298,8 +2371,12 @@ impl LayoutEngine {
             return w;
         }
 
-        if honor_width && !node.style.width.is_auto() && !node.style.width.has_percentage() {
-            let w = self.res_len(&node.style.width, font_px, 0.0, root_font_px);
+        if honor_width
+            && !node.style.width.is_auto()
+            && (!node.style.width.has_percentage() || width_basis.is_some())
+        {
+            let basis = width_basis.unwrap_or(0.0);
+            let w = self.res_len(&node.style.width, font_px, basis, root_font_px);
             // ⛔ A `border-box` width ALREADY contains the padding and border,
             // and every caller adds those again on top of what we return — the
             // contract here is a CONTENT width. Handing back the raw value made
@@ -2357,12 +2434,13 @@ impl LayoutEngine {
                         _ => "",
                     },
                 };
-                return self.measure_text_cached(
+                return self.measure_text_cached_with_stretch(
                     label,
                     font_px,
                     node.style.font_weight,
                     node.style.font_style,
                     &node.style.font_family,
+                    node.style.font_stretch,
                 );
             }
         }
@@ -2413,22 +2491,7 @@ impl LayoutEngine {
                 &text,
                 node.style.text_transform,
             );
-            let letter_spacing = node
-                .style
-                .letter_spacing
-                .resolve(font_px, 0.0, root_font_px);
-            let word_spacing = node.style.word_spacing.resolve(font_px, 0.0, root_font_px);
-            let w = if letter_spacing != 0.0 || word_spacing != 0.0 {
-                text::measure_text_with_spacing(&text, font_px, letter_spacing, word_spacing, None)
-            } else {
-                self.measure_text_cached(
-                    &text,
-                    font_px,
-                    node.style.font_weight,
-                    node.style.font_style,
-                    &node.style.font_family,
-                )
-            };
+            let w = self.measure_text_with_css_spacing(&text, font_px, &node.style, root_font_px);
             return w;
         }
 
@@ -2832,12 +2895,6 @@ impl LayoutEngine {
         if node.is_text_node() || node.text.is_empty() {
             return 0.0;
         }
-        let (letter_spacing, word_spacing) = (
-            node.style
-                .letter_spacing
-                .resolve(font_px, 0.0, root_font_px),
-            node.style.word_spacing.resolve(font_px, 0.0, root_font_px),
-        );
         node.text
             .split(|c: char| c.is_ascii_whitespace())
             .filter(|word| !word.is_empty())
@@ -2846,23 +2903,7 @@ impl LayoutEngine {
                     word,
                     node.style.text_transform,
                 );
-                if letter_spacing != 0.0 || word_spacing != 0.0 {
-                    text::measure_text_with_spacing(
-                        &transformed,
-                        font_px,
-                        letter_spacing,
-                        word_spacing,
-                        None,
-                    )
-                } else {
-                    self.measure_text_cached(
-                        &transformed,
-                        font_px,
-                        node.style.font_weight,
-                        node.style.font_style,
-                        &node.style.font_family,
-                    )
-                }
+                self.measure_text_with_css_spacing(&transformed, font_px, &node.style, root_font_px)
             })
             .fold(0.0_f32, f32::max)
     }
@@ -2891,22 +2932,7 @@ impl LayoutEngine {
             &text,
             node.style.text_transform,
         );
-        let letter_spacing = node
-            .style
-            .letter_spacing
-            .resolve(font_px, 0.0, root_font_px);
-        let word_spacing = node.style.word_spacing.resolve(font_px, 0.0, root_font_px);
-        if letter_spacing != 0.0 || word_spacing != 0.0 {
-            text::measure_text_with_spacing(&text, font_px, letter_spacing, word_spacing, None)
-        } else {
-            self.measure_text_cached(
-                &text,
-                font_px,
-                node.style.font_weight,
-                node.style.font_style,
-                &node.style.font_family,
-            )
-        }
+        self.measure_text_with_css_spacing(&text, font_px, &node.style, root_font_px)
     }
 
     fn generated_content_width(
@@ -2920,12 +2946,13 @@ impl LayoutEngine {
             if content.is_empty() {
                 return 0.0;
             }
-            return self.measure_text_cached(
+            return self.measure_text_cached_with_stretch(
                 content,
                 parent_font_px,
                 FontWeight::Normal,
                 FontStyle::Normal,
                 "",
+                100.0,
             );
         };
         let font_px = style.font_size_px(parent_font_px, root_font_px);
@@ -2941,12 +2968,11 @@ impl LayoutEngine {
             } else if transformed.is_empty() {
                 0.0
             } else {
-                self.measure_text_cached(
+                self.measure_text_with_css_spacing(
                     &transformed,
                     font_px,
-                    style.font_weight,
-                    style.font_style,
-                    &style.font_family,
+                    style,
+                    root_font_px,
                 )
             };
         content_w.max(0.0)
@@ -3610,6 +3636,19 @@ impl LayoutEngine {
             return 0.0;
         }
 
+        if node.is_text_node()
+            && node.text.chars().all(|ch| ch.is_ascii_whitespace())
+            && matches!(node.style.white_space, WhiteSpace::Normal | WhiteSpace::Nowrap)
+        {
+            clear_layout_subtree(node);
+            node.layout.layout_dirty = false;
+            node.layout.intrinsic_dirty = false;
+            node.layout.paint_dirty = false;
+            node.has_dirty_layout_descendant = false;
+            node.layout.last_containing_width = containing_w;
+            return 0.0;
+        }
+
         if is_layout_inert_svg_node(node) {
             node.layout.content_rect = Rect::default();
             node.layout.padding_rect = Rect::default();
@@ -3897,6 +3936,84 @@ impl LayoutEngine {
             }
         }
 
+        if is_native_replaced_control(node) {
+            clear_layout_children(node);
+            node.layout.line_cache.clear();
+            node.layout.inline_runs.clear();
+
+            let fallback_w = match node.tag.as_str() {
+                "input" => {
+                    match node.attributes.get("type").map(|s| s.as_str()) {
+                        Some("checkbox" | "radio") => font_px.max(13.0),
+                        Some(kind @ ("submit" | "reset" | "button")) => {
+                            let default_label = match kind {
+                                "submit" => "Submit",
+                                "reset" => "Reset",
+                                _ => "",
+                            };
+                            let label = node.attributes.get("value")
+                                .map(String::as_str)
+                                .filter(|value| !value.is_empty())
+                                .unwrap_or(default_label);
+                            self.measure_text_cached_with_stretch(
+                                label,
+                                font_px,
+                                node.style.font_weight,
+                                node.style.font_style,
+                                &node.style.font_family,
+                                node.style.font_stretch,
+                            )
+                        }
+                        _ => 200.0,
+                    }
+                }
+                "select" => 200.0,
+                "textarea" => 200.0,
+                "progress" | "meter" => 160.0,
+                _ => 0.0,
+            };
+            let fallback_h = match node.tag.as_str() {
+                "input" => {
+                    if matches!(
+                        node.attributes.get("type").map(|s| s.as_str()),
+                        Some("checkbox" | "radio")
+                    ) {
+                        font_px.max(13.0)
+                    } else {
+                        (font_px * 1.5).ceil().max(20.0)
+                    }
+                }
+                "select" => {
+                    let rows = crate::html::forms::display_size(node).max(1) as f32;
+                    (font_px * 1.35 * rows).ceil().max(18.0)
+                }
+                "textarea" => (font_px * 1.35 * 2.0).ceil().max(40.0),
+                "progress" | "meter" => 16.0,
+                _ => 0.0,
+            };
+            let final_w = rbox.content_width.unwrap_or(fallback_w).max(0.0);
+            let final_h = rbox.content_height.unwrap_or(fallback_h).max(0.0);
+            block::build_box_rects(
+                node,
+                &rbox,
+                x + rbox.margin_left + rbox.border_left + rbox.padding_left,
+                y + rbox.margin_top + rbox.border_top + rbox.padding_top,
+                final_w,
+                final_h,
+                rbox.margin_left,
+                rbox.margin_right,
+            );
+            node.layout.scroll_width = final_w;
+            node.layout.scroll_height = final_h;
+            node.layout.scroll_left = 0.0;
+            node.layout.scroll_top = 0.0;
+            node.layout.resolved_content_width = final_w;
+            node.layout.layout_dirty = false;
+            node.layout.intrinsic_dirty = false;
+            node.layout.last_containing_width = containing_w;
+            return node.layout.margin_rect.h;
+        }
+
         // ── Layout subtree pruning ────────────────────────────────────────────
         // If this box's resolved content width is identical to the previous
         // layout AND nothing is dirty AND there is no incoming float context
@@ -3913,6 +4030,7 @@ impl LayoutEngine {
         let viewport_h_unchanged = self.viewport_h == self.last_geometry_viewport_h;
         if fc.is_none()
             && !c.force_independent_formatting_context
+            && node.style.width.intrinsic().is_none()
             && !node.layout.layout_dirty
             && !node.has_dirty_descendant
             && !node.has_dirty_layout_descendant

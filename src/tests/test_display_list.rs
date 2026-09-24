@@ -2428,6 +2428,9 @@ fn replay_scrolls_text_shadow_with_text() {
         line_height: 30.0,
         color: Color::rgba(0, 0, 0, 255),
         blur: 0.0,
+        letter_spacing: 0.0,
+        word_spacing: 0.0,
+        small_caps: false,
     });
 
     let mut pixmap = tiny_skia::Pixmap::new(180, 100).unwrap();

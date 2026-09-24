@@ -199,7 +199,7 @@ pub fn evaluate_media(condition: &str, vw: f32, vh: f32) -> bool {
         ("inverted-colors:", "none"),
         ("any-hover:", "hover"),
         ("any-pointer:", "fine"),
-        ("scripting:", "enabled"),
+        ("scripting:", "none"),
         ("update:", "fast"),
     ] {
         if let Some(rest) = lower.strip_prefix(feature) {

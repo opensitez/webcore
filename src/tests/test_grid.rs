@@ -337,6 +337,43 @@ fn grid_minmax_zero_fr_keeps_block_container_width() {
 }
 
 #[test]
+fn grid_auto_track_percentage_image_does_not_expand_page_to_natural_width() {
+    let html = r#"
+        <style>
+            body { margin: 0; }
+            #root { display: grid; width: 1366px; }
+            #main { display: grid; width: 100%; }
+            img { display: block; width: 100%; height: auto; }
+        </style>
+        <div id="root">
+            <main id="main">
+                <img id="hero" width="3456" height="2158">
+            </main>
+        </div>
+    "#;
+    let doc = parse_and_layout(html, 1366.0);
+    let root = find_by_id(&doc.root, "root").unwrap();
+    let main = find_by_id(&doc.root, "main").unwrap();
+    let hero = find_by_id(&doc.root, "hero").unwrap();
+
+    assert!(
+        (root.layout.content_rect.w - 1366.0).abs() < 0.5,
+        "auto grid track should stay at available width, got {}",
+        root.layout.content_rect.w
+    );
+    assert!(
+        (main.layout.content_rect.w - 1366.0).abs() < 0.5,
+        "width:100% grid item should resolve against the grid, got {}",
+        main.layout.content_rect.w
+    );
+    assert!(
+        (hero.layout.content_rect.w - 1366.0).abs() < 0.5,
+        "width:100% image should not contribute natural width to the page, got {}",
+        hero.layout.content_rect.w
+    );
+}
+
+#[test]
 fn media_grid_minmax_rem_track_keeps_block_container_width() {
     let html = r#"
         <style>
@@ -552,6 +589,83 @@ fn grid_named_lines_can_come_from_custom_property_track_list() {
         "named full span should cover the full grid, got x={} w={}",
         full.layout.content_rect.x,
         full.layout.content_rect.w
+    );
+}
+
+#[test]
+fn grid_named_area_shorthand_spans_brave_style_layout_tracks() {
+    let doc = parse_and_layout(
+        r#"<html><body style="margin:0">
+          <style>
+            .layout {
+              display: grid;
+              grid-template-columns:
+                minmax(0, calc((100% - calc(1280px + (2rem * 2))) / 2))
+                [main-content-start]
+                minmax(0, 1fr)
+                [article-start]
+                minmax(0, 45.7375rem)
+                [article-end]
+                minmax(0, 1fr)
+                [main-content-end]
+                minmax(0, calc((100% - calc(1280px + (2rem * 2))) / 2));
+              column-gap: 2rem;
+              width: 100%;
+            }
+            .layout > * { grid-column: main-content; height: 10px; }
+          </style>
+          <main class="layout"><section id="hero"></section></main>
+        </body></html>"#,
+        1366.0,
+    );
+
+    let hero = find_by_id(&doc.root, "hero").expect("hero");
+    assert!(
+        (hero.layout.content_rect.x - 43.0).abs() < 2.0,
+        "main-content should start after the outer rail and gap, got x={}",
+        hero.layout.content_rect.x
+    );
+    assert!(
+        (hero.layout.content_rect.w - 1280.0).abs() < 2.0,
+        "main-content should span the two flexible tracks, center track, and inner gaps, got w={}",
+        hero.layout.content_rect.w
+    );
+}
+
+#[test]
+fn grid_named_area_shorthand_survives_multiline_nested_calc_tracks() {
+    let doc = parse_and_layout(
+        r#"<html><body style="margin:0">
+          <style>
+            .layout {
+              display: grid;
+              grid-template-columns: minmax(0, calc((100% - calc(
+                1280px + (2rem * 2)
+              )) / 2)) [main-content-start] minmax(0,1fr) [article-start]
+              minmax(0,45.7375rem) [article-end] minmax(0,1fr)
+              [main-content-end] minmax(0, calc((100% - calc(
+                1280px + (2rem * 2)
+              )) / 2));
+              column-gap: 2rem;
+              width: 100%;
+            }
+            .layout > * { grid-column: main-content; height: 10px; }
+          </style>
+          <main class="layout"><section id="hero"></section></main>
+        </body></html>"#,
+        1366.0,
+    );
+
+    let hero = find_by_id(&doc.root, "hero").expect("hero");
+    assert!(
+        (hero.layout.content_rect.x - 43.0).abs() < 2.0,
+        "main-content should start after the outer rail and gap, got x={}",
+        hero.layout.content_rect.x
+    );
+    assert!(
+        (hero.layout.content_rect.w - 1280.0).abs() < 2.0,
+        "main-content should span the intended tracks, got w={}",
+        hero.layout.content_rect.w
     );
 }
 

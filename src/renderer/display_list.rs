@@ -260,6 +260,9 @@ pub enum PaintCmd {
         line_height: f32,
         color: Color,
         blur: f32,
+        letter_spacing: f32,
+        word_spacing: f32,
+        small_caps: bool,
     },
 
     /// Background image with positioning/sizing metadata.

@@ -114,17 +114,8 @@ impl Document {
                             (cur as usize).saturating_sub(1)
                         };
                         let option_id = options[new_idx];
-                        let new_text = self
-                            .find_webcore(option_id)
-                            .map(crate::html::forms::option_label)
-                            .unwrap_or_default();
                         if let Some(sel) = self.find_webcore_mut(fid) {
                             let changed = crate::html::forms::pick_option(sel, option_id);
-                            if let Some(tn) =
-                                sel.children.iter_mut().rev().find(|c| c.tag == "#text")
-                            {
-                                tn.text = new_text;
-                            }
                             sel.layout.layout_dirty = true;
                             if changed {
                                 self.style_dirty = true;
@@ -243,6 +234,9 @@ impl Document {
                 // a click changes `:checked` — see the note at the click path.
                 self.style_dirty = true;
             } else if {
+                if !editor_fallback_may_edit(&self.root, &self.editor, self.focused_box) {
+                    false
+                } else {
                 // ⛔ The editor mutates the render tree with no arena in
                 // scope, so the DOM has to be told afterwards — see
                 // `resync_subtree`.
@@ -255,6 +249,7 @@ impl Document {
                     self.root = root;
                 }
                 handled
+                }
             } {
                 redraw = true;
             }
@@ -262,4 +257,34 @@ impl Document {
 
         redraw
     }
+}
+
+fn editor_fallback_may_edit(root: &WebCore, editor: &Editor, focused_id: u32) -> bool {
+    if focused_id != 0 && is_native_form_control_descendant(root, focused_id) {
+        return false;
+    }
+    editor
+        .caret_info()
+        .map(|(caret_id, _)| crate::dom::is_in_contenteditable_by_id(root, caret_id))
+        .unwrap_or(false)
+}
+
+fn is_native_form_control_descendant(root: &WebCore, id: u32) -> bool {
+    fn walk(node: &WebCore, id: u32, in_control: bool) -> Option<bool> {
+        let owns_control = matches!(
+            node.tag.as_str(),
+            "input" | "select" | "textarea" | "button" | "option"
+        );
+        if node.node_id == id {
+            return Some(in_control || owns_control);
+        }
+        let next_in_control = in_control || owns_control;
+        for child in &node.children {
+            if let Some(found) = walk(child, id, next_in_control) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(root, id, false).unwrap_or(false)
 }

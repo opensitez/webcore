@@ -2030,6 +2030,45 @@ impl Renderer {
                 }
             }
         }
+        if let Some(node) = doc.get_node(doc.focused_box)
+            && node.tag == "input"
+            && crate::types::is_text_input(node)
+        {
+            let value = crate::types::input_value(node);
+            let prefix: String = value.chars().take(node.input_cursor).collect();
+            let font_px = node.style.font_size_px(16.0, 16.0);
+            let advance = crate::layout::inline_layout::measure_text_width_fs_attrs(
+                &mut self.font_system,
+                &prefix,
+                font_px,
+                cosmic_text::Weight(node.style.font_weight.value()),
+                match node.style.font_style {
+                    FontStyle::Italic => cosmic_text::Style::Italic,
+                    FontStyle::Oblique => cosmic_text::Style::Oblique,
+                    _ => cosmic_text::Style::Normal,
+                },
+                scale * zoom,
+                &node.style.font_family,
+                crate::layout::inline_layout::stretch_from_percent(node.style.font_stretch),
+            );
+            let rect = node.layout.content_rect;
+            let caret_x = (rect.x + 2.0 + advance).min(rect.right() - 1.0) - doc.scroll_x;
+            let caret_h = (font_px * 1.2).min(rect.h);
+            let caret_y = rect.y + (rect.h - caret_h).max(0.0) / 2.0 - doc.scroll_y;
+            let mut color = node.style.caret_color.unwrap_or(node.style.color);
+            let background = node.style.background_color;
+            if node.style.caret_color.is_none() && color == background && background.a == 255 {
+                let brightness = 299u32 * background.r as u32
+                    + 587u32 * background.g as u32
+                    + 114u32 * background.b as u32;
+                color = if brightness < 128_000 { Color::WHITE } else { Color::BLACK };
+            }
+            let mut paint = Paint::default();
+            paint.set_color(color.to_tiny_skia());
+            if let Some(caret) = SkRect::from_xywh(caret_x, caret_y, 1.5, caret_h) {
+                pixmap.fill_rect(caret, &paint, Transform::from_scale(scale * zoom, scale * zoom), None);
+            }
+        }
         self.scale = scale;
         let scrollbar_w = doc.root.style.scrollbar_width_px();
         if doc_h > view_h && scrollbar_w > 0.0 {

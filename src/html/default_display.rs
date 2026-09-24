@@ -31,9 +31,10 @@ pub fn default_display(tag: &str) -> &'static str {
         "button" => "inline-flex",
         "ruby" => "ruby",
         "rt" => "ruby-text",
-        // Non-visual: display:none
-        "head" | "style" | "script" | "title" | "meta" | "link" | "noscript" | "option"
-        | "optgroup" | "datalist" | "track" => "none",
+        // Non-visual: display:none. `<noscript>` is intentionally not here:
+        // webcore does not execute JavaScript, so body fallback content renders.
+        "head" | "style" | "script" | "title" | "meta" | "link" | "option" | "optgroup"
+        | "datalist" | "track" => "none",
         // Everything else is inline
         _ => "inline",
     }

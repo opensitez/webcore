@@ -2083,8 +2083,7 @@ impl Document {
         walk(&self.root, option)
     }
 
-    /// Re-settle a `<select>` after its options changed: run the selectedness
-    /// setting algorithm, then move the shown label to match.
+    /// Re-settle a `<select>` after its options changed.
     ///
     /// ⛔ Needed on every route that adds or removes an option, not just the
     /// parser's. A drop-down built through the DOM had no selection at all,
@@ -2094,7 +2093,6 @@ impl Document {
     pub(crate) fn notify_select_changed(&mut self, select: u32) {
         if let Some(sel) = self.find_webcore_mut(select) {
             crate::html::forms::run_selectedness_setting_algorithm(sel);
-            crate::html::forms::refresh_select_display_text(sel);
             sel.layout.layout_dirty = true;
         }
         self.style_dirty = true;

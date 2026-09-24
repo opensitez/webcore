@@ -294,6 +294,39 @@ fn mouse_focus_does_not_show_outline() {
 }
 
 #[test]
+fn mouse_focus_styles_apply_on_next_layout() {
+    let mut doc = parse_and_layout(
+        "<style>input:focus { background-color: #123456 } form:focus-within { color: #abcdef }</style><form id=f><input id=i></form>",
+    );
+    let rect = crate::dom::query_selector(&doc.root, "#i")
+        .unwrap()
+        .layout
+        .border_rect;
+    let center = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, center, 0);
+    assert!(doc.style_dirty);
+
+    let mut engine = LayoutEngine::new();
+    engine.viewport_h = 600.0;
+    engine.layout(&mut doc, 800.0);
+
+    assert_eq!(
+        crate::dom::query_selector(&doc.root, "#i")
+            .unwrap()
+            .style
+            .background_color,
+        Color::rgb(0x12, 0x34, 0x56),
+    );
+    assert_eq!(
+        crate::dom::query_selector(&doc.root, "#f")
+            .unwrap()
+            .style
+            .color,
+        Color::rgb(0xab, 0xcd, 0xef),
+    );
+}
+
+#[test]
 fn author_can_override_focus_outline_color() {
     let mut doc = parse_and_layout(
         r#"<html><head><style>

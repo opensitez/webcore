@@ -1075,6 +1075,8 @@ pub fn layout_inline_block(
             }
         }
 
+        let flat_text = collect_flat_text(node);
+
         // Collect atomic positions and inline fragment rects on this line
         {
             let mut cur_x = line_x;
@@ -1124,7 +1126,22 @@ pub fn layout_inline_block(
                     InlineItemKind::OutOfFlow { path } => {
                         out_of_flow_static_pos.push((path.clone(), atomic_x, cursor_y));
                     }
-                    InlineItemKind::Text { path, .. } => {
+                    InlineItemKind::Text {
+                        path,
+                        text_start,
+                        text_len,
+                    } => {
+                        let seg_start = floor_cb(&flat_text, *text_start);
+                        let seg_end = floor_cb(
+                            &flat_text,
+                            (*text_start + *text_len).min(flat_text.len()),
+                        );
+                        if seg_start < seg_end && flat_text[seg_start..seg_end].trim().is_empty()
+                        {
+                            cur_x += item.advance;
+                            prefix_w += item.advance;
+                            continue;
+                        }
                         let text_x = if is_rtl && seen_atomic_before_text {
                             atomic_x
                         } else {
@@ -1148,7 +1165,6 @@ pub fn layout_inline_block(
         // byte on the line. Leading collapsible whitespace can be a Text item
         // before an atomic inline child; stopping at that whitespace paints the
         // visible text under the atomic child.
-        let flat_text = collect_flat_text(node);
         let mut text_x_off = 0.0f32;
         let mut prefix_w = 0.0f32;
         let mut seen_atomic_before_text = false;
@@ -2101,6 +2117,7 @@ fn collect_items_inner(
                 node.style.font_weight,
                 node.style.font_style,
                 &node.style.font_family,
+                node.style.font_stretch,
                 letter_s,
                 word_s,
                 node.style.word_break,
@@ -2287,6 +2304,7 @@ fn collect_items_inner(
             node.style.font_weight,
             node.style.font_style,
             &node.style.font_family,
+            node.style.font_stretch,
             letter_s,
             word_s,
             node.style.word_break,
@@ -2480,6 +2498,7 @@ fn emit_generated_inline_content(
         style.font_weight,
         style.font_style,
         &style.font_family,
+        style.font_stretch,
         letter_s,
         word_s,
         style.word_break,
@@ -2586,6 +2605,7 @@ fn tokenize_text(
     font_weight: FontWeight,
     font_style: FontStyle,
     font_family: &str,
+    font_stretch: f32,
     letter_spacing: f32,
     word_spacing: f32,
     word_break: WordBreak,
@@ -2606,8 +2626,14 @@ fn tokenize_text(
     let measure_transformed = |engine: &LayoutEngine, s: &str| -> (f32, f32) {
         let transformed =
             crate::renderer::display_list_builder::apply_text_transform(s, text_transform);
-        let w =
-            engine.measure_text_cached(&transformed, font_px, font_weight, font_style, font_family);
+        let w = engine.measure_text_cached_with_stretch(
+            &transformed,
+            font_px,
+            font_weight,
+            font_style,
+            font_family,
+            font_stretch,
+        );
         let tracking = letter_spacing * transformed.chars().count() as f32;
         (w, tracking)
     };
@@ -2807,8 +2833,14 @@ fn tokenize_text(
             // Emit one space item per space character so caret byte offsets stay in sync.
             // (Previously all consecutive spaces were collapsed to one rendered item,
             //  causing the caret to drift right while text stayed left.)
-            let space_w =
-                engine.measure_text_cached(" ", font_px, font_weight, font_style, font_family);
+            let space_w = engine.measure_text_cached_with_stretch(
+                " ",
+                font_px,
+                font_weight,
+                font_style,
+                font_family,
+                font_stretch,
+            );
             // A space is a word separator (css-text-3 §8.1) and a character
             // (§8.2), so it carries both spacings.
             let space_w = space_w + word_spacing + letter_spacing;
@@ -3410,6 +3442,7 @@ pub fn measure_text_width_weighted(
     style: FontStyle,
     scale: f32,
     font_family: &str,
+    font_stretch: f32,
 ) -> f32 {
     if let Some(fs) = font_system {
         let ct_weight = Weight(weight.value());
@@ -3418,7 +3451,17 @@ pub fn measure_text_width_weighted(
             FontStyle::Oblique => CTextStyle::Oblique,
             FontStyle::Normal => CTextStyle::Normal,
         };
-        measure_text_width_fs_attrs(fs, text, font_px, ct_weight, ct_style, scale, font_family)
+        let ct_stretch = stretch_from_percent(font_stretch);
+        measure_text_width_fs_attrs(
+            fs,
+            text,
+            font_px,
+            ct_weight,
+            ct_style,
+            scale,
+            font_family,
+            ct_stretch,
+        )
     } else {
         let w = measure_text_width_ts(text, font_px, 8);
         if weight.is_bold() { w * 1.15 } else { w }
@@ -3439,6 +3482,7 @@ pub fn measure_text_width_fs(
         CTextStyle::Normal,
         scale,
         "",
+        Stretch::Normal,
     )
 }
 
@@ -3454,6 +3498,7 @@ pub fn measure_text_width_fs_attrs(
     style: CTextStyle,
     scale: f32,
     font_family: &str,
+    stretch: Stretch,
 ) -> f32 {
     if text.is_empty() {
         return 0.0;
@@ -3466,6 +3511,7 @@ pub fn measure_text_width_fs_attrs(
         font_px.to_bits().hash(&mut h);
         weight.0.hash(&mut h);
         (style as u8).hash(&mut h);
+        format!("{:?}", stretch).hash(&mut h);
         scale.to_bits().hash(&mut h);
         font_family.hash(&mut h);
         size_adjust.to_bits().hash(&mut h);
@@ -3485,7 +3531,7 @@ pub fn measure_text_width_fs_attrs(
     let phys_px = font_px * size_adjust * scale.max(1.0);
     let inv = if scale > 1.0 { 1.0 / scale } else { 1.0 };
     let metrics = Metrics::new(phys_px, phys_px * 1.2);
-    let mut attrs = Attrs::new().weight(weight).style(style);
+    let mut attrs = Attrs::new().weight(weight).style(style).stretch(stretch);
     // Set the correct font family so monospace/serif/etc. are measured accurately
     let resolved;
     if !font_family.is_empty() {
@@ -3512,7 +3558,18 @@ pub fn measure_text_width_fs_attrs(
 
     let width = if text.starts_with(char::is_whitespace) || text.ends_with(char::is_whitespace) {
         let space_width = {
-            let measured = measure_shaped(fs, "n n", &attrs) - measure_shaped(fs, "nn", &attrs);
+            // A buffer containing only U+0020 can report zero in some font/
+            // shaper combinations, but using a tiny fallback makes layout much
+            // narrower than the text that paint later draws. NBSP has the same
+            // advance class as a normal collapsible space in common web fonts
+            // and gives us the font's real space metric without needing a
+            // context word.
+            let nbsp = measure_shaped(fs, "\u{00a0}", &attrs);
+            let measured = if nbsp > 0.1 {
+                nbsp
+            } else {
+                measure_shaped(fs, "n n", &attrs) - measure_shaped(fs, "nn", &attrs)
+            };
             if measured > 0.1 {
                 measured
             } else {

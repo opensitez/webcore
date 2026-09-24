@@ -88,6 +88,62 @@ mod tests {
     }
 
     #[test]
+    fn hit_testing_reaches_controls_inside_float_overlapping_later_block() {
+        let html = r#"
+            <style>
+                body { margin: 0; }
+                #search { width: 300px; }
+                #form { float: right; width: 120px; height: 30px; }
+                #q { width: 100px; height: 24px; }
+                #cover { height: 100px; }
+            </style>
+            <div id="search">
+                <form id="form"><input id="q" value=""></form>
+            </div>
+            <div id="cover"></div>
+        "#;
+        let mut doc = parse_and_layout(html, 300.0);
+        let input = crate::tests::test_grid::find_by_id(&doc.root, "q").expect("input not found");
+        let cover = crate::tests::test_grid::find_by_id(&doc.root, "cover").expect("cover");
+        assert!(
+            cover.layout.border_rect.y <= input.layout.border_rect.y + 0.5,
+            "test setup needs later block overlapping the floated form vertically: cover={:?} input={:?}",
+            cover.layout.border_rect,
+            input.layout.border_rect
+        );
+
+        let pt = (
+            input.layout.border_rect.x + input.layout.border_rect.w / 2.0,
+            input.layout.border_rect.y + input.layout.border_rect.h / 2.0,
+        );
+        let hit = crate::layout::hit_test::point_to_hit(&doc.root, pt, 0).expect("hit");
+        assert_eq!(
+            hit.node_id, input.node_id,
+            "visible input inside a float must receive the pointer event"
+        );
+        assert_eq!(
+            hit_test_box_at(&doc.root, pt, 0),
+            input.node_id,
+            "the secondary hit walker must agree"
+        );
+
+        doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, pt, 0);
+        doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, pt, 0);
+        assert_eq!(doc.focused_box, hit.node_id);
+        doc.process_key_event(
+            crate::dom::HtmlEventType::KeyDown,
+            'x' as u32,
+            Some('x'),
+            false,
+            false,
+            false,
+            false,
+        );
+        let input = crate::tests::test_grid::find_by_id(&doc.root, "q").expect("input not found");
+        assert_eq!(crate::types::input_value(input), "x");
+    }
+
+    #[test]
     fn right_float_narrows_nested_list_item_text() {
         let html = r#"
             <style>

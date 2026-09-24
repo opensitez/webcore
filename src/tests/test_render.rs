@@ -89,6 +89,50 @@ fn auto_table_percentage_header_keeps_min_content_width() {
     );
 }
 
+#[test]
+fn whitespace_only_text_nodes_do_not_generate_flex_items_or_stale_boxes() {
+    use super::harness::{find_box, parse_and_layout};
+
+    let doc = parse_and_layout(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        .row { display: flex; gap: 20px; width: 300px; font: 16px sans-serif; }
+        .item { width: 50px; height: 10px; }
+        </style>
+        <div class="row" id="row">
+          <span class="item" id="a"></span>
+          <span class="item" id="b"></span>
+        </div>
+    "#,
+        500.0,
+    );
+
+    let row = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "row"))
+        .expect("row");
+    let a = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "a"))
+        .expect("a");
+    let b = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "b"))
+        .expect("b");
+
+    assert!(
+        (b.layout.margin_rect.x - a.layout.margin_rect.right() - 20.0).abs() < 0.5,
+        "only the authored flex gap should separate real items; a={:?} b={:?}",
+        a.layout.margin_rect,
+        b.layout.margin_rect
+    );
+
+    for child in &row.children {
+        if child.is_text_node() {
+            assert_eq!(
+                child.layout.margin_rect,
+                crate::types::Rect::default(),
+                "whitespace text nodes must not retain independent layout geometry"
+            );
+        }
+    }
+}
+
 // ── Button background covers right padding ───────────────────────────────────
 // Pixel test: the background color must appear in the right-padding zone.
 #[test]
@@ -2330,6 +2374,7 @@ fn inline_run_boundaries_preserve_collapsed_spaces() {
         style,
         1.0,
         &against_family,
+        100.0,
     );
     let slowing_prefix_weight = crate::types::FontWeight::Value(slowing_weight as u16);
     let slowing_prefix_style = match slowing_style {
@@ -2346,6 +2391,7 @@ fn inline_run_boundaries_preserve_collapsed_spaces() {
             slowing_prefix_style,
             1.0,
             &slowing_family,
+            100.0,
         );
     assert!(
         slowing_visible_x > against_x + against_w + 2.0,
@@ -2432,6 +2478,7 @@ fn inline_child_boundary_preserves_following_text_space() {
         time_style,
         1.0,
         &time_family,
+        100.0,
     );
 
     assert!(
@@ -2591,6 +2638,7 @@ fn punctuation_after_inline_link_does_not_get_word_gap() {
                 style,
                 1.0,
                 &entry.5,
+                100.0,
             )
     };
 
@@ -2710,6 +2758,7 @@ fn punctuation_after_italic_inline_does_not_get_word_gap() {
             tilcayo_style,
             1.0,
             &tilcayo_family,
+            100.0,
         );
     let space_width = crate::layout::inline_layout::measure_text_width_weighted(
         " ",
@@ -2719,6 +2768,7 @@ fn punctuation_after_italic_inline_does_not_get_word_gap() {
         tilcayo_style,
         1.0,
         &tilcayo_family,
+        100.0,
     );
     let pictured_right = pictured_x
         + crate::layout::inline_layout::measure_text_width_weighted(
@@ -2729,6 +2779,7 @@ fn punctuation_after_italic_inline_does_not_get_word_gap() {
             pictured_style,
             1.0,
             &pictured_family,
+            100.0,
         );
     let before_pictured_gap = pictured_x - tilcayo_right;
     assert!(
@@ -2818,6 +2869,7 @@ is a volcano in the southern Peruvian <a>Andes</a>, rising above <a>Arequipa</a>
             style,
             1.0,
             &misti_family,
+            100.0,
         );
     assert!(
         !volcano_text.starts_with(char::is_whitespace) && volcano_x > misti_right,

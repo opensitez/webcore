@@ -956,12 +956,21 @@ pub(crate) fn resolve_var_pass(val: &str, variables: &HashMap<String, String>) -
                 if resolved.is_empty() {
                     if let Some(fb) = fallback {
                         out.push_str(fb);
+                        if needs_var_substitution_separator(fb, rest) {
+                            out.push(' ');
+                        }
                     }
                 } else {
                     out.push_str(resolved);
+                    if needs_var_substitution_separator(resolved, rest) {
+                        out.push(' ');
+                    }
                 }
             } else if let Some(fb) = fallback {
                 out.push_str(fb);
+                if needs_var_substitution_separator(fb, rest) {
+                    out.push(' ');
+                }
             } else {
                 out.push_str("var(");
                 out.push_str(inner);
@@ -973,6 +982,22 @@ pub(crate) fn resolve_var_pass(val: &str, variables: &HashMap<String, String>) -
         }
     }
     out
+}
+
+fn needs_var_substitution_separator(inserted: &str, rest: &str) -> bool {
+    let Some(last) = inserted.chars().rev().find(|c| !c.is_ascii_whitespace()) else {
+        return false;
+    };
+    let Some(next) = rest.chars().find(|c| !c.is_ascii_whitespace()) else {
+        return false;
+    };
+    if next == ',' || next == '/' || next == ')' || next == ';' {
+        return false;
+    }
+    if last == '(' || last == ',' || last == '/' {
+        return false;
+    }
+    next.is_ascii_alphanumeric() || next == '-' || next == '_' || next == '.' || next == '#'
 }
 
 /// Resolve a CSS `content` property value string to a displayable string.

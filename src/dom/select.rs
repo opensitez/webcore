@@ -126,12 +126,8 @@ impl Document {
             });
             sel.layout.layout_dirty = true;
         }
-        // A closed drop-down shows a child text node rather than its options,
-        // so the shown label has to follow the selection. `option:checked` is a
-        // selector, so this is a style change too.
-        if let Some(sel) = self.find_webcore_mut(select) {
-            crate::html::forms::refresh_select_display_text(sel);
-        }
+        // The control painter reads selectedness directly. `option:checked`
+        // is a selector, so this is a style change too.
         self.style_dirty = true;
     }
 

@@ -150,6 +150,7 @@ impl Stylesheet {
     /// to parse a full external stylesheet synchronously.
     pub fn append_fragment(&mut self, mut fragment: Stylesheet) {
         let before = self.rules.len();
+        self.variables.extend(fragment.variables);
         self.raw_sources.append(&mut fragment.raw_sources);
         self.font_faces.append(&mut fragment.font_faces);
         self.page_rules.append(&mut fragment.page_rules);

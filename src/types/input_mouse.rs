@@ -251,26 +251,10 @@ impl Document {
                             e.related_target = old_focus;
                             self.dispatch_input_event(e);
                         }
-                        // Always recascade when focus changes so :focus/:focus-visible update.
-                        self.stylesheet.rebuild_index();
-                        let target_id = self.fragment_target_id();
-                        let hover_chain =
-                            crate::css::build_hover_chain(&self.root, self.hovered_box);
-                        crate::css::apply_cascade_vp_hover_target_url(
-                            &mut self.root,
-                            &self.stylesheet,
-                            None,
-                            16.0,
-                            self.viewport_w,
-                            self.viewport_h,
-                            self.focused_box,
-                            false,
-                            &hover_chain,
-                            target_id,
-                            &self.base_url,
-                        );
+                        // The frame's next style pass applies :focus and
+                        // :focus-within. Rebuilding the rule index and
+                        // recascading here made a click do the same work twice.
                         self.style_dirty = true;
-                        crate::dom::mark_layout_dirty(&mut self.root);
                         redraw = true;
                     }
                 }
@@ -511,42 +495,14 @@ impl Document {
                                 let group_h = font_px * 1.5;
 
                                 // Count items (options + optgroups) for height
-                                let mut opt_texts: Vec<String> = Vec::new();
-                                let mut opt_values: Vec<String> = Vec::new();
                                 let mut total_h = 8.0f32; // padding
                                 for child in &sel.children {
                                     if child.tag == "option" {
-                                        let txt: String = child
-                                            .children
-                                            .iter()
-                                            .filter(|c| c.tag == "#text")
-                                            .map(|c| c.text.as_str())
-                                            .collect();
-                                        let val = child
-                                            .attributes
-                                            .get("value")
-                                            .cloned()
-                                            .unwrap_or_else(|| txt.clone());
-                                        opt_texts.push(txt.trim().to_string());
-                                        opt_values.push(val.trim().to_string());
                                         total_h += item_h;
                                     } else if child.tag == "optgroup" {
                                         total_h += group_h;
                                         for gc in &child.children {
                                             if gc.tag == "option" {
-                                                let txt: String = gc
-                                                    .children
-                                                    .iter()
-                                                    .filter(|c| c.tag == "#text")
-                                                    .map(|c| c.text.as_str())
-                                                    .collect();
-                                                let val = gc
-                                                    .attributes
-                                                    .get("value")
-                                                    .cloned()
-                                                    .unwrap_or_else(|| txt.clone());
-                                                opt_texts.push(txt.trim().to_string());
-                                                opt_values.push(val.trim().to_string());
                                                 total_h += item_h;
                                             }
                                         }
@@ -597,8 +553,6 @@ impl Document {
 
                                     if let Some(opt_idx) = clicked_opt {
                                         let sel_id = self.open_select;
-                                        let new_text =
-                                            opt_texts.get(opt_idx).cloned().unwrap_or_default();
                                         // The option's node_id, so the pick runs
                                         // over the spec's own list of options
                                         // rather than this popup's parallel
@@ -614,17 +568,6 @@ impl Document {
                                         {
                                             let changed =
                                                 crate::html::forms::pick_option(sel_mut, option_id);
-                                            // The drop-down's shown text is a
-                                            // child text node rather than a
-                                            // repaint of the options.
-                                            if let Some(tn) = sel_mut
-                                                .children
-                                                .iter_mut()
-                                                .rev()
-                                                .find(|c| c.tag == "#text")
-                                            {
-                                                tn.text = new_text;
-                                            }
                                             sel_mut.layout.layout_dirty = true;
                                             if changed {
                                                 // `option:checked` is a selector.

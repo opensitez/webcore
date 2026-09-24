@@ -1200,62 +1200,6 @@ impl EngineFrame {
         });
     }
 
-    fn schedule_streamed_element_image(
-        &mut self,
-        tag: &str,
-        attributes: &crate::dom::attrs::AttrMap,
-        path: Vec<usize>,
-    ) {
-        let requests = if tag == "video" {
-            attributes
-                .get("poster")
-                .map(|poster| {
-                    vec![(
-                        crate::types::PendingImageTarget::Element,
-                        crate::html::resolve_url(poster, &self.doc.base_url),
-                    )]
-                })
-                .unwrap_or_default()
-        } else if tag == "img" {
-            let mut requests = Vec::new();
-            if let Some(src) = find_node_by_path(&self.doc.root, &path)
-                .and_then(crate::html::image_fallback_source)
-                .or_else(|| crate::html::image_fallback_source_attrs(attributes))
-            {
-                requests.push((
-                    crate::types::PendingImageTarget::ElementFallback,
-                    crate::html::resolve_url(src, &self.doc.base_url),
-                ));
-            }
-            find_node_by_path(&self.doc.root, &path)
-                .and_then(|node| (!node.resolved_src.is_empty()).then(|| node.resolved_src.clone()))
-                .or_else(|| {
-                    crate::html::image_srcset_source_attrs(attributes)
-                        .and_then(|srcset| {
-                            crate::html::parse_srcset_url_for(
-                                srcset,
-                                attributes.get("sizes").map(String::as_str),
-                                self.viewport_w,
-                                self.viewport_h,
-                                1.0,
-                            )
-                        })
-                        .map(|candidate| crate::html::resolve_url(&candidate, &self.doc.base_url))
-                })
-                .map(|preferred| {
-                    if !requests.iter().any(|(_, url)| url == &preferred) {
-                        requests.push((crate::types::PendingImageTarget::Element, preferred));
-                    }
-                });
-            requests
-        } else {
-            Vec::new()
-        };
-        for (target, url) in requests {
-            self.schedule_streamed_image(0, path.clone(), target, url);
-        }
-    }
-
     fn apply_streamed_image_dimension_hints(&mut self, path: &[usize]) {
         let Some(node) = crate::types::find_node_by_path_mut(&mut self.doc.root, path) else {
             return;
@@ -1297,6 +1241,26 @@ impl EngineFrame {
     }
 
     fn schedule_unscheduled_document_images(&mut self) {
+        fn image_source_is_known(node: &crate::types::WebCore) -> bool {
+            !node.resolved_src.is_empty() || crate::html::image_fallback_source(node).is_some()
+        }
+
+        fn node_can_paint_resource(node: &crate::types::WebCore) -> bool {
+            if matches!(node.style.display, crate::types::Display::None) || !node.style.visibility {
+                return false;
+            }
+            let rect = node.layout.border_rect;
+            let has_layout = node.layout.last_containing_width > 0.0
+                || node.layout.content_rect.w > 0.0
+                || node.layout.content_rect.h > 0.0
+                || node.layout.margin_rect.w > 0.0
+                || node.layout.margin_rect.h > 0.0;
+            if !has_layout || (rect.w > 0.0 && rect.h > 0.0) {
+                return true;
+            }
+            node.is_image_element() && rect.w > 0.0 && image_source_is_known(node)
+        }
+
         fn collect(
             node: &crate::types::WebCore,
             base_url: &str,
@@ -1305,7 +1269,8 @@ impl EngineFrame {
             path: &mut Vec<usize>,
             out: &mut Vec<(u32, Vec<usize>, crate::types::PendingImageTarget, String)>,
         ) {
-            if node.is_image_element() && node.image_data.is_none() {
+            let can_paint_resource = node_can_paint_resource(node);
+            if can_paint_resource && node.is_image_element() && node.image_data.is_none() {
                 if !node.resolved_src.is_empty() {
                     out.push((
                         node.node_id,
@@ -1336,7 +1301,8 @@ impl EngineFrame {
                         crate::html::resolve_url(&candidate, base_url),
                     ));
                 }
-            } else if node.tag == "video"
+            } else if can_paint_resource
+                && node.tag == "video"
                 && node.image_data.is_none()
                 && let Some(poster) = node.attributes.get("poster")
             {
@@ -1347,7 +1313,10 @@ impl EngineFrame {
                     crate::html::resolve_url(poster, base_url),
                 ));
             }
-            if node.bg_image_data.is_none() && !node.style.background_image_url.is_empty() {
+            if can_paint_resource
+                && node.bg_image_data.is_none()
+                && !node.style.background_image_url.is_empty()
+            {
                 out.push((
                     node.node_id,
                     path.clone(),
@@ -1370,7 +1339,7 @@ impl EngineFrame {
                     .get(layer_index)
                     .and_then(|image| image.as_ref())
                     .is_some();
-                if !loaded {
+                if can_paint_resource && !loaded {
                     out.push((
                         node.node_id,
                         path.clone(),
@@ -1379,7 +1348,10 @@ impl EngineFrame {
                     ));
                 }
             }
-            if node.mask_image_data.is_none() && !node.style.rare().mask_image_url.is_empty() {
+            if can_paint_resource
+                && node.mask_image_data.is_none()
+                && !node.style.rare().mask_image_url.is_empty()
+            {
                 out.push((
                     node.node_id,
                     path.clone(),
@@ -1457,7 +1429,6 @@ impl EngineFrame {
                                     self.resolve_streamed_image_source(&element_path);
                                     self.apply_streamed_image_dimension_hints(&element_path);
                                 }
-                                self.schedule_streamed_element_image(tag, attributes, element_path);
                             }
                         }
                     }
@@ -1547,11 +1518,6 @@ impl EngineFrame {
                                         self.resolve_streamed_image_source(&element_path);
                                         self.apply_streamed_image_dimension_hints(&element_path);
                                     }
-                                    self.schedule_streamed_element_image(
-                                        &tag,
-                                        &attributes,
-                                        element_path,
-                                    );
                                 }
                             }
                         }
@@ -1604,7 +1570,6 @@ impl EngineFrame {
         materialize_streamed_inline_svgs(&mut self.doc.root);
         post_process_streamed_tree(&mut self.doc.root, &self.doc.base_url);
         crate::html::number_lists(&mut self.doc.root);
-        self.schedule_unscheduled_document_images();
         self.stylesheet_tx = None;
         if self.doc.pending_images.is_none()
             && self
@@ -2161,6 +2126,31 @@ mod tests {
     }
 
     #[test]
+    fn streaming_frame_schedules_var_resolved_utility_mask_images() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<html><head><style>
+                .icon{display:block;width:10px;height:10px;mask-image:var(--icon-url)}
+                .\[--icon-url\:url\(\'\/leo-icons\/search\.svg\'\)\]{--icon-url:url('/leo-icons/search.svg')}
+            </style></head><body><span class="icon [--icon-url:url('/leo-icons/search.svg')]"></span></body></html>"#,
+        );
+        frame.finish_loading();
+
+        assert!(
+            frame.update_frame(),
+            "first frame should cascade and discover var-resolved mask resources"
+        );
+        assert!(
+            frame.scheduled_images.iter().any(|key| {
+                key.contains("Mask") && key.contains("https://example.test/leo-icons/search.svg")
+            }),
+            "var-resolved CSS mask images must enter the image loader; got {:?}",
+            frame.scheduled_images
+        );
+    }
+
+    #[test]
     fn streaming_frame_preserves_declarative_shadow_style_scope() {
         let mut frame = EngineFrame::empty(320.0, 240.0);
         frame.start_streaming("https://example.test/");
@@ -2501,7 +2491,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_frame_schedules_normalized_srcset_candidate() {
+    fn streaming_frame_resolves_normalized_srcset_candidate_before_layout() {
         let mut frame = EngineFrame::empty(800.0, 600.0);
         frame.start_streaming("https://example.test/news/");
         frame.feed_html_chunk(
@@ -2512,23 +2502,13 @@ mod tests {
         let img = frame.doc.get_node(img).unwrap();
         assert_eq!(img.resolved_src, "https://example.test/news/large.webp");
         assert!(
-            frame
-                .scheduled_images
-                .iter()
-                .any(|key| key.contains("https://example.test/news/large.webp")),
-            "streaming image loader should fetch the selected responsive candidate"
-        );
-        assert!(
-            frame
-                .scheduled_images
-                .iter()
-                .any(|key| key.contains("https://example.test/news/small.webp")),
-            "streaming image loader should also fetch the fallback candidate for progressive paint"
+            frame.scheduled_images.is_empty(),
+            "streaming parser should resolve image state but wait for layout before fetching"
         );
     }
 
     #[test]
-    fn streaming_frame_schedules_lazy_data_src_image() {
+    fn streaming_frame_resolves_lazy_data_src_image_before_layout() {
         let mut frame = EngineFrame::empty(800.0, 600.0);
         frame.start_streaming("https://example.test/news/");
         frame.feed_html_chunk(
@@ -2540,11 +2520,8 @@ mod tests {
         assert_eq!(img.resolved_src, "https://example.test/news/post.webp");
         assert_eq!((img.image_width, img.image_height), (320, 180));
         assert!(
-            frame
-                .scheduled_images
-                .iter()
-                .any(|key| key.contains("https://example.test/news/post.webp")),
-            "streaming image loader should schedule lazy/deferred image sources"
+            frame.scheduled_images.is_empty(),
+            "deferred image sources should not be decoded before style/layout can hide them"
         );
     }
 
@@ -2590,7 +2567,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_frame_schedules_lazy_data_srcset_candidate() {
+    fn streaming_frame_resolves_lazy_data_srcset_candidate_before_layout() {
         let mut frame = EngineFrame::empty(800.0, 600.0);
         frame.start_streaming("https://example.test/news/");
         frame.feed_html_chunk(
@@ -2601,11 +2578,8 @@ mod tests {
         let img = frame.doc.get_node(img).unwrap();
         assert_eq!(img.resolved_src, "https://example.test/news/hero.webp");
         assert!(
-            frame
-                .scheduled_images
-                .iter()
-                .any(|key| key.contains("https://example.test/news/hero.webp")),
-            "lazy responsive image candidates should use the same resolver as srcset"
+            frame.scheduled_images.is_empty(),
+            "lazy responsive image candidates should resolve without starting pre-layout fetches"
         );
     }
 
@@ -2630,6 +2604,81 @@ mod tests {
                 .iter()
                 .any(|key| key.contains("https://example.test/news/hero.webp")),
             "final image sweep should not miss lazy responsive images with no src"
+        );
+    }
+
+    #[test]
+    fn final_image_sweep_skips_display_none_images() {
+        let mut frame = EngineFrame::empty(800.0, 600.0);
+        frame.start_streaming("https://example.test/news/");
+        let body = frame.doc.create_element("body");
+        frame.doc.append_child(frame.doc.root.node_id, body);
+        let img = frame.doc.create_element("img");
+        frame.doc.append_child(body, img);
+        frame.doc.set_attribute(img, "src", "hidden-large.webp");
+        if let Some(node) = frame.doc.find_webcore_mut(img) {
+            std::sync::Arc::make_mut(&mut node.style).display = crate::types::Display::None;
+        }
+
+        frame.schedule_unscheduled_document_images();
+
+        assert!(
+            frame.scheduled_images.is_empty(),
+            "display:none images should not be fetched and decoded by the layout-aware sweep"
+        );
+    }
+
+    #[test]
+    fn post_layout_image_sweep_respects_streamed_css_display_none() {
+        let mut frame = EngineFrame::empty(800.0, 600.0);
+        frame.start_streaming("https://example.test/news/");
+        frame.feed_html_chunk(
+            br#"<style>.hidden-image{display:none}</style><body><img class="hidden-image" src="hidden-large.webp" width="1200" height="800">"#,
+        );
+        frame.finish_loading();
+        frame.update_frame();
+
+        assert!(
+            frame.scheduled_images.is_empty(),
+            "images hidden by streamed CSS should not be queued after layout"
+        );
+    }
+
+    #[test]
+    fn post_layout_image_sweep_schedules_visible_svg_with_auto_height() {
+        let mut frame = EngineFrame::empty(800.0, 600.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<style>.brand{display:block;width:240px;height:auto}</style><body><img class="brand" src="/brand.svg">"#,
+        );
+        frame.finish_loading();
+        frame.update_frame();
+
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("https://example.test/brand.svg")),
+            "visible SVG images with auto height must be fetched for intrinsic sizing"
+        );
+    }
+
+    #[test]
+    fn post_layout_image_sweep_schedules_visible_raster_with_auto_height() {
+        let mut frame = EngineFrame::empty(800.0, 600.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<style>.hero{display:block;width:240px;height:auto}</style><body><img class="hero" src="/hero.png">"#,
+        );
+        frame.finish_loading();
+        frame.update_frame();
+
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("https://example.test/hero.png")),
+            "visible raster images with auto height must be fetched for intrinsic sizing"
         );
     }
 

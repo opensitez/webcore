@@ -29,10 +29,6 @@ slot { display: contents; }
 [hidden]:not([hidden=until-found i]):not(embed) { display: none; }
 [hidden=until-found i]:not(embed) { content-visibility: hidden; }
 embed[hidden] { display: inline; height: 0; width: 0; }
-/* Scripting is enabled, so `<noscript>` never renders. `!important` because
-   the spec says so: a page must not be able to reveal its no-script fallback
-   with a stylesheet. */
-noscript { display: none !important; }
 html { display: block; }
 body { display: block; margin: 8px; }
 article, aside, nav, section { display: block; }
@@ -189,12 +185,11 @@ input[type=image] { display: inline-block; width: auto; height: auto; border: no
 input[type=radio], input[type=checkbox] { display: inline-block; width: 16px; height: 16px; min-height: 0; vertical-align: middle; margin: 0 6px 0 2px; border: none; padding: 0; background: transparent; flex-shrink: 0; }
 label { display: inline-block; }
 input { display: inline-block; width: 200px; min-height: 2.2em; padding: 0 6px; border: 1px solid #ababab; border-radius: 3px; box-sizing: border-box; vertical-align: middle; background-color: #ffffff; color: #000000; }
-/* A button input's height is its LABEL's line box plus the padding and border
-   — it has no children to give it one, so `height: auto` collapsed it to a
-   sliver with the word sitting outside. `calc` rather than a fixed px so it
-   still tracks the font, and `width: auto` keeps the intrinsic width the
-   label measures. */
-input[type=submit], input[type=button], input[type=reset] { width: auto; height: calc(1.2em + 8px); border: 1px solid #767676; padding: 3px 8px; background-color: #e8e8e8; }
+/* Button inputs get their label normalized into an internal text node, so auto
+   height can follow the line-height + padding just like `<button>`. Do not pin
+   height here: author styles such as Bootstrap's `.btn` must be able to size
+   the control from their own line-height and padding. */
+input[type=submit], input[type=button], input[type=reset] { width: auto; border: 1px solid #767676; padding: 3px 8px; background-color: #e8e8e8; }
 select { display: inline-block; width: 200px; padding: 0 6px; border: 1px solid #ababab; border-radius: 3px; box-sizing: border-box; vertical-align: middle; background-color: #ffffff; color: #000000; }
 /* A CLOSED select is one row tall. A list box — `size` above one, or
    `multiple` — is as tall as its rows, and that height depends on a NUMBER,

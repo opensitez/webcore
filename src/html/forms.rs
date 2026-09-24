@@ -382,27 +382,6 @@ pub fn reset_select(select: &mut WebCore) {
         o.dirty_selectedness = false;
     });
     run_selectedness_setting_algorithm(select);
-    refresh_select_display_text(select);
-}
-
-/// Re-sync a drop-down's shown label to its selectedness.
-///
-/// A closed drop-down shows a child text node rather than its options, so any
-/// path that moves the selection has to move the label with it — otherwise the
-/// control paints the selection it USED to have. A list box paints its rows
-/// from the options themselves and has no such node.
-pub fn refresh_select_display_text(select: &mut WebCore) {
-    if is_list_box(select) {
-        return;
-    }
-    let text = list_of_options(select)
-        .iter()
-        .find(|o| o.selectedness)
-        .map(|o| option_label(o))
-        .unwrap_or_default();
-    if let Some(tn) = select.children.iter_mut().rev().find(|c| c.tag == "#text") {
-        tn.text = text;
-    }
 }
 
 /// **Pick an option** (HTML §4.10.7), the algorithm a click on a single-select

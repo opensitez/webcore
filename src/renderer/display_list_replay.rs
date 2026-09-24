@@ -2139,46 +2139,48 @@ fn replay_commands_inner(
                     // `<button>` takes its label from its CHILDREN, which the
                     // inline text pipeline lays out and draws. Nothing to do.
                     ("button", _) => {}
-                    // ⛔ An `<input>` button is a VOID element — it has no
-                    // children for that pipeline to find, and its label is the
-                    // `value` ATTRIBUTE (HTML §4.10.5.1.19). Sharing the arm
-                    // with `<button>` meant `<input type=submit value="Send">`
-                    // drew an empty pill: correct chrome, no word on it.
-                    //
-                    // With no `value` the UA supplies the label, which is why a
-                    // bare `<input type=submit>` reads "Submit" in every
-                    // browser rather than being blank.
+                    // Submit/button/reset labels are laid out as anonymous text
+                    // by the normal inline pipeline, so they inherit colour,
+                    // text-shadow, spacing and transforms exactly like browser
+                    // text. Drawing them again here made a second label with
+                    // widget-default colour and no CSS text effects.
                     ("input", "submit") | ("input", "button") | ("input", "reset") => {
-                        let label: &str = if !value.is_empty() {
-                            value
-                        } else {
+                        let label = if value.is_empty() {
                             match input_type.as_str() {
                                 "submit" => "Submit",
                                 "reset" => "Reset",
                                 _ => "",
                             }
+                        } else {
+                            value.as_str()
                         };
                         if !label.is_empty() {
                             if let Some((ref mut fs, ref mut sc)) = text_ctx {
-                                let c = apply_opacity(color, a2);
+                                let text_w = crate::layout::inline_layout::measure_text_width_fs_attrs(
+                                    fs,
+                                    label,
+                                    *font_size,
+                                    cosmic_text::Weight(*font_weight),
+                                    CTextStyle::Normal,
+                                    scale,
+                                    font_family,
+                                    crate::layout::inline_layout::stretch_from_percent(100.0),
+                                );
                                 let line_h = *font_size * 1.2;
-                                // Centred both ways, as button chrome is.
-                                let text_y = rect.y + (rect.h - line_h).max(0.0) / 2.0;
-                                let text_w = label.chars().count() as f32 * *font_size * 0.5;
-                                let text_x = rect.x + (rect.w - text_w).max(0.0) / 2.0;
+                                let c = apply_opacity(color, a2);
                                 draw_text_cmd(
                                     target,
                                     *fs,
                                     *sc,
                                     scale,
-                                    text_x,
-                                    text_y,
+                                    rect.x + (rect.w - text_w).max(0.0) / 2.0,
+                                    rect.y + (rect.h - line_h).max(0.0) / 2.0,
                                     label,
                                     font_family,
                                     *font_size,
                                     *font_weight,
                                     0,
-                                    rect.w,
+                                    100.0,
                                     line_h,
                                     &c,
                                     &super::display_list::TextDecoration::default(),
@@ -2239,6 +2241,9 @@ fn replay_commands_inner(
                 line_height,
                 color,
                 blur,
+                letter_spacing,
+                word_spacing,
+                small_caps,
             } => {
                 if let Some((ref mut fs, ref mut sc)) = text_ctx {
                     let c = apply_opacity(color, 1.0);
@@ -2246,19 +2251,25 @@ fn replay_commands_inner(
                     if *blur > 0.0 {
                         let can_use_local_shadow = transform_depth == 0 && clip_mask.is_none();
                         if can_use_local_shadow {
-                            let text_w = crate::layout::inline_layout::measure_text_width_fs_attrs(
-                                fs,
-                                text,
-                                *font_size,
-                                cosmic_text::Weight(*font_weight),
-                                match *font_style {
-                                    1 => CTextStyle::Italic,
-                                    2 => CTextStyle::Oblique,
-                                    _ => CTextStyle::Normal,
-                                },
-                                text_scale,
-                                font_family,
-                            );
+                            let text_w =
+                                crate::layout::inline_layout::measure_text_width_fs_attrs(
+                                    fs,
+                                    text,
+                                    *font_size,
+                                    cosmic_text::Weight(*font_weight),
+                                    match *font_style {
+                                        1 => CTextStyle::Italic,
+                                        2 => CTextStyle::Oblique,
+                                        _ => CTextStyle::Normal,
+                                    },
+                                    text_scale,
+                                    font_family,
+                                    crate::layout::inline_layout::stretch_from_percent(
+                                        *font_stretch,
+                                    ),
+                                ) + *letter_spacing * text.chars().count() as f32
+                                    + *word_spacing
+                                        * text.chars().filter(|c| c.is_whitespace()).count() as f32;
                             let text_h = (*line_height).max(*font_size).max(1.0);
                             let shadow_pad = (*blur * 4.0 + 4.0).ceil();
                             let dev_left =
@@ -2297,9 +2308,9 @@ fn replay_commands_inner(
                                     *line_height,
                                     &c,
                                     &super::display_list::TextDecoration::default(),
-                                    0.0,
-                                    0.0,
-                                    false,
+                                    *letter_spacing,
+                                    *word_spacing,
+                                    *small_caps,
                                     None,
                                 );
                                 crate::canvas::blur_pixmap(&mut layer, *blur);
@@ -2333,9 +2344,9 @@ fn replay_commands_inner(
                                 *line_height,
                                 &c,
                                 &super::display_list::TextDecoration::default(),
-                                0.0,
-                                0.0,
-                                false,
+                                *letter_spacing,
+                                *word_spacing,
+                                *small_caps,
                                 None,
                             );
                             crate::canvas::blur_pixmap(&mut layer, *blur);
@@ -2373,9 +2384,9 @@ fn replay_commands_inner(
                             *line_height,
                             &c,
                             &super::display_list::TextDecoration::default(),
-                            0.0,
-                            0.0,
-                            false,
+                            *letter_spacing,
+                            *word_spacing,
+                            *small_caps,
                             clip_mask,
                         );
                     }
@@ -2856,7 +2867,7 @@ pub(crate) fn blit_shaped_buffer(
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
     buf: &mut Buffer,
-    text: &str,
+    _text: &str,
     phys_x: f32,
     phys_y: f32,
     _letter_spacing: f32,
@@ -2871,8 +2882,6 @@ pub(crate) fn blit_shaped_buffer(
         origin_x: i32,
         origin_y: i32,
         color_alpha: u32,
-        word_offsets: Vec<f32>,
-        glyph_index: usize,
         clip_mask: Option<&'a tiny_skia::Mask>,
     }
 
@@ -2890,14 +2899,7 @@ pub(crate) fn blit_shaped_buffer(
             );
         }
 
-        fn glyph(&mut self, mut physical_glyph: cosmic_text::PhysicalGlyph, color: CTextColor) {
-            let word_offset = self
-                .word_offsets
-                .get(self.glyph_index)
-                .copied()
-                .unwrap_or(0.0);
-            physical_glyph.x += word_offset.round() as i32;
-            self.glyph_index += 1;
+        fn glyph(&mut self, physical_glyph: cosmic_text::PhysicalGlyph, color: CTextColor) {
             let origin_x = self.origin_x;
             let origin_y = self.origin_y;
             let color_alpha = self.color_alpha;
@@ -2922,18 +2924,6 @@ pub(crate) fn blit_shaped_buffer(
         }
     }
 
-    let word_offsets: Vec<f32> = {
-        let mut offset = 0.0;
-        let mut out = Vec::new();
-        for ch in text.chars() {
-            if ch.is_whitespace() {
-                offset += _word_spacing;
-            } else {
-                out.push(offset);
-            }
-        }
-        out
-    };
     let mut renderer = PixmapTextRenderer {
         pixmap,
         font_system,
@@ -2941,8 +2931,6 @@ pub(crate) fn blit_shaped_buffer(
         origin_x: phys_x as i32,
         origin_y: phys_y as i32,
         color_alpha: color.a() as u32,
-        word_offsets,
-        glyph_index: 0,
         clip_mask,
     };
     buf.render(&mut renderer, color);
@@ -3057,6 +3045,7 @@ fn draw_text_cmd(
             },
             scale,
             font_family,
+            crate::layout::inline_layout::stretch_from_percent(font_stretch),
         ) + _letter_spacing * leading.chars().count() as f32;
         draw_text_cmd(
             pixmap,
@@ -3078,91 +3067,6 @@ fn draw_text_cmd(
             word_spacing,
             _small_caps,
             clip_mask,
-        );
-        return;
-    }
-    if word_spacing != 0.0 && text.chars().any(char::is_whitespace) {
-        let mut cursor_x = x;
-        let mut segment = String::new();
-        let flush_segment = |segment: &mut String,
-                             cursor_x: &mut f32,
-                             pixmap: &mut Pixmap,
-                             font_system: &mut FontSystem,
-                             swash_cache: &mut SwashCache| {
-            if segment.is_empty() {
-                return;
-            }
-            let advance = crate::layout::inline_layout::measure_text_width_fs_attrs(
-                font_system,
-                segment,
-                font_size,
-                cosmic_text::Weight(font_weight),
-                match font_style {
-                    1 => CTextStyle::Italic,
-                    2 => CTextStyle::Oblique,
-                    _ => CTextStyle::Normal,
-                },
-                scale,
-                font_family,
-            ) + _letter_spacing * segment.chars().count() as f32;
-            draw_text_cmd(
-                pixmap,
-                font_system,
-                swash_cache,
-                scale,
-                *cursor_x,
-                y,
-                segment,
-                font_family,
-                font_size,
-                font_weight,
-                font_style,
-                font_stretch,
-                line_height,
-                color,
-                decoration,
-                _letter_spacing,
-                0.0,
-                _small_caps,
-                clip_mask,
-            );
-            *cursor_x += advance;
-            segment.clear();
-        };
-
-        for ch in text.chars() {
-            if ch.is_whitespace() {
-                flush_segment(
-                    &mut segment,
-                    &mut cursor_x,
-                    pixmap,
-                    font_system,
-                    swash_cache,
-                );
-                cursor_x += crate::layout::inline_layout::measure_text_width_fs_attrs(
-                    font_system,
-                    &ch.to_string(),
-                    font_size,
-                    cosmic_text::Weight(font_weight),
-                    match font_style {
-                        1 => CTextStyle::Italic,
-                        2 => CTextStyle::Oblique,
-                        _ => CTextStyle::Normal,
-                    },
-                    scale,
-                    font_family,
-                ) + _letter_spacing
-                    + word_spacing;
-            } else {
-                segment.push(ch);
-            }
-        }
-        flush_segment(
-            &mut segment,
-            &mut cursor_x,
-            pixmap,
-            font_system,
-            swash_cache,
         );
         return;
     }
@@ -3189,10 +3093,15 @@ fn draw_text_cmd(
         .style(ct_s)
         .stretch(ct_stretch)
         .family(family);
-    if _letter_spacing != 0.0 && phys_px > 0.0 {
-        attrs = attrs.letter_spacing((_letter_spacing * sc) / phys_px);
+    let letter_spacing_attr = if _letter_spacing != 0.0 {
+        (_letter_spacing * sc) / phys_px
+    } else {
+        0.0
+    };
+    if letter_spacing_attr != 0.0 {
+        attrs = attrs.letter_spacing(letter_spacing_attr);
     }
-
+    let text_for_shape = text;
     let phys_x = x * sc;
     let phys_y = y * sc;
     let ct_color = CTextColor::rgba(color.r, color.g, color.b, color.a);
@@ -3208,7 +3117,7 @@ fn draw_text_cmd(
     let key = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        text.hash(&mut h);
+        text_for_shape.hash(&mut h);
         phys_px.to_bits().hash(&mut h);
         phys_lh.to_bits().hash(&mut h);
         font_weight.hash(&mut h);
@@ -3238,7 +3147,36 @@ fn draw_text_cmd(
         if !map.1.contains_key(&key) {
             let mut buf = Buffer::new(font_system, metrics);
             buf.set_size(font_system, None, Some((phys_lh + 4.0).max(1.0)));
-            buf.set_text(font_system, text, &attrs, Shaping::Advanced, None);
+            if word_spacing != 0.0 && text_for_shape.contains(' ') {
+                let word_attrs =
+                    attrs.clone().letter_spacing(((_letter_spacing + word_spacing) * sc) / phys_px);
+                let mut spans = Vec::new();
+                let mut rest = text_for_shape;
+                while !rest.is_empty() {
+                    match rest.find(' ') {
+                        Some(at) => {
+                            if at > 0 {
+                                spans.push((&rest[..at], attrs.clone()));
+                            }
+                            spans.push((&rest[at..at + 1], word_attrs.clone()));
+                            rest = &rest[at + 1..];
+                        }
+                        None => {
+                            spans.push((rest, attrs.clone()));
+                            break;
+                        }
+                    }
+                }
+                buf.set_rich_text(
+                    font_system,
+                    spans.iter().map(|(s, a)| (*s, a.clone())),
+                    &attrs,
+                    Shaping::Advanced,
+                    None,
+                );
+            } else {
+                buf.set_text(font_system, text_for_shape, &attrs, Shaping::Advanced, None);
+            }
             buf.shape_until_scroll(font_system, false);
             map.1.insert(key, buf);
         }
@@ -3248,7 +3186,7 @@ fn draw_text_cmd(
             font_system,
             swash_cache,
             buf,
-            text,
+            text_for_shape,
             phys_x,
             phys_y,
             _letter_spacing * sc,
@@ -3426,9 +3364,10 @@ fn draw_transformed_text_cmd(
         ct_style,
         1.0,
         font_family,
+        crate::layout::inline_layout::stretch_from_percent(font_stretch),
     );
-    let spacing = letter_spacing.max(0.0) * text.chars().count() as f32
-        + word_spacing.max(0.0) * text.chars().filter(|c| c.is_whitespace()).count() as f32;
+    let spacing = letter_spacing * text.chars().count() as f32
+        + word_spacing * text.chars().filter(|c| c.is_whitespace()).count() as f32;
     let line_h = line_height.max(font_size * 1.2).max(1.0);
     let pad = line_h.max(font_size).max(1.0) * 2.0 + 8.0;
     let logical_w = (measured + spacing + pad * 2.0).max(1.0);

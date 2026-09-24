@@ -167,15 +167,21 @@ fn split_calc_additive(expr: &str) -> Vec<(char, &str)> {
         match bytes[i] {
             b'(' => depth += 1,
             b')' => depth -= 1,
-            b' ' if depth == 0 && i + 2 < bytes.len() => {
-                let op = bytes[i + 1];
-                if (op == b'+' || op == b'-') && bytes[i + 2] == b' ' {
+            b'+' | b'-' if depth == 0 && i > start && i + 1 < bytes.len() => {
+                // CSS calc additive operators require whitespace on both sides,
+                // but CSS whitespace includes newlines, tabs, CR and FF. The old
+                // tree parser only accepted a literal space, so multiline nested
+                // calc()/min()/max()/clamp() expressions silently became invalid.
+                if i > 0 && css_calc_ws(bytes[i - 1]) && css_calc_ws(bytes[i + 1]) {
                     let term = expr[start..i].trim();
                     if !term.is_empty() {
                         parts.push((sign, term));
                     }
-                    sign = op as char;
-                    i += 3;
+                    sign = bytes[i] as char;
+                    i += 1;
+                    while i < bytes.len() && css_calc_ws(bytes[i]) {
+                        i += 1;
+                    }
                     start = i;
                     continue;
                 }
@@ -220,8 +226,13 @@ fn coeffs_mul(a: &Coeffs, f: f32) -> Coeffs {
     [a[0] * f, a[1] * f, a[2] * f, a[3] * f, a[4] * f, a[5] * f]
 }
 
+#[inline]
+fn css_calc_ws(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
+}
+
 fn calc_skip_ws(b: &[u8], pos: &mut usize) {
-    while *pos < b.len() && (b[*pos] == b' ' || b[*pos] == b'\t') {
+    while *pos < b.len() && css_calc_ws(b[*pos]) {
         *pos += 1;
     }
 }
@@ -237,7 +248,7 @@ fn calc_parse_additive(b: &[u8], pos: &mut usize) -> Coeffs {
         // CSS calc requires spaces around + and - operators.
         // Check for ` + ` or ` - ` pattern (we already consumed leading ws).
         let op = b[*pos];
-        if (op == b'+' || op == b'-') && *pos + 1 < b.len() && b[*pos + 1] == b' ' {
+        if (op == b'+' || op == b'-') && *pos + 1 < b.len() && css_calc_ws(b[*pos + 1]) {
             // Make sure the previous char was a space (we consumed it in skip_ws)
             *pos += 1; // skip operator
             calc_skip_ws(b, pos);

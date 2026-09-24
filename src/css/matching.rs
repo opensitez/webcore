@@ -91,6 +91,7 @@ pub struct AncestorInfo {
     pub type_child_index: usize,   // 0-based among same-tag siblings
     pub type_sibling_count: usize, // count of same-tag siblings
     pub node_id: u32,              // stable node id for hover chain check
+    pub prev_siblings: Vec<SiblingInfo>,
 }
 
 /// Previous/following element sibling state used by sibling combinators.
@@ -243,22 +244,22 @@ pub fn matches_selector_with_ancestors(
                     // Left parts must match the direct parent (last ancestor)
                     if let Some(parent) = ancestors.last() {
                         let parent_ancestors = &ancestors[..ancestors.len() - 1];
-                        let parent_ctx = MatchContext {
-                            focused_box: ctx.focused_box,
-                            keyboard_focus: ctx.keyboard_focus,
-                            type_child_index: parent.type_child_index,
-                            type_sibling_count: parent.type_sibling_count,
-                            html_box: None,
-                            hover_chain: ctx.hover_chain,
-                            focus_within_chain: ctx.focus_within_chain,
-                            element_id: parent.node_id,
-                            scope_root_id: ctx.scope_root_id,
-                            target_id: ctx.target_id,
-                            document_url: ctx.document_url,
-                            prev_siblings: &[],
-                            next_siblings: &[],
-                            next_sibling_nodes: &[],
-                        };
+	                        let parent_ctx = MatchContext {
+	                            focused_box: ctx.focused_box,
+	                            keyboard_focus: ctx.keyboard_focus,
+	                            type_child_index: parent.type_child_index,
+	                            type_sibling_count: parent.type_sibling_count,
+	                            html_box: None,
+	                            hover_chain: ctx.hover_chain,
+	                            focus_within_chain: ctx.focus_within_chain,
+	                            element_id: parent.node_id,
+	                            scope_root_id: ctx.scope_root_id,
+	                            target_id: ctx.target_id,
+	                            document_url: ctx.document_url,
+	                            prev_siblings: &parent.prev_siblings,
+	                            next_siblings: &[],
+	                            next_sibling_nodes: &[],
+	                        };
                         matches_selector_with_ancestors(
                             left_parts,
                             &parent.tag,
@@ -1284,15 +1285,16 @@ fn matches_element_or_descendant(
     ) {
         return true;
     }
-    ancestors.push(AncestorInfo {
-        tag: elem.tag.clone(),
-        attributes: elem.attributes.clone(),
-        child_index: 0,
-        sibling_count: 1,
-        type_child_index: 0,
-        type_sibling_count: 1,
-        node_id: elem.node_id,
-    });
+	    ancestors.push(AncestorInfo {
+	        tag: elem.tag.clone(),
+	        attributes: elem.attributes.clone(),
+	        child_index: 0,
+	        sibling_count: 1,
+	        type_child_index: 0,
+	        type_sibling_count: 1,
+	        node_id: elem.node_id,
+	        prev_siblings: Vec::new(),
+	    });
     for child in elem.children.iter().filter(|c| c.is_element()) {
         if matches_element_or_descendant(child, parts, ancestors, ctx) {
             ancestors.pop();

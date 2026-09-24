@@ -497,6 +497,7 @@ fn stream_stylesheet_fragments(
 
 fn stylesheet_has_content(sheet: &css::Stylesheet) -> bool {
     !sheet.rules.is_empty()
+        || !sheet.variables.is_empty()
         || !sheet.font_faces.is_empty()
         || !sheet.keyframes.is_empty()
         || !sheet.page_rules.is_empty()
@@ -1531,7 +1532,11 @@ fn collect_remote_images(
     path: &mut Vec<usize>,
     pending: &mut Vec<(u32, Vec<usize>, types::PendingImageTarget, String)>,
 ) {
-    if (node.is_image_element() || node.tag == "video") && node.image_data.is_none() {
+    let can_paint_resource = node_can_paint_resource(node);
+    if can_paint_resource
+        && (node.is_image_element() || node.tag == "video")
+        && node.image_data.is_none()
+    {
         let raw = if node.tag == "video" {
             node.attributes.get("poster").map(|s| s.as_str())
         } else {
@@ -1578,7 +1583,10 @@ fn collect_remote_images(
             ));
         }
     }
-    if node.bg_image_data.is_none() && !node.style.background_image_url.is_empty() {
+    if can_paint_resource
+        && node.bg_image_data.is_none()
+        && !node.style.background_image_url.is_empty()
+    {
         let resolved = html::resolve_url(&node.style.background_image_url, base_url);
         let url = resolved.as_str();
         if is_async_image_url(url) {
@@ -1610,7 +1618,7 @@ fn collect_remote_images(
         }
         let resolved = html::resolve_url(&layer.image_url, base_url);
         let url = resolved.as_str();
-        if is_async_image_url(url) {
+        if can_paint_resource && is_async_image_url(url) {
             pending.push((
                 node.node_id,
                 path.clone(),
@@ -1619,7 +1627,10 @@ fn collect_remote_images(
             ));
         }
     }
-    if node.mask_image_data.is_none() && !node.style.rare().mask_image_url.is_empty() {
+    if can_paint_resource
+        && node.mask_image_data.is_none()
+        && !node.style.rare().mask_image_url.is_empty()
+    {
         let resolved = html::resolve_url(&node.style.rare().mask_image_url, base_url);
         let url = resolved.as_str();
         if is_async_image_url(url) {
@@ -1641,6 +1652,26 @@ fn collect_remote_images(
         collect_remote_images(child, base_url, viewport_w, viewport_h, path, pending);
         path.pop();
     }
+}
+
+fn node_can_paint_resource(node: &types::WebCore) -> bool {
+    if matches!(node.style.display, types::Display::None) || !node.style.visibility {
+        return false;
+    }
+    let rect = node.layout.border_rect;
+    let has_layout = node.layout.last_containing_width > 0.0
+        || node.layout.content_rect.w > 0.0
+        || node.layout.content_rect.h > 0.0
+        || node.layout.margin_rect.w > 0.0
+        || node.layout.margin_rect.h > 0.0;
+    if !has_layout || (rect.w > 0.0 && rect.h > 0.0) {
+        return true;
+    }
+    node.is_image_element() && rect.w > 0.0 && image_source_is_known(node)
+}
+
+fn image_source_is_known(node: &types::WebCore) -> bool {
+    !node.resolved_src.is_empty() || html::image_fallback_source(node).is_some()
 }
 
 fn is_async_image_url(url: &str) -> bool {

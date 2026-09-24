@@ -220,15 +220,35 @@ pub fn layout_flex(
         } else {
             0.0
         };
-        let min_w = {
-            let v = engine.res_len(&node.style.min_width, font_px, containing_w, root_font_px);
-            (v - bb_extra).max(0.0)
+        let avail_w = (containing_w - rbox.h_space()).max(0.0);
+        let min_w = match engine.res_len_sizing(
+            &node.style.min_width,
+            node,
+            avail_w,
+            font_px,
+            containing_w,
+            root_font_px,
+        ) {
+            Some(v) => v,
+            None => {
+                let v = engine.res_len(&node.style.min_width, font_px, containing_w, root_font_px);
+                (v - bb_extra).max(0.0)
+            }
         };
-        let max_w = if node.style.max_width.is_none() || node.style.max_width.is_auto() {
-            f32::MAX
-        } else {
-            let v = engine.res_len(&node.style.max_width, font_px, containing_w, root_font_px);
-            (v - bb_extra).max(0.0)
+        let max_w = match engine.res_len_sizing(
+            &node.style.max_width,
+            node,
+            avail_w,
+            font_px,
+            containing_w,
+            root_font_px,
+        ) {
+            Some(v) => v,
+            None if node.style.max_width.is_none() || node.style.max_width.is_auto() => f32::MAX,
+            None => {
+                let v = engine.res_len(&node.style.max_width, font_px, containing_w, root_font_px);
+                (v - bb_extra).max(0.0)
+            }
         };
         content_w = content_w.max(min_w).min(max_w);
     }
@@ -1121,6 +1141,21 @@ pub fn layout_flex(
         }
     }
 
+    let aspect_cross_size = node.style.aspect_ratio.and_then(|ratio| {
+        if ratio <= 0.0 {
+            None
+        } else if is_row {
+            Some((content_w / ratio).max(0.0))
+        } else {
+            rbox.content_height.map(|h| (h * ratio).max(0.0))
+        }
+    });
+    let item_available_height = if is_row {
+        rbox.content_height.or(aspect_cross_size)
+    } else {
+        rbox.content_height
+    };
+
     // ── Layout each item at its resolved main size, compute cross sizes ────────
     // Mirror C++: set item.box->style.width/height = {cssW/cssH, Px} before LayoutBox
 
@@ -1147,7 +1182,7 @@ pub fn layout_flex(
         engine.layout_box(
             child,
             &item_constraints(
-                rbox.content_height,
+                item_available_height,
                 item_containing,
                 content_x,
                 content_y,
@@ -1213,6 +1248,8 @@ pub fn layout_flex(
             Some(content_w)
         };
         if let Some(cs) = definite_cross {
+            lines[0].cross_size = cs;
+        } else if let Some(cs) = aspect_cross_size {
             lines[0].cross_size = cs;
         } else if is_row && flex_min_h > lines[0].cross_size {
             lines[0].cross_size = flex_min_h.min(flex_max_h);
@@ -1466,7 +1503,8 @@ pub fn layout_flex(
                     // `auto` (Flexbox §5.2 / §9.4). This stretched regardless,
                     // so `<i style="height:20px">` in a 60px-tall flex row came
                     // out 60 tall — the declared height was simply discarded.
-                    let cross_is_auto = child.style.height.is_auto();
+                    let cross_is_auto =
+                        child.style.height.is_auto() && child.style.height.intrinsic().is_none();
                     if cross_is_auto
                         && target_h > 0.0
                         && (target_h - child.layout.content_rect.h).abs() > 0.5
@@ -1482,7 +1520,7 @@ pub fn layout_flex(
                         engine.layout_box(
                             child,
                             &item_constraints(
-                                rbox.content_height,
+                                item_available_height,
                                 item_containing,
                                 content_x,
                                 content_y,
@@ -1504,7 +1542,8 @@ pub fn layout_flex(
                         + irb.margin_right;
                     let stretch_w = (lc - cross_extra).max(0.0);
                     // The same, mirrored: in a column the cross axis is width.
-                    let cross_is_auto = child.style.width.is_auto();
+                    let cross_is_auto =
+                        child.style.width.is_auto() && child.style.width.intrinsic().is_none();
                     if cross_is_auto
                         && stretch_w > 0.0
                         && (stretch_w - child.layout.content_rect.w).abs() > 0.5
@@ -1516,7 +1555,7 @@ pub fn layout_flex(
                         engine.layout_box(
                             child,
                             &item_constraints(
-                                rbox.content_height,
+                                item_available_height,
                                 stretch_w + cross_extra - irb.margin_left - irb.margin_right,
                                 content_x,
                                 content_y,
@@ -1544,8 +1583,10 @@ pub fn layout_flex(
                 // For column direction with Center/FlexStart/FlexEnd: shrink auto-width
                 // children to their intrinsic (max-content) width, matching browser behavior.
                 if !is_row {
-                    let child_width_is_auto =
-                        child_ref(node, &items[item_idx].path).style.width.is_auto();
+                    let child_width_is_auto = {
+                        let width = &child_ref(node, &items[item_idx].path).style.width;
+                        width.is_auto() && width.intrinsic().is_none()
+                    };
                     if child_width_is_auto {
                         let child = child_mut(node, &items[item_idx].path);
                         let intrinsic_w = engine
@@ -1564,7 +1605,7 @@ pub fn layout_flex(
                             engine.layout_box(
                                 child,
                                 &item_constraints(
-                                    rbox.content_height,
+                                    item_available_height,
                                     intrinsic_w,
                                     content_x,
                                     content_y,

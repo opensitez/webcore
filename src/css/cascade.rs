@@ -312,16 +312,17 @@ fn projected_rule_targets_assigned_node(sel: &CssSelector) -> bool {
 }
 
 pub(crate) fn projected_ancestor_info(node: &WebCore) -> AncestorInfo {
-    AncestorInfo {
-        tag: node.tag.clone(),
-        attributes: node.attributes.clone(),
-        child_index: 0,
-        sibling_count: 1,
-        type_child_index: 0,
-        type_sibling_count: 1,
-        node_id: node.node_id,
-    }
-}
+	    AncestorInfo {
+	        tag: node.tag.clone(),
+	        attributes: node.attributes.clone(),
+	        child_index: 0,
+	        sibling_count: 1,
+	        type_child_index: 0,
+	        type_sibling_count: 1,
+	        node_id: node.node_id,
+	        prev_siblings: Vec::new(),
+	    }
+	}
 
 pub(crate) fn apply_host_projected_rules_to_projected(
     node: &mut crate::types::WebCore,
@@ -1798,15 +1799,16 @@ pub fn debug_match_report_for_node(
             return None;
         }
 
-        ancestors.push(AncestorInfo {
-            tag: node.tag.clone(),
-            attributes: node.attributes.clone(),
-            child_index,
-            sibling_count,
-            type_child_index,
-            type_sibling_count,
-            node_id: node.node_id,
-        });
+	        ancestors.push(AncestorInfo {
+	            tag: node.tag.clone(),
+	            attributes: node.attributes.clone(),
+	            child_index,
+	            sibling_count,
+	            type_child_index,
+	            type_sibling_count,
+	            node_id: node.node_id,
+	            prev_siblings: prev_siblings.to_vec(),
+	        });
 
         let children = node.effective_children();
         let n_children = children.len();
@@ -3414,15 +3416,16 @@ pub(crate) fn apply_cascade_inner(
 
     build_pseudo_element_boxes(root);
 
-    ancestors.push(AncestorInfo {
-        tag: root.tag.clone(),
-        attributes: root.attributes.clone(),
-        child_index,
-        sibling_count,
-        type_child_index,
-        type_sibling_count,
-        node_id: root.node_id,
-    });
+	    ancestors.push(AncestorInfo {
+	        tag: root.tag.clone(),
+	        attributes: root.attributes.clone(),
+	        child_index,
+	        sibling_count,
+	        type_child_index,
+	        type_sibling_count,
+	        node_id: root.node_id,
+	        prev_siblings: prev_siblings.to_vec(),
+	    });
 
     // Helper: cascade a list of children with a given stylesheet
     fn cascade_children(

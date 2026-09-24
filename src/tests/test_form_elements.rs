@@ -66,6 +66,15 @@ fn find_by_node_id<'a>(node: &'a WebCore, nid: u32) -> Option<&'a WebCore> {
     None
 }
 
+fn collect_text(node: &WebCore, out: &mut String) {
+    if node.tag == "#text" {
+        out.push_str(&node.text);
+    }
+    for child in &node.children {
+        collect_text(child, out);
+    }
+}
+
 // ── Text Input Tests ─────────────────────────────────────────────────────────
 
 #[test]
@@ -559,6 +568,49 @@ fn button_has_width() {
         "button width {} should be > 20",
         input.layout.content_rect.w
     );
+}
+
+#[test]
+fn submit_input_sizes_to_its_label() {
+    let doc = layout_html(
+        r#"<input type="submit" value="Create a poem" style="font: 16px sans-serif; padding: 6px 12px; box-sizing: border-box">"#,
+        400.0,
+    );
+    let input = find_by_tag(&doc.root, "input").unwrap();
+    let content_width = input.layout.content_rect.w;
+    assert!(content_width > 70.0 && content_width < 130.0, "{content_width}");
+}
+
+#[test]
+fn native_text_control_remains_readable_when_foreground_equals_background() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list;
+
+    let doc = layout_html(
+        r#"<input type="text" value="visible" style="color: #8d0c0c; background: #8d0c0c">"#,
+        400.0,
+    );
+    let list = build_display_list(&doc.root, 400.0, 900.0);
+    let color = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::FormElement { color, value, .. } if value == "visible" => Some(*color),
+        _ => None,
+    }).expect("text input paint command");
+    assert_eq!(color, Color::WHITE);
+}
+
+#[test]
+fn submit_label_is_painted_only_by_native_control() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list;
+
+    let doc = layout_html(r#"<input type="submit" value="Create a poem">"#, 400.0);
+    let list = build_display_list(&doc.root, 400.0, 900.0);
+    assert!(list.commands.iter().any(|cmd| matches!(cmd,
+        PaintCmd::FormElement { value, .. } if value == "Create a poem"
+    )));
+    assert!(!list.commands.iter().any(|cmd| matches!(cmd,
+        PaintCmd::Text { text, .. } if text == "Create a poem"
+    )));
 }
 
 // ── Select Tests ─────────────────────────────────────────────────────────────
@@ -1765,6 +1817,111 @@ fn click_and_type_integration() {
 }
 
 #[test]
+fn typing_after_clicking_submit_label_does_not_edit_document_text() {
+    let mut doc = layout_html(
+        r#"<form><input id="name" type="text"><input id="go" type="submit" value="Create a poem"></form>"#,
+        600.0,
+    );
+    let submit = find_by_id(&doc.root, "go").unwrap();
+    let center = (
+        submit.layout.border_rect.x + submit.layout.border_rect.w / 2.0,
+        submit.layout.border_rect.y + submit.layout.border_rect.h / 2.0,
+    );
+
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, center, 0);
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, center, 0);
+    doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        'x' as u32,
+        Some('x'),
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let submit = find_by_id(&doc.root, "go").unwrap();
+    assert_eq!(
+        submit.children.iter().find(|c| c.tag == "#text").map(|c| c.text.as_str()),
+        Some("Create a poem"),
+        "native input button label text is internal control content, not editable document text"
+    );
+}
+
+#[test]
+fn keypress_on_normal_page_does_not_edit_document_text() {
+    let mut doc = layout_html(r#"<div id="body">hello</div>"#, 600.0);
+    doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        'x' as u32,
+        Some('x'),
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let body = find_by_id(&doc.root, "body").unwrap();
+    let mut text = String::new();
+    collect_text(body, &mut text);
+    assert_eq!(text, "hello", "normal browser documents are not editable");
+}
+
+#[test]
+fn clicking_normal_text_does_not_make_page_editable() {
+    let mut doc = layout_html(r#"<div id="body">hello</div>"#, 600.0);
+    let body = find_by_id(&doc.root, "body").unwrap();
+    let center = (
+        body.layout.border_rect.x + body.layout.border_rect.w / 2.0,
+        body.layout.border_rect.y + body.layout.border_rect.h / 2.0,
+    );
+
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, center, 0);
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, center, 0);
+    assert!(
+        doc.editor.caret_info().is_none(),
+        "ordinary text clicks must not arm the document editor"
+    );
+
+    doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        'x' as u32,
+        Some('x'),
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let body = find_by_id(&doc.root, "body").unwrap();
+    let mut text = String::new();
+    collect_text(body, &mut text);
+    assert_eq!(text, "hello");
+}
+
+#[test]
+fn keypress_inside_contenteditable_still_edits_text() {
+    let mut doc = layout_html(r#"<div id="ed" contenteditable>hello</div>"#, 600.0);
+    let ed = find_by_id(&doc.root, "ed").unwrap();
+    doc.editor.set_caret_from_hit(ed.node_id, 5, false);
+
+    doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        'x' as u32,
+        Some('x'),
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let ed = find_by_id(&doc.root, "ed").unwrap();
+    let mut text = String::new();
+    collect_text(ed, &mut text);
+    assert_eq!(text, "hellox");
+}
+
+#[test]
 fn click_and_type_password() {
     let mut doc = layout_html(r#"<input type="password" id="p" value="">"#, 400.0);
     let input = find_by_id(&doc.root, "p").unwrap();
@@ -2693,6 +2850,44 @@ fn build_post_url_no_query() {
 }
 
 // ── Select keyboard navigation ──────────────────────────────────────────────
+
+#[test]
+fn choosing_option_does_not_turn_select_whitespace_into_visible_text() {
+    let mut doc = layout_html(
+        "<select id='s'><option value='a' selected>Alpha</option><option value='b'>Beta</option>\n</select>",
+        400.0,
+    );
+    let sel = find_by_id(&doc.root, "s").unwrap();
+    let select_id = sel.node_id;
+    let rect = sel.layout.border_rect;
+    let center = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    let option_y = rect.y + rect.h + 4.0 + sel.style.font_size_px(16.0, 16.0) * 2.7;
+
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, center, 0);
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, center, 0);
+    assert_eq!(doc.open_select, select_id);
+    doc.process_mouse_event(
+        crate::dom::HtmlEventType::MouseDown,
+        (center.0, option_y),
+        0,
+    );
+    doc.process_mouse_event(
+        crate::dom::HtmlEventType::MouseUp,
+        (center.0, option_y),
+        0,
+    );
+
+    let sel = find_by_id(&doc.root, "s").unwrap();
+    assert_eq!(crate::html::forms::select_value(sel), "b");
+    assert_eq!(
+        sel.children
+            .iter()
+            .filter(|child| child.tag == "#text")
+            .map(|child| child.text.as_str())
+            .collect::<String>(),
+        "\n",
+    );
+}
 
 #[test]
 fn select_arrow_down_changes_option() {
@@ -3916,6 +4111,56 @@ fn an_unstyled_list_box_still_occupies_space() {
         r.h > dd_h,
         "a 4-row list box ({}) is not taller than a drop-down ({dd_h})",
         r.h
+    );
+}
+
+#[test]
+fn select_option_children_do_not_leak_into_document_layout() {
+    let doc = layout_html(
+        r#"<main>
+             <select id="lang" class="block" style="display:block;width:220px;padding:6px 32px 6px 16px">
+               <option>English</option>
+               <option selected>Deutsch</option>
+               <option>Español</option>
+             </select>
+             <p id="after">After</p>
+           </main>"#,
+        500.0,
+    );
+    let select = find_by_id(&doc.root, "lang").unwrap();
+    assert!(select.layout.content_rect.w > 0.0);
+    assert!(select.layout.content_rect.h > 0.0);
+
+    fn assert_hidden_option_subtree(node: &WebCore) {
+        if node.tag == "option" || node.tag == "#text" {
+            assert_eq!(
+                node.layout.content_rect,
+                Rect::default(),
+                "{} leaked layout {:?}",
+                node.tag,
+                node.layout.content_rect
+            );
+            assert_eq!(
+                node.layout.margin_rect,
+                Rect::default(),
+                "{} leaked margin {:?}",
+                node.tag,
+                node.layout.margin_rect
+            );
+        }
+        for child in &node.children {
+            assert_hidden_option_subtree(child);
+        }
+    }
+    for child in &select.children {
+        assert_hidden_option_subtree(child);
+    }
+
+    let after = find_by_id(&doc.root, "after").unwrap();
+    assert!(
+        after.layout.margin_rect.y < 200.0,
+        "hidden options pushed following content to y={}",
+        after.layout.margin_rect.y
     );
 }
 

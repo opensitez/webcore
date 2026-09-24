@@ -78,15 +78,16 @@ pub fn mark_hover_dirty(
             node.has_dirty_descendant = true;
             any_dirty = true;
         }
-        let anc = AncestorInfo {
-            tag: node.tag.clone(),
-            attributes: node.attributes.clone(),
-            child_index,
-            sibling_count,
-            type_child_index,
-            type_sibling_count,
-            node_id: node.node_id,
-        };
+	        let anc = AncestorInfo {
+	            tag: node.tag.clone(),
+	            attributes: node.attributes.clone(),
+	            child_index,
+	            sibling_count,
+	            type_child_index,
+	            type_sibling_count,
+	            node_id: node.node_id,
+	            prev_siblings: Vec::new(),
+	        };
         ancestors.push(anc);
 
         let child_count = node.children.len();
@@ -204,15 +205,16 @@ pub fn hover_change_requires_style(
             return true;
         }
 
-        let anc = AncestorInfo {
-            tag: node.tag.clone(),
-            attributes: node.attributes.clone(),
-            child_index,
-            sibling_count,
-            type_child_index,
-            type_sibling_count,
-            node_id: node.node_id,
-        };
+	        let anc = AncestorInfo {
+	            tag: node.tag.clone(),
+	            attributes: node.attributes.clone(),
+	            child_index,
+	            sibling_count,
+	            type_child_index,
+	            type_sibling_count,
+	            node_id: node.node_id,
+	            prev_siblings: Vec::new(),
+	        };
         ancestors.push(anc);
 
         let child_count = node.children.len();
@@ -461,15 +463,16 @@ fn apply_cascade_incremental_walk(
     }
 
     // has_dirty_descendant only — don't re-cascade this node, just recurse into children
-    let anc = AncestorInfo {
-        tag: node.tag.clone(),
-        attributes: node.attributes.clone(),
-        child_index,
-        sibling_count,
-        type_child_index,
-        type_sibling_count,
-        node_id: node.node_id,
-    };
+	    let anc = AncestorInfo {
+	        tag: node.tag.clone(),
+	        attributes: node.attributes.clone(),
+	        child_index,
+	        sibling_count,
+	        type_child_index,
+	        type_sibling_count,
+	        node_id: node.node_id,
+	        prev_siblings: Vec::new(),
+	    };
     ancestors.push(anc);
 
     let parent_s = node.style.clone();
