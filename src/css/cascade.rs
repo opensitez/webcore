@@ -108,6 +108,17 @@ fn clear_inherit_tracking_for_id(inherit_props: &mut HashSet<String>, id: proper
     }
 }
 
+fn track_inherit_for_id(inherit_props: &mut HashSet<String>, id: properties::PropertyId) {
+    let def = property_defs::get(id);
+    if def.longhands.is_empty() {
+        inherit_props.insert(def.name.to_string());
+    } else {
+        for &longhand in def.longhands {
+            inherit_props.insert(property_defs::get(longhand).name.to_string());
+        }
+    }
+}
+
 fn apply_css_value_with_cascade_context(
     style: &mut ComputedStyle,
     id: properties::PropertyId,
@@ -2660,7 +2671,7 @@ pub(crate) fn apply_cascade_inner(
                 }
                 let trimmed = resolved.trim();
                 if trimmed == "inherit" {
-                    inherit_props.insert(prop.to_string());
+                    track_inherit_for_id(&mut inherit_props, properties::resolve(prop));
                 } else if trimmed == "revert-layer" {
                     copy_property_from_style(&mut style, revert_layer_base, prop);
                 } else if trimmed == "revert" {
@@ -2699,8 +2710,7 @@ pub(crate) fn apply_cascade_inner(
                     continue;
                 }
                 if matches!(val, crate::types::CssValue::Inherit) {
-                    let name = property_defs::get(id).name;
-                    inherit_props.insert(name.to_string());
+                    track_inherit_for_id(&mut inherit_props, id);
                 } else if matches!(val, crate::types::CssValue::RevertLayer) {
                     let name = property_defs::get(id).name;
                     copy_property_from_style(&mut style, revert_layer_base, name);
@@ -2725,7 +2735,7 @@ pub(crate) fn apply_cascade_inner(
                             let trimmed = resolved.trim();
                             let name = property_defs::get(id).name;
                             if trimmed == "inherit" {
-                                inherit_props.insert(name.to_string());
+                                track_inherit_for_id(&mut inherit_props, id);
                             } else if trimmed == "revert-layer" {
                                 copy_property_from_style(&mut style, revert_layer_base, name);
                             } else if trimmed == "revert" {
@@ -2746,7 +2756,7 @@ pub(crate) fn apply_cascade_inner(
                     } else {
                         let trimmed = s.trim();
                         if trimmed == "inherit" {
-                            inherit_props.insert(property_defs::get(id).name.to_string());
+                            track_inherit_for_id(&mut inherit_props, id);
                         } else if trimmed == "revert-layer" {
                             let name = property_defs::get(id).name;
                             copy_property_from_style(&mut style, revert_layer_base, name);
@@ -3070,7 +3080,10 @@ pub(crate) fn apply_cascade_inner(
     let parent_font_px = parent_style
         .map(|p| p.font_size_px(root_font_px, root_font_px))
         .unwrap_or(root_font_px);
-    let font_px = style.font_size_px(parent_font_px, root_font_px);
+    let font_px = style
+        .font_size
+        .resolve_vp(parent_font_px, parent_font_px, root_font_px, vw, vh)
+        .max(1.0);
     style.font_size = CssLength::Px(font_px);
 
     // If this is the root element (<html>), its computed font-size becomes the

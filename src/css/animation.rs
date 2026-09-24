@@ -377,11 +377,8 @@ fn parse_linear_points(inner: &str) -> Option<Vec<(f32, f32)>> {
     )
 }
 
-/// Extract CSS custom properties (--name: value) from `:root { }` blocks.
-/// Extract CSS custom properties (--*) from rule blocks.
-/// Collects from any rule block, since custom properties can be set on any element
-/// and are inherited. This matches the common patterns: `:root`, `html`, `html.class`,
-/// `body`, and element-level overrides.
+/// Extract unconditional root custom properties for stylesheet-level consumers.
+/// Selector-qualified properties remain in the cascade and apply only when matched.
 pub(crate) fn extract_root_variables_cleaned(css: &str, vars: &mut HashMap<String, String>) {
     extract_root_variables_inner(css, vars);
 }
@@ -491,20 +488,12 @@ pub(crate) fn extract_root_variables_vp(
         if let Some(brace) = s.find('{') {
             let selector = s[..brace].trim();
             let (block, rest) = consume_block(&s[brace..]);
-            // Only extract custom properties from :root and html selectors
-            // (universal scope). Selector-specific variables are handled
-            // by the per-element cascade via inherited_vars.
+            // Only unconditional root selectors are global. Selector-specific
+            // variables are handled by the per-element cascade.
             let sel_lower = selector.to_ascii_lowercase();
-            let is_root = sel_lower.split(',').any(|s| {
-                let s = s.trim();
-                s == ":root"
-                    || s == "html"
-                    || s == "*"
-                    || s.starts_with(":root[")
-                    || s.starts_with(":root:")
-                    || s.starts_with("html[")
-                    || s.starts_with("html:")
-            });
+            let is_root = sel_lower
+                .split(',')
+                .any(|s| matches!(s.trim(), ":root" | "html" | "*"));
             if is_root && block.contains("--") {
                 for decl in block.split(';') {
                     let decl = decl.trim();

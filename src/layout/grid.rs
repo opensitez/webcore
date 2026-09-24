@@ -932,7 +932,14 @@ pub fn layout_grid(
         let child = grid_child_ref(node, path);
         // intrinsic_sizes (unified) rather than layout_box(10000), which would
         // leak the dummy width into the child's cached layout.
-        let sz = engine.intrinsic_sizes_with_width_basis(child, font_px, root_font_px, content_w);
+        // A percentage width on a grid item is relative to its eventual grid
+        // area, not the entire multi-track container. Measuring it against
+        // content_w here would make a 100%-wide item inflate its own track.
+        let sz = if n_measured_cols > 1 && child.style.width.has_percentage() {
+            engine.intrinsic_sizes(child, font_px, root_font_px)
+        } else {
+            engine.intrinsic_sizes_with_width_basis(child, font_px, root_font_px, content_w)
+        };
         col_spans.push((
             cs.min(n_measured_cols),
             ce.min(n_measured_cols),
@@ -2191,17 +2198,21 @@ fn resolve_to_pixels(
                     fr_value[i] = t.max_value;
                     limit[i] = base[i];
                 } else {
-                    limit[i] = resolve_track_component_px(
-                        t.max_kind,
-                        t.max_value,
-                        t.max_value,
-                        t.max_calc_length.as_ref(),
-                        container,
-                        font_px,
-                        root_font_px,
-                        mn,
-                        mx,
-                    );
+                    limit[i] = if t.max_kind == GridTrackKind::Auto {
+                        mx
+                    } else {
+                        resolve_track_component_px(
+                            t.max_kind,
+                            t.max_value,
+                            t.max_value,
+                            t.max_calc_length.as_ref(),
+                            container,
+                            font_px,
+                            root_font_px,
+                            mn,
+                            mx,
+                        )
+                    };
                     if t.max_kind == GridTrackKind::Auto {
                         max_is_auto[i] = true;
                     }

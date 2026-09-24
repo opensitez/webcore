@@ -32,6 +32,7 @@ pub struct Renderer {
     cursor_physical: (f32, f32),
     viewport_h: f32,
     cached_display_list: Option<display_list::DisplayList>,
+    cached_list_image_bytes: usize,
     cached_scroll_x: f32,
     cached_scroll_y: f32,
     cached_paint_top: f32,
@@ -446,6 +447,7 @@ impl Renderer {
             cursor_physical: (0.0, 0.0),
             viewport_h: 700.0,
             cached_display_list: None,
+            cached_list_image_bytes: 0,
             cached_scroll_x: 0.0,
             cached_scroll_y: 0.0,
             cached_paint_top: 0.0,
@@ -1561,6 +1563,7 @@ impl Renderer {
             if !animation_restore.is_empty() {
                 crate::css::restore_animation_overrides(&mut doc.root, animation_restore);
             }
+            self.cached_list_image_bytes = list.memory_estimate().image_bytes;
             self.cached_display_list = Some(list);
             self.cached_paint_top = paint_top;
             self.cached_paint_bottom = paint_bottom;
@@ -1873,14 +1876,37 @@ impl Renderer {
             && let Some(ref list) = self.cached_display_list
         {
             let replay_start = std::time::Instant::now();
-            if self.use_tiles {
+            let mut needed_tiles = Vec::new();
+            let mut render_tiles = self.use_tiles;
+            if render_tiles {
                 self.tile_manager.doc_width = doc_w.max(view_w);
                 self.tile_manager.doc_height = doc_h.max(view_h);
                 let tile_scale = scale * zoom;
-                let needed_tiles = self.tile_manager.update_viewport(
+                needed_tiles = self.tile_manager.update_viewport(
                     Rect::new(doc.scroll_x, doc.scroll_y, view_w, view_h),
                     tile_scale,
                 );
+                let tile_px = (tiles::TILE_SIZE * tile_scale).ceil() as u32;
+                let cold_tiles = needed_tiles
+                    .iter()
+                    .filter(|key| {
+                        self.tile_manager.tiles.get(key).is_none_or(|tile| {
+                            tile.dirty
+                                || tile.pixmap.width() != tile_px
+                                || tile.pixmap.height() != tile_px
+                        })
+                    })
+                    .count();
+                // Replaying a small list once is cheaper than rasterizing a
+                // large cold tile border on the UI thread during a jump.
+                render_tiles = !(cold_tiles as f32 * tiles::TILE_SIZE.powi(2)
+                    > view_w * view_h * 2.0
+                    && self.cached_list_image_bytes <= 16 * 1024 * 1024
+                    && list.commands.len() <= 1500
+                    && doc.animation_overrides.is_empty());
+            }
+            if render_tiles {
+                let tile_scale = scale * zoom;
                 for (tx, ty) in needed_tiles {
                     let needs_tile = self.tile_manager.ensure_tile(tx, ty);
                     if needs_tile {

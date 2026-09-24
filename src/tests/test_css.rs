@@ -5099,6 +5099,67 @@ fn css_var_inherited_from_root() {
 }
 
 #[test]
+fn font_inherit_shorthand_does_not_override_later_longhands() {
+    let doc = parse_and_layout(
+        r#"<style>
+            body { font: 18px serif; }
+            h2 { font: inherit; }
+            .headline { font-size: 48px; font-weight: 900; font-family: Arial; }
+        </style><h2 class="headline">Headline</h2>"#,
+        800.0,
+    );
+    let heading = find_box(&doc.root, &|b| b.tag == "h2").unwrap();
+    assert_eq!(heading.style.font_size, CssLength::Px(48.0));
+    assert_eq!(heading.style.font_weight, FontWeight::Value(900));
+    assert_eq!(heading.style.font_family, "Arial");
+}
+
+#[test]
+fn inactive_root_theme_does_not_override_light_custom_property() {
+    let doc = parse_and_layout(
+        r#"<html data-theme="light"><head><style>
+            html { --background: white; }
+            html[data-theme=dark] { --background: #05162c; }
+            body { background-color: var(--background); }
+        </style></head><body>Light</body></html>"#,
+        800.0,
+    );
+    let body = find_box(&doc.root, &|b| b.tag == "body").unwrap();
+    assert_eq!(body.style.background_color, Color::rgb(255, 255, 255));
+}
+
+#[test]
+fn grouped_root_light_theme_does_not_take_inactive_dark_value() {
+    let doc = parse_and_layout(
+        r#"<html><head><style>
+            :root, html[data-theme=light] { --background: #ffffff; }
+            html[data-theme=dark] { --background: #05162c; }
+            body { background-color: var(--background); }
+        </style></head><body>Light</body></html>"#,
+        800.0,
+    );
+    let body = find_box(&doc.root, &|b| b.tag == "body").unwrap();
+    assert_eq!(body.style.background_color, Color::rgb(255, 255, 255));
+}
+
+#[test]
+fn desktop_headline_calc_font_size_resolves_at_viewport_width() {
+    let doc = parse_and_layout(
+        r#"<style>
+            h2 { font-size: 48px; }
+            @media screen and (min-width:1280px) {
+                h2 { font-size: calc(36px + 16 * (100vw - 1280px) / 160); }
+            }
+        </style><h2>Headline</h2>"#,
+        1366.0,
+    );
+    let heading = find_box(&doc.root, &|b| b.tag == "h2").unwrap();
+    let actual = heading.style.font_size.resolve_vp(16.0, 0.0, 16.0, 1366.0, 768.0);
+    let parsed = crate::css::parse_length("calc(36px + 16 * (100vw - 1280px) / 160)");
+    assert!((actual - 44.6).abs() < 0.1, "got {actual}px from {:?}, parsed {:?}", heading.style.font_size, parsed);
+}
+
+#[test]
 fn css_bootstrap_rgb_triplet_vars_resolve_in_important_utilities() {
     let doc = parse_and_layout(
         r#"<html><head><style>
@@ -5224,7 +5285,7 @@ fn custom_property_color_mix_chain_resolves_before_border_shorthand() {
 }
 
 #[test]
-fn stylesheet_root_variable_extraction_handles_root_pseudos_without_descendants() {
+fn stylesheet_root_variable_extraction_leaves_conditional_selectors_scoped() {
     let mut sheet = Stylesheet::default();
     sheet.parse_and_add(
         r#"
@@ -5234,8 +5295,8 @@ fn stylesheet_root_variable_extraction_handles_root_pseudos_without_descendants(
         "#,
     );
     sheet.resolve_variables_for_viewport(800.0, 600.0);
-    assert_eq!(sheet.variables.get("--brand").map(String::as_str), Some("#434fcf"));
-    assert_eq!(sheet.variables.get("--accent").map(String::as_str), Some("#fb542b"));
+    assert!(!sheet.variables.contains_key("--brand"));
+    assert!(!sheet.variables.contains_key("--accent"));
     assert!(
         !sheet.variables.contains_key("--scoped-only"),
         "descendant-scoped custom properties must not be promoted to stylesheet globals"

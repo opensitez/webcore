@@ -881,15 +881,6 @@ fn parse_stylesheet_inner(
                     continue;
                 }
 
-                // :root — extract CSS variables
-                if sel_str == ":root" {
-                    // Variables are stored on the Stylesheet, not as rules.
-                    // We emit a special rule with empty selectors as a marker;
-                    // the caller (parse_and_add) handles it.
-                    // For now: skip (variables handled by Stylesheet::parse_and_add).
-                    continue;
-                }
-
                 let original_selector = sel_str.to_string();
 
                 // Detect ::before / ::after pseudo-elements, strip from selector for matching

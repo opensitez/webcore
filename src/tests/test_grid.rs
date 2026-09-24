@@ -374,6 +374,32 @@ fn grid_auto_track_percentage_image_does_not_expand_page_to_natural_width() {
 }
 
 #[test]
+fn grid_minmax_auto_tracks_measure_percent_sized_item_from_its_content() {
+    let doc = parse_and_layout(
+        r#"<style>
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            #grid { display: grid; width: 985px;
+                grid-template-columns: minmax(520px, auto) minmax(355px, auto); }
+            #media { width: 100%; }
+            #media img { display: block; width: 100%; height: auto; }
+            #info { margin-left: 24px; }
+            #title { font-size: 44.6px; font-weight: 900; word-break: break-word; }
+        </style>
+        <div id="grid">
+            <div id="media"><img width="520" height="293"></div>
+            <div id="info"><h2 id="title">Judge orders Trump admin must restore White House access to banned media outlets</h2></div>
+        </div>"#,
+        1366.0,
+    );
+    let media = find_by_id(&doc.root, "media").unwrap();
+    let info = find_by_id(&doc.root, "info").unwrap();
+    assert!((media.layout.border_rect.w - 520.0).abs() < 1.0,
+        "media track should use 520px intrinsic image width, got {}", media.layout.border_rect.w);
+    assert!((info.layout.margin_rect.w - 465.0).abs() < 1.0,
+        "info track should take remaining 465px, got {}", info.layout.margin_rect.w);
+}
+
+#[test]
 fn media_grid_minmax_rem_track_keeps_block_container_width() {
     let html = r#"
         <style>
