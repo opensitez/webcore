@@ -1303,6 +1303,28 @@ fn min_with_calc_inside() {
 }
 
 #[test]
+fn min_with_multiline_calc_inside() {
+    let d = load_html(
+        concat!(
+            "<div style='width:800px'>",
+            "<div id='t' style='width:min(calc(\n",
+            "  100%\n",
+            "  -\n",
+            "  100px\n",
+            "), 500px);height:40px'>X</div>",
+            "</div>",
+        ),
+        900.0,
+    );
+    let t = by_id(&d.root, "t").unwrap();
+    assert!(
+        (t.layout.content_rect.w - 500.0).abs() < 10.0,
+        "multiline min+calc={:.0}",
+        t.layout.content_rect.w
+    );
+}
+
+#[test]
 fn clamp_all_calc() {
     let d = load_html(
         "<div style='width:1000px'><div id='t' style='width:clamp(calc(10% + 50px), calc(30% + 20px), calc(50% - 50px));height:40px'>X</div></div>",

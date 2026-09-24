@@ -806,3 +806,108 @@ fn var_many_variables_no_timeout() {
     let t = by_id(&doc.root, "t").unwrap();
     assert!((t.layout.content_rect.w - 100.0).abs() < 5.0, "--v10=100px");
 }
+
+#[test]
+fn var_light_dark_honors_element_color_scheme() {
+    let doc = load_html(
+        concat!(
+            "<style>",
+            ":root { --bg: light-dark(#f7f7f8, #212426); --fg: light-dark(#000000, #ffffff); }",
+            ".panel { color-scheme: dark; background-color: var(--bg); color: var(--fg); }",
+            "</style>",
+            "<div id='t' class='panel'>Dark panel</div>",
+        ),
+        800.0,
+    );
+    let t = by_id(&doc.root, "t").unwrap();
+    assert_eq!(
+        (
+            t.style.background_color.r,
+            t.style.background_color.g,
+            t.style.background_color.b
+        ),
+        (0x21, 0x24, 0x26),
+        "light-dark() inside var() should use the dark arm when color-scheme:dark is on the element"
+    );
+    assert_eq!(
+        (t.style.color.r, t.style.color.g, t.style.color.b),
+        (255, 255, 255),
+        "text color should use the dark-scheme light foreground"
+    );
+}
+
+#[test]
+fn var_light_dark_uses_final_color_scheme_across_rules() {
+    let doc = load_html(
+        concat!(
+            "<style>",
+            ":root { --bg: light-dark(#f7f7f8, #212426); --fg: light-dark(#000000, #ffffff); }",
+            ".navigation { background-color: var(--bg); color: var(--fg); }",
+            ".navigation[data-scheme=dark] { color-scheme: dark; }",
+            "</style>",
+            "<nav id='t' class='navigation' data-scheme='dark'>Dark nav</nav>",
+        ),
+        800.0,
+    );
+    let t = by_id(&doc.root, "t").unwrap();
+    assert_eq!(
+        (
+            t.style.background_color.r,
+            t.style.background_color.g,
+            t.style.background_color.b
+        ),
+        (0x21, 0x24, 0x26),
+        "var(light-dark()) should resolve with the final color-scheme even when color-scheme is declared in a later matching rule"
+    );
+    assert_eq!(
+        (t.style.color.r, t.style.color.g, t.style.color.b),
+        (255, 255, 255),
+        "foreground should use the same final dark scheme"
+    );
+}
+
+#[test]
+fn supports_light_dark_root_vars_skip_polyfill_fallback() {
+    let doc = load_html(
+        concat!(
+            "<style>",
+            ":root { --color-gray-90:#f7f7f8; --color-gray-10:#212426; --color-black:#000000; --color-white:#ffffff; }",
+            "@supports (color: light-dark(red, red)) {",
+            "  :root {",
+            "    --color-background-primary: light-dark(var(--color-gray-90), var(--color-gray-10));",
+            "    --color-text-primary: light-dark(var(--color-black), var(--color-white));",
+            "  }",
+            "}",
+            "@supports not (color: light-dark(red, red)) {",
+            "  :root * { --color-background-primary:#badbad; --color-text-primary:#badbad; }",
+            "}",
+            ".homepage--dark {",
+            "  color: var(--color-text-primary);",
+            "  background-color: var(--color-background-primary);",
+            "  color-scheme: dark;",
+            "}",
+            "</style>",
+            "<div id='content' class='homepage--dark'>MDN shell</div>",
+        ),
+        800.0,
+    );
+    let content = by_id(&doc.root, "content").unwrap();
+    assert_eq!(
+        (
+            content.style.background_color.r,
+            content.style.background_color.g,
+            content.style.background_color.b
+        ),
+        (0x21, 0x24, 0x26),
+        "native @supports light-dark() vars should win over the fallback block"
+    );
+    assert_eq!(
+        (
+            content.style.color.r,
+            content.style.color.g,
+            content.style.color.b
+        ),
+        (255, 255, 255),
+        "MDN-style dark shell should compute white text"
+    );
+}

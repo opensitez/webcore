@@ -1097,26 +1097,25 @@ fn html_summary_is_list_item() {
 
 #[test]
 fn html_summary_disclosure_marker_closed() {
-    // SummaryDisclosureMarkerClosed: Disclosure variant used for closed state.
-    // Note: Rust uses a single Disclosure variant; C++ had DisclosureClosed/Open.
+    // SummaryDisclosureMarkerClosed: closed details use the closed marker.
     let doc = parse(r#"<details><summary>Title</summary><p>Body</p></details>"#);
     let summary = find_box(&doc.root, &|b: &WebCore| b.tag == "summary");
     assert!(summary.is_some());
     assert_eq!(
         summary.unwrap().style.list_style_type,
-        ListStyleType::Disclosure
+        ListStyleType::DisclosureClosed
     );
 }
 
 #[test]
 fn html_summary_disclosure_marker_open() {
-    // SummaryDisclosureMarkerOpen: same Disclosure variant for open state.
+    // SummaryDisclosureMarkerOpen: open details use the open marker.
     let doc = parse(r#"<details open><summary>Title</summary><p>Body</p></details>"#);
     let summary = find_box(&doc.root, &|b: &WebCore| b.tag == "summary");
     assert!(summary.is_some());
     assert_eq!(
         summary.unwrap().style.list_style_type,
-        ListStyleType::Disclosure
+        ListStyleType::DisclosureOpen
     );
 }
 

@@ -93,6 +93,7 @@ fn ce_toggle_bold_turns_on() {
         text_offset: 0,
         length: 11,
         style: ComputedStyle::default(),
+        path: Vec::new(),
     }];
     let range = TextRange { start: 0, end: 11 };
     toggle_bold(&mut b, &range);
@@ -112,6 +113,7 @@ fn ce_toggle_bold_turns_off_when_all_bold() {
         text_offset: 0,
         length: 5,
         style,
+        path: Vec::new(),
     }];
     let range = TextRange { start: 0, end: 5 };
     toggle_bold(&mut b, &range);
@@ -131,11 +133,13 @@ fn ce_toggle_bold_partial_range() {
             text_offset: 0,
             length: 5,
             style: ComputedStyle::default(),
+            path: Vec::new(),
         }, // "Hello"
         InlineRun {
             text_offset: 6,
             length: 5,
             style: ComputedStyle::default(),
+            path: Vec::new(),
         }, // "World"
     ];
     // Toggle bold on "World" only
@@ -163,6 +167,7 @@ fn ce_toggle_italic_turns_on() {
         text_offset: 0,
         length: 4,
         style: ComputedStyle::default(),
+        path: Vec::new(),
     }];
     let range = TextRange { start: 0, end: 4 };
     toggle_italic(&mut b, &range);
@@ -179,6 +184,7 @@ fn ce_toggle_italic_turns_off() {
         text_offset: 0,
         length: 4,
         style,
+        path: Vec::new(),
     }];
     let range = TextRange { start: 0, end: 4 };
     toggle_italic(&mut b, &range);
@@ -197,6 +203,7 @@ fn ce_toggle_underline_turns_on() {
         text_offset: 0,
         length: 4,
         style: ComputedStyle::default(),
+        path: Vec::new(),
     }];
     let range = TextRange { start: 0, end: 4 };
     toggle_underline(&mut b, &range);
@@ -216,6 +223,7 @@ fn ce_toggle_underline_turns_off() {
         text_offset: 0,
         length: 4,
         style,
+        path: Vec::new(),
     }];
     let range = TextRange { start: 0, end: 4 };
     toggle_underline(&mut b, &range);
@@ -237,6 +245,7 @@ fn ce_set_font_size() {
         text_offset: 0,
         length: 5,
         style: ComputedStyle::default(),
+        path: Vec::new(),
     }];
     let range = TextRange { start: 0, end: 5 };
     set_font_size(&mut b, &range, 24.0);
@@ -252,11 +261,13 @@ fn ce_set_font_size_partial() {
             text_offset: 0,
             length: 5,
             style: ComputedStyle::default(),
+            path: Vec::new(),
         },
         InlineRun {
             text_offset: 6,
             length: 5,
             style: ComputedStyle::default(),
+            path: Vec::new(),
         },
     ];
     // Set size only on "World"
@@ -282,6 +293,7 @@ fn ce_set_text_color() {
         text_offset: 0,
         length: 5,
         style: ComputedStyle::default(),
+        path: Vec::new(),
     }];
     let range = TextRange { start: 0, end: 5 };
     set_text_color(&mut b, &range, Color::rgb(255, 0, 0));
@@ -297,11 +309,13 @@ fn ce_set_text_color_partial() {
             text_offset: 0,
             length: 5,
             style: ComputedStyle::default(),
+            path: Vec::new(),
         },
         InlineRun {
             text_offset: 6,
             length: 5,
             style: ComputedStyle::default(),
+            path: Vec::new(),
         },
     ];
     // Color only "World" blue
