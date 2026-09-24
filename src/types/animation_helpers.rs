@@ -338,6 +338,7 @@ fn transition_length(v: &CssLength) -> String {
         CssLength::Vh(n) => format!("{n}vh"),
         CssLength::Vmin(n) => format!("{n}vmin"),
         CssLength::Vmax(n) => format!("{n}vmax"),
+        CssLength::Cqi(n) => format!("{n}cqi"),
         CssLength::Zero => "0px".to_string(),
         CssLength::Auto => "auto".to_string(),
         CssLength::None => "none".to_string(),

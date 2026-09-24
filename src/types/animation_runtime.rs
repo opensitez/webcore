@@ -605,6 +605,9 @@ pub(crate) fn animation_properties_affect_layout(props: &[(String, String)]) -> 
 }
 
 pub(crate) fn animation_property_affects_layout(prop: &str) -> bool {
+    if animation_property_is_transform(prop) {
+        return false;
+    }
     !matches!(
         prop,
         "opacity"
@@ -640,6 +643,13 @@ pub(crate) fn animation_property_affects_layout(prop: &str) -> bool {
     )
 }
 
+pub(crate) fn animation_property_is_transform(prop: &str) -> bool {
+    matches!(
+        prop,
+        "transform" | "-webkit-transform" | "-moz-transform" | "-ms-transform"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::animation_property_affects_layout;
@@ -648,6 +658,8 @@ mod tests {
     fn clip_path_animation_only_changes_paint() {
         assert!(!animation_property_affects_layout("clip-path"));
         assert!(!animation_property_affects_layout("transform"));
+        assert!(!animation_property_affects_layout("-webkit-transform"));
+        assert!(!animation_property_affects_layout("-ms-transform"));
         assert!(animation_property_affects_layout("width"));
     }
 }

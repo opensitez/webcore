@@ -36,12 +36,17 @@ fn parse_vw() {
 
 #[test]
 fn container_query_units_parse_to_axis_lengths() {
-    assert_eq!(parse_length("5cqw"), CssLength::Vw(5.0));
-    assert_eq!(parse_length("5cqi"), CssLength::Vw(5.0));
+    assert_eq!(parse_length("5cqw"), CssLength::Cqi(5.0));
+    assert_eq!(parse_length("5cqi"), CssLength::Cqi(5.0));
     assert_eq!(parse_length("5cqh"), CssLength::Vh(5.0));
     assert_eq!(parse_length("5cqb"), CssLength::Vh(5.0));
     assert_eq!(parse_length("5cqmin"), CssLength::Vmin(5.0));
     assert_eq!(parse_length("5cqmax"), CssLength::Vmax(5.0));
+}
+
+#[test]
+fn container_inline_unit_uses_containing_size_not_viewport() {
+    assert!((resolve(&parse_length("143cqi"), 325.0, 1366.0) - 464.75).abs() < 0.01);
 }
 
 #[test]

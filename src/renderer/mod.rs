@@ -297,7 +297,12 @@ fn animation_overrides_are_transform_only(
     !overrides.is_empty()
         && overrides
             .values()
-            .all(|props| !props.is_empty() && props.iter().all(|(prop, _)| prop == "transform"))
+            .all(|props| {
+                !props.is_empty()
+                    && props.iter().all(|(prop, _)| {
+                        crate::types::animation_runtime::animation_property_is_transform(prop)
+                    })
+            })
 }
 
 fn animation_overrides_are_transform_only_for_ids(
@@ -307,7 +312,10 @@ fn animation_overrides_are_transform_only_for_ids(
     !ids.is_empty()
         && ids.iter().all(|id| {
             overrides.get(id).is_some_and(|props| {
-                !props.is_empty() && props.iter().all(|(prop, _)| prop == "transform")
+                !props.is_empty()
+                    && props.iter().all(|(prop, _)| {
+                        crate::types::animation_runtime::animation_property_is_transform(prop)
+                    })
             })
         })
 }
@@ -464,7 +472,7 @@ impl Renderer {
             content_offset_y: 0.0,
             compositor: compositor::Compositor::new(),
             tile_manager: tiles::TileManager::new(),
-            use_tiles: std::env::var_os("WEBCORE_EXPERIMENTAL_TILES").is_some(),
+            use_tiles: std::env::var_os("WEBCORE_DISABLE_TILES").is_none(),
         }
     }
 
@@ -558,8 +566,10 @@ impl Renderer {
             .into_iter()
             .filter_map(|(node_id, rect)| {
                 let props = doc.animation_overrides.get(&node_id)?;
-                let transform_only =
-                    !props.is_empty() && props.iter().all(|(prop, _)| prop == "transform");
+                let transform_only = !props.is_empty()
+                    && props.iter().all(|(prop, _)| {
+                        crate::types::animation_runtime::animation_property_is_transform(prop)
+                    });
                 (!transform_only && rect_intersects(rect, viewport)).then_some(rect)
             })
             .collect::<Vec<_>>();
@@ -1460,6 +1470,11 @@ impl Renderer {
             && self.cached_display_list.is_some();
 
         let dirty_paint_rects = self.dirty_paint_rects.clone();
+        if self.use_tiles {
+            for rect in &dirty_paint_rects {
+                self.tile_manager.invalidate_rect(rect);
+            }
+        }
         let animation_transform_overrides =
             animation_transform_matrices(&doc.root, &doc.animation_overrides, view_w, view_h);
         let transform_only_animation_frame =

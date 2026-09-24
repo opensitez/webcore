@@ -3221,6 +3221,7 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32) 
             Color::BLACK
         };
     }
+    value_color.a = ((value_color.a as f32) * node.style.opacity).round() as u8;
     let value = if tag == "select" {
         // The shown text is "the label of an option of which selectedness is
         // set to true" (HTML §15.5.16) — SELECTEDNESS, not the `selected`
@@ -3283,6 +3284,13 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32) 
         font_weight: node.style.font_weight.value(),
         font_family: node.style.font_family.clone(),
         color: value_color,
+        text_indent: node.style.text_indent.resolve_vp(
+            font_px,
+            cr.w,
+            font_px,
+            0.0,
+            0.0,
+        ),
         placeholder_color: node
             .style
             .placeholder_style

@@ -3899,6 +3899,18 @@ impl LayoutEngine {
 
         self.clamp_resolved_content_width(&mut rbox, node, containing_w, font_px, root_font_px);
 
+        // A percentage height in an auto-height containing block computes to
+        // auto. Replaced elements still use their intrinsic ratio in that case,
+        // including when CSS gives the image a definite percentage width.
+        if has_intrinsic
+            && ih > 0.0
+            && matches!(node.style.height, CssLength::Percent(_))
+            && c.available_height.is_none()
+            && rbox.content_height.is_none()
+        {
+            rbox.content_height = Some(rbox.content_width.unwrap_or(iw) * ih / iw);
+        }
+
         // Apply forced dimensions from Constraints (used by flex layout).
         // These override style.width/height without mutating the DOM.
         if let Some(fw) = c.forced_width {

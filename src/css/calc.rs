@@ -119,8 +119,8 @@ fn parse_calc_tree_multiplicative(expr: &str) -> CalcNode {
     if op_char != 0 && last_op > 0 {
         let lhs_str = expr[..last_op].trim();
         let rhs_str = expr[last_op + 1..].trim();
-        if let Ok(scalar) = rhs_str.parse::<f32>() {
-            let lhs = parse_calc_tree_atom(lhs_str);
+        if let Some(scalar) = parse_calc_scalar(rhs_str) {
+            let lhs = parse_calc_tree_multiplicative(lhs_str);
             return if op_char == b'*' {
                 CalcNode::Mul(Box::new(lhs), scalar)
             } else {
@@ -132,12 +132,27 @@ fn parse_calc_tree_multiplicative(expr: &str) -> CalcNode {
         // `calc(min(50%, 300px) * 2)`. Division does not: its right operand
         // must be the number.
         if op_char == b'*' {
-            if let Ok(scalar) = lhs_str.parse::<f32>() {
-                return CalcNode::Mul(Box::new(parse_calc_tree_atom(rhs_str)), scalar);
+            if let Some(scalar) = parse_calc_scalar(lhs_str) {
+                return CalcNode::Mul(Box::new(parse_calc_tree_multiplicative(rhs_str)), scalar);
             }
         }
     }
     parse_calc_tree_atom(expr)
+}
+
+fn parse_calc_scalar(expr: &str) -> Option<f32> {
+    let expr = expr.trim();
+    if !expr.bytes().all(|b| {
+        b.is_ascii_digit() || matches!(b, b'.' | b'+' | b'-' | b'*' | b'/' | b'(' | b')')
+            || css_calc_ws(b)
+    }) {
+        return None;
+    }
+    let mut pos = 0;
+    let values = calc_parse_additive(expr.as_bytes(), &mut pos);
+    calc_skip_ws(expr.as_bytes(), &mut pos);
+    (pos == expr.len() && values[1].is_finite() && values.iter().enumerate().all(|(i, v)| i == 1 || *v == 0.0))
+        .then_some(values[1])
 }
 
 fn parse_calc_tree_atom(expr: &str) -> CalcNode {

@@ -237,6 +237,36 @@ fn inline_replaced_image_uses_percent_width_and_css_aspect_ratio() {
 }
 
 #[test]
+fn replaced_image_percent_height_in_auto_container_uses_intrinsic_ratio() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        .card { width: 250px; }
+        img { display: inline-block; width: 100%; height: 100%; }
+        </style>
+        <div class="card"><a><img id="pic" width="400" height="200"></a></div>
+        "#,
+        800.0,
+    );
+    let img = find_box(&doc.root, &|b| {
+        b.tag == "img" && b.attributes.get("id") == Some(&"pic".to_string())
+    })
+    .unwrap();
+    assert!(
+        (img.layout.border_rect.w - 250.0).abs() < 0.5,
+        "expected 250px image width, got {}",
+        img.layout.border_rect.w
+    );
+    assert!(
+        (img.layout.border_rect.h - 125.0).abs() < 0.5,
+        "indefinite percentage height should preserve the image ratio; got {}",
+        img.layout.border_rect.h
+    );
+}
+
+#[test]
 fn margin_trim_inline_start_removes_first_child_margin() {
     let mut renderer = crate::Renderer::new();
     let doc = renderer.load_html(
@@ -1989,6 +2019,22 @@ fn relative_inline_label_can_overlap_a_one_pixel_separator_line() {
         label.y < separator.y - 8.0,
         "position:relative top:-16px should move the inline label above the 1px line; separator={separator:?}, label={label:?}"
     );
+}
+
+#[test]
+fn inline_query_container_unit_sizes_card_from_container_width() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"<style>
+            body { margin: 0 }
+            #container { container-type: inline-size; width: 325px }
+            #card { height: 143cqi; box-sizing: border-box; padding: 12px }
+        </style><div id="container"><div id="card">Content</div></div>"#,
+        1366.0,
+    );
+    let id = doc.get_element_by_id("card").unwrap();
+    let rect = doc.get_bounding_client_rect(id).unwrap();
+    assert!((rect.h - 464.75).abs() < 1.0, "card rect: {rect:?}");
 }
 
 /// **css-multicol-1 §3.4 step 11 — column width is `max(0, …)`, not

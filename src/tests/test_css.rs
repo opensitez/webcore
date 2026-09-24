@@ -6827,6 +6827,16 @@ fn calc_understands_every_unit_the_length_parser_does() {
     close(px(&mut d, "d"), 42.0, "calc(10px + 2em) at a 16px font");
 }
 
+#[test]
+fn calc_with_clamp_and_chained_arithmetic_keeps_numeric_subexpressions() {
+    let length = crate::css::parse_length(
+        "calc((clamp(1356px, 100vw, 1600px) - 32px - (36 - 1) * 8px) / 36 * 7 + (7 - 1) * 8px)",
+    );
+    let got = length.resolve_vp(16.0, 1366.0, 16.0, 1366.0, 768.0);
+    let want = (1366.0 - 32.0 - 35.0 * 8.0) / 36.0 * 7.0 + 6.0 * 8.0;
+    assert!((got - want).abs() < 0.01, "got {got}, want {want}");
+}
+
 /// ⛔ A rem-based media query was ALWAYS TRUE.
 ///
 /// `parse_media_px` was a third private unit table — `px`, `em`, and a bare

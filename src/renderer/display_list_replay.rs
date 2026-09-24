@@ -1588,6 +1588,7 @@ fn replay_commands_inner(
                 font_weight,
                 font_family,
                 color,
+                text_indent,
                 placeholder_color,
                 file_button_color,
                 file_button_background,
@@ -1794,6 +1795,14 @@ fn replay_commands_inner(
                         }
                     }
                     ("select", _) => {
+                        let control_clip = build_clip_mask_with_transform(
+                            &rect,
+                            &[0.0; 4],
+                            &[0.0; 4],
+                            pw,
+                            ph,
+                            Transform::identity(),
+                        );
                         if !*appearance_none {
                             // Draw dropdown chevron arrow using the element's text color
                             let arrow_x = rect.x + rect.w - 14.0;
@@ -1820,7 +1829,6 @@ fn replay_commands_inner(
                                 let c = apply_opacity(color, a2);
                                 let line_h = *font_size * 1.2;
                                 let text_y = rect.y + (rect.h - line_h).max(0.0) / 2.0;
-                                let text_max_w = (rect.w - 20.0).max(0.0);
                                 draw_text_cmd(
                                     target,
                                     *fs,
@@ -1833,14 +1841,14 @@ fn replay_commands_inner(
                                     *font_size,
                                     *font_weight,
                                     0,
-                                    text_max_w,
+                                    100.0,
                                     line_h,
                                     &c,
                                     &super::display_list::TextDecoration::default(),
                                     0.0,
                                     0.0,
                                     false,
-                                    clip_mask,
+                                    control_clip.as_ref().or(clip_mask),
                                 );
                             }
                         }
@@ -2193,12 +2201,16 @@ fn replay_commands_inner(
                                 );
                                 let line_h = *font_size * 1.2;
                                 let c = apply_opacity(color, a2);
+                                let label_x = rect.x + (rect.w - text_w).max(0.0) / 2.0 + text_indent * scale;
+                                if label_x + text_w <= rect.x || label_x >= rect.x + rect.w {
+                                    continue;
+                                }
                                 draw_text_cmd(
                                     target,
                                     *fs,
                                     *sc,
                                     scale,
-                                    rect.x + (rect.w - text_w).max(0.0) / 2.0,
+                                    label_x,
                                     rect.y + (rect.h - line_h).max(0.0) / 2.0,
                                     label,
                                     font_family,

@@ -276,7 +276,7 @@ impl EngineFrame {
             }
             let image_poll = self
                 .doc
-                .poll_pending_images_budgeted(8, std::time::Duration::from_millis(2));
+                .poll_pending_images_budgeted(64, std::time::Duration::ZERO);
             if image_poll.loaded_any {
                 if image_poll.needs_relayout {
                     resource_requested_relayout = true;
@@ -299,7 +299,7 @@ impl EngineFrame {
             }
             if self
                 .engine
-                .poll_pending_fonts_budgeted(2, std::time::Duration::from_millis(2))
+                .poll_pending_fonts_budgeted(32, std::time::Duration::ZERO)
             {
                 self.doc.style_dirty = true;
                 resource_requested_relayout = true;
@@ -1648,7 +1648,12 @@ fn animation_overrides_are_transform_only(
     !overrides.is_empty()
         && overrides
             .values()
-            .all(|props| !props.is_empty() && props.iter().all(|(prop, _)| prop == "transform"))
+            .all(|props| {
+                !props.is_empty()
+                    && props.iter().all(|(prop, _)| {
+                        crate::types::animation_runtime::animation_property_is_transform(prop)
+                    })
+            })
 }
 
 fn retained_paint_band(doc: &Document, viewport_h: f32) -> crate::types::Rect {
@@ -1726,6 +1731,19 @@ fn post_process_streamed_tree(node: &mut crate::types::WebCore, base_url: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefixed_transform_keyframes_remain_compositor_only() {
+        let overrides = std::collections::HashMap::from([(
+            1,
+            vec![
+                ("-webkit-transform".to_string(), "rotate(10deg)".to_string()),
+                ("-ms-transform".to_string(), "rotate(10deg)".to_string()),
+                ("transform".to_string(), "rotate(10deg)".to_string()),
+            ],
+        )]);
+        assert!(animation_overrides_are_transform_only(&overrides));
+    }
 
     #[test]
     fn queued_stylesheet_fragments_are_applied_in_one_frame() {

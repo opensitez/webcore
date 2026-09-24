@@ -210,6 +210,7 @@ pub enum PaintCmd {
         font_weight: u16,
         font_family: String,
         color: Color,
+        text_indent: f32,
         placeholder_color: Color,
         file_button_color: Color,
         file_button_background: Color,

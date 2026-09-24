@@ -28,6 +28,9 @@ pub enum CssLength {
     Vmin(f32),
     /// `vmax` — 1% of the LARGER viewport axis.
     Vmax(f32),
+    /// Percentage of the query container's inline size. Layout supplies the
+    /// containing inline size for directly contained query descendants.
+    Cqi(f32),
     // ── The four rare variants below are BOXED, and the reason is size ──
     // `CssLength` appears 53 times in `ComputedStyle`, so its width dominates:
     // an inline `Calc([f32; 6])` (24 bytes) or a three-Box `Clamp` (24 bytes)
@@ -148,6 +151,7 @@ impl CssLength {
             CssLength::Vh(v) => v / 100.0 * viewport_h,
             CssLength::Vmin(v) => v / 100.0 * viewport_w.min(viewport_h),
             CssLength::Vmax(v) => v / 100.0 * viewport_w.max(viewport_h),
+            CssLength::Cqi(v) => v / 100.0 * containing_px,
             CssLength::Calc(c) => {
                 c[0] / 100.0 * containing_px
                     + c[1]

@@ -85,8 +85,8 @@ impl TileManager {
 
     /// Ensure a tile exists, creating it if needed. Returns whether it needs rasterization.
     pub fn ensure_tile(&mut self, tx: i32, ty: i32) -> bool {
+        let phys_size = (TILE_SIZE * self.scale).ceil() as u32;
         let tile = self.tiles.entry((tx, ty)).or_insert_with(|| {
-            let phys_size = (TILE_SIZE * self.scale).ceil() as u32;
             RasterTile {
                 tile_x: tx,
                 tile_y: ty,
@@ -95,6 +95,11 @@ impl TileManager {
                 dirty: true,
             }
         });
+        if tile.pixmap.width() != phys_size || tile.pixmap.height() != phys_size {
+            tile.pixmap = tiny_skia::Pixmap::new(phys_size.max(1), phys_size.max(1))
+                .unwrap_or_else(|| tiny_skia::Pixmap::new(1, 1).unwrap());
+            tile.dirty = true;
+        }
         tile.dirty
     }
 
@@ -115,10 +120,13 @@ impl TileManager {
 
     /// Mark tiles that intersect a dirty rect as needing re-rasterization.
     pub fn invalidate_rect(&mut self, rect: &Rect) {
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            return;
+        }
         let min_tx = (rect.x / TILE_SIZE).floor() as i32;
-        let max_tx = ((rect.x + rect.w) / TILE_SIZE).ceil() as i32;
+        let max_tx = (((rect.x + rect.w).ceil() - 1.0) / TILE_SIZE).floor() as i32;
         let min_ty = (rect.y / TILE_SIZE).floor() as i32;
-        let max_ty = ((rect.y + rect.h) / TILE_SIZE).ceil() as i32;
+        let max_ty = (((rect.y + rect.h).ceil() - 1.0) / TILE_SIZE).floor() as i32;
 
         for ty in min_ty..=max_ty {
             for tx in min_tx..=max_tx {
@@ -261,5 +269,31 @@ mod tests {
 
         tm.evict_distant();
         assert!(tm.tile_count() < 2, "distant tile should be evicted");
+    }
+
+    #[test]
+    fn cached_tile_reallocates_when_scale_changes() {
+        let mut tiles = TileManager::new();
+        tiles.update_viewport(Rect::new(0.0, 0.0, 512.0, 512.0), 1.0);
+        assert!(tiles.ensure_tile(0, 0));
+        tiles.mark_clean(0, 0);
+        assert!(!tiles.ensure_tile(0, 0));
+
+        tiles.update_viewport(Rect::new(0.0, 0.0, 512.0, 512.0), 2.0);
+        assert!(tiles.ensure_tile(0, 0));
+        assert_eq!(tiles.tiles[&(0, 0)].pixmap.width(), 1024);
+    }
+
+    #[test]
+    fn paint_invalidation_only_dirties_intersecting_tiles() {
+        let mut tiles = TileManager::new();
+        tiles.update_viewport(Rect::new(0.0, 0.0, 1024.0, 512.0), 1.0);
+        tiles.ensure_tile(0, 0);
+        tiles.ensure_tile(1, 0);
+        tiles.mark_clean(0, 0);
+        tiles.mark_clean(1, 0);
+        tiles.invalidate_rect(&Rect::new(20.0, 20.0, 30.0, 30.0));
+        assert!(tiles.tiles[&(0, 0)].dirty);
+        assert!(!tiles.tiles[&(1, 0)].dirty);
     }
 }

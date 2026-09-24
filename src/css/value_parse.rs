@@ -185,11 +185,9 @@ fn parse_length_inner(v: &str) -> CssLength {
         // inline axis is the width and the block axis the height.
         "vi" => CssLength::Vw(n),
         "vb" => CssLength::Vh(n),
-        // Container query units need the selected query container's dimensions
-        // to be exact. Until length resolution carries that container context,
-        // use the viewport-shaped fallback variants so valid declarations do
-        // not collapse to `auto`.
-        "cqw" | "cqi" => CssLength::Vw(n),
+        // Inline container units retain their identity through the cascade;
+        // the layout resolver supplies the containing inline size.
+        "cqw" | "cqi" => CssLength::Cqi(n),
         "cqh" | "cqb" => CssLength::Vh(n),
         "cqmin" => CssLength::Vmin(n),
         "cqmax" => CssLength::Vmax(n),

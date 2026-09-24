@@ -2389,6 +2389,7 @@ fn replay_scrolls_form_element_content() {
         font_weight: 400,
         font_family: "Arial".to_string(),
         color: Color::BLACK,
+        text_indent: 0.0,
         placeholder_color: Color::rgba(0, 0, 0, 128),
         file_button_color: Color::BLACK,
         file_button_background: Color::TRANSPARENT,
@@ -4015,6 +4016,7 @@ fn appearance_none_checkbox_does_not_paint_native_chrome() {
         font_weight: 400,
         font_family: "Arial".to_string(),
         color: Color::BLACK,
+        text_indent: 0.0,
         placeholder_color: Color::rgba(0, 0, 0, 128),
         file_button_color: Color::BLACK,
         file_button_background: Color::TRANSPARENT,
@@ -4038,6 +4040,62 @@ fn appearance_none_checkbox_does_not_paint_native_chrome() {
         pixmap.data().chunks_exact(4).all(|px| px[3] == 0),
         "appearance:none should leave native checkbox chrome unpainted"
     );
+}
+
+#[test]
+fn form_labels_respect_text_indent_and_control_clipping() {
+    let mut list = DisplayList::new();
+    list.push(PaintCmd::FormElement {
+        tag: "input".to_string(),
+        input_type: "submit".to_string(),
+        rect: Rect::new(10.0, 10.0, 45.0, 30.0),
+        node_id: 1,
+        attributes: Vec::new(),
+        font_size: 14.0,
+        font_weight: 400,
+        font_family: "Arial".to_string(),
+        color: Color::BLACK,
+        text_indent: -1000.0,
+        placeholder_color: Color::BLACK,
+        file_button_color: Color::BLACK,
+        file_button_background: Color::TRANSPARENT,
+        file_button_font_size: 14.0,
+        file_button_font_weight: 400,
+        file_button_font_family: "Arial".to_string(),
+        checked: false,
+        value: "Go".to_string(),
+        placeholder: String::new(),
+        input_cursor: 0,
+        appearance_none: true,
+        vertical: false,
+        options: Vec::new(),
+        selected: -1,
+        selected_all: Vec::new(),
+    });
+    let mut pixmap = tiny_skia::Pixmap::new(160, 50).unwrap();
+    pixmap.fill(tiny_skia::Color::WHITE);
+    let mut fonts = cosmic_text::FontSystem::new();
+    let mut cache = cosmic_text::SwashCache::new();
+    crate::renderer::display_list_replay::replay_with_text(
+        &list, &mut pixmap, 1.0, &mut fonts, &mut cache,
+    );
+    assert!(pixmap.data().chunks_exact(4).all(|px| px[0] == 255));
+
+    if let PaintCmd::FormElement { tag, input_type, value, text_indent, .. } = &mut list.commands[0] {
+        *tag = "select".to_string();
+        input_type.clear();
+        *value = "All Departments".to_string();
+        *text_indent = 0.0;
+    }
+    pixmap.fill(tiny_skia::Color::WHITE);
+    crate::renderer::display_list_replay::replay_with_text(
+        &list, &mut pixmap, 1.0, &mut fonts, &mut cache,
+    );
+    for y in 0..50usize {
+        for x in 55..160usize {
+            assert_eq!(pixmap.data()[(y * 160 + x) * 4], 255, "select text escaped at {x},{y}");
+        }
+    }
 }
 
 #[test]
