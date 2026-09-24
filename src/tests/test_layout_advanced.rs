@@ -6,6 +6,26 @@ use crate::html::parse_html;
 use crate::layout::LayoutEngine;
 use crate::types::*;
 
+#[test]
+fn negative_text_indent_does_not_expand_hidden_logo_intrinsic_width() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+        * { margin: 0; padding: 0; }
+        #logo { display: inline-block; min-width: 64px; }
+        #outer, #inner { display: block; }
+        #inner { text-indent: -99999px; }
+        </style>
+        <div id="logo"><span id="outer"><span id="inner">Fox Nation</span></span></div>
+        "#,
+        1280.0,
+    );
+    let logo = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "logo"))
+        .unwrap();
+    assert!((logo.layout.border_rect.w - 64.0).abs() < 1.0, "{logo:?}");
+}
+
 // ── Min-Height / Max-Height Parsing ───────────────────────────────────────────
 
 #[test]
@@ -83,6 +103,44 @@ fn negative_calc_padding_clamps_to_zero_used_value() {
         logo.layout.content_rect.x >= 0.0,
         "negative used padding must not pull content before the containing block: {:?}",
         logo.layout.content_rect
+    );
+}
+
+#[test]
+fn absolute_auto_width_shrinks_to_explicit_child_width() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r##"
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        .header { position: relative; width: 600px; }
+        .branding { position: absolute; left: 24px; top: 0; z-index: 10; }
+        .branding h1 { margin: 0; }
+        .branding a { display: block; width: 96px; height: 96px; }
+        nav { margin-left: 120px; height: 50px; }
+        </style>
+        <div class="header">
+          <div class="branding"><h1><a href="#">Logo</a></h1></div>
+          <nav><a href="#menu">Menu</a></nav>
+        </div>
+        "##,
+        600.0,
+    );
+    let branding = find_box(&doc.root, &|b| {
+        b.attributes.get("class").is_some_and(|class| class == "branding")
+    })
+    .unwrap();
+    let intrinsic = LayoutEngine::new().max_content_width(branding, 16.0, 16.0);
+    let h1 = find_box(branding, &|b| b.tag == "h1").unwrap();
+    let h1_width = LayoutEngine::new().max_content_width(h1, 16.0, 16.0);
+    assert!(
+        (intrinsic - 96.0).abs() <= 1.0,
+        "intrinsic width: {intrinsic}, h1: {h1_width}"
+    );
+    assert!(
+        (branding.layout.border_rect.w - 96.0).abs() <= 1.0,
+        "absolute auto width should shrink to its child: {:?}",
+        branding.layout.border_rect
     );
 }
 

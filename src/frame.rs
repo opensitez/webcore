@@ -115,6 +115,7 @@ pub struct EngineFrame {
     /// browser frame loop instead of doing it once per arriving fragment.
     pending_resource_relayout: bool,
     last_resource_relayout: Option<std::time::Instant>,
+    last_animation_layout_values: std::collections::HashMap<u32, Vec<(String, String)>>,
     /// Host callbacks (boxed trait object).
     callbacks: Box<dyn EngineCallbacks>,
 }
@@ -145,6 +146,7 @@ impl EngineFrame {
             resource_wake: None,
             pending_resource_relayout: false,
             last_resource_relayout: None,
+            last_animation_layout_values: std::collections::HashMap::new(),
             callbacks: Box::new(NoopCallbacks),
         }
     }
@@ -201,6 +203,7 @@ impl EngineFrame {
             None,
             std::time::Duration::ZERO,
         );
+        self.last_animation_layout_values.clear();
         self.first_paint_done = false;
         self.needs_style = true;
         self.needs_layout = true;
@@ -249,6 +252,7 @@ impl EngineFrame {
         &mut self,
         scroll_priority: bool,
     ) -> FrameUpdate {
+        let _profile_frame = crate::profile::span(crate::profile::Phase::FrameUpdate);
         let mut update = FrameUpdate::default();
         let trace_frame = std::env::var_os("WEBCORE_TRACE_IDLE").is_some();
         let style_dirty_before_resource_poll = self.doc.style_dirty;
@@ -309,6 +313,10 @@ impl EngineFrame {
             self.pending_resource_relayout = true;
         }
         let resource_poll_ms = resource_poll_start.elapsed().as_millis();
+        crate::profile::record(
+            crate::profile::Phase::ResourcePoll,
+            resource_poll_start.elapsed(),
+        );
         if self.pending_resource_relayout && !scroll_priority {
             let pending_resources = self.doc.pending_images.is_some()
                 || self.doc.pending_stylesheets.is_some()
@@ -371,9 +379,11 @@ impl EngineFrame {
             if svg_animations_running {
                 self.doc.needs_animation_frame = true;
             }
-            animation_needs_layout = self.doc.animation_overrides.values().any(|props| {
-                crate::types::animation_runtime::animation_properties_affect_layout(props)
-            });
+            let layout_values = crate::types::animation_runtime::layout_animation_values(
+                &self.doc.animation_overrides,
+            );
+            animation_needs_layout = layout_values != self.last_animation_layout_values;
+            self.last_animation_layout_values = layout_values;
             if animation_needs_layout {
                 self.needs_style = true;
                 self.needs_layout = true;
@@ -1009,6 +1019,7 @@ impl EngineFrame {
     /// Feed chunks with `feed_html_chunk()`, finalize with `finish_loading()`.
     pub fn start_streaming(&mut self, base_url: &str) {
         self.doc = crate::html::parse_html("<html></html>");
+        self.last_animation_layout_values.clear();
         self.doc.root.children.clear();
         self.doc.rebuild_node_index();
         self.doc.base_url = base_url.to_string();
@@ -1416,6 +1427,7 @@ impl EngineFrame {
         &mut self,
         chunk: &[u8],
     ) -> Vec<(String, crate::html::streaming::ResourceKind)> {
+        let _profile_html = crate::profile::span(crate::profile::Phase::HtmlParse);
         use crate::html::streaming::DomMutation;
 
         let parser = self.streaming_parser.get_or_insert_with(|| {

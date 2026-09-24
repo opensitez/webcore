@@ -223,6 +223,7 @@ impl Stylesheet {
     }
 
     pub fn parse_and_add(&mut self, css: &str) {
+        let _profile_css = crate::profile::span(crate::profile::Phase::CssParse);
         // Strip comments once, share the cleaned string across all extractors.
         let cleaned = strip_css_comments(css);
         let cleaned = cleaned.as_str();

@@ -2740,7 +2740,9 @@ impl LayoutEngine {
         if items.is_empty() {
             return None;
         }
-        Some(inline_items_max_content_advance(&items))
+        let advance = inline_items_max_content_advance(&items);
+        let indent = self.res_len(&node.style.text_indent, font_px, 0.0, root_font_px);
+        Some((advance + indent).max(0.0))
     }
 
     fn inline_items_min_content_width(
@@ -2826,7 +2828,7 @@ impl LayoutEngine {
         is_root: bool,
     ) -> bool {
         if matches!(node.style.display, Display::None)
-            || matches!(node.style.position, Position::Absolute | Position::Fixed)
+            || (!is_root && matches!(node.style.position, Position::Absolute | Position::Fixed))
         {
             return true;
         }
@@ -3300,6 +3302,7 @@ impl LayoutEngine {
         let dom_style_dirty = doc.style_dirty;
         doc.style_dirty = false;
 
+        let cascade_profile_start = crate::profile::is_enabled().then(std::time::Instant::now);
         perf::start_phase();
         let did_cascade = if needs_cascade || dom_style_dirty {
             // Full cascade needed (initial, viewport change, etc.)
@@ -3400,8 +3403,12 @@ impl LayoutEngine {
         // below the viewport. Full layout runs in a single pass.
         // TODO: implement proper deferred layout with background completion.
         perf::end_cascade();
+        if let Some(started) = cascade_profile_start {
+            crate::profile::record(crate::profile::Phase::Cascade, started.elapsed());
+        }
         let cascade_end = std::time::Instant::now();
         self.initial_layout_done = true;
+        let geometry_profile_start = crate::profile::is_enabled().then(std::time::Instant::now);
         self.layout_geometry(doc, viewport_width, root_font_px);
         self.last_geometry_viewport_h = self.viewport_h;
 
@@ -3446,6 +3453,9 @@ impl LayoutEngine {
         }
         if !animation_restore.is_empty() {
             crate::css::restore_animation_overrides(&mut doc.root, animation_restore);
+        }
+        if let Some(started) = geometry_profile_start {
+            crate::profile::record(crate::profile::Phase::Geometry, started.elapsed());
         }
 
         // Detect aria-live region changes and queue announcements.

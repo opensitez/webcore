@@ -1818,13 +1818,6 @@ pub fn resolve_css_urls(css: &str, css_base_url: &str) -> String {
     if css_base_url.is_empty() || !css_base_url.contains("://") {
         return css.to_string();
     }
-    // Find the directory of the CSS file URL
-    let css_dir = if let Some(last_slash) = css_base_url.rfind('/') {
-        &css_base_url[..=last_slash]
-    } else {
-        css_base_url
-    };
-
     let mut result = String::with_capacity(css.len());
     let mut remaining = css;
     while let Some(url_start) = find_url_function(remaining) {
@@ -1838,13 +1831,13 @@ pub fn resolve_css_urls(css: &str, css_base_url: &str) -> String {
         };
 
         // Only resolve relative URLs (not absolute, data:, or already-resolved)
-        let resolved = if url_content.contains("://")
+        let resolved = if url_content.starts_with('#')
             || url_content.starts_with("data:")
-            || url_content.starts_with('/')
+            || url_content.contains("://")
         {
             url_content.to_string()
         } else {
-            format!("{}{}", css_dir, url_content)
+            crate::html::resolve_url(&url_content, css_base_url)
         };
 
         result.push_str(&format!("url('{}')", resolved));

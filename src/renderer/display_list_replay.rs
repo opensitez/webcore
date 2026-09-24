@@ -583,40 +583,15 @@ fn replay_commands_inner(
                         }
                     }
                 } else {
-                    // Fallback: draw borders as filled rectangles (no rounding)
-                    let mut paint = Paint::default();
-                    if widths[0] > 0.0 && colors[0].a != 0 {
-                        paint.set_color(to_sk_color(&apply_opacity(&colors[0], alpha)));
-                        if let Some(r) = SkRect::from_xywh(rect.x, rect.y, rect.w, widths[0]) {
-                            target.fill_rect(r, &paint, ts, clip_mask);
+                    for side in 0..4 {
+                        if widths[side] <= 0.0 || colors[side].a == 0 {
+                            continue;
                         }
-                    }
-                    if widths[2] > 0.0 && colors[2].a != 0 {
-                        paint.set_color(to_sk_color(&apply_opacity(&colors[2], alpha)));
-                        if let Some(r) = SkRect::from_xywh(
-                            rect.x,
-                            rect.y + rect.h - widths[2],
-                            rect.w,
-                            widths[2],
-                        ) {
-                            target.fill_rect(r, &paint, ts, clip_mask);
-                        }
-                    }
-                    if widths[3] > 0.0 && colors[3].a != 0 {
-                        paint.set_color(to_sk_color(&apply_opacity(&colors[3], alpha)));
-                        if let Some(r) = SkRect::from_xywh(rect.x, rect.y, widths[3], rect.h) {
-                            target.fill_rect(r, &paint, ts, clip_mask);
-                        }
-                    }
-                    if widths[1] > 0.0 && colors[1].a != 0 {
-                        paint.set_color(to_sk_color(&apply_opacity(&colors[1], alpha)));
-                        if let Some(r) = SkRect::from_xywh(
-                            rect.x + rect.w - widths[1],
-                            rect.y,
-                            widths[1],
-                            rect.h,
-                        ) {
-                            target.fill_rect(r, &paint, ts, clip_mask);
+                        if let Some(path) = border_side_path(*rect, *widths, side) {
+                            let mut paint = Paint::default();
+                            paint.set_color(to_sk_color(&apply_opacity(&colors[side], alpha)));
+                            paint.anti_alias = true;
+                            target.fill_path(&path, &paint, FillRule::Winding, ts, clip_mask);
                         }
                     }
                 }
@@ -2592,6 +2567,26 @@ fn composite_masked_layer(
         Transform::identity(),
         None,
     );
+}
+
+fn border_side_path(rect: Rect, widths: [f32; 4], side: usize) -> Option<tiny_skia::Path> {
+    let (x0, y0) = (rect.x, rect.y);
+    let (x1, y1) = (rect.x + rect.w, rect.y + rect.h);
+    let [top, right, bottom, left] = widths;
+    let points = match side {
+        0 => [(x0, y0), (x1, y0), (x1 - right, y0 + top), (x0 + left, y0 + top)],
+        1 => [(x1, y0), (x1, y1), (x1 - right, y1 - bottom), (x1 - right, y0 + top)],
+        2 => [(x1, y1), (x0, y1), (x0 + left, y1 - bottom), (x1 - right, y1 - bottom)],
+        3 => [(x0, y1), (x0, y0), (x0 + left, y0 + top), (x0 + left, y1 - bottom)],
+        _ => return None,
+    };
+    let mut path = PathBuilder::new();
+    path.move_to(points[0].0, points[0].1);
+    for point in points.iter().skip(1) {
+        path.line_to(point.0, point.1);
+    }
+    path.close();
+    path.finish()
 }
 
 fn draw_border_image_stretch(

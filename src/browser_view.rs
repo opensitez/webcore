@@ -1222,6 +1222,7 @@ impl BrowserView {
                 fill_placeholder(target, x, y, view_w, view_h);
             }
         }
+        crate::profile::finish_scroll_paint();
     }
 
     pub fn handle_mouse_move(&mut self, x: f32, y: f32) -> bool {
@@ -1235,6 +1236,7 @@ impl BrowserView {
             if doc.process_scrollbar_event(HtmlEventType::MouseMove, x, y, width, height)
                 && (doc.scroll_y - old_scroll_y).abs() >= 0.5
             {
+                crate::profile::mark_scroll_input();
                 self.scroll_priority_frame = true;
                 self.wake();
                 return true;
@@ -1291,6 +1293,7 @@ impl BrowserView {
         if doc.process_scrollbar_event(kind, x, y, width, height)
             && (doc.scroll_y - old_scroll_y).abs() >= 0.5
         {
+            crate::profile::mark_scroll_input();
             self.scroll_priority_frame = true;
             self.wake();
             return true;
@@ -1332,10 +1335,11 @@ impl BrowserView {
         wheel.target = doc.hovered_box;
         let mut changed = doc.dispatch_input_event(wheel).0;
         let max_y = (Document::scroll_height(&doc.root) - height).max(0.0);
-        let old_y = doc.scroll_y;
+        let old = (doc.scroll_x, doc.scroll_y);
         doc.scroll_x = (doc.scroll_x + dx).max(0.0);
         doc.scroll_y = (doc.scroll_y + dy).clamp(0.0, max_y);
-        if (doc.scroll_y - old_y).abs() >= 0.5 {
+        if (doc.scroll_y - old.1).abs() >= 0.5 || (doc.scroll_x - old.0).abs() >= 0.5 {
+            crate::profile::mark_scroll_input();
             self.scroll_priority_frame = true;
             self.wake();
             changed = true;
@@ -1368,6 +1372,7 @@ impl BrowserView {
         doc.scroll_x = x.max(0.0);
         doc.scroll_y = y.clamp(0.0, max_y);
         if (doc.scroll_y - old.1).abs() >= 0.5 || (doc.scroll_x - old.0).abs() >= 0.5 {
+            crate::profile::mark_scroll_input();
             self.scroll_priority_frame = true;
             self.wake();
             true

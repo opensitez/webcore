@@ -541,6 +541,19 @@ fn css_multiple_values() {
 // ── Stylesheet Parsing ────────────────────────────────────────────────────────
 
 #[test]
+fn external_stylesheet_urls_use_stylesheet_origin() {
+    let css = crate::css::resolve_css_urls(
+        r#".logo { background-image: url('/static/logo.svg') }
+           .icon { background-image: url('../icons/chevron.svg') }
+           .local { filter: url('#shadow') }"#,
+        "https://static.example.test/styles/css/site.css",
+    );
+    assert!(css.contains("url('https://static.example.test/static/logo.svg')"));
+    assert!(css.contains("url('https://static.example.test/styles/icons/chevron.svg')"));
+    assert!(css.contains("url('#shadow')"));
+}
+
+#[test]
 fn font_face_preserves_standard_descriptors() {
     let mut sheet = Stylesheet::default();
     sheet.parse_and_add_with_base(

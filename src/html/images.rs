@@ -337,6 +337,7 @@ fn decode_image_bytes_ex_with_source(
     bytes: &[u8],
     source_bytes: Option<std::sync::Arc<Vec<u8>>>,
 ) -> Option<DecodedImage> {
+    let _profile_decode = crate::profile::span(crate::profile::Phase::ImageDecode);
     if (bytes.starts_with(b"GIF87a")
         || bytes.starts_with(b"GIF89a")
         || (bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP"))

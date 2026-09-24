@@ -339,7 +339,7 @@ impl Document {
     /// Populates `animation_overrides` with interpolated CSS values.
     /// Sets `needs_animation_frame = true` if any animation/transition is still running.
     pub fn tick_animations(&mut self, now: std::time::Instant) {
-        self.animation_overrides.clear();
+        let previous_overrides = std::mem::take(&mut self.animation_overrides);
         let keyframes = self.stylesheet.keyframes.clone();
         let mut still_running = false;
         let mut finished_events: Vec<(&'static str, u32)> = Vec::new();
@@ -576,19 +576,22 @@ impl Document {
         // Paint/compositor-only animations (transform, opacity, stroke, etc.)
         // still need repaint, but forcing full geometry for every shimmer/spinner
         // makes large pages repaint continuously.
-        if !self.animation_overrides.is_empty() {
-            fn mark_dirty(node: &mut WebCore, ids: &HashMap<u32, Vec<(String, String)>>) {
-                if ids
-                    .get(&node.node_id)
-                    .is_some_and(|props| animation_properties_affect_layout(props))
-                {
+        if !self.animation_overrides.is_empty() || !previous_overrides.is_empty() {
+            let current_layout = layout_animation_values(&self.animation_overrides);
+            let previous_layout = layout_animation_values(&previous_overrides);
+            fn mark_dirty(
+                node: &mut WebCore,
+                current: &HashMap<u32, Vec<(String, String)>>,
+                previous: &HashMap<u32, Vec<(String, String)>>,
+            ) {
+                if current.get(&node.node_id) != previous.get(&node.node_id) {
                     node.layout.layout_dirty = true;
                 }
                 for child in &mut node.children {
-                    mark_dirty(child, ids);
+                    mark_dirty(child, current, previous);
                 }
             }
-            mark_dirty(&mut self.root, &self.animation_overrides);
+            mark_dirty(&mut self.root, &current_layout, &previous_layout);
         }
 
         for (event_type, target) in finished_events {
@@ -602,6 +605,22 @@ pub(crate) fn animation_properties_affect_layout(props: &[(String, String)]) -> 
     props
         .iter()
         .any(|(prop, _)| animation_property_affects_layout(prop))
+}
+
+pub(crate) fn layout_animation_values(
+    overrides: &HashMap<u32, Vec<(String, String)>>,
+) -> HashMap<u32, Vec<(String, String)>> {
+    overrides
+        .iter()
+        .filter_map(|(&id, props)| {
+            let values = props
+                .iter()
+                .filter(|(prop, _)| animation_property_affects_layout(prop))
+                .cloned()
+                .collect::<Vec<_>>();
+            (!values.is_empty()).then_some((id, values))
+        })
+        .collect()
 }
 
 pub(crate) fn animation_property_affects_layout(prop: &str) -> bool {

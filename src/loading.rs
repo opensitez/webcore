@@ -525,10 +525,25 @@ pub fn spawn_page_load<F>(url: String, options: PageLoadOptions, mut on_event: F
 where
     F: FnMut(PageLoadEvent) + Send + 'static,
 {
+    let profile_epoch = crate::profile::epoch();
+    let profile_fetch = crate::profile::span(crate::profile::Phase::HtmlFetch);
     std::thread::spawn(move || {
-        let event = match load_document_streaming_chunks(&url, &options, |url, html| {
+        let started = crate::profile::is_enabled().then(std::time::Instant::now);
+        let loaded = load_document_streaming_chunks(&url, &options, |url, html| {
             on_event(PageLoadEvent::Chunk { url, html });
-        }) {
+        });
+        if let Some(started) = started {
+            crate::profile::record_resource_for(
+                profile_epoch,
+                "document",
+                &url,
+                "load",
+                loaded.as_ref().map_or(0, |(html, _)| html.len()),
+                started.elapsed(),
+            );
+        }
+        drop(profile_fetch);
+        let event = match loaded {
             Ok((html, final_url)) => PageLoadEvent::Complete {
                 url: final_url,
                 html,
@@ -945,6 +960,7 @@ where
 }
 
 pub fn fetch_text_resource(url: &str, cache_dir: Option<&str>) -> Result<String, String> {
+    let _profile_fetch = crate::profile::span(crate::profile::Phase::CssFetch);
     if let Some(cache_dir) = cache_dir
         && !should_bypass_snapshot_cache(url)
     {
@@ -979,6 +995,7 @@ pub fn fetch_text_resource_streaming<F>(
 where
     F: FnMut(&str),
 {
+    let _profile_fetch = crate::profile::span(crate::profile::Phase::CssFetch);
     let mut decoder = encoding_rs::UTF_8.new_decoder();
     if let Some(cache_dir) = cache_dir
         && !should_bypass_snapshot_cache(url)
@@ -1059,6 +1076,7 @@ pub fn cached_fetch_bytes(url: &str, cache_dir: &str) -> Result<Vec<u8>, String>
 }
 
 pub fn cached_fetch_bytes_arc(url: &str, cache_dir: &str) -> Result<Arc<Vec<u8>>, String> {
+    let _profile_fetch = crate::profile::span(crate::profile::Phase::ImageFetch);
     if url.starts_with("data:") {
         return crate::html::image_data_url_bytes(url)
             .map(Arc::new)
@@ -1157,6 +1175,8 @@ fn cached_fetch_bytes_uncached(url: &str, cache_dir: &str) -> Result<Vec<u8>, St
 }
 
 pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let started = crate::profile::is_enabled().then(std::time::Instant::now);
+    let profile_epoch = crate::profile::epoch();
     let do_fetch = |client: &reqwest::blocking::Client| -> Result<Vec<u8>, String> {
         let resp = client
             .get(url)
@@ -1175,10 +1195,21 @@ pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
         let bytes = resp.bytes().map_err(|e| e.to_string())?;
         Ok(bytes.to_vec())
     };
-    match do_fetch(&crate::http_client()) {
+    let result = match do_fetch(&crate::http_client()) {
         Ok(bytes) if !bytes.is_empty() => Ok(bytes),
         _ => do_fetch(&crate::http_client_lenient()),
+    };
+    if let Some(started) = started {
+        crate::profile::record_resource_for(
+            profile_epoch,
+            "image",
+            url,
+            "network",
+            result.as_ref().map_or(0, Vec::len),
+            started.elapsed(),
+        );
     }
+    result
 }
 
 fn fetch_text_resource_uncached(url: &str) -> Result<String, String> {
@@ -1188,6 +1219,8 @@ fn fetch_text_resource_uncached(url: &str) -> Result<String, String> {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return std::fs::read_to_string(url).map_err(|e| e.to_string());
     }
+    let started = crate::profile::is_enabled().then(std::time::Instant::now);
+    let profile_epoch = crate::profile::epoch();
     let do_fetch = |client: &reqwest::blocking::Client| -> Result<String, String> {
         let resp = client
             .get(url)
@@ -1206,10 +1239,21 @@ fn fetch_text_resource_uncached(url: &str) -> Result<String, String> {
         }
         Ok(decode_body(&bytes))
     };
-    match do_fetch(&crate::http_client()) {
+    let result = match do_fetch(&crate::http_client()) {
         Ok(text) if !text.is_empty() => Ok(text),
         _ => do_fetch(&crate::http_client_lenient()),
+    };
+    if let Some(started) = started {
+        crate::profile::record_resource_for(
+            profile_epoch,
+            "stylesheet",
+            url,
+            "network",
+            result.as_ref().map_or(0, String::len),
+            started.elapsed(),
+        );
     }
+    result
 }
 
 fn fetch_text_resource_uncached_streaming<F>(url: &str, mut on_chunk: F) -> Result<(), String>
@@ -1230,6 +1274,8 @@ where
         }
         return Ok(());
     }
+    let started = crate::profile::is_enabled().then(std::time::Instant::now);
+    let profile_epoch = crate::profile::epoch();
     let do_fetch = |client: &reqwest::blocking::Client,
                     on_chunk: &mut dyn FnMut(&[u8])|
      -> Result<(), String> {
@@ -1264,11 +1310,22 @@ where
         saw = true;
         on_chunk(bytes);
     };
-    match do_fetch(&crate::http_client(), &mut first) {
+    let result = match do_fetch(&crate::http_client(), &mut first) {
         Ok(()) => Ok(()),
         Err(err) if saw => Err(err),
         Err(_) => do_fetch(&crate::http_client_lenient(), &mut on_chunk),
+    };
+    if let Some(started) = started {
+        crate::profile::record_resource_for(
+            profile_epoch,
+            "stylesheet",
+            url,
+            "network+consume",
+            0,
+            started.elapsed(),
+        );
     }
+    result
 }
 
 fn decode_streaming_utf8(decoder: &mut encoding_rs::Decoder, bytes: &[u8], last: bool) -> String {

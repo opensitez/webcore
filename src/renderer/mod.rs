@@ -32,7 +32,6 @@ pub struct Renderer {
     cursor_physical: (f32, f32),
     viewport_h: f32,
     cached_display_list: Option<display_list::DisplayList>,
-    cached_list_image_bytes: usize,
     cached_scroll_x: f32,
     cached_scroll_y: f32,
     cached_paint_top: f32,
@@ -52,6 +51,7 @@ pub struct Renderer {
     paint_only_display_list_dirty: bool,
     pending_resource_relayout: bool,
     last_resource_relayout: Option<std::time::Instant>,
+    last_animation_layout_values: std::collections::HashMap<u32, Vec<(String, String)>>,
     last_idle_scroll_x: f32,
     last_idle_scroll_y: f32,
     dirty_paint_rects: Vec<Rect>,
@@ -447,7 +447,6 @@ impl Renderer {
             cursor_physical: (0.0, 0.0),
             viewport_h: 700.0,
             cached_display_list: None,
-            cached_list_image_bytes: 0,
             cached_scroll_x: 0.0,
             cached_scroll_y: 0.0,
             cached_paint_top: 0.0,
@@ -467,6 +466,7 @@ impl Renderer {
             paint_only_display_list_dirty: false,
             pending_resource_relayout: false,
             last_resource_relayout: None,
+            last_animation_layout_values: std::collections::HashMap::new(),
             last_idle_scroll_x: f32::NAN,
             last_idle_scroll_y: f32::NAN,
             dirty_paint_rects: Vec::new(),
@@ -699,10 +699,11 @@ impl Renderer {
             if svg_animations_running || media_running {
                 needs_redraw = true;
             }
-            let animation_needs_layout = doc.animation_overrides.values().any(|props| {
-                crate::types::animation_runtime::animation_properties_affect_layout(props)
-            });
-            if animation_needs_layout && !doc.animation_overrides.is_empty() {
+            let layout_values =
+                crate::types::animation_runtime::layout_animation_values(&doc.animation_overrides);
+            let animation_needs_layout = layout_values != self.last_animation_layout_values;
+            self.last_animation_layout_values = layout_values;
+            if animation_needs_layout {
                 self.invalidate_display_list();
                 needs_redraw = true;
                 if trace_idle {
@@ -1388,6 +1389,7 @@ impl Renderer {
     }
 
     pub fn render(&mut self, doc: &mut Document, pixmap: &mut Pixmap, scale: f32) {
+        let _profile_render = crate::profile::span(crate::profile::Phase::Render);
         let trace_render = std::env::var_os("WEBCORE_TRACE_RENDER").is_some();
         let render_start = std::time::Instant::now();
         let mut build_ms = 0u128;
@@ -1563,7 +1565,6 @@ impl Renderer {
             if !animation_restore.is_empty() {
                 crate::css::restore_animation_overrides(&mut doc.root, animation_restore);
             }
-            self.cached_list_image_bytes = list.memory_estimate().image_bytes;
             self.cached_display_list = Some(list);
             self.cached_paint_top = paint_top;
             self.cached_paint_bottom = paint_bottom;
@@ -1578,6 +1579,7 @@ impl Renderer {
                 self.compositor.build_layers(&doc.root, view_w, view_h);
             }
             build_ms = build_start.elapsed().as_millis();
+            crate::profile::record(crate::profile::Phase::DisplayList, build_start.elapsed());
             rebuilt_display_list = true;
         }
         self.cached_scroll_x = doc.scroll_x;
@@ -1876,40 +1878,19 @@ impl Renderer {
             && let Some(ref list) = self.cached_display_list
         {
             let replay_start = std::time::Instant::now();
-            let mut needed_tiles = Vec::new();
-            let mut render_tiles = self.use_tiles;
-            if render_tiles {
+            if self.use_tiles {
                 self.tile_manager.doc_width = doc_w.max(view_w);
                 self.tile_manager.doc_height = doc_h.max(view_h);
                 let tile_scale = scale * zoom;
-                needed_tiles = self.tile_manager.update_viewport(
+                let needed_tiles = self.tile_manager.update_viewport(
                     Rect::new(doc.scroll_x, doc.scroll_y, view_w, view_h),
                     tile_scale,
                 );
-                let tile_px = (tiles::TILE_SIZE * tile_scale).ceil() as u32;
-                let cold_tiles = needed_tiles
-                    .iter()
-                    .filter(|key| {
-                        self.tile_manager.tiles.get(key).is_none_or(|tile| {
-                            tile.dirty
-                                || tile.pixmap.width() != tile_px
-                                || tile.pixmap.height() != tile_px
-                        })
-                    })
-                    .count();
-                // Replaying a small list once is cheaper than rasterizing a
-                // large cold tile border on the UI thread during a jump.
-                render_tiles = !(cold_tiles as f32 * tiles::TILE_SIZE.powi(2)
-                    > view_w * view_h * 2.0
-                    && self.cached_list_image_bytes <= 16 * 1024 * 1024
-                    && list.commands.len() <= 1500
-                    && doc.animation_overrides.is_empty());
-            }
-            if render_tiles {
-                let tile_scale = scale * zoom;
                 for (tx, ty) in needed_tiles {
                     let needs_tile = self.tile_manager.ensure_tile(tx, ty);
                     if needs_tile {
+                        let tile_profile_start =
+                            crate::profile::is_enabled().then(std::time::Instant::now);
                         if let Some(tile) = self.tile_manager.tiles.get_mut(&(tx, ty)) {
                             tile.pixmap.fill(canvas_color);
                             let tile_scroll_x = tx as f32 * tiles::TILE_SIZE;
@@ -1938,12 +1919,28 @@ impl Renderer {
                             }
                             tile.dirty = false;
                         }
+                        if let Some(started) = tile_profile_start {
+                            crate::profile::record(
+                                crate::profile::Phase::TileRaster,
+                                started.elapsed(),
+                            );
+                        }
                     }
                 }
                 self.tile_manager.evict_distant();
+                let composite_profile_start =
+                    crate::profile::is_enabled().then(std::time::Instant::now);
                 self.tile_manager
                     .composite_to(pixmap, doc.scroll_x, doc.scroll_y, tile_scale);
+                if let Some(started) = composite_profile_start {
+                    crate::profile::record(
+                        crate::profile::Phase::TileComposite,
+                        started.elapsed(),
+                    );
+                }
             } else {
+                let direct_profile_start =
+                    crate::profile::is_enabled().then(std::time::Instant::now);
                 // The scroll offset is applied HERE, at replay, which is what makes
                 // one cached list serve every scroll position.
                 if animation_transform_overrides.is_empty() {
@@ -1966,6 +1963,12 @@ impl Renderer {
                         doc.scroll_x,
                         doc.scroll_y,
                         &animation_transform_overrides,
+                    );
+                }
+                if let Some(started) = direct_profile_start {
+                    crate::profile::record(
+                        crate::profile::Phase::DirectReplay,
+                        started.elapsed(),
                     );
                 }
             }

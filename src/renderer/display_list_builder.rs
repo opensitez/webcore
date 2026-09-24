@@ -1474,15 +1474,16 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                     bstyle(eff_style.border_left_style),
                 ];
                 for side in 0..4 {
-                    if border_widths[side] <= 0.0
-                        || border_colors[side].a == 0
-                        || border_styles[side] == 0
-                    {
+                    if border_widths[side] <= 0.0 || border_styles[side] == 0 {
                         border_widths[side] = 0.0;
                         border_styles[side] = 0;
                     }
                 }
-                if border_widths.iter().any(|width| *width > 0.0) {
+                if border_widths
+                    .iter()
+                    .enumerate()
+                    .any(|(side, width)| *width > 0.0 && border_colors[side].a > 0)
+                {
                     list.push(PaintCmd::Border {
                         rect: border_rect,
                         widths: border_widths,

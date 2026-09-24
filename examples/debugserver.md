@@ -10,7 +10,10 @@ cargo run --release --example browser -- --debug-port 9222 https://example.com
 cargo run --release --example browser -- --headless https://example.com
 
 # With Chrome comparison
-cargo run --release --example browser -- --headless --chrome https://example.com
+cargo run --release --example browser -- --debug-port 9222 --chrome https://example.com
+
+# Opt-in loading and rendering profile in the GUI
+cargo run --release --example browser -- --cached --profile --debug-port 9222 https://example.com
 ```
 
 ## Three Ways to Inspect
@@ -67,6 +70,7 @@ cargo run --release --example browser -- [OPTIONS] [URL]
   --cached           Use snapshot_cache/ for fetched resources (default)
   --cache-dir <dir>  Custom cache directory
   --no-images        Skip image loading
+  --profile          Collect phase/resource timings and print a summary every 5s
 ```
 
 ## Command Reference
@@ -105,8 +109,9 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 | `inspect-node` | `{"cmd":"inspect-node","nid":42}` — by node_id; image nodes include decoded `image` metadata (`src`, natural width/height, byte count) when available |
 | `deep` | `{"cmd":"deep","selector":"td"}` — full dump |
 | `computed` | `{"cmd":"computed","selector":"h1"}` — includes `node_id`, box geometry, display/flex fields, `direction`, `writing_mode`, resolved padding/margins |
-| `css` | `{"cmd":"css","selector":"td","props":"display,width"}` |
+| `css` | `{"cmd":"css","selector":"td","props":"display,width"}` — also supports debug fields such as `svg-path`, `svg-fill-stored`, `svg-stroke-stored`, `svg-paint-flags`, and `matched-rule-count` |
 | `resolve-css` | `{"cmd":"resolve-css","value":"var(--brand)"}` — resolve CSS variable references against the active stylesheet |
+| `stylesheet-vars` | `{"cmd":"stylesheet-vars","query":"--brand","limit":20}` — list active stylesheet custom properties after viewport-aware resolution |
 | `rules` | `{"cmd":"rules","selector":"h1"}` — matched CSS rules |
 | `inspect-mode` | `{"cmd":"inspect-mode","on":"true"}` — recascade with matched-rule capture enabled for scripted `rules` inspection; GUI mode preserves the pre-panel page viewport so responsive media queries do not change while the inspector opens |
 | `rule-search` | `{"cmd":"rule-search","query":"lg\\:flex","limit":10}` — search loaded stylesheet selectors while debugging cascade misses |
@@ -115,10 +120,11 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 | `node-id-stats` | `{"cmd":"node-id-stats"}` — counts duplicate `node_id` values in the current DOM/render tree |
 | `keyframes` | `{"cmd":"keyframes","query":"ticker","limit":10}` — inspect parsed `@keyframes` stops and properties for animation debugging |
 | `lines` | `{"cmd":"lines","selector":"p"}` — line-cache geometry for matched elements, including bidi visual segments (`x`, `w`, `level`) for RTL/LTR paint debugging |
-| `paint-dump` | `{"cmd":"paint-dump","x":0,"y":0,"w":400,"h":200,"limit":80}` — display-list commands in a viewport rectangle; text entries include font metrics and decoration flags, fill rectangles include color/radius, borders include per-side widths/colors/styles, and CSS mask entries include mask image dimensions |
+| `paint-dump` | `{"cmd":"paint-dump","x":0,"y":0,"w":400,"h":200,"limit":80}` — display-list commands in a viewport rectangle; text entries include font metrics and decoration flags, fill rectangles include color/radius, borders include per-side widths/colors/styles, image entries include intrinsic size, byte count, nontransparent pixel count, content bounds, and average RGB, and CSS mask entries include mask image dimensions |
 | `display-list-stats` | `{"cmd":"display-list-stats"}` — command counts for the current viewport paint-band display list, including text, image, clip, transform, layer, and mask commands plus `paint_top`/`paint_bottom` |
 | `image-states` | `{"cmd":"image-states","limit":80}` — DOM image/background/mask state, including source URLs, `srcset`, node IDs, element/background/mask decoded state, natural sizes, byte counts, layout rects, pending-channel/in-flight status, and load errors |
 | `resource-states` | `{"cmd":"resource-states"}` — loading flag plus pending CSS/image/font resource state, stylesheet counts, and document height |
+| `stylesheet-slots` | `{"cmd":"stylesheet-slots"}` — document stylesheet order, linked/inline slots, resolved stylesheet URLs, and per-slot loaded rule counts for debugging cascade/resource ordering |
 | `memory-stats` | `{"cmd":"memory-stats"}` — browser-owned memory accounting plus OS process RSS/VSZ; includes retained viewport/content surfaces, tile surfaces, display-list command count with inline/heap/text/image/vector byte estimates, raw resource cache, parsed CSS cache, decoded image cache, DOM node/image/style counts, estimated DOM/layout/computed-style/line-cache/matched-rule/stylesheet bytes, and unique decoded DOM image buffers |
 | `animated-images` | `{"cmd":"animated-images"}` — list animated image nodes, frame counts, layout rects, clip band, and whether the engine currently considers them visible |
 | `animations` | `{"cmd":"animations"}` — list active CSS keyframe animations, their target node IDs, duration, iteration count, and animated property names |
@@ -155,6 +161,7 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 | Command | Example |
 |---------|---------|
 | `perf` | `{"cmd":"perf"}` — current browser-view load state for the active tab |
+| `profile` | `{"cmd":"profile","limit":20}` — cumulative phase count/total/max timings and slowest resources; add `"reset":true` to start a new measurement window |
 | `bench` | `{"cmd":"bench","n":5}` — cascade/layout benchmark |
 | `bench-progressive` | `{"cmd":"bench-progressive"}` — above-fold vs full |
 | `bench-render` | `{"cmd":"bench-render","dy":500}` — live BrowserView paint/scroll/cached-paint benchmark in the GUI path |
@@ -171,11 +178,25 @@ WEBCORE_TRACE_RENDER=1 cargo run --release --example browser -- --cached https:/
 
 `WEBCORE_TRACE_IDLE` reports why the engine requested work (`stylesheet`, `image-layout`, `image-paint`, `font`, `css-animation-paint`, `css-animation-layout`, `animated-image`, etc.) and whether more timed work is pending. `WEBCORE_TRACE_RENDER` splits each render into display-list build and replay time, and reports whether the renderer-owned backing surface was reused.
 
+`--profile` is disabled by default. It records timing across loader and rendering threads, prints a cumulative console summary every five seconds while the GUI draws, and enables the `profile` debug command:
+
+```bash
+cargo run --release --example browser -- --cached --profile --debug-port 9222 http://localhost/websites/foxnews.html
+python3 examples/debugclient.py send 9222 '{"cmd":"profile","limit":10}'
+python3 examples/debugclient.py send 9222 '{"cmd":"profile","reset":true}'
+```
+
+The profile reports HTML load and streamed parse, CSS load and parse, image load and decode, resource polling, cascade, geometry, frame updates, display-list recording, tile raster/composite, direct replay, full render, demo-browser draw, and `scroll_paint`. Each phase has `count`, cumulative `total_ms`, and slowest `max_ms`. `scroll_paint` measures from the first wheel, scrollbar, or programmatic scroll change awaiting a frame through completion of the next viewport paint; it includes scheduling delay but not OS compositor presentation. Divide `total_ms` by `count` for the mean scroll latency, and use `max_ms` to spot freezes. Resource entries are the 128 slowest observed document, stylesheet, and image loads, with URL, bytes where known, source, and elapsed time. `network` means an actual HTTP request; `load` includes cache/local/document delivery; `network+consume` includes streaming CSS callbacks and parsing. Phase timers are inclusive and can overlap, so do not add their totals to infer page wall time. The profiler resets on navigation; `"reset":true` also clears the current window without navigating. Use a release GUI run for realistic scroll timings.
+
+Viewport rendering uses cached raster tiles by default. Set `WEBCORE_DISABLE_TILES=1` when comparing against the full-display-list replay path during scroll debugging.
+
 ### Chrome Comparison (requires `--chrome`)
 | Command | Example |
 |---------|---------|
 | `chrome-screenshot` | `{"cmd":"chrome-screenshot","out":"/tmp/chrome.png"}` |
 | `chrome-sync` | `{"cmd":"chrome-sync"}` — navigate Chrome to the active webcore URL for side-by-side inspection |
+| `chrome-eval` | `{"cmd":"chrome-eval","expression":"getComputedStyle(document.querySelector('input')).color"}` — inspect Chrome's live page in GUI comparison mode |
+| `chrome-type` | `{"cmd":"chrome-type","text":"hello"}` — send native text input to Chrome's focused control |
 | `compare` | `{"cmd":"compare","out":"/tmp/compare.png"}` — capture webcore and Chrome screenshots and report visual diff metadata |
 
 ## Python REPL Shortcuts

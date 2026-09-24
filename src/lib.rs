@@ -938,6 +938,7 @@ pub mod layout;
 pub mod loading;
 pub mod markdown;
 pub mod platform;
+pub mod profile;
 pub mod renderer;
 pub mod svg;
 pub mod video;
@@ -1216,6 +1217,7 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
         });
     doc.preserve_stylesheet_document_order = true;
     eprintln!("Parse: {:.0}ms", t0.elapsed().as_millis());
+    crate::profile::record(crate::profile::Phase::HtmlParse, t0.elapsed());
     drop(css_tx); // close sender so rx.iter() terminates after all threads finish
 
     // Collect fetched stylesheets. Browser hosts that want progressive first

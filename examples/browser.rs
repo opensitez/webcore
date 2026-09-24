@@ -137,7 +137,10 @@ struct BrowserApp {
 
     // Remote debug server (--debug-port)
     debug_cmd_rx: Option<mpsc::Receiver<(String, mpsc::Sender<String>)>>,
+    chrome_port: u16,
+    chrome_process: Option<std::process::Child>,
     last_memory_trace: Option<std::time::Instant>,
+    last_profile_trace: Option<std::time::Instant>,
 }
 
 impl BrowserApp {
@@ -170,7 +173,10 @@ impl BrowserApp {
             cache_dir: None,
             no_images: false,
             debug_cmd_rx: None,
+            chrome_port: 0,
+            chrome_process: None,
             last_memory_trace: None,
+            last_profile_trace: None,
         }
     }
 
@@ -186,6 +192,8 @@ impl BrowserApp {
     }
 
     fn start_view_navigation(&mut self, index: usize, url: String) {
+        webcore::profile::reset();
+        self.last_profile_trace = None;
         let page_w = self.page_width();
         let content_h = self.content_h();
         let cache_dir = self.cache_dir.clone();
@@ -448,6 +456,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
     // ── Render ────────────────────────────────────────────────────────────────
 
     fn draw(&mut self) {
+        let profile_draw = webcore::profile::span(webcore::profile::Phase::BrowserDraw);
         let Some(platform) = self.platform.as_mut() else {
             return;
         };
@@ -583,7 +592,17 @@ body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
         if std::env::var_os("WEBCORE_TRACE_RENDER").is_some() && draw_ms > 5 {
             eprintln!("[browser] Draw total: {draw_ms}ms");
         }
+        drop(profile_draw);
         self.trace_memory_if_requested();
+        if webcore::profile::is_enabled() {
+            let now = std::time::Instant::now();
+            if self.last_profile_trace.is_none_or(|last| {
+                now.saturating_duration_since(last) >= std::time::Duration::from_secs(5)
+            }) {
+                self.last_profile_trace = Some(now);
+                eprintln!("{}", webcore::profile::summary());
+            }
+        }
     }
 
     fn trace_memory_if_requested(&mut self) {
@@ -1854,20 +1873,56 @@ fn escape_html(s: &str) -> String {
 // All commands mirror debugserver.rs but operate on the active tab's document.
 
 /// Escape a string for JSON output.
-/// Select elements, allowing a trailing `::before` / `::after` to address the
-/// synthetic pseudo-element child instead of the element itself.
-fn dbg_select_with_pseudo<'a>(root: &'a webcore::WebCore, sel: &str) -> Vec<&'a webcore::WebCore> {
+fn dbg_walk_composed<'a, F: FnMut(&'a webcore::WebCore)>(node: &'a webcore::WebCore, f: &mut F) {
+    f(node);
+    for child in node.effective_children() {
+        dbg_walk_composed(child, f);
+    }
+}
+
+fn dbg_composed_nodes_for_ids<'a>(
+    root: &'a webcore::WebCore,
+    ids: &std::collections::HashSet<u32>,
+) -> Vec<&'a webcore::WebCore> {
+    let mut out = Vec::new();
+    dbg_walk_composed(root, &mut |node| {
+        if node.node_id != 0 && ids.contains(&node.node_id) {
+            out.push(node);
+        }
+    });
+    out
+}
+
+fn dbg_select_composed_with_pseudo<'a>(
+    root: &'a webcore::WebCore,
+    doc: &Document,
+    sel: &str,
+) -> Vec<&'a webcore::WebCore> {
     for tag in ["::before", "::after"] {
         if let Some(base) = sel.trim().strip_suffix(tag) {
-            let base = base.trim();
-            let parents = webcore::dom::query_selector_all(root, base);
-            return parents
+            let base_ids: std::collections::HashSet<u32> =
+                doc.query_selector_all(base.trim()).into_iter().collect();
+            return dbg_composed_nodes_for_ids(root, &base_ids)
                 .into_iter()
                 .filter_map(|p| p.children.iter().find(|c| c.tag == tag))
                 .collect();
         }
     }
-    webcore::dom::query_selector_all(root, sel)
+    let ids: std::collections::HashSet<u32> = doc.query_selector_all(sel).into_iter().collect();
+    dbg_composed_nodes_for_ids(root, &ids)
+}
+
+fn dbg_get_composed_by_id<'a>(
+    root: &'a webcore::WebCore,
+    node_id: u32,
+) -> Option<&'a webcore::WebCore> {
+    let mut result = None;
+    dbg_walk_composed(root, &mut |node| {
+        if result.is_none() && node.node_id == node_id {
+            result = Some(node);
+        }
+    });
+    result
 }
 
 fn dbg_json_escape(s: &str) -> String {
@@ -1886,6 +1941,49 @@ fn dbg_json_escape(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+fn profile_json(limit: usize) -> String {
+    if !webcore::profile::is_enabled() {
+        return r#"{"ok":false,"error":"start browser with --profile"}"#.to_string();
+    }
+    let snapshot = webcore::profile::snapshot();
+    let phases: Vec<_> = webcore::profile::Phase::ALL
+        .iter()
+        .filter_map(|phase| {
+            let timing = snapshot.timings[*phase as usize];
+            (timing.count > 0).then(|| {
+                format!(
+                    r#"{{"name":{},"count":{},"total_ms":{:.3},"max_ms":{:.3}}}"#,
+                    dbg_json_escape(phase.name()),
+                    timing.count,
+                    timing.total_ns as f64 / 1_000_000.0,
+                    timing.max_ns as f64 / 1_000_000.0,
+                )
+            })
+        })
+        .collect();
+    let resources: Vec<_> = snapshot
+        .resources
+        .iter()
+        .take(limit.min(128))
+        .map(|resource| {
+            format!(
+                r#"{{"kind":{},"url":{},"source":{},"bytes":{},"ms":{:.3}}}"#,
+                dbg_json_escape(resource.kind),
+                dbg_json_escape(&resource.url),
+                dbg_json_escape(resource.source),
+                resource.bytes,
+                resource.duration_ns as f64 / 1_000_000.0,
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"ok":true,"elapsed_ms":{:.3},"phases":[{}],"resources":[{}]}}"#,
+        snapshot.elapsed.as_secs_f64() * 1000.0,
+        phases.join(","),
+        resources.join(","),
+    )
 }
 
 fn dbg_json_str(json: &str, key: &str) -> Option<String> {
@@ -2498,12 +2596,15 @@ fn dbg_dump_box(depth: usize, node: &webcore::WebCore, buf: &mut String) {
     };
     let _ = writeln!(
         buf,
-        "{}{}{}{} [{:?}] c=[{:.0},{:.0} {:.0}x{:.0}] m=[{:.0},{:.0} {:.0}x{:.0}]{}",
+        "{}{}{}{} [{:?} pos={:?} w={:?} h={:?}] c=[{:.0},{:.0} {:.0}x{:.0}] m=[{:.0},{:.0} {:.0}x{:.0}]{}",
         indent,
         tag,
         id,
         cls,
         node.style.display,
+        node.style.position,
+        node.style.width,
+        node.style.height,
         node.layout.content_rect.x,
         node.layout.content_rect.y,
         node.layout.content_rect.w,
@@ -2514,7 +2615,7 @@ fn dbg_dump_box(depth: usize, node: &webcore::WebCore, buf: &mut String) {
         node.layout.margin_rect.h,
         text_preview
     );
-    for child in &node.children {
+    for child in node.effective_children() {
         dbg_dump_box(depth + 1, child, buf);
     }
 }
@@ -2547,17 +2648,16 @@ fn dbg_serialize_html(node: &webcore::WebCore, buf: &mut String, depth: usize) {
 }
 
 fn dbg_selector_center(doc: &Document, selector: &str) -> Option<(f32, f32)> {
-    let mut result = None;
-    Document::walk_all(&doc.root, &mut |node| {
-        if result.is_some() {
-            return;
-        }
-        if dbg_matches_query(doc, node, selector) {
-            let r = &node.layout.content_rect;
-            result = Some((r.x + r.w / 2.0, r.y + r.h / 2.0));
-        }
-    });
-    result
+    dbg_select_composed_with_pseudo(&doc.root, doc, selector)
+        .into_iter()
+        .find_map(|node| {
+            let r = node.layout.content_rect;
+            if r.w > 0.0 && r.h > 0.0 {
+                Some((r.x + r.w / 2.0, r.y + r.h / 2.0))
+            } else {
+                None
+            }
+        })
 }
 
 impl BrowserApp {
@@ -2588,6 +2688,68 @@ impl BrowserApp {
 
     fn dispatch_debug_cmd(&mut self, cmd: &str, line: &str) -> String {
         match cmd {
+            "chrome-eval" => {
+                if self.chrome_port == 0 {
+                    return r#"{"ok":false,"error":"start GUI with --chrome"}"#.to_string();
+                }
+                let Some(expression) = dbg_json_str(line, "expression") else {
+                    return r#"{"ok":false,"error":"chrome-eval needs expression"}"#.to_string();
+                };
+                let params = format!(
+                    r#"{{"expression":{},"returnByValue":true}}"#,
+                    json_quote(&expression)
+                );
+                match cdp_send(self.chrome_port, "Runtime.evaluate", &params) {
+                    Ok(response) => format!(r#"{{"ok":true,"cdp":{response}}}"#),
+                    Err(error) => format!(r#"{{"ok":false,"error":{}}}"#, dbg_json_escape(&error)),
+                }
+            }
+            "chrome-type" => {
+                if self.chrome_port == 0 {
+                    return r#"{"ok":false,"error":"start GUI with --chrome"}"#.to_string();
+                }
+                let Some(value) = dbg_json_str(line, "text") else {
+                    return r#"{"ok":false,"error":"chrome-type needs text"}"#.to_string();
+                };
+                let params = format!(r#"{{"text":{}}}"#, json_quote(&value));
+                match cdp_send(self.chrome_port, "Input.insertText", &params) {
+                    Ok(response) => format!(r#"{{"ok":true,"cdp":{response}}}"#),
+                    Err(error) => format!(r#"{{"ok":false,"error":{}}}"#, dbg_json_escape(&error)),
+                }
+            }
+            "chrome-sync" => {
+                if self.chrome_port == 0 {
+                    return r#"{"ok":false,"error":"start GUI with --chrome"}"#.to_string();
+                }
+                let url = self.tabs[self.active].url.clone();
+                let params = format!(r#"{{"url":{}}}"#, json_quote(&url));
+                match cdp_send(self.chrome_port, "Page.navigate", &params) {
+                    Ok(response) => format!(r#"{{"ok":true,"cdp":{response}}}"#),
+                    Err(error) => format!(r#"{{"ok":false,"error":{}}}"#, dbg_json_escape(&error)),
+                }
+            }
+            "chrome-screenshot" => {
+                if self.chrome_port == 0 {
+                    return r#"{"ok":false,"error":"start GUI with --chrome"}"#.to_string();
+                }
+                let path = dbg_json_str(line, "out")
+                    .unwrap_or_else(|| "chrome_screenshot.png".to_string());
+                match cdp_send(self.chrome_port, "Page.captureScreenshot", r#"{"format":"png"}"#) {
+                    Ok(response) => {
+                        if let Some(data) = dbg_json_str(&response, "data") {
+                            match base64_decode_std(&data)
+                                .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()))
+                            {
+                                Ok(()) => format!(r#"{{"ok":true,"path":{}}}"#, dbg_json_escape(&path)),
+                                Err(error) => format!(r#"{{"ok":false,"error":{}}}"#, dbg_json_escape(&error)),
+                            }
+                        } else {
+                            r#"{"ok":false,"error":"Chrome screenshot missing data"}"#.to_string()
+                        }
+                    }
+                    Err(error) => format!(r#"{{"ok":false,"error":{}}}"#, dbg_json_escape(&error)),
+                }
+            }
             // ── Screenshot ───────────────────────────────────────────────────
             "screenshot" => {
                 let path = dbg_json_str(line, "out").unwrap_or_else(|| "snapshot.png".to_string());
@@ -2629,6 +2791,12 @@ impl BrowserApp {
                 }
                 None => r#"{"ok":false,"error":"navigate needs url"}"#.to_string(),
             },
+            "profile" => {
+                if dbg_json_bool(line, "reset").unwrap_or(false) {
+                    webcore::profile::reset();
+                }
+                profile_json(dbg_json_num(line, "limit").unwrap_or(20.0) as usize)
+            }
             // ── Browse tab list / switch ──────────────────────────────────────
             "tabs" => {
                 let list: Vec<String> = self
@@ -2942,6 +3110,29 @@ impl BrowserApp {
                 }
                 None => r#"{"ok":false,"error":"computed needs selector"}"#.to_string(),
             },
+            "lines" => match dbg_json_str(line, "selector") {
+                Some(sel) => {
+                    let mut parts = Vec::new();
+                    if let Some(doc) = self.tabs[self.active].view.document() {
+                        Document::walk_all(&doc.root, &mut |node| {
+                            if dbg_matches_query(doc, node, &sel) {
+                                let lines: Vec<String> = node.layout.line_cache.iter().map(|line| {
+                                    format!(
+                                        r#"{{"x":{},"y":{},"w":{},"h":{},"text_start":{},"text_length":{},"text_x_offset":{}}}"#,
+                                        line.x, line.y, line.width, line.height,
+                                        line.text_start, line.text_length, line.text_x_offset
+                                    )
+                                }).collect();
+                                parts.push(format!(r#"{{"node_id":{},"lines":[{}]}}"#,
+                                    node.node_id, lines.join(",")));
+                            }
+                        });
+                    }
+                    format!(r#"{{"ok":true,"count":{},"elements":[{}]}}"#,
+                        parts.len(), parts.join(","))
+                }
+                None => r#"{"ok":false,"error":"lines needs selector"}"#.to_string(),
+            },
             "height-dump" => {
                 let limit = dbg_json_num(line, "limit").unwrap_or(40.0).max(1.0) as usize;
                 if let Some(doc) = self.tabs[self.active].view.document() {
@@ -3126,6 +3317,8 @@ impl BrowserApp {
                                 font_size,
                                 font_weight,
                                 decoration,
+                                letter_spacing,
+                                word_spacing,
                                 ..
                             } => {
                                 if *tx <= qx2
@@ -3134,12 +3327,14 @@ impl BrowserApp {
                                     && *ty + *font_size >= y
                                 {
                                     out.push(format!(
-                                        r#"{{"kind":"text","x":{:.1},"y":{:.1},"font":{},"size":{:.1},"weight":{},"underline":{},"overline":{},"strikethrough":{},"text":{}}}"#,
+                                        r#"{{"kind":"text","x":{:.1},"y":{:.1},"font":{},"size":{:.1},"weight":{},"letter_spacing":{:.3},"word_spacing":{:.3},"underline":{},"overline":{},"strikethrough":{},"text":{}}}"#,
                                         tx,
                                         ty,
                                         dbg_json_escape(font_family),
                                         font_size,
                                         font_weight,
+                                        letter_spacing,
+                                        word_spacing,
                                         decoration.underline,
                                         decoration.overline,
                                         decoration.strikethrough,
@@ -3170,15 +3365,16 @@ impl BrowserApp {
                                     ));
                                 }
                             }
-                            PaintCmd::Image { rect, .. } => {
+                            PaintCmd::Image { rect, data } => {
                                 if rect.x <= qx2
                                     && rect.right() >= x
                                     && rect.y <= qy2
                                     && rect.bottom() >= y
                                 {
+                                    let stats = paint_dump_image_stats_json(data);
                                     out.push(format!(
-                                        r#"{{"kind":"image","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1}}}"#,
-                                        rect.x, rect.y, rect.w, rect.h
+                                        r#"{{"kind":"image","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},{}}}"#,
+                                        rect.x, rect.y, rect.w, rect.h, stats
                                     ));
                                 }
                             }
@@ -3693,11 +3889,18 @@ impl BrowserApp {
                 let mut buf = String::new();
                 if let Some(doc) = self.tabs[self.active].view.document() {
                     match sel.as_deref() {
-                        Some(sel) => Document::walk_all(&doc.root, &mut |node| {
-                            if dbg_matches_query(doc, node, sel) {
-                                dbg_dump_box(0, node, &mut buf);
-                            }
-                        }),
+                        Some(sel) => {
+                            let hit_ids: std::collections::HashSet<u32> =
+                                dbg_select_composed_with_pseudo(&doc.root, doc, sel)
+                                    .into_iter()
+                                    .map(|hit| hit.node_id)
+                                    .collect();
+                            dbg_walk_composed(&doc.root, &mut |node| {
+                                if hit_ids.contains(&node.node_id) {
+                                    dbg_dump_box(0, node, &mut buf);
+                                }
+                            });
+                        }
                         None => dbg_dump_box(0, &doc.root, &mut buf),
                     }
                 }
@@ -3770,6 +3973,172 @@ impl BrowserApp {
                     doc.linked_stylesheets.len(),
                     doc.loaded_stylesheet_slots.len(),
                     webcore::Document::scroll_height(&doc.root),
+                )
+            }
+            "stylesheet-slots" => {
+                let Some(doc) = self.tabs[self.active].view.document() else {
+                    return r#"{"ok":false,"error":"no document"}"#.to_string();
+                };
+                let mut slots = Vec::new();
+                for (idx, sheet) in doc.document_stylesheets.iter().enumerate() {
+                    match sheet {
+                        webcore::types::DocumentStylesheet::Inline { css } => {
+                            slots.push(format!(
+                                r#"{{"idx":{},"kind":"inline","css_len":{},"loaded_rules":null}}"#,
+                                idx,
+                                css.len()
+                            ));
+                        }
+                        webcore::types::DocumentStylesheet::Linked { href, media } => {
+                            let abs = webcore::html::resolve_url(href, &doc.base_url);
+                            let slot_rules = doc
+                                .loaded_stylesheet_slots
+                                .get(&idx)
+                                .map(|sheet| sheet.rules.len());
+                            let href_rules = doc
+                                .loaded_linked_stylesheets
+                                .get(&abs)
+                                .map(|sheet| sheet.rules.len());
+                            slots.push(format!(
+                                r#"{{"idx":{},"kind":"linked","href":{},"resolved":{},"media":{},"slot_rules":{},"href_rules":{}}}"#,
+                                idx,
+                                dbg_json_escape(href),
+                                dbg_json_escape(&abs),
+                                dbg_json_escape(media),
+                                slot_rules
+                                    .map(|n| n.to_string())
+                                    .unwrap_or_else(|| "null".to_string()),
+                                href_rules
+                                    .map(|n| n.to_string())
+                                    .unwrap_or_else(|| "null".to_string()),
+                            ));
+                        }
+                    }
+                }
+                format!(
+                    r#"{{"ok":true,"base_url":{},"document_stylesheets":{},"linked_stylesheets":{},"loaded_slots":{},"loaded_hrefs":{},"slots":[{}]}}"#,
+                    dbg_json_escape(&doc.base_url),
+                    doc.document_stylesheets.len(),
+                    doc.linked_stylesheets.len(),
+                    doc.loaded_stylesheet_slots.len(),
+                    doc.loaded_linked_stylesheets.len(),
+                    slots.join(",")
+                )
+            }
+            "resolve-css" => {
+                let Some(doc) = self.tabs[self.active].view.document() else {
+                    return r#"{"ok":false,"error":"no document"}"#.to_string();
+                };
+                let value = dbg_json_str(line, "value").unwrap_or_default();
+                let resolved =
+                    webcore::css::resolve_var_references(&value, &doc.stylesheet.variables);
+                format!(
+                    r#"{{"ok":true,"value":{},"resolved":{},"variables":{}}}"#,
+                    dbg_json_escape(&value),
+                    dbg_json_escape(&resolved),
+                    doc.stylesheet.variables.len()
+                )
+            }
+            "stylesheet-vars" => {
+                let Some(doc) = self.tabs[self.active].view.document() else {
+                    return r#"{"ok":false,"error":"no document"}"#.to_string();
+                };
+                let query = dbg_json_str(line, "query").unwrap_or_default();
+                let limit = dbg_json_num(line, "limit").unwrap_or(40.0).max(1.0) as usize;
+                let mut vars = doc
+                    .stylesheet
+                    .variables
+                    .iter()
+                    .filter(|(name, value)| {
+                        query.is_empty() || name.contains(&query) || value.contains(&query)
+                    })
+                    .collect::<Vec<_>>();
+                vars.sort_by(|(a, _), (b, _)| a.cmp(b));
+                let matched_count = vars.len();
+                let entries = vars
+                    .into_iter()
+                    .take(limit)
+                    .map(|(name, value)| {
+                        format!(
+                            r#"{{"name":{},"value":{}}}"#,
+                            dbg_json_escape(name),
+                            dbg_json_escape(value)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    r#"{{"ok":true,"query":{},"variables":{},"count":{},"entries":[{}]}}"#,
+                    dbg_json_escape(&query),
+                    doc.stylesheet.variables.len(),
+                    matched_count,
+                    entries
+                )
+            }
+            "shadow-styles" => {
+                let Some(doc) = self.tabs[self.active].view.document() else {
+                    return r#"{"ok":false,"error":"no document"}"#.to_string();
+                };
+                fn walk_shadow_styles(
+                    node: &webcore::WebCore,
+                    doc: &webcore::Document,
+                    out: &mut Vec<String>,
+                ) {
+                    if let Some(sr) = node.shadow_root.as_ref() {
+                        let mut sheets = Vec::new();
+                        for (idx, sheet) in sr.document_stylesheets.iter().enumerate() {
+                            match sheet {
+                                webcore::types::DocumentStylesheet::Inline { css } => {
+                                    sheets.push(format!(
+                                        r#"{{"idx":{},"kind":"inline","css_len":{}}}"#,
+                                        idx,
+                                        css.len()
+                                    ));
+                                }
+                                webcore::types::DocumentStylesheet::Linked { href, media } => {
+                                    let abs = webcore::html::resolve_url(href, &doc.base_url);
+                                    let rules = doc
+                                        .loaded_linked_stylesheets
+                                        .get(&abs)
+                                        .or_else(|| doc.loaded_linked_stylesheets.get(href))
+                                        .map(|sheet| sheet.rules.len());
+                                    sheets.push(format!(
+                                        r#"{{"idx":{},"kind":"linked","href":{},"resolved":{},"media":{},"loaded_rules":{}}}"#,
+                                        idx,
+                                        dbg_json_escape(href),
+                                        dbg_json_escape(&abs),
+                                        dbg_json_escape(media),
+                                        rules
+                                            .map(|n| n.to_string())
+                                            .unwrap_or_else(|| "null".to_string())
+                                    ));
+                                }
+                            }
+                        }
+                        out.push(format!(
+                            r#"{{"host_tag":{},"host_id":{},"host_class":{},"host_node_id":{},"shadow_node_id":{},"rules":{},"sheets":[{}]}}"#,
+                            dbg_json_escape(&node.tag),
+                            dbg_json_escape(node.attributes.get("id").map(String::as_str).unwrap_or("")),
+                            dbg_json_escape(node.attributes.get("class").map(String::as_str).unwrap_or("")),
+                            node.node_id,
+                            sr.node_id,
+                            sr.stylesheet.rules.len(),
+                            sheets.join(",")
+                        ));
+                        for child in &sr.children {
+                            walk_shadow_styles(child, doc, out);
+                        }
+                    }
+                    for child in &node.children {
+                        walk_shadow_styles(child, doc, out);
+                    }
+                }
+                let mut roots = Vec::new();
+                walk_shadow_styles(&doc.root, doc, &mut roots);
+                format!(
+                    r#"{{"ok":true,"count":{},"roots":[{}]}}"#,
+                    roots.len(),
+                    roots.join(",")
                 )
             }
             "memory-stats" => {
@@ -3848,6 +4217,48 @@ impl BrowserApp {
                     items.join(",")
                 )
             }
+            "intrinsic" => {
+                let Some(doc) = self.tabs[self.active].view.document() else {
+                    return r#"{"ok":false,"error":"no document"}"#.to_string();
+                };
+                let selector = dbg_json_str(line, "selector").unwrap_or_default();
+                let nodes = webcore::dom::query_selector_all(&doc.root, &selector);
+                let engine = webcore::layout::LayoutEngine::new();
+                let root_font_px = doc.root.style.font_size_px(16.0, 16.0);
+                let mut items = Vec::new();
+                for node in nodes {
+                    let font_px = node.style.font_size_px(root_font_px, root_font_px);
+                    let min_content =
+                        engine.min_content_width_of_content(node, font_px, root_font_px);
+                    let max_content =
+                        engine.max_content_width_of_content(node, font_px, root_font_px);
+                    let fit_content = engine.intrinsic_width(
+                        &webcore::types::CssLength::FitContent,
+                        node,
+                        node.layout.content_rect.w,
+                        font_px,
+                        root_font_px,
+                        node.layout.content_rect.w,
+                    );
+                    items.push(format!(
+                        r#"{{"tag":"{}","id":"{}","class":"{}","display":"{:?}","position":"{:?}","content_w":{:.1},"min_content":{:.1},"max_content":{:.1},"fit_content":{:.1}}}"#,
+                        node.tag,
+                        node.attributes.get("id").map(String::as_str).unwrap_or(""),
+                        node.attributes.get("class").map(String::as_str).unwrap_or(""),
+                        node.style.display,
+                        node.style.position,
+                        node.layout.content_rect.w,
+                        min_content,
+                        max_content,
+                        fit_content
+                    ));
+                }
+                format!(
+                    r#"{{"ok":true,"count":{},"elements":[{}]}}"#,
+                    items.len(),
+                    items.join(",")
+                )
+            }
             "css" => {
                 let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
@@ -3856,8 +4267,7 @@ impl BrowserApp {
                 let props_str = dbg_json_str(line, "props").unwrap_or_default();
                 // Ids as well as nodes: the fallback resolver needs `&mut doc`,
                 // so a node borrow cannot be held across it.
-                let ids = webcore::dom::query_selector_all_ids(&doc.root, &selector);
-                let nodes = dbg_select_with_pseudo(&doc.root, &selector);
+                let nodes = dbg_select_composed_with_pseudo(&doc.root, doc, &selector);
                 let mut items: Vec<String> = Vec::new();
                 let mut fallbacks: Vec<(usize, String)> = Vec::new();
                 for (ni, node) in nodes.into_iter().enumerate() {
@@ -3906,12 +4316,40 @@ impl BrowserApp {
                             "background-px" => {
                                 format!("{}x{}", node.bg_image_width, node.bg_image_height)
                             }
-                            _ => format!("(unknown: {})", prop),
+                            "svg-path" => node
+                                .svg_tree_path
+                                .as_ref()
+                                .map(|path| {
+                                    path.iter()
+                                        .map(|part| part.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(".")
+                                })
+                                .unwrap_or_default(),
+                            "svg-fill-stored" => node
+                                .style
+                                .svg_fill
+                                .map(|c| format!("#{:02x}{:02x}{:02x}{:02x}", c.r, c.g, c.b, c.a))
+                                .unwrap_or_else(|| "none".to_string()),
+                            "svg-stroke-stored" => node
+                                .style
+                                .svg_stroke
+                                .map(|c| format!("#{:02x}{:02x}{:02x}{:02x}", c.r, c.g, c.b, c.a))
+                                .unwrap_or_else(|| "none".to_string()),
+                            "svg-paint-flags" => {
+                                format!("{}", node.style.rare().specified_svg_paint_props)
+                            }
+                            "matched-rule-count" => format!("{}", node.matched_rules.len()),
+                            _ => String::new(),
                         };
                         if val.is_empty() {
                             fallbacks.push((ni, prop.to_string()));
                         }
-                        kv.push(format!(r#""{}":"{}""#, prop, val));
+                        kv.push(format!(
+                            "{}:{}",
+                            dbg_json_escape(prop),
+                            dbg_json_escape(&val)
+                        ));
                     }
                     items.push(format!("{{{}}}", kv.join(",")));
                 }
@@ -3919,10 +4357,18 @@ impl BrowserApp {
                 if !fallbacks.is_empty() {
                     if let Some(doc) = self.tabs[self.active].view.document_mut() {
                         for (ni, prop) in fallbacks {
-                            let Some(&nid) = ids.get(ni) else { continue };
+                            let Some(nid) = items.get(ni).and_then(|_| {
+                                dbg_select_composed_with_pseudo(&doc.root, doc, &selector)
+                                    .get(ni)
+                                    .map(|n| n.node_id)
+                            }) else {
+                                continue;
+                            };
                             let val = doc.computed_style_property(nid, &prop);
-                            let empty = format!("\"{}\":\"\"", prop);
-                            let filled = format!("\"{}\":\"{}\"", prop, dbg_json_escape(&val));
+                            let empty =
+                                format!("{}:{}", dbg_json_escape(&prop), dbg_json_escape(""));
+                            let filled =
+                                format!("{}:{}", dbg_json_escape(&prop), dbg_json_escape(&val));
                             items[ni] = items[ni].replace(&empty, &filled);
                         }
                     }
@@ -4373,7 +4819,9 @@ impl BrowserApp {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
                 let nid = dbg_json_num(line, "nid").unwrap_or(0.0) as u32;
-                if let Some(node) = doc.get_box_by_id(nid) {
+                if let Some(node) =
+                    dbg_get_composed_by_id(&doc.root, nid).or_else(|| doc.get_box_by_id(nid))
+                {
                     let l = &node.layout;
                     let tag = &node.tag;
                     let id = node.attributes.get("id").map(|s| s.as_str()).unwrap_or("");
@@ -4442,9 +4890,14 @@ impl BrowserApp {
                 let root_sel = dbg_json_str(line, "selector");
                 // Find root node: by nid, by selector, or document root
                 let root_node = if let Some(id) = nid {
-                    doc.get_box_by_id(id).unwrap_or(&doc.root)
+                    dbg_get_composed_by_id(&doc.root, id)
+                        .or_else(|| doc.get_box_by_id(id))
+                        .unwrap_or(&doc.root)
                 } else if let Some(sel) = root_sel {
-                    webcore::dom::query_selector(&doc.root, &sel).unwrap_or(&doc.root)
+                    dbg_select_composed_with_pseudo(&doc.root, doc, &sel)
+                        .into_iter()
+                        .next()
+                        .unwrap_or(&doc.root)
                 } else {
                     &doc.root
                 };
@@ -4459,7 +4912,7 @@ impl BrowserApp {
                     let nid = node.node_id;
                     let cr = node.layout.content_rect;
                     let child_count = node
-                        .children
+                        .effective_children()
                         .iter()
                         .filter(|c| !(c.tag == "#text" && c.text.trim().is_empty()))
                         .count();
@@ -4474,7 +4927,7 @@ impl BrowserApp {
                     };
                     let children_json = if depth < max_depth && child_count > 0 {
                         let kids: Vec<String> = node
-                            .children
+                            .effective_children()
                             .iter()
                             .filter(|c| !(c.tag == "#text" && c.text.trim().is_empty()))
                             .map(|c| tree_json(c, depth + 1, max_depth))
@@ -5224,11 +5677,33 @@ fn main() {
     let mut height: f32 = 900.0;
     let mut no_images = false;
     let mut chrome_port: u16 = 0;
+    let mut profile_enabled = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--cached" => {
                 cache_dir = Some(String::from("snapshot_cache"));
+            }
+            "--cache" => {
+                i += 1;
+                if i < args.len() {
+                    match args[i].trim().to_ascii_lowercase().as_str() {
+                        "on" | "true" | "1" | "yes" => {
+                            cache_dir = Some(String::from("snapshot_cache"));
+                        }
+                        "off" | "false" | "0" | "no" => {
+                            cache_dir = None;
+                        }
+                        other => {
+                            eprintln!(
+                                "[browser] ignoring unknown --cache value '{other}' (use on/off)"
+                            );
+                        }
+                    }
+                }
+            }
+            "--no-cache" => {
+                cache_dir = None;
             }
             "--cache-dir" => {
                 i += 1;
@@ -5263,6 +5738,9 @@ fn main() {
             "--no-images" => {
                 no_images = true;
             }
+            "--profile" => {
+                profile_enabled = true;
+            }
             "--chrome" => {
                 chrome_port = 9223;
             }
@@ -5279,6 +5757,10 @@ fn main() {
             }
         }
         i += 1;
+    }
+
+    if profile_enabled {
+        webcore::profile::enable();
     }
 
     if headless {
@@ -5301,12 +5783,37 @@ fn main() {
         app.no_images = no_images;
         app.initial_width = width;
         app.initial_height = height;
+        if chrome_port > 0 {
+            app.chrome_port = chrome_port;
+            if let Some(path) = find_chrome() {
+                let url = normalize_url(app.initial_url.clone().unwrap_or_else(|| "about:blank".into()));
+                match std::process::Command::new(path)
+                    .arg(format!("--remote-debugging-port={chrome_port}"))
+                    .arg(format!("--window-size={},{}", width as u32, height as u32))
+                    .arg("--disable-extensions")
+                    .arg("--no-first-run")
+                    .arg("--no-default-browser-check")
+                    .arg(format!("--user-data-dir=/tmp/browser-chrome-{chrome_port}"))
+                    .arg(format!("--app={url}"))
+                    .spawn()
+                {
+                    Ok(child) => app.chrome_process = Some(child),
+                    Err(error) => eprintln!("[browser] Chrome launch failed: {error}"),
+                }
+            } else {
+                eprintln!("[browser] Chrome not found");
+            }
+        }
         if let Some(port) = debug_port {
             let (cmd_tx, cmd_rx) = mpsc::channel::<(String, mpsc::Sender<String>)>();
             app.debug_cmd_rx = Some(cmd_rx);
             browser_debug_spawn_tcp(port, cmd_tx, proxy);
         }
         event_loop.run_app(&mut app).unwrap();
+        if let Some(mut child) = app.chrome_process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -5468,6 +5975,58 @@ fn json_quote(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+fn paint_dump_image_stats_json(data: &ImageRef) -> String {
+    let (bytes, w, h) = match data {
+        ImageRef::Owned(bytes, w, h) => (bytes.as_slice(), *w, *h),
+        ImageRef::Shared(bytes, w, h) => (bytes.as_slice(), *w, *h),
+    };
+    let mut nontransparent = 0usize;
+    let mut min_x = w;
+    let mut min_y = h;
+    let mut max_x = 0u32;
+    let mut max_y = 0u32;
+    let mut color_sum = [0usize; 3];
+    for (i, px) in bytes.chunks_exact(4).enumerate() {
+        if px[3] == 0 {
+            continue;
+        }
+        let x = (i as u32) % w;
+        let y = (i as u32) / w;
+        nontransparent += 1;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+        color_sum[0] += px[0] as usize;
+        color_sum[1] += px[1] as usize;
+        color_sum[2] += px[2] as usize;
+    }
+    let bounds = if nontransparent == 0 {
+        "null".to_string()
+    } else {
+        format!("[{min_x},{min_y},{max_x},{max_y}]")
+    };
+    let avg = if nontransparent == 0 {
+        "[0,0,0]".to_string()
+    } else {
+        format!(
+            "[{},{},{}]",
+            color_sum[0] / nontransparent,
+            color_sum[1] / nontransparent,
+            color_sum[2] / nontransparent
+        )
+    };
+    format!(
+        r#""img_w":{},"img_h":{},"img_bytes":{},"nontransparent":{},"content_bounds":{},"avg_rgb":{}"#,
+        w,
+        h,
+        bytes.len(),
+        nontransparent,
+        bounds,
+        avg
+    )
 }
 
 /// Format a layout coordinate for the debug protocol: the exact value, with
@@ -6075,9 +6634,19 @@ fn dispatch_headless_cmd(
 ) -> String {
     let cmd_start = std::time::Instant::now();
     let cmd = dbg_json_str(line, "cmd").unwrap_or_default();
+    if cmd == "profile" {
+        if dbg_json_bool(line, "reset").unwrap_or(false) {
+            webcore::profile::reset();
+        }
+        return append_cmd_ms(
+            profile_json(dbg_json_num(line, "limit").unwrap_or(20.0) as usize),
+            cmd_start,
+        );
+    }
     if cmd == "navigate" {
         let result = if let Some(new_url) = dbg_json_str(line, "url") {
             let new_url = normalize_url(new_url);
+            webcore::profile::reset();
             view.load_until_ready(new_url.clone(), std::time::Duration::from_secs(30));
             format!(r#"{{"ok":true,"url":"{}"}}"#, view.url())
         } else {
@@ -6284,16 +6853,20 @@ fn dispatch_headless_cmd(
                         font_size,
                         font_weight,
                         decoration,
+                        letter_spacing,
+                        word_spacing,
                         ..
                     } => {
                         if *tx <= qx2 && *tx + 1200.0 >= x && *ty <= qy2 && *ty + *font_size >= y {
                             out.push(format!(
-                                r#"{{"kind":"text","x":{:.1},"y":{:.1},"font":{},"size":{:.1},"weight":{},"underline":{},"overline":{},"strikethrough":{},"text":{}}}"#,
+                                r#"{{"kind":"text","x":{:.1},"y":{:.1},"font":{},"size":{:.1},"weight":{},"letter_spacing":{:.3},"word_spacing":{:.3},"underline":{},"overline":{},"strikethrough":{},"text":{}}}"#,
                                 tx,
                                 ty,
                                 dbg_json_escape(font_family),
                                 font_size,
                                 font_weight,
+                                letter_spacing,
+                                word_spacing,
                                 decoration.underline,
                                 decoration.overline,
                                 decoration.strikethrough,
@@ -6320,12 +6893,13 @@ fn dispatch_headless_cmd(
                             ));
                         }
                     }
-                    PaintCmd::Image { rect, .. } => {
+                    PaintCmd::Image { rect, data } => {
                         if rect.x <= qx2 && rect.right() >= x && rect.y <= qy2 && rect.bottom() >= y
                         {
+                            let stats = paint_dump_image_stats_json(data);
                             out.push(format!(
-                                r#"{{"kind":"image","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1}}}"#,
-                                rect.x, rect.y, rect.w, rect.h
+                                r#"{{"kind":"image","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},{}}}"#,
+                                rect.x, rect.y, rect.w, rect.h, stats
                             ));
                         }
                     }
@@ -7202,9 +7776,42 @@ fn dispatch_headless_cmd(
                                 None => String::new(),
                             }
                         }
+                        "svg-path" => doc
+                            .get_box_by_id(nid)
+                            .and_then(|n| {
+                                n.svg_tree_path.as_ref().map(|path| {
+                                    path.iter()
+                                        .map(|part| part.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join(".")
+                                })
+                            })
+                            .unwrap_or_default(),
+                        "svg-fill-stored" => doc
+                            .get_box_by_id(nid)
+                            .and_then(|n| n.style.svg_fill)
+                            .map(|c| format!("#{:02x}{:02x}{:02x}{:02x}", c.r, c.g, c.b, c.a))
+                            .unwrap_or_else(|| "none".to_string()),
+                        "svg-stroke-stored" => doc
+                            .get_box_by_id(nid)
+                            .and_then(|n| n.style.svg_stroke)
+                            .map(|c| format!("#{:02x}{:02x}{:02x}{:02x}", c.r, c.g, c.b, c.a))
+                            .unwrap_or_else(|| "none".to_string()),
+                        "svg-paint-flags" => doc
+                            .get_box_by_id(nid)
+                            .map(|n| format!("{}", n.style.rare().specified_svg_paint_props))
+                            .unwrap_or_default(),
+                        "matched-rule-count" => doc
+                            .get_box_by_id(nid)
+                            .map(|n| format!("{}", n.matched_rules.len()))
+                            .unwrap_or_default(),
                         _ => doc.computed_style_property(nid, prop),
                     };
-                    kv.push(format!(r#""{}":"{}""#, prop, dbg_json_escape(&val)));
+                    kv.push(format!(
+                        "{}:{}",
+                        dbg_json_escape(prop),
+                        dbg_json_escape(&val)
+                    ));
                 }
                 items.push(format!("{{{}}}", kv.join(",")));
             }
@@ -7390,6 +7997,39 @@ fn dispatch_headless_cmd(
                 dbg_json_escape(&value),
                 dbg_json_escape(&resolved),
                 doc.stylesheet.variables.len()
+            )
+        }
+        "stylesheet-vars" => {
+            let query = dbg_json_str(line, "query").unwrap_or_default();
+            let limit = dbg_json_num(line, "limit").unwrap_or(40.0).max(1.0) as usize;
+            let mut vars = doc
+                .stylesheet
+                .variables
+                .iter()
+                .filter(|(name, value)| {
+                    query.is_empty() || name.contains(&query) || value.contains(&query)
+                })
+                .collect::<Vec<_>>();
+            vars.sort_by(|(a, _), (b, _)| a.cmp(b));
+            let matched_count = vars.len();
+            let entries = vars
+                .into_iter()
+                .take(limit)
+                .map(|(name, value)| {
+                    format!(
+                        r#"{{"name":{},"value":{}}}"#,
+                        dbg_json_escape(name),
+                        dbg_json_escape(value)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                r#"{{"ok":true,"query":{},"variables":{},"count":{},"entries":[{}]}}"#,
+                dbg_json_escape(&query),
+                doc.stylesheet.variables.len(),
+                matched_count,
+                entries
             )
         }
         // ── Force element state ──────────────────────────────────────────

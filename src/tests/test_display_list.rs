@@ -5338,6 +5338,47 @@ fn zero_width_border_sides_do_not_paint_rectangles() {
 }
 
 #[test]
+fn transparent_border_sides_shape_css_triangle() {
+    let (_, built) = build(
+        r#"<style>
+          body { margin: 0; }
+          .arrow::after { content: ""; position: absolute; left: 4px; top: 4px;
+            width: 0; height: 0; border-top: 6px solid transparent;
+            border-bottom: 6px solid transparent; border-left: 12px solid #666; }
+        </style><div class="arrow"></div>"#,
+    );
+    assert!(built.commands.iter().any(|cmd| {
+        matches!(cmd, PaintCmd::Border { widths, colors, .. }
+            if widths[0] == 6.0 && widths[2] == 6.0 && widths[3] == 12.0
+                && colors[0].a == 0 && colors[2].a == 0)
+    }));
+
+    let list = DisplayList {
+        commands: vec![PaintCmd::Border {
+            rect: Rect::new(4.0, 4.0, 12.0, 12.0),
+            widths: [6.0, 0.0, 6.0, 12.0],
+            colors: [
+                Color::rgba(0, 0, 0, 0),
+                Color::rgba(0, 0, 0, 0),
+                Color::rgba(0, 0, 0, 0),
+                Color::rgba(102, 102, 102, 255),
+            ],
+            styles: [1, 0, 1, 1],
+            radii: [0.0; 4],
+            radii_y: [0.0; 4],
+            opacity: 1.0,
+        }],
+        has_scroll_dependent_sticky: false,
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(20, 20).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let alpha = |x: usize, y: usize| pixmap.data()[(y * 20 + x) * 4 + 3];
+    assert!(alpha(6, 10) > 200, "base of triangle should paint");
+    assert_eq!(alpha(14, 5), 0, "triangle corner should stay transparent");
+}
+
+#[test]
 fn transparent_borders_do_not_enter_the_display_list() {
     let html = r#"
         <div id="menu" style="
