@@ -23,6 +23,29 @@ pub struct MediaQueryList {
     pub matches: bool,
 }
 
+#[cfg(test)]
+mod indexed_mutation_tests {
+    #[test]
+    fn appended_node_index_falls_back_after_sibling_insert() {
+        let mut doc = crate::html::parse_html(
+            "<html><body><main id='parent'><p id='first'></p></main></body></html>",
+        );
+        doc.rebuild_node_index();
+        let parent = doc.query_selector("#parent").unwrap();
+        let first = doc.query_selector("#first").unwrap();
+        let appended = doc.create_element("span");
+        doc.append_child(parent, appended);
+        assert!(doc.node_index.contains_key(&appended));
+        assert_eq!(doc.find_webcore_mut(appended).unwrap().tag, "span");
+
+        let inserted = doc.create_element("div");
+        doc.insert_before(parent, inserted, first);
+        doc.find_webcore_mut(appended).unwrap().text = "tracked".to_string();
+        assert_eq!(doc.get_box_by_id(appended).unwrap().text, "tracked");
+        assert_ne!(doc.get_box_by_id(inserted).unwrap().text, "tracked");
+    }
+}
+
 // ─── Read ───────────────────────────────────────────────────────────────────
 
 impl Document {
@@ -1896,11 +1919,24 @@ impl Document {
                 .unwrap_or_else(|| WebCore::new("#error"))
         };
 
+        let indexed_parent_path = self.node_index.get(&parent_id).and_then(|path| {
+            let mut node = &self.root;
+            for step in path {
+                node = node.children.get(*step as usize)?;
+            }
+            (node.node_id == parent_id).then(|| path.clone())
+        });
+        let mut appended_index = None;
         if let Some(parent) = self.find_webcore_mut(parent_id) {
+            appended_index = Some(parent.children.len());
             parent.children.push(child_box);
             parent.layout.layout_dirty = true;
             parent.layout.intrinsic_dirty = true;
             parent.has_dirty_layout_descendant = true;
+        }
+        if let (Some(mut path), Some(index)) = (indexed_parent_path, appended_index) {
+            path.push(index as u32);
+            self.node_index.insert(child_id, path);
         }
         self.ranges_after_insert(parent_id, insert_index);
     }
@@ -2960,12 +2996,8 @@ impl Document {
 
     /// Find a shared reference to an WebCore by node_id.
     ///
-    /// A tree walk on purpose. `get_box_by_id` has an O(1) fast path through
-    /// `node_index`, which is a `HashMap<u32, *const WebCore>` rebuilt only by
-    /// `rebuild_node_index()` — that is, only at layout. Any DOM mutation in
-    /// between moves boxes inside their parent's `Vec<WebCore>` and leaves
-    /// those pointers dangling, and the fast path would hand one back. The DOM
-    /// API mutates without laying out, so it must not use that index.
+    /// Uses validated index paths for attached nodes, while detached subtrees
+    /// remain searchable before they are inserted into the document.
     pub(crate) fn find_webcore(&self, id: u32) -> Option<&WebCore> {
         // `pending_nodes` FIRST. A node created but not yet inserted is not in
         // the tree, and the ordinary DOM idiom writes to it before it ever is:
@@ -3007,33 +3039,7 @@ impl Document {
                 return Some(found);
             }
         }
-        // A SHADOW TREE IS PART OF THE TREE.
-        //
-        // The walk followed `children` only, so no node inside a shadow root
-        // was findable — and every API that resolves an id through here
-        // (`get_attribute`, `tag_name`, `text_content`, the slot interface)
-        // silently answered nothing for shadow content. It is the same class of
-        // miss as the detached-subtree case above: a node that is genuinely in
-        // the tree, reached by a link the walk did not follow.
-        fn walk(node: &WebCore, id: u32) -> Option<&WebCore> {
-            if node.node_id == id {
-                return Some(node);
-            }
-            if let Some(sr) = &node.shadow_root {
-                for child in &sr.children {
-                    if let Some(found) = walk(child, id) {
-                        return Some(found);
-                    }
-                }
-            }
-            for child in &node.children {
-                if let Some(found) = walk(child, id) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-        walk(&self.root, id)
+        self.get_box_by_id(id)
     }
 
     /// Find a mutable reference to an WebCore by node_id.
@@ -3044,6 +3050,25 @@ impl Document {
     pub(crate) fn find_webcore_mut(&mut self, id: u32) -> Option<&mut WebCore> {
         if self.pending_nodes.contains_key(&id) {
             return self.pending_nodes.get_mut(&id);
+        }
+        if let Some(path) = self.node_index.get(&id) {
+            let mut node = &self.root;
+            let mut valid = true;
+            for step in path {
+                if let Some(child) = node.children.get(*step as usize) {
+                    node = child;
+                } else {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid && node.node_id == id {
+                let mut node = &mut self.root;
+                for step in path {
+                    node = &mut node.children[*step as usize];
+                }
+                return Some(node);
+            }
         }
         // Shadow trees too — see the note in `find_webcore`.
         fn walk(node: &mut WebCore, id: u32) -> Option<&mut WebCore> {

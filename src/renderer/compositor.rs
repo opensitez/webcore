@@ -134,7 +134,8 @@ impl PaintSegments {
 
 fn paint_segment_structure(cmd: &PaintCmd) -> bool {
     matches!(cmd,
-        PaintCmd::PushClip { .. } | PaintCmd::PopClip
+        PaintCmd::BeginFixedPosition | PaintCmd::EndFixedPosition
+        | PaintCmd::PushClip { .. } | PaintCmd::PopClip
         | PaintCmd::PushClipPath { .. }
         | PaintCmd::PushTransform { .. } | PaintCmd::PopTransform
         | PaintCmd::PushOpacity { .. } | PaintCmd::PopOpacity
@@ -542,6 +543,31 @@ fn length(text: &str, reference: f32) -> Option<f32> {
 mod tests {
     use super::*;
     use crate::load_html;
+
+    #[test]
+    fn empty_fixed_layers_do_not_create_paint_segments() {
+        let mut list = DisplayList::new();
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+            color: crate::types::Color::WHITE,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        list.push(PaintCmd::BeginFixedPosition);
+        list.push(PaintCmd::EndFixedPosition);
+        list.push(PaintCmd::BeginFixedPosition);
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(0.0, 0.0, 20.0, 20.0),
+            color: crate::types::Color::WHITE,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        list.push(PaintCmd::EndFixedPosition);
+
+        let segments = PaintSegments::from_display_list(&list, 200.0, 100.0).unwrap();
+        assert_eq!(segments.segments.len(), 2);
+        assert_eq!(segments.segments.iter().filter(|segment| segment.fixed).count(), 1);
+    }
 
     #[test]
     fn a_percentage_translate_resolves_against_the_elements_own_box() {

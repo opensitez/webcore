@@ -24,6 +24,8 @@ pub enum Phase {
     DisplayList,
     TileRaster,
     TileComposite,
+    FixedReplay,
+    ContentCache,
     DirectReplay,
     Render,
     BrowserDraw,
@@ -31,7 +33,7 @@ pub enum Phase {
 }
 
 impl Phase {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 19] = [
         Self::HtmlFetch,
         Self::HtmlParse,
         Self::CssFetch,
@@ -45,6 +47,8 @@ impl Phase {
         Self::DisplayList,
         Self::TileRaster,
         Self::TileComposite,
+        Self::FixedReplay,
+        Self::ContentCache,
         Self::DirectReplay,
         Self::Render,
         Self::BrowserDraw,
@@ -66,6 +70,8 @@ impl Phase {
             Self::DisplayList => "display_list",
             Self::TileRaster => "tile_raster",
             Self::TileComposite => "tile_composite",
+            Self::FixedReplay => "fixed_replay",
+            Self::ContentCache => "content_cache",
             Self::DirectReplay => "direct_replay",
             Self::Render => "render",
             Self::BrowserDraw => "browser_draw",

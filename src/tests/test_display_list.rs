@@ -22,6 +22,24 @@ fn build(html: &str) -> (EngineFrame, DisplayList) {
 }
 
 #[test]
+fn auto_z_positioned_content_paints_after_earlier_fixed_layer() {
+    let (_, list) = build(
+        "<style>body{margin:0}.overlay{position:fixed;inset:0;background:#fff}.row{position:relative}</style><div class=overlay></div><div class=row>Message subject</div>",
+    );
+    let fixed_end = list
+        .commands
+        .iter()
+        .position(|cmd| matches!(cmd, PaintCmd::EndFixedPosition))
+        .expect("fixed layer");
+    let subject = list
+        .commands
+        .iter()
+        .position(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text.contains("Message subject")))
+        .expect("positioned row text");
+    assert!(fixed_end < subject, "later positioned content must paint over the fixed layer");
+}
+
+#[test]
 fn indented_inline_text_paints_at_the_collapsed_space_position() {
     fn word_x(html: &str) -> f32 {
         let (_, list) = build(html);

@@ -79,6 +79,20 @@ pub(crate) struct FrameUpdate {
     pub paint_rects: Vec<Rect>,
 }
 
+fn mark_font_layout_dirty(node: &mut crate::types::WebCore) {
+    node.layout.layout_dirty = true;
+    node.layout.line_cache.clear();
+    node.layout.inline_runs.clear();
+    for child in &mut node.children {
+        mark_font_layout_dirty(child);
+    }
+    if let Some(shadow) = node.shadow_root.as_mut() {
+        for child in &mut shadow.children {
+            mark_font_layout_dirty(child);
+        }
+    }
+}
+
 /// The self-contained engine. Wraps Document + LayoutEngine into a frame-based
 /// update cycle. The host feeds content and events; the engine handles
 /// cascade, layout, and display list internally.
@@ -114,6 +128,7 @@ pub struct EngineFrame {
     /// immediately, but coalesce the expensive relayout/cascade work to the
     /// browser frame loop instead of doing it once per arriving fragment.
     pending_resource_relayout: bool,
+    pending_resource_restyle: bool,
     last_resource_relayout: Option<std::time::Instant>,
     last_animation_layout_values: std::collections::HashMap<u32, Vec<(String, String)>>,
     last_color_scheme_preference: crate::css::ColorSchemePreference,
@@ -151,6 +166,7 @@ impl EngineFrame {
             cache_dir: None,
             resource_wake: None,
             pending_resource_relayout: false,
+            pending_resource_restyle: false,
             last_resource_relayout: None,
             last_animation_layout_values: std::collections::HashMap::new(),
             last_color_scheme_preference: crate::css::color_scheme_preference(),
@@ -292,6 +308,7 @@ impl EngineFrame {
                 }
                 self.engine.invalidate_cascade();
                 resource_requested_relayout = true;
+                self.pending_resource_restyle = true;
             }
             let image_poll = self
                 .doc
@@ -320,7 +337,7 @@ impl EngineFrame {
                 .engine
                 .poll_pending_fonts_budgeted(32, std::time::Duration::ZERO)
             {
-                self.doc.style_dirty = true;
+                mark_font_layout_dirty(&mut self.doc.root);
                 resource_requested_relayout = true;
             }
         }
@@ -341,11 +358,12 @@ impl EngineFrame {
                 .map(|last| now.saturating_duration_since(last))
                 .unwrap_or(std::time::Duration::from_millis(100));
             if !pending_resources || elapsed >= std::time::Duration::from_millis(32) {
-                self.needs_style = true;
+                self.needs_style |= self.pending_resource_restyle;
                 self.needs_layout = true;
                 self.needs_paint = true;
                 update.rebuild_display_list = true;
                 self.pending_resource_relayout = false;
+                self.pending_resource_restyle = false;
                 self.last_resource_relayout = Some(now);
             }
         }

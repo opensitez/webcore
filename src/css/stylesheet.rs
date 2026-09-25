@@ -5,6 +5,11 @@ use super::*;
 use crate::types::*;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+
+thread_local! {
+    static CANDIDATE_SEEN: RefCell<(Vec<u32>, u32)> = const { RefCell::new((Vec::new(), 0)) };
+}
 
 // ─── Stylesheet ───────────────────────────────────────────────────────────────
 
@@ -26,6 +31,7 @@ pub struct Stylesheet {
     idx_by_class: HashMap<String, Vec<usize>>,
     idx_by_tag: HashMap<String, Vec<usize>>,
     idx_universal: Vec<usize>, // rules with * or no specific key selector
+    idx_rule_flags: Vec<u8>,
     idx_dirty: bool,
     /// `@layer` names in declaration order. See `layer_rank`.
     pub layer_order: Vec<String>,
@@ -280,7 +286,12 @@ impl Stylesheet {
         self.idx_by_class.clear();
         self.idx_by_tag.clear();
         self.idx_universal.clear();
+        self.idx_rule_flags.clear();
         for (i, rule) in self.rules.iter().enumerate() {
+            self.idx_rule_flags.push(
+                u8::from(rule.selectors.iter().any(selector_is_sibling_sensitive))
+                    | (u8::from(rule.selectors.iter().any(|selector| !selector.is_simple)) << 1),
+            );
             let keys = rule_key_selectors(rule);
             if keys.is_empty() {
                 self.idx_universal.push(i);
@@ -382,26 +393,29 @@ impl Stylesheet {
                 out.extend_from_slice(indices);
             }
         }
-        // Use a fast dedup via a seen-bitset instead of sort+dedup.
-        // For typical pages (< 10k rules), a bitset is much faster than sorting.
+        // Reuse a generation-stamped scratch table. Large stylesheets otherwise
+        // allocate and clear a fresh bitset for every element in every cascade.
         if out.len() > 1 {
             let max_idx = out.iter().copied().max().unwrap_or(0);
-            if max_idx < 65536 {
-                // Fast path: bitvec dedup
-                let words = (max_idx / 64) + 1;
-                let mut seen = vec![0u64; words];
-                let mut write = 0;
-                for read in 0..out.len() {
-                    let idx = out[read];
-                    let word = idx / 64;
-                    let bit = 1u64 << (idx % 64);
-                    if seen[word] & bit == 0 {
-                        seen[word] |= bit;
-                        out[write] = idx;
-                        write += 1;
+            if max_idx < 1_000_000 {
+                CANDIDATE_SEEN.with_borrow_mut(|(seen, generation)| {
+                    seen.resize(max_idx + 1, 0);
+                    *generation = generation.wrapping_add(1);
+                    if *generation == 0 {
+                        seen.fill(0);
+                        *generation = 1;
                     }
-                }
-                out.truncate(write);
+                    let mut write = 0;
+                    for read in 0..out.len() {
+                        let idx = out[read];
+                        if seen[idx] != *generation {
+                            seen[idx] = *generation;
+                            out[write] = idx;
+                            write += 1;
+                        }
+                    }
+                    out.truncate(write);
+                });
             } else {
                 out.sort_unstable();
                 out.dedup();
@@ -410,19 +424,15 @@ impl Stylesheet {
     }
 
     pub(crate) fn candidate_rules_are_sibling_sensitive(&self, candidates: &[usize]) -> bool {
-        candidates.iter().copied().any(|rule_idx| {
-            self.rules
-                .get(rule_idx)
-                .is_some_and(|rule| rule.selectors.iter().any(selector_is_sibling_sensitive))
-        })
+        candidates
+            .iter()
+            .any(|&rule_idx| self.idx_rule_flags.get(rule_idx).is_some_and(|flags| flags & 1 != 0))
     }
 
     pub(crate) fn candidate_rules_need_selector_context(&self, candidates: &[usize]) -> bool {
-        candidates.iter().copied().any(|rule_idx| {
-            self.rules
-                .get(rule_idx)
-                .is_some_and(|rule| rule.selectors.iter().any(|selector| !selector.is_simple))
-        })
+        candidates
+            .iter()
+            .any(|&rule_idx| self.idx_rule_flags.get(rule_idx).is_some_and(|flags| flags & 2 != 0))
     }
 }
 

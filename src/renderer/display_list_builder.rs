@@ -4474,7 +4474,8 @@ fn creates_stacking_context(node: &WebCore) -> bool {
 fn is_explicit_z_positioned(node: &WebCore) -> bool {
     node.style.position == Position::Fixed
         || node.style.position == Position::Absolute
-        || (node.style.is_positioned() && !node.style.z_index_is_auto)
+        || node.style.position == Position::Relative
+        || (node.style.position == Position::Sticky && !node.style.z_index_is_auto)
 }
 
 fn sticky_containing_block_for_children(node: &WebCore, inherited: Option<Rect>) -> Option<Rect> {

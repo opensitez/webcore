@@ -1873,6 +1873,8 @@ impl Renderer {
                     let tile_scale = scale * zoom;
                     for segment in &mut segments.segments {
                         if segment.fixed {
+                            let fixed_start =
+                                crate::profile::is_enabled().then(std::time::Instant::now);
                             if animation_transform_overrides.is_empty() {
                                 display_list_replay::replay_commands_with_scroll(
                                     &segment.list.commands,
@@ -1893,6 +1895,12 @@ impl Renderer {
                                     0.0,
                                     0.0,
                                     &animation_transform_overrides,
+                                );
+                            }
+                            if let Some(started) = fixed_start {
+                                crate::profile::record(
+                                    crate::profile::Phase::FixedReplay,
+                                    started.elapsed(),
                                 );
                             }
                             continue;
@@ -2032,7 +2040,11 @@ impl Renderer {
         let should_cache_content_surface =
             page_content_repainted && (!transform_only_animation_frame || !used_dirty_surface);
         if should_cache_content_surface {
+            let cache_start = crate::profile::is_enabled().then(std::time::Instant::now);
             self.cache_content_surface(pixmap);
+            if let Some(started) = cache_start {
+                crate::profile::record(crate::profile::Phase::ContentCache, started.elapsed());
+            }
             self.cached_surface_scale = scale;
             self.cached_surface_zoom = zoom;
             self.cached_surface_scroll_x = doc.scroll_x;
@@ -2050,6 +2062,7 @@ impl Renderer {
             && let Some(ref list) = self.cached_display_list
             && !list.fixed_commands.is_empty()
         {
+            let fixed_start = crate::profile::is_enabled().then(std::time::Instant::now);
             if animation_transform_overrides.is_empty() {
                 display_list_replay::replay_commands_with_scroll(
                     &list.fixed_commands,
@@ -2071,6 +2084,9 @@ impl Renderer {
                     0.0,
                     &animation_transform_overrides,
                 );
+            }
+            if let Some(started) = fixed_start {
+                crate::profile::record(crate::profile::Phase::FixedReplay, started.elapsed());
             }
         }
         // Paint custom components on top of the display list

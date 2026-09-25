@@ -56,6 +56,9 @@ pub struct BrowserView {
     streamed_html_len: usize,
     stream_paint_ready: bool,
     stream_needs_layout: bool,
+    stream_layout_committed: bool,
+    html_parse_backlog: bool,
+    interaction_layout_pending: bool,
     url: String,
     title: String,
     loading: bool,
@@ -68,6 +71,7 @@ pub struct BrowserView {
     load_id: usize,
     tx: mpsc::Sender<BrowserViewLoadResult>,
     rx: mpsc::Receiver<BrowserViewLoadResult>,
+    deferred_load_result: Option<BrowserViewLoadResult>,
     wake: Option<Arc<dyn Fn() + Send + Sync>>,
     pending_navigate: Arc<Mutex<Option<String>>>,
 }
@@ -439,6 +443,9 @@ impl BrowserView {
             streamed_html_len: 0,
             stream_paint_ready: false,
             stream_needs_layout: false,
+            stream_layout_committed: false,
+            html_parse_backlog: false,
+            interaction_layout_pending: false,
             url: String::new(),
             title: String::new(),
             loading: false,
@@ -451,6 +458,7 @@ impl BrowserView {
             load_id: 0,
             tx,
             rx,
+            deferred_load_result: None,
             wake: None,
             pending_navigate: Arc::new(Mutex::new(None)),
         }
@@ -514,6 +522,7 @@ impl BrowserView {
             self.streamed_html_len = 0;
             self.stream_paint_ready = false;
             self.stream_needs_layout = true;
+            self.stream_layout_committed = false;
         } else if self.streamed_html_len == 0
             && self
                 .stream_frame
@@ -639,6 +648,8 @@ impl BrowserView {
                     .invalidate_animation_paint_rects(&frame.doc, self.width, self.height);
         }
         self.stream_needs_layout = false;
+        self.stream_layout_committed = true;
+        self.interaction_layout_pending = false;
         visual_changed
     }
 
@@ -938,6 +949,10 @@ impl BrowserView {
         self.streamed_html_len = 0;
         self.stream_paint_ready = false;
         self.stream_needs_layout = true;
+        self.stream_layout_committed = false;
+        self.html_parse_backlog = false;
+        self.interaction_layout_pending = false;
+        self.deferred_load_result = None;
         self.invalidate_backing();
         self.load_id = self.load_id.wrapping_add(1);
         let load_id = self.load_id;
@@ -1019,13 +1034,18 @@ impl BrowserView {
         let mut html_chunks = 0usize;
         let mut budget_exhausted = false;
         loop {
+            let result = self
+                .deferred_load_result
+                .take()
+                .or_else(|| self.rx.try_recv().ok());
+            let Some(result) = result else {
+                break;
+            };
             if html_chunks > 0 && start.elapsed() >= std::time::Duration::from_millis(16) {
+                self.deferred_load_result = Some(result);
                 budget_exhausted = true;
                 break;
             }
-            let Ok(result) = self.rx.try_recv() else {
-                break;
-            };
             match result {
                 BrowserViewLoadResult::HtmlChunk { load_id, url, html }
                     if load_id == self.load_id =>
@@ -1044,6 +1064,7 @@ impl BrowserView {
                 _ => {}
             }
         }
+        self.html_parse_backlog = budget_exhausted;
         if let Some((url, _html)) = completed {
             self.url = url.clone();
             if let Some(frame) = self.stream_frame.as_mut() {
@@ -1061,6 +1082,7 @@ impl BrowserView {
                 self.title = fallback_title_from_url(&url);
             }
             self.loading = false;
+            self.html_parse_backlog = false;
             self.install_form_navigation_handler(&url);
             changed = true;
         }
@@ -1088,7 +1110,7 @@ impl BrowserView {
         let scroll_priority = self.scroll_priority_frame;
         let changed = if scroll_priority { false } else { self.poll() };
         let nav_changed = self.drain_pending_navigation();
-        let stream_layout_changed = if scroll_priority {
+        let stream_layout_changed = if scroll_priority || self.defer_queued_html_layout() {
             false
         } else {
             self.update_streamed_frame_before_paint()
@@ -1133,7 +1155,7 @@ impl BrowserView {
         let scroll_priority = self.scroll_priority_frame;
         let changed = if scroll_priority { false } else { self.poll() };
         let nav_changed = self.drain_pending_navigation();
-        let stream_layout_changed = if scroll_priority {
+        let stream_layout_changed = if scroll_priority || self.defer_queued_html_layout() {
             false
         } else {
             self.update_streamed_frame_before_paint()
@@ -1168,8 +1190,15 @@ impl BrowserView {
             || frame_needs_work
             || has_animations
             || self.stream_needs_layout;
-        let needs_redraw = frame_needs_redraw || self.stream_needs_layout;
+        let needs_redraw = !self.defer_queued_html_layout()
+            && (frame_needs_redraw || self.stream_needs_layout);
         (needs_wake, needs_redraw)
+    }
+
+    fn defer_queued_html_layout(&self) -> bool {
+        self.html_parse_backlog
+            && self.stream_layout_committed
+            && !self.interaction_layout_pending
     }
 
     pub fn paint_into(&mut self, target: &mut Pixmap, x: i32, y: i32, scale: f32) {
@@ -1177,7 +1206,7 @@ impl BrowserView {
         // have to consume already-queued interaction style work. Otherwise a
         // hover/focus change can set stream_needs_layout and then render the
         // stale display list forever until an unrelated resource tick happens.
-        if self.stream_needs_layout {
+        if self.stream_needs_layout && !self.defer_queued_html_layout() {
             self.ensure_streamed_layout_current();
         }
         let width_px = target.width().max(1);
@@ -1252,16 +1281,6 @@ impl BrowserView {
                     doc.hovered_box,
                     &doc.hover_sensitive_nodes,
                 );
-            if needs_style {
-                // Hover selectors can be nested inside modern selector forms
-                // (`:is()`, `:where()`, `:not()`) and inside projected custom
-                // element content. The incremental hover pass is still too
-                // narrow for that surface and can leave stale/projection boxes
-                // in flow. Use the normal full style pass for live browser
-                // interaction so menus recascade like the initial/forced-state
-                // paths until the incremental engine can prove equivalence.
-                doc.style_dirty = true;
-            }
             if !needs_style && doc.hover_changed {
                 doc.hover_changed = false;
                 doc.prev_hovered_box = doc.hovered_box;
@@ -1271,6 +1290,7 @@ impl BrowserView {
         if needs_style {
             if self.stream_frame.is_some() {
                 self.stream_needs_layout = true;
+                self.interaction_layout_pending = true;
             } else {
                 self.layout_active();
             }
@@ -2207,6 +2227,13 @@ mod tests {
         view.feed_streaming_chunk(base, "<p>A</p><p>B</p>");
 
         assert!(view.stream_needs_layout);
+        let doc = &view.stream_frame.as_ref().unwrap().doc;
+        let paragraph_id = doc.query_selector("p").unwrap();
+        assert!(
+            doc.node_index.contains_key(&paragraph_id),
+            "streamed nodes should be indexed before layout"
+        );
+        assert_eq!(doc.get_box_by_id(paragraph_id).unwrap().tag, "p");
         assert!(view.update_streamed_frame_before_paint());
         assert!(!view.stream_needs_layout);
 
@@ -2326,11 +2353,32 @@ mod tests {
                 .map(|idx| format!("<p>{idx}</p>").len())
                 .sum::<usize>();
 
-        assert!(view.poll());
+        let mut polls = 0;
+        while view.streamed_html_len < total_len && polls < 12 {
+            assert!(view.poll());
+            assert!(view.stream_needs_layout);
+            polls += 1;
+        }
         assert_eq!(
             view.streamed_html_len, total_len,
-            "small chunks already in the queue should reach layout together"
+            "ready chunks should reach layout within bounded parser turns"
         );
+        assert!(view.update_streamed_frame_before_paint());
+        assert!(!view.stream_needs_layout);
+    }
+
+    #[test]
+    fn queued_html_defers_repeat_layout_but_not_first_paint_or_interaction() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        view.html_parse_backlog = true;
+        assert!(!view.defer_queued_html_layout());
+        view.stream_layout_committed = true;
+        assert!(view.defer_queued_html_layout());
+        view.interaction_layout_pending = true;
+        assert!(!view.defer_queued_html_layout());
+        view.interaction_layout_pending = false;
+        view.html_parse_backlog = false;
+        assert!(!view.defer_queued_html_layout());
     }
 
     #[test]
