@@ -257,6 +257,7 @@ fn line_height_number_is_a_multiple_not_pixels() {
     for (input, expect) in [
         ("1.375", crate::types::CssLength::Em(1.375)),
         ("2", crate::types::CssLength::Em(2.0)),
+        ("calc(1.6 * .65)", crate::types::CssLength::Em(1.04)),
         ("normal", crate::types::CssLength::Em(1.2)),
     ] {
         // The string path.

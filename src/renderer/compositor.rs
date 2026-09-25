@@ -10,6 +10,141 @@
 //! tiles around. Only content changes trigger rasterization.
 
 use crate::types::{Rect, WebCore};
+use super::display_list::{DisplayList, PaintCmd};
+use super::tiles::TileManager;
+
+pub struct PaintSegment {
+    pub list: DisplayList,
+    pub fixed: bool,
+    pub tiles: TileManager,
+}
+
+/// Ordered document and viewport paint layers. Splitting at fixed-position
+/// blocks preserves stacking order while document layers retain raster tiles
+/// across scrolls.
+pub struct PaintSegments {
+    pub segments: Vec<PaintSegment>,
+}
+
+impl PaintSegments {
+    pub fn from_display_list(list: &DisplayList, viewport_w: f32, doc_h: f32) -> Option<Self> {
+        let mut inside_fixed = false;
+        let mut has_fixed = false;
+        let mut effect_depth = 0i32;
+        let mut clips = Vec::new();
+        for cmd in &list.commands {
+            match cmd {
+                PaintCmd::BeginFixedPosition => {
+                    if inside_fixed || effect_depth != 0 || clips.iter().any(|rect: &Rect| {
+                        rect.x > 0.0 || rect.y > 0.0 || rect.right() < viewport_w
+                            || rect.bottom() + 0.5 < doc_h
+                    }) {
+                        return None;
+                    }
+                    inside_fixed = true;
+                    has_fixed = true;
+                }
+                PaintCmd::EndFixedPosition => {
+                    if !inside_fixed {
+                        return None;
+                    }
+                    inside_fixed = false;
+                }
+                _ if inside_fixed => {}
+                PaintCmd::PushClip { rect, .. } => clips.push(*rect),
+                PaintCmd::PopClip => { clips.pop(); }
+                PaintCmd::PushClipPath { .. }
+                | PaintCmd::PushTransform { .. }
+                | PaintCmd::PushOpacity { .. }
+                | PaintCmd::PushFilter { .. }
+                | PaintCmd::PushMask { .. }
+                | PaintCmd::PushBlendMode { .. }
+                | PaintCmd::PushTextGradient { .. } => effect_depth += 1,
+                PaintCmd::PopTransform
+                | PaintCmd::PopOpacity
+                | PaintCmd::PopFilter
+                | PaintCmd::PopMask
+                | PaintCmd::PopBlendMode
+                | PaintCmd::PopTextGradient => effect_depth -= 1,
+                _ => {}
+            }
+        }
+        if !has_fixed || inside_fixed || effect_depth != 0 {
+            return None;
+        }
+
+        let mut kinds = vec![false];
+        let mut owners = Vec::with_capacity(list.commands.len());
+        let mut owner = 0usize;
+        for cmd in &list.commands {
+            match cmd {
+                PaintCmd::BeginFixedPosition => {
+                    kinds.push(true);
+                    owner = kinds.len() - 1;
+                    owners.push(Some(owner));
+                }
+                PaintCmd::EndFixedPosition => {
+                    owners.push(Some(owner));
+                    kinds.push(false);
+                    owner = kinds.len() - 1;
+                }
+                _ if kinds[owner] || !paint_segment_structure(cmd) => owners.push(Some(owner)),
+                _ => owners.push(None),
+            }
+        }
+        let mut segments: Vec<_> = kinds
+            .into_iter()
+            .map(|fixed| PaintSegment {
+                list: DisplayList::new(),
+                fixed,
+                tiles: TileManager::new(),
+            })
+            .collect();
+        for (cmd, owner) in list.commands.iter().zip(owners) {
+            if let Some(index) = owner {
+                segments[index].list.push(cmd.clone());
+            } else {
+                for segment in &mut segments {
+                    segment.list.push(cmd.clone());
+                }
+            }
+        }
+        segments.retain(|segment| {
+            segment.list.commands.iter().any(|cmd| !paint_segment_structure(cmd))
+        });
+        Some(Self { segments })
+    }
+
+    pub fn invalidate_all(&mut self) {
+        for segment in &mut self.segments {
+            if !segment.fixed {
+                segment.tiles.invalidate_all();
+            }
+        }
+    }
+
+    pub fn invalidate_rect(&mut self, rect: &Rect) {
+        for segment in &mut self.segments {
+            if !segment.fixed {
+                segment.tiles.invalidate_rect(rect);
+            }
+        }
+    }
+}
+
+fn paint_segment_structure(cmd: &PaintCmd) -> bool {
+    matches!(cmd,
+        PaintCmd::PushClip { .. } | PaintCmd::PopClip
+        | PaintCmd::PushClipPath { .. }
+        | PaintCmd::PushTransform { .. } | PaintCmd::PopTransform
+        | PaintCmd::PushOpacity { .. } | PaintCmd::PopOpacity
+        | PaintCmd::PushFilter { .. } | PaintCmd::PopFilter
+        | PaintCmd::PushMask { .. } | PaintCmd::PopMask
+        | PaintCmd::PushBlendMode { .. } | PaintCmd::PopBlendMode
+        | PaintCmd::PushTextGradient { .. } | PaintCmd::PopTextGradient
+        | PaintCmd::BeginStackingContext { .. } | PaintCmd::EndStackingContext
+    )
+}
 
 /// Unique layer identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]

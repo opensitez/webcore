@@ -379,6 +379,9 @@ pub fn parse_line_height(v: &str) -> CssLength {
     if let Ok(n) = v.parse::<f32>() {
         return CssLength::Em(n);
     }
+    if let Some(n) = super::calc::parse_calc_number(v) {
+        return CssLength::Em(n);
+    }
     parse_length(v)
 }
 

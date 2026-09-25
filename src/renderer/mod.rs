@@ -61,6 +61,7 @@ pub struct Renderer {
     pub compositor: compositor::Compositor,
     /// Tile manager — caches rasterized tiles for fast scroll.
     pub tile_manager: tiles::TileManager,
+    paint_segments: Option<compositor::PaintSegments>,
     /// Whether to use tiled rendering (can be disabled for debugging).
     pub use_tiles: bool,
 }
@@ -445,12 +446,14 @@ impl Renderer {
             content_offset_y: 0.0,
             compositor: compositor::Compositor::new(),
             tile_manager: tiles::TileManager::new(),
+            paint_segments: None,
             use_tiles: std::env::var_os("WEBCORE_DISABLE_TILES").is_none(),
         }
     }
 
     pub fn invalidate_display_list(&mut self) {
         self.display_list_dirty = true;
+        self.paint_segments = None;
         self.paint_only_display_list_dirty = false;
         self.cached_paint_top = 0.0;
         self.cached_paint_bottom = 0.0;
@@ -462,6 +465,9 @@ impl Renderer {
         self.display_list_dirty = true;
         self.paint_only_display_list_dirty = true;
         self.tile_manager.invalidate_all();
+        if let Some(segments) = &mut self.paint_segments {
+            segments.invalidate_all();
+        }
     }
 
     #[cfg(test)]
@@ -889,13 +895,24 @@ impl Renderer {
             .map(|surface| surface.data().len())
             .unwrap_or(0);
         let cached_surface_bytes = 0;
-        let tile_surface_bytes = self
+        let mut tile_surface_bytes: usize = self
             .tile_manager
             .tiles
             .values()
             .map(|tile| tile.pixmap.data().len())
             .sum();
-        let tile_count = self.tile_manager.tiles.len();
+        let mut tile_count = self.tile_manager.tiles.len();
+        if let Some(segments) = &self.paint_segments {
+            for segment in &segments.segments {
+                tile_count += segment.tiles.tiles.len();
+                tile_surface_bytes += segment
+                    .tiles
+                    .tiles
+                    .values()
+                    .map(|tile| tile.pixmap.data().len())
+                    .sum::<usize>();
+            }
+        }
         let display_list = self
             .cached_display_list
             .as_ref()
@@ -1448,8 +1465,12 @@ impl Renderer {
         if self.use_tiles {
             for rect in &dirty_paint_rects {
                 self.tile_manager.invalidate_rect(rect);
+                if let Some(segments) = &mut self.paint_segments {
+                    segments.invalidate_rect(rect);
+                }
             }
-            if scroll_changed_since_surface
+            if self.paint_segments.is_none()
+                && scroll_changed_since_surface
                 && self.cached_display_list.as_ref().is_some_and(|list| {
                     list.commands.iter().any(|cmd| {
                         matches!(cmd, display_list::PaintCmd::BeginFixedPosition)
@@ -1545,6 +1566,9 @@ impl Renderer {
             if !animation_restore.is_empty() {
                 crate::css::restore_animation_overrides(&mut doc.root, animation_restore);
             }
+            self.paint_segments = self.use_tiles.then(|| {
+                compositor::PaintSegments::from_display_list(&list, view_w, doc_h)
+            }).flatten();
             self.cached_display_list = Some(list);
             self.cached_paint_top = paint_top;
             self.cached_paint_bottom = paint_bottom;
@@ -1845,6 +1869,78 @@ impl Renderer {
         {
             let replay_start = std::time::Instant::now();
             if self.use_tiles {
+                if let Some(segments) = &mut self.paint_segments {
+                    let tile_scale = scale * zoom;
+                    for segment in &mut segments.segments {
+                        if segment.fixed {
+                            if animation_transform_overrides.is_empty() {
+                                display_list_replay::replay_commands_with_scroll(
+                                    &segment.list.commands,
+                                    pixmap,
+                                    tile_scale,
+                                    &mut self.font_system,
+                                    &mut self.swash_cache,
+                                    0.0,
+                                    0.0,
+                                );
+                            } else {
+                                display_list_replay::replay_commands_with_scroll_and_transform_overrides(
+                                    &segment.list.commands,
+                                    pixmap,
+                                    tile_scale,
+                                    &mut self.font_system,
+                                    &mut self.swash_cache,
+                                    0.0,
+                                    0.0,
+                                    &animation_transform_overrides,
+                                );
+                            }
+                            continue;
+                        }
+                        segment.tiles.doc_width = doc_w.max(view_w);
+                        segment.tiles.doc_height = doc_h.max(view_h);
+                        let needed = segment.tiles.update_viewport(
+                            Rect::new(doc.scroll_x, doc.scroll_y, view_w, view_h),
+                            tile_scale,
+                        );
+                        for (tx, ty) in needed {
+                            if segment.tiles.ensure_tile(tx, ty) {
+                                let tile_profile_start =
+                                    crate::profile::is_enabled().then(std::time::Instant::now);
+                                if let Some(tile) = segment.tiles.tiles.get_mut(&(tx, ty)) {
+                                    tile.pixmap.fill(tiny_skia::Color::TRANSPARENT);
+                                    display_list_replay::replay_tile_with_scroll_and_transform_overrides(
+                                        &segment.list,
+                                        &mut tile.pixmap,
+                                        tile_scale,
+                                        &mut self.font_system,
+                                        &mut self.swash_cache,
+                                        tx as f32 * tiles::TILE_SIZE,
+                                        ty as f32 * tiles::TILE_SIZE,
+                                        doc.scroll_x,
+                                        doc.scroll_y,
+                                        (!animation_transform_overrides.is_empty())
+                                            .then_some(&animation_transform_overrides),
+                                    );
+                                }
+                                segment.tiles.mark_clean(tx, ty);
+                                if let Some(started) = tile_profile_start {
+                                    crate::profile::record(
+                                        crate::profile::Phase::TileRaster,
+                                        started.elapsed(),
+                                    );
+                                }
+                            }
+                        }
+                        segment.tiles.evict_distant();
+                        segment.tiles.composite_over(
+                            pixmap,
+                            doc.scroll_x,
+                            doc.scroll_y,
+                            tile_scale,
+                        );
+                    }
+                } else {
                 self.tile_manager.doc_width = doc_w.max(view_w);
                 self.tile_manager.doc_height = doc_h.max(view_h);
                 let tile_scale = scale * zoom;
@@ -1894,6 +1990,7 @@ impl Renderer {
                         crate::profile::Phase::TileComposite,
                         started.elapsed(),
                     );
+                }
                 }
             } else {
                 let direct_profile_start =

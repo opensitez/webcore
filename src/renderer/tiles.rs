@@ -13,9 +13,6 @@ use std::collections::HashMap;
 /// Tile size in logical pixels.
 pub const TILE_SIZE: f32 = 512.0;
 
-/// Buffer zone beyond viewport — pre-rasterize tiles this far out.
-const BUFFER_TILES: i32 = 1;
-
 /// A single rasterized tile.
 pub struct RasterTile {
     /// Tile grid coordinates.
@@ -63,16 +60,20 @@ impl TileManager {
         self.needed_tiles()
     }
 
-    /// Get tile coordinates that are needed (viewport + buffer).
+    /// Get tiles intersecting the viewport. Offscreen work must not hold up a
+    /// visible frame; prefetch can be scheduled separately when idle.
     fn needed_tiles(&self) -> Vec<(i32, i32)> {
-        let min_tx = (self.viewport.x / TILE_SIZE).floor() as i32 - BUFFER_TILES;
-        let max_tx = ((self.viewport.x + self.viewport.w) / TILE_SIZE).ceil() as i32 + BUFFER_TILES;
-        let min_ty = (self.viewport.y / TILE_SIZE).floor() as i32 - BUFFER_TILES;
-        let max_ty = ((self.viewport.y + self.viewport.h) / TILE_SIZE).ceil() as i32 + BUFFER_TILES;
+        if self.viewport.w <= 0.0 || self.viewport.h <= 0.0 {
+            return Vec::new();
+        }
+        let min_tx = (self.viewport.x / TILE_SIZE).floor() as i32;
+        let max_tx = ((self.viewport.x + self.viewport.w - 0.001) / TILE_SIZE).floor() as i32;
+        let min_ty = (self.viewport.y / TILE_SIZE).floor() as i32;
+        let max_ty = ((self.viewport.y + self.viewport.h - 0.001) / TILE_SIZE).floor() as i32;
 
         // Clamp to document bounds
-        let doc_max_tx = (self.doc_width / TILE_SIZE).ceil() as i32;
-        let doc_max_ty = (self.doc_height / TILE_SIZE).ceil() as i32;
+        let doc_max_tx = ((self.doc_width - 0.001).max(0.0) / TILE_SIZE).floor() as i32;
+        let doc_max_ty = ((self.doc_height - 0.001).max(0.0) / TILE_SIZE).floor() as i32;
 
         let mut needed = Vec::new();
         for ty in min_ty.max(0)..=max_ty.min(doc_max_ty) {
@@ -149,6 +150,38 @@ impl TileManager {
             let dist = ((tile_cx - center_x).powi(2) + (tile_cy - center_y).powi(2)).sqrt();
             dist < max_dist
         });
+    }
+
+    /// Composite visible tiles onto the output pixmap.
+    pub fn composite_over(
+        &self,
+        output: &mut tiny_skia::Pixmap,
+        scroll_x: f32,
+        scroll_y: f32,
+        scale: f32,
+    ) {
+        for ((tx, ty), tile) in &self.tiles {
+            if tile.dirty {
+                continue;
+            }
+            let x = (*tx as f32 * TILE_SIZE - scroll_x) * scale;
+            let y = (*ty as f32 * TILE_SIZE - scroll_y) * scale;
+            if x + tile.pixmap.width() as f32 <= 0.0
+                || y + tile.pixmap.height() as f32 <= 0.0
+                || x >= output.width() as f32
+                || y >= output.height() as f32
+            {
+                continue;
+            }
+            output.draw_pixmap(
+                0,
+                0,
+                tile.pixmap.as_ref(),
+                &tiny_skia::PixmapPaint::default(),
+                tiny_skia::Transform::from_translate(x.round(), y.round()),
+                None,
+            );
+        }
     }
 
     /// Composite visible tiles onto the output pixmap.
@@ -236,10 +269,22 @@ mod tests {
         tm.doc_width = 2000.0;
         tm.doc_height = 5000.0;
         let needed = tm.update_viewport(Rect::new(0.0, 0.0, 800.0, 600.0), 1.0);
-        // Should need tiles covering viewport + buffer
-        assert!(!needed.is_empty());
-        assert!(needed.contains(&(0, 0)));
-        assert!(needed.contains(&(1, 0)));
+        assert_eq!(needed, vec![(0, 0), (1, 0), (0, 1), (1, 1)]);
+    }
+
+    #[test]
+    fn viewport_edge_does_not_rasterize_an_offscreen_tile() {
+        let mut tm = TileManager::new();
+        tm.doc_width = 2048.0;
+        tm.doc_height = 2048.0;
+        assert_eq!(
+            tm.update_viewport(Rect::new(0.0, 0.0, 512.0, 512.0), 1.0),
+            vec![(0, 0)]
+        );
+        assert_eq!(
+            tm.update_viewport(Rect::new(0.0, 500.0, 512.0, 512.0), 1.0),
+            vec![(0, 0), (0, 1)]
+        );
     }
 
     #[test]

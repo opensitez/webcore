@@ -1004,6 +1004,12 @@ fn replay_commands_inner(
                 let filters = filter_stack.pop().unwrap_or_default();
                 if let Some(layer) = layer_stack.pop() {
                     let mut pm = layer.pixmap;
+                    // A viewport tile may contain the filter commands for an
+                    // offscreen element but none of its pixels. Filtering an
+                    // empty layer cannot change the destination.
+                    if !pm.pixels().iter().any(|pixel| pixel.alpha() != 0) {
+                        continue;
+                    }
                     // Apply each filter to the layer pixels
                     for (filter_type, value, dx, dy, color) in &filters {
                         if *filter_type == 9 {

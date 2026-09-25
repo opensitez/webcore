@@ -590,6 +590,36 @@ fn variable_percentage_line_height_uses_font_size_for_line_boxes() {
 }
 
 #[test]
+fn unitless_calc_line_height_reserves_multiline_heading_space() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+        :root { --line-height-base: 1.6; }
+        * { margin: 0; padding: 0; }
+        h1 { width: 300px; font-size: 70px; line-height: calc(var(--line-height-base) * .65); }
+        </style>
+        <h1 id="title">People Training OpenAI's AI Fired for Using AI</h1>
+        <p id="after">After</p>
+        "#,
+        360.0,
+    );
+    let title = find_box(&doc.root, &|b| b.attributes.get("id") == Some(&"title".to_string()))
+        .unwrap();
+    let after = find_box(&doc.root, &|b| b.attributes.get("id") == Some(&"after".to_string()))
+        .unwrap();
+    assert!(
+        title.layout.content_rect.h >= 140.0,
+        "unitless calc() must multiply the font size: {:?}",
+        title.layout.content_rect
+    );
+    assert!(
+        after.layout.content_rect.y >= title.layout.content_rect.y + title.layout.content_rect.h,
+        "following content must clear the heading"
+    );
+}
+
+#[test]
 fn layoutadv_min_height_percent() {
     let mut s = ComputedStyle::default();
     apply_property(&mut s, "min-height", "50%");

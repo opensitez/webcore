@@ -155,6 +155,11 @@ fn parse_calc_scalar(expr: &str) -> Option<f32> {
         .then_some(values[1])
 }
 
+pub(crate) fn parse_calc_number(value: &str) -> Option<f32> {
+    let expr = value.trim().strip_prefix("calc(")?.strip_suffix(')')?;
+    parse_calc_scalar(expr)
+}
+
 fn parse_calc_tree_atom(expr: &str) -> CalcNode {
     use crate::types::CalcNode;
     let expr = expr.trim();

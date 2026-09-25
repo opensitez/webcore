@@ -352,7 +352,10 @@ pub(crate) fn pre_parse_value(id: properties::PropertyId, val: &str) -> crate::t
         // 1.375 PIXELS — and only on this path, which left the two value paths
         // disagreeing about the same declaration.
         LineHeight => {
-            if v == "normal" || v.parse::<f32>().is_ok() {
+            if v == "normal"
+                || v.parse::<f32>().is_ok()
+                || super::calc::parse_calc_number(v).is_some()
+            {
                 return CssValue::Length(super::parse_line_height(v));
             }
             if let Some(l) = try_parse_length(v) {
