@@ -2725,7 +2725,7 @@ pub(crate) fn apply_cascade_inner(
                     // Raw values may contain var() even when has_vars is false
                     // (the rule has var refs but no variables are defined in scope).
                     // Resolve var() with empty vars — triggers fallback values.
-                    if s.contains("var(") {
+                    if s.contains("var(") || s.to_ascii_lowercase().contains("light-dark(") {
                         let resolved = resolve_var_references_for_color_scheme(
                             s,
                             local_vars,

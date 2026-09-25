@@ -295,6 +295,10 @@ pub enum PaintCmd {
 
     /// Marker: end of a stacking context.
     EndStackingContext,
+    /// Paint the enclosed fixed-position box in viewport coordinates while
+    /// preserving its place in the surrounding stacking order.
+    BeginFixedPosition,
+    EndFixedPosition,
 }
 
 /// Text decoration info for a text run.
@@ -327,13 +331,9 @@ pub struct DisplayList {
     /// True when `commands` contains a `position: sticky` element whose
     /// recorded position depends on the current scroll offset.
     pub has_scroll_dependent_sticky: bool,
-    /// `position: fixed` content, in VIEWPORT coordinates.
-    ///
-    /// ⛔ Separate because `commands` is in DOCUMENT coordinates and replay
-    /// translates it by the scroll offset — which is what lets one cached list
-    /// serve every scroll position. Fixed content must NOT move, so it cannot
-    /// live in the same list. Replaying these with the same translation makes
-    /// a fixed header scroll away with the page.
+    /// Legacy viewport overlay commands. CSS fixed boxes now remain in
+    /// `commands` at their stacking position, between Begin/EndFixedPosition.
+    /// The replay switch keeps them anchored while the document scrolls.
     pub fixed_commands: Vec<PaintCmd>,
 }
 

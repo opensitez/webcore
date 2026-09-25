@@ -76,6 +76,7 @@ pub struct RareStyle {
     /// `current_color_props`.
     pub logical_box: Vec<(LogicalSlot, CssLength)>,
     pub logical_borders: Vec<LogicalBorderValue>,
+    pub logical_corners: Vec<(LogicalCornerSlot, CssLength, CssLength)>,
     /// `transform-origin`, as offsets from the reference box's top-left corner
     /// — a percentage is a fraction of the box, a length is absolute.
     ///
@@ -120,6 +121,7 @@ impl RareStyle {
         specified_svg_paint_props: 0,
         logical_box: Vec::new(),
         logical_borders: Vec::new(),
+        logical_corners: Vec::new(),
         transform_origin: None,
         additional_background_layers: Vec::new(),
         grid_template_columns: Vec::new(),

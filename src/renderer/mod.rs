@@ -1478,6 +1478,15 @@ impl Renderer {
             for rect in &dirty_paint_rects {
                 self.tile_manager.invalidate_rect(rect);
             }
+            if scroll_changed_since_surface
+                && self.cached_display_list.as_ref().is_some_and(|list| {
+                    list.commands.iter().any(|cmd| {
+                        matches!(cmd, display_list::PaintCmd::BeginFixedPosition)
+                    })
+                })
+            {
+                self.tile_manager.invalidate_all();
+            }
         }
         let animation_transform_overrides =
             animation_transform_matrices(&doc.root, &doc.animation_overrides, view_w, view_h);
@@ -1895,28 +1904,19 @@ impl Renderer {
                             tile.pixmap.fill(canvas_color);
                             let tile_scroll_x = tx as f32 * tiles::TILE_SIZE;
                             let tile_scroll_y = ty as f32 * tiles::TILE_SIZE;
-                            if animation_transform_overrides.is_empty() {
-                                display_list_replay::replay_with_scroll(
-                                    list,
-                                    &mut tile.pixmap,
-                                    tile_scale,
-                                    &mut self.font_system,
-                                    &mut self.swash_cache,
-                                    tile_scroll_x,
-                                    tile_scroll_y,
-                                );
-                            } else {
-                                display_list_replay::replay_with_scroll_and_transform_overrides(
-                                    list,
-                                    &mut tile.pixmap,
-                                    tile_scale,
-                                    &mut self.font_system,
-                                    &mut self.swash_cache,
-                                    tile_scroll_x,
-                                    tile_scroll_y,
-                                    &animation_transform_overrides,
-                                );
-                            }
+                            display_list_replay::replay_tile_with_scroll_and_transform_overrides(
+                                list,
+                                &mut tile.pixmap,
+                                tile_scale,
+                                &mut self.font_system,
+                                &mut self.swash_cache,
+                                tile_scroll_x,
+                                tile_scroll_y,
+                                doc.scroll_x,
+                                doc.scroll_y,
+                                (!animation_transform_overrides.is_empty())
+                                    .then_some(&animation_transform_overrides),
+                            );
                             tile.dirty = false;
                         }
                         if let Some(started) = tile_profile_start {

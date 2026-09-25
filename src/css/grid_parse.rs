@@ -166,9 +166,11 @@ pub fn parse_track_list_with_names(
             };
             let count_str = inner[..comma].trim();
             let track_str = inner[comma + 1..].trim();
-            let track = parse_single_track(track_str);
+            let mut pattern_names = std::collections::HashMap::new();
+            let mut nested_auto = Vec::new();
+            let pattern = parse_track_list_with_names(track_str, &mut nested_auto, &mut pattern_names);
             if count_str == "auto-fill" || count_str == "auto-fit" {
-                auto_repeat_cols.push(track.clone());
+                auto_repeat_cols.extend(pattern);
             } else {
                 let count = if let Ok(n) = count_str.parse::<usize>() {
                     n
@@ -178,7 +180,14 @@ pub fn parse_track_list_with_names(
                     if resolved > 0.0 { resolved as usize } else { 1 }
                 };
                 for _ in 0..count {
-                    result.push(track.clone());
+                    let offset = result.len();
+                    for (name, positions) in &pattern_names {
+                        line_names
+                            .entry(name.clone())
+                            .or_insert_with(Vec::new)
+                            .extend(positions.iter().map(|pos| offset + pos));
+                    }
+                    result.extend(pattern.iter().cloned());
                 }
             }
         } else if !t.is_empty() {

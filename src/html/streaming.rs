@@ -53,6 +53,8 @@ pub enum DomMutation {
         url: String,
         media: String,
     },
+    /// A linked stylesheet, including its media condition.
+    StylesheetHint { url: String, media: String },
     /// An element was closed.
     CloseElement,
     /// A resource was discovered that should be fetched.
@@ -109,6 +111,7 @@ pub struct StreamingParser {
     in_style: bool,
     /// Accumulated style content.
     style_buffer: String,
+    style_media: String,
     /// A `<style>` inside `<template>` is shadow-scoped markup, not a document
     /// stylesheet. Keep its emitted node path so the raw CSS can be attached to
     /// the template fragment for declarative shadow DOM finalization.
@@ -135,6 +138,7 @@ impl StreamingParser {
             in_title: false,
             in_style: false,
             style_buffer: String::new(),
+            style_media: String::new(),
             style_node_path: None,
             in_script: false,
         }
@@ -225,7 +229,7 @@ impl StreamingParser {
                         mutations.push(DomMutation::AddStylesheet {
                             css,
                             url: String::new(),
-                            media: String::new(),
+                            media: std::mem::take(&mut self.style_media),
                         });
                     }
                 }
@@ -306,7 +310,7 @@ impl StreamingParser {
                         mutations.push(DomMutation::AddStylesheet {
                             css,
                             url: String::new(),
-                            media: String::new(),
+                            media: std::mem::take(&mut self.style_media),
                         });
                     }
                     self.in_style = false;
@@ -397,6 +401,7 @@ impl StreamingParser {
                     self.discover_resources(&tag, &attrs, &mut mutations);
 
                     if tag == "style" && !self_closing {
+                        self.style_media = attrs.get("media").cloned().unwrap_or_default();
                         if self
                             .stack
                             .last()
@@ -571,9 +576,9 @@ impl StreamingParser {
                         }
                         self.discovered_resources
                             .push((ResourceKind::Stylesheet, url.clone()));
-                        mutations.push(DomMutation::ResourceHint {
-                            kind: ResourceKind::Stylesheet,
+                        mutations.push(DomMutation::StylesheetHint {
                             url,
+                            media: attrs.get("media").cloned().unwrap_or_default(),
                         });
                     }
                 } else if rel.split_ascii_whitespace().any(|part| part == "preload") {
@@ -883,9 +888,23 @@ mod tests {
         );
         let resources: Vec<_> = mutations
             .iter()
-            .filter(|m| matches!(m, DomMutation::ResourceHint { .. }))
+            .filter(|m| matches!(m, DomMutation::ResourceHint { .. } | DomMutation::StylesheetHint { .. }))
             .collect();
         assert!(resources.len() >= 2, "should discover stylesheet and image");
+    }
+
+    #[test]
+    fn streaming_preserves_linked_stylesheet_media() {
+        let mut parser = StreamingParser::new("https://example.com/");
+        let mutations = parser.feed_str(
+            r#"<link rel="stylesheet" href="dark.css" media="(prefers-color-scheme: dark)">"#,
+        );
+        assert!(mutations.iter().any(|mutation| matches!(
+            mutation,
+            DomMutation::StylesheetHint { url, media }
+                if url == "https://example.com/dark.css"
+                    && media == "(prefers-color-scheme: dark)"
+        )));
     }
 
     #[test]
@@ -1077,6 +1096,19 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, DomMutation::InsertElement { tag, .. } if tag == "body"))
         );
+    }
+
+    #[test]
+    fn streaming_style_preserves_media_condition() {
+        let mut parser = StreamingParser::new("");
+        let mutations = parser.feed_str(
+            "<style media=\"(prefers-color-scheme: dark)\">body{color:white}</style>",
+        );
+        assert!(mutations.iter().any(|mutation| matches!(
+            mutation,
+            DomMutation::AddStylesheet { media, .. }
+                if media == "(prefers-color-scheme: dark)"
+        )));
     }
 
     #[test]

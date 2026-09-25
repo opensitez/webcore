@@ -7,6 +7,54 @@ use crate::layout::LayoutEngine;
 use crate::types::*;
 
 #[test]
+fn flex_items_reserve_min_width_of_percentage_width_children() {
+    let doc = parse_and_layout(
+        "<style>*{margin:0;padding:0}ul{display:flex;width:500px;list-style:none}\
+         li>a{display:flex;width:100%;min-width:80px}</style>\
+         <ul><li id='one'><a>Home</a></li><li id='two'><a>Jobs</a></li></ul>",
+        500.0,
+    );
+    let one = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "one")).unwrap();
+    let two = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "two")).unwrap();
+    assert!(one.layout.border_rect.w >= 80.0, "{:?}", one.layout.border_rect);
+    assert!(two.layout.border_rect.x - one.layout.border_rect.x >= 80.0);
+}
+
+#[test]
+fn stretch_width_fills_margin_box_and_supports_vendor_aliases() {
+    for width in ["stretch", "-webkit-fill-available", "-moz-available"] {
+        let html = format!(
+            "<style>*{{margin:0;padding:0;box-sizing:border-box}}</style>\
+             <div style='width:216px;display:grid'>\
+               <div id='cover' style='grid-area:1 / -1;justify-self:start;width:{width};\
+                 margin-left:16px;padding:4px;border:2px solid;height:56px'></div>\
+             </div>"
+        );
+        let doc = parse_and_layout(&html, 400.0);
+        let cover = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "cover")).unwrap();
+        assert!((cover.layout.border_rect.w - 200.0).abs() < 1.0, "{width}: {:?}", cover.layout.border_rect);
+    }
+}
+
+#[test]
+fn logical_corner_radii_follow_direction_after_cascade() {
+    let doc = parse_and_layout(
+        "<style>*{margin:0;padding:0}\
+         #ltr,#rtl{width:100px;height:40px;border-start-start-radius:99px;\
+           border-start-end-radius:15px;border-end-start-radius:8px;border-end-end-radius:4px}\
+         #rtl{direction:rtl}</style><div id='ltr'></div><div id='rtl'></div>",
+        200.0,
+    );
+    let ltr = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "ltr")).unwrap();
+    let rtl = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "rtl")).unwrap();
+    assert_eq!(ltr.style.border_top_left_radius, CssLength::Px(99.0));
+    assert_eq!(ltr.style.border_top_right_radius, CssLength::Px(15.0));
+    assert_eq!(rtl.style.border_top_right_radius, CssLength::Px(99.0));
+    assert_eq!(rtl.style.border_top_left_radius, CssLength::Px(15.0));
+    assert_eq!(rtl.style.border_bottom_right_radius, CssLength::Px(8.0));
+}
+
+#[test]
 fn negative_text_indent_does_not_expand_hidden_logo_intrinsic_width() {
     let mut renderer = crate::Renderer::new();
     let doc = renderer.load_html(

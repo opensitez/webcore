@@ -1397,9 +1397,20 @@ pub fn resolve_box_vp(
     let content_width = if style.width.is_auto() || inline_ignores_size {
         None
     } else {
-        let mut w = res(&style.width).max(0.0);
+        let mut w = if style.width == CssLength::Stretch {
+            containing_w
+                - res(&style.margin_left)
+                - res(&style.margin_right)
+                - pad_left
+                - pad_right
+                - border_left
+                - border_right
+        } else {
+            res(&style.width)
+        }
+        .max(0.0);
         // box-sizing: border-box — subtract padding + border from declared width
-        if style.box_sizing == BoxSizing::BorderBox {
+        if style.box_sizing == BoxSizing::BorderBox && style.width != CssLength::Stretch {
             w = (w - pad_left - pad_right - border_left - border_right).max(0.0);
         }
         Some(w)
@@ -2169,6 +2180,17 @@ impl LayoutEngine {
             }
         }
 
+        // A cyclic percentage width cannot make its containing block's
+        // min-content size definite. Its fixed component still contributes.
+        if node.is_image_element()
+            && node.style.width.has_percentage()
+            && width_basis.is_none()
+        {
+            return self
+                .res_len(&node.style.width, font_px, 0.0, root_font_px)
+                .max(0.0);
+        }
+
         // Replaced elements: the size they are shown at, ratio included.
         if let Some(w) = self.replaced_intrinsic_width(node, font_px, root_font_px) {
             return w;
@@ -2326,7 +2348,15 @@ impl LayoutEngine {
                 + child_rbox.border_right
                 + child_rbox.margin_left
                 + child_rbox.margin_right;
-            let cw = self.min_content_width(ch, font_px, root_font_px) + child_outer;
+            let mut cw = self.min_content_width(ch, font_px, root_font_px) + child_outer;
+            if !ch.style.min_width.is_auto() && !ch.style.min_width.has_percentage() {
+                let min_w = self.res_len(&ch.style.min_width, child_font, 0.0, root_font_px);
+                cw = cw.max(if ch.style.box_sizing == BoxSizing::BorderBox {
+                    min_w + child_rbox.margin_left + child_rbox.margin_right
+                } else {
+                    min_w + child_outer
+                });
+            }
             if cw > max_w {
                 max_w = cw;
             }
@@ -2617,6 +2647,14 @@ impl LayoutEngine {
                 + child_rbox.margin_left
                 + child_rbox.margin_right;
             let mut cw = self.max_content_width(ch, font_px, root_font_px) + child_outer;
+            if !ch.style.min_width.is_auto() && !ch.style.min_width.has_percentage() {
+                let min_w = self.res_len(&ch.style.min_width, child_font, 0.0, root_font_px);
+                cw = cw.max(if ch.style.box_sizing == BoxSizing::BorderBox {
+                    min_w + child_rbox.margin_left + child_rbox.margin_right
+                } else {
+                    min_w + child_outer
+                });
+            }
             if ch.style.is_inline_level() || !matches!(ch.style.float, Float::None) {
                 cw = cw.ceil() + 1.0;
             }

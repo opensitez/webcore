@@ -346,6 +346,7 @@ fn transition_length(v: &CssLength) -> String {
         CssLength::MinContent => "min-content".to_string(),
         CssLength::MaxContent => "max-content".to_string(),
         CssLength::FitContent => "fit-content".to_string(),
+        CssLength::Stretch => "stretch".to_string(),
         CssLength::FitContentArg(_)
         | CssLength::Calc(_)
         | CssLength::CalcExpr(_)

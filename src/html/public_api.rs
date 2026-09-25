@@ -441,8 +441,7 @@ fn parse_html_full(
     // Fetch local-only linked stylesheets (file:// paths).
     // Remote stylesheets are handled by lib.rs in parallel.
     for (href, media) in &doc.linked_stylesheets.clone() {
-        // Skip print-only stylesheets for screen rendering
-        if media.eq_ignore_ascii_case("print") {
+        if !crate::css::evaluate_media(media, doc.viewport_w, doc.viewport_h) {
             continue;
         }
         let url = resolve_url(href, base_url);

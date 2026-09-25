@@ -388,12 +388,15 @@ pub fn layout_grid_subgrid(
         let cf = child.style.font_size_px(font_px, root_font_px);
         let eff_justify = effective_justify_self(child, node_justify_items);
         let eff_align = effective_align_self_grid(child, node_align_items);
-        let saved_w = if eff_justify == AlignItems::Stretch
-            && child.style.width.is_auto()
+        let saved_w = if child.style.width.is_auto()
             && child.style.width.intrinsic().is_none()
         {
             let cr = engine.res_box(&child.style, cf, sw, root_font_px);
-            let css_w = stretched_grid_item_content_width(sw, &cr, child.style.box_sizing);
+            let css_w = if eff_justify == AlignItems::Stretch {
+                stretched_grid_item_content_width(sw, &cr, child.style.box_sizing)
+            } else {
+                fitted_grid_item_css_width(engine, child, &cr, sw, font_px, root_font_px)
+            };
             let saved = child.style.width.clone();
             std::sync::Arc::make_mut(&mut child.style).width = CssLength::Px(css_w);
             child.layout.layout_dirty = true;
@@ -431,15 +434,9 @@ pub fn layout_grid_subgrid(
 
         let cr = engine.res_box(&child.style, cf, sw, root_font_px);
         let cell_w = sw;
-        let dx_align = match eff_justify {
-            AlignItems::FlexEnd => {
-                cell_w - child.layout.border_rect.w - cr.margin_left - cr.margin_right
-            }
-            AlignItems::Center => {
-                (cell_w - child.layout.border_rect.w - cr.margin_left - cr.margin_right) / 2.0
-            }
-            _ => 0.0,
-        };
+        let dx_align = grid_inline_alignment_offset(
+            child, eff_justify, cell_w, cr.margin_left, cr.margin_right,
+        );
         let dy_align = match eff_align {
             AlignItems::FlexEnd => {
                 cell_h - child.layout.border_rect.h - cr.margin_top - cr.margin_bottom
@@ -465,7 +462,14 @@ pub fn layout_grid_subgrid(
     let ch = rbox.content_height.unwrap_or(total_h);
 
     node.layout.layout_dirty = false;
-    layout_abs_children(engine, node, font_px, root_font_px);
+    layout_abs_children(
+        engine, node, font_px, root_font_px,
+        Some(AbsGridAreas {
+            x: content_x, y: content_y,
+            col_x: &col_x_local, col_w: &col_px,
+            row_y: &row_y_local, row_h: &row_heights,
+        }),
+    );
     finish_grid(node, rbox, content_x, content_y, content_w, ch)
 }
 
@@ -485,10 +489,19 @@ pub fn layout_grid(
     let y = c.y;
     let font_px = c.parent_font_px;
     let root_font_px = c.root_font_px;
-    let content_w = match rbox.content_width {
+    let mut content_w = match rbox.content_width {
         Some(w) => w,
         None => (containing_w - rbox.h_space()).max(0.0),
     };
+    if let Some(kind) = node
+        .style
+        .width
+        .intrinsic()
+        .filter(|_| rbox.content_width.is_none())
+    {
+        content_w =
+            engine.intrinsic_width(&kind, node, content_w, font_px, root_font_px, containing_w);
+    }
     let content_x = x + rbox.margin_left + rbox.border_left + rbox.padding_left;
     let content_y = y + rbox.margin_top + rbox.border_top + rbox.padding_top;
 
@@ -550,7 +563,7 @@ pub fn layout_grid(
         let ch = rbox.content_height.unwrap_or(0.0);
         node.layout.layout_dirty = false;
         let result = finish_grid(node, rbox, content_x, content_y, content_w, ch);
-        layout_abs_children(engine, node, font_px, root_font_px);
+        layout_abs_children(engine, node, font_px, root_font_px, None);
         return result;
     }
 
@@ -911,7 +924,7 @@ pub fn layout_grid(
         let ch = rbox.content_height.unwrap_or(0.0);
         node.layout.layout_dirty = false;
         let result = finish_grid(node, rbox, content_x, content_y, content_w, ch);
-        layout_abs_children(engine, node, font_px, root_font_px);
+        layout_abs_children(engine, node, font_px, root_font_px, None);
         return result;
     }
 
@@ -943,7 +956,13 @@ pub fn layout_grid(
         col_spans.push((
             cs.min(n_measured_cols),
             ce.min(n_measured_cols),
-            sz.min_content,
+            if matches!(child.style.width, CssLength::Auto)
+                && matches!(child.style.min_width, CssLength::Zero | CssLength::Px(0.0))
+            {
+                0.0
+            } else {
+                sz.min_content
+            },
             sz.max_content,
         ));
     }
@@ -1492,11 +1511,21 @@ pub fn layout_grid(
         // Handle justify-self / align-self
         let eff_justify = effective_justify_self(child, node_justify_items);
         let eff_align = effective_align_self_grid(child, node_align_items);
-        let saved_w = if eff_justify == AlignItems::Stretch
-            && child.style.width.is_auto()
+        let saved_w = if child.style.width.is_auto()
             && child.style.width.intrinsic().is_none()
         {
-            let css_w = stretched_grid_item_content_width(span_w, &crbox, child.style.box_sizing);
+            let css_w = if eff_justify == AlignItems::Stretch {
+                stretched_grid_item_content_width(span_w, &crbox, child.style.box_sizing)
+            } else {
+                fitted_grid_item_css_width(
+                    engine,
+                    child,
+                    &crbox,
+                    span_w,
+                    font_px,
+                    root_font_px,
+                )
+            };
             let saved = child.style.width.clone();
             std::sync::Arc::make_mut(&mut child.style).width = CssLength::Px(css_w);
             child.layout.layout_dirty = true;
@@ -1533,13 +1562,13 @@ pub fn layout_grid(
             child.layout.layout_dirty = true; // force re-layout with new height
             engine.layout_box(
                 child,
-                &Constraints::new(span_w, ix, iy, font_px, root_font_px),
+                &Constraints::with_height(span_w, cell_h, ix, iy, font_px, root_font_px),
             );
             std::sync::Arc::make_mut(&mut child.style).height = saved_h;
         } else {
             engine.layout_box(
                 child,
-                &Constraints::new(span_w, ix, iy, font_px, root_font_px),
+                &Constraints::with_height(span_w, cell_h, ix, iy, font_px, root_font_px),
             );
         }
         if let Some(saved) = saved_w {
@@ -1560,21 +1589,9 @@ pub fn layout_grid(
         }
         let cell_w = span_w;
 
-        let dx_align = match eff_justify {
-            AlignItems::FlexStart => 0.0,
-            AlignItems::FlexEnd => {
-                cell_w - child.layout.border_rect.w - crbox.margin_left - crbox.margin_right
-            }
-            AlignItems::Center => {
-                (cell_w - child.layout.border_rect.w - crbox.margin_left - crbox.margin_right) / 2.0
-            }
-            AlignItems::Stretch => 0.0,
-            // The INLINE-axis baseline group is not modelled — there is one
-            // baseline per box and it is a block-axis one — so an inline-axis
-            // baseline value falls back to `start`, as the spec allows when a
-            // box has no baseline in that axis.
-            AlignItems::Baseline | AlignItems::LastBaseline => 0.0,
-        };
+        let dx_align = grid_inline_alignment_offset(
+            child, eff_justify, cell_w, crbox.margin_left, crbox.margin_right,
+        );
         let dy_align = match eff_align {
             AlignItems::FlexStart => 0.0,
             AlignItems::FlexEnd => {
@@ -1631,7 +1648,14 @@ pub fn layout_grid(
     node.layout.layout_dirty = false;
 
     let result = finish_grid(node, rbox, content_x, content_y, content_w, ch);
-    layout_abs_children(engine, node, font_px, root_font_px);
+    layout_abs_children(
+        engine, node, font_px, root_font_px,
+        Some(AbsGridAreas {
+            x: content_x, y: content_y,
+            col_x: &col_x, col_w: &col_px,
+            row_y: &row_y, row_h: &row_heights,
+        }),
+    );
     result
 }
 
@@ -1685,6 +1709,19 @@ fn lookup_named_line(
 ) -> Option<usize> {
     if name.is_empty() {
         return None;
+    }
+    if let Some((line_name, ordinal)) = name.rsplit_once(char::is_whitespace) {
+        if let Ok(n) = ordinal.trim().parse::<isize>() {
+            if n != 0 {
+                if let Some(indices) = line_names.get(line_name.trim()) {
+                    return if n > 0 {
+                        indices.get(n as usize - 1).copied()
+                    } else {
+                        indices.get(indices.len().checked_sub((-n) as usize)?).copied()
+                    };
+                }
+            }
+        }
     }
     if let Some(indices) = line_names.get(name) {
         return indices.first().copied();
@@ -2411,6 +2448,45 @@ fn stretched_grid_item_content_width(
     }
 }
 
+fn fitted_grid_item_css_width(
+    engine: &LayoutEngine,
+    child: &WebCore,
+    rbox: &ResolvedBox,
+    area_w: f32,
+    font_px: f32,
+    root_font_px: f32,
+) -> f32 {
+    let available_content = (area_w - rbox.h_space()).max(0.0);
+    let min_content = engine.min_content_width_of_content(child, font_px, root_font_px);
+    let max_content = engine.max_content_width_of_content(child, font_px, root_font_px);
+    let content = max_content.min(available_content).max(min_content);
+    if child.style.box_sizing == BoxSizing::BorderBox {
+        content + rbox.padding_left + rbox.padding_right + rbox.border_left + rbox.border_right
+    } else {
+        content
+    }
+}
+
+fn grid_inline_alignment_offset(
+    child: &WebCore,
+    justify: AlignItems,
+    cell_w: f32,
+    margin_left: f32,
+    margin_right: f32,
+) -> f32 {
+    let free = (cell_w - child.layout.border_rect.w - margin_left - margin_right).max(0.0);
+    let left_auto = child.style.margin_left.is_auto();
+    let right_auto = child.style.margin_right.is_auto();
+    if left_auto || right_auto {
+        return if left_auto && right_auto { free / 2.0 } else if left_auto { free } else { 0.0 };
+    }
+    match justify {
+        AlignItems::FlexEnd => free,
+        AlignItems::Center => free / 2.0,
+        _ => 0.0,
+    }
+}
+
 // ─── finish & abs children ───────────────────────────────────────────────────
 
 fn finish_grid(
@@ -2461,7 +2537,22 @@ fn finish_grid(
     node.layout.margin_rect.h
 }
 
-fn layout_abs_children(engine: &LayoutEngine, node: &mut WebCore, font_px: f32, root_font_px: f32) {
+struct AbsGridAreas<'a> {
+    x: f32,
+    y: f32,
+    col_x: &'a [f32],
+    col_w: &'a [f32],
+    row_y: &'a [f32],
+    row_h: &'a [f32],
+}
+
+fn layout_abs_children(
+    engine: &LayoutEngine,
+    node: &mut WebCore,
+    font_px: f32,
+    root_font_px: f32,
+    areas: Option<AbsGridAreas<'_>>,
+) {
     let containing_rect = if crate::layout::establishes_positioned_containing_block(&node.style) {
         node.layout.padding_rect
     } else {
@@ -2475,9 +2566,47 @@ fn layout_abs_children(engine: &LayoutEngine, node: &mut WebCore, font_px: f32, 
             matches!(c.style.position, Position::Absolute | Position::Fixed)
         })
         .collect();
+    let area_map = build_area_map(&node.style.rare().grid_template_areas);
     for path in abs_paths {
+        let area_rect = areas.as_ref().and_then(|tracks| {
+            let child = grid_child_ref(node, &path);
+            if child.style.position != Position::Absolute
+                || !is_explicitly_placed(
+                    child,
+                    &area_map,
+                    &node.style.grid_col_line_names,
+                    &node.style.grid_row_line_names,
+                )
+            {
+                return None;
+            }
+            let (cs, ce, rs, re) = resolve_placement(
+                child,
+                &area_map,
+                tracks.col_w.len(),
+                tracks.row_h.len(),
+                &node.style.grid_col_line_names,
+                &node.style.grid_row_line_names,
+            );
+            if cs >= ce || rs >= re || ce > tracks.col_w.len() || re > tracks.row_h.len() {
+                return None;
+            }
+            let x0 = (cs..ce).map(|i| tracks.col_x[i]).fold(f32::INFINITY, f32::min);
+            let x1 = (cs..ce)
+                .map(|i| tracks.col_x[i] + tracks.col_w[i])
+                .fold(f32::NEG_INFINITY, f32::max);
+            let y0 = tracks.row_y[rs];
+            let y1 = tracks.row_y[re - 1] + tracks.row_h[re - 1];
+            Some(Rect::new(tracks.x + x0, tracks.y + y0, x1 - x0, y1 - y0))
+        });
         let child = grid_child_mut(node, &path);
-        layout_positioned(engine, child, containing_rect, font_px, root_font_px);
+        layout_positioned(
+            engine,
+            child,
+            area_rect.unwrap_or(containing_rect),
+            font_px,
+            root_font_px,
+        );
     }
 }
 

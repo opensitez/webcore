@@ -270,8 +270,9 @@ pub(crate) fn pre_parse_value(id: properties::PropertyId, val: &str) -> crate::t
     use properties::PropertyId::*;
     let v = val.trim();
 
-    // Skip var() references — must be resolved at cascade time
-    if v.contains("var(") {
+    // These functions depend on custom properties or the element's used color
+    // scheme, neither of which is known while compiling the stylesheet.
+    if v.contains("var(") || v.to_ascii_lowercase().contains("light-dark(") {
         return CssValue::Raw(val.to_string());
     }
 

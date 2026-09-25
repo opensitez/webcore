@@ -285,7 +285,10 @@ pub(crate) fn note_current_color(
 pub fn finalize_logical(style: &mut ComputedStyle) {
     use crate::types::*;
     finalize_logical_float_clear(style);
-    if style.rare().logical_box.is_empty() && style.rare().logical_borders.is_empty() {
+    if style.rare().logical_box.is_empty()
+        && style.rare().logical_borders.is_empty()
+        && style.rare().logical_corners.is_empty()
+    {
         return;
     }
     let decls = std::mem::take(&mut style.rare_mut().logical_box);
@@ -296,6 +299,40 @@ pub fn finalize_logical(style: &mut ComputedStyle) {
     let b_start = block_start_side(wm);
     let b_end = opposite(b_start);
     let horizontal_inline = inline_axis_is_horizontal(wm);
+
+    let corners = std::mem::take(&mut style.rare_mut().logical_corners);
+    for (slot, x, y) in corners {
+        let (block, inline) = match slot {
+            LogicalCornerSlot::StartStart => (b_start, i_start),
+            LogicalCornerSlot::StartEnd => (b_start, i_end),
+            LogicalCornerSlot::EndStart => (b_end, i_start),
+            LogicalCornerSlot::EndEnd => (b_end, i_end),
+        };
+        match (block, inline) {
+            (PhysicalSide::Top, PhysicalSide::Left)
+            | (PhysicalSide::Left, PhysicalSide::Top) => {
+                style.border_top_left_radius = x;
+                style.border_top_left_radius_y = y;
+                style.border_radius = style.border_top_left_radius.clone();
+            }
+            (PhysicalSide::Top, PhysicalSide::Right)
+            | (PhysicalSide::Right, PhysicalSide::Top) => {
+                style.border_top_right_radius = x;
+                style.border_top_right_radius_y = y;
+            }
+            (PhysicalSide::Bottom, PhysicalSide::Left)
+            | (PhysicalSide::Left, PhysicalSide::Bottom) => {
+                style.border_bottom_left_radius = x;
+                style.border_bottom_left_radius_y = y;
+            }
+            (PhysicalSide::Bottom, PhysicalSide::Right)
+            | (PhysicalSide::Right, PhysicalSide::Bottom) => {
+                style.border_bottom_right_radius = x;
+                style.border_bottom_right_radius_y = y;
+            }
+            _ => {}
+        }
+    }
 
     for (slot, len) in decls {
         match slot {
@@ -533,11 +570,32 @@ pub fn apply_property_by_id_str(
 /// shrink and basis exactly as they were instead of returning them to
 /// `0 1 auto`. Only the longhands hold the values, so only they can be reset.
 fn reset_to_initial(style: &mut ComputedStyle, id: properties::PropertyId) {
+    use properties::PropertyId;
     let def = property_defs::get(id);
     if !def.longhands.is_empty() {
         for &lh in def.longhands {
             reset_to_initial(style, lh);
         }
+        return;
+    }
+    if matches!(
+        id,
+        PropertyId::MarginBlockStart
+            | PropertyId::MarginBlockEnd
+            | PropertyId::MarginInlineStart
+            | PropertyId::MarginInlineEnd
+            | PropertyId::PaddingBlockStart
+            | PropertyId::PaddingBlockEnd
+            | PropertyId::PaddingInlineStart
+            | PropertyId::PaddingInlineEnd
+            | PropertyId::BorderStartStartRadius
+            | PropertyId::BorderStartEndRadius
+            | PropertyId::BorderEndStartRadius
+            | PropertyId::BorderEndEndRadius
+    ) {
+        // Logical declarations are applied after cascade, once writing mode is
+        // known. Queue the initial value too, so it supersedes an earlier one.
+        (def.apply)(style, "0");
         return;
     }
     let default_style = ComputedStyle::default();
@@ -822,16 +880,35 @@ pub(crate) fn resolve_var_references_for_color_scheme(
 }
 
 pub(crate) fn resolve_light_dark_functions(val: &str, color_scheme: &str) -> String {
-    if !val.contains("light-dark(") {
+    resolve_light_dark_functions_with_preference(
+        val,
+        color_scheme,
+        crate::css::color_scheme_preference(),
+    )
+}
+
+fn resolve_light_dark_functions_with_preference(
+    val: &str,
+    color_scheme: &str,
+    preference: crate::css::ColorSchemePreference,
+) -> String {
+    if !val.to_ascii_lowercase().contains("light-dark(") {
         return val.to_string();
     }
-    let prefer_dark = color_scheme
+    let supports_dark = color_scheme
         .split_ascii_whitespace()
-        .next()
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("dark"));
+        .any(|scheme| scheme.eq_ignore_ascii_case("dark"));
+    let supports_light = color_scheme
+        .split_ascii_whitespace()
+        .any(|scheme| scheme.eq_ignore_ascii_case("light"));
+    let prefer_dark = match (supports_light, supports_dark, preference) {
+        (false, true, _) => true,
+        (true, true, crate::css::ColorSchemePreference::Dark) => true,
+        _ => false,
+    };
     let mut out = String::new();
     let mut rest = val;
-    while let Some(start) = rest.find("light-dark(") {
+    while let Some(start) = rest.to_ascii_lowercase().find("light-dark(") {
         out.push_str(&rest[..start]);
         let args_start = start + "light-dark(".len();
         let args = &rest[args_start..];
@@ -852,6 +929,48 @@ pub(crate) fn resolve_light_dark_functions(val: &str, color_scheme: &str) -> Str
     }
     out.push_str(rest);
     out
+}
+
+#[cfg(test)]
+mod light_dark_tests {
+    use super::*;
+    use crate::css::ColorSchemePreference::{Dark, Light};
+
+    #[test]
+    fn light_dark_uses_preference_when_both_schemes_are_supported() {
+        assert_eq!(
+            resolve_light_dark_functions_with_preference("light-dark(white, black)", "light dark", Dark),
+            "black"
+        );
+        assert_eq!(
+            resolve_light_dark_functions_with_preference("light-dark(white, black)", "dark light", Light),
+            "white"
+        );
+    }
+
+    #[test]
+    fn light_dark_respects_single_scheme_and_normal_fallback() {
+        assert_eq!(
+            resolve_light_dark_functions_with_preference("light-dark(white, black)", "light", Dark),
+            "white"
+        );
+        assert_eq!(
+            resolve_light_dark_functions_with_preference("light-dark(white, black)", "dark", Light),
+            "black"
+        );
+        assert_eq!(
+            resolve_light_dark_functions_with_preference("light-dark(white, black)", "normal", Dark),
+            "white"
+        );
+    }
+
+    #[test]
+    fn light_dark_function_name_is_case_insensitive() {
+        assert_eq!(
+            resolve_light_dark_functions_with_preference("LIGHT-DARK(white, black)", "dark", Light),
+            "black"
+        );
+    }
 }
 
 fn take_function_args(s: &str) -> Option<(&str, usize)> {

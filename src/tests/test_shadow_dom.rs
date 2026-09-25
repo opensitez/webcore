@@ -242,6 +242,42 @@ fn shadow_content_is_laid_out() {
 }
 
 #[test]
+fn inline_shadow_host_lays_out_its_inline_children() {
+    let doc = layout_html(
+        r#"
+        <p id="before">Description</p>
+        <x-controls id="host"><template shadowrootmode="open">
+            <button id="first">First</button><button id="second">Second</button>
+        </template></x-controls>
+        <p id="after">After</p>
+        "#,
+        400.0,
+    );
+    let before = find_by_id(&doc.root, "before").unwrap();
+    let host = find_by_id(&doc.root, "host").unwrap();
+    let first = find_by_id(&doc.root, "first").unwrap();
+    let second = find_by_id(&doc.root, "second").unwrap();
+    let after = find_by_id(&doc.root, "after").unwrap();
+    assert!(
+        first.layout.border_rect.w > 0.0,
+        "first shadow button has no box: host={:?} display={:?}, first={:?} display={:?}",
+        host.layout.border_rect,
+        host.style.display,
+        first.layout.border_rect,
+        first.style.display
+    );
+    assert!(second.layout.border_rect.w > 0.0, "second shadow button has no box");
+    assert!(
+        first.layout.border_rect.y >= before.layout.border_rect.bottom(),
+        "shadow controls overlap preceding paragraph"
+    );
+    assert!(
+        after.layout.border_rect.y >= first.layout.border_rect.bottom(),
+        "following paragraph overlaps shadow controls"
+    );
+}
+
+#[test]
 fn light_dom_hidden_without_slot() {
     let doc = layout_html(
         r#"

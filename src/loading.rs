@@ -845,8 +845,14 @@ fn scan_html_chunk_for_resources(
     state: &Arc<Mutex<PreloadState>>,
 ) {
     for mutation in parser.feed(chunk) {
-        if let crate::DomMutation::ResourceHint { kind, url } = mutation {
-            schedule_preload(kind, url, options, state);
+        match mutation {
+            crate::DomMutation::ResourceHint { kind, url } => {
+                schedule_preload(kind, url, options, state);
+            }
+            crate::DomMutation::StylesheetHint { url, .. } => {
+                schedule_preload(crate::ResourceKind::Stylesheet, url, options, state);
+            }
+            _ => {}
         }
     }
 }
@@ -1177,7 +1183,7 @@ fn cached_fetch_bytes_uncached(url: &str, cache_dir: &str) -> Result<Vec<u8>, St
 pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     let started = crate::profile::is_enabled().then(std::time::Instant::now);
     let profile_epoch = crate::profile::epoch();
-    let do_fetch = |client: &reqwest::blocking::Client| -> Result<Vec<u8>, String> {
+    let do_fetch = |client: &reqwest::blocking::Client| -> Result<Vec<u8>, (String, bool)> {
         let resp = client
             .get(url)
             .header(
@@ -1188,16 +1194,18 @@ pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
             .header("Sec-Fetch-Mode", "no-cors")
             .header("Sec-Fetch-Site", "cross-site")
             .send()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| (e.to_string(), true))?;
         if !resp.status().is_success() {
-            return Err(format!("HTTP {}", resp.status()));
+            return Err((format!("HTTP {}", resp.status()), false));
         }
-        let bytes = resp.bytes().map_err(|e| e.to_string())?;
+        let bytes = resp.bytes().map_err(|e| (e.to_string(), false))?;
         Ok(bytes.to_vec())
     };
     let result = match do_fetch(&crate::http_client()) {
         Ok(bytes) if !bytes.is_empty() => Ok(bytes),
-        _ => do_fetch(&crate::http_client_lenient()),
+        Err((_, true)) => do_fetch(&crate::http_client_lenient()).map_err(|(e, _)| e),
+        Err((error, false)) => Err(error),
+        Ok(_) => Err("empty image response".to_string()),
     };
     if let Some(started) = started {
         crate::profile::record_resource_for(
@@ -1374,6 +1382,40 @@ fn decode_body(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_http_error_is_not_retried_with_certificate_fallback() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/image", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let server_running = running.clone();
+        let server = std::thread::spawn(move || {
+            let mut requests = 0;
+            while server_running.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0; 2048];
+                        let _ = stream.read(&mut request);
+                        stream
+                            .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .unwrap();
+                        requests += 1;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("local image server: {e}"),
+                }
+            }
+            requests
+        });
+        let error = fetch_bytes(&url).unwrap_err();
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(error.contains("403"));
+        assert_eq!(server.join().unwrap(), 1);
+    }
 
     #[test]
     fn page_session_emits_loading_preview_before_final_result() {

@@ -195,12 +195,13 @@ pub fn layout_inline_block(
     let avail_h = rbox.content_height;
     prelayout_nested_inline_blocks(engine, node, content_w, avail_h, font_px, root_font_px);
 
-    for ci in 0..node.children.len() {
-        if matches!(node.children[ci].style.display, Display::Contents) {
-            let child_font_px = node.children[ci].style.font_size_px(font_px, root_font_px);
+    let children = node.effective_children_mut();
+    for ci in 0..children.len() {
+        if matches!(children[ci].style.display, Display::Contents) {
+            let child_font_px = children[ci].style.font_size_px(font_px, root_font_px);
             prelayout_nested_inline_blocks(
                 engine,
-                &mut node.children[ci],
+                &mut children[ci],
                 content_w,
                 avail_h,
                 child_font_px,
@@ -209,22 +210,22 @@ pub fn layout_inline_block(
             continue;
         }
         if matches!(
-            node.children[ci].style.display,
+            children[ci].style.display,
             Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
-        ) || is_atomic_inline_replaced(&node.children[ci])
+        ) || is_atomic_inline_replaced(&children[ci])
         {
             let child_constraints = match avail_h {
                 Some(h) => Constraints::with_height(content_w, h, 0.0, 0.0, font_px, root_font_px),
                 None => Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
             };
-            engine.layout_box(&mut node.children[ci], &child_constraints);
+            engine.layout_box(&mut children[ci], &child_constraints);
             // Shrink-to-fit for auto-width inline-block (CSS §10.3.9):
             // InlineBlock with width:auto should size to content, not expand to fill container.
-            if node.children[ci].style.width.is_auto() {
+            if children[ci].style.width.is_auto() {
                 // Use line.width (raw text content width) not line.x + line.width - origin,
                 // because line.x includes the text-align centering offset which inflates
                 // the result when text-align:center is inherited.
-                let max_line_w = node.children[ci]
+                let max_line_w = children[ci]
                     .layout
                     .line_cache
                     .iter()
@@ -236,10 +237,10 @@ pub fn layout_inline_block(
                 // back to the laid-out line width only for boxes whose
                 // intrinsic walk has no useful answer.
                 let max_content_w =
-                    engine.max_content_width(&node.children[ci], font_px, root_font_px);
+                    engine.max_content_width(&children[ci], font_px, root_font_px);
                 let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
                 {
-                    let irb = &node.children[ci];
+                    let irb = &children[ci];
                     let shrink_w = intrinsic_w.ceil()
                         + shrink_to_fit_slop(irb)
                         + irb.layout.resolved_pad_left
@@ -251,7 +252,7 @@ pub fn layout_inline_block(
                     if shrink_w > 0.0
                         && (shrink_w < content_w
                             || matches!(
-                                node.children[ci].style.white_space,
+                                children[ci].style.white_space,
                                 WhiteSpace::Nowrap | WhiteSpace::Pre
                             ))
                     {
@@ -266,39 +267,39 @@ pub fn layout_inline_block(
                             ),
                             None => Constraints::new(shrink_w, 0.0, 0.0, font_px, root_font_px),
                         };
-                        engine.layout_box(&mut node.children[ci], &shrink_constraints);
+                        engine.layout_box(&mut children[ci], &shrink_constraints);
                     }
                 }
             }
-        } else if node.children[ci].style.is_inline_level()
-            && has_in_flow_block_children(&node.children[ci])
+        } else if children[ci].style.is_inline_level()
+            && has_in_flow_block_children(&children[ci])
         {
             // Inline element containing block-level children (e.g. <a><strong style="display:block">).
             // Per CSS, this creates an anonymous block formatting context. We approximate by
             // pre-laying the element out as a block container so its children get proper dimensions.
             engine.layout_box(
-                &mut node.children[ci],
+                &mut children[ci],
                 &Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
             );
-        } else if !matches!(node.children[ci].style.float, crate::types::Float::None) {
+        } else if !matches!(children[ci].style.float, crate::types::Float::None) {
             // Float children need to be laid out to get valid dimensions.
             engine.layout_box(
-                &mut node.children[ci],
+                &mut children[ci],
                 &Constraints::new(content_w, content_x, content_y, font_px, root_font_px),
             );
             // Shrink-to-fit for auto-width floats
-            if node.children[ci].style.width.is_auto() {
-                let max_line_w = node.children[ci]
+            if children[ci].style.width.is_auto() {
+                let max_line_w = children[ci]
                     .layout
                     .line_cache
                     .iter()
                     .map(|line| line.width)
                     .fold(0.0_f32, f32::max);
                 let max_content_w =
-                    engine.max_content_width(&node.children[ci], font_px, root_font_px);
+                    engine.max_content_width(&children[ci], font_px, root_font_px);
                 let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
                 if intrinsic_w > 0.0 && intrinsic_w < content_w {
-                    let irb = &node.children[ci];
+                    let irb = &children[ci];
                     let shrink_w = intrinsic_w.ceil()
                         + shrink_to_fit_slop(irb)
                         + irb.layout.resolved_pad_left
@@ -308,7 +309,7 @@ pub fn layout_inline_block(
                         + irb.layout.resolved_margin_left
                         + irb.layout.resolved_margin_right;
                     engine.layout_box(
-                        &mut node.children[ci],
+                        &mut children[ci],
                         &Constraints::new(shrink_w, content_x, content_y, font_px, root_font_px),
                     );
                 }
@@ -352,7 +353,7 @@ pub fn layout_inline_block(
             &mut previous_collapsible_space,
         );
     }
-    for (i, child) in node.children.iter().enumerate() {
+    for (i, child) in node.effective_children().iter().enumerate() {
         if matches!(child.style.display, Display::None) {
             continue;
         }
@@ -498,7 +499,7 @@ pub fn layout_inline_block(
             .map(|v| v == "true")
             .unwrap_or(false);
         let add_placeholder = !is_void
-            && node.children.is_empty()
+            && node.effective_children().is_empty()
             && rbox.content_height.is_none()
             && (is_prose_tag || is_contenteditable);
         if add_placeholder {
@@ -1620,10 +1621,10 @@ fn is_empty_inline_flow_box(node: &WebCore) -> bool {
 fn resolve_path<'a>(root: &'a WebCore, path: &[usize]) -> Option<&'a WebCore> {
     let mut cur = root;
     for &idx in path {
-        if idx >= cur.children.len() {
+        if idx >= cur.effective_children().len() {
             return None;
         }
-        cur = &cur.children[idx];
+        cur = &cur.effective_children()[idx];
     }
     Some(cur)
 }
@@ -1632,10 +1633,10 @@ fn resolve_path<'a>(root: &'a WebCore, path: &[usize]) -> Option<&'a WebCore> {
 fn resolve_path_mut<'a>(root: &'a mut WebCore, path: &[usize]) -> Option<&'a mut WebCore> {
     let mut cur = root;
     for &idx in path {
-        if idx >= cur.children.len() {
+        if idx >= cur.effective_children().len() {
             return None;
         }
-        cur = &mut cur.children[idx];
+        cur = &mut cur.effective_children_mut()[idx];
     }
     Some(cur)
 }
@@ -2385,7 +2386,7 @@ fn collect_items_inner(
         parent_decoration
     };
     if generated_content.is_empty() {
-        for (i, child) in node.children.iter().enumerate() {
+        for (i, child) in node.effective_children().iter().enumerate() {
             collect_items_inner(
                 engine,
                 child,
@@ -3208,11 +3209,12 @@ pub(crate) fn css_family_to_cosmic(raw: &str) -> Family<'_> {
         "monospace" => Family::Monospace,
         "cursive" => Family::Cursive,
         "fantasy" => Family::Fantasy,
-        // ⛔ `system-ui` IS a generic, and `resolve_css_family` — the resolver
-        // the MEASURING path uses — treats it as one. Passing it through as a
-        // face name here meant a box was measured with the sans-serif generic
-        // and painted with whatever cosmic-text made of the literal name.
-        "system-ui" => Family::SansSerif,
+        "system-ui" | "-apple-system" | "BlinkMacSystemFont" => {
+            #[cfg(target_os = "macos")]
+            { Family::Name("System Font") }
+            #[cfg(not(target_os = "macos"))]
+            { Family::SansSerif }
+        }
         "" => Family::SansSerif,
         name => Family::Name(name),
     }
@@ -3336,7 +3338,16 @@ fn resolve_css_family_slow(fs: &cosmic_text::FontSystem, raw: &str) -> ResolvedF
         }
         let lower = name.to_ascii_lowercase();
         match lower.as_str() {
-            "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" | "system-ui" => {
+            "system-ui" | "-apple-system" | "blinkmacsystemfont" => {
+                #[cfg(target_os = "macos")]
+                if AVAILABLE.with(|a| a.borrow().1.contains("system font")) {
+                    chosen = Some(ResolvedFamily::Named(std::rc::Rc::from("System Font")));
+                    break;
+                }
+                chosen = Some(ResolvedFamily::Generic("sans-serif"));
+                break;
+            }
+            "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy" => {
                 let g = match lower.as_str() {
                     "serif" => "serif",
                     "monospace" => "monospace",
@@ -4305,34 +4316,36 @@ fn prelayout_nested_inline_blocks(
     font_px: f32,
     root_font_px: f32,
 ) {
-    for ci in 0..node.children.len() {
-        if matches!(node.children[ci].style.display, Display::None) {
-            clear_layout_subtree(&mut node.children[ci]);
+    let recurse_atomic = matches!(node.style.display, Display::Inline | Display::Contents);
+    let children = node.effective_children_mut();
+    for ci in 0..children.len() {
+        if matches!(children[ci].style.display, Display::None) {
+            clear_layout_subtree(&mut children[ci]);
             continue;
         }
         if matches!(
-            node.children[ci].style.position,
+            children[ci].style.position,
             Position::Absolute | Position::Fixed
         ) {
             continue;
         }
-        if !matches!(node.children[ci].style.float, crate::types::Float::None) {
+        if !matches!(children[ci].style.float, crate::types::Float::None) {
             let child_constraints = match avail_h {
                 Some(h) => Constraints::with_height(content_w, h, 0.0, 0.0, font_px, root_font_px),
                 None => Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
             };
-            engine.layout_box(&mut node.children[ci], &child_constraints);
-            if node.children[ci].style.width.is_auto() {
-                let max_line_w = node.children[ci]
+            engine.layout_box(&mut children[ci], &child_constraints);
+            if children[ci].style.width.is_auto() {
+                let max_line_w = children[ci]
                     .layout
                     .line_cache
                     .iter()
                     .map(|l| l.width)
                     .fold(0.0_f32, f32::max);
                 let max_content_w =
-                    engine.max_content_width(&node.children[ci], font_px, root_font_px);
+                    engine.max_content_width(&children[ci], font_px, root_font_px);
                 let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
-                let fc = &node.children[ci];
+                let fc = &children[ci];
                 let shrink_w = intrinsic_w.ceil()
                     + shrink_to_fit_slop(fc)
                     + fc.layout.resolved_pad_left
@@ -4344,7 +4357,7 @@ fn prelayout_nested_inline_blocks(
                 if shrink_w > 0.0
                     && (shrink_w < content_w
                         || matches!(
-                            node.children[ci].style.white_space,
+                            children[ci].style.white_space,
                             WhiteSpace::Nowrap | WhiteSpace::Pre
                         ))
                 {
@@ -4354,39 +4367,39 @@ fn prelayout_nested_inline_blocks(
                         }
                         None => Constraints::new(shrink_w, 0.0, 0.0, font_px, root_font_px),
                     };
-                    engine.layout_box(&mut node.children[ci], &shrink_constraints);
+                    engine.layout_box(&mut children[ci], &shrink_constraints);
                 }
             }
             continue;
         }
         if matches!(
-            node.children[ci].style.display,
+            children[ci].style.display,
             Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
-        ) || is_atomic_inline_replaced(&node.children[ci])
+        ) || is_atomic_inline_replaced(&children[ci])
         {
             // When called from the top-level (block container), direct inline-block
             // children are already handled by the step 0 loop in layout_inline_block().
             // Only lay out here in the recursive case (node is an inline wrapper,
             // e.g. span > a > img where this function was called on the <a>).
-            if matches!(node.style.display, Display::Inline | Display::Contents) {
+            if recurse_atomic {
                 let child_constraints = match avail_h {
                     Some(h) => {
                         Constraints::with_height(content_w, h, 0.0, 0.0, font_px, root_font_px)
                     }
                     None => Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
                 };
-                engine.layout_box(&mut node.children[ci], &child_constraints);
-                if node.children[ci].style.width.is_auto() {
-                    let max_line_w = node.children[ci]
+                engine.layout_box(&mut children[ci], &child_constraints);
+                if children[ci].style.width.is_auto() {
+                    let max_line_w = children[ci]
                         .layout
                         .line_cache
                         .iter()
                         .map(|l| l.width)
                         .fold(0.0_f32, f32::max);
                     let max_content_w =
-                        engine.max_content_width(&node.children[ci], font_px, root_font_px);
+                        engine.max_content_width(&children[ci], font_px, root_font_px);
                     let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
-                    let gc = &node.children[ci];
+                    let gc = &children[ci];
                     let shrink_w = intrinsic_w.ceil()
                         + shrink_to_fit_slop(gc)
                         + gc.layout.resolved_pad_left
@@ -4398,7 +4411,7 @@ fn prelayout_nested_inline_blocks(
                     if shrink_w > 0.0
                         && (shrink_w < content_w
                             || matches!(
-                                node.children[ci].style.white_space,
+                                children[ci].style.white_space,
                                 WhiteSpace::Nowrap | WhiteSpace::Pre
                             ))
                     {
@@ -4413,159 +4426,22 @@ fn prelayout_nested_inline_blocks(
                             ),
                             None => Constraints::new(shrink_w, 0.0, 0.0, font_px, root_font_px),
                         };
-                        engine.layout_box(&mut node.children[ci], &shrink_constraints);
+                        engine.layout_box(&mut children[ci], &shrink_constraints);
                     }
                 }
             }
             continue;
         }
-        // Inline children: recurse to find nested inline-blocks.
-        if matches!(
-            node.children[ci].style.display,
-            Display::Inline | Display::Contents
-        ) {
-            let child_font_px = node.children[ci].style.font_size_px(font_px, root_font_px);
-            // Pre-layout any inline-block grandchildren inside this inline child.
-            for gci in 0..node.children[ci].children.len() {
-                let grandchild_display = node.children[ci].children[gci].style.display;
-                if !matches!(
-                    node.children[ci].children[gci].style.float,
-                    crate::types::Float::None
-                ) {
-                    let child_constraints = match avail_h {
-                        Some(h) => Constraints::with_height(
-                            content_w,
-                            h,
-                            0.0,
-                            0.0,
-                            child_font_px,
-                            root_font_px,
-                        ),
-                        None => Constraints::new(content_w, 0.0, 0.0, child_font_px, root_font_px),
-                    };
-                    engine.layout_box(&mut node.children[ci].children[gci], &child_constraints);
-                    if node.children[ci].children[gci].style.width.is_auto() {
-                        let max_line_w = node.children[ci].children[gci]
-                            .layout
-                            .line_cache
-                            .iter()
-                            .map(|l| l.width)
-                            .fold(0.0_f32, f32::max);
-                        let max_content_w = engine.max_content_width(
-                            &node.children[ci].children[gci],
-                            font_px,
-                            root_font_px,
-                        );
-                        let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
-                        let gc = &node.children[ci].children[gci];
-                        let shrink_w = intrinsic_w.ceil()
-                            + shrink_to_fit_slop(gc)
-                            + gc.layout.resolved_pad_left
-                            + gc.layout.resolved_pad_right
-                            + gc.layout.resolved_border_left
-                            + gc.layout.resolved_border_right
-                            + gc.layout.resolved_margin_left
-                            + gc.layout.resolved_margin_right;
-                        if shrink_w > 0.0 && shrink_w < content_w {
-                            let shrink_constraints = match avail_h {
-                                Some(h) => Constraints::with_height(
-                                    shrink_w,
-                                    h,
-                                    0.0,
-                                    0.0,
-                                    child_font_px,
-                                    root_font_px,
-                                ),
-                                None => Constraints::new(
-                                    shrink_w,
-                                    0.0,
-                                    0.0,
-                                    child_font_px,
-                                    root_font_px,
-                                ),
-                            };
-                            engine.layout_box(
-                                &mut node.children[ci].children[gci],
-                                &shrink_constraints,
-                            );
-                        }
-                    }
-                } else if matches!(
-                    grandchild_display,
-                    Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
-                ) || is_atomic_inline_replaced(&node.children[ci].children[gci])
-                {
-                    let child_constraints = match avail_h {
-                        Some(h) => Constraints::with_height(
-                            content_w,
-                            h,
-                            0.0,
-                            0.0,
-                            child_font_px,
-                            root_font_px,
-                        ),
-                        None => Constraints::new(content_w, 0.0, 0.0, child_font_px, root_font_px),
-                    };
-                    engine.layout_box(&mut node.children[ci].children[gci], &child_constraints);
-                    // Shrink-to-fit for auto-width nested inline-blocks
-                    if node.children[ci].children[gci].style.width.is_auto() {
-                        let max_line_w = node.children[ci].children[gci]
-                            .layout
-                            .line_cache
-                            .iter()
-                            .map(|l| l.width)
-                            .fold(0.0_f32, f32::max);
-                        let max_content_w = engine.max_content_width(
-                            &node.children[ci].children[gci],
-                            font_px,
-                            root_font_px,
-                        );
-                        let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
-                        let gc = &node.children[ci].children[gci];
-                        let shrink_w = intrinsic_w.ceil()
-                            + shrink_to_fit_slop(gc)
-                            + gc.layout.resolved_pad_left
-                            + gc.layout.resolved_pad_right
-                            + gc.layout.resolved_border_left
-                            + gc.layout.resolved_border_right
-                            + gc.layout.resolved_margin_left
-                            + gc.layout.resolved_margin_right;
-                        if shrink_w < content_w {
-                            let shrink_constraints = match avail_h {
-                                Some(h) => Constraints::with_height(
-                                    shrink_w,
-                                    h,
-                                    0.0,
-                                    0.0,
-                                    child_font_px,
-                                    root_font_px,
-                                ),
-                                None => Constraints::new(
-                                    shrink_w,
-                                    0.0,
-                                    0.0,
-                                    child_font_px,
-                                    root_font_px,
-                                ),
-                            };
-                            engine.layout_box(
-                                &mut node.children[ci].children[gci],
-                                &shrink_constraints,
-                            );
-                        }
-                    }
-                } else if matches!(grandchild_display, Display::Inline) {
-                    // One more level: recurse for deeper nesting.
-                    prelayout_nested_inline_blocks(
-                        engine,
-                        &mut node.children[ci].children[gci],
-                        content_w,
-                        avail_h,
-                        child_font_px,
-                        root_font_px,
-                    );
-                }
-            }
+        if matches!(children[ci].style.display, Display::Inline | Display::Contents) {
+            let child_font_px = children[ci].style.font_size_px(font_px, root_font_px);
+            prelayout_nested_inline_blocks(
+                engine,
+                &mut children[ci],
+                content_w,
+                avail_h,
+                child_font_px,
+                root_font_px,
+            );
         }
     }
 }

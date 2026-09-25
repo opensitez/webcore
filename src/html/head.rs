@@ -72,10 +72,13 @@ pub(crate) fn handle_head_tag(
         "style" => {
             parser.fire_hook(tag, &attrs);
             let css = parser.collect_raw_text_until("style");
-            parser.stylesheet.parse_and_add(&normalize_css_text(&css));
+            let media = attrs.get("media").cloned().unwrap_or_default();
+            if crate::css::evaluate_media(&media, 0.0, 0.0) {
+                parser.stylesheet.parse_and_add(&normalize_css_text(&css));
+            }
             parser
                 .document_stylesheets
-                .push(DocumentStylesheet::Inline { css: css.clone() });
+                .push(DocumentStylesheet::Inline { css: css.clone(), media });
             parser.push_head_node("style", attrs, css);
         }
         "title" => {

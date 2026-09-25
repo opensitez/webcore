@@ -38,6 +38,14 @@ pub enum LogicalBorderSlot {
     BlockEnd,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogicalCornerSlot {
+    StartStart,
+    StartEnd,
+    EndStart,
+    EndEnd,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LogicalBorderValue {
     pub slot: LogicalBorderSlot,

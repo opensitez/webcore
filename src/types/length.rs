@@ -62,6 +62,8 @@ pub enum CssLength {
     MinContent,
     MaxContent,
     FitContent,
+    /// CSS Sizing 4 `stretch`: the margin box fills the containing block.
+    Stretch,
     /// `fit-content(<length-percentage>)` — the FUNCTION form, css-sizing-3
     /// §6.1, which is `max(min-content, min(max-content, <argument>))`. It
     /// carries an argument, so it cannot share the `FitContent` keyword's
@@ -223,6 +225,7 @@ impl CssLength {
             CssLength::MinContent
             | CssLength::MaxContent
             | CssLength::FitContent
+            | CssLength::Stretch
             | CssLength::FitContentArg(_) => 0.0,
             CssLength::Zero => 0.0,
             CssLength::None => 0.0,
@@ -262,6 +265,7 @@ impl CssLength {
     pub fn has_percentage(&self) -> bool {
         match self {
             CssLength::Percent(_) => true,
+            CssLength::Stretch => true,
             CssLength::Calc(c) => c[0] != 0.0,
             CssLength::CalcExpr(node) => node.has_percentage(),
             CssLength::Min(vals) | CssLength::Max(vals) => vals.iter().any(|v| v.has_percentage()),

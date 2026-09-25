@@ -1225,7 +1225,7 @@ fn offscreen_paint_damage_is_clipped_before_redraw() {
 /// | scheme | why it is safe |
 /// |---|---|
 /// | static, relative, float, absolute | positioned in the document; translate |
-/// | fixed | NOT translated — its own `fixed_commands` list |
+/// | fixed | viewport replay markers bypass document scroll translation |
 /// | sticky | position IS a function of scroll ⇒ forces a rebuild |
 ///
 /// `fixed` and `sticky` both broke when the list first moved to document

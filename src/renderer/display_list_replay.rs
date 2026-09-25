@@ -17,7 +17,7 @@ use tiny_skia::{
 
 /// Replay a display list onto a pixmap (no text — use replay_with_text for full rendering).
 pub fn replay(list: &DisplayList, pixmap: &mut Pixmap, scale: f32) {
-    replay_commands_inner(&list.commands, pixmap, scale, None, 0.0, 0.0, None, None);
+    replay_commands_inner(&list.commands, pixmap, scale, None, 0.0, 0.0, None, None, None);
 }
 
 /// Replay with text rendering via cosmic_text.
@@ -118,6 +118,40 @@ fn rect_outside_view(rect: Rect, left: f32, top: f32, right: f32, bottom: f32) -
     rect.right() < left || rect.x > right || rect.bottom() < top || rect.y > bottom
 }
 
+fn gradient_stops_with_transparent_hues(
+    stops: &[(Color, f32)],
+    opacity: f32,
+) -> Vec<tiny_skia::GradientStop> {
+    let mut result = Vec::with_capacity(stops.len() + 2);
+    for (index, (color, position)) in stops.iter().enumerate() {
+        let alpha = (color.a as f32 * opacity).clamp(0.0, 255.0) as u8;
+        if color.a == 0 {
+            let before = stops[..index].iter().rev().find(|(c, _)| c.a > 0);
+            let after = stops[index + 1..].iter().find(|(c, _)| c.a > 0);
+            if let Some((neighbor, _)) = before {
+                result.push(tiny_skia::GradientStop::new(
+                    *position,
+                    tiny_skia::Color::from_rgba8(neighbor.r, neighbor.g, neighbor.b, 0),
+                ));
+            }
+            if let Some((neighbor, _)) = after {
+                result.push(tiny_skia::GradientStop::new(
+                    *position,
+                    tiny_skia::Color::from_rgba8(neighbor.r, neighbor.g, neighbor.b, 0),
+                ));
+            }
+            if before.is_some() || after.is_some() {
+                continue;
+            }
+        }
+        result.push(tiny_skia::GradientStop::new(
+            *position,
+            tiny_skia::Color::from_rgba8(color.r, color.g, color.b, alpha),
+        ));
+    }
+    result
+}
+
 fn transformed_bounds_to_viewport(ts: Transform, rect: Rect, scale: f32) -> Option<Rect> {
     if rect.w <= 0.0 || rect.h <= 0.0 {
         return None;
@@ -186,6 +220,7 @@ pub fn replay_with_text(
         0.0,
         None,
         None,
+        None,
     );
 }
 
@@ -207,6 +242,7 @@ pub fn replay_with_scroll(
         Some((font_system, swash_cache)),
         scroll_x,
         scroll_y,
+        None,
         None,
         None,
     );
@@ -233,6 +269,7 @@ pub fn replay_with_scroll_and_transform_overrides(
         scroll_x,
         scroll_y,
         None,
+        None,
         Some(transform_overrides),
     );
 }
@@ -256,6 +293,7 @@ pub fn replay_with_scroll_clip(
         Some((font_system, swash_cache)),
         scroll_x,
         scroll_y,
+        None,
         Some(clip),
         None,
     );
@@ -279,6 +317,7 @@ pub fn replay_with_scroll_clip_and_transform_overrides(
         Some((font_system, swash_cache)),
         scroll_x,
         scroll_y,
+        None,
         Some(clip),
         Some(transform_overrides),
     );
@@ -302,6 +341,7 @@ pub fn replay_commands_with_scroll(
         scroll_y,
         None,
         None,
+        None,
     );
 }
 
@@ -322,6 +362,7 @@ pub fn replay_commands_with_scroll_and_transform_overrides(
         Some((font_system, swash_cache)),
         scroll_x,
         scroll_y,
+        None,
         None,
         Some(transform_overrides),
     );
@@ -345,8 +386,36 @@ pub fn replay_commands_with_scroll_clip_and_transform_overrides(
         Some((font_system, swash_cache)),
         scroll_x,
         scroll_y,
+        None,
         Some(clip),
         Some(transform_overrides),
+    );
+}
+
+/// A tile's raster origin is not the viewport origin. Fixed boxes must follow
+/// the viewport even when ordinary document boxes are rasterized into tiles.
+pub fn replay_tile_with_scroll_and_transform_overrides(
+    list: &DisplayList,
+    pixmap: &mut Pixmap,
+    scale: f32,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    tile_x: f32,
+    tile_y: f32,
+    viewport_x: f32,
+    viewport_y: f32,
+    transform_overrides: Option<&HashMap<u32, [f32; 6]>>,
+) {
+    replay_commands_inner(
+        &list.commands,
+        pixmap,
+        scale,
+        Some((font_system, swash_cache)),
+        tile_x,
+        tile_y,
+        Some((viewport_x, viewport_y)),
+        None,
+        transform_overrides,
     );
 }
 
@@ -364,12 +433,15 @@ fn replay_commands_inner(
     mut text_ctx: Option<(&mut FontSystem, &mut SwashCache)>,
     scroll_x: f32,
     scroll_y: f32,
+    fixed_viewport_scroll: Option<(f32, f32)>,
     dirty_clip: Option<Rect>,
     transform_overrides: Option<&HashMap<u32, [f32; 6]>>,
 ) {
     // Start with scale + scroll translation. Display list is in document
     // coordinates; the scroll offset maps to screen coordinates.
     let mut ts = Transform::from_scale(scale, scale).pre_translate(-scroll_x, -scroll_y);
+    let mut fixed_stack: Vec<(Transform, f32, f32, i32)> = Vec::new();
+    let (mut active_scroll_x, mut active_scroll_y) = (scroll_x, scroll_y);
     let mut transform_stack: Vec<Transform> = Vec::new();
     let mut filter_stack: Vec<Vec<(u8, f32, f32, f32, crate::types::Color)>> = Vec::new();
     let mut clip_stack: Vec<Rect> = Vec::new();
@@ -432,6 +504,34 @@ fn replay_commands_inner(
     let mut skip_clip_depth = 0u32;
 
     for cmd in commands {
+        match cmd {
+            PaintCmd::BeginFixedPosition => {
+                fixed_stack.push((ts, active_scroll_x, active_scroll_y, transform_depth));
+                let (viewport_x, viewport_y) = fixed_viewport_scroll.unwrap_or((scroll_x, scroll_y));
+                active_scroll_x = scroll_x - viewport_x;
+                active_scroll_y = scroll_y - viewport_y;
+                ts = Transform::from_scale(scale, scale)
+                    .pre_translate(-active_scroll_x, -active_scroll_y);
+                transform_depth = 0;
+                continue;
+            }
+            PaintCmd::EndFixedPosition => {
+                if let Some((saved_ts, saved_x, saved_y, saved_depth)) = fixed_stack.pop() {
+                    ts = saved_ts;
+                    active_scroll_x = saved_x;
+                    active_scroll_y = saved_y;
+                    transform_depth = saved_depth;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        let (vis_left, vis_top, vis_right, vis_bot) = (
+            vis_left - (scroll_x - active_scroll_x),
+            vis_top - (scroll_y - active_scroll_y),
+            vis_right - (scroll_x - active_scroll_x),
+            vis_bot - (scroll_y - active_scroll_y),
+        );
         if skip_clip_depth > 0 {
             match cmd {
                 PaintCmd::PushClip { .. } | PaintCmd::PushClipPath { .. } => {
@@ -766,13 +866,13 @@ fn replay_commands_inner(
                 // coordinate space, just like the paint commands it clips.
                 let mut mask = if transform_depth == 0
                     && simple_clip_contains_viewport(
-                        rect, radius, radius_y, pw, ph, scale, scroll_x, scroll_y,
+                        rect, radius, radius_y, pw, ph, scale, active_scroll_x, active_scroll_y,
                     ) {
                     None
                 } else if transform_depth > 0 {
                     build_clip_mask_with_transform(rect, radius, radius_y, pw, ph, ts)
                 } else {
-                    build_clip_mask(rect, radius, radius_y, pw, ph, scale, scroll_x, scroll_y)
+                    build_clip_mask(rect, radius, radius_y, pw, ph, scale, active_scroll_x, active_scroll_y)
                 };
                 if let (Some(m), Some(prev)) =
                     (&mut mask, clip_mask_stack.last().and_then(|x| x.as_ref()))
@@ -804,7 +904,7 @@ fn replay_commands_inner(
                 let mut mask = if transform_depth > 0 {
                     build_polygon_clip_mask_with_transform(points, pw, ph, ts)
                 } else {
-                    build_polygon_clip_mask(points, pw, ph, scale, scroll_x, scroll_y)
+                    build_polygon_clip_mask(points, pw, ph, scale, active_scroll_x, active_scroll_y)
                 };
                 if let (Some(m), Some(prev)) =
                     (&mut mask, clip_mask_stack.last().and_then(|x| x.as_ref()))
@@ -931,7 +1031,7 @@ fn replay_commands_inner(
                     }
                 }
                 let mask = build_clip_mask(
-                    rect, &[0.0; 4], &[0.0; 4], pw, ph, scale, scroll_x, scroll_y,
+                    rect, &[0.0; 4], &[0.0; 4], pw, ph, scale, active_scroll_x, active_scroll_y,
                 );
                 target.draw_pixmap(
                     0,
@@ -965,8 +1065,8 @@ fn replay_commands_inner(
                             rect,
                             &data,
                             scale,
-                            scroll_x,
-                            scroll_y,
+                            active_scroll_x,
+                            active_scroll_y,
                         );
                     }
                 }
@@ -1014,7 +1114,8 @@ fn replay_commands_inner(
                     let mut paint = Paint::default();
                     paint.set_color(to_sk_color(&c));
                     fill_inset_box_shadow_shape(
-                        target, *rect, *offset_x, *offset_y, *blur, *spread, &paint, ts, clip_mask,
+                        target, *rect, *offset_x, *offset_y, *blur, *spread, *radii, *radii_y,
+                        &paint, ts, clip_mask,
                     );
                 } else {
                     let sr = Rect::new(
@@ -1033,15 +1134,15 @@ fn replay_commands_inner(
                         if can_use_local_shadow {
                             let shadow_pad = (*blur * 4.0 + 4.0).ceil();
                             let dev_left =
-                                ((sr.x - scroll_x) * scale - shadow_pad).floor().max(0.0) as u32;
+                                ((sr.x - active_scroll_x) * scale - shadow_pad).floor().max(0.0) as u32;
                             let dev_top =
-                                ((sr.y - scroll_y) * scale - shadow_pad).floor().max(0.0) as u32;
-                            let dev_right = ((sr.x + sr.w - scroll_x) * scale + shadow_pad)
+                                ((sr.y - active_scroll_y) * scale - shadow_pad).floor().max(0.0) as u32;
+                            let dev_right = ((sr.x + sr.w - active_scroll_x) * scale + shadow_pad)
                                 .ceil()
                                 .min(pw as f32)
                                 .max(dev_left as f32)
                                 as u32;
-                            let dev_bottom = ((sr.y + sr.h - scroll_y) * scale + shadow_pad)
+                            let dev_bottom = ((sr.y + sr.h - active_scroll_y) * scale + shadow_pad)
                                 .ceil()
                                 .min(ph as f32)
                                 .max(dev_top as f32)
@@ -1055,8 +1156,8 @@ fn replay_commands_inner(
                                 let mut paint = Paint::default();
                                 paint.set_color(to_sk_color(&c));
                                 let local_ts = Transform::from_scale(scale, scale).pre_translate(
-                                    -scroll_x - dev_left as f32 / scale.max(0.001),
-                                    -scroll_y - dev_top as f32 / scale.max(0.001),
+                                    -active_scroll_x - dev_left as f32 / scale.max(0.001),
+                                    -active_scroll_y - dev_top as f32 / scale.max(0.001),
                                 );
                                 let max_r = radii[0].max(radii[1]).max(radii[2]).max(radii[3]);
                                 if max_r > 0.5 {
@@ -1159,6 +1260,7 @@ fn replay_commands_inner(
 
             PaintCmd::BeginStackingContext { .. } => {}
             PaintCmd::EndStackingContext => {}
+            PaintCmd::BeginFixedPosition | PaintCmd::EndFixedPosition => {}
 
             PaintCmd::Gradient {
                 rect,
@@ -1178,10 +1280,7 @@ fn replay_commands_inner(
                 opacity: grad_opacity,
                 blend_mode,
             } => {
-                use tiny_skia::{
-                    GradientStop as SkStop, LinearGradient, Point as SkPoint, RadialGradient,
-                    SpreadMode,
-                };
+                use tiny_skia::{LinearGradient, Point as SkPoint, RadialGradient, SpreadMode};
                 if stops.len() < 2 {
                     continue;
                 }
@@ -1197,16 +1296,7 @@ fn replay_commands_inner(
                     continue;
                 }
 
-                let sk_stops: Vec<SkStop> = stops
-                    .iter()
-                    .map(|(color, pos)| {
-                        let a = ((color.a as f32) * combined_opacity) as u8;
-                        SkStop::new(
-                            *pos,
-                            tiny_skia::Color::from_rgba8(color.r, color.g, color.b, a),
-                        )
-                    })
-                    .collect();
+                let sk_stops = gradient_stops_with_transparent_hues(stops, combined_opacity);
 
                 // The gradient image is the size of the POSITIONING area
                 // (`background-origin`) and is drawn once per tile, so its
@@ -1287,7 +1377,7 @@ fn replay_commands_inner(
                 // would round every internal tile edge as well.
                 let tile_mask = if tiled && max_r > 0.0 {
                     build_clip_mask(
-                        clip, radii, radii_y, mask_w, mask_h, scale, scroll_x, scroll_y,
+                        clip, radii, radii_y, mask_w, mask_h, scale, active_scroll_x, active_scroll_y,
                     )
                 } else {
                     None
@@ -2437,7 +2527,7 @@ fn replay_commands_inner(
                 let bg_clip = if transform_depth > 0 {
                     build_clip_mask_with_transform(clip, radii, radii_y, pw, ph, ts)
                 } else {
-                    build_clip_mask(clip, radii, radii_y, pw, ph, scale, scroll_x, scroll_y)
+                    build_clip_mask(clip, radii, radii_y, pw, ph, scale, active_scroll_x, active_scroll_y)
                 };
                 let bg_clip_ref = bg_clip.as_ref().or(clip_mask);
                 if let Some(img_pixmap) = tiny_skia::PixmapRef::from_bytes(rgba, iw, ih) {
@@ -3133,7 +3223,23 @@ fn draw_text_cmd(
     if letter_spacing_attr != 0.0 {
         attrs = attrs.letter_spacing(letter_spacing_attr);
     }
-    let text_for_shape = text;
+    // Private-use code points have no portable meaning outside their icon font.
+    // If that named face failed to load, a generic fallback may map the same
+    // code point to an unrelated icon; show a missing-glyph square instead.
+    let missing_icon_font = matches!(
+        crate::layout::inline_layout::css_family_to_cosmic(font_family),
+        cosmic_text::Family::Name(_)
+    ) && matches!(resolved, crate::layout::inline_layout::ResolvedFamily::Generic(_));
+    let fallback_text = if missing_icon_font && text.chars().any(is_private_use_character) {
+        Some(
+            text.chars()
+                .map(|ch| if is_private_use_character(ch) { '\u{25a1}' } else { ch })
+                .collect::<String>(),
+        )
+    } else {
+        None
+    };
+    let text_for_shape = fallback_text.as_deref().unwrap_or(text);
     let phys_x = x * sc;
     let phys_y = y * sc;
     let ct_color = CTextColor::rgba(color.r, color.g, color.b, color.a);
@@ -3354,6 +3460,10 @@ fn draw_text_cmd(
             .unwrap_or(phys_y + phys_px * 0.4);
         draw_deco_line(pixmap, phys_x, line_w, sy, decoration.style);
     }
+}
+
+fn is_private_use_character(ch: char) -> bool {
+    matches!(ch as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3608,6 +3718,8 @@ fn fill_inset_box_shadow_shape(
     offset_y: f32,
     blur: f32,
     spread: f32,
+    radii: [f32; 4],
+    radii_y: [f32; 4],
     paint: &Paint,
     transform: Transform,
     clip_mask: Option<&tiny_skia::Mask>,
@@ -3643,6 +3755,40 @@ fn fill_inset_box_shadow_shape(
     let right = ((-offset_x).max(0.0) + spread + blur_extent)
         .max(0.0)
         .min(rect.w);
+
+    if radii.iter().chain(radii_y.iter()).any(|&radius| radius > 0.0) {
+        if let Some(outer) = rounded_rect_path_corners_xy(
+            rect.x, rect.y, rect.w, rect.h, radii, radii_y,
+        ) {
+            let mut ring = PathBuilder::new();
+            ring.push_path(&outer);
+            let inner_w = rect.w - left - right;
+            let inner_h = rect.h - top - bottom;
+            if inner_w > 0.0 && inner_h > 0.0 {
+                let inner_radii = [
+                    (radii[0] - left).max(0.0),
+                    (radii[1] - right).max(0.0),
+                    (radii[2] - right).max(0.0),
+                    (radii[3] - left).max(0.0),
+                ];
+                let inner_radii_y = [
+                    (radii_y[0] - top).max(0.0),
+                    (radii_y[1] - top).max(0.0),
+                    (radii_y[2] - bottom).max(0.0),
+                    (radii_y[3] - bottom).max(0.0),
+                ];
+                if let Some(inner) = rounded_rect_path_corners_xy(
+                    rect.x + left, rect.y + top, inner_w, inner_h, inner_radii, inner_radii_y,
+                ) {
+                    ring.push_path(&inner);
+                }
+            }
+            if let Some(path) = ring.finish() {
+                target.fill_path(&path, paint, FillRule::EvenOdd, transform, clip_mask);
+                return;
+            }
+        }
+    }
 
     fill_piece(
         target, rect.x, rect.y, rect.w, top, paint, transform, clip_mask,

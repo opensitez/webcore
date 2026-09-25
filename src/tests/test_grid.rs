@@ -39,6 +39,116 @@ fn test_grid_auto_tracks() {
 }
 
 #[test]
+fn auto_track_respects_grid_item_min_width_zero() {
+    let doc = parse_and_layout(
+        "<div id='grid' style='display:grid;width:200px'>\
+           <div id='item' style='min-width:0'>SuperLongUnbreakableTextThatExceedsTheGridTrack</div>\
+         </div>",
+        400.0,
+    );
+    let grid = find_by_id(&doc.root, "grid").unwrap();
+    let item = find_by_id(&doc.root, "item").unwrap();
+    assert!((grid.layout.border_rect.w - 200.0).abs() < 1.0);
+    assert!((item.layout.border_rect.w - 200.0).abs() < 1.0, "{:?}", item.layout.border_rect);
+}
+
+#[test]
+fn two_part_grid_area_places_items_on_the_same_row() {
+    let doc = parse_and_layout(
+        "<div style='display:grid;grid-template-columns:128px;width:128px'>\
+           <div id='first' style='grid-area:1 / -1;width:128px;height:128px'></div>\
+           <div id='second' style='grid-area:1 / -1;width:128px;height:128px'></div>\
+         </div>",
+        400.0,
+    );
+    let first = find_by_id(&doc.root, "first").unwrap();
+    let second = find_by_id(&doc.root, "second").unwrap();
+    assert!((first.layout.border_rect.y - second.layout.border_rect.y).abs() < 1.0);
+    assert!((first.layout.border_rect.x - second.layout.border_rect.x).abs() < 1.0);
+}
+
+#[test]
+fn fit_content_grid_container_shrinks_to_its_track() {
+    let doc = parse_and_layout(
+        "<div style='width:500px;display:flex;flex-direction:column;align-items:center'>\
+           <div id='grid' style='display:grid;width:fit-content;grid-template-columns:128px'>\
+             <div style='grid-area:1 / -1;width:128px;height:128px'></div>\
+             <div style='grid-area:1 / -1;width:128px;height:128px'></div>\
+           </div></div>",
+        600.0,
+    );
+    let grid = find_by_id(&doc.root, "grid").unwrap();
+    assert!((grid.layout.border_rect.w - 128.0).abs() < 1.0, "{:?}", grid.layout.border_rect);
+    assert!((grid.layout.border_rect.x - 194.0).abs() < 1.0, "{:?}", grid.layout.border_rect);
+}
+
+#[test]
+fn block_level_flex_container_auto_margins_center_max_width() {
+    let doc = parse_and_layout(
+        "<div id='outer' style='width:1280px'>\
+           <div id='inner' style='display:flex;max-width:1128px;margin-inline:auto;height:52px'></div>\
+         </div>",
+        1280.0,
+    );
+    let outer = find_by_id(&doc.root, "outer").unwrap();
+    let inner = find_by_id(&doc.root, "inner").unwrap();
+    assert!((inner.layout.border_rect.w - 1128.0).abs() < 1.0);
+    assert!((inner.layout.border_rect.x - outer.layout.content_rect.x - 76.0).abs() < 1.0);
+}
+
+#[test]
+fn stretched_nested_grid_relayouts_its_children_at_final_width() {
+    let doc = parse_and_layout(
+        "<style>*{margin:0;padding:0}</style>\
+         <div style='display:grid;width:216px'>\
+           <div id='inner' style='display:grid'>\
+             <div id='cover' style='grid-area:1 / -1;display:grid;height:56px;min-width:0'></div>\
+             <div style='grid-area:1 / -1;display:grid;width:fit-content;margin:32px 0 0 16px'>\
+               <div style='width:80px;height:80px'></div>\
+             </div>\
+           </div>\
+         </div>",
+        400.0,
+    );
+    let inner = find_by_id(&doc.root, "inner").unwrap();
+    let cover = find_by_id(&doc.root, "cover").unwrap();
+    assert!((inner.layout.border_rect.w - 216.0).abs() < 1.0);
+    assert!((cover.layout.border_rect.w - 216.0).abs() < 1.0, "{:?}", cover.layout.border_rect);
+}
+
+#[test]
+fn percentage_height_grid_item_uses_final_row_height() {
+    let doc = parse_and_layout(
+        "<style>*{margin:0;padding:0}</style>\
+         <div style='display:grid;width:216px;height:56px'>\
+           <div id='cover' style='height:100%;background:#edf3f8'></div>\
+         </div>",
+        400.0,
+    );
+    let cover = find_by_id(&doc.root, "cover").unwrap();
+    assert!((cover.layout.border_rect.h - 56.0).abs() < 1.0, "{:?}", cover.layout.border_rect);
+}
+
+#[test]
+fn justify_self_end_auto_width_grid_item_uses_content_width() {
+    let doc = parse_and_layout(
+        "<style>
+          #grid { display:grid; grid-template-columns:1fr 1fr 1fr; width:600px; }
+          #right { grid-column:3; justify-self:end; }
+          #right ul { display:flex; margin:0; padding:0; list-style:none; }
+        </style>
+        <div id=grid><div id=right><ul><li>Europe</li><li>Pro</li></ul></div></div>",
+        600.0,
+    );
+    let grid = find_by_id(&doc.root, "grid").unwrap();
+    let right = find_by_id(&doc.root, "right").unwrap();
+    assert!(right.layout.border_rect.w < 200.0);
+    assert!(
+        (right.layout.border_rect.right() - grid.layout.content_rect.right()).abs() < 1.0
+    );
+}
+
+#[test]
 fn unresolved_var_in_calc_does_not_poison_previous_declaration() {
     let html = r#"
         <style>#box { width: 120px; }</style>
@@ -1586,6 +1696,61 @@ fn grid_min_content_track_uses_the_min_content_contribution() {
         "max-content track = 60, and §12.7 stretches only `auto` tracks, got {}",
         w("b2")
     );
+}
+
+#[test]
+fn absolute_grid_item_uses_its_named_area_as_containing_block() {
+    let doc = parse_and_layout(
+        r#"<style>
+          * { margin: 0; padding: 0 }
+          .grid { position: relative; display: grid; width: 300px;
+                  grid-template-columns: 100px 100px 100px;
+                  grid-template-rows: 100px 50px;
+                  grid-template-areas: 'left logo right' 'nav nav nav' }
+          #logo { position: absolute; grid-area: logo; top: 50%; left: 50%;
+                  width: 20px; height: 20px }
+        </style><div class="grid"><div id="logo"></div><div style="grid-area:nav"></div></div>"#,
+        600.0,
+    );
+    let logo = find_by_id(&doc.root, "logo").unwrap();
+    assert!((logo.layout.border_rect.x - 150.0).abs() < 0.5);
+    assert!((logo.layout.border_rect.y - 50.0).abs() < 0.5);
+}
+
+#[test]
+fn grid_item_auto_inline_margins_center_fixed_width_child() {
+    let doc = parse_and_layout(
+        r#"<style>
+          * { margin: 0; padding: 0 }
+          .grid { display: grid; width: 1280px }
+          #child { width: 1128px; margin-inline: auto; height: 10px }
+        </style><div class="grid"><div id="child"></div></div>"#,
+        1280.0,
+    );
+    let child = find_by_id(&doc.root, "child").unwrap();
+    assert!((child.layout.border_rect.x - 76.0).abs() < 0.5);
+}
+
+#[test]
+fn repeated_named_grid_lines_place_three_columns() {
+    let doc = parse_and_layout(
+        r#"<style>
+          * { margin: 0; padding: 0 }
+          .grid { display: grid; width: 1128px; column-gap: 24px;
+                  grid-template-columns: repeat(24, [col-start] 1fr [col-end]) }
+          #left { grid-column: 1 / col-end 5 }
+          #center { grid-column: 6 / col-end 17 }
+          #right { grid-column: 18 / -1 }
+        </style><div class="grid"><aside id="left"></aside><section id="center"></section><aside id="right"></aside></div>"#,
+        1280.0,
+    );
+    let rect = |id: &str| find_by_id(&doc.root, id).unwrap().layout.border_rect;
+    assert!((rect("left").x - 0.0).abs() < 0.5);
+    assert!((rect("left").w - 216.0).abs() < 0.5);
+    assert!((rect("center").x - 240.0).abs() < 0.5);
+    assert!((rect("center").w - 552.0).abs() < 0.5);
+    assert!((rect("right").x - 816.0).abs() < 0.5);
+    assert!((rect("right").w - 312.0).abs() < 0.5);
 }
 
 /// **§12.6/§12.7 — a `max-content` track freezes at its growth limit; only

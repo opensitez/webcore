@@ -245,10 +245,16 @@ impl Document {
         self.stylesheet = crate::css::ua_stylesheet();
         for (idx, ds) in self.document_stylesheets.iter().enumerate() {
             match ds {
-                DocumentStylesheet::Inline { css } => {
+                DocumentStylesheet::Inline { css, media } => {
+                    if !crate::css::evaluate_media(media, self.viewport_w, self.viewport_h) {
+                        continue;
+                    }
                     self.stylesheet.parse_and_add_with_base(css, &self.base_url);
                 }
-                DocumentStylesheet::Linked { href, .. } => {
+                DocumentStylesheet::Linked { href, media } => {
+                    if !crate::css::evaluate_media(media, self.viewport_w, self.viewport_h) {
+                        continue;
+                    }
                     let abs = crate::html::resolve_url(href, &self.base_url);
                     if let Some(sheet) = self
                         .loaded_stylesheet_slots
@@ -260,6 +266,19 @@ impl Document {
                 }
             }
         }
+    }
+
+    pub(crate) fn reevaluate_stylesheet_media(&mut self, viewport_w: f32, viewport_h: f32) {
+        self.viewport_w = viewport_w;
+        self.viewport_h = viewport_h;
+        if self.preserve_stylesheet_document_order {
+            self.rebuild_author_stylesheet_from_document_order();
+            self.stylesheet
+                .resolve_variables_for_viewport(viewport_w, viewport_h);
+            self.stylesheet.rebuild_index();
+        }
+        self.refresh_shadow_linked_stylesheets();
+        self.style_dirty = true;
     }
 
     pub(crate) fn refresh_shadow_linked_stylesheets(&mut self) -> bool {
@@ -276,6 +295,8 @@ impl Document {
             node: &mut WebCore,
             base_url: &str,
             loaded_linked: &HashMap<String, crate::css::Stylesheet>,
+            viewport_w: f32,
+            viewport_h: f32,
         ) -> bool {
             let mut changed = false;
             if let Some(sr) = node.shadow_root.as_mut() {
@@ -286,10 +307,16 @@ impl Document {
                     let mut stylesheet = crate::css::ua_stylesheet();
                     for ds in &sr.document_stylesheets {
                         match ds {
-                            DocumentStylesheet::Inline { css } => {
+                            DocumentStylesheet::Inline { css, media } => {
+                                if !crate::css::evaluate_media(media, viewport_w, viewport_h) {
+                                    continue;
+                                }
                                 stylesheet.parse_and_add_author(css);
                             }
-                            DocumentStylesheet::Linked { href, .. } => {
+                            DocumentStylesheet::Linked { href, media } => {
+                                if !crate::css::evaluate_media(media, viewport_w, viewport_h) {
+                                    continue;
+                                }
                                 let abs = crate::html::resolve_url(href, base_url);
                                 if let Some(sheet) =
                                     loaded_linked.get(&abs).or_else(|| loaded_linked.get(href))
@@ -310,18 +337,24 @@ impl Document {
                     sr.stylesheet = stylesheet;
                 }
                 for child in &mut sr.children {
-                    changed |= refresh_node(child, base_url, loaded_linked);
+                    changed |= refresh_node(child, base_url, loaded_linked, viewport_w, viewport_h);
                 }
             }
             for child in &mut node.children {
-                changed |= refresh_node(child, base_url, loaded_linked);
+                changed |= refresh_node(child, base_url, loaded_linked, viewport_w, viewport_h);
             }
             changed
         }
 
         let base_url = self.base_url.clone();
         let loaded_linked = &self.loaded_linked_stylesheets;
-        refresh_node(&mut self.root, &base_url, loaded_linked)
+        refresh_node(
+            &mut self.root,
+            &base_url,
+            loaded_linked,
+            self.viewport_w,
+            self.viewport_h,
+        )
     }
 
     /// Poll for images that arrived from background fetch threads.
@@ -1154,6 +1187,31 @@ mod tests {
     }
 
     #[test]
+    fn document_order_excludes_nonmatching_linked_media() {
+        let mut doc = Document::new();
+        doc.viewport_w = 800.0;
+        doc.viewport_h = 600.0;
+        doc.document_stylesheets = vec![
+            DocumentStylesheet::Linked {
+                href: "screen.css".into(),
+                media: "screen".into(),
+            },
+            DocumentStylesheet::Linked {
+                href: "print.css".into(),
+                media: "print".into(),
+            },
+        ];
+        doc.loaded_stylesheet_slots
+            .insert(0, stylesheet_with_color(".screen-only", "red"));
+        doc.loaded_stylesheet_slots
+            .insert(1, stylesheet_with_color(".print-only", "blue"));
+        doc.rebuild_author_stylesheet_from_document_order();
+        assert!(doc.stylesheet.rules.iter().any(|r| r.declarations.get("color").is_some_and(|v| v == "red")));
+        assert!(!doc.stylesheet.rules.iter().any(|r| r.declarations.get("color").is_some_and(|v| v == "blue")));
+        assert!(doc.loaded_stylesheet_slots.contains_key(&1));
+    }
+
+    #[test]
     fn pending_stylesheet_poll_respects_the_document_order_budget() {
         let mut doc = Document::new();
         doc.preserve_stylesheet_document_order = true;
@@ -1186,6 +1244,24 @@ mod tests {
     }
 
     #[test]
+    fn inline_stylesheet_media_tracks_viewport_when_rebuilt() {
+        let mut doc = Document::new();
+        doc.document_stylesheets
+            .push(crate::types::DocumentStylesheet::Inline {
+                css: ".wide-only { color: red }".to_string(),
+                media: "(min-width: 600px)".to_string(),
+            });
+        doc.viewport_w = 800.0;
+        doc.viewport_h = 600.0;
+        doc.rebuild_author_stylesheet_from_document_order();
+        let wide_rules = doc.stylesheet.rules.len();
+
+        doc.viewport_w = 400.0;
+        doc.rebuild_author_stylesheet_from_document_order();
+        assert_eq!(doc.stylesheet.rules.len() + 1, wide_rules);
+    }
+
+    #[test]
     fn pending_stylesheet_poll_preserves_document_order_not_arrival_order() {
         let mut doc = Document::new();
         doc.preserve_stylesheet_document_order = true;
@@ -1194,6 +1270,7 @@ mod tests {
         doc.document_stylesheets
             .push(crate::types::DocumentStylesheet::Inline {
                 css: ".target { color: rgb(10, 0, 0) }".to_string(),
+                media: String::new(),
             });
         doc.document_stylesheets
             .push(crate::types::DocumentStylesheet::Linked {
@@ -1203,6 +1280,7 @@ mod tests {
         doc.document_stylesheets
             .push(crate::types::DocumentStylesheet::Inline {
                 css: ".target { color: rgb(20, 0, 0) }".to_string(),
+                media: String::new(),
             });
         doc.document_stylesheets
             .push(crate::types::DocumentStylesheet::Linked {

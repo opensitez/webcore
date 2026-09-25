@@ -13,6 +13,14 @@ pub struct Platform {
 }
 
 impl Platform {
+    /// Save the last frame presented by this browser window without drawing
+    /// another frame. Useful when a repaint would hide a stale-surface bug.
+    pub fn save_presented_png(&self, path: &str) -> Result<(u32, u32), String> {
+        let pixmap = self.pixmap.as_ref().ok_or("no frame has been presented")?;
+        pixmap.save_png(path).map_err(|error| error.to_string())?;
+        Ok((pixmap.width(), pixmap.height()))
+    }
+
     pub fn new_windowed(window: Arc<Window>) -> Self {
         let context = Context::new(window.clone()).expect("Failed to create softbuffer context");
         let surface = Surface::new(&context, window.clone()).expect("Failed to create surface");

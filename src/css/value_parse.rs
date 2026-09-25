@@ -30,6 +30,9 @@ pub fn parse_length(v: &str) -> CssLength {
     if v == "fit-content" {
         return CssLength::FitContent;
     }
+    if matches!(v, "stretch" | "-webkit-fill-available" | "-moz-available") {
+        return CssLength::Stretch;
+    }
     // css-sizing-3 §6.1 — the function form carries the size to clamp to.
     if let Some(arg) = v
         .strip_prefix("fit-content(")

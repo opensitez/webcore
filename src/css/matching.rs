@@ -222,7 +222,7 @@ pub fn matches_selector_with_ancestors(
                             scope_root_id: ctx.scope_root_id,
                             target_id: ctx.target_id,
                             document_url: ctx.document_url,
-                            prev_siblings: &[],
+                            prev_siblings: &anc.prev_siblings,
                             next_siblings: &[],
                             next_sibling_nodes: &[],
                         };

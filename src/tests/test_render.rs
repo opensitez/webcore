@@ -2985,11 +2985,8 @@ fn flex_text_boundary_preserves_separator_space_before_icon() {
     );
 }
 
-/// **The measuring and painting font resolvers must agree on generic family
-/// names.** Sizing goes through `resolve_css_family`, painting through the
-/// cheaper `css_family_to_cosmic`. They disagreed about `system-ui`: the first
-/// maps it to the sans-serif generic, the second passed it through as a face
-/// NAME, so a box was measured with one font and painted with another.
+/// **The measuring and painting font resolvers must agree on family names.**
+/// Both paths must select the same installed face for platform font keywords.
 #[test]
 fn the_two_font_resolvers_agree_on_generic_families() {
     use cosmic_text::Family;
@@ -3004,6 +3001,7 @@ fn the_two_font_resolvers_agree_on_generic_families() {
         "cursive",
         "fantasy",
         "system-ui, sans-serif",
+        "-apple-system, sans-serif",
     ] {
         let painted = crate::layout::inline_layout::css_family_to_cosmic(stack);
         let resolved = crate::layout::inline_layout::resolve_css_family(fs, stack);

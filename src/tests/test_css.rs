@@ -11,6 +11,22 @@ use crate::renderer::display_list::PaintCmd;
 use crate::renderer::display_list_builder::build_display_list;
 use crate::types::*;
 
+#[test]
+fn desktop_media_unset_clears_logical_block_start_margin() {
+    let doc = parse_and_layout(
+        r#"<style>
+          .item { margin-block-start: 6px; font-size: 32px }
+          @media only screen and (min-width: 63.75rem) {
+            .item { margin-block-start: unset; font-size: 40px }
+          }
+        </style><div class="item" id="item">Text</div>"#,
+        1280.0,
+    );
+    let item = crate::tests::test_grid::find_by_id(&doc.root, "item").unwrap();
+    assert_eq!(item.style.margin_top, CssLength::Zero);
+    assert_eq!(item.style.font_size, CssLength::Px(40.0));
+}
+
 fn build_display_texts(html: &str) -> Vec<String> {
     let doc = parse_html(html);
     let mut frame = EngineFrame::new(doc, 800.0, 600.0);
@@ -4091,6 +4107,31 @@ fn compound_ancestor_descendant_rule_resolves_inherited_custom_width() {
         "descendant rule should resolve inherited --img-width against the wrapper; got {}",
         pic.layout.content_rect.w
     );
+}
+
+#[test]
+fn percentage_width_image_does_not_expand_flex_column_to_natural_width() {
+    let doc = parse_and_layout(
+        "<style>
+           #row { display: flex; width: 900px; }
+           #main { flex: 1; }
+           #side { width: 300px; flex-shrink: 0; }
+           #main a { display: inline-block; width: 100%; }
+           #main img { width: 100%; height: auto; }
+         </style>
+         <div id=row><div id=main><a><picture><img id=pic width=979 height=653></picture></a></div><div id=side>Side</div></div>",
+        900.0,
+    );
+    let find = |id| {
+        find_box(&doc.root, &|b| b.attributes.get("id").map(String::as_str) == Some(id))
+            .unwrap()
+    };
+    assert!((find("main").layout.border_rect.w - 600.0).abs() < 1.0);
+    assert!(
+        (find("side").layout.border_rect.x - find("row").layout.border_rect.x - 600.0).abs()
+            < 1.0
+    );
+    assert!((find("pic").layout.border_rect.w - 600.0).abs() < 1.0);
 }
 
 #[test]
@@ -11375,6 +11416,20 @@ fn prefers_color_scheme_uses_engine_preference() {
         1280.0,
         900.0
     ));
+}
+
+#[test]
+fn light_dark_color_follows_element_color_scheme_in_cascade() {
+    let mut frame = crate::frame::EngineFrame::empty(800.0, 600.0);
+    frame.load_html(
+        "<style>#target { color-scheme: dark; color: light-dark(white, black); }</style><p id='target'>Text</p>",
+    );
+    frame.update_frame();
+    let target = find_box(&frame.doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "target")
+    })
+    .expect("target element");
+    assert_eq!(target.style.color, crate::types::Color::rgb(0, 0, 0));
 }
 
 #[test]

@@ -252,6 +252,31 @@ pub fn layout_flex(
         };
         content_w = content_w.max(min_w).min(max_w);
     }
+    let mut resolved_box = *rbox;
+    if node.style.display == Display::Flex
+        && matches!(node.style.float, Float::None)
+        && !c.force_independent_formatting_context
+        && c.forced_width.is_none()
+    {
+        let left_auto = node.style.margin_left.is_auto();
+        let right_auto = node.style.margin_right.is_auto();
+        if left_auto || right_auto {
+            let border_w = content_w + rbox.padding_left + rbox.padding_right
+                + rbox.border_left + rbox.border_right;
+            let free = (containing_w - border_w
+                - if left_auto { 0.0 } else { rbox.margin_left }
+                - if right_auto { 0.0 } else { rbox.margin_right }).max(0.0);
+            if left_auto && right_auto {
+                resolved_box.margin_left = (free / 2.0).floor();
+                resolved_box.margin_right = free - resolved_box.margin_left;
+            } else if left_auto {
+                resolved_box.margin_left = free;
+            } else {
+                resolved_box.margin_right = free;
+            }
+        }
+    }
+    let rbox = &resolved_box;
     let shrink_to_fit = node.style.display == Display::InlineFlex && rbox.content_width.is_none();
     let content_x = x + rbox.margin_left + rbox.border_left + rbox.padding_left;
     let content_y = y + rbox.margin_top + rbox.border_top + rbox.padding_top;

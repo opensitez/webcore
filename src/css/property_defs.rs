@@ -850,6 +850,38 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             copy: copy_border_bottom_right_radius,
             longhands: &[],
         },
+        BorderStartStartRadius => &PropertyDef {
+            id: BorderStartStartRadius,
+            name: "border-start-start-radius",
+            inherited: false,
+            apply: apply_border_start_start_radius,
+            copy: copy_noop,
+            longhands: &[],
+        },
+        BorderStartEndRadius => &PropertyDef {
+            id: BorderStartEndRadius,
+            name: "border-start-end-radius",
+            inherited: false,
+            apply: apply_border_start_end_radius,
+            copy: copy_noop,
+            longhands: &[],
+        },
+        BorderEndStartRadius => &PropertyDef {
+            id: BorderEndStartRadius,
+            name: "border-end-start-radius",
+            inherited: false,
+            apply: apply_border_end_start_radius,
+            copy: copy_noop,
+            longhands: &[],
+        },
+        BorderEndEndRadius => &PropertyDef {
+            id: BorderEndEndRadius,
+            name: "border-end-end-radius",
+            inherited: false,
+            apply: apply_border_end_end_radius,
+            copy: copy_noop,
+            longhands: &[],
+        },
 
         BorderImage => &PropertyDef {
             id: BorderImage,
@@ -4124,6 +4156,22 @@ fn apply_border_bottom_right_radius(s: &mut ComputedStyle, v: &str) {
     s.border_bottom_right_radius = x;
     s.border_bottom_right_radius_y = y;
 }
+fn note_logical_corner(s: &mut ComputedStyle, slot: LogicalCornerSlot, v: &str) {
+    let (x, y) = parse_radius_pair(v);
+    s.rare_mut().logical_corners.push((slot, x, y));
+}
+fn apply_border_start_start_radius(s: &mut ComputedStyle, v: &str) {
+    note_logical_corner(s, LogicalCornerSlot::StartStart, v);
+}
+fn apply_border_start_end_radius(s: &mut ComputedStyle, v: &str) {
+    note_logical_corner(s, LogicalCornerSlot::StartEnd, v);
+}
+fn apply_border_end_start_radius(s: &mut ComputedStyle, v: &str) {
+    note_logical_corner(s, LogicalCornerSlot::EndStart, v);
+}
+fn apply_border_end_end_radius(s: &mut ComputedStyle, v: &str) {
+    note_logical_corner(s, LogicalCornerSlot::EndEnd, v);
+}
 
 fn copy_border_top_left_radius(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.border_top_left_radius = s.border_top_left_radius.clone();
@@ -5163,22 +5211,33 @@ fn apply_grid_row_end(s: &mut ComputedStyle, v: &str) {
 }
 fn apply_grid_area(s: &mut ComputedStyle, v: &str) {
     let parts: Vec<&str> = v.splitn(4, '/').collect();
-    if parts.len() == 4 {
-        let rs = super::parse_grid_line(parts[0].trim());
-        let cs = super::parse_grid_line(parts[1].trim());
-        let re = super::parse_grid_line(parts[2].trim());
-        let ce = super::parse_grid_line(parts[3].trim());
-        if rs != 0 || cs != 0 || re != 0 || ce != 0 {
-            s.grid_row_start = rs;
-            s.grid_column_start = cs;
-            s.grid_row_end = re;
-            s.grid_column_end = ce;
-        } else {
-            s.grid_area = v.to_string();
-        }
-    } else {
+    if parts.len() == 1 && super::parse_grid_line_named(parts[0].trim()).1 == v.trim() {
         s.grid_area = v.to_string();
+        return;
     }
+
+    let (rs, rs_name) = super::parse_grid_line_named(parts[0].trim());
+    let (cs, cs_name) = parts
+        .get(1)
+        .map(|part| super::parse_grid_line_named(part.trim()))
+        .unwrap_or_else(|| (0, rs_name.clone()));
+    let (re, re_name) = parts
+        .get(2)
+        .map(|part| super::parse_grid_line_named(part.trim()))
+        .unwrap_or_else(|| (0, rs_name.clone()));
+    let (ce, ce_name) = parts
+        .get(3)
+        .map(|part| super::parse_grid_line_named(part.trim()))
+        .unwrap_or_else(|| (0, cs_name.clone()));
+    s.grid_area.clear();
+    s.grid_row_start = rs;
+    s.grid_row_start_name = rs_name;
+    s.grid_column_start = cs;
+    s.grid_column_start_name = cs_name;
+    s.grid_row_end = re;
+    s.grid_row_end_name = re_name;
+    s.grid_column_end = ce;
+    s.grid_column_end_name = ce_name;
 }
 fn apply_grid_template(s: &mut ComputedStyle, v: &str) {
     if v == "none" {

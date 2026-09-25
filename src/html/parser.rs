@@ -718,14 +718,17 @@ impl HtmlParser {
                         // and a serialize/reparse round-trip rewrote the page's
                         // own stylesheet.
                         let css = self.collect_raw_text_until("style");
+                        let media = attrs.get("media").cloned().unwrap_or_default();
                         let cur_parent = stack
                             .last()
                             .map(|f| f.parent_tag.as_str())
                             .unwrap_or(parent_tag);
                         if cur_parent != "template" {
-                            self.stylesheet.parse_and_add(&normalize_css_text(&css));
+                            if crate::css::evaluate_media(&media, 0.0, 0.0) {
+                                self.stylesheet.parse_and_add(&normalize_css_text(&css));
+                            }
                             self.document_stylesheets
-                                .push(DocumentStylesheet::Inline { css: css.clone() });
+                                .push(DocumentStylesheet::Inline { css: css.clone(), media });
                         }
                         let mut style_node = self.new_box("style");
                         style_node.text = css.clone();
@@ -997,9 +1000,12 @@ impl HtmlParser {
         }
         if tag == "style" {
             let css = self.collect_raw_text_until("style");
-            self.stylesheet.parse_and_add(&normalize_css_text(&css));
+            let media = attrs.get("media").cloned().unwrap_or_default();
+            if crate::css::evaluate_media(&media, 0.0, 0.0) {
+                self.stylesheet.parse_and_add(&normalize_css_text(&css));
+            }
             self.document_stylesheets
-                .push(DocumentStylesheet::Inline { css: css.clone() });
+                .push(DocumentStylesheet::Inline { css: css.clone(), media });
             // The element stays in the tree — see the sibling arm in
             // `parse_children_into`.
             let mut style_node = self.new_box("style");

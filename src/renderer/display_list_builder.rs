@@ -240,33 +240,6 @@ pub fn build_display_list_full_with_font_system(
     let mut list = DisplayList::new();
     build_for_box(root, &mut list, &ctx);
 
-    // Fixed elements: rendered at viewport position (already scroll=0)
-    let fixed_ctx = BuildContext {
-        scroll_x: 0.0,
-        scroll_y: 0.0,
-        sticky_scroll_x: 0.0,
-        sticky_scroll_y: 0.0,
-        sticky_scroll_container: None,
-        sticky_containing_block: None,
-        hovered_id,
-        active_id,
-        visited_hrefs,
-        base_url,
-        clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
-        paint_clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
-        suppress_deferred_z_descendants: false,
-        font_system: ctx.font_system,
-        transform_ctx: ctx.transform_ctx,
-    };
-    let mut fixed_nodes = Vec::new();
-    collect_fixed_elements(root, &mut fixed_nodes);
-    for node in fixed_nodes {
-        // Into a list of its own — see `DisplayList::fixed_commands`.
-        let mut fixed = DisplayList::new();
-        build_for_box(node, &mut fixed, &fixed_ctx);
-        list.fixed_commands.extend(fixed.commands);
-    }
-
     list
 }
 
@@ -351,31 +324,6 @@ pub fn build_display_list_viewport_with_font_system(
     };
     let mut list = DisplayList::new();
     build_for_box(root, &mut list, &ctx);
-
-    let fixed_ctx = BuildContext {
-        scroll_x: 0.0,
-        scroll_y: 0.0,
-        sticky_scroll_x: 0.0,
-        sticky_scroll_y: 0.0,
-        sticky_scroll_container: None,
-        sticky_containing_block: None,
-        hovered_id,
-        active_id,
-        visited_hrefs,
-        base_url,
-        clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
-        paint_clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
-        suppress_deferred_z_descendants: false,
-        font_system: ctx.font_system,
-        transform_ctx: ctx.transform_ctx,
-    };
-    let mut fixed_nodes = Vec::new();
-    collect_fixed_elements(root, &mut fixed_nodes);
-    for node in fixed_nodes {
-        let mut fixed = DisplayList::new();
-        build_for_box(node, &mut fixed, &fixed_ctx);
-        list.fixed_commands.extend(fixed.commands);
-    }
 
     list
 }
@@ -1573,26 +1521,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         ctx.sticky_scroll_container
     };
 
-    let establishes_cb = !matches!(
-        node.style.display,
-        Display::Inline | Display::Contents | Display::None
-    );
-    let cb_rect = if establishes_cb {
-        let mut r = if node.layout.content_rect.w > 0.0 || node.layout.content_rect.h > 0.0 {
-            node.layout.content_rect
-        } else if node.layout.padding_rect.w > 0.0 || node.layout.padding_rect.h > 0.0 {
-            node.layout.padding_rect
-        } else {
-            node.layout.border_rect
-        };
-        if is_sc {
-            r.w = r.w.max(node.layout.scroll_width);
-            r.h = r.h.max(node.layout.scroll_height);
-        }
-        Some(r)
-    } else {
-        ctx.sticky_containing_block
-    };
+    let cb_rect = sticky_containing_block_for_children(node, ctx.sticky_containing_block);
 
     let suppress_z = ctx.suppress_deferred_z_descendants && !stacking;
 
@@ -1621,14 +1550,19 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             let eff_children = node.effective_children();
             let mut negative_z = Vec::new();
             for child in eff_children {
-                collect_explicit_z_descendants(child, &mut negative_z);
+                collect_explicit_z_descendants(
+                    child,
+                    child_ctx.sticky_containing_block,
+                    &mut negative_z,
+                );
             }
-            negative_z.retain(|c| c.style.z_index < 0 && !c.style.z_index_is_auto);
-            negative_z.sort_by_key(|c| c.style.z_index);
+            negative_z.retain(|(c, _)| c.style.z_index < 0 && !c.style.z_index_is_auto);
+            negative_z.sort_by_key(|(c, _)| c.style.z_index);
             let mut z_ctx = child_ctx;
             z_ctx.suppress_deferred_z_descendants = false;
-            for child in negative_z {
-                build_for_box(child, list, &z_ctx);
+            for (child, containing_block) in negative_z {
+                z_ctx.sticky_containing_block = containing_block;
+                build_positioned_box(child, list, &z_ctx);
             }
         }
 
@@ -1892,7 +1826,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
 
         // ── (q) Children: normal flow, then explicit z-index descendants ────
         // Skip ::before/::after (handled as inline text in steps j/l above).
-        // Skip position:fixed (rendered in separate overlay pass).
+            // Fixed boxes are deferred with other positioned descendants.
         {
             let eff_children = node.effective_children();
             let is_renderable = |c: &WebCore| -> bool {
@@ -1912,10 +1846,14 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                     && c.style.position != Position::Fixed
             };
 
-            let mut deferred_z: Vec<&WebCore> = Vec::new();
+            let mut deferred_z = Vec::new();
             if !suppress_z {
                 for child in eff_children {
-                    collect_explicit_z_descendants(child, &mut deferred_z);
+                    collect_explicit_z_descendants(
+                        child,
+                        child_ctx.sticky_containing_block,
+                        &mut deferred_z,
+                    );
                 }
             }
 
@@ -1930,9 +1868,11 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 }
             }
 
-            deferred_z
-                .retain(|c| is_renderable(c) && (c.style.z_index_is_auto || c.style.z_index >= 0));
-            deferred_z.sort_by_key(|c| {
+            deferred_z.retain(|(c, _)| {
+                (is_renderable(c) || c.style.position == Position::Fixed)
+                    && (c.style.z_index_is_auto || c.style.z_index >= 0)
+            });
+            deferred_z.sort_by_key(|(c, _)| {
                 if c.style.z_index_is_auto {
                     0
                 } else {
@@ -1941,8 +1881,9 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             });
             let mut z_ctx = child_ctx;
             z_ctx.suppress_deferred_z_descendants = false;
-            for child in deferred_z {
-                build_for_box(child, list, &z_ctx);
+            for (child, containing_block) in deferred_z {
+                z_ctx.sticky_containing_block = containing_block;
+                build_positioned_box(child, list, &z_ctx);
             }
         }
     }
@@ -4419,16 +4360,28 @@ fn format_list_marker(lst: ListStyleType, index: i32) -> String {
     format!("{}.", crate::css::format_counter_value(index, style))
 }
 
-fn collect_fixed_elements<'a>(node: &'a WebCore, out: &mut Vec<&'a WebCore>) {
-    if matches!(node.style.display, Display::None) {
+fn build_positioned_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext<'_>) {
+    if node.style.position != Position::Fixed {
+        build_for_box(node, list, ctx);
         return;
     }
-    if node.style.position == Position::Fixed && node.node_id != 0 {
-        out.push(node);
-    }
-    for child in &node.children {
-        collect_fixed_elements(child, out);
-    }
+    let viewport_w = ctx.transform_ctx.viewport_w;
+    let viewport_h = ctx.transform_ctx.viewport_h;
+    let fixed_ctx = BuildContext {
+        scroll_x: 0.0,
+        scroll_y: 0.0,
+        sticky_scroll_x: 0.0,
+        sticky_scroll_y: 0.0,
+        sticky_scroll_container: None,
+        sticky_containing_block: None,
+        clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
+        paint_clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
+        suppress_deferred_z_descendants: false,
+        ..*ctx
+    };
+    list.push(PaintCmd::BeginFixedPosition);
+    build_for_box(node, list, &fixed_ctx);
+    list.push(PaintCmd::EndFixedPosition);
 }
 
 fn creates_stacking_context(node: &WebCore) -> bool {
@@ -4445,17 +4398,39 @@ fn creates_stacking_context(node: &WebCore) -> bool {
 }
 
 fn is_explicit_z_positioned(node: &WebCore) -> bool {
-    node.style.position != Position::Fixed
-        && (node.style.position == Position::Absolute
-            || (node.style.is_positioned() && !node.style.z_index_is_auto))
+    node.style.position == Position::Fixed
+        || node.style.position == Position::Absolute
+        || (node.style.is_positioned() && !node.style.z_index_is_auto)
 }
 
-fn collect_explicit_z_descendants<'a>(node: &'a WebCore, out: &mut Vec<&'a WebCore>) {
-    if matches!(node.style.display, Display::None) || node.style.position == Position::Fixed {
+fn sticky_containing_block_for_children(node: &WebCore, inherited: Option<Rect>) -> Option<Rect> {
+    if matches!(node.style.display, Display::Inline | Display::Contents | Display::None) {
+        return inherited;
+    }
+    let mut rect = if node.layout.content_rect.w > 0.0 || node.layout.content_rect.h > 0.0 {
+        node.layout.content_rect
+    } else if node.layout.padding_rect.w > 0.0 || node.layout.padding_rect.h > 0.0 {
+        node.layout.padding_rect
+    } else {
+        node.layout.border_rect
+    };
+    if is_scroll_container(&node.style) {
+        rect.w = rect.w.max(node.layout.scroll_width);
+        rect.h = rect.h.max(node.layout.scroll_height);
+    }
+    Some(rect)
+}
+
+fn collect_explicit_z_descendants<'a>(
+    node: &'a WebCore,
+    containing_block: Option<Rect>,
+    out: &mut Vec<(&'a WebCore, Option<Rect>)>,
+) {
+    if matches!(node.style.display, Display::None) {
         return;
     }
     if is_explicit_z_positioned(node) {
-        out.push(node);
+        out.push((node, containing_block));
         return;
     }
     if creates_stacking_context(node) {
@@ -4464,8 +4439,9 @@ fn collect_explicit_z_descendants<'a>(node: &'a WebCore, out: &mut Vec<&'a WebCo
     if node.tag == "::before" || node.tag == "::after" {
         return;
     }
+    let child_containing_block = sticky_containing_block_for_children(node, containing_block);
     for child in node.effective_children() {
-        collect_explicit_z_descendants(child, out);
+        collect_explicit_z_descendants(child, child_containing_block, out);
     }
 }
 

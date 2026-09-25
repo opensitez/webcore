@@ -3,6 +3,25 @@
 use crate::css::{AncestorInfo, AttrOp, Combinator, SelectorPart, parse_selector};
 use crate::types::*;
 
+#[test]
+fn descendant_of_adjacent_sibling_keeps_ancestors_sibling_context() {
+    let doc = crate::html::parse_html(
+        r#"<style>
+            body { margin: 0 }
+            .header + .banner .ad { display:flex; min-height:94px; padding:30px 0 }
+            .header + .other .ad { display:none }
+        </style>
+        <div class="header"></div>
+        <div class="banner"><div id="ad" class="ad"></div></div>"#,
+    );
+    let mut frame = crate::frame::EngineFrame::new(doc, 800.0, 600.0);
+    frame.update_frame();
+    let id = frame.doc.get_element_by_id("ad").unwrap();
+    let ad = frame.doc.find_webcore(id).unwrap();
+    assert_eq!(ad.style.display, Display::Flex);
+    assert!((ad.layout.border_rect.h - 154.0).abs() < 1.0);
+}
+
 // ── Basic Selector Matching ───────────────────────────────────────────────────
 
 #[test]

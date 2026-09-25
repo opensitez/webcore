@@ -8,7 +8,8 @@ use crate::renderer::display_list_builder::{
     build_display_list, build_display_list_full, build_display_list_full_with_font_system,
 };
 use crate::renderer::display_list_replay::{
-    reduce_corner_radii, replay, replay_with_scroll, replay_with_scroll_and_transform_overrides,
+    reduce_corner_radii, replay, replay_tile_with_scroll_and_transform_overrides, replay_with_text,
+    replay_with_scroll, replay_with_scroll_and_transform_overrides,
 };
 use crate::types::{Color, Rect};
 
@@ -1673,6 +1674,135 @@ fn z_indexed_descendant_inside_plain_wrapper_competes_with_siblings() {
 }
 
 #[test]
+fn fixed_backdrop_respects_positioned_z_order_and_viewport_scroll() {
+    let (_, list) = build(
+        r#"<style>
+             body { margin:0; background:white; }
+             #backdrop { position:fixed; z-index:1; inset:0; width:100px; height:100px; background:blue; }
+             #article { position:relative; z-index:2; width:100px; height:60px; background:red; }
+           </style>
+           <main><div id="backdrop"></div><section id="article"></section></main>"#,
+    );
+    let colors: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::FillRect { color, .. } if color.a > 0 => Some((color.r, color.g, color.b)),
+            _ => None,
+        })
+        .collect();
+    let blue = colors.iter().position(|c| *c == (0, 0, 255)).expect("fixed backdrop");
+    let red = colors.iter().position(|c| *c == (255, 0, 0)).expect("article");
+    assert!(blue < red, "fixed backdrop must paint behind higher z-index article");
+
+    let mut fonts = cosmic_text::FontSystem::new();
+    let mut cache = cosmic_text::SwashCache::new();
+    let mut pixmap = tiny_skia::Pixmap::new(100, 100).unwrap();
+    replay_with_scroll(&list, &mut pixmap, 1.0, &mut fonts, &mut cache, 0.0, 40.0);
+    let pixel = |x: usize, y: usize| {
+        let i = (y * 100 + x) * 4;
+        let bytes = pixmap.data();
+        (bytes[i], bytes[i + 1], bytes[i + 2])
+    };
+    assert_eq!(pixel(50, 10), (255, 0, 0));
+    assert_eq!(pixel(50, 80), (0, 0, 255));
+
+    let (_, overlay) = build(
+        r#"<style>
+             body { margin:0; }
+             #article { position:relative; z-index:2; width:100px; height:60px; background:red; }
+             #overlay { position:fixed; z-index:3; inset:0; width:100px; height:100px; background:blue; }
+           </style>
+           <main><section id="article"></section><div id="overlay"></div></main>"#,
+    );
+    let colors: Vec<_> = overlay
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::FillRect { color, .. } if color.a > 0 => Some((color.r, color.g, color.b)),
+            _ => None,
+        })
+        .collect();
+    let blue = colors.iter().position(|c| *c == (0, 0, 255)).expect("fixed overlay");
+    let red = colors.iter().position(|c| *c == (255, 0, 0)).expect("article");
+    assert!(red < blue, "higher z-index fixed overlay must paint above article");
+}
+
+#[test]
+fn fixed_box_rasterizes_at_one_viewport_position_across_tiles() {
+    let mut list = DisplayList::new();
+    let fill = |rect, color| PaintCmd::FillRect {
+        rect,
+        color,
+        radius: [0.0; 4],
+        radius_y: [0.0; 4],
+    };
+    list.push(fill(Rect::new(0.0, 0.0, 128.0, 256.0), Color::rgb(0, 0, 255)));
+    list.push(PaintCmd::BeginFixedPosition);
+    list.push(fill(Rect::new(0.0, 0.0, 128.0, 80.0), Color::rgb(255, 0, 0)));
+    list.push(PaintCmd::EndFixedPosition);
+
+    let mut fonts = cosmic_text::FontSystem::new();
+    let mut cache = cosmic_text::SwashCache::new();
+    let mut first = tiny_skia::Pixmap::new(128, 128).unwrap();
+    let mut second = tiny_skia::Pixmap::new(128, 128).unwrap();
+    for (pixmap, tile_y) in [(&mut first, 0.0), (&mut second, 128.0)] {
+        replay_tile_with_scroll_and_transform_overrides(
+            &list, pixmap, 1.0, &mut fonts, &mut cache, 0.0, tile_y, 0.0, 100.0, None,
+        );
+    }
+    let pixel = |pixmap: &tiny_skia::Pixmap, y: usize| {
+        let i = (y * 128 + 64) * 4;
+        let bytes = pixmap.data();
+        (bytes[i], bytes[i + 1], bytes[i + 2])
+    };
+    assert_eq!(pixel(&first, 10), (0, 0, 255));
+    assert_eq!(pixel(&first, 110), (255, 0, 0));
+    assert_eq!(pixel(&second, 10), (255, 0, 0));
+    assert_eq!(pixel(&second, 110), (0, 0, 255));
+}
+
+#[test]
+fn transparent_gradient_stop_keeps_opaque_neighbor_hue() {
+    let (_, list) = build(
+        r#"<style>
+            body { margin: 0; background: white; }
+            #fade { width: 100px; height: 30px;
+                    background: linear-gradient(90deg, white 20%, transparent); }
+           </style><div id="fade"></div>"#,
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(100, 30).unwrap();
+    pixmap.fill(tiny_skia::Color::WHITE);
+    replay(&list, &mut pixmap, 1.0);
+    let i = (15 * 100 + 70) * 4;
+    assert_eq!(&pixmap.data()[i..i + 4], &[255, 255, 255, 255]);
+}
+
+#[test]
+fn unavailable_icon_font_uses_missing_glyph_square() {
+    let render = |content: &str, family: &str| {
+        let html = format!(
+            "<body style='margin:0'><div style='font-family:{family};font-size:20px;line-height:24px;color:red'>{content}</div></body>"
+        );
+        let (_, list) = build_full(&html);
+        assert!(list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Text { .. })));
+        let mut pixmap = tiny_skia::Pixmap::new(64, 32).unwrap();
+        replay_with_text(
+            &list,
+            &mut pixmap,
+            1.0,
+            &mut cosmic_text::FontSystem::new(),
+            &mut cosmic_text::SwashCache::new(),
+        );
+        pixmap.data().to_vec()
+    };
+    let missing_icon = render("\u{e90d}", "unavailable-icon-face");
+    let square = render("□", "sans-serif");
+    assert_eq!(missing_icon, square);
+    assert!(square.iter().any(|channel| *channel != 0));
+}
+
+#[test]
 fn clip_path_inset_and_circle_emit_display_list_clips() {
     let (_, inset) = build(
         r#"<style>body{margin:0}</style>
@@ -2672,6 +2802,45 @@ fn sticky_clamped_to_containing_block_bottom() {
         "sticky element should be clamped to containing block bottom (400 - 40 = 360), got {}",
         red.y
     );
+}
+
+#[test]
+fn deferred_sticky_uses_its_parent_containing_block() {
+    let doc = parse_html(
+        r#"<style>
+            html, body { margin: 0; height: 600px; }
+            #spacer { height: 500px; }
+            #wrapper { height: 300px; padding-top: 200px; }
+            #sticky { position: sticky; top: 24px; z-index: 400;
+                      width: 40px; height: 40px; background: red; }
+        </style>
+        <div id="spacer"></div>
+        <div id="wrapper"><div id="sticky"></div></div>"#,
+    );
+    let mut frame = EngineFrame::new(doc, 800.0, 600.0);
+    frame.update_frame();
+    frame.doc.root.layout.content_rect.h = 600.0;
+    frame.doc.root.layout.padding_rect.h = 600.0;
+    frame.doc.root.layout.border_rect.h = 600.0;
+    let expected_y = frame
+        .doc
+        .get_element_by_id("sticky")
+        .and_then(|id| frame.doc.get_node(id))
+        .expect("sticky node")
+        .layout
+        .border_rect
+        .y;
+    let list = build_display_list_full(
+        &frame.doc.root, 800.0, 600.0, 0.0, 0.0, 0, 0,
+        &std::collections::HashSet::new(), "",
+    );
+    let painted_y = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::FillRect { rect, color, .. } if color.r == 255 && color.g == 0 && color.b == 0 => {
+            Some(rect.y)
+        }
+        _ => None,
+    }).expect("sticky background");
+    assert!((painted_y - expected_y).abs() < 0.1, "painted at {painted_y}, laid out at {expected_y}");
 }
 
 // ── Pseudo-elements ─────────────────────────────────────────────────────────
@@ -4202,6 +4371,20 @@ fn border_radius_fifty_percent_paints_as_circle() {
         outside_arc_alpha < 32,
         "50% border-radius should follow a circular arc, not a quadratic squircle; alpha={outside_arc_alpha}"
     );
+}
+
+#[test]
+fn inset_box_shadow_respects_rounded_corners() {
+    let (_frame, list) = build(
+        "<style>*{margin:0;padding:0}div{width:84px;height:32px;\
+         border-radius:16px;box-shadow:inset 0 0 0 1px black}</style><div></div>",
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(90, 40).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let alpha = |x, y| pixmap.pixel(x, y).unwrap().alpha();
+    assert_eq!(alpha(0, 0), 0, "the outer pill corner must stay transparent");
+    assert!(alpha(42, 0) > 150, "the top edge must retain its inset outline");
+    assert_eq!(alpha(42, 16), 0, "the center must not be filled by the shadow");
 }
 
 /// identity `[1, 0, 0, 1, 0, 0]` — the percentage translation is exactly zero.

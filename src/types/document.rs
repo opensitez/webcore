@@ -70,7 +70,7 @@ pub struct AnimatedImageTick {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DocumentStylesheet {
-    Inline { css: String },
+    Inline { css: String, media: String },
     Linked { href: String, media: String },
 }
 

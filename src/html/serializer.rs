@@ -44,6 +44,7 @@ pub fn serialize_length(len: &CssLength) -> String {
         CssLength::MinContent => "min-content".to_string(),
         CssLength::MaxContent => "max-content".to_string(),
         CssLength::FitContent => "fit-content".to_string(),
+        CssLength::Stretch => "stretch".to_string(),
         CssLength::FitContentArg(a) => format!("fit-content({})", serialize_length(a)),
         CssLength::None => String::new(),
         CssLength::Zero => String::new(),

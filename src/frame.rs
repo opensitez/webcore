@@ -116,13 +116,19 @@ pub struct EngineFrame {
     pending_resource_relayout: bool,
     last_resource_relayout: Option<std::time::Instant>,
     last_animation_layout_values: std::collections::HashMap<u32, Vec<(String, String)>>,
+    last_color_scheme_preference: crate::css::ColorSchemePreference,
     /// Host callbacks (boxed trait object).
     callbacks: Box<dyn EngineCallbacks>,
 }
 
 impl EngineFrame {
     /// Create from an existing Document.
-    pub fn new(doc: Document, viewport_w: f32, viewport_h: f32) -> Self {
+    pub fn new(mut doc: Document, viewport_w: f32, viewport_h: f32) -> Self {
+        doc.viewport_w = viewport_w;
+        doc.viewport_h = viewport_h;
+        if doc.preserve_stylesheet_document_order {
+            doc.reevaluate_stylesheet_media(viewport_w, viewport_h);
+        }
         let mut engine = LayoutEngine::new();
         engine.viewport_w = viewport_w;
         engine.viewport_h = viewport_h;
@@ -147,6 +153,7 @@ impl EngineFrame {
             pending_resource_relayout: false,
             last_resource_relayout: None,
             last_animation_layout_values: std::collections::HashMap::new(),
+            last_color_scheme_preference: crate::css::color_scheme_preference(),
             callbacks: Box::new(NoopCallbacks),
         }
     }
@@ -254,6 +261,14 @@ impl EngineFrame {
     ) -> FrameUpdate {
         let _profile_frame = crate::profile::span(crate::profile::Phase::FrameUpdate);
         let mut update = FrameUpdate::default();
+        let color_scheme_preference = crate::css::color_scheme_preference();
+        if self.last_color_scheme_preference != color_scheme_preference {
+            self.last_color_scheme_preference = color_scheme_preference;
+            self.doc
+                .reevaluate_stylesheet_media(self.viewport_w, self.viewport_h);
+            self.mark_style_dirty();
+            self.engine.invalidate_cascade();
+        }
         let trace_frame = std::env::var_os("WEBCORE_TRACE_IDLE").is_some();
         let style_dirty_before_resource_poll = self.doc.style_dirty;
         let resource_poll_start = std::time::Instant::now();
@@ -501,6 +516,7 @@ impl EngineFrame {
             self.viewport_h = h;
             self.engine.viewport_w = w;
             self.engine.viewport_h = h;
+            self.doc.reevaluate_stylesheet_media(w, h);
             // `window.onresize`. It resolved as a handler name and nothing ever
             // fired it, so a page that laid itself out on resize never ran.
             self.doc.fire_window_event("resize");
@@ -1019,6 +1035,8 @@ impl EngineFrame {
     /// Feed chunks with `feed_html_chunk()`, finalize with `finish_loading()`.
     pub fn start_streaming(&mut self, base_url: &str) {
         self.doc = crate::html::parse_html("<html></html>");
+        self.doc.viewport_w = self.viewport_w;
+        self.doc.viewport_h = self.viewport_h;
         self.last_animation_layout_values.clear();
         self.doc.root.children.clear();
         self.doc.rebuild_node_index();
@@ -1067,7 +1085,7 @@ impl EngineFrame {
         tx
     }
 
-    fn schedule_streamed_stylesheet(&mut self, slot_idx: usize, url: String) {
+    fn schedule_streamed_stylesheet(&mut self, slot_idx: usize, url: String, media: String) {
         let scheduled_key = format!("{slot_idx}\n{url}");
         if !self.scheduled_stylesheets.insert(scheduled_key) {
             return;
@@ -1076,7 +1094,7 @@ impl EngineFrame {
         let cache_dir = self.cache_dir.clone();
         let wake = self.resource_wake.clone();
         crate::spawn_css_resource_task(move || {
-            let cache_key = format!("{url}\n");
+            let cache_key = format!("{url}\n{media}");
             let loader: crate::StylesheetLoader = std::sync::Arc::new({
                 let cache_dir = cache_dir.clone();
                 move |css_url| crate::fetch_text_resource(css_url, cache_dir.as_deref())
@@ -1090,19 +1108,19 @@ impl EngineFrame {
             let loaded = crate::load_stylesheet_cached(
                 cache_key,
                 url.clone(),
-                String::new(),
+                media.clone(),
                 loader,
                 Some(streaming_loader),
                 true,
                 |sheet| {
-                    let _ = tx.send((slot_idx, url.clone(), sheet, String::new()));
+                    let _ = tx.send((slot_idx, url.clone(), sheet, media.clone()));
                     if let Some(wake) = wake.as_ref() {
                         wake();
                     }
                 },
             );
             if loaded.emitted_fragments == 0 {
-                let _ = tx.send((slot_idx, url, loaded.sheet, String::new()));
+                let _ = tx.send((slot_idx, url, loaded.sheet, media));
                 if let Some(wake) = wake.as_ref() {
                     wake();
                 }
@@ -1307,19 +1325,14 @@ impl EngineFrame {
         ) {
             let can_paint_resource = node_can_paint_resource(node);
             if can_paint_resource && node.is_image_element() && node.image_data.is_none() {
+                let fallback = crate::html::image_fallback_source(node)
+                    .map(|src| crate::html::resolve_url(src, base_url));
                 if !node.resolved_src.is_empty() {
                     out.push((
                         node.node_id,
                         path.clone(),
                         crate::types::PendingImageTarget::Element,
                         node.resolved_src.clone(),
-                    ));
-                } else if let Some(src) = crate::html::image_fallback_source(node) {
-                    out.push((
-                        node.node_id,
-                        path.clone(),
-                        crate::types::PendingImageTarget::ElementFallback,
-                        crate::html::resolve_url(src, base_url),
                     ));
                 } else if let Some(srcset) = crate::html::image_srcset_source(node)
                     && let Some(candidate) = crate::html::parse_srcset_url_for(
@@ -1335,6 +1348,16 @@ impl EngineFrame {
                         path.clone(),
                         crate::types::PendingImageTarget::Element,
                         crate::html::resolve_url(&candidate, base_url),
+                    ));
+                }
+                if let Some(url) = fallback
+                    && (node.resolved_src.is_empty() || node.resolved_src != url)
+                {
+                    out.push((
+                        node.node_id,
+                        path.clone(),
+                        crate::types::PendingImageTarget::ElementFallback,
+                        url,
                     ));
                 }
             } else if can_paint_resource
@@ -1483,34 +1506,38 @@ impl EngineFrame {
                         self.doc.append_child(parent_id, child_id);
                     }
                 }
-                DomMutation::AddStylesheet { css, .. } => {
+                DomMutation::AddStylesheet { css, media, .. } => {
                     self.doc
                         .document_stylesheets
-                        .push(crate::types::DocumentStylesheet::Inline { css: css.clone() });
-                    self.doc
-                        .stylesheet
-                        .parse_and_add_with_base(&css, &self.doc.base_url);
-                    self.doc.stylesheet.rebuild_index();
-                    self.mark_style_dirty();
-                    self.engine.invalidate_cascade();
+                        .push(crate::types::DocumentStylesheet::Inline {
+                            css: css.clone(),
+                            media: media.clone(),
+                        });
+                    if crate::css::evaluate_media(&media, self.doc.viewport_w, self.doc.viewport_h) {
+                        self.doc
+                            .stylesheet
+                            .parse_and_add_with_base(&css, &self.doc.base_url);
+                        self.doc.stylesheet.rebuild_index();
+                        self.mark_style_dirty();
+                        self.engine.invalidate_cascade();
+                    }
                 }
                 DomMutation::TitleChanged { title } => {
                     self.callbacks.on_title_changed(title);
                 }
+                DomMutation::StylesheetHint { url, media } => {
+                    self.doc.linked_stylesheets.push((url.clone(), media.clone()));
+                    let slot_idx = self.doc.document_stylesheets.len();
+                    self.doc.document_stylesheets.push(
+                        crate::types::DocumentStylesheet::Linked {
+                            href: url.clone(),
+                            media: media.clone(),
+                        },
+                    );
+                    self.schedule_streamed_stylesheet(slot_idx, url.clone(), media.clone());
+                    resource_hints.push((url.clone(), crate::html::streaming::ResourceKind::Stylesheet));
+                }
                 DomMutation::ResourceHint { kind, url } => {
-                    if matches!(kind, crate::html::streaming::ResourceKind::Stylesheet) {
-                        self.doc
-                            .linked_stylesheets
-                            .push((url.clone(), String::new()));
-                        let slot_idx = self.doc.document_stylesheets.len();
-                        self.doc.document_stylesheets.push(
-                            crate::types::DocumentStylesheet::Linked {
-                                href: url.clone(),
-                                media: String::new(),
-                            },
-                        );
-                        self.schedule_streamed_stylesheet(slot_idx, url.clone());
-                    }
                     resource_hints.push((url.clone(), kind.clone()));
                 }
                 _ => {}
@@ -1574,35 +1601,41 @@ impl EngineFrame {
                             self.doc.append_child(parent_id, child_id);
                         }
                     }
-                    crate::html::streaming::DomMutation::AddStylesheet { css, .. } => {
+                    crate::html::streaming::DomMutation::AddStylesheet { css, media, .. } => {
+                        let active = crate::css::evaluate_media(
+                            &media,
+                            self.doc.viewport_w,
+                            self.doc.viewport_h,
+                        );
                         let css_text = css.clone();
                         self.doc
                             .document_stylesheets
-                            .push(crate::types::DocumentStylesheet::Inline { css });
-                        self.doc
-                            .stylesheet
-                            .parse_and_add_with_base(&css_text, &self.doc.base_url);
-                        self.doc.stylesheet.rebuild_index();
-                        self.mark_style_dirty();
-                        self.engine.invalidate_cascade();
+                            .push(crate::types::DocumentStylesheet::Inline { css, media });
+                        if active {
+                            self.doc
+                                .stylesheet
+                                .parse_and_add_with_base(&css_text, &self.doc.base_url);
+                            self.doc.stylesheet.rebuild_index();
+                            self.mark_style_dirty();
+                            self.engine.invalidate_cascade();
+                        }
                     }
                     crate::html::streaming::DomMutation::TitleChanged { title } => {
                         self.callbacks.on_title_changed(&title);
                     }
+                    crate::html::streaming::DomMutation::StylesheetHint { url, media } => {
+                        self.doc.linked_stylesheets.push((url.clone(), media.clone()));
+                        let slot_idx = self.doc.document_stylesheets.len();
+                        self.doc.document_stylesheets.push(
+                            crate::types::DocumentStylesheet::Linked {
+                                href: url.clone(),
+                                media: media.clone(),
+                            },
+                        );
+                        self.schedule_streamed_stylesheet(slot_idx, url, media);
+                    }
                     crate::html::streaming::DomMutation::ResourceHint { kind, url } => {
-                        if matches!(kind, crate::html::streaming::ResourceKind::Stylesheet) {
-                            self.doc
-                                .linked_stylesheets
-                                .push((url.clone(), String::new()));
-                            let slot_idx = self.doc.document_stylesheets.len();
-                            self.doc.document_stylesheets.push(
-                                crate::types::DocumentStylesheet::Linked {
-                                    href: url.clone(),
-                                    media: String::new(),
-                                },
-                            );
-                            self.schedule_streamed_stylesheet(slot_idx, url);
-                        }
+                        let _ = (kind, url);
                     }
                     _ => {}
                 }
@@ -1794,9 +1827,37 @@ mod tests {
                 .doc
                 .document_stylesheets
                 .iter()
-                .any(|sheet| matches!(sheet, crate::types::DocumentStylesheet::Inline { css } if css.contains(".a"))),
+                .any(|sheet| matches!(sheet, crate::types::DocumentStylesheet::Inline { css, .. } if css.contains(".a"))),
             "streaming should register inline stylesheets on the document as they arrive"
         );
+    }
+
+    #[test]
+    fn viewport_change_reevaluates_streamed_style_media() {
+        let mut frame = EngineFrame::empty(800.0, 600.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            b"<style media=\"(min-width: 600px)\">.wide-only{color:red}</style><p>Media</p>",
+        );
+        frame.finish_loading();
+        frame.update_frame();
+        let wide_rules = frame.doc.stylesheet.rules.len();
+
+        frame.set_viewport(400.0, 600.0);
+        assert_eq!(frame.doc.stylesheet.rules.len() + 1, wide_rules);
+        frame.set_viewport(800.0, 600.0);
+        assert_eq!(frame.doc.stylesheet.rules.len(), wide_rules);
+    }
+
+    #[test]
+    fn frame_construction_uses_viewport_for_parsed_style_media() {
+        let doc = crate::html::parse_html(
+            "<style media='(min-width: 600px)'>.wide-only{color:red}</style><p>Media</p>",
+        );
+        let frame_wide = EngineFrame::new(doc, 800.0, 600.0);
+        let wide_rules = frame_wide.doc.stylesheet.rules.len();
+        let frame_narrow = EngineFrame::new(frame_wide.doc, 400.0, 600.0);
+        assert_eq!(frame_narrow.doc.stylesheet.rules.len() + 1, wide_rules);
     }
 
     #[test]
@@ -1971,7 +2032,7 @@ mod tests {
     fn streaming_frame_schedules_stylesheet_without_host_babysitting() {
         let mut frame = EngineFrame::empty(320.0, 240.0);
         frame.start_streaming("https://example.test/");
-        frame.feed_html_chunk(br#"<html><head><link rel="stylesheet" href="/app.css"></head>"#);
+        frame.feed_html_chunk(br#"<html><head><link rel="stylesheet" href="/app.css" media="(prefers-color-scheme: dark)"></head>"#);
 
         assert!(
             frame.doc.pending_stylesheets.is_some(),
@@ -1988,7 +2049,8 @@ mod tests {
                 .doc
                 .linked_stylesheets
                 .iter()
-                .any(|(href, _)| href == "https://example.test/app.css"),
+                .any(|(href, media)| href == "https://example.test/app.css"
+                    && media == "(prefers-color-scheme: dark)"),
             "streaming stylesheet links should be visible through document resource bookkeeping"
         );
     }
@@ -2728,6 +2790,26 @@ mod tests {
             frame.scheduled_images.is_empty(),
             "display:none images should not be fetched and decoded by the layout-aware sweep"
         );
+    }
+
+    #[test]
+    fn final_image_sweep_keeps_img_source_when_picture_candidate_is_selected() {
+        let mut frame = EngineFrame::empty(800.0, 600.0);
+        frame.start_streaming("https://example.test/news/");
+        let img = frame.doc.create_element("img");
+        frame.doc.append_child(frame.doc.root.node_id, img);
+        frame.doc.set_attribute(img, "src", "saved-photo.jpg");
+        frame.doc.find_webcore_mut(img).unwrap().resolved_src =
+            "https://example.test/selected-photo.webp".into();
+
+        frame.schedule_unscheduled_document_images();
+
+        assert!(frame.scheduled_images.iter().any(|key| {
+            key.contains("Element:#") && key.contains("selected-photo.webp")
+        }));
+        assert!(frame.scheduled_images.iter().any(|key| {
+            key.contains("ElementFallback:#") && key.contains("saved-photo.jpg")
+        }));
     }
 
     #[test]

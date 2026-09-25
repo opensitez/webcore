@@ -545,8 +545,10 @@ impl crate::html::parser::HtmlParser {
                                 } else {
                                     child.text.clone()
                                 };
-                                shadow_stylesheets
-                                    .push(crate::types::DocumentStylesheet::Inline { css });
+                                let media = child.attributes.get("media").cloned().unwrap_or_default();
+                                shadow_stylesheets.push(
+                                    crate::types::DocumentStylesheet::Inline { css, media },
+                                );
                             } else if child.tag == "link"
                                 && child
                                     .attributes
@@ -585,7 +587,10 @@ impl crate::html::parser::HtmlParser {
                 // Start with UA stylesheet so shadow tree gets default styles
                 let mut stylesheet = crate::css::ua_stylesheet();
                 for sheet in &shadow_stylesheets {
-                    if let crate::types::DocumentStylesheet::Inline { css } = sheet {
+                    if let crate::types::DocumentStylesheet::Inline { css, media } = sheet {
+                        if !crate::css::evaluate_media(media, 0.0, 0.0) {
+                            continue;
+                        }
                         // Author origin: a shadow root's own `<style>` outranks the
                         // UA sheet it is layered on, the same as a document's.
                         stylesheet.parse_and_add_author(css);

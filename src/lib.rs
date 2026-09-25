@@ -504,6 +504,74 @@ fn stylesheet_has_content(sheet: &css::Stylesheet) -> bool {
         || !sheet.counter_styles.is_empty()
 }
 
+fn css_import_target(rule: &str) -> Option<(&str, &str)> {
+    let rule = rule.trim();
+    let rest = rule.get(7..)?;
+    if !rule.get(..7)?.eq_ignore_ascii_case("@import")
+        || !rest.chars().next().is_some_and(char::is_whitespace)
+    {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let rest = if rest.get(..4).is_some_and(|prefix| prefix.eq_ignore_ascii_case("url(")) {
+        rest.get(4..)?.trim_start()
+    } else {
+        rest
+    };
+    let (url, rest) = if let Some(quote @ ('\'' | '"')) = rest.chars().next() {
+        let tail = rest.get(1..)?;
+        let end = tail.find(quote)?;
+        (&tail[..end], tail[end + 1..].trim_start())
+    } else {
+        let end = rest.find(|ch: char| ch == ')' || ch.is_whitespace())?;
+        (&rest[..end], rest[end..].trim_start())
+    };
+    let rest = rest.strip_prefix(')').unwrap_or(rest).trim();
+    let media = rest.strip_suffix(';')?.trim();
+    Some((url, media))
+}
+
+fn emit_css_imports(
+    css_text: &str,
+    css_url: &str,
+    media: &str,
+    loader: &StylesheetLoader,
+    stack: &mut std::collections::HashSet<String>,
+    emit: &mut impl FnMut(css::Stylesheet),
+) -> usize {
+    if stack.len() >= 32 {
+        return 0;
+    }
+    let cleaned = css::parser::strip_css_comments(css_text);
+    let mut count = 0;
+    for unit in complete_css_units(&cleaned) {
+        let unit = unit.trim();
+        if unit.to_ascii_lowercase().starts_with("@charset") {
+            continue;
+        }
+        let Some((href, import_media)) = css_import_target(unit) else {
+            break;
+        };
+        let url = resolve_css_url(css_url, href);
+        if !stack.insert(url.clone()) {
+            continue;
+        }
+        if let Ok(imported) = loader(&url) {
+            let effective_media = if import_media.is_empty() || import_media.eq_ignore_ascii_case("all") {
+                media.to_string()
+            } else if media.is_empty() || media.eq_ignore_ascii_case("all") {
+                import_media.to_string()
+            } else {
+                format!("{media} and {import_media}")
+            };
+            count += emit_css_imports(&imported, &url, &effective_media, loader, stack, emit);
+            count += stream_stylesheet_fragments(&imported, &url, &effective_media, &mut *emit);
+        }
+        stack.remove(&url);
+    }
+    count
+}
+
 pub(crate) fn drain_complete_css_text(buffer: &mut String) -> Option<String> {
     let drain_to = complete_css_drain_boundary(buffer);
     if drain_to == 0 {
@@ -771,6 +839,7 @@ where
     let mut combined = crate::css::Stylesheet::default();
     let mut text_len = 0usize;
     let mut emitted = 0usize;
+    let mut import_stack = std::collections::HashSet::from([css_url.clone()]);
     if let Some(streaming_loader) = streaming_loader {
         let mut buffer = String::new();
         let mut streamed_text = String::new();
@@ -779,6 +848,17 @@ where
             streamed_text.push_str(chunk);
             buffer.push_str(chunk);
             if let Some(complete_css) = drain_complete_css_text(&mut buffer) {
+                emitted += emit_css_imports(
+                    &complete_css,
+                    &css_url,
+                    &media,
+                    &loader,
+                    &mut import_stack,
+                    &mut |fragment| {
+                        combined.append_fragment(fragment.clone());
+                        emit_fragment(fragment);
+                    },
+                );
                 let mut fragment = crate::css::Stylesheet::default();
                 fragment.parse_and_add_with_base_media(&complete_css, &css_url, &media);
                 if stylesheet_has_content(&fragment) {
@@ -792,7 +872,18 @@ where
             match loader(&css_url) {
                 Ok(text) => {
                     text_len = text.len();
-                    emitted = stream_stylesheet_fragments(&text, &css_url, &media, |fragment| {
+                    emitted += emit_css_imports(
+                        &text,
+                        &css_url,
+                        &media,
+                        &loader,
+                        &mut import_stack,
+                        &mut |fragment| {
+                            combined.append_fragment(fragment.clone());
+                            emit_fragment(fragment);
+                        },
+                    );
+                    emitted += stream_stylesheet_fragments(&text, &css_url, &media, |fragment| {
                         combined.append_fragment(fragment.clone());
                         emit_fragment(fragment);
                     });
@@ -813,6 +904,17 @@ where
         }
         let tail = std::mem::take(&mut buffer);
         if !tail.trim().is_empty() {
+            emitted += emit_css_imports(
+                &tail,
+                &css_url,
+                &media,
+                &loader,
+                &mut import_stack,
+                &mut |fragment| {
+                    combined.append_fragment(fragment.clone());
+                    emit_fragment(fragment);
+                },
+            );
             let mut fragment = crate::css::Stylesheet::default();
             fragment.parse_and_add_with_base_media(&tail, &css_url, &media);
             if stylesheet_has_content(&fragment) {
@@ -824,7 +926,18 @@ where
     } else {
         let text = loader(&css_url).unwrap_or_default();
         text_len = text.len();
-        emitted = stream_stylesheet_fragments(&text, &css_url, &media, |fragment| {
+        emitted += emit_css_imports(
+            &text,
+            &css_url,
+            &media,
+            &loader,
+            &mut import_stack,
+            &mut |fragment| {
+                combined.append_fragment(fragment.clone());
+                emit_fragment(fragment);
+            },
+        );
+        emitted += stream_stylesheet_fragments(&text, &css_url, &media, |fragment| {
             combined.append_fragment(fragment.clone());
             emit_fragment(fragment);
         });
@@ -862,6 +975,59 @@ where
 mod stylesheet_loader_tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn imported_css_precedes_parent_and_resolves_its_own_font_urls() {
+        let loader: StylesheetLoader = Arc::new(|url| match url {
+            "https://site.test/base.css" => Ok(
+                "@import url('fonts/fonts.css'); .title { color: blue }".into(),
+            ),
+            "https://site.test/fonts/fonts.css" => Ok(
+                "@import '../base.css'; @font-face { font-family: Demo; src: url('demo.woff2') } .title { color: red }".into(),
+            ),
+            _ => Err(format!("unexpected URL: {url}")),
+        });
+        let result = load_stylesheet_cached(
+            "test-import-order".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            None,
+            false,
+            |_| {},
+        );
+        assert_eq!(result.sheet.rules.len(), 2);
+        assert!(result.sheet.rules[0].declarations.iter().any(|decl| decl.1 == "red"));
+        assert!(result.sheet.rules[1].declarations.iter().any(|decl| decl.1 == "blue"));
+        assert!(result.sheet.font_faces[0].src.contains("https://site.test/fonts/demo.woff2"));
+    }
+
+    #[test]
+    fn streamed_css_import_is_emitted_before_parent_rule() {
+        let parent = "@import 'https://site.test/theme.css'; .title { color: blue }";
+        let loader: StylesheetLoader = Arc::new(move |url| match url {
+            "https://site.test/theme.css" => Ok(".title { color: red }".into()),
+            _ => Err(format!("unexpected URL: {url}")),
+        });
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(move |_, emit| {
+            for chunk in parent.as_bytes().chunks(9) {
+                emit(std::str::from_utf8(chunk).unwrap());
+            }
+            Ok(())
+        });
+        let mut seen = Vec::new();
+        let result = load_stylesheet_cached(
+            "test-streamed-import-order".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            Some(streaming_loader),
+            false,
+            |sheet| seen.extend(sheet.rules.into_iter().map(|rule| rule.declarations.get("color").unwrap().clone())),
+        );
+        assert_eq!(seen, ["red", "blue"]);
+        assert_eq!(result.sheet.rules.len(), 2);
+    }
 
     #[test]
     fn streaming_stylesheet_keeps_minified_bootstrap_rules() {
@@ -1284,10 +1450,16 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
         doc.stylesheet = crate::css::ua_stylesheet();
         for (idx, ds) in doc.document_stylesheets.iter().enumerate() {
             match ds {
-                crate::types::DocumentStylesheet::Inline { css } => {
+                crate::types::DocumentStylesheet::Inline { css, media } => {
+                    if !crate::css::evaluate_media(media, doc.viewport_w, doc.viewport_h) {
+                        continue;
+                    }
                     doc.stylesheet.parse_and_add_with_base(css, &doc.base_url);
                 }
-                crate::types::DocumentStylesheet::Linked { href, .. } => {
+                crate::types::DocumentStylesheet::Linked { href, media } => {
+                    if !crate::css::evaluate_media(media, doc.viewport_w, doc.viewport_h) {
+                        continue;
+                    }
                     let abs = resolve_css_url(base_url, href);
                     if let Some(sheet) = fetched_slots.get(&idx).or_else(|| fetched_map.get(&abs)) {
                         doc.stylesheet.append_fragment(sheet.clone());
