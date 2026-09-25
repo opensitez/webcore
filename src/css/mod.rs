@@ -64,20 +64,20 @@ pub(crate) fn evaluate_container_for_type_and_style(
     if let Some(rest) = cond.strip_prefix("not ") {
         return !evaluate_container_for_type_and_style(rest.trim(), w, h, container_type, style);
     }
-    if let Some(idx) = find_keyword_outside_parens(cond, " and ") {
-        return evaluate_container_for_type_and_style(&cond[..idx], w, h, container_type, style)
+    if let Some((start, end)) = find_keyword_outside_parens(cond, "and") {
+        return evaluate_container_for_type_and_style(&cond[..start], w, h, container_type, style)
             && evaluate_container_for_type_and_style(
-                &cond[idx + 5..],
+                &cond[end..],
                 w,
                 h,
                 container_type,
                 style,
             );
     }
-    if let Some(idx) = find_keyword_outside_parens(cond, " or ") {
-        return evaluate_container_for_type_and_style(&cond[..idx], w, h, container_type, style)
+    if let Some((start, end)) = find_keyword_outside_parens(cond, "or") {
+        return evaluate_container_for_type_and_style(&cond[..start], w, h, container_type, style)
             || evaluate_container_for_type_and_style(
-                &cond[idx + 4..],
+                &cond[end..],
                 w,
                 h,
                 container_type,

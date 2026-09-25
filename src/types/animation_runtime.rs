@@ -70,6 +70,66 @@ fn keyframes_with_synthesized_endpoints(
     out
 }
 
+fn resolve_keyframe_values_for_element(
+    stops: &mut [KeyframeStop],
+    node: &WebCore,
+    root_font_px: f32,
+    viewport_w: f32,
+    viewport_h: f32,
+) {
+    for stop in stops.iter_mut() {
+        for (_, value) in &mut stop.properties {
+            if value.contains("var(") {
+                *value = resolve_var_references_for_color_scheme(
+                    value,
+                    &node.style.custom_props,
+                    &node.style.color_scheme,
+                );
+            }
+        }
+    }
+
+    // calc() can combine lengths and percentages, so interpolating its text
+    // loses the element's reference box. Resolve both transform endpoints to
+    // matrices first; the ordinary transform interpolation path stays intact.
+    let has_calculated_transform = stops.iter().any(|stop| {
+        stop.properties.iter().any(|(property, value)| {
+            property == "transform" && value.contains("calc(")
+        })
+    });
+    if !has_calculated_transform {
+        return;
+    }
+    let ctx = TransformCtx {
+        font_px: node.style.font_size_px(root_font_px, root_font_px),
+        root_font_px,
+        viewport_w,
+        viewport_h,
+    };
+    for stop in stops.iter_mut() {
+        for (property, value) in &mut stop.properties {
+            if property != "transform" {
+                continue;
+            }
+            let Some(transform) = parse_css_transform_checked(value) else {
+                continue;
+            };
+            let mut style = ComputedStyle::default();
+            style.css_transform = transform;
+            let matrix = crate::renderer::display_list_builder::compute_transform_matrix_raw(
+                &style,
+                node.layout.border_rect.w,
+                node.layout.border_rect.h,
+                &ctx,
+            );
+            *value = format!(
+                "matrix({},{},{},{},{},{})",
+                matrix[0], matrix[1], matrix[2], matrix[3], matrix[4], matrix[5]
+            );
+        }
+    }
+}
+
 fn compose_animation_properties(
     properties: Vec<(String, String)>,
     underlying: &HashMap<String, String>,
@@ -402,7 +462,18 @@ impl Document {
                         let underlying = find_node_by_id(&self.root, state.element_id)
                             .map(|node| extract_transitionable_style(&node.style))
                             .unwrap_or_default();
-                        let stops = keyframes_with_synthesized_endpoints(kf, &underlying);
+                        let mut stops = keyframes_with_synthesized_endpoints(kf, &underlying);
+                        if let Some(node) = find_node_by_id(&self.root, state.element_id) {
+                            let initial_font_px = ComputedStyle::INITIAL_FONT_SIZE_PX;
+                            let root_font_px = self.root.style.font_size_px(initial_font_px, initial_font_px);
+                            resolve_keyframe_values_for_element(
+                                &mut stops,
+                                node,
+                                root_font_px,
+                                self.viewport_w,
+                                self.viewport_h,
+                            );
+                        }
                         let endpoint_frac = iteration_count.fract();
                         let final_iteration = if endpoint_frac == 0.0 {
                             (iteration_count - 1.0).max(0.0).floor()
@@ -493,7 +564,18 @@ impl Document {
                 let underlying = find_node_by_id(&self.root, state.element_id)
                     .map(|node| extract_transitionable_style(&node.style))
                     .unwrap_or_default();
-                let stops = keyframes_with_synthesized_endpoints(kf, &underlying);
+                let mut stops = keyframes_with_synthesized_endpoints(kf, &underlying);
+                if let Some(node) = find_node_by_id(&self.root, state.element_id) {
+                    let initial_font_px = ComputedStyle::INITIAL_FONT_SIZE_PX;
+                    let root_font_px = self.root.style.font_size_px(initial_font_px, initial_font_px);
+                    resolve_keyframe_values_for_element(
+                        &mut stops,
+                        node,
+                        root_font_px,
+                        self.viewport_w,
+                        self.viewport_h,
+                    );
+                }
                 let props = compose_animation_properties(
                     interpolate_keyframe_stops(&stops, eased),
                     &underlying,

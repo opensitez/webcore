@@ -894,8 +894,17 @@ fn parse_stylesheet_inner(
 
                 let mut rule = CssRule::default();
                 rule.selectors = vec![sel];
-                rule.declarations = declarations.clone();
-                rule.important_declarations = important_declarations.clone();
+                if sel_str.to_ascii_lowercase().ends_with("::-webkit-scrollbar") {
+                    if declarations.get("display").map(String::as_str) == Some("none") {
+                        rule.declarations.insert("scrollbar-width".into(), "none".into());
+                    }
+                    if important_declarations.get("display").map(String::as_str) == Some("none") {
+                        rule.important_declarations.insert("scrollbar-width".into(), "none".into());
+                    }
+                } else {
+                    rule.declarations = declarations.clone();
+                    rule.important_declarations = important_declarations.clone();
+                }
                 rule.specificity = sp;
                 rule.media_condition = parent_media.to_string();
                 rule.original_selector = original_selector;
@@ -1084,6 +1093,9 @@ fn strip_pseudo_element(sel: &str) -> (String, PseudoElement, bool, Option<CssSe
             (13, PseudoElement::GrammarError)
         } else if pe_str.starts_with("backdrop") {
             (8, PseudoElement::Backdrop)
+        } else if pe_str == "-webkit-scrollbar" {
+            let clean = sel[..pos].trim();
+            return (if clean.is_empty() { "*" } else { clean }.to_string(), PseudoElement::None, false, None);
         } else if let Some(len) = pseudo_function_len(&pe_str, "part") {
             (len, PseudoElement::Ignored)
         } else if let Some(len) = pseudo_function_len(&pe_str, "slotted") {
@@ -1635,7 +1647,30 @@ pub fn parse_selector(s: &str) -> CssSelector {
             }
             '[' => {
                 chars.next();
-                let attr_str: String = chars.by_ref().take_while(|&c| c != ']').collect();
+                let mut attr_str = String::new();
+                let mut quote = None;
+                let mut escaped = false;
+                let mut closed = false;
+                for c in chars.by_ref() {
+                    if escaped {
+                        escaped = false;
+                    } else if c == '\\' {
+                        escaped = true;
+                    } else if Some(c) == quote {
+                        quote = None;
+                    } else if quote.is_none() {
+                        if c == '\'' || c == '"' {
+                            quote = Some(c);
+                        } else if c == ']' {
+                            closed = true;
+                            break;
+                        }
+                    }
+                    attr_str.push(c);
+                }
+                if !closed || quote.is_some() {
+                    valid = false;
+                }
                 let (name, op, value, case_sensitive) = parse_attr_selector(&attr_str);
                 parts.push(SelectorPart::Attribute {
                     name,

@@ -718,9 +718,10 @@ pub fn layout_grid(
         }
     }
 
-    // Step 2.5: Column-locked items (explicit column, auto row).
-    // Use the column from resolve_placement (pass 1) and auto-place the row.
-    {
+    // In column flow these items have a definite placement on the major axis.
+    // In row flow they must be placed alongside fully automatic items in DOM
+    // order below, otherwise a later fixed-column item steals an earlier row.
+    if col_flow {
         for (ii, path) in item_indices.iter().enumerate() {
             let child = grid_child_ref(node, path);
             if is_explicitly_placed(child, &area_map, &col_line_names, &row_line_names) {
@@ -800,15 +801,20 @@ pub fn layout_grid(
         if rs_has_name2 || (!rs_is_span2 && rs_val2 != 0) {
             continue;
         }
-        // Skip column-locked items (handled in step 2.5)
+        // In column flow, column-locked items were placed in the preceding pass.
         let (cs_is_span2, cs_val2) = decode_grid_line(child.style.grid_column_start);
         let cs_has_name2 = !child.style.grid_column_start_name.is_empty()
             && lookup_named_line(&child.style.grid_column_start_name, &col_line_names).is_some();
-        if cs_has_name2 || (!cs_is_span2 && cs_val2 != 0) {
+        let column_locked = cs_has_name2 || (!cs_is_span2 && cs_val2 != 0);
+        if col_flow && column_locked {
             continue;
         }
 
-        let span_col = get_span_col(child);
+        let span_col = if column_locked && !col_flow {
+            placements[ii].1.saturating_sub(placements[ii].0).max(1)
+        } else {
+            get_span_col(child)
+        };
         let span_row = get_span_row(child).max(1);
         // If span exceeds grid columns, expand the grid to fit
         if span_col > max_col {
@@ -820,10 +826,27 @@ pub fn layout_grid(
             auto_col = 0;
         }
 
-        if col_flow {
+        if !col_flow && column_locked {
+            let (column, end, _, _) = placements[ii];
+            if column < auto_col {
+                auto_row += 1;
+            }
+            auto_col = column;
+            max_col = max_col.max(end);
+            loop {
+                ensure_row(&mut occ, auto_row + span_row, max_col);
+                let fits = (auto_row..auto_row + span_row).all(|row| {
+                    (column..end).all(|col| !occ[row][col])
+                });
+                if fits || auto_row > MAX_GRID_SPAN {
+                    break;
+                }
+                auto_row += 1;
+            }
+        } else if col_flow {
             // Column-flow: fill down each column, then move to next column
             // Number of rows per column = explicit row track count (or unlimited if none)
-            let col_row_limit = n_rows_from_template(&row_tracks, n_items);
+            let col_row_limit = n_rows_from_template(&row_tracks);
             // auto_col = current column, auto_row = current row within column
             'outer_col: loop {
                 if auto_row > MAX_GRID_SPAN || auto_col > MAX_GRID_SPAN {
@@ -1908,11 +1931,11 @@ fn re_from(p: &(usize, usize, usize, usize)) -> usize {
     p.3
 }
 
-fn n_rows_from_template(row_tracks: &[GridTrackSize], n_items: usize) -> usize {
+fn n_rows_from_template(row_tracks: &[GridTrackSize]) -> usize {
     if !row_tracks.is_empty() {
         row_tracks.len()
     } else {
-        n_items.max(1)
+        1
     }
 }
 

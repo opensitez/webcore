@@ -102,6 +102,16 @@ fn selectors_attr_equals() {
 }
 
 #[test]
+fn selectors_attr_quoted_brackets_match_full_value() {
+    let mut card = WebCore::new("div");
+    card.attributes.insert("data-components", "['chapo']");
+    let selector = parse_selector(r#"div[data-components="['chapo']"]"#);
+    assert!(selector.valid);
+    assert!(selector.matches_box(&card));
+    assert!(!parse_selector(r#"div[data-components="['other']"]"#).matches_box(&card));
+}
+
+#[test]
 fn selectors_attr_prefix() {
     let sel = parse_selector("[class^=\"btn\"]");
     assert!(sel.parts.iter().any(|p| matches!(

@@ -657,15 +657,6 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     let pw = pr.w;
     let ph = pr.h;
     let font_px = node.style.font_size_px(ctx.transform_ctx.root_font_px, ctx.transform_ctx.root_font_px);
-    let paint_self = rect_intersects(
-        Rect::new(
-            br.x - sx - 256.0,
-            br.y - sy - 256.0,
-            br.w + 512.0,
-            br.h + 512.0,
-        ),
-        ctx.paint_clip,
-    );
 
     // ── Border radii, per corner ─────────────────────────────────────────────
     //
@@ -865,6 +856,15 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     } else {
         (px, py)
     };
+    let paint_self = rect_intersects(
+        Rect::new(
+            br.x + px - pr.x - 256.0,
+            br.y + py - pr.y - 256.0,
+            br.w + 512.0,
+            br.h + 512.0,
+        ),
+        ctx.paint_clip,
+    );
 
     // Effective scroll offsets accounting for sticky clamping
     let eff_sx = pr.x - px;
@@ -1064,7 +1064,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
 
     // ── (b) Background color (opacity applied to alpha) ──────────────────────
     {
-        let is_inline_with_text = node.style.is_inline_level()
+        let is_inline_with_text = matches!(node.style.display, Display::Inline)
             && !node.is_image_element()
             && inline_has_non_empty_text(node);
         let opacity = eff_style.opacity;
@@ -4478,7 +4478,9 @@ fn is_explicit_z_positioned(node: &WebCore) -> bool {
 }
 
 fn sticky_containing_block_for_children(node: &WebCore, inherited: Option<Rect>) -> Option<Rect> {
-    if matches!(node.style.display, Display::Inline | Display::Contents | Display::None) {
+    if node.tag == "anonymous-block"
+        || matches!(node.style.display, Display::Inline | Display::Contents | Display::None)
+    {
         return inherited;
     }
     let mut rect = if node.layout.content_rect.w > 0.0 || node.layout.content_rect.h > 0.0 {

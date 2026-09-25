@@ -94,16 +94,16 @@ pub fn evaluate_media(condition: &str, vw: f32, vh: f32) -> bool {
     }
 
     // Handle `and` combinator outside parens
-    if let Some(idx) = find_keyword_outside_parens(cond, " and ") {
-        let left = &cond[..idx];
-        let right = &cond[idx + 5..];
+    if let Some((start, end)) = find_keyword_outside_parens(cond, "and") {
+        let left = &cond[..start];
+        let right = &cond[end..];
         return evaluate_media(left.trim(), vw, vh) && evaluate_media(right.trim(), vw, vh);
     }
 
     // Handle `or` combinator outside parens
-    if let Some(idx) = find_keyword_outside_parens(cond, " or ") {
-        let left = &cond[..idx];
-        let right = &cond[idx + 4..];
+    if let Some((start, end)) = find_keyword_outside_parens(cond, "or") {
+        let left = &cond[..start];
+        let right = &cond[end..];
         return evaluate_media(left.trim(), vw, vh) || evaluate_media(right.trim(), vw, vh);
     }
 
@@ -128,8 +128,8 @@ pub fn evaluate_media(condition: &str, vw: f32, vh: f32) -> bool {
         let inner = cond[1..cond.len() - 1].trim();
         let is_parenthesized_logical = inner.starts_with('(')
             || (inner.len() >= 4 && inner.as_bytes()[..4].eq_ignore_ascii_case(b"not "))
-            || find_keyword_outside_parens(inner, " and ").is_some()
-            || find_keyword_outside_parens(inner, " or ").is_some();
+            || find_keyword_outside_parens(inner, "and").is_some()
+            || find_keyword_outside_parens(inner, "or").is_some();
         if is_parenthesized_logical {
             return evaluate_media(inner, vw, vh);
         }
@@ -314,8 +314,9 @@ pub fn evaluate_media(condition: &str, vw: f32, vh: f32) -> bool {
     false
 }
 
-/// Find byte index of `keyword` in `s` where it is not inside parentheses.
-pub(crate) fn find_keyword_outside_parens(s: &str, keyword: &str) -> Option<usize> {
+/// Find an `and`/`or` token outside parentheses. Parentheses delimit tokens
+/// even without intervening whitespace, as in `(width: 1px)and (height: 1px)`.
+pub(crate) fn find_keyword_outside_parens(s: &str, keyword: &str) -> Option<(usize, usize)> {
     let bytes = s.as_bytes();
     let kw = keyword.as_bytes();
     let mut depth = 0usize;
@@ -338,11 +339,16 @@ pub(crate) fn find_keyword_outside_parens(s: &str, keyword: &str) -> Option<usiz
                 // into the permissive media-type default — so
                 // `@media screen AND (min-width: 500px)` matched at every
                 // width and desktop-only rules applied on mobile.
+                let end = i + kw.len();
+                let left_boundary = i == 0 || bytes[i - 1].is_ascii_whitespace() || bytes[i - 1] == b')';
+                let right_boundary = end == bytes.len() || bytes[end].is_ascii_whitespace() || bytes[end] == b'(';
                 if depth == 0
                     && bytes.len() - i >= kw.len()
+                    && left_boundary
+                    && right_boundary
                     && bytes[i..i + kw.len()].eq_ignore_ascii_case(kw)
                 {
-                    return Some(i);
+                    return Some((i, end));
                 }
                 i += 1;
             }

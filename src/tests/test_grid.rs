@@ -39,6 +39,23 @@ fn test_grid_auto_tracks() {
 }
 
 #[test]
+fn later_fixed_column_item_does_not_precede_auto_item_in_row_flow() {
+    let doc = parse_and_layout(
+        "<div style='display:grid;grid-template-columns:200px 100px;width:300px'>\
+           <div id='first' style='height:100px'></div>\
+           <aside id='aside' style='grid-column:2;grid-row:1 / span 2'></aside>\
+           <div id='later' style='grid-column:1;height:50px'></div>\
+         </div>",
+        400.0,
+    );
+    let first = find_by_id(&doc.root, "first").unwrap().layout.border_rect;
+    let aside = find_by_id(&doc.root, "aside").unwrap().layout.border_rect;
+    let later = find_by_id(&doc.root, "later").unwrap().layout.border_rect;
+    assert_eq!(first.y, aside.y);
+    assert!(later.y >= first.bottom(), "later item must follow first row: {later:?}");
+}
+
+#[test]
 fn auto_track_respects_grid_item_min_width_zero() {
     let doc = parse_and_layout(
         "<div id='grid' style='display:grid;width:200px'>\
@@ -242,6 +259,25 @@ fn grid_spanning_item_prefers_flexible_track_over_max_content_track() {
         "max-content date column should size to the date, not absorb title width: {:?}",
         date.layout.border_rect
     );
+}
+
+#[test]
+fn column_flow_without_explicit_rows_places_items_across_one_row() {
+    let doc = parse_and_layout(
+        r#"<style>
+          .channels { display:grid; grid-auto-flow:column; grid-auto-columns:200px; width:400px; overflow-x:auto }
+          .channels > div { height:56px }
+        </style>
+        <div class="channels" id="channels"><div id="a"></div><div id="b"></div><div id="c"></div></div>"#,
+        800.0,
+    );
+    let a = find_by_id(&doc.root, "a").unwrap().layout.border_rect;
+    let b = find_by_id(&doc.root, "b").unwrap().layout.border_rect;
+    let c = find_by_id(&doc.root, "c").unwrap().layout.border_rect;
+    assert!((a.y - b.y).abs() < 1.0 && (b.y - c.y).abs() < 1.0);
+    assert!((b.x - a.x - 200.0).abs() < 1.0);
+    assert!((c.x - b.x - 200.0).abs() < 1.0);
+    assert!((find_by_id(&doc.root, "channels").unwrap().layout.border_rect.h - 56.0).abs() < 1.0);
 }
 
 #[test]

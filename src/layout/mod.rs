@@ -519,6 +519,16 @@ fn load_local_font_face(
     face: &crate::css::FontFaceDecl,
     name: &str,
 ) -> bool {
+    if face.weight.is_none() && face.style.is_none() && face.stretch.is_none() {
+        let ids: Vec<_> = fs.db().faces()
+            .filter(|candidate| candidate.families.iter().any(|(family, _)| family.eq_ignore_ascii_case(name)))
+            .map(|candidate| candidate.id)
+            .collect();
+        if !ids.is_empty() {
+            register_css_font_face_alias(fs, face, &ids);
+            return true;
+        }
+    }
     let query = fontdb::Query {
         families: &[fontdb::Family::Name(name)],
         weight: parse_font_face_weight(face.weight.as_deref()).unwrap_or(fontdb::Weight::NORMAL),
@@ -3081,7 +3091,10 @@ impl LayoutEngine {
                     }
                     let url_inner = match &source.kind {
                         crate::css::FontFaceSourceKind::Local(name) => {
-                            let key = format!("local({name})");
+                            let key = format!(
+                                "local({name}) as {} {:?} {:?} {:?}",
+                                face.family, face.weight, face.style, face.stretch
+                            );
                             if self.scheduled_font_faces.contains(&key) {
                                 found = true;
                                 continue;

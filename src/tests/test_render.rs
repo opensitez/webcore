@@ -1334,6 +1334,47 @@ fn layout_sticky_inside_scrollable_div() {
     );
 }
 
+#[test]
+fn sticky_header_and_inline_button_paint_after_scrolling_past_their_flow_positions() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list_viewport;
+
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"<style>
+            * { margin: 0; padding: 0; }
+            .spacer { height: 100px; }
+            header { position: sticky; top: 0; display: inline-flex; width: 200px;
+                     height: 40px; background: #ffffff; }
+            button { position: sticky; top: 0; display: inline-flex; width: 40px;
+                     height: 40px; background: #020203; }
+            .content { height: 600px; }
+        </style>
+        <div class="spacer"></div><header>Logo</header><button>Menu</button>
+        <div class="content"></div>"#,
+        300.0,
+    );
+    let mut pm = tiny_skia::Pixmap::new(300, 100).unwrap();
+    renderer.render(&mut doc, &mut pm, 1.0);
+    let list = build_display_list_viewport(
+        &doc.root, 300.0, 100.0, 0.0, 250.0, 250.0, 350.0,
+        0, 0, &std::collections::HashSet::new(), "",
+    );
+    let fills: Vec<_> = list.commands.iter().filter_map(|cmd| match cmd {
+        PaintCmd::FillRect { rect, color, .. } => Some((rect, color)),
+        _ => None,
+    }).collect();
+    let fill_summary: Vec<_> = fills.iter().map(|(rect, color)|
+        (rect.x, rect.y, rect.w, rect.h, color.r, color.g, color.b)
+    ).collect();
+    assert!(fills.iter().any(|(rect, color)| rect.y + rect.h > 250.0 && rect.y < 350.0
+        && color.r == 255 && color.g == 255 && color.b == 255),
+        "sticky header background must be painted in the scrolled viewport: {fill_summary:?}");
+    assert!(fills.iter().any(|(rect, color)| rect.y + rect.h > 250.0 && rect.y < 350.0
+        && color.r == 2 && color.g == 2 && color.b == 3),
+        "sticky inline button must be painted in the scrolled viewport: {fill_summary:?}");
+}
+
 // ── inline-block in flex: background must cover padding ──────────────────────
 
 #[test]

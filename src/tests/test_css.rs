@@ -12,6 +12,48 @@ use crate::renderer::display_list_builder::build_display_list;
 use crate::types::*;
 
 #[test]
+fn negative_margin_can_reduce_atomic_inline_advance_to_zero() {
+    let doc = parse_and_layout(
+        r#"<style>
+          * { margin:0; padding:0 }
+          .nav { width:1000px }
+          .links { display:inline-flex; width:1000px; height:50px }
+          .menu { display:inline-flex; width:40px; height:40px; margin-left:-40px; position:sticky }
+        </style><div class="nav"><header class="links" id="links"></header><button class="menu" id="menu"></button></div>"#,
+        1200.0,
+    );
+    let links = crate::tests::test_grid::find_by_id(&doc.root, "links").unwrap().layout.border_rect;
+    let menu = crate::tests::test_grid::find_by_id(&doc.root, "menu").unwrap().layout.border_rect;
+    assert!((menu.y - links.y).abs() < 1.0, "button wrapped below the header: {menu:?} {links:?}");
+    assert!((menu.x - (links.x + links.w - menu.w)).abs() < 1.0);
+}
+
+#[test]
+fn media_and_container_queries_accept_adjacent_logical_keyword() {
+    let query = "(min-width:768px)and (max-width:1023px)";
+    assert!(crate::css::evaluate_media(query, 900.0, 700.0));
+    assert!(!crate::css::evaluate_media(query, 1280.0, 700.0));
+    assert!(crate::css::evaluate_container(query, 900.0, 700.0));
+    assert!(!crate::css::evaluate_container(query, 1280.0, 700.0));
+}
+
+#[test]
+fn webkit_scrollbar_display_none_hides_bar_without_disabling_scroll() {
+    let doc = parse_and_layout(
+        r#"<style>
+          .scroll { width: 100px; overflow-x: auto; white-space: nowrap }
+          .scroll::-webkit-scrollbar { display: none }
+          .scroll::-webkit-scrollbar-thumb { background: red }
+        </style><div id="scroll" class="scroll">A long line that overflows horizontally</div>"#,
+        800.0,
+    );
+    let node = crate::tests::test_grid::find_by_id(&doc.root, "scroll").unwrap();
+    assert_eq!(node.style.scrollbar_width, "none");
+    assert_eq!(node.style.overflow_x, Overflow::Auto);
+    assert!(node.layout.scroll_width > node.layout.content_rect.w);
+}
+
+#[test]
 fn desktop_media_unset_clears_logical_block_start_margin() {
     let doc = parse_and_layout(
         r#"<style>
@@ -673,6 +715,73 @@ fn font_face_source_tech_filters_unsupported_requirements() {
     assert!(
         !crate::layout::font_source_techs_supported(&sources[1]),
         "unsupported font technology requirements should make a source ineligible"
+    );
+}
+
+#[test]
+fn local_font_face_alias_is_available_to_fallback_stack() {
+    let mut renderer = crate::Renderer::new();
+    let html = r#"<style>
+        @font-face { font-family: Site Fallback; src: local("Arial"); }
+        @font-face { font-family: Other Fallback; src: local("Arial"); }
+        #title { font-family: Missing Site Face, Site Fallback; }
+    </style><div id="title">Fallback text</div>"#;
+    let _ = renderer.load_html(html, 400.0);
+    let fs = &renderer.font_system;
+    let arial = fontdb::Query {
+        families: &[fontdb::Family::Name("Arial")],
+        weight: fontdb::Weight::NORMAL,
+        stretch: fontdb::Stretch::Normal,
+        style: fontdb::Style::Normal,
+    };
+    if fs.db().query(&arial).is_none() {
+        eprintln!("Arial is unavailable on this host — skipping local-face assertion");
+        return;
+    }
+    assert!(
+        matches!(
+            crate::layout::inline_layout::resolve_css_family(
+                fs,
+                "Missing Site Face, Site Fallback"
+            ),
+            crate::layout::inline_layout::ResolvedFamily::Named(name)
+                if name.as_ref() == "Site Fallback"
+        ),
+        "the local @font-face alias should resolve before a generic fallback"
+    );
+    assert!(
+        matches!(
+            crate::layout::inline_layout::resolve_css_family(fs, "Other Fallback"),
+            crate::layout::inline_layout::ResolvedFamily::Named(name)
+                if name.as_ref() == "Other Fallback"
+        ),
+        "different aliases for the same local family must both be registered"
+    );
+    let alias_normal = crate::layout::inline_layout::measure_text_width_weighted(
+        "Darüber spricht Deutschland", 20.0, Some(&mut renderer.font_system),
+        FontWeight::Normal, FontStyle::Normal, 1.0,
+        "Missing Site Face, Site Fallback", 100.0,
+    );
+    let arial_normal = crate::layout::inline_layout::measure_text_width_weighted(
+        "Darüber spricht Deutschland", 20.0, Some(&mut renderer.font_system),
+        FontWeight::Normal, FontStyle::Normal, 1.0, "Arial", 100.0,
+    );
+    assert!(
+        (alias_normal - arial_normal).abs() < 1.0,
+        "local alias should shape normally like Arial: alias={alias_normal}, Arial={arial_normal}"
+    );
+    let alias_width = crate::layout::inline_layout::measure_text_width_weighted(
+        "Darüber spricht Deutschland", 20.0, Some(&mut renderer.font_system),
+        FontWeight::Bold, FontStyle::Normal, 1.0,
+        "Missing Site Face, Site Fallback", 100.0,
+    );
+    let arial_width = crate::layout::inline_layout::measure_text_width_weighted(
+        "Darüber spricht Deutschland", 20.0, Some(&mut renderer.font_system),
+        FontWeight::Bold, FontStyle::Normal, 1.0, "Arial", 100.0,
+    );
+    assert!(
+        (alias_width - arial_width).abs() < 1.0,
+        "local alias should shape like Arial: alias bold={alias_width}, Arial bold={arial_width}, alias normal={alias_normal}, Arial normal={arial_normal}"
     );
 }
 

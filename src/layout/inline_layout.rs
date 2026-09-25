@@ -2238,12 +2238,12 @@ fn collect_items_inner(
         let used_margin_w = node.layout.border_rect.w
             + node.layout.resolved_margin_left
             + node.layout.resolved_margin_right;
-        let box_w = if used_margin_w > 0.0 {
-            used_margin_w
+        let box_w = if node.layout.border_rect.w > 0.0 {
+            used_margin_w.max(0.0)
         } else if node.layout.margin_rect.w > 0.0 {
             node.layout.margin_rect.w
         } else {
-            50.0
+            0.0
         };
         let box_h = if node.layout.margin_rect.h > 0.0 {
             node.layout.margin_rect.h

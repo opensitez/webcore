@@ -384,7 +384,8 @@ fn animation_transform_matrices(
         }
     }
 
-    let root_font_px = root.style.font_size_px(16.0, 16.0);
+    let initial_font_px = ComputedStyle::INITIAL_FONT_SIZE_PX;
+    let root_font_px = root.style.font_size_px(initial_font_px, initial_font_px);
     let mut out = std::collections::HashMap::new();
     walk(
         root,
@@ -1417,9 +1418,9 @@ impl Renderer {
         // list almost immediately, so scrolling paid a full record/replay pass
         // instead of shifting the existing backing surface and painting only
         // the newly exposed strip.
-        let paint_overscan = (view_h * 8.0).max(6000.0);
-        let paint_top = (doc.scroll_y - paint_overscan).max(0.0);
-        let paint_bottom = (doc.scroll_y + view_h + paint_overscan).min(doc_h.max(view_h));
+        let paint_band = retained_paint_band_for_doc(doc, view_w, view_h);
+        let paint_top = paint_band.y;
+        let paint_bottom = paint_band.bottom();
 
         // Check what changed since last render
         let layout_changed = doc.layout_generation != self.cached_layout_generation;
@@ -2036,7 +2037,8 @@ impl Renderer {
         {
             let value = crate::types::input_value(node);
             let prefix: String = value.chars().take(node.input_cursor).collect();
-            let font_px = node.style.font_size_px(16.0, 16.0);
+            let initial_font_px = ComputedStyle::INITIAL_FONT_SIZE_PX;
+            let font_px = node.style.font_size_px(initial_font_px, initial_font_px);
             let advance = crate::layout::inline_layout::measure_text_width_fs_attrs(
                 &mut self.font_system,
                 &prefix,

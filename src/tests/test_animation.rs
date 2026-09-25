@@ -1064,6 +1064,29 @@ fn tick_animations_produces_overrides() {
 }
 
 #[test]
+fn keyframe_transform_resolves_element_variables_and_mixed_units() {
+    let html = r#"<style>
+        @keyframes shine {
+            0% { transform: translateX(calc(var(--direction) * var(--width))); }
+            40%, 100% { transform: translateX(calc(-1 * var(--direction) * 100%)); }
+        }
+        #box { --direction: -1; --width: 8rem; width: 800px; height: 40px;
+               animation: shine 1s linear infinite; }
+    </style><div id="box"></div>"#;
+    let mut doc = parse_html(html);
+    let mut engine = LayoutEngine::new();
+    engine.layout(&mut doc, 1000.0);
+    let box_id = doc.query_selector("#box").unwrap();
+    let start = doc.active_animations[0].start_time;
+    doc.tick_animations(start + Duration::from_millis(200));
+    let transform = doc.animation_overrides_for(box_id).unwrap().iter()
+        .find(|(name, _)| name == "transform").unwrap().1.as_str();
+    let translate_x: f32 = transform.strip_prefix("matrix(").unwrap()
+        .trim_end_matches(')').split(',').nth(4).unwrap().parse().unwrap();
+    assert!((translate_x - 336.0).abs() < 1.0, "expected midpoint from -128px to +800px, got {transform}");
+}
+
+#[test]
 fn one_sided_to_keyframe_starts_from_underlying_style() {
     let html = r#"<html><head><style>
         @keyframes fade-out { to { opacity: 0; } }
