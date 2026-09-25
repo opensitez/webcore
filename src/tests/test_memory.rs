@@ -1194,6 +1194,27 @@ fn full_repaint_clears_animation_dirty_rects() {
 }
 
 #[test]
+fn transform_animation_preserves_unrelated_content_in_dirty_rect() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<style>body{margin:0;background:#1766aa}.box{width:20px;height:20px;background:red;transform:translateX(0px)}</style><div id='box' class='box'></div>",
+        320.0,
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(320, 240).unwrap();
+    renderer.render(&mut doc, &mut pixmap, 1.0);
+    let static_pixel = pixmap.pixel(100, 100).unwrap();
+    let box_id = doc.query_selector("#box").unwrap();
+    doc.animation_overrides.insert(
+        box_id,
+        vec![("transform".to_string(), "translateX(10px)".to_string())],
+    );
+    renderer.invalidate_paint_rects([crate::types::Rect::new(0.0, 0.0, 200.0, 160.0)]);
+    renderer.render(&mut doc, &mut pixmap, 1.0);
+
+    assert_eq!(pixmap.pixel(100, 100).unwrap(), static_pixel);
+}
+
+#[test]
 fn offscreen_paint_damage_is_clipped_before_redraw() {
     let mut r = crate::Renderer::new();
     let mut doc = r.load_html(

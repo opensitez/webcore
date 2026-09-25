@@ -372,6 +372,10 @@ pub enum ClipPathKind {
     Polygon,
 }
 
+impl ComputedStyle {
+    pub const INITIAL_FONT_SIZE_PX: f32 = 16.0;
+}
+
 impl Default for ComputedStyle {
     fn default() -> Self {
         Self {
@@ -442,7 +446,7 @@ impl Default for ComputedStyle {
             svg_fill: Some(Color::BLACK),
             svg_stroke: None,
             font_family: String::from("sans-serif"),
-            font_size: CssLength::Px(16.0),
+            font_size: CssLength::Px(Self::INITIAL_FONT_SIZE_PX),
             font_weight: FontWeight::Normal,
             relative_font_weight_base: None,
             font_style: FontStyle::Normal,

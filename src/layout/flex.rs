@@ -1617,7 +1617,7 @@ pub fn layout_flex(
                         let intrinsic_w = engine
                             .max_content_width(child, font_px, root_font_px)
                             .min(content_w);
-                        if intrinsic_w < items[item_idx].cross_size - 0.5 {
+                        if (intrinsic_w - child.layout.content_rect.w).abs() > 0.5 {
                             // Keep a flex-resolved MAIN size, but let a
                             // content-sized auto-height item grow if the
                             // narrower cross size makes its text wrap. Yahoo's
@@ -1631,12 +1631,12 @@ pub fn layout_flex(
                                 child,
                                 &item_constraints(
                                     item_available_height,
-                                    intrinsic_w,
+                                    content_w,
                                     content_x,
                                     content_y,
                                     font_px,
                                     root_font_px,
-                                    None,
+                                    Some(intrinsic_w),
                                     keep_resolved_main.then_some(items[item_idx].main_used),
                                 ),
                             );

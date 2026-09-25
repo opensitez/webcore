@@ -1,7 +1,7 @@
 //! Tests for CSS value AST: min(), max(), clamp(), calc() with proper resolution.
 
 use crate::css::{parse_color, parse_length};
-use crate::types::{BorderStyle, Color, CssLength};
+use crate::types::{BorderStyle, Color, CssLength, Display};
 
 fn resolve(val: &CssLength, containing: f32, vw: f32) -> f32 {
     val.resolve_vp(16.0, containing, 16.0, vw, 600.0)
@@ -954,6 +954,55 @@ fn logical_inline_margins_and_padding_follow_direction() {
         CssLength::Px(7.0),
         "rtl: inline-end is the LEFT padding"
     );
+}
+
+#[test]
+fn two_value_logical_shorthands_resolve_in_flow_order() {
+    let ltr = cascaded(
+        "<div id='t' style='position:relative; padding-inline:24px 12px; \
+         padding-block:40px 32px; margin-inline:3px 7px; margin-block:2px 5px; \
+         inset-inline:10px 20px; inset-block:4px 6px'>x</div>",
+    );
+    assert_eq!(ltr.padding_left, CssLength::Px(24.0));
+    assert_eq!(ltr.padding_right, CssLength::Px(12.0));
+    assert_eq!(ltr.padding_top, CssLength::Px(40.0));
+    assert_eq!(ltr.padding_bottom, CssLength::Px(32.0));
+    assert_eq!(ltr.margin_left, CssLength::Px(3.0));
+    assert_eq!(ltr.margin_right, CssLength::Px(7.0));
+    assert_eq!(ltr.margin_top, CssLength::Px(2.0));
+    assert_eq!(ltr.margin_bottom, CssLength::Px(5.0));
+    assert_eq!(ltr.left, CssLength::Px(10.0));
+    assert_eq!(ltr.right, CssLength::Px(20.0));
+    assert_eq!(ltr.top, CssLength::Px(4.0));
+    assert_eq!(ltr.bottom, CssLength::Px(6.0));
+
+    let rtl = cascaded(
+        "<div id='t' style='direction:rtl; padding-inline:24px 12px; \
+         margin-inline:3px 7px; inset-inline:10px 20px'>x</div>",
+    );
+    assert_eq!(rtl.padding_right, CssLength::Px(24.0));
+    assert_eq!(rtl.padding_left, CssLength::Px(12.0));
+    assert_eq!(rtl.margin_right, CssLength::Px(3.0));
+    assert_eq!(rtl.margin_left, CssLength::Px(7.0));
+    assert_eq!(rtl.right, CssLength::Px(10.0));
+    assert_eq!(rtl.left, CssLength::Px(20.0));
+}
+
+#[test]
+fn general_sibling_attribute_selector_matches_preceding_hidden_element() {
+    let matched = cascaded(
+        "<style>span[data-checked=''] ~ button .label { display:none }</style>\
+         <div><span data-checked='' style='display:none'></span>\
+         <button><span id='t' class='label'>Less</span></button></div>",
+    );
+    assert_eq!(matched.display, Display::None);
+
+    let unmatched = cascaded(
+        "<style>span[data-checked=''] ~ button .label { display:none }</style>\
+         <div><span data-checked='checked' style='display:none'></span>\
+         <button><span id='t' class='label'>Less</span></button></div>",
+    );
+    assert_ne!(unmatched.display, Display::None);
 }
 
 /// css-logical-1 §4.1 defines `min-`/`max-inline-size` and `-block-size`

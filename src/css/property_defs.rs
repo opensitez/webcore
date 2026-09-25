@@ -8281,9 +8281,16 @@ fn note_logical(s: &mut ComputedStyle, slot: LogicalSlot, v: &str) {
     let l = parse_length(v);
     s.rare_mut().logical_box.push((slot, l));
 }
+fn note_logical_pair(s: &mut ComputedStyle, start: LogicalSlot, end: LogicalSlot, v: &str) {
+    let parts = split_top_level_whitespace(v);
+    if parts.is_empty() || parts.len() > 2 {
+        return;
+    }
+    note_logical(s, start, parts[0]);
+    note_logical(s, end, parts.get(1).copied().unwrap_or(parts[0]));
+}
 fn apply_margin_block(s: &mut ComputedStyle, v: &str) {
-    note_logical(s, LogicalSlot::MarginBlockStart, v);
-    note_logical(s, LogicalSlot::MarginBlockEnd, v);
+    note_logical_pair(s, LogicalSlot::MarginBlockStart, LogicalSlot::MarginBlockEnd, v);
 }
 fn apply_margin_block_start(s: &mut ComputedStyle, v: &str) {
     note_logical(s, LogicalSlot::MarginBlockStart, v);
@@ -8292,8 +8299,7 @@ fn apply_margin_block_end(s: &mut ComputedStyle, v: &str) {
     note_logical(s, LogicalSlot::MarginBlockEnd, v);
 }
 fn apply_margin_inline(s: &mut ComputedStyle, v: &str) {
-    note_logical(s, LogicalSlot::MarginInlineStart, v);
-    note_logical(s, LogicalSlot::MarginInlineEnd, v);
+    note_logical_pair(s, LogicalSlot::MarginInlineStart, LogicalSlot::MarginInlineEnd, v);
 }
 fn apply_margin_inline_start(s: &mut ComputedStyle, v: &str) {
     note_logical(s, LogicalSlot::MarginInlineStart, v);
@@ -8302,8 +8308,7 @@ fn apply_margin_inline_end(s: &mut ComputedStyle, v: &str) {
     note_logical(s, LogicalSlot::MarginInlineEnd, v);
 }
 fn apply_padding_block(s: &mut ComputedStyle, v: &str) {
-    note_logical(s, LogicalSlot::PaddingBlockStart, v);
-    note_logical(s, LogicalSlot::PaddingBlockEnd, v);
+    note_logical_pair(s, LogicalSlot::PaddingBlockStart, LogicalSlot::PaddingBlockEnd, v);
 }
 fn apply_padding_block_start(s: &mut ComputedStyle, v: &str) {
     note_logical(s, LogicalSlot::PaddingBlockStart, v);
@@ -8312,8 +8317,7 @@ fn apply_padding_block_end(s: &mut ComputedStyle, v: &str) {
     note_logical(s, LogicalSlot::PaddingBlockEnd, v);
 }
 fn apply_padding_inline(s: &mut ComputedStyle, v: &str) {
-    note_logical(s, LogicalSlot::PaddingInlineStart, v);
-    note_logical(s, LogicalSlot::PaddingInlineEnd, v);
+    note_logical_pair(s, LogicalSlot::PaddingInlineStart, LogicalSlot::PaddingInlineEnd, v);
 }
 fn apply_padding_inline_start(s: &mut ComputedStyle, v: &str) {
     note_logical(s, LogicalSlot::PaddingInlineStart, v);
@@ -8457,14 +8461,10 @@ fn apply_inset(s: &mut ComputedStyle, v: &str) {
     );
 }
 fn apply_inset_block(s: &mut ComputedStyle, v: &str) {
-    let l = parse_length(v);
-    s.top = l.clone();
-    s.bottom = l;
+    note_logical_pair(s, LogicalSlot::InsetBlockStart, LogicalSlot::InsetBlockEnd, v);
 }
 fn apply_inset_inline(s: &mut ComputedStyle, v: &str) {
-    let l = parse_length(v);
-    s.left = l.clone();
-    s.right = l;
+    note_logical_pair(s, LogicalSlot::InsetInlineStart, LogicalSlot::InsetInlineEnd, v);
 }
 
 // ── Place shorthands ────────────────────────────────────────────────────────

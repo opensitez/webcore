@@ -1495,6 +1495,21 @@ pub(crate) fn build_pseudo_style_shared(
 /// debug build does not reuse stack slots between sibling scopes. Only a
 /// real function boundary pops them (`arenaplan.md` item 3).
 pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
+    fn wrap_flex_pseudo_text(pseudo_box: &mut crate::types::WebCore) {
+        if pseudo_box.text.is_empty()
+            || !matches!(pseudo_box.style.display, Display::Flex | Display::InlineFlex)
+        {
+            return;
+        }
+        let mut text_box = crate::types::WebCore::new("#text");
+        text_box.node_id = crate::dom::arena::next_shadow_node_id();
+        text_box.text = std::mem::take(&mut pseudo_box.text);
+        let mut text_style = ComputedStyle::default();
+        text_style.inherit_from(&pseudo_box.style);
+        text_box.style = std::sync::Arc::new(text_style);
+        pseudo_box.children.push(text_box);
+    }
+
     fn mark_pseudo_layout_dirty(node: &mut crate::types::WebCore) {
         node.layout.layout_dirty = true;
         node.layout.intrinsic_dirty = true;
@@ -1586,6 +1601,7 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         {
             std::sync::Arc::make_mut(&mut pseudo_box.style).display = Display::Block;
         }
+        wrap_flex_pseudo_text(&mut pseudo_box);
         preserve_loaded_pseudo_resources(&mut pseudo_box, existing_node);
         mark_pseudo_layout_dirty(&mut pseudo_box);
         if let Some(idx) = existing {
@@ -1633,6 +1649,7 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         {
             std::sync::Arc::make_mut(&mut pseudo_box.style).display = Display::Block;
         }
+        wrap_flex_pseudo_text(&mut pseudo_box);
         preserve_loaded_pseudo_resources(&mut pseudo_box, existing_node);
         mark_pseudo_layout_dirty(&mut pseudo_box);
         if let Some(idx) = existing {

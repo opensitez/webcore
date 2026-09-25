@@ -165,7 +165,7 @@ tbody[hidden], thead[hidden], tfoot[hidden], tr[hidden], col[hidden], colgroup[h
 button, input[type=submit], input[type=button], input[type=reset] {
   display: inline-flex; align-items: center; justify-content: center;
   padding: 1px 6px; cursor: default; background-color: #e8e8e8; border: 1px solid #767676;
-  white-space: nowrap; border-radius: 3px;
+  white-space: nowrap; border-radius: 3px; box-sizing: border-box;
 }
 button:hover, input[type=submit]:hover, input[type=button]:hover, input[type=reset]:hover {
   background-color: #e0e0e0; border-color: #666;

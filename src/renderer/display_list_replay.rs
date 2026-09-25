@@ -453,6 +453,7 @@ fn replay_commands_inner(
         .collect();
     let mut layer_stack: Vec<Layer> = Vec::new();
     let mut mask_stack: Vec<(Rect, ImageRef)> = Vec::new();
+    let mut text_gradient_stack: Vec<&PaintCmd> = Vec::new();
 
     // ── Viewport culling ────────────────────────────────────────────────────
     //
@@ -569,6 +570,12 @@ fn replay_commands_inner(
         let clip_mask = clip_mask_stack.last().and_then(|m| m.as_ref());
 
         match cmd {
+            PaintCmd::PushTextGradient { .. } => {
+                text_gradient_stack.push(cmd);
+            }
+            PaintCmd::PopTextGradient => {
+                text_gradient_stack.pop();
+            }
             PaintCmd::FillRect {
                 rect,
                 color,
@@ -773,6 +780,13 @@ fn replay_commands_inner(
                 small_caps,
                 decoration,
             } => {
+                let text_gradient = if color.a == 0 {
+                    text_gradient_stack
+                        .last()
+                        .and_then(|gradient| TextGradientSampler::new(gradient, ts))
+                } else {
+                    None
+                };
                 let phys_x = ts.sx * *x + ts.kx * *y + ts.tx;
                 let phys_y = ts.ky * *x + ts.sy * *y + ts.ty;
 
@@ -792,7 +806,7 @@ fn replay_commands_inner(
                         .unwrap_or(pixmap);
                     if transform_stack.is_empty() {
                         let (text_scale, text_x, text_y) = transformed_text_origin(&ts, *x, *y);
-                        draw_text_cmd(
+                        draw_text_cmd_with_gradient(
                             target,
                             *fs,
                             *sc,
@@ -812,6 +826,7 @@ fn replay_commands_inner(
                             *word_spacing,
                             *small_caps,
                             clip_mask,
+                            text_gradient.as_ref(),
                         );
                     } else {
                         draw_transformed_text_cmd(
@@ -2973,17 +2988,153 @@ fn apply_opacity(c: &Color, alpha: f32) -> Color {
     Color::rgba(c.r, c.g, c.b, (c.a as f32 * alpha) as u8)
 }
 
-/// Blit an ALREADY-SHAPED cosmic-text buffer onto the pixmap at a physical
-/// origin, source-over.
-///
-/// Extracted from `draw_text_cmd` so the canvas can share it. The two callers
-/// need the same last step and nothing before it: `draw_text_cmd` shapes from a
-/// display-list command, `<canvas>`'s `fillText` shapes from the 2D context's
-/// own font state, and only then do both want these exact glyphs composited.
-///
-/// `color`'s alpha scales every glyph on top of whatever cosmic-text resolves
-/// per glyph — a span carrying its own colour keeps it, and the parameter still
-/// controls the overall opacity.
+/// Samples an element's background in document coordinates at each glyph pixel.
+struct TextGradientSampler<'a> {
+    rect: Rect,
+    background_color: Color,
+    gradient_type: u8,
+    angle: f32,
+    direction: GradientDirection,
+    radial_center_x: f32,
+    radial_center_y: f32,
+    radial_radius_x: f32,
+    radial_radius_y: f32,
+    stops: &'a [(Color, f32)],
+    inverse: Transform,
+}
+
+impl<'a> TextGradientSampler<'a> {
+    fn new(command: &'a PaintCmd, transform: Transform) -> Option<Self> {
+        let PaintCmd::PushTextGradient {
+            rect,
+            background_color,
+            gradient_type,
+            angle,
+            direction,
+            radial_center_x,
+            radial_center_y,
+            radial_radius_x,
+            radial_radius_y,
+            stops,
+        } = command else {
+            return None;
+        };
+        Some(Self {
+            rect: *rect,
+            background_color: *background_color,
+            gradient_type: *gradient_type,
+            angle: *angle,
+            direction: *direction,
+            radial_center_x: *radial_center_x,
+            radial_center_y: *radial_center_y,
+            radial_radius_x: *radial_radius_x,
+            radial_radius_y: *radial_radius_y,
+            stops,
+            inverse: transform.invert()?,
+        })
+    }
+
+    fn sample(&self, physical_x: f32, physical_y: f32) -> Color {
+        let mut point = tiny_skia::Point::from_xy(physical_x + 0.5, physical_y + 0.5);
+        self.inverse.map_point(&mut point);
+        let rect = self.rect;
+        if point.x < rect.x
+            || point.x >= rect.right()
+            || point.y < rect.y
+            || point.y >= rect.bottom()
+        {
+            return self.background_color;
+        }
+        let position = if self.gradient_type == 1 {
+            let angle = match self.direction {
+                GradientDirection::Angle(_) => self.angle,
+                GradientDirection::Corner { x, y } => {
+                    (x as f32 * rect.w)
+                        .atan2(-(y as f32 * rect.h))
+                        .to_degrees()
+                        .rem_euclid(360.0)
+                }
+            };
+            let rad = angle.to_radians();
+            let dx = rad.sin();
+            let dy = -rad.cos();
+            let half = ((rect.w * dx).abs() + (rect.h * dy).abs()) / 2.0;
+            if half <= 0.0 {
+                return self.background_color;
+            }
+            let cx = rect.x + rect.w / 2.0;
+            let cy = rect.y + rect.h / 2.0;
+            ((point.x - cx) * dx + (point.y - cy) * dy) / (2.0 * half) + 0.5
+        } else {
+            let cx = rect.x + self.radial_center_x;
+            let cy = rect.y + self.radial_center_y;
+            let rx = self.radial_radius_x.max(1.0);
+            let ry = self.radial_radius_y.max(1.0);
+            (((point.x - cx) / rx).powi(2) + ((point.y - cy) / ry).powi(2)).sqrt()
+        };
+        let foreground = sample_text_gradient_stops(self.stops, position);
+        composite_text_background(foreground, self.background_color)
+    }
+}
+
+fn composite_text_background(foreground: Color, background: Color) -> Color {
+    let fa = foreground.a as f32 / 255.0;
+    let ba = background.a as f32 / 255.0;
+    let alpha = fa + ba * (1.0 - fa);
+    if alpha <= 0.0 {
+        return Color::TRANSPARENT;
+    }
+    let channel = |front: u8, back: u8| {
+        ((front as f32 * fa + back as f32 * ba * (1.0 - fa)) / alpha)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color::rgba(
+        channel(foreground.r, background.r),
+        channel(foreground.g, background.g),
+        channel(foreground.b, background.b),
+        (alpha * 255.0).round() as u8,
+    )
+}
+
+fn sample_text_gradient_stops(stops: &[(Color, f32)], position: f32) -> Color {
+    let Some(&(first, first_at)) = stops.first() else {
+        return Color::TRANSPARENT;
+    };
+    if position <= first_at {
+        return first;
+    }
+    for pair in stops.windows(2) {
+        let (a, a_at) = pair[0];
+        let (b, b_at) = pair[1];
+        if position <= b_at {
+            let t = if b_at > a_at {
+                ((position - a_at) / (b_at - a_at)).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let alpha = a.a as f32 * (1.0 - t) + b.a as f32 * t;
+            if alpha <= 0.0 {
+                return Color::TRANSPARENT;
+            }
+            let channel = |left: u8, right: u8| -> u8 {
+                ((left as f32 * a.a as f32 * (1.0 - t) + right as f32 * b.a as f32 * t) / alpha)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            };
+            return Color::rgba(
+                channel(a.r, b.r),
+                channel(a.g, b.g),
+                channel(a.b, b.b),
+                alpha.round() as u8,
+            );
+        }
+    }
+    stops.last().map(|(color, _)| *color).unwrap_or(first)
+}
+
+/// Blit an already-shaped cosmic-text buffer onto the pixmap, source-over.
+/// Canvas and display-list text share this final glyph composition step.
 pub(crate) fn blit_shaped_buffer(
     pixmap: &mut Pixmap,
     font_system: &mut FontSystem,
@@ -2997,6 +3148,27 @@ pub(crate) fn blit_shaped_buffer(
     color: CTextColor,
     clip_mask: Option<&tiny_skia::Mask>,
 ) {
+    blit_shaped_buffer_with_gradient(
+        pixmap, font_system, swash_cache, buf, _text, phys_x, phys_y,
+        _letter_spacing, _word_spacing, color, clip_mask, None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blit_shaped_buffer_with_gradient(
+    pixmap: &mut Pixmap,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    buf: &mut Buffer,
+    _text: &str,
+    phys_x: f32,
+    phys_y: f32,
+    _letter_spacing: f32,
+    _word_spacing: f32,
+    color: CTextColor,
+    clip_mask: Option<&tiny_skia::Mask>,
+    text_gradient: Option<&TextGradientSampler<'_>>,
+) {
     struct PixmapTextRenderer<'a> {
         pixmap: &'a mut Pixmap,
         font_system: &'a mut FontSystem,
@@ -3005,6 +3177,7 @@ pub(crate) fn blit_shaped_buffer(
         origin_y: i32,
         color_alpha: u32,
         clip_mask: Option<&'a tiny_skia::Mask>,
+        text_gradient: Option<&'a TextGradientSampler<'a>>,
     }
 
     impl cosmic_text::Renderer for PixmapTextRenderer<'_> {
@@ -3018,6 +3191,7 @@ pub(crate) fn blit_shaped_buffer(
                 color,
                 self.color_alpha,
                 self.clip_mask,
+                self.text_gradient,
             );
         }
 
@@ -3026,6 +3200,7 @@ pub(crate) fn blit_shaped_buffer(
             let origin_y = self.origin_y;
             let color_alpha = self.color_alpha;
             let clip_mask = self.clip_mask;
+            let text_gradient = self.text_gradient;
             self.swash_cache.with_pixels(
                 self.font_system,
                 physical_glyph.cache_key,
@@ -3040,6 +3215,7 @@ pub(crate) fn blit_shaped_buffer(
                         pixel_color,
                         color_alpha,
                         clip_mask,
+                        text_gradient,
                     );
                 },
             );
@@ -3054,6 +3230,7 @@ pub(crate) fn blit_shaped_buffer(
         origin_y: phys_y as i32,
         color_alpha: color.a() as u32,
         clip_mask,
+        text_gradient,
     };
     buf.render(&mut renderer, color);
 }
@@ -3067,6 +3244,7 @@ fn blit_text_pixel_rect(
     gc: CTextColor,
     color_a: u32,
     clip_mask: Option<&tiny_skia::Mask>,
+    text_gradient: Option<&TextGradientSampler<'_>>,
 ) {
     let ga = gc.a();
     if ga == 0 {
@@ -3093,6 +3271,7 @@ fn blit_text_pixel_rect(
                 continue;
             }
             let idx = row + px_x as usize;
+            let sampled = text_gradient.map(|gradient| gradient.sample(px_x as f32, py as f32));
             let final_a = if let Some(m) = mask_data {
                 let mask_val = m.get(idx).copied().unwrap_or(0);
                 if mask_val == 0 {
@@ -3102,14 +3281,20 @@ fn blit_text_pixel_rect(
             } else {
                 eff_a
             };
+            let final_a = sampled
+                .as_ref()
+                .map_or(final_a, |sample| final_a * sample.a as u32 / 255);
             if final_a == 0 {
                 continue;
             }
             let sa = final_a;
             let ia = 255 - sa;
-            let pr = gc.r() as u32 * sa / 255;
-            let pg = gc.g() as u32 * sa / 255;
-            let pb = gc.b() as u32 * sa / 255;
+            let (sr, sg, sb) = sampled
+                .map(|sample| (sample.r, sample.g, sample.b))
+                .unwrap_or((gc.r(), gc.g(), gc.b()));
+            let pr = sr as u32 * sa / 255;
+            let pg = sg as u32 * sa / 255;
+            let pb = sb as u32 * sa / 255;
             let dst = &mut pixels[idx];
             let r = (pr + dst.red() as u32 * ia / 255) as u8;
             let g = (pg + dst.green() as u32 * ia / 255) as u8;
@@ -3143,6 +3328,36 @@ fn draw_text_cmd(
     _small_caps: bool,
     clip_mask: Option<&tiny_skia::Mask>,
 ) {
+    draw_text_cmd_with_gradient(
+        pixmap, font_system, swash_cache, scale, x, y, text, font_family,
+        font_size, font_weight, font_style, font_stretch, line_height, color,
+        decoration, _letter_spacing, word_spacing, _small_caps, clip_mask, None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_text_cmd_with_gradient(
+    pixmap: &mut Pixmap,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    scale: f32,
+    x: f32,
+    y: f32,
+    text: &str,
+    font_family: &str,
+    font_size: f32,
+    font_weight: u16,
+    font_style: u8,
+    font_stretch: f32,
+    line_height: f32,
+    color: &Color,
+    decoration: &super::display_list::TextDecoration,
+    _letter_spacing: f32,
+    word_spacing: f32,
+    _small_caps: bool,
+    clip_mask: Option<&tiny_skia::Mask>,
+    text_gradient: Option<&TextGradientSampler<'_>>,
+) {
     if text.is_empty() {
         return;
     }
@@ -3169,7 +3384,7 @@ fn draw_text_cmd(
             font_family,
             crate::layout::inline_layout::stretch_from_percent(font_stretch),
         ) + _letter_spacing * leading.chars().count() as f32;
-        draw_text_cmd(
+        draw_text_cmd_with_gradient(
             pixmap,
             font_system,
             swash_cache,
@@ -3189,6 +3404,7 @@ fn draw_text_cmd(
             word_spacing,
             _small_caps,
             clip_mask,
+            text_gradient,
         );
         return;
     }
@@ -3242,7 +3458,11 @@ fn draw_text_cmd(
     let text_for_shape = fallback_text.as_deref().unwrap_or(text);
     let phys_x = x * sc;
     let phys_y = y * sc;
-    let ct_color = CTextColor::rgba(color.r, color.g, color.b, color.a);
+    let ct_color = if text_gradient.is_some() {
+        CTextColor::rgba(255, 255, 255, 255)
+    } else {
+        CTextColor::rgba(color.r, color.g, color.b, color.a)
+    };
 
     // ⛔ SHAPE ONCE, BLIT MANY. This built a `Buffer` and ran a full
     // cosmic-text shaping pass for EVERY text run on EVERY frame — so a page
@@ -3319,7 +3539,7 @@ fn draw_text_cmd(
             map.1.insert(key, buf);
         }
         let buf = map.1.get_mut(&key).expect("just inserted");
-        blit_shaped_buffer(
+        blit_shaped_buffer_with_gradient(
             pixmap,
             font_system,
             swash_cache,
@@ -3331,6 +3551,7 @@ fn draw_text_cmd(
             word_spacing * sc,
             ct_color,
             clip_mask,
+            text_gradient,
         );
         buf.layout_runs()
             .next()

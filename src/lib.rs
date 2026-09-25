@@ -627,6 +627,10 @@ fn complete_css_drain_boundary(css_text: &str) -> usize {
             i += 1;
             continue;
         }
+        if b == b'\\' {
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
         match b {
             b'{' => depth += 1,
             b'}' => {
@@ -682,6 +686,10 @@ fn complete_css_units(css_text: &str) -> Vec<&str> {
         if b == b'\'' || b == b'"' {
             in_string = Some(b);
             i += 1;
+            continue;
+        }
+        if b == b'\\' {
+            i = (i + 2).min(bytes.len());
             continue;
         }
         match b {
@@ -975,6 +983,41 @@ where
 mod stylesheet_loader_tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn streamed_data_url_background_rule_is_preserved() {
+        let css = r#".bg-\[url\(\'data\:image\/svg\+xml\;base64\2c AAA\'\)\]{color:red}.loader{background-image:url("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=");background-size:12rem}.disabled{opacity:.4}"#.to_string();
+        let escaped_semicolon = css.find("\\;").expect("escaped selector semicolon");
+        assert_eq!(complete_css_drain_boundary(&css[..escaped_semicolon + 2]), 0);
+        let mut expected = css::Stylesheet::default();
+        expected.parse_and_add_with_base(&css, "https://example.test/main.css");
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(move |_, emit| {
+            let mut start = 0;
+            while start < css.len() {
+                let mut end = (start + 4096).min(css.len());
+                while !css.is_char_boundary(end) {
+                    end -= 1;
+                }
+                emit(&css[start..end]);
+                start = end;
+            }
+            Ok(())
+        });
+        let loader: StylesheetLoader = Arc::new(|_| Err("not expected".into()));
+        let result = load_stylesheet_cached(
+            "test-streamed-data-url-background".into(),
+            "https://example.test/main.css".into(),
+            String::new(),
+            loader,
+            Some(streaming_loader),
+            false,
+            |_| {},
+        );
+        let expected_selectors: Vec<_> = expected.rules.iter().map(|rule| rule.original_selector.as_str()).collect();
+        let actual_selectors: Vec<_> = result.sheet.rules.iter().map(|rule| rule.original_selector.as_str()).collect();
+        assert_eq!(actual_selectors, expected_selectors);
+        assert!(actual_selectors.contains(&".loader"));
+    }
 
     #[test]
     fn imported_css_precedes_parent_and_resolves_its_own_font_urls() {

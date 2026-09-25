@@ -66,6 +66,7 @@ pub struct LayoutBox {
     /// Paint-only change (color/background) — skip layout, just repaint.
     pub paint_dirty: bool,
     pub last_containing_width: f32,
+    pub last_containing_height: Option<f32>,
 
     // Resolved box-model cache (set by layout, read by parent layout)
     pub resolved_margin_top: f32,
@@ -116,6 +117,7 @@ impl Default for LayoutBox {
             intrinsic_dirty: false,
             paint_dirty: false,
             last_containing_width: 0.0,
+            last_containing_height: None,
             resolved_margin_top: 0.0,
             resolved_margin_right: 0.0,
             resolved_margin_bottom: 0.0,

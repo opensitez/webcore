@@ -612,6 +612,7 @@ pub fn layout_inline_block(
     if !old_lines.is_empty()
         && !node.layout.layout_dirty
         && (node.layout.last_containing_width - content_w).abs() < 0.5
+        && super::same_containing_height(node.layout.last_containing_height, c.available_height)
         && float_ctx.is_none()
     {
         // Reuse old lines — just shift to new position
@@ -655,6 +656,7 @@ pub fn layout_inline_block(
         }
         node.layout.layout_dirty = false;
         node.layout.last_containing_width = c.available_width;
+        node.layout.last_containing_height = c.available_height;
         return node.layout.margin_rect.h;
     }
 
@@ -1245,7 +1247,14 @@ pub fn layout_inline_block(
             // The existing early-stop cannot do this job: it needs
             // `old_line_idx > 0` and copies the whole TAIL, so the first line is
             // always re-shaped and a block of one or two lines never benefits.
-            let key = char_x_fingerprint(&flat_text, &runs, &ll, line_items, engine.scale);
+            let key = char_x_fingerprint(
+                &flat_text,
+                &runs,
+                &ll,
+                line_items,
+                engine.scale,
+                root_font_px,
+            );
             let reused = old_lines.get(old_line_idx).and_then(|ol| {
                 (ol.char_x_key == key && key != 0 && !ol.char_x.is_empty())
                     .then(|| ol.char_x.clone())
@@ -1261,7 +1270,14 @@ pub fn layout_inline_block(
                 None => {
                     if let Some(fs_ptr) = engine.font_system {
                         let fs = unsafe { &mut *fs_ptr };
-                        fill_char_x_for_line(fs, &flat_text, &runs, &mut ll, engine.scale);
+                        fill_char_x_for_line(
+                            fs,
+                            &flat_text,
+                            &runs,
+                            &mut ll,
+                            engine.scale,
+                            root_font_px,
+                        );
                         align_char_x_to_inline_items(&mut ll, line_items);
                         ll.char_x_key = key;
                     }
@@ -1563,6 +1579,7 @@ pub fn layout_inline_block(
 
     node.layout.layout_dirty = false;
     node.layout.last_containing_width = content_w;
+    node.layout.last_containing_height = c.available_height;
     node.layout.margin_rect.h
 }
 
@@ -2254,6 +2271,15 @@ fn collect_items_inner(
             }
         } else {
             (box_h, 0.0)
+        };
+        let (item_ascent, item_descent) = if node.style.vertical_align == VerticalAlign::Middle {
+            // CSS 2.1 §10.8.1: the midpoint of an atomic inline aligns with
+            // the parent's baseline plus half its x-height. It does not sit
+            // on the baseline with an extra strut descent below it.
+            let mid = (parent_font_px * 0.25).min(box_h / 2.0);
+            (box_h / 2.0 + mid, box_h / 2.0 - mid)
+        } else {
+            (item_ascent, item_descent)
         };
         items.push(InlineItem {
             kind: InlineItemKind::Atomic {
@@ -3266,7 +3292,7 @@ thread_local! {
 /// Cached per stack string, and the availability set is rebuilt whenever the
 /// font DB grows (a `@font-face` load).
 pub(crate) fn resolve_css_family(fs: &cosmic_text::FontSystem, raw: &str) -> ResolvedFamily {
-    // ⛔ A front cache keyed on the string's ADDRESS, not its contents.
+    // A front cache starts with the string's address, then verifies its contents.
     // This is called once per shaped segment per line; hashing a font stack
     // ("Linux Libertine", Georgia, Times, "Source Serif Pro", serif) on every
     // one of those cost 12.7 us a call — more than the fallback scan it
@@ -3275,8 +3301,8 @@ pub(crate) fn resolve_css_family(fs: &cosmic_text::FontSystem, raw: &str) -> Res
     FRONT
         .with(|f| {
             let f = f.borrow();
-            for (ptr, len, fam) in f.iter() {
-                if *ptr == raw.as_ptr() && *len == raw.len() {
+            for (ptr, cached_raw, fam) in f.iter() {
+                if *ptr == raw.as_ptr() && cached_raw.as_ref() == raw {
                     return Some(fam.clone());
                 }
             }
@@ -3288,9 +3314,20 @@ pub(crate) fn resolve_css_family(fs: &cosmic_text::FontSystem, raw: &str) -> Res
 }
 
 thread_local! {
-    /// (address, length, family) — a tiny direct scan, cleared when it fills.
-    static FRONT: std::cell::RefCell<Vec<(*const u8, usize, ResolvedFamily)>> =
+    /// (address, content, family) — content guards against reused string storage.
+    static FRONT: std::cell::RefCell<Vec<(*const u8, Box<str>, ResolvedFamily)>> =
         std::cell::RefCell::new(Vec::new());
+}
+
+#[cfg(test)]
+#[test]
+fn font_family_cache_rechecks_reused_string_storage() {
+    let fs = cosmic_text::FontSystem::new();
+    clear_font_family_caches();
+    let mut family = String::from("sans-serif");
+    assert!(matches!(resolve_css_family(&fs, &family), ResolvedFamily::Generic("sans-serif")));
+    family.replace_range(.., "serif     ");
+    assert!(matches!(resolve_css_family(&fs, &family), ResolvedFamily::Generic("serif")));
 }
 
 pub(crate) fn clear_font_family_caches() {
@@ -3312,7 +3349,7 @@ fn resolve_css_family_slow(fs: &cosmic_text::FontSystem, raw: &str) -> ResolvedF
             if f.len() >= 16 {
                 f.clear();
             }
-            f.push((raw.as_ptr(), raw.len(), hit.clone()));
+            f.push((raw.as_ptr(), raw.into(), hit.clone()));
         });
         return hit;
     }
@@ -3374,7 +3411,7 @@ fn resolve_css_family_slow(fs: &cosmic_text::FontSystem, raw: &str) -> ResolvedF
         if f.len() >= 16 {
             f.clear();
         }
-        f.push((raw.as_ptr(), raw.len(), chosen.clone()));
+        f.push((raw.as_ptr(), raw.into(), chosen.clone()));
     });
     chosen
 }
@@ -3851,6 +3888,7 @@ fn char_x_fingerprint(
     line: &crate::types::LayoutLine,
     items: &[InlineItem],
     scale: f32,
+    root_font_px: f32,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let start = line.text_start;
@@ -3867,6 +3905,7 @@ fn char_x_fingerprint(
     line.text_x_offset.to_bits().hash(&mut h);
     line.width.to_bits().hash(&mut h);
     scale.to_bits().hash(&mut h);
+    root_font_px.to_bits().hash(&mut h);
     for item in items {
         item.advance.to_bits().hash(&mut h);
         item.is_space.hash(&mut h);
@@ -3883,17 +3922,20 @@ fn char_x_fingerprint(
         }
         r.text_offset.hash(&mut h);
         r.length.hash(&mut h);
-        r.style.font_size_px(16.0, 16.0).to_bits().hash(&mut h);
+        r.style
+            .font_size_px(16.0, root_font_px)
+            .to_bits()
+            .hash(&mut h);
         r.style
             .word_spacing
-            .resolve(16.0, 0.0, 16.0)
+            .resolve(16.0, 0.0, root_font_px)
             .to_bits()
             .hash(&mut h);
         // Tracking moves every glyph on the line, so a run that only changed
         // its `letter-spacing` must not be handed the previous `char_x`.
         r.style
             .letter_spacing
-            .resolve(16.0, 0.0, 16.0)
+            .resolve(16.0, 0.0, root_font_px)
             .to_bits()
             .hash(&mut h);
         r.style.font_weight.value().hash(&mut h);
@@ -3964,6 +4006,7 @@ pub fn fill_char_x_for_line(
     runs: &[InlineRun],
     line: &mut LayoutLine,
     scale: f32,
+    root_font_px: f32,
 ) {
     let line_start = line.text_start;
     let line_end = (line.text_start + line.text_length).min(flat.len());
@@ -3986,7 +4029,7 @@ pub fn fill_char_x_for_line(
                            positions: &mut Vec<f32>|
      -> f32 {
         let seg_text = &flat[s..e];
-        let font_px = run.style.font_size_px(16.0, 16.0);
+        let font_px = run.style.font_size_px(16.0, root_font_px);
         let ct_w = weight_from_style(
             run.style.font_weight,
             &run.style.rare().font_variation_settings,

@@ -5339,6 +5339,22 @@ fn custom_property_color_mix_chain_resolves_before_border_shorthand() {
 }
 
 #[test]
+fn color_mix_calc_percentage_keeps_opaque_theme_colors() {
+    let doc = parse_and_layout(
+        r#"<style>:root { --main: #f2f0ed; --ink: #0c0b09 }
+        .banner {
+          --tw-bg-opacity: 1;
+          background-color: color-mix(in srgb, var(--main) calc(100%*var(--tw-bg-opacity, 1)), transparent);
+          color: color-mix(in srgb, var(--ink) calc(100%*var(--tw-bg-opacity, 1)), transparent);
+        }</style><div class="banner" id="banner">Title</div>"#,
+        800.0,
+    );
+    let banner = crate::tests::test_grid::find_by_id(&doc.root, "banner").unwrap();
+    assert_eq!(banner.style.background_color, Color::rgb(242, 240, 237));
+    assert_eq!(banner.style.color, Color::rgb(12, 11, 9));
+}
+
+#[test]
 fn stylesheet_root_variable_extraction_leaves_conditional_selectors_scoped() {
     let mut sheet = Stylesheet::default();
     sheet.parse_and_add(
@@ -8986,6 +9002,28 @@ fn a_line_box_reserves_room_below_the_baseline_for_its_strut() {
     );
 }
 
+#[test]
+fn inline_flex_percent_height_button_matches_stretched_sibling() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"<style>body{margin:0}</style>
+        <div style="display:flex;align-items:stretch">
+          <div><input style="height:40px;box-sizing:border-box"></div>
+          <div id="wrap"><button id="button" style="display:inline-flex;height:100%;padding:8px 24px;line-height:20px;font-size:14px;border:0"><i style="display:block;font-size:16px">x</i></button></div>
+        </div>"#,
+        900.0,
+    );
+    let mut heights = Vec::new();
+    for id in ["wrap", "button"] {
+        let element = doc.get_element_by_id(id).unwrap();
+        let h = doc.get_bounding_client_rect(element).unwrap().h;
+        heights.push((id, h));
+    }
+    for (id, h) in heights {
+        assert!((h - 40.0).abs() < 0.5, "{id} should be 40px high, got {h}");
+    }
+}
+
 /// CSS 2.1 §9.5.1: a float's top may not be higher than the top of the current
 /// line box — it sits ON that line, and inline content already there moves
 /// aside for it. The pending line was being flushed instead, dropping the float
@@ -11224,6 +11262,44 @@ fn a_float_escaping_its_block_still_moves_later_content() {
 }
 
 // ── Tokenizer string-awareness (css-syntax-3) ───────────────────────────────
+
+#[test]
+fn data_url_background_rule_survives_between_neighboring_rules() {
+    let css = r#".img-contain{position:relative}.loader{background-image:url("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=");background-position:50%;background-repeat:no-repeat;background-size:12rem}.disabled{opacity:.4}"#;
+    let mut sheet = crate::css::Stylesheet::default();
+    sheet.parse_and_add_with_base(css, "https://example.test/main.css");
+    assert!(sheet.rules.iter().any(|rule| rule.original_selector == ".loader"),
+        "missing .loader among {:?}", sheet.rules.iter().map(|rule| &rule.original_selector).collect::<Vec<_>>());
+}
+
+#[test]
+fn absolute_auto_width_badge_shrinks_to_its_label() {
+    let doc = parse_and_layout(
+        r#"<a style="position:relative;display:block;width:600px;height:200px">
+        <img width="600" height="200">
+        <span id="badge" style="position:absolute;left:8px;top:8px;display:inline-block;padding:0 6px;background:red">Portrait</span>
+        </a>"#,
+        800.0,
+    );
+    let badge = crate::tests::test_grid::find_by_id(&doc.root, "badge").unwrap();
+    assert!(badge.layout.border_rect.w > 30.0 && badge.layout.border_rect.w < 100.0,
+        "badge should shrink to its label, got {:?}", badge.layout.border_rect);
+}
+
+#[test]
+fn column_flex_auto_width_tag_uses_max_content_not_wrapped_content() {
+    let doc = parse_and_layout(
+        r#"<style>.tags{display:flex;flex-direction:column;align-items:flex-start;width:220px}
+        .tag{display:flex;flex:none;padding:8px 24px;font:14px/20px Arial}</style>
+        <div class="tags"><a class="tag" id="tag"><span>Bassirou Diomaye Faye</span></a></div>"#,
+        800.0,
+    );
+    let tag = crate::tests::test_grid::find_by_id(&doc.root, "tag").unwrap();
+    assert!(tag.layout.border_rect.w > 160.0 && tag.layout.border_rect.w <= 220.0,
+        "tag should fit its unwrapped text and padding, got {:?}", tag.layout.border_rect);
+    assert!(tag.layout.border_rect.h <= 40.0,
+        "tag text should stay on one line, got {:?}", tag.layout.border_rect);
+}
 
 /// **A `}` inside a string is string content, not a block end.** Brace matching
 /// ran over raw text, so `content: "}"` closed the rule early, the remainder was

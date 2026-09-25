@@ -911,6 +911,16 @@ fn parse_color_mix(body: &str) -> Option<Color> {
         for t in toks {
             if let Some(p) = t.strip_suffix('%') {
                 pct = p.parse::<f64>().ok();
+            } else if t.starts_with("calc(") {
+                pct = match parse_length_checked(t) {
+                    Some(CssLength::Percent(value)) => Some(value as f64),
+                    Some(CssLength::Calc(coeffs))
+                        if coeffs[1..].iter().all(|value| value.abs() < f32::EPSILON) =>
+                    {
+                        Some(coeffs[0] as f64)
+                    }
+                    _ => None,
+                };
             } else if colour.is_none() {
                 colour = parse_color(t);
             }

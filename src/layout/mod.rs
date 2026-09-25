@@ -1466,6 +1466,14 @@ pub fn resolve_box_vp(
 
 // ─── Layout Engine ────────────────────────────────────────────────────────────
 
+fn same_containing_height(previous: Option<f32>, current: Option<f32>) -> bool {
+    match (previous, current) {
+        (None, None) => true,
+        (Some(a), Some(b)) => (a - b).abs() < 0.5,
+        _ => false,
+    }
+}
+
 pub struct LayoutEngine {
     pub root_font_px: f32,
     /// Logical viewport width (for vw units).
@@ -1528,7 +1536,7 @@ const MAX_TEXT_WIDTH_CACHE_ENTRIES: usize = 65_536;
 impl LayoutEngine {
     pub fn new() -> Self {
         Self {
-            root_font_px: 16.0,
+            root_font_px: crate::types::ComputedStyle::INITIAL_FONT_SIZE_PX,
             viewport_w: 900.0,
             viewport_h: 700.0,
             font_system: None,
@@ -2743,7 +2751,9 @@ impl LayoutEngine {
         let mut runs = Vec::new();
         let mut text_offset = 0usize;
         let mut previous_collapsible_space = false;
-        if matches!(node.style.display, Display::InlineBlock) {
+        if matches!(node.style.display, Display::InlineBlock)
+            || matches!(node.style.position, Position::Absolute | Position::Fixed)
+        {
             for (idx, child) in node.effective_children().iter().enumerate() {
                 inline_layout::collect_items_continuing(
                     self,
@@ -2820,7 +2830,9 @@ impl LayoutEngine {
         let mut runs = Vec::new();
         let mut text_offset = 0usize;
         let mut previous_collapsible_space = false;
-        if matches!(node.style.display, Display::InlineBlock) {
+        if matches!(node.style.display, Display::InlineBlock)
+            || matches!(node.style.position, Position::Absolute | Position::Fixed)
+        {
             for (idx, child) in node.effective_children().iter().enumerate() {
                 inline_layout::collect_items_continuing(
                     self,
@@ -3283,12 +3295,11 @@ impl LayoutEngine {
         // 16px, but an incremental hover cascade usually starts below `<html>`;
         // for that path, `rem` must use the root size the previous full cascade
         // already computed.
-        const CSS_INITIAL_ROOT_FONT_PX: f32 = 16.0;
         let computed_root_font_px = match doc.root.style.font_size {
             crate::types::CssLength::Px(v) if v > 0.0 => v,
             _ => self.root_font_px,
         };
-        let cascade_root_px = CSS_INITIAL_ROOT_FONT_PX;
+        let cascade_root_px = crate::types::ComputedStyle::INITIAL_FONT_SIZE_PX;
         let root_font_px = cascade_root_px;
 
         // Anonymous blocks are layout fragments, not DOM nodes. Progressive
@@ -3705,6 +3716,7 @@ impl LayoutEngine {
             node.layout.paint_dirty = false;
             node.has_dirty_layout_descendant = false;
             node.layout.last_containing_width = containing_w;
+            node.layout.last_containing_height = c.available_height;
             return 0.0;
         }
 
@@ -3735,6 +3747,7 @@ impl LayoutEngine {
         if !node.layout.layout_dirty
             && node.layout.last_containing_width > 0.0
             && (node.layout.last_containing_width - containing_w).abs() < 0.01
+            && same_containing_height(node.layout.last_containing_height, c.available_height)
             && node.layout.margin_rect.w > 0.0
             && node.layout.margin_rect.h > 0.0
             && fc.is_none()
@@ -4082,6 +4095,7 @@ impl LayoutEngine {
             node.layout.layout_dirty = false;
             node.layout.intrinsic_dirty = false;
             node.layout.last_containing_width = containing_w;
+            node.layout.last_containing_height = c.available_height;
             return node.layout.margin_rect.h;
         }
 
@@ -4106,6 +4120,7 @@ impl LayoutEngine {
             && !node.has_dirty_descendant
             && !node.has_dirty_layout_descendant
             && node.layout.resolved_content_width > 0.0
+            && same_containing_height(node.layout.last_containing_height, c.available_height)
             && viewport_h_unchanged
         {
             let new_content_w = if let Some(cw) = rbox.content_width {
@@ -4135,6 +4150,7 @@ impl LayoutEngine {
                 }
                 node.layout.layout_dirty = false;
                 node.layout.last_containing_width = containing_w;
+                node.layout.last_containing_height = c.available_height;
                 return node.layout.margin_rect.h;
             }
         }
@@ -4354,6 +4370,7 @@ impl LayoutEngine {
         node.layout.paint_dirty = false;
         node.has_dirty_layout_descendant = false;
         node.layout.last_containing_width = containing_w;
+        node.layout.last_containing_height = c.available_height;
         h
     }
 

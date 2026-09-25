@@ -65,6 +65,21 @@ pub enum PaintCmd {
         small_caps: bool,
     },
 
+    /// A CSS gradient painted through descendant text glyphs.
+    PushTextGradient {
+        rect: Rect,
+        background_color: Color,
+        gradient_type: u8,
+        angle: f32,
+        direction: GradientDirection,
+        radial_center_x: f32,
+        radial_center_y: f32,
+        radial_radius_x: f32,
+        radial_radius_y: f32,
+        stops: Vec<(Color, f32)>,
+    },
+    PopTextGradient,
+
     /// Draw an image (RGBA data) at a position.
     Image { rect: Rect, data: ImageRef },
 
@@ -471,7 +486,7 @@ impl DisplayListMemoryEstimate {
                     crate::types::Color,
                 )>()));
             }
-            PaintCmd::Gradient { stops, .. } => {
+            PaintCmd::Gradient { stops, .. } | PaintCmd::PushTextGradient { stops, .. } => {
                 self.add_vec_bytes(
                     stops
                         .capacity()

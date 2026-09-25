@@ -99,12 +99,13 @@ pub struct AncestorInfo {
 /// Selectors such as `input:checked ~ .menu` need the sibling's live form state,
 /// not only its tag/class/id attributes. Keeping this as a compact record avoids
 /// handing full DOM nodes through every combinator path while preserving the
-/// state pseudo-classes that are answerable from a sibling row.
+/// state pseudo-classes and attribute selectors on sibling rows.
 #[derive(Clone, Debug, Default)]
 pub struct SiblingInfo {
     pub tag: String,
     pub id: String,
     pub class_attr: String,
+    pub attributes: crate::dom::attrs::AttrMap,
     pub node_id: u32,
     pub checkedness: bool,
     pub selectedness: bool,
@@ -116,6 +117,7 @@ impl SiblingInfo {
             tag: node.tag.clone(),
             id: node.attributes.get("id").cloned().unwrap_or_default(),
             class_attr: node.attributes.get("class").cloned().unwrap_or_default(),
+            attributes: node.attributes.clone(),
             node_id: node.node_id,
             checkedness: node.checkedness,
             selectedness: node.selectedness,
@@ -327,19 +329,18 @@ fn matches_sibling(
     ancestors: &[AncestorInfo],
     ctx: &MatchContext<'_>,
 ) -> bool {
-    let mut attrs = crate::dom::attrs::AttrMap::new();
-    if !sib.id.is_empty() {
-        attrs.insert("id".to_string(), sib.id.clone());
-    }
-    if !sib.class_attr.is_empty() {
-        attrs.insert("class".to_string(), sib.class_attr.clone());
-    }
-    if sib.checkedness {
-        attrs.insert("checked".to_string(), String::new());
-    }
-    if sib.selectedness {
-        attrs.insert("selected".to_string(), String::new());
-    }
+    let attrs = if sib.checkedness || sib.selectedness {
+        let mut attrs = sib.attributes.clone();
+        if sib.checkedness {
+            attrs.insert("checked".to_string(), String::new());
+        }
+        if sib.selectedness {
+            attrs.insert("selected".to_string(), String::new());
+        }
+        std::borrow::Cow::Owned(attrs)
+    } else {
+        std::borrow::Cow::Borrowed(&sib.attributes)
+    };
     let sib_ctx = MatchContext {
         focused_box: ctx.focused_box,
         keyboard_focus: ctx.keyboard_focus,

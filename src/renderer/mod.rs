@@ -347,38 +347,6 @@ fn display_list_has_transform_slots_for_ids(
         })
 }
 
-fn transform_animation_commands_for_ids(
-    list: &display_list::DisplayList,
-    ids: &std::collections::HashSet<u32>,
-) -> Vec<display_list::PaintCmd> {
-    if ids.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    let mut capture_depth = 0usize;
-    for cmd in &list.commands {
-        match cmd {
-            display_list::PaintCmd::PushTransform { node_id, .. }
-                if capture_depth == 0 && ids.contains(node_id) =>
-            {
-                capture_depth = 1;
-                out.push(cmd.clone());
-            }
-            display_list::PaintCmd::PushTransform { .. } if capture_depth > 0 => {
-                capture_depth += 1;
-                out.push(cmd.clone());
-            }
-            display_list::PaintCmd::PopTransform if capture_depth > 0 => {
-                out.push(cmd.clone());
-                capture_depth = capture_depth.saturating_sub(1);
-            }
-            _ if capture_depth > 0 => out.push(cmd.clone()),
-            _ => {}
-        }
-    }
-    out
-}
-
 fn animation_transform_matrices(
     root: &WebCore,
     overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
@@ -431,8 +399,10 @@ fn animation_transform_matrices(
 
 impl Renderer {
     pub fn new() -> Self {
+        let mut font_system = FontSystem::new();
+        configure_generic_font_families(&mut font_system);
         Self {
-            font_system: FontSystem::new(),
+            font_system,
             swash_cache: SwashCache::new(),
             component_registry: ComponentRegistry::default(),
             layout_engine_inner: crate::layout::LayoutEngine::new(),
@@ -1684,11 +1654,6 @@ impl Renderer {
                 if can_repaint_dirty {
                     let replay_start = std::time::Instant::now();
                     pixmap.data_mut().copy_from_slice(surface.data());
-                    let animated_commands = if transform_only_animation_frame {
-                        transform_animation_commands_for_ids(list, &visible_animation_ids)
-                    } else {
-                        Vec::new()
-                    };
                     for rect in &dirty_paint_rects {
                         if let Some(clip) = viewport_clip_from_doc_rect(
                             *rect,
@@ -1698,19 +1663,7 @@ impl Renderer {
                             view_h,
                         ) {
                             fill_viewport_clip(pixmap, clip, tile_scale, canvas_color);
-                            if !animated_commands.is_empty() {
-                                display_list_replay::replay_commands_with_scroll_clip_and_transform_overrides(
-                                    &animated_commands,
-                                    pixmap,
-                                    tile_scale,
-                                    &mut self.font_system,
-                                    &mut self.swash_cache,
-                                    doc.scroll_x,
-                                    doc.scroll_y,
-                                    clip,
-                                    &animation_transform_overrides,
-                                );
-                            } else if animation_transform_overrides.is_empty() {
+                            if animation_transform_overrides.is_empty() {
                                 display_list_replay::replay_with_scroll_clip(
                                     list,
                                     pixmap,
@@ -1722,6 +1675,9 @@ impl Renderer {
                                     clip,
                                 );
                             } else {
+                                // The dirty rectangle can also contain unrelated content.
+                                // Repainting only the animated transform subtree after
+                                // clearing it erases everything else beneath that rectangle.
                                 display_list_replay::replay_with_scroll_clip_and_transform_overrides(
                                     list,
                                     pixmap,
@@ -2957,6 +2913,43 @@ impl Renderer {
                 );
                 y += item_h;
             }
+        }
+    }
+}
+
+fn configure_generic_font_families(font_system: &mut FontSystem) {
+    fn installed_name(db: &fontdb::Database, candidates: &[&str]) -> Option<String> {
+        candidates.iter().find_map(|candidate| {
+            db.faces()
+                .flat_map(|face| face.families.iter())
+                .find(|(name, _)| name.eq_ignore_ascii_case(candidate))
+                .map(|(name, _)| name.clone())
+        })
+    }
+
+    let db = font_system.db_mut();
+    if db.query(&fontdb::Query {
+        families: &[cosmic_text::Family::Serif],
+        ..fontdb::Query::default()
+    }).is_none() {
+        if let Some(name) = installed_name(db, &["Times New Roman", "Georgia", "Liberation Serif", "Noto Serif", "DejaVu Serif", "Times"]) {
+            db.set_serif_family(name);
+        }
+    }
+    if db.query(&fontdb::Query {
+        families: &[cosmic_text::Family::SansSerif],
+        ..fontdb::Query::default()
+    }).is_none() {
+        if let Some(name) = installed_name(db, &["Arial", "Helvetica", "Segoe UI", "Liberation Sans", "Noto Sans", "DejaVu Sans", "Open Sans"]) {
+            db.set_sans_serif_family(name);
+        }
+    }
+    if db.query(&fontdb::Query {
+        families: &[cosmic_text::Family::Monospace],
+        ..fontdb::Query::default()
+    }).is_none() {
+        if let Some(name) = installed_name(db, &["Menlo", "Consolas", "Liberation Mono", "Noto Sans Mono", "DejaVu Sans Mono", "Courier New"]) {
+            db.set_monospace_family(name);
         }
     }
 }

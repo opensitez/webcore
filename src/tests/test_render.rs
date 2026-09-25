@@ -381,6 +381,174 @@ fn pixel(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8, u8) {
 }
 
 #[test]
+fn gradient_background_clip_text_paints_glyphs_not_the_box() {
+    let html = r#"
+        <style>
+          html, body { margin: 0; background: white; min-height: 70px; }
+          #label {
+            display: inline-flex;
+            padding: 8px 16px;
+            font: bold 36px sans-serif;
+            color: transparent;
+            background-color: black;
+            background-image: linear-gradient(to right, red, blue);
+            background-clip: text;
+          }
+        </style>
+        <span id="label">GRADIENT</span>
+        "#;
+    let doc = parse_and_layout(html, 340.0);
+    let label = super::harness::find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "label")
+    })
+    .unwrap();
+    assert_eq!(
+        label.style.background_clip,
+        crate::types::BackgroundClip::Text
+    );
+    assert_eq!(label.style.color.a, 0);
+    let pm = render_html(html, 340, 70);
+
+    let mut red = 0;
+    let mut blue = 0;
+    let mut background = 0;
+    for y in 0..65 {
+        for x in 0..330 {
+            let (r, g, b, a) = pixel(&pm, x, y);
+            if r as u16 > b as u16 + 50 && r as u16 > g as u16 + 50 {
+                red += 1;
+            }
+            if b as u16 > r as u16 + 50 && b as u16 > g as u16 + 50 {
+                blue += 1;
+            }
+            if a > 0 && r < 80 && g < 80 && b < 80 {
+                background += 1;
+            }
+        }
+    }
+    assert!(
+        red > 20 && blue > 20,
+        "gradient should color the text, red={red} blue={blue}"
+    );
+    assert!(
+        background < 20,
+        "background-clip:text must not paint the box, dark={background}"
+    );
+    let (r, g, b, _) = pixel(&pm, 5, 5);
+    assert!(
+        r > 240 && g > 240 && b > 240,
+        "outside glyphs should remain white"
+    );
+}
+
+#[test]
+fn solid_background_clip_text_keeps_box_transparent() {
+    let pm = render_html(
+        r#"
+        <style>
+          html, body { margin: 0; background: white; min-height: 70px; }
+          span { display: inline-flex; padding: 8px 16px; font: bold 36px sans-serif;
+                 color: transparent; background: rgb(0, 150, 0); background-clip: text; }
+        </style>
+        <span>SOLID</span>
+        "#,
+        260,
+        70,
+    );
+    let mut green = 0;
+    for y in 0..65 {
+        for x in 0..250 {
+            let (r, g, b, _) = pixel(&pm, x, y);
+            if g as u16 > r as u16 + 40 && g as u16 > b as u16 + 40 {
+                green += 1;
+            }
+        }
+    }
+    assert!(green > 20, "solid background should paint text glyphs");
+    let (r, g, b, _) = pixel(&pm, 5, 5);
+    assert!(
+        r > 240 && g > 240 && b > 240,
+        "box outside glyphs should stay white"
+    );
+}
+
+#[test]
+fn inline_icon_text_uses_document_root_rem_size() {
+    use crate::renderer::display_list::PaintCmd;
+
+    let mut renderer = Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+          html { font-size: 62.5%; }
+          a { display: block; position: relative; font-size: 20px; }
+          .icon { font-size: .8rem; }
+        </style>
+        <a class="sub-pin" href="/"><span class="icon">a</span>Story</a>
+        "#,
+        300.0,
+    );
+    let list = crate::renderer::display_list_builder::build_display_list(&doc.root, 300.0, 80.0);
+    let icon_sizes = list.commands.iter().filter_map(|command| match command {
+        PaintCmd::Text { text, font_size, .. } if text == "a" => Some(*font_size),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert_eq!(icon_sizes, vec![8.0], "rem must use the root's 10px size");
+}
+
+#[test]
+fn painted_rem_radius_uses_document_root_font_size() {
+    use crate::renderer::display_list::PaintCmd;
+
+    let mut renderer = Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+          html { font-size: 62.5%; }
+          body { margin: 0; }
+          .box { width: 40px; height: 40px; background: red; border-radius: 1rem; }
+        </style>
+        <div class="box"></div>
+        "#,
+        100.0,
+    );
+    let list = crate::renderer::display_list_builder::build_display_list(&doc.root, 100.0, 100.0);
+    let radius = list.commands.iter().find_map(|command| match command {
+        PaintCmd::FillRect { color, radius, .. } if color.r == 255 && color.g == 0 && color.b == 0 => Some(radius[0]),
+        _ => None,
+    });
+    assert_eq!(radius, Some(10.0));
+}
+
+#[test]
+fn flex_pseudo_text_is_centered_as_an_anonymous_flex_item() {
+    use crate::renderer::display_list::PaintCmd;
+
+    let mut renderer = Renderer::new();
+    let doc = renderer.load_html(
+        r#"
+        <style>
+          html { font-size: 62.5%; }
+          body { margin: 0; }
+          span { display: block; position: relative; height: 30px; }
+          span::before { content: "a"; display: inline-flex; position: absolute;
+            left: 0; top: 0; width: 2rem; height: 2rem; align-items: center;
+            justify-content: center; font-size: .8rem; line-height: 2rem;
+            background: rgb(253, 222, 160); }
+        </style>
+        <span></span>
+        "#,
+        100.0,
+    );
+    let list = crate::renderer::display_list_builder::build_display_list(&doc.root, 100.0, 50.0);
+    let text_x = list.commands.iter().find_map(|command| match command {
+        PaintCmd::Text { text, x, font_size, .. } if text == "a" && *font_size == 8.0 => Some(*x),
+        _ => None,
+    });
+    assert!(matches!(text_x, Some(x) if x > 5.0 && x < 12.0), "pseudo glyph must be centered in its 20px flex box: {text_x:?}");
+}
+
+#[test]
 fn svg_stroke_current_color_does_not_get_filled() {
     let pm = render_html(
         r#"
@@ -3011,6 +3179,25 @@ fn the_two_font_resolvers_agree_on_generic_families() {
             "{stack:?}: painting picks {painted:?}, measuring picks {measured:?}"
         );
     }
+}
+
+#[test]
+fn missing_named_font_uses_available_serif_fallback() {
+    let renderer = Renderer::new();
+    let fs = &renderer.font_system;
+    let resolved = crate::layout::inline_layout::resolve_css_family(
+        fs,
+        "missing-page-headline-font, serif",
+    );
+    assert!(matches!(resolved, crate::layout::inline_layout::ResolvedFamily::Generic("serif")));
+    let id = fs.db().query(&fontdb::Query {
+        families: &[cosmic_text::Family::Serif],
+        weight: fontdb::Weight(600),
+        stretch: fontdb::Stretch::Normal,
+        style: fontdb::Style::Normal,
+    });
+    let selected = id.and_then(|id| fs.db().face(id));
+    assert!(selected.is_some(), "no available serif face; configured serif is {:?}", fs.db().family_name(&cosmic_text::Family::Serif));
 }
 
 // ── word-spacing and letter-spacing are MEASURED, not just painted ───────────

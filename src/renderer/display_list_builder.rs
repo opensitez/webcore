@@ -138,6 +138,11 @@ fn background_gradient_rect(
     Rect::new(x, y, draw_w.max(0.0), draw_h.max(0.0))
 }
 
+fn root_font_size_px(root: &WebCore) -> f32 {
+    let initial = ComputedStyle::INITIAL_FONT_SIZE_PX;
+    root.style.font_size_px(initial, initial)
+}
+
 /// Build a display list from a laid-out box tree.
 pub fn build_display_list(root: &WebCore, viewport_w: f32, viewport_h: f32) -> DisplayList {
     let visited = std::collections::HashSet::new();
@@ -161,8 +166,8 @@ pub fn build_display_list(root: &WebCore, viewport_w: f32, viewport_h: f32) -> D
         font_system: None,
         transform_ctx: crate::types::TransformCtx {
             // The root box's font size IS the root font size — `rem`.
-            font_px: root.style.font_size_px(16.0, 16.0),
-            root_font_px: root.style.font_size_px(16.0, 16.0),
+            font_px: root_font_size_px(root),
+            root_font_px: root_font_size_px(root),
             viewport_w,
             viewport_h,
         },
@@ -231,8 +236,8 @@ pub fn build_display_list_full_with_font_system(
         font_system,
         transform_ctx: crate::types::TransformCtx {
             // The root box's font size IS the root font size — `rem`.
-            font_px: root.style.font_size_px(16.0, 16.0),
-            root_font_px: root.style.font_size_px(16.0, 16.0),
+            font_px: root_font_size_px(root),
+            root_font_px: root_font_size_px(root),
             viewport_w,
             viewport_h,
         },
@@ -316,8 +321,8 @@ pub fn build_display_list_viewport_with_font_system(
         suppress_deferred_z_descendants: false,
         font_system,
         transform_ctx: crate::types::TransformCtx {
-            font_px: root.style.font_size_px(16.0, 16.0),
-            root_font_px: root.style.font_size_px(16.0, 16.0),
+            font_px: root_font_size_px(root),
+            root_font_px: root_font_size_px(root),
             viewport_w,
             viewport_h,
         },
@@ -522,6 +527,7 @@ fn push_inline_descendant_box_backgrounds(
         if is_inline_text_box
             && inline_box_has_edges(child)
             && child.style.background_color.a > 0
+            && child.style.background_clip != BackgroundClip::Text
             && rect_intersects(background_clip_rect_for_node(child, sx, sy), paint_clip)
         {
             let opacity = child.style.opacity;
@@ -559,7 +565,7 @@ fn inline_relative_visual_offset(root: &WebCore, path: &[usize], root_font_px: f
         if cur.style.position != Position::Relative {
             continue;
         }
-        let font_px = cur.style.font_size_px(16.0, root_font_px);
+        let font_px = cur.style.font_size_px(root_font_px, root_font_px);
         let containing_w = cur.layout.content_rect.w.max(root.layout.content_rect.w);
         if !cur.style.left.is_auto() {
             dx += cur.style.left.resolve(font_px, containing_w, root_font_px);
@@ -650,7 +656,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     let py = pr.y - sy;
     let pw = pr.w;
     let ph = pr.h;
-    let font_px = node.style.font_size_px(16.0, 16.0);
+    let font_px = node.style.font_size_px(ctx.transform_ctx.root_font_px, ctx.transform_ctx.root_font_px);
     let paint_self = rect_intersects(
         Rect::new(
             br.x - sx - 256.0,
@@ -673,35 +679,35 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     let r_tl = node
         .style
         .border_top_left_radius
-        .resolve(font_px, pr.w, 16.0);
+        .resolve(font_px, pr.w, ctx.transform_ctx.root_font_px);
     let r_tr = node
         .style
         .border_top_right_radius
-        .resolve(font_px, pr.w, 16.0);
+        .resolve(font_px, pr.w, ctx.transform_ctx.root_font_px);
     let r_br = node
         .style
         .border_bottom_right_radius
-        .resolve(font_px, pr.w, 16.0);
+        .resolve(font_px, pr.w, ctx.transform_ctx.root_font_px);
     let r_bl = node
         .style
         .border_bottom_left_radius
-        .resolve(font_px, pr.w, 16.0);
+        .resolve(font_px, pr.w, ctx.transform_ctx.root_font_px);
     let r_tl_y = node
         .style
         .border_top_left_radius_y
-        .resolve(font_px, pr.h, 16.0);
+        .resolve(font_px, pr.h, ctx.transform_ctx.root_font_px);
     let r_tr_y = node
         .style
         .border_top_right_radius_y
-        .resolve(font_px, pr.h, 16.0);
+        .resolve(font_px, pr.h, ctx.transform_ctx.root_font_px);
     let r_br_y = node
         .style
         .border_bottom_right_radius_y
-        .resolve(font_px, pr.h, 16.0);
+        .resolve(font_px, pr.h, ctx.transform_ctx.root_font_px);
     let r_bl_y = node
         .style
         .border_bottom_left_radius_y
-        .resolve(font_px, pr.h, 16.0);
+        .resolve(font_px, pr.h, ctx.transform_ctx.root_font_px);
     let radii_arr = [r_tl, r_tr, r_br, r_bl];
     let radii_y_arr = [r_tl_y, r_tr_y, r_br_y, r_bl_y];
 
@@ -769,19 +775,19 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         let top_val = node
             .style
             .top
-            .resolve(font_px, viewport_bottom - viewport_top, 16.0);
+            .resolve(font_px, viewport_bottom - viewport_top, ctx.transform_ctx.root_font_px);
         let left_val = node
             .style
             .left
-            .resolve(font_px, viewport_right - viewport_left, 16.0);
+            .resolve(font_px, viewport_right - viewport_left, ctx.transform_ctx.root_font_px);
         let bottom_val = node
             .style
             .bottom
-            .resolve(font_px, viewport_bottom - viewport_top, 16.0);
+            .resolve(font_px, viewport_bottom - viewport_top, ctx.transform_ctx.root_font_px);
         let right_val = node
             .style
             .right
-            .resolve(font_px, viewport_right - viewport_left, 16.0);
+            .resolve(font_px, viewport_right - viewport_left, ctx.transform_ctx.root_font_px);
         let nat_x = pr.x - sx;
         let nat_y = pr.y - sy;
 
@@ -977,9 +983,9 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         list.push(PaintCmd::PushFilter { filters });
     }
 
-    let clip_path_rect = clip_path_rect(eff_style, node.layout.border_rect, sx, sy, font_px);
+    let clip_path_rect = clip_path_rect(eff_style, node.layout.border_rect, sx, sy, font_px, ctx.transform_ctx.root_font_px);
     let clip_path_polygon =
-        clip_path_polygon_points(eff_style, node.layout.border_rect, sx, sy, font_px);
+        clip_path_polygon_points(eff_style, node.layout.border_rect, sx, sy, font_px, ctx.transform_ctx.root_font_px);
     if let Some((rect, radius)) = clip_path_rect {
         list.push(PaintCmd::PushClip {
             rect,
@@ -1039,16 +1045,19 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 let c = node.layout.content_rect;
                 Rect::new(c.x - eff_sx, c.y - eff_sy, c.w, c.h)
             }
-            // `text` clips to the glyphs themselves, which needs a glyph mask
-            // the painter does not build. The padding box is the smallest area
-            // that always lies inside the intended one, so an unsupported
-            // `text` clip paints no more than it does without the property.
             BackgroundClip::PaddingBox | BackgroundClip::Text => Rect::new(px, py, pw, ph),
             BackgroundClip::BorderBox => Rect::new(br.x - eff_sx, br.y - eff_sy, br.w, br.h),
         }
     };
     let bg_clip_rect = background_box(eff_style.background_clip);
     let bg_origin_rect = background_box(eff_style.background_origin);
+    let raw_bg = eff_style.background_color;
+    let clipped_background_color = Color::rgba(
+        raw_bg.r,
+        raw_bg.g,
+        raw_bg.b,
+        (raw_bg.a as f32 * eff_style.opacity) as u8,
+    );
     // `background-repeat` decides, per axis, whether the image (or gradient)
     // tiles out of the positioning area to cover the painting area.
     let (bg_repeat_x_mode, bg_repeat_y_mode) = node.style.background_repeat.axis_modes();
@@ -1058,9 +1067,11 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         let is_inline_with_text = node.style.is_inline_level()
             && !node.is_image_element()
             && inline_has_non_empty_text(node);
-        let raw_bg = eff_style.background_color;
         let opacity = eff_style.opacity;
-        if raw_bg.a > 0 && !is_inline_with_text {
+        if raw_bg.a > 0
+            && !is_inline_with_text
+            && eff_style.background_clip != BackgroundClip::Text
+        {
             let alpha = ((raw_bg.a as f32) * opacity) as u8;
             let bg = Color::rgba(raw_bg.r, raw_bg.g, raw_bg.b, alpha);
             if paint_self {
@@ -1077,6 +1088,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     }
 
     // ── (c) Gradient background ──────────────────────────────────────────────
+    let mut has_text_gradient = false;
     if paint_self
         && node.style.gradient_type != GradientType::None
         && node.style.rare().gradient_stops.len() >= 2
@@ -1126,23 +1138,58 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             font_px,
             ctx.transform_ctx.root_font_px,
         );
-        list.push(PaintCmd::Gradient {
-            rect: gradient_rect,
-            clip: bg_clip_rect,
-            repeat_x_mode: bg_repeat_x_mode,
-            repeat_y_mode: bg_repeat_y_mode,
-            gradient_type: grad_type_u8,
-            angle: node.style.gradient_angle,
-            direction: node.style.gradient_direction,
-            radial_center_x,
-            radial_center_y,
-            radial_radius_x,
-            radial_radius_y,
-            stops,
-            radii: radii_arr,
-            radii_y: radii_y_arr,
-            opacity,
-            blend_mode: background_blend_mode_to_u8(&eff_style.background_blend_mode),
+        if eff_style.background_clip == BackgroundClip::Text {
+            has_text_gradient = true;
+            list.push(PaintCmd::PushTextGradient {
+                rect: gradient_rect,
+                background_color: clipped_background_color,
+                gradient_type: grad_type_u8,
+                angle: node.style.gradient_angle,
+                direction: node.style.gradient_direction,
+                radial_center_x,
+                radial_center_y,
+                radial_radius_x,
+                radial_radius_y,
+                stops,
+            });
+        } else {
+            list.push(PaintCmd::Gradient {
+                rect: gradient_rect,
+                clip: bg_clip_rect,
+                repeat_x_mode: bg_repeat_x_mode,
+                repeat_y_mode: bg_repeat_y_mode,
+                gradient_type: grad_type_u8,
+                angle: node.style.gradient_angle,
+                direction: node.style.gradient_direction,
+                radial_center_x,
+                radial_center_y,
+                radial_radius_x,
+                radial_radius_y,
+                stops,
+                radii: radii_arr,
+                radii_y: radii_y_arr,
+                opacity,
+                blend_mode: background_blend_mode_to_u8(&eff_style.background_blend_mode),
+            });
+        }
+    }
+    if paint_self
+        && eff_style.background_clip == BackgroundClip::Text
+        && !has_text_gradient
+        && clipped_background_color.a > 0
+    {
+        has_text_gradient = true;
+        list.push(PaintCmd::PushTextGradient {
+            rect: bg_clip_rect,
+            background_color: Color::TRANSPARENT,
+            gradient_type: 1,
+            angle: 90.0,
+            direction: crate::types::GradientDirection::Angle(90.0),
+            radial_center_x: 0.0,
+            radial_center_y: 0.0,
+            radial_radius_x: 1.0,
+            radial_radius_y: 1.0,
+            stops: vec![(clipped_background_color, 0.0), (clipped_background_color, 1.0)],
         });
     }
 
@@ -1354,6 +1401,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 border_rect,
                 font_px,
                 false,
+                ctx.transform_ctx.root_font_px,
             );
             let border_image_rect = Rect::new(
                 border_rect.x - border_image_outsets[3],
@@ -1367,6 +1415,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 border_image_rect,
                 font_px,
                 true,
+                ctx.transform_ctx.root_font_px,
             );
             let mut painted_border_image = false;
             if let Some(src) = crate::css::extract_url(&eff_style.border_image_source) {
@@ -1482,7 +1531,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
         );
     let overflow_clip_margin =
-        resolve_overflow_clip_margin(eff_style, font_px, node.layout.padding_rect.w);
+        resolve_overflow_clip_margin(eff_style, font_px, node.layout.padding_rect.w, ctx.transform_ctx.root_font_px);
     let overflow_clip_rect = Rect::new(
         px - overflow_clip_margin,
         py - overflow_clip_margin,
@@ -1578,6 +1627,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 node.style.before_style.as_deref().unwrap_or(&node.style),
                 eff_sx,
                 eff_sy,
+                ctx.transform_ctx.root_font_px,
             );
         }
 
@@ -1620,7 +1670,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             && !node.text.is_empty()
             && node.layout.line_cache.is_empty()
         {
-            emit_generated_pseudo_content(list, node, &node.text, &node.style, child_sx, child_sy);
+            emit_generated_pseudo_content(list, node, &node.text, &node.style, child_sx, child_sy, ctx.transform_ctx.root_font_px);
         }
 
         // ── (l) ::after pseudo-element (fallback when line_cache is empty) ─────
@@ -1631,7 +1681,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             let mut after_offset = 0.0f32;
             if !node.style.before_content.is_empty() {
                 let ps = node.style.before_style.as_deref().unwrap_or(&node.style);
-                let fpx = ps.font_size_px(16.0, 16.0).max(1.0);
+                let fpx = ps.font_size_px(ctx.transform_ctx.root_font_px, ctx.transform_ctx.root_font_px).max(1.0);
                 after_offset = node.style.before_content.chars().count() as f32 * fpx * 0.55 + 6.0;
             }
             emit_generated_pseudo_content_offset(
@@ -1642,6 +1692,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 eff_sx,
                 eff_sy,
                 after_offset,
+                ctx.transform_ctx.root_font_px,
             );
         }
 
@@ -1666,7 +1717,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
 
         // ── (o) Form elements (content only — box decoration handled by CSS steps above)
         if paint_self {
-            build_form_element(node, list, eff_sx, eff_sy);
+            build_form_element(node, list, eff_sx, eff_sy, ctx.transform_ctx.root_font_px);
         }
 
         // ── (p) Image / SVG / Canvas / Media ────────────────────────────────
@@ -1691,7 +1742,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                         node.image_width as f32,
                         node.image_height as f32,
                         font_px,
-                        16.0,
+                        ctx.transform_ctx.root_font_px,
                     );
                     let clips_radius =
                         radii_arr.iter().any(|r| *r > 0.5) || radii_y_arr.iter().any(|r| *r > 0.5);
@@ -1910,6 +1961,9 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     }
 
     // ── Pop in reverse order ─────────────────────────────────────────────────
+    if has_text_gradient {
+        list.push(PaintCmd::PopTextGradient);
+    }
     if overflow_clips {
         list.push(PaintCmd::PopClip);
     }
@@ -2132,12 +2186,16 @@ fn build_inline_text(
     }
 
     let opacity = eff_style.opacity;
-    let fallback_font_px = node.style.font_size_px(16.0, 16.0).max(1.0);
+    let root_font_px = ctx.transform_ctx.root_font_px;
+    let fallback_font_px = node.style.font_size_px(root_font_px, root_font_px).max(1.0);
     let fallback_letter_spc = node
         .style
         .letter_spacing
-        .resolve(fallback_font_px, 0.0, 16.0);
-    let fallback_word_spc = node.style.word_spacing.resolve(fallback_font_px, 0.0, 16.0);
+        .resolve(fallback_font_px, 0.0, root_font_px);
+    let fallback_word_spc = node
+        .style
+        .word_spacing
+        .resolve(fallback_font_px, 0.0, root_font_px);
 
     // When overflow is clipping and text-indent pushes content far outside the
     // element's box, skip all text rendering — the clip would hide it anyway and
@@ -2153,7 +2211,7 @@ fn build_inline_text(
         let ti = node
             .style
             .text_indent
-            .resolve(fallback_font_px, node.layout.content_rect.w, 16.0);
+            .resolve(fallback_font_px, node.layout.content_rect.w, root_font_px);
         if ti < -(node.layout.content_rect.w + 100.0) {
             return;
         }
@@ -2308,9 +2366,9 @@ fn build_inline_text(
             let (run_style, run_font_px, run_letter_spc, run_word_spc, _run_extra) =
                 if let Some(ri) = chunk.run_idx {
                     let run = &node.layout.inline_runs[ri];
-                    let fp = run.style.font_size_px(16.0, 16.0).max(1.0);
-                    let ls = run.style.letter_spacing.resolve(fp, 0.0, 16.0);
-                    let ws = run.style.word_spacing.resolve(fp, 0.0, 16.0);
+                    let fp = run.style.font_size_px(fallback_font_px, root_font_px).max(1.0);
+                    let ls = run.style.letter_spacing.resolve(fp, 0.0, root_font_px);
+                    let ws = run.style.word_spacing.resolve(fp, 0.0, root_font_px);
                     (Some(&run.style), fp, ls, ws, line.extra_space_per_word)
                 } else {
                     (
@@ -2332,7 +2390,7 @@ fn build_inline_text(
             let (relative_dx, relative_dy) = chunk
                 .run_idx
                 .and_then(|ri| node.layout.inline_runs.get(ri))
-                .map(|run| inline_relative_visual_offset(node, &run.path, 16.0))
+                .map(|run| inline_relative_visual_offset(node, &run.path, root_font_px))
                 .unwrap_or((0.0, 0.0));
             let seg_text = &flat[s..e];
 
@@ -2438,7 +2496,7 @@ fn build_inline_text(
             } else {
                 style_ref
                     .line_height
-                    .resolve(run_font_px, 0.0, 16.0)
+                    .resolve(run_font_px, 0.0, root_font_px)
                     .max(run_font_px * 1.2)
             };
 
@@ -2634,7 +2692,10 @@ fn build_inline_text(
             } else {
                 style_ref.background_color
             };
-            if run_background.a > 0 {
+            if run_background.a > 0
+                && style_ref.background_clip != BackgroundClip::Text
+                && paint_style_ref.background_clip != BackgroundClip::Text
+            {
                 let run_w = if !line.char_x.is_empty() {
                     let start_off = s - line_start;
                     let end_off = e - line_start;
@@ -2696,10 +2757,10 @@ fn build_inline_text(
             // Main text
             let deco_t = style_ref
                 .text_decoration_thickness
-                .resolve(run_font_px, 0.0, 16.0);
+                .resolve(run_font_px, 0.0, root_font_px);
             let underline_offset = style_ref
                 .text_underline_offset
-                .resolve(run_font_px, 0.0, 16.0);
+                .resolve(run_font_px, 0.0, root_font_px);
             let letter_sp = run_letter_spc;
 
             emit_text_emphasis_marks(
@@ -2799,17 +2860,23 @@ fn build_inline_text(
                     ) + letter_sp * leading.chars().count() as f32
                         + run_word_spc * leading.chars().filter(|&c| c == ' ').count() as f32;
                 }
-                let first_font_px = first_style.font_size_px(16.0, 16.0).max(1.0);
+                let first_font_px = first_style
+                    .font_size_px(fallback_font_px, root_font_px)
+                    .max(1.0);
                 let first_line_h = first_style
                     .line_height
-                    .resolve(first_font_px, 0.0, 16.0)
+                    .resolve(first_font_px, 0.0, root_font_px)
                     .max(first_font_px * 1.2);
                 let first_color = first_style.color;
                 let first_alpha = ((first_color.a as f32) * opacity) as u8;
                 let first_text_color =
                     Color::rgba(first_color.r, first_color.g, first_color.b, first_alpha);
-                let first_letter_sp = first_style.letter_spacing.resolve(first_font_px, 0.0, 16.0);
-                let first_word_sp = first_style.word_spacing.resolve(first_font_px, 0.0, 16.0);
+                let first_letter_sp = first_style
+                    .letter_spacing
+                    .resolve(first_font_px, 0.0, root_font_px);
+                let first_word_sp = first_style
+                    .word_spacing
+                    .resolve(first_font_px, 0.0, root_font_px);
                 emit_text_run(
                     first.to_string(),
                     letter_x,
@@ -2896,13 +2963,13 @@ fn build_list_marker(
     }
     let ms = node.style.marker_style.as_deref();
     let font_px = ms
-        .map(|s| s.font_size_px(16.0, 16.0))
-        .unwrap_or_else(|| node.style.font_size_px(16.0, 16.0));
+        .map(|s| s.font_size_px(ctx.transform_ctx.root_font_px, ctx.transform_ctx.root_font_px))
+        .unwrap_or_else(|| node.style.font_size_px(ctx.transform_ctx.root_font_px, ctx.transform_ctx.root_font_px));
     let fallback_line_y = node.layout.content_rect.y;
     let fallback_line_h = node
         .style
         .line_height
-        .resolve(font_px, font_px, 16.0)
+        .resolve(font_px, font_px, ctx.transform_ctx.root_font_px)
         .max(font_px * 1.2);
     let (line_x, line_y, line_h) = match node.layout.line_cache.first() {
         Some(l) => (l.x, l.y, l.height),
@@ -2925,13 +2992,13 @@ fn build_list_marker(
     let marker_line_height = ms
         .map(|s| {
             s.line_height
-                .resolve(font_px, font_px, 16.0)
+                .resolve(font_px, font_px, ctx.transform_ctx.root_font_px)
                 .max(font_px * 1.2)
         })
         .unwrap_or_else(|| {
             node.style
                 .line_height
-                .resolve(font_px, font_px, 16.0)
+                .resolve(font_px, font_px, ctx.transform_ctx.root_font_px)
                 .max(font_px * 1.2)
         });
     if !node.style.marker_content.is_empty() {
@@ -3128,7 +3195,7 @@ fn build_list_marker(
 // Form element
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32) {
+fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32, root_font_px: f32) {
     let tag = node.tag.as_str();
     let input_type = node
         .attributes
@@ -3145,7 +3212,7 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32) 
     }
 
     let cr = node.layout.content_rect;
-    let font_px = node.style.font_size_px(16.0, 16.0).max(1.0);
+    let font_px = node.style.font_size_px(root_font_px, root_font_px).max(1.0);
     let mut value_color = node.style.color;
     let background = node.style.background_color;
     if matches!(tag, "input" | "textarea")
@@ -3327,11 +3394,11 @@ fn build_laid_out_text_node(
         return;
     }
 
-    let font_px = node.style.font_size_px(16.0, 16.0).max(1.0);
+    let font_px = node.style.font_size_px(ctx.transform_ctx.root_font_px, ctx.transform_ctx.root_font_px).max(1.0);
     let line_h = node
         .style
         .line_height
-        .resolve(font_px, 0.0, 16.0)
+        .resolve(font_px, 0.0, ctx.transform_ctx.root_font_px)
         .max(font_px * 1.2);
     let y = node.layout.content_rect.y - sy;
     if y + line_h < paint_clip.y || y > paint_clip.bottom() {
@@ -3345,6 +3412,7 @@ fn build_laid_out_text_node(
         &node.style,
         font_px,
         line_h,
+        ctx.transform_ctx.root_font_px,
     );
 }
 
@@ -3355,8 +3423,9 @@ fn emit_generated_pseudo_content(
     style: &ComputedStyle,
     sx: f32,
     sy: f32,
+    root_font_px: f32,
 ) {
-    emit_generated_pseudo_content_offset(list, node, text, style, sx, sy, 0.0);
+    emit_generated_pseudo_content_offset(list, node, text, style, sx, sy, 0.0, root_font_px);
 }
 
 fn emit_generated_pseudo_content_offset(
@@ -3367,14 +3436,15 @@ fn emit_generated_pseudo_content_offset(
     sx: f32,
     sy: f32,
     offset_x: f32,
+    root_font_px: f32,
 ) {
     if text.is_empty() {
         return;
     }
-    let font_px = style.font_size_px(16.0, 16.0).max(1.0);
+    let font_px = style.font_size_px(node.style.font_size_px(root_font_px, root_font_px), root_font_px).max(1.0);
     let line_h = style
         .line_height
-        .resolve(font_px, 0.0, 16.0)
+        .resolve(font_px, 0.0, root_font_px)
         .max(font_px * 1.2);
     let mut x = node.layout.content_rect.x - sx + offset_x;
     let text_w = text.chars().count() as f32 * font_px * 0.55;
@@ -3391,7 +3461,7 @@ fn emit_generated_pseudo_content_offset(
         _ => {}
     }
     let y = node.layout.content_rect.y - sy + (node.layout.content_rect.h - line_h) * 0.5;
-    emit_text(list, x, y, text, style, font_px, line_h);
+    emit_text(list, x, y, text, style, font_px, line_h, root_font_px);
 }
 
 fn emit_text(
@@ -3402,16 +3472,17 @@ fn emit_text(
     style: &ComputedStyle,
     font_px: f32,
     line_h: f32,
+    root_font_px: f32,
 ) {
     if text.is_empty() || font_px <= 0.0 {
         return;
     }
     let fp = font_px.max(1.0);
     let lh = if line_h > 0.0 { line_h } else { fp * 1.2 };
-    let letter_sp = style.letter_spacing.resolve(fp, 0.0, 16.0);
-    let word_sp = style.word_spacing.resolve(fp, 0.0, 16.0);
-    let deco_t = style.text_decoration_thickness.resolve(fp, 0.0, 16.0);
-    let underline_offset = style.text_underline_offset.resolve(fp, 0.0, 16.0);
+    let letter_sp = style.letter_spacing.resolve(fp, 0.0, root_font_px);
+    let word_sp = style.word_spacing.resolve(fp, 0.0, root_font_px);
+    let deco_t = style.text_decoration_thickness.resolve(fp, 0.0, root_font_px);
+    let underline_offset = style.text_underline_offset.resolve(fp, 0.0, root_font_px);
     list.push(PaintCmd::Text {
         x,
         y,
@@ -3450,12 +3521,12 @@ fn emit_text(
     });
 }
 
-fn resolve_overflow_clip_margin(style: &ComputedStyle, font_px: f32, reference: f32) -> f32 {
+fn resolve_overflow_clip_margin(style: &ComputedStyle, font_px: f32, reference: f32, root_font_px: f32) -> f32 {
     style
         .overflow_clip_margin
         .split_whitespace()
         .find_map(crate::css::parse_length_checked)
-        .map(|length| length.resolve(font_px, reference, 16.0).max(0.0))
+        .map(|length| length.resolve(font_px, reference, root_font_px).max(0.0))
         .unwrap_or(0.0)
 }
 
@@ -3465,25 +3536,26 @@ fn clip_path_rect(
     scroll_x: f32,
     scroll_y: f32,
     font_px: f32,
+    root_font_px: f32,
 ) -> Option<(Rect, [f32; 4])> {
     match style.clip_path.kind {
         ClipPathKind::Inset => {
             let top = style
                 .clip_path
                 .inset_top
-                .resolve(font_px, border_rect.h, 16.0);
+                .resolve(font_px, border_rect.h, root_font_px);
             let right = style
                 .clip_path
                 .inset_right
-                .resolve(font_px, border_rect.w, 16.0);
+                .resolve(font_px, border_rect.w, root_font_px);
             let bottom = style
                 .clip_path
                 .inset_bottom
-                .resolve(font_px, border_rect.h, 16.0);
+                .resolve(font_px, border_rect.h, root_font_px);
             let left = style
                 .clip_path
                 .inset_left
-                .resolve(font_px, border_rect.w, 16.0);
+                .resolve(font_px, border_rect.w, root_font_px);
             let w = (border_rect.w - left - right).max(0.0);
             let h = (border_rect.h - top - bottom).max(0.0);
             Some((
@@ -3501,18 +3573,18 @@ fn clip_path_rect(
             let r = style
                 .clip_path
                 .circle_radius
-                .resolve(font_px, reference, 16.0)
+                .resolve(font_px, reference, root_font_px)
                 .max(0.0);
             let cx = border_rect.x
                 + style
                     .clip_path
                     .center_x
-                    .resolve(font_px, border_rect.w, 16.0);
+                    .resolve(font_px, border_rect.w, root_font_px);
             let cy = border_rect.y
                 + style
                     .clip_path
                     .center_y
-                    .resolve(font_px, border_rect.h, 16.0);
+                    .resolve(font_px, border_rect.h, root_font_px);
             Some((
                 Rect::new(cx - r - scroll_x, cy - r - scroll_y, r * 2.0, r * 2.0),
                 [r; 4],
@@ -3522,23 +3594,23 @@ fn clip_path_rect(
             let rx = style
                 .clip_path
                 .ellipse_rx
-                .resolve(font_px, border_rect.w, 16.0)
+                .resolve(font_px, border_rect.w, root_font_px)
                 .max(0.0);
             let ry = style
                 .clip_path
                 .ellipse_ry
-                .resolve(font_px, border_rect.h, 16.0)
+                .resolve(font_px, border_rect.h, root_font_px)
                 .max(0.0);
             let cx = border_rect.x
                 + style
                     .clip_path
                     .center_x
-                    .resolve(font_px, border_rect.w, 16.0);
+                    .resolve(font_px, border_rect.w, root_font_px);
             let cy = border_rect.y
                 + style
                     .clip_path
                     .center_y
-                    .resolve(font_px, border_rect.h, 16.0);
+                    .resolve(font_px, border_rect.h, root_font_px);
             Some((
                 Rect::new(cx - rx - scroll_x, cy - ry - scroll_y, rx * 2.0, ry * 2.0),
                 [rx.min(ry); 4],
@@ -3554,6 +3626,7 @@ fn clip_path_polygon_points(
     scroll_x: f32,
     scroll_y: f32,
     font_px: f32,
+    root_font_px: f32,
 ) -> Option<Vec<(f32, f32)>> {
     if style.clip_path.kind != ClipPathKind::Polygon || style.clip_path.points.len() < 3 {
         return None;
@@ -3565,8 +3638,8 @@ fn clip_path_polygon_points(
             .iter()
             .map(|(x, y)| {
                 (
-                    border_rect.x + x.resolve(font_px, border_rect.w, 16.0) - scroll_x,
-                    border_rect.y + y.resolve(font_px, border_rect.h, 16.0) - scroll_y,
+                    border_rect.x + x.resolve(font_px, border_rect.w, root_font_px) - scroll_x,
+                    border_rect.y + y.resolve(font_px, border_rect.h, root_font_px) - scroll_y,
                 )
             })
             .collect(),
@@ -3751,6 +3824,7 @@ fn border_image_side_values(
     rect: Rect,
     font_px: f32,
     width_value: bool,
+    root_font_px: f32,
 ) -> [f32; 4] {
     let tokens: Vec<&str> = value
         .split_whitespace()
@@ -3765,7 +3839,7 @@ fn border_image_side_values(
             return (border_widths[side] * multiplier).max(0.0);
         }
         crate::css::parse_length_checked(token)
-            .map(|length| length.resolve(font_px, refs[side], 16.0).max(0.0))
+            .map(|length| length.resolve(font_px, refs[side], root_font_px).max(0.0))
             .unwrap_or_else(|| {
                 if width_value {
                     border_widths[side]
