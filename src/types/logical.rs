@@ -6,6 +6,8 @@ use super::*;
 /// A flow-relative box property, as declared.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogicalSlot {
+    MarginPhysical(PhysicalSide),
+    PaddingPhysical(PhysicalSide),
     MarginInlineStart,
     MarginInlineEnd,
     MarginBlockStart,

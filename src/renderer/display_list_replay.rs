@@ -58,6 +58,7 @@ fn cmd_bounds(cmd: &PaintCmd) -> Option<Rect> {
             x,
             y,
             size,
+            text_align,
             font_size,
             line_height,
             text,
@@ -65,7 +66,8 @@ fn cmd_bounds(cmd: &PaintCmd) -> Option<Rect> {
         } => {
             let pad = size.max(*font_size).max(*line_height) * 2.0;
             let width = size.max(*font_size * text.chars().count().max(1) as f32);
-            Some(Rect::new(x - pad, y - pad, width + pad * 2.0, pad * 2.0))
+            let left = if *text_align == crate::types::TextAlign::Right { x - width } else { *x };
+            Some(Rect::new(left - pad, y - pad, width + pad * 2.0, pad * 2.0))
         }
         PaintCmd::Text {
             x,
@@ -184,6 +186,15 @@ fn transformed_bounds_to_viewport(ts: Transform, rect: Rect, scale: f32) -> Opti
 #[cfg(test)]
 mod transform_bounds_tests {
     use super::*;
+
+    #[test]
+    fn text_raster_resolution_includes_scale_rotation_and_skew() {
+        assert_eq!(text_transform_raster_scale(Transform::from_scale(1.5, 2.0)), 2.0);
+        assert!((text_transform_raster_scale(Transform::from_rotate(30.0)) - 1.0).abs() < 0.001);
+        let skew = Transform::from_row(1.0, 0.0, 1.0, 1.0, 0.0, 0.0);
+        assert!((text_transform_raster_scale(skew) - 1.618034).abs() < 0.001);
+        assert_eq!(text_transform_raster_scale(Transform::from_scale(-3.0, 2.0)), 3.0);
+    }
 
     #[test]
     fn rotated_paint_bounds_follow_tiny_skia_matrix() {
@@ -1554,6 +1565,7 @@ fn replay_commands_inner(
 
             PaintCmd::ListMarker {
                 marker_type,
+                text_align,
                 x,
                 y,
                 size,
@@ -1607,7 +1619,22 @@ fn replay_commands_inner(
                     3 => {
                         // text marker
                         if let Some((ref mut fs, ref mut sc)) = text_ctx {
-                            let (text_scale, text_x, text_y) = transformed_text_origin(&ts, *x, *y);
+                            let marker_x = if *text_align == crate::types::TextAlign::Right {
+                                let width = crate::layout::inline_layout::measure_text_width_fs_attrs(
+                                    fs, text, *font_size, cosmic_text::Weight(*font_weight),
+                                    match font_style {
+                                        1 => CTextStyle::Italic,
+                                        2 => CTextStyle::Oblique,
+                                        _ => CTextStyle::Normal,
+                                    },
+                                    1.0, font_family,
+                                    crate::layout::inline_layout::stretch_from_percent(100.0),
+                                );
+                                x - width
+                            } else {
+                                *x
+                            };
+                            let (text_scale, text_x, text_y) = transformed_text_origin(&ts, marker_x, *y);
                             draw_text_cmd(
                                 target,
                                 *fs,
@@ -1676,6 +1703,8 @@ fn replay_commands_inner(
                 font_family,
                 color,
                 text_indent,
+                text_align,
+                direction,
                 placeholder_color,
                 file_button_color,
                 file_button_background,
@@ -2186,12 +2215,27 @@ fn replay_commands_inner(
                                 // Vertically center the text in the element
                                 let line_h = *font_size * 1.2;
                                 let text_y = rect.y + (rect.h - line_h).max(0.0) / 2.0;
+                                let text_w = crate::layout::inline_layout::measure_text_width_fs_attrs(
+                                    fs, display_text, *font_size, cosmic_text::Weight(*font_weight),
+                                    CTextStyle::Normal, scale, font_family,
+                                    crate::layout::inline_layout::stretch_from_percent(100.0),
+                                );
+                                let rtl = *direction == crate::types::Direction::RTL;
+                                let alignment = match text_align {
+                                    crate::types::TextAlign::Center => 0.5,
+                                    crate::types::TextAlign::Right => 1.0,
+                                    crate::types::TextAlign::Start if rtl => 1.0,
+                                    crate::types::TextAlign::End if !rtl => 1.0,
+                                    _ => 0.0,
+                                };
+                                let text_x = rect.x + (rect.w - text_w).max(0.0) * alignment
+                                    + text_indent * scale * if rtl { -1.0 } else { 1.0 };
                                 draw_text_cmd(
                                     target,
                                     *fs,
                                     *sc,
                                     scale,
-                                    rect.x + 2.0,
+                                    text_x,
                                     text_y,
                                     display_text,
                                     font_family,
@@ -3721,6 +3765,16 @@ fn draw_transformed_text_cmd(
         return;
     }
 
+    // Uniform, axis-aligned text can be rasterized directly at device size.
+    if transform.kx == 0.0 && transform.ky == 0.0
+        && transform.sx == transform.sy && transform.sx > 0.0 {
+        let (raster_scale, text_x, text_y) = transformed_text_origin(&transform, x, y);
+        draw_text_cmd(pixmap, font_system, swash_cache, raster_scale, text_x, text_y,
+            text, font_family, font_size, font_weight, font_style, font_stretch,
+            line_height, color, decoration, letter_spacing, word_spacing, small_caps, clip_mask);
+        return;
+    }
+
     let ct_style = match font_style {
         1 => CTextStyle::Italic,
         2 => CTextStyle::Oblique,
@@ -3742,8 +3796,16 @@ fn draw_transformed_text_cmd(
     let pad = line_h.max(font_size).max(1.0) * 2.0 + 8.0;
     let logical_w = (measured + spacing + pad * 2.0).max(1.0);
     let logical_h = (line_h + pad * 2.0).max(1.0);
-    let pix_w = (logical_w * scale).ceil().clamp(1.0, 16384.0) as u32;
-    let pix_h = (logical_h * scale).ceil().clamp(1.0, 16384.0) as u32;
+    // Rasterize for the largest stretch of the full CSS-to-device transform,
+    // then resample only the residual rotation/skew/anisotropic compression.
+    // Limiting resolution, rather than clipping dimensions, preserves the run.
+    const MAX_TEXT_LAYER_SIDE: f32 = 16384.0;
+    let raster_scale = text_transform_raster_scale(transform)
+        .min(MAX_TEXT_LAYER_SIDE / logical_w)
+        .min(MAX_TEXT_LAYER_SIDE / logical_h);
+    if !raster_scale.is_finite() || raster_scale <= 0.0 { return; }
+    let pix_w = (logical_w * raster_scale).ceil().max(1.0) as u32;
+    let pix_h = (logical_h * raster_scale).ceil().max(1.0) as u32;
     let Some(mut layer) = Pixmap::new(pix_w, pix_h) else {
         return;
     };
@@ -3753,7 +3815,7 @@ fn draw_transformed_text_cmd(
         &mut layer,
         font_system,
         swash_cache,
-        scale,
+        raster_scale,
         pad,
         pad,
         text,
@@ -3775,15 +3837,28 @@ fn draw_transformed_text_cmd(
     let origin_y = y - pad;
     let image_transform = transform
         .pre_translate(origin_x, origin_y)
-        .pre_scale(1.0 / scale, 1.0 / scale);
+        .pre_scale(1.0 / raster_scale, 1.0 / raster_scale);
     pixmap.draw_pixmap(
         0,
         0,
         layer.as_ref(),
-        &tiny_skia::PixmapPaint::default(),
+        &tiny_skia::PixmapPaint {
+            quality: tiny_skia::FilterQuality::Bilinear,
+            ..Default::default()
+        },
         image_transform,
         clip_mask,
     );
+}
+
+fn text_transform_raster_scale(transform: Transform) -> f32 {
+    // Largest singular value of the linear part, including device pixel ratio.
+    let (a, b, c, d) = (f64::from(transform.sx), f64::from(transform.ky),
+        f64::from(transform.kx), f64::from(transform.sy));
+    let xx = a * a + b * b;
+    let yy = c * c + d * d;
+    let xy = a * c + b * d;
+    ((xx + yy + (xx - yy).hypot(2.0 * xy)) / 2.0).sqrt() as f32
 }
 
 fn underline_skip_ink_segments(text: &str, x: f32, width: f32) -> Vec<(f32, f32)> {

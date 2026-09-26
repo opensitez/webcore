@@ -1,453 +1,704 @@
-//! The `calc()` expression parser — a self-contained sub-parser that was
-//! sitting inside the length parser.
-
-#![allow(unused_imports)]
+//! Typed CSS calculations. Relative units remain unresolved until layout.
 use super::*;
 use crate::types::*;
-use std::collections::{HashMap, HashSet};
 
-const ZERO_COEFFS: Coeffs = [0.0; 6];
+// length, angle, time, frequency, resolution, percentage exponents.
+type Dimension = [i8; 6];
+const NUMBER: Dimension = [0; 6];
+const LENGTH: Dimension = [1, 0, 0, 0, 0, 0];
+const ANGLE: Dimension = [0, 1, 0, 0, 0, 0];
+const MAX_CALC_DEPTH: usize = 128;
 
-// ── Recursive descent calc() evaluator ───────────────────────────────────────
-// Coefficients: [percent, px, em, rem, vw, vh]
-type Coeffs = [f32; 6];
-
-/// Parse the inside of `calc(...)` using recursive descent.
-///
-/// Handles arbitrary nesting, mixed units, and correct operator precedence:
-///   calc(100% - 21.5rem + (100vw - 1569px) / 2)
-///
-/// The result is a linear combination of unit coefficients [pct, px, em, rem, vw, vh].
-/// At layout time, each coefficient is multiplied by its resolved unit value.
-pub(crate) fn parse_calc(expr: &str) -> CssLength {
-    let expr = expr.trim();
-    // If the expression contains min()/max()/clamp(), use tree-based parser
-    // since these can't be represented as linear coefficients.
-    // `vmin`/`vmax` join min()/max()/clamp() on the tree path: the coefficient
-    // form has no slot that means "the smaller axis", and projecting them onto
-    // the `vw` slot answers the wrong axis on every landscape viewport
-    // (css-values-4 §6.1.2). The tree keeps each term as a `CssLength`, which
-    // knows its own axis at resolve time.
-    let has_axis_dependent_unit = {
-        let l = expr.to_ascii_lowercase();
-        ["vmin", "vmax", "cqw", "cqh", "cqi", "cqb", "cqmin", "cqmax"]
-            .iter()
-            .any(|unit| l.contains(unit))
-    };
-    if has_axis_dependent_unit
-        || expr.contains("env(")
-        || expr.contains("min(")
-        || expr.contains("max(")
-        || expr.contains("clamp(")
-    {
-        let node = parse_calc_tree(expr);
-        return CssLength::CalcExpr(Box::new(node));
+pub(crate) fn serialize_math_literal(value: f32, unit: &str) -> String {
+    let keyword = if value.is_nan() { Some("NaN") }
+        else if value == f32::INFINITY { Some("infinity") }
+        else if value == f32::NEG_INFINITY { Some("-infinity") }
+        else { None };
+    match keyword {
+        Some(keyword) if unit.is_empty() => keyword.into(),
+        Some(keyword) => format!("calc({keyword} * 1{unit})"),
+        None => format!("{value}{unit}"),
     }
-    let bytes = expr.as_bytes();
-    let mut pos = 0usize;
-    let coeffs = calc_parse_additive(bytes, &mut pos);
-    let vals = coeffs;
-    // A NaN coefficient means some term used a unit we cannot parse, so the
-    // expression is invalid. `Auto` is the fallback every unparseable length
-    // answers with, and `parse_length_checked` turns it back into a rejection.
-    if vals.iter().any(|v| v.is_nan()) {
+}
+
+/// Serialize the calculation tree without losing operation precedence or units.
+/// The caller chooses specified-value or computed-value length serialization.
+pub(crate) fn serialize_calculation(node: &CalcNode, length: &impl Fn(&CssLength) -> String) -> String {
+    let child = |node: &CalcNode| serialize_calculation(node, length);
+    match node {
+        CalcNode::Value(value) => length(value),
+        CalcNode::Scalar(value, unit) => serialize_math_literal(*value, match unit {
+            CalcScalarUnit::Number => "",
+            CalcScalarUnit::Radians => "rad",
+            CalcScalarUnit::Seconds => "s",
+            CalcScalarUnit::Hertz => "Hz",
+            CalcScalarUnit::Dppx => "dppx",
+            CalcScalarUnit::Percent => "%",
+        }),
+        CalcNode::Add(a, b) => format!("({} + {})", child(a), child(b)),
+        CalcNode::Sub(a, b) => format!("({} - {})", child(a), child(b)),
+        CalcNode::Product(a, b) => format!("({} * {})", child(a), child(b)),
+        CalcNode::Quotient(a, b) => format!("({} / {})", child(a), child(b)),
+        CalcNode::Mul(a, b) => format!("({} * {})", child(a), serialize_math_literal(*b, "")),
+        CalcNode::Div(a, b) => format!("({} / {})", child(a), serialize_math_literal(*b, "")),
+        CalcNode::Function(function, args) => {
+            use CssMathFunction::*;
+            let name = match function {
+                Min => "min", Max => "max", Clamp => "clamp", Round(_) => "round",
+                Mod => "mod", Rem => "rem", Abs => "abs", Sign => "sign",
+                Sin => "sin", Cos => "cos", Tan => "tan", Asin => "asin",
+                Acos => "acos", Atan => "atan", Atan2 => "atan2", Pow => "pow",
+                Sqrt => "sqrt", Hypot => "hypot", Log => "log", Exp => "exp",
+            };
+            let mut serialized = Vec::with_capacity(args.len() + 1);
+            if let Round(strategy) = function {
+                serialized.push(match strategy {
+                    CssRoundingStrategy::Nearest => "nearest",
+                    CssRoundingStrategy::Up => "up",
+                    CssRoundingStrategy::Down => "down",
+                    CssRoundingStrategy::ToZero => "to-zero",
+                }.into());
+            }
+            serialized.extend(args.iter().enumerate().map(|(i, arg)| {
+                let unbounded = matches!(arg, CalcNode::Scalar(v, _) | CalcNode::Value(CssLength::Px(v))
+                    if (i == 0 && *v == f32::NEG_INFINITY) || (i == 2 && *v == f32::INFINITY));
+                if *function == Clamp && unbounded { "none".into() } else { child(arg) }
+            }));
+            format!("{name}({})", serialized.join(", "))
+        }
+    }
+}
+
+struct Calculation {
+    node: CalcNode,
+    dimension: Dimension,
+}
+
+impl Calculation {
+    fn number(value: f32) -> Self {
+        Self {
+            node: CalcNode::Scalar(value, CalcScalarUnit::Number),
+            dimension: NUMBER,
+        }
+    }
+}
+
+pub(crate) fn is_math_function(value: &str) -> bool {
+    let Some((name, _)) = value.split_once('(') else {
+        return false;
+    };
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "calc"
+            | "min"
+            | "max"
+            | "clamp"
+            | "round"
+            | "mod"
+            | "rem"
+            | "abs"
+            | "sign"
+            | "sin"
+            | "cos"
+            | "tan"
+            | "asin"
+            | "acos"
+            | "atan"
+            | "atan2"
+            | "pow"
+            | "sqrt"
+            | "hypot"
+            | "log"
+            | "exp"
+    )
+}
+
+pub(crate) fn parse_math_length(value: &str) -> CssLength {
+    let Some(result) = MathParser::parse(value, true) else {
+        return CssLength::Auto;
+    };
+    if result.dimension != LENGTH {
         return CssLength::Auto;
     }
-    // Simplify: if only one unit is non-zero, return a simple CssLength variant.
-    let n_nonzero = vals.iter().filter(|&&v| v != 0.0).count();
-    if n_nonzero <= 1 {
-        if vals[0] != 0.0 {
-            return CssLength::Percent(vals[0]);
-        }
-        if vals[2] != 0.0 {
-            return CssLength::Em(vals[2]);
-        }
-        if vals[3] != 0.0 {
-            return CssLength::Rem(vals[3]);
-        }
-        if vals[4] != 0.0 {
-            return CssLength::Vw(vals[4]);
-        }
-        if vals[5] != 0.0 {
-            return CssLength::Vh(vals[5]);
-        }
-        return CssLength::Px(vals[1]);
-    }
-    CssLength::Calc(Box::new(vals))
-}
-
-/// Parse calc() expression into a CalcNode tree (handles nested min/max/clamp).
-fn parse_calc_tree(expr: &str) -> CalcNode {
-    use crate::types::CalcNode;
-    let expr = expr.trim();
-
-    // Split on top-level `+` and `-` (with spaces, per CSS spec)
-    let parts = split_calc_additive(expr);
-    if parts.len() == 1 {
-        return parse_calc_tree_multiplicative(parts[0].1);
-    }
-
-    let mut result = parse_calc_tree_multiplicative(parts[0].1);
-    for &(sign, term) in &parts[1..] {
-        let rhs = parse_calc_tree_multiplicative(term);
-        result = if sign == '+' {
-            CalcNode::Add(Box::new(result), Box::new(rhs))
-        } else {
-            CalcNode::Sub(Box::new(result), Box::new(rhs))
-        };
-    }
-    result
-}
-
-fn parse_calc_tree_multiplicative(expr: &str) -> CalcNode {
-    use crate::types::CalcNode;
-    let expr = expr.trim();
-    // Simple: check for * or / not inside parens
-    let mut depth = 0i32;
-    let mut last_op = 0usize;
-    let mut op_char = 0u8;
-    let bytes = expr.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            b'*' | b'/' if depth == 0 && i > 0 => {
-                last_op = i;
-                op_char = b;
-            }
-            _ => {}
-        }
-    }
-    if op_char != 0 && last_op > 0 {
-        let lhs_str = expr[..last_op].trim();
-        let rhs_str = expr[last_op + 1..].trim();
-        if let Some(scalar) = parse_calc_scalar(rhs_str) {
-            let lhs = parse_calc_tree_multiplicative(lhs_str);
-            return if op_char == b'*' {
-                CalcNode::Mul(Box::new(lhs), scalar)
-            } else {
-                CalcNode::Div(Box::new(lhs), scalar)
-            };
-        }
-        // css-values-4 §10.6: multiplication commutes, so the scalar may be on
-        // EITHER side — `calc(2 * min(50%, 300px))` is the same product as
-        // `calc(min(50%, 300px) * 2)`. Division does not: its right operand
-        // must be the number.
-        if op_char == b'*' {
-            if let Some(scalar) = parse_calc_scalar(lhs_str) {
-                return CalcNode::Mul(Box::new(parse_calc_tree_multiplicative(rhs_str)), scalar);
-            }
-        }
-    }
-    parse_calc_tree_atom(expr)
-}
-
-fn parse_calc_scalar(expr: &str) -> Option<f32> {
-    let expr = expr.trim();
-    if !expr.bytes().all(|b| {
-        b.is_ascii_digit() || matches!(b, b'.' | b'+' | b'-' | b'*' | b'/' | b'(' | b')')
-            || css_calc_ws(b)
-    }) {
-        return None;
-    }
-    let mut pos = 0;
-    let values = calc_parse_additive(expr.as_bytes(), &mut pos);
-    calc_skip_ws(expr.as_bytes(), &mut pos);
-    (pos == expr.len() && values[1].is_finite() && values.iter().enumerate().all(|(i, v)| i == 1 || *v == 0.0))
-        .then_some(values[1])
+    compact_length(result.node)
 }
 
 pub(crate) fn parse_calc_number(value: &str) -> Option<f32> {
-    let expr = value.trim().strip_prefix("calc(")?.strip_suffix(')')?;
-    parse_calc_scalar(expr)
+    parse_numeric_dimension(value, NUMBER)
 }
 
-fn parse_calc_tree_atom(expr: &str) -> CalcNode {
-    use crate::types::CalcNode;
-    let expr = expr.trim();
-    // Parenthesized
-    if expr.starts_with('(') && expr.ends_with(')') {
-        return parse_calc_tree(&expr[1..expr.len() - 1]);
-    }
-    // min/max/clamp — delegate to parse_length which handles these
-    if expr.starts_with("min(") || expr.starts_with("max(") || expr.starts_with("clamp(") {
-        return CalcNode::Value(parse_length(expr));
-    }
-    // Simple value
-    CalcNode::Value(parse_length(expr))
+pub(crate) fn parse_css_number(value: &str) -> Option<f32> {
+    let value = value.trim();
+    value.parse::<f32>().ok().or_else(|| parse_calc_number(value))
+        .filter(|n| n.is_finite())
 }
 
-/// Split a calc expression at top-level `+` and `-` operators (CSS requires spaces around them).
-fn split_calc_additive(expr: &str) -> Vec<(char, &str)> {
-    let mut parts = Vec::new();
-    let mut depth = 0i32;
-    let bytes = expr.as_bytes();
-    let mut start = 0usize;
-    let mut sign = '+';
-    let mut i = 0usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            b'+' | b'-' if depth == 0 && i > start && i + 1 < bytes.len() => {
-                // CSS calc additive operators require whitespace on both sides,
-                // but CSS whitespace includes newlines, tabs, CR and FF. The old
-                // tree parser only accepted a literal space, so multiline nested
-                // calc()/min()/max()/clamp() expressions silently became invalid.
-                if i > 0 && css_calc_ws(bytes[i - 1]) && css_calc_ws(bytes[i + 1]) {
-                    let term = expr[start..i].trim();
-                    if !term.is_empty() {
-                        parts.push((sign, term));
-                    }
-                    sign = bytes[i] as char;
-                    i += 1;
-                    while i < bytes.len() && css_calc_ws(bytes[i]) {
-                        i += 1;
-                    }
-                    start = i;
-                    continue;
+pub(crate) fn parse_nonnegative_number(value: &str) -> Option<f32> {
+    let number = parse_css_number(value)?;
+    // Literal out-of-range values are invalid; calculations clamp at computed value time.
+    if is_math_function(value.trim()) { Some(number.max(0.0)) }
+    else { (number >= 0.0).then_some(number) }
+}
+
+pub(crate) fn parse_css_integer(value: &str) -> Option<i32> {
+    let value = value.trim();
+    if let Ok(integer) = value.parse::<i32>() { return Some(integer); }
+    let number = parse_calc_number(value).filter(|n| n.is_finite())?;
+    Some((f64::from(number) + 0.5).floor() as i32)
+}
+
+pub(crate) fn parse_positive_integer(value: &str) -> Option<i32> {
+    let integer = parse_css_integer(value)?;
+    if is_math_function(value.trim()) { Some(integer.max(1)) }
+    else { (integer > 0).then_some(integer) }
+}
+
+fn parse_numeric_dimension(value: &str, dimension: Dimension) -> Option<f32> {
+    if !is_math_function(value) {
+        return None;
+    }
+    let result = MathParser::parse(value, false)?;
+    if result.dimension != dimension || !context_independent(&result.node) {
+        return None;
+    }
+    Some(result.node.resolve_vp(0.0, 0.0, 0.0, 0.0, 0.0))
+}
+
+pub(crate) fn parse_math_angle_deg(value: &str) -> Option<f32> {
+    parse_numeric_dimension(value, ANGLE).map(f32::to_degrees)
+}
+
+pub(crate) fn parse_math_time_ms(value: &str) -> Option<f32> {
+    parse_numeric_dimension(value, [0, 0, 1, 0, 0, 0]).map(|v| v * 1000.0)
+}
+
+pub(crate) fn parse_math_alpha(value: &str) -> Option<f32> {
+    if !is_math_function(value) {
+        return None;
+    }
+    let result = MathParser::parse(value, false)?;
+    let percentage = result.dimension == [0, 0, 0, 0, 0, 1];
+    if (result.dimension != NUMBER && !percentage) || !context_independent(&result.node) {
+        return None;
+    }
+    let value = result.node.resolve_vp(0.0, 0.0, 0.0, 0.0, 0.0);
+    Some(if percentage { value / 100.0 } else { value })
+}
+
+fn context_independent(node: &CalcNode) -> bool {
+    match node {
+        CalcNode::Scalar(_, _) => true,
+        CalcNode::Value(CssLength::Px(_) | CssLength::Zero) => true,
+        CalcNode::Value(_) => false,
+        CalcNode::Add(a, b)
+        | CalcNode::Sub(a, b)
+        | CalcNode::Product(a, b)
+        | CalcNode::Quotient(a, b) => context_independent(a) && context_independent(b),
+        CalcNode::Mul(a, _) | CalcNode::Div(a, _) => context_independent(a),
+        CalcNode::Function(_, args) => args.iter().all(context_independent),
+    }
+}
+
+// Preserve the compact linear representation and percentage-only results used
+// by existing consumers; nonlinear and context-dependent products keep their AST.
+fn compact_length(node: CalcNode) -> CssLength {
+    let node = match node {
+        CalcNode::Function(CssMathFunction::Min, args) => {
+            return CssLength::Min(Box::new(args.into_iter().map(compact_length).collect()));
+        }
+        CalcNode::Function(CssMathFunction::Max, args) => {
+            return CssLength::Max(Box::new(args.into_iter().map(compact_length).collect()));
+        }
+        CalcNode::Function(CssMathFunction::Clamp, args) => {
+            let mut args = args.into_iter().map(compact_length);
+            return CssLength::Clamp(Box::new([
+                args.next().unwrap(),
+                args.next().unwrap(),
+                args.next().unwrap(),
+            ]));
+        }
+        other => other,
+    };
+    fn coefficients(node: &CalcNode) -> Option<[f32; 6]> {
+        let mut out = [0.0; 6];
+        match node {
+            CalcNode::Value(value) => match value {
+                CssLength::Percent(v) => out[0] = *v,
+                CssLength::Px(v) => out[1] = *v,
+                CssLength::Em(v) => out[2] = *v,
+                CssLength::Rem(v) => out[3] = *v,
+                CssLength::Vw(v) => out[4] = *v,
+                CssLength::Vh(v) => out[5] = *v,
+                CssLength::Zero => {}
+                _ => return None,
+            },
+            CalcNode::Add(a, b) | CalcNode::Sub(a, b) => {
+                let left = coefficients(a)?;
+                let right = coefficients(b)?;
+                let sign = if matches!(node, CalcNode::Sub(..)) {
+                    -1.0
+                } else {
+                    1.0
+                };
+                for i in 0..6 {
+                    out[i] = left[i] + sign * right[i];
                 }
             }
-            _ => {}
+            CalcNode::Mul(a, scalar) | CalcNode::Div(a, scalar) => {
+                if !scalar.is_finite() || *scalar == 0.0 && matches!(node, CalcNode::Div(..)) {
+                    return None;
+                }
+                out = coefficients(a)?;
+                let factor = if matches!(node, CalcNode::Div(..)) {
+                    1.0 / scalar
+                } else {
+                    *scalar
+                };
+                for v in &mut out {
+                    *v *= factor;
+                }
+            }
+            _ => return None,
         }
-        i += 1;
+        out.iter().all(|v| v.is_finite()).then_some(out)
     }
-    let tail = expr[start..].trim();
-    if !tail.is_empty() {
-        parts.push((sign, tail));
-    }
-    if parts.is_empty() {
-        parts.push(('+', expr));
-    }
-    parts
-}
-
-fn coeffs_add(a: &Coeffs, b: &Coeffs) -> Coeffs {
-    [
-        a[0] + b[0],
-        a[1] + b[1],
-        a[2] + b[2],
-        a[3] + b[3],
-        a[4] + b[4],
-        a[5] + b[5],
-    ]
-}
-
-fn coeffs_sub(a: &Coeffs, b: &Coeffs) -> Coeffs {
-    [
-        a[0] - b[0],
-        a[1] - b[1],
-        a[2] - b[2],
-        a[3] - b[3],
-        a[4] - b[4],
-        a[5] - b[5],
-    ]
-}
-
-fn coeffs_mul(a: &Coeffs, f: f32) -> Coeffs {
-    [a[0] * f, a[1] * f, a[2] * f, a[3] * f, a[4] * f, a[5] * f]
-}
-
-#[inline]
-fn css_calc_ws(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0c)
-}
-
-fn calc_skip_ws(b: &[u8], pos: &mut usize) {
-    while *pos < b.len() && css_calc_ws(b[*pos]) {
-        *pos += 1;
-    }
-}
-
-/// Additive level: handles `+` and `-` (lowest precedence).
-fn calc_parse_additive(b: &[u8], pos: &mut usize) -> Coeffs {
-    let mut result = calc_parse_multiplicative(b, pos);
-    loop {
-        calc_skip_ws(b, pos);
-        if *pos >= b.len() {
-            break;
+    if let Some(c) = coefficients(&node) {
+        if c.iter().filter(|v| **v != 0.0).count() <= 1 {
+            if c[0] != 0.0 {
+                return CssLength::Percent(c[0]);
+            }
+            if c[2] != 0.0 {
+                return CssLength::Em(c[2]);
+            }
+            if c[3] != 0.0 {
+                return CssLength::Rem(c[3]);
+            }
+            if c[4] != 0.0 {
+                return CssLength::Vw(c[4]);
+            }
+            if c[5] != 0.0 {
+                return CssLength::Vh(c[5]);
+            }
+            return CssLength::Px(c[1]);
         }
-        // CSS calc requires spaces around + and - operators.
-        // Check for ` + ` or ` - ` pattern (we already consumed leading ws).
-        let op = b[*pos];
-        if (op == b'+' || op == b'-') && *pos + 1 < b.len() && css_calc_ws(b[*pos + 1]) {
-            // Make sure the previous char was a space (we consumed it in skip_ws)
-            *pos += 1; // skip operator
-            calc_skip_ws(b, pos);
-            let rhs = calc_parse_multiplicative(b, pos);
-            result = if op == b'+' {
-                coeffs_add(&result, &rhs)
+        return CssLength::Calc(Box::new(c));
+    }
+    CssLength::CalcExpr(Box::new(node))
+}
+
+struct MathParser<'a> {
+    input: &'a str,
+    pos: usize,
+    percentage_hint: Option<Dimension>,
+    depth: usize,
+}
+
+impl<'a> MathParser<'a> {
+    fn parse(input: &'a str, length_percentage: bool) -> Option<Calculation> {
+        Self::parse_hint(input, length_percentage.then_some(LENGTH))
+    }
+
+    fn parse_hint(input: &'a str, percentage_hint: Option<Dimension>) -> Option<Calculation> {
+        let mut parser = Self {
+            input,
+            pos: 0,
+            percentage_hint,
+            depth: 0,
+        };
+        let result = parser.sum()?;
+        parser.whitespace();
+        (parser.pos == input.len()).then_some(result)
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.input.as_bytes().get(self.pos).copied()
+    }
+    fn whitespace(&mut self) -> bool {
+        let start = self.pos;
+        while self
+            .peek()
+            .is_some_and(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 12))
+        {
+            self.pos += 1;
+        }
+        self.pos != start
+    }
+    fn take(&mut self, byte: u8) -> bool {
+        if self.peek() == Some(byte) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn sum(&mut self) -> Option<Calculation> {
+        let mut left = self.product()?;
+        loop {
+            let spaced = self.whitespace();
+            let op = self.peek();
+            if !matches!(op, Some(b'+' | b'-')) {
+                break;
+            }
+            if !spaced {
+                return None;
+            }
+            self.pos += 1;
+            if !self.whitespace() {
+                return None;
+            }
+            let right = self.product()?;
+            if left.dimension != right.dimension {
+                return None;
+            }
+            left.node = if op == Some(b'+') {
+                CalcNode::Add(Box::new(left.node), Box::new(right.node))
             } else {
-                coeffs_sub(&result, &rhs)
+                CalcNode::Sub(Box::new(left.node), Box::new(right.node))
             };
-        } else {
-            break;
         }
+        Some(left)
     }
-    result
-}
 
-/// Multiplicative level: handles `*` and `/` (higher precedence).
-fn calc_parse_multiplicative(b: &[u8], pos: &mut usize) -> Coeffs {
-    let mut result = calc_parse_atom(b, pos);
-    loop {
-        calc_skip_ws(b, pos);
-        if *pos >= b.len() {
-            break;
-        }
-        let op = b[*pos];
-        if op == b'*' || op == b'/' {
-            *pos += 1;
-            calc_skip_ws(b, pos);
-            if op == b'*' {
-                // One side must be a plain number. Try: coeffs * number or number * coeffs.
-                // We already have lhs as coeffs, so rhs should be a number.
-                let rhs = calc_parse_atom(b, pos);
-                // If rhs is purely px (unitless number parsed as px), use as scalar.
-                // If lhs is purely px, treat lhs as scalar and rhs as unit-bearing.
-                let rhs_scalar = if rhs[0] == 0.0
-                    && rhs[2] == 0.0
-                    && rhs[3] == 0.0
-                    && rhs[4] == 0.0
-                    && rhs[5] == 0.0
-                {
-                    Some(rhs[1])
+    fn product(&mut self) -> Option<Calculation> {
+        let mut left = self.atom()?;
+        loop {
+            let before_space = self.pos;
+            self.whitespace();
+            let op = self.peek();
+            if !matches!(op, Some(b'*' | b'/')) {
+                self.pos = before_space;
+                break;
+            }
+            self.pos += 1;
+            let right = self.atom()?;
+            let left_dimension = left.dimension;
+            for i in 0..6 {
+                left.dimension[i] = if op == Some(b'*') {
+                    left.dimension[i].checked_add(right.dimension[i])?
                 } else {
-                    None
+                    left.dimension[i].checked_sub(right.dimension[i])?
                 };
-                let lhs_scalar = if result[0] == 0.0
-                    && result[2] == 0.0
-                    && result[3] == 0.0
-                    && result[4] == 0.0
-                    && result[5] == 0.0
-                {
-                    Some(result[1])
+            }
+            left.node = if right.dimension == NUMBER {
+                if let CalcNode::Scalar(n, CalcScalarUnit::Number) = right.node {
+                    if op == Some(b'*') {
+                        CalcNode::Mul(Box::new(left.node), n)
+                    } else if n.is_finite() && n != 0.0 {
+                        CalcNode::Div(Box::new(left.node), n)
+                    } else {
+                        CalcNode::Quotient(
+                            Box::new(left.node),
+                            Box::new(CalcNode::Scalar(n, CalcScalarUnit::Number)),
+                        )
+                    }
+                } else if op == Some(b'*') {
+                    CalcNode::Product(Box::new(left.node), Box::new(right.node))
                 } else {
-                    None
-                };
-                if let Some(s) = rhs_scalar {
-                    result = coeffs_mul(&result, s);
-                } else if let Some(s) = lhs_scalar {
-                    result = coeffs_mul(&rhs, s);
-                } else {
-                    // Both have units — invalid in CSS, just keep lhs
+                    CalcNode::Quotient(Box::new(left.node), Box::new(right.node))
                 }
+            } else if op == Some(b'*') && left_dimension == NUMBER {
+                if let CalcNode::Scalar(n, CalcScalarUnit::Number) = left.node {
+                    CalcNode::Mul(Box::new(right.node), n)
+                } else {
+                    CalcNode::Product(Box::new(left.node), Box::new(right.node))
+                }
+            } else if op == Some(b'*') {
+                CalcNode::Product(Box::new(left.node), Box::new(right.node))
             } else {
-                // Division: coeffs / number
-                let rhs = calc_parse_atom(b, pos);
-                let divisor = rhs[1]; // should be a unitless number (px slot)
-                if divisor != 0.0 {
-                    result = coeffs_mul(&result, 1.0 / divisor);
+                CalcNode::Quotient(Box::new(left.node), Box::new(right.node))
+            };
+        }
+        Some(left)
+    }
+
+    fn atom(&mut self) -> Option<Calculation> {
+        self.whitespace();
+        // Bound recursion for hostile stylesheets, rather than exhausting the stack.
+        if self.depth >= MAX_CALC_DEPTH {
+            return None;
+        }
+        self.depth += 1;
+        let result = self.atom_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn atom_inner(&mut self) -> Option<Calculation> {
+        if self.take(b'(') {
+            let result = self.sum()?;
+            self.whitespace();
+            return self.take(b')').then_some(result);
+        }
+        let start = self.pos;
+        if self.peek().is_some_and(|b| b.is_ascii_alphabetic())
+            || self.input[self.pos..]
+                .to_ascii_lowercase()
+                .starts_with("-infinity")
+        {
+            while self
+                .peek()
+                .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'-')
+            {
+                self.pos += 1;
+            }
+            let name = self.input[start..self.pos].to_ascii_lowercase();
+            if self.take(b'(') {
+                if name == "env" {
+                    let mut nesting = 1;
+                    while let Some(b) = self.peek() {
+                        self.pos += 1;
+                        if b == b'(' {
+                            nesting += 1;
+                        }
+                        if b == b')' {
+                            nesting -= 1;
+                        }
+                        if nesting == 0 {
+                            let value = parse_length(&self.input[start..self.pos]);
+                            return (!matches!(value, CssLength::Auto)).then_some(Calculation {
+                                node: CalcNode::Value(value),
+                                dimension: LENGTH,
+                            });
+                        }
+                    }
+                    return None;
+                }
+                return self.function(&name);
+            }
+            return Some(Calculation::number(match name.as_str() {
+                "pi" => std::f32::consts::PI,
+                "e" => std::f32::consts::E,
+                "infinity" => f32::INFINITY,
+                "-infinity" => f32::NEG_INFINITY,
+                "nan" => f32::NAN,
+                _ => return None,
+            }));
+        }
+        if matches!(self.peek(), Some(b'+' | b'-')) {
+            self.pos += 1;
+        }
+        let digits = self.pos;
+        while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+            self.pos += 1;
+        }
+        let mut has_digit = self.pos > digits;
+        if self.take(b'.') {
+            let fractional = self.pos;
+            while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+                self.pos += 1;
+            }
+            if self.pos == fractional {
+                return None;
+            }
+            has_digit = true;
+        }
+        if !has_digit {
+            return None;
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            let exponent = self.pos;
+            self.pos += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.pos += 1;
+            }
+            let digits = self.pos;
+            while self.peek().is_some_and(|b| b.is_ascii_digit()) {
+                self.pos += 1;
+            }
+            if self.pos == digits {
+                self.pos = exponent;
+            }
+        }
+        let number: f32 = self.input[start..self.pos].parse().ok()?;
+        let unit_start = self.pos;
+        while self.peek().is_some_and(|b| b.is_ascii_alphabetic()) {
+            self.pos += 1;
+        }
+        self.take(b'%');
+        let unit = self.input[unit_start..self.pos].to_ascii_lowercase();
+        if unit.is_empty() {
+            return Some(Calculation::number(number));
+        }
+        let (dimension, scalar) = match unit.as_str() {
+            "rad" => (ANGLE, Some(number)),
+            "deg" => (ANGLE, Some(number.to_radians())),
+            "grad" => (ANGLE, Some(number * std::f32::consts::PI / 200.0)),
+            "turn" => (ANGLE, Some(number * std::f32::consts::TAU)),
+            "s" => ([0, 0, 1, 0, 0, 0], Some(number)),
+            "ms" => ([0, 0, 1, 0, 0, 0], Some(number / 1000.0)),
+            "hz" => ([0, 0, 0, 1, 0, 0], Some(number)),
+            "khz" => ([0, 0, 0, 1, 0, 0], Some(number * 1000.0)),
+            "dppx" | "x" => ([0, 0, 0, 0, 1, 0], Some(number)),
+            "dpi" => ([0, 0, 0, 0, 1, 0], Some(number / 96.0)),
+            "dpcm" => ([0, 0, 0, 0, 1, 0], Some(number * 2.54 / 96.0)),
+            "%" if self.percentage_hint.is_none() => ([0, 0, 0, 0, 0, 1], Some(number)),
+            _ => (LENGTH, None),
+        };
+        let node = if let Some(n) = scalar {
+            let unit = match dimension {
+                ANGLE => CalcScalarUnit::Radians,
+                [0, 0, 1, 0, 0, 0] => CalcScalarUnit::Seconds,
+                [0, 0, 0, 1, 0, 0] => CalcScalarUnit::Hertz,
+                [0, 0, 0, 0, 1, 0] => CalcScalarUnit::Dppx,
+                _ => CalcScalarUnit::Percent,
+            };
+            CalcNode::Scalar(n, unit)
+        } else {
+            let value = parse_length(&self.input[start..self.pos]);
+            if matches!(value, CssLength::Auto) { return None; }
+            CalcNode::Value(value)
+        };
+        Some(Calculation {
+            node,
+            dimension,
+        })
+    }
+
+    fn function(&mut self, name: &str) -> Option<Calculation> {
+        use CssMathFunction::*;
+        let mut strategy = CssRoundingStrategy::Nearest;
+        self.whitespace();
+        if name == "round" {
+            let start = self.pos;
+            while self
+                .peek()
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'-')
+            {
+                self.pos += 1;
+            }
+            strategy = match &self.input[start..self.pos].to_ascii_lowercase()[..] {
+                "nearest" => CssRoundingStrategy::Nearest,
+                "up" => CssRoundingStrategy::Up,
+                "down" => CssRoundingStrategy::Down,
+                "to-zero" => CssRoundingStrategy::ToZero,
+                _ => {
+                    self.pos = start;
+                    CssRoundingStrategy::Nearest
+                }
+            };
+            if self.pos != start {
+                self.whitespace();
+                if !self.take(b',') {
+                    return None;
                 }
             }
-        } else {
-            break;
         }
-    }
-    result
-}
-
-/// Atom level: parenthesized sub-expression or a single value with units.
-fn calc_parse_atom(b: &[u8], pos: &mut usize) -> Coeffs {
-    calc_skip_ws(b, pos);
-    if *pos >= b.len() {
-        return ZERO_COEFFS;
-    }
-
-    // Nested calc() — strip the "calc(" prefix and parse inner expression
-    if *pos + 5 <= b.len() && &b[*pos..*pos + 5] == b"calc(" {
-        *pos += 5; // skip "calc("
-        let result = calc_parse_additive(b, pos);
-        calc_skip_ws(b, pos);
-        if *pos < b.len() && b[*pos] == b')' {
-            *pos += 1;
+        let mut args: Vec<Calculation> = Vec::new();
+        let mut unbounded = Vec::new();
+        loop {
+            self.whitespace();
+            if name == "clamp"
+                && self.input[self.pos..]
+                    .get(..4)
+                    .is_some_and(|s| s.eq_ignore_ascii_case("none"))
+            {
+                self.pos += 4;
+                if !matches!(args.len(), 0 | 2) {
+                    return None;
+                }
+                unbounded.push(args.len());
+                args.push(Calculation::number(if args.is_empty() {
+                    f32::NEG_INFINITY
+                } else {
+                    f32::INFINITY
+                }));
+            } else {
+                args.push(self.sum()?);
+            }
+            self.whitespace();
+            if self.take(b')') {
+                break;
+            }
+            if !self.take(b',') {
+                return None;
+            }
         }
-        return result;
-    }
-
-    // Parenthesized sub-expression
-    if b[*pos] == b'(' {
-        *pos += 1; // skip '('
-        let result = calc_parse_additive(b, pos);
-        calc_skip_ws(b, pos);
-        if *pos < b.len() && b[*pos] == b')' {
-            *pos += 1;
+        if name == "calc" {
+            return (args.len() == 1).then(|| args.remove(0));
         }
-        return result;
+        let function = match name {
+            "min" => Min,
+            "max" => Max,
+            "clamp" => Clamp,
+            "round" => Round(strategy),
+            "mod" => Mod,
+            "rem" => Rem,
+            "abs" => Abs,
+            "sign" => Sign,
+            "sin" => Sin,
+            "cos" => Cos,
+            "tan" => Tan,
+            "asin" => Asin,
+            "acos" => Acos,
+            "atan" => Atan,
+            "atan2" => Atan2,
+            "pow" => Pow,
+            "sqrt" => Sqrt,
+            "hypot" => Hypot,
+            "log" => Log,
+            "exp" => Exp,
+            _ => return None,
+        };
+        let count = args.len();
+        let valid_count = match function {
+            Min | Max | Hypot => count > 0,
+            Clamp => count == 3,
+            Round(_) | Log => (1..=2).contains(&count),
+            Mod | Rem | Atan2 | Pow => count == 2,
+            _ => count == 1,
+        };
+        if !valid_count {
+            return None;
+        }
+        for index in unbounded {
+            args[index].dimension = args[1].dimension;
+            if args[1].dimension == LENGTH {
+                let value = if index == 0 { f32::NEG_INFINITY } else { f32::INFINITY };
+                args[index].node = CalcNode::Value(CssLength::Px(value));
+            }
+        }
+        let input_dimension = args[0].dimension;
+        let all_same = args.iter().all(|a| a.dimension == input_dimension);
+        let dimension = match function {
+            Min | Max | Clamp | Round(_) | Mod | Rem | Hypot => {
+                if !all_same
+                    || matches!(function, Round(_)) && count == 1 && input_dimension != NUMBER
+                {
+                    return None;
+                }
+                input_dimension
+            }
+            Abs => input_dimension,
+            Sign => NUMBER,
+            Sin | Cos | Tan => {
+                if input_dimension != NUMBER && input_dimension != ANGLE {
+                    return None;
+                }
+                NUMBER
+            }
+            Asin | Acos | Atan => {
+                if input_dimension != NUMBER {
+                    return None;
+                }
+                ANGLE
+            }
+            Atan2 => {
+                if !all_same {
+                    return None;
+                }
+                ANGLE
+            }
+            Pow | Sqrt | Log | Exp => {
+                if !args.iter().all(|a| a.dimension == NUMBER) {
+                    return None;
+                }
+                NUMBER
+            }
+        };
+        Some(Calculation {
+            dimension,
+            node: CalcNode::Function(function, args.into_iter().map(|a| a.node).collect()),
+        })
     }
-
-    // Parse a number (possibly negative) followed by optional unit
-    let start = *pos;
-    // Allow leading sign
-    if *pos < b.len() && (b[*pos] == b'-' || b[*pos] == b'+') {
-        *pos += 1;
-    }
-    // Allow leading dot like ".875rem"
-    let mut has_digit = false;
-    while *pos < b.len() && b[*pos].is_ascii_digit() {
-        *pos += 1;
-        has_digit = true;
-    }
-    if *pos < b.len() && b[*pos] == b'.' {
-        *pos += 1;
-    }
-    while *pos < b.len() && b[*pos].is_ascii_digit() {
-        *pos += 1;
-        has_digit = true;
-    }
-    if !has_digit {
-        return ZERO_COEFFS;
-    }
-
-    let num_end = *pos;
-    let num_str = std::str::from_utf8(&b[start..num_end]).unwrap_or("0");
-    let num: f32 = num_str.parse().unwrap_or(0.0);
-
-    // Parse unit suffix
-    let unit_start = *pos;
-    while *pos < b.len() && b[*pos].is_ascii_alphabetic() {
-        *pos += 1;
-    }
-    // Also allow '%'
-    if *pos < b.len() && b[*pos] == b'%' {
-        *pos += 1;
-    }
-    let unit = std::str::from_utf8(&b[unit_start..*pos]).unwrap_or("");
-
-    // ⛔ ONE unit table, not two. This had its own — `%`, `px`, `em`, `rem`,
-    // `vw`, `vh`, `pt`, plus `vmin`/`vmax` mapped to the `vw` slot and
-    // commented "approximate", and a catch-all `_ => px`. That catch-all is
-    // the dangerous part: `calc(1in + 2px)` silently answered **3px** instead
-    // of 98px, because `in` was unknown and taken as pixels. Every unit added
-    // to `parse_length` would have had to be added here too, and any that was
-    // not became a silent wrong answer rather than a parse failure.
-    //
-    // `parse_length` is the single definition; this projects its result onto
-    // the coefficient slots.
-    let mut c = ZERO_COEFFS;
-    if unit == "%" {
-        c[0] = num;
-        return c;
-    }
-    match crate::css::value_parse::parse_length(&format!("{num}{unit}")) {
-        CssLength::Px(v) => c[1] = v,
-        CssLength::Em(v) => c[2] = v,
-        CssLength::Rem(v) => c[3] = v,
-        CssLength::Vw(v) => c[4] = v,
-        CssLength::Vh(v) => c[5] = v,
-        CssLength::Percent(v) => c[0] = v,
-        // ⛔ The coefficient form has no vmin/vmax slot, so it cannot carry
-        // them. Answering with the WRONG AXIS (what the old table did) is
-        // worse than dropping the term, but both are wrong — `calc()` mixing
-        // vmin/vmax needs the tree path, which is the next step here.
-        CssLength::Zero => {}
-        // ⛔ NOT pixels. A term in a unit `parse_length` does not recognise
-        // makes the whole `calc()` invalid (css-values-4 §5.1), and an invalid
-        // declaration is DROPPED — the previous cascade winner stands. Folding
-        // the bare number into the px slot answered `calc(1zz + 2px)` = 3px.
-        // NaN is the carrier: it survives every add, subtract and multiply
-        // below, so `parse_calc` sees it however deep the term sat.
-        _ => c[1] = f32::NAN,
-    }
-    c
 }

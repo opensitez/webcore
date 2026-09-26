@@ -2037,6 +2037,37 @@ fn render_css_scale_transform_affects_text() {
 }
 
 #[test]
+fn individual_math_transforms_paint_without_transform_property() {
+    let pm = render_html(r#"<style>
+        * { margin:0; padding:0; }
+        body { background:white; }
+        div { width:40px; height:20px; background:red; transform-origin:0 0;
+              translate:calc(50% + 10px) 20px; scale:sqrt(4) calc(50%);
+              rotate:calc(.25turn - 90deg); }
+        </style><div></div>"#, 160, 80);
+    assert_eq!(pixel(&pm, 35, 25), (255, 0, 0, 255));
+    assert_eq!(pixel(&pm, 105, 25), (255, 0, 0, 255));
+    assert_eq!(pixel(&pm, 10, 5), (255, 255, 255, 255));
+    assert_eq!(pixel(&pm, 35, 35), (255, 255, 255, 255));
+}
+
+#[test]
+fn uniformly_scaled_text_rasterizes_at_device_font_size() {
+    let scaled = render_html(r#"<style>
+        * { margin:0; padding:0; }
+        body { background:white; }
+        div { position:absolute; left:0; top:0; font:20px/24px sans-serif;
+              color:black; transform-origin:0 0; transform:scale(2); }
+        </style><div>Scale</div>"#, 240, 100);
+    let native = render_html(r#"<style>
+        * { margin:0; padding:0; }
+        body { background:white; }
+        div { position:absolute; left:0; top:0; font:40px/48px sans-serif; color:black; }
+        </style><div>Scale</div>"#, 240, 100);
+    assert_eq!(scaled.data(), native.data(), "scale(2) must rasterize glyphs at 40px, not stretch 20px pixels");
+}
+
+#[test]
 fn debug_sidebar_box_sizing() {
     use super::harness::{find_box, parse_and_layout};
     use crate::types::BoxSizing;

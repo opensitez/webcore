@@ -7,6 +7,65 @@ use crate::layout::LayoutEngine;
 use crate::types::*;
 
 #[test]
+fn anonymous_block_cleanup_handles_deep_trees_without_recursion() {
+    let mut root = WebCore::new("leaf");
+    for i in 0..4096 {
+        if i % 3 == 0 {
+            let mut wrapper = WebCore::new("anonymous-block");
+            wrapper.children.push(root);
+            root = wrapper;
+        }
+        let mut parent = WebCore::new("section");
+        parent.children.push(root);
+        root = parent;
+    }
+    crate::layout::block::unwrap_all_anonymous_blocks(&mut root);
+    let mut count = 0;
+    // Consume the chain iteratively as well; recursive drop is not under test.
+    while let Some(child) = root.children.pop() {
+        assert_eq!(root.tag, "section");
+        count += 1;
+        root = child;
+    }
+    assert_eq!(count, 4096);
+    assert_eq!(root.tag, "leaf");
+}
+
+#[test]
+fn rtl_table_columns_and_spanning_cells_follow_direction() {
+    for collapse in ["separate", "collapse"] {
+        let page = |direction| format!(
+            "<style>body{{margin:0}}table{{direction:{direction};width:300px;table-layout:fixed;border-collapse:{collapse};border-spacing:4px}}td{{padding:0;height:20px}}</style><table id=t><tr><td id=a>A</td><td id=b>B</td><td id=c>C</td></tr><tr><td id=span colspan=2>Span</td><td id=d>D</td></tr></table>"
+        );
+        let ltr = parse_and_layout(&page("ltr"), 600.0);
+        let rtl = parse_and_layout(&page("rtl"), 600.0);
+        let get = |root: &WebCore, id: &str| {
+            crate::dom::query_selector(root, &format!("#{id}")).unwrap().layout.border_rect
+        };
+        let table = get(&rtl.root, "t");
+        for id in ["a", "b", "c", "span", "d"] {
+            let left = get(&ltr.root, id);
+            let right = get(&rtl.root, id);
+            assert!((left.w - right.w).abs() < 0.1);
+            assert!((right.x - (table.x + table.w - (left.x - get(&ltr.root, "t").x) - left.w)).abs() < 0.1,
+                "{collapse} {id}: {left:?} -> {right:?}");
+        }
+    }
+}
+
+#[test]
+fn floated_auto_table_keeps_inline_images_on_one_max_content_line() {
+    let mut renderer = crate::Renderer::new();
+    let icon = "<span><a><img width=20 height=20></a></span>";
+    let html = format!(
+        "<style>body{{direction:rtl;font:14px/1.6 Arial}}table{{float:left}}td{{text-align:center}}</style><table><tr><td id=icons>{icon}<span>&nbsp;</span>{icon}<span>&nbsp;</span>{icon}<span>&nbsp;</span>{icon}</td></tr></table>"
+    );
+    let doc = renderer.load_html(&html, 800.0);
+    let cell = crate::dom::query_selector(&doc.root, "#icons").unwrap();
+    assert_eq!(cell.layout.line_cache.len(), 1, "max-content table must not wrap its icons: {:?}", cell.layout);
+}
+
+#[test]
 fn blockified_button_intrinsics_do_not_depend_on_previous_geometry() {
     for label in ["Add Tree", "<span>Add</span> Tree"] {
         let mut doc = parse(&format!(

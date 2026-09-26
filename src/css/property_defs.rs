@@ -3304,13 +3304,9 @@ fn apply_opacity(s: &mut ComputedStyle, v: &str) {
     } else if let Ok(n) = v.parse::<f32>() {
         Some(n)
     } else {
-        match crate::css::parse_length(v) {
-            CssLength::Percent(p) => Some(p / 100.0),
-            CssLength::Px(n) => Some(n),
-            _ => None,
-        }
+        super::calc::parse_math_alpha(v)
     };
-    s.opacity = op.unwrap_or(1.0).clamp(0.0, 1.0);
+    if let Some(op) = op { s.opacity = op.clamp(0.0, 1.0); }
 }
 
 fn copy_color(d: &mut ComputedStyle, s: &ComputedStyle) {
@@ -3769,7 +3765,7 @@ fn apply_z_index(s: &mut ComputedStyle, v: &str) {
     if v.eq_ignore_ascii_case("auto") {
         s.z_index = 0;
         s.z_index_is_auto = true;
-    } else if let Ok(n) = v.parse() {
+    } else if let Some(n) = super::calc::parse_css_integer(v) {
         s.z_index = n;
         s.z_index_is_auto = false;
     }
@@ -4832,10 +4828,10 @@ fn apply_flex_wrap(s: &mut ComputedStyle, v: &str) {
     };
 }
 fn apply_flex_grow(s: &mut ComputedStyle, v: &str) {
-    s.flex_grow = v.parse().unwrap_or(0.0);
+    if let Some(value) = super::calc::parse_nonnegative_number(v) { s.flex_grow = value; }
 }
 fn apply_flex_shrink(s: &mut ComputedStyle, v: &str) {
-    s.flex_shrink = v.parse().unwrap_or(1.0);
+    if let Some(value) = super::calc::parse_nonnegative_number(v) { s.flex_shrink = value; }
 }
 fn apply_flex_basis(s: &mut ComputedStyle, v: &str) {
     // `content` is legal on `flex-basis` alone (Flexbox §7.2.3), so it is read
@@ -4847,7 +4843,7 @@ fn apply_flex_basis(s: &mut ComputedStyle, v: &str) {
     };
 }
 fn apply_order(s: &mut ComputedStyle, v: &str) {
-    s.order = v.parse().unwrap_or(0);
+    if let Some(value) = super::calc::parse_css_integer(v) { s.order = value; }
 }
 
 fn apply_flex(s: &mut ComputedStyle, v: &str) {
@@ -4866,24 +4862,30 @@ fn apply_flex(s: &mut ComputedStyle, v: &str) {
     let mut basis: Option<CssLength> = None;
     for tok in super::split_css_shorthand_values(v) {
         let t = tok.as_str();
-        if let Ok(n) = t.parse::<f32>() {
+        if let Some(n) = super::calc::parse_nonnegative_number(t) {
             // A bare number is a flex factor — unless both are already taken,
             // in which case it is the basis (`flex: 1 1 0`).
             if grow.is_none() {
                 grow = Some(n);
             } else if shrink.is_none() {
                 shrink = Some(n);
-            } else if basis.is_none() {
+            } else if basis.is_none() && n == 0.0 {
                 basis = Some(CssLength::Zero);
+            } else {
+                return;
             }
             continue;
         }
+        if super::calc::parse_css_number(t).is_some() { return; }
         if basis.is_none() {
             basis = Some(if t.eq_ignore_ascii_case("content") {
                 CssLength::Content
             } else {
-                parse_length(t)
+                let Some(length) = super::parse_length_checked(t) else { return; };
+                length
             });
+        } else {
+            return;
         }
     }
     // Omitted components take the shorthand's own defaults, which are not the
@@ -6920,27 +6922,29 @@ fn apply_aspect_ratio(s: &mut ComputedStyle, v: &str) {
     // "prefer a replaced element's own intrinsic ratio, and use this one
     // otherwise". Matching the whole value against `"auto"` left `"auto 16"`
     // to be read as a number, which failed and fell back to 1: 1/9, not 16/9.
-    let rest = v
-        .split_whitespace()
-        .filter(|t| !t.eq_ignore_ascii_case("auto"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let mut tokens = split_top_level_whitespace(v);
+    if tokens.is_empty() { return; }
+    let has_auto = if tokens.first().is_some_and(|t| t.eq_ignore_ascii_case("auto")) {
+        tokens.remove(0);
+        true
+    } else if tokens.last().is_some_and(|t| t.eq_ignore_ascii_case("auto")) {
+        tokens.pop();
+        true
+    } else { false };
+    let rest = tokens.join(" ");
     let rest = rest.trim();
     if rest.is_empty() {
-        s.aspect_ratio = None;
+        if has_auto { s.aspect_ratio = None; }
         return;
     }
-    if let Some(slash) = rest.find('/') {
-        let w: f32 = rest[..slash].trim().parse().unwrap_or(1.0);
-        let h: f32 = rest[slash + 1..].trim().parse().unwrap_or(1.0);
-        if h > 0.0 {
-            s.aspect_ratio = Some(w / h);
-        }
-    } else if let Ok(n) = rest.parse::<f32>() {
-        if n > 0.0 {
-            s.aspect_ratio = Some(n);
-        }
-    }
+    let (numerator, denominator) = match find_top_level_char(rest, '/') {
+        Some(slash) => (&rest[..slash], &rest[slash + 1..]),
+        None => (rest, "1"),
+    };
+    let Some(w) = super::parse_nonnegative_number(numerator) else { return; };
+    let Some(h) = super::parse_nonnegative_number(denominator) else { return; };
+    // A zero component is a valid but degenerate ratio, with auto sizing.
+    s.aspect_ratio = (w > 0.0 && h > 0.0).then_some(w / h);
 }
 
 fn copy_object_fit(d: &mut ComputedStyle, s: &ComputedStyle) {
@@ -7025,10 +7029,12 @@ fn apply_backface_visibility(s: &mut ComputedStyle, v: &str) {
     apply_keyword_list(&mut s.backface_visibility, v, &["visible", "hidden"]);
 }
 fn apply_filter(s: &mut ComputedStyle, v: &str) {
+    let Some(filters) = super::parse_css_filter_checked(v, s.color) else { return; };
     s.rare_mut().filter = v.to_string();
-    s.css_filter = super::parse_css_filter_with_current_color(v, s.color);
+    s.css_filter = filters;
 }
 fn apply_backdrop_filter(s: &mut ComputedStyle, v: &str) {
+    if super::parse_css_filter_checked(v, s.color).is_none() { return; }
     s.rare_mut().backdrop_filter = v.to_string();
 }
 
@@ -7433,12 +7439,12 @@ fn apply_hyphens(s: &mut ComputedStyle, v: &str) {
     };
 }
 fn apply_widows(s: &mut ComputedStyle, v: &str) {
-    if let Ok(n) = v.parse() {
+    if let Some(n) = super::calc::parse_positive_integer(v) {
         s.widows = n;
     }
 }
 fn apply_orphans(s: &mut ComputedStyle, v: &str) {
-    if let Ok(n) = v.parse() {
+    if let Some(n) = super::calc::parse_positive_integer(v) {
         s.orphans = n;
     }
 }
@@ -7504,26 +7510,17 @@ fn copy_caret_color(d: &mut ComputedStyle, s: &ComputedStyle) {
 // ── Quotes ──────────────────────────────────────────────────────────────────
 
 fn apply_quotes(s: &mut ComputedStyle, v: &str) {
-    s.rare_mut().quotes.clear();
-    if v != "none" && v != "auto" {
-        let bytes = v.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'"' || bytes[i] == b'\'' {
-                let q = bytes[i];
-                i += 1;
-                let start = i;
-                while i < bytes.len() && bytes[i] != q {
-                    i += 1;
-                }
-                s.rare_mut().quotes.push(v[start..i].to_string());
-                if i < bytes.len() {
-                    i += 1;
-                }
-            } else {
-                i += 1;
-            }
-        }
+    let mut rest = v.trim();
+    if rest.eq_ignore_ascii_case("auto") { s.rare_mut().quotes = None; return; }
+    if rest.eq_ignore_ascii_case("none") { s.rare_mut().quotes = Some(Vec::new()); return; }
+    let mut pairs = Vec::new();
+    while !rest.is_empty() {
+        let Some((text, tail)) = super::apply::consume_css_string(rest) else { return; };
+        pairs.push(text);
+        rest = tail.trim_start();
+    }
+    if !pairs.is_empty() && pairs.len() % 2 == 0 {
+        s.rare_mut().quotes = Some(pairs);
     }
 }
 
@@ -7763,19 +7760,27 @@ fn copy_line_clamp(d: &mut ComputedStyle, s: &ComputedStyle) {
 // ── Multi-column ────────────────────────────────────────────────────────────
 
 fn apply_column_count(s: &mut ComputedStyle, v: &str) {
-    s.column_count = if v == "auto" { None } else { v.parse().ok() };
+    if v.eq_ignore_ascii_case("auto") { s.column_count = None; }
+    else if let Some(n) = super::calc::parse_positive_integer(v) { s.column_count = Some(n); }
 }
 fn apply_column_width(s: &mut ComputedStyle, v: &str) {
     s.column_width = parse_length(v);
 }
 fn apply_columns(s: &mut ComputedStyle, v: &str) {
-    for tok in v.split_whitespace() {
-        if let Ok(n) = tok.parse::<i32>() {
-            s.column_count = Some(n);
-        } else {
-            s.column_width = parse_length(tok);
-        }
+    let tokens = super::split_css_shorthand_values(v);
+    if tokens.is_empty() || tokens.len() > 2 { return; }
+    let mut count = None;
+    let mut width = None;
+    for tok in tokens {
+        if tok.eq_ignore_ascii_case("auto") { continue; }
+        if let Some(n) = super::calc::parse_positive_integer(&tok) {
+            if count.replace(n).is_some() { return; }
+        } else if let Some(length) = parse_length_checked(&tok) {
+            if tok.parse::<f32>().is_ok_and(|number| number != 0.0) || width.replace(length).is_some() { return; }
+        } else { return; }
     }
+    s.column_count = count;
+    s.column_width = width.unwrap_or(CssLength::Auto);
 }
 fn apply_column_rule(s: &mut ComputedStyle, v: &str) {
     super::apply_border_side_shorthand(

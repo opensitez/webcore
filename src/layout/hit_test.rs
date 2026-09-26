@@ -335,7 +335,7 @@ pub struct HitResult {
 /// layout engine that has one is not on this path. Percentages — the reference
 /// box — and `px`/`em` are exact. Recorded in `cssgaps.md`.
 pub(crate) fn to_local(node: &WebCore, pt: (f32, f32)) -> (f32, f32) {
-    if node.style.css_transform.ops.is_empty() {
+    if !node.style.has_transform() {
         return pt;
     }
     let m = crate::renderer::display_list_builder::compute_transform_matrix(
@@ -639,7 +639,7 @@ fn creates_hit_stacking_context(node: &WebCore) -> bool {
     let style = &node.style;
     (style.is_positioned() && !style.z_index_is_auto)
         || style.opacity < 1.0
-        || !style.css_transform.ops.is_empty()
+        || style.has_transform()
         || !style.css_filter.ops.is_empty()
         || !style.rare().backdrop_filter.is_empty()
         || style.will_change_transform
@@ -784,7 +784,7 @@ fn point_inside_clip_path(node: &WebCore, x: f32, y: f32) -> bool {
             x >= b.x + left && x < b.x + b.w - right && y >= b.y + top && y < b.y + b.h - bottom
         }
         ClipPathKind::Circle => {
-            let reference = b.w.min(b.h);
+            let reference = b.w.hypot(b.h) / std::f32::consts::SQRT_2;
             let r = node
                 .style
                 .clip_path
@@ -1088,7 +1088,10 @@ fn deepest_box_at(node: &WebCore, pt: (f32, f32), _button: u8) -> Option<u32> {
             if let Some(r) = deepest_box_at(child, (cx, cy), _button) {
                 return Some(r);
             }
-            if in_margin && accepts_pointer_events(child) {
+            if in_margin
+                && accepts_pointer_events(child)
+                && point_inside_clip_path(child, cx, cy)
+            {
                 return Some(child.node_id);
             }
         }

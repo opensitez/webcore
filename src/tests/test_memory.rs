@@ -318,7 +318,7 @@ fn the_rare_property_ceiling_is_worth_measuring_before_building() {
             || !s.rare().transitions.is_empty()
             || !s.rare().font_variation_settings.is_empty()
             || !s.rare().font_feature_settings.is_empty()
-            || !s.rare().quotes.is_empty()
+            || s.rare().quotes.is_some()
             || !s.rare().filter.is_empty()
             || !s.rare().backdrop_filter.is_empty()
             || !s.rare().mask_image_url.is_empty();

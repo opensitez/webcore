@@ -582,7 +582,30 @@ fn submit_input_sizes_to_its_label() {
 }
 
 #[test]
-fn native_text_control_remains_readable_when_foreground_equals_background() {
+fn block_controls_participate_in_adjoining_sibling_margins() {
+    for tag in ["input", "textarea", "select", "progress", "meter"] {
+        for (bottom, top, gap) in [(16, 0, 16), (16, 12, 16), (16, -6, 10), (-8, -4, -8)] {
+            let mut doc = layout_html(&format!(
+                "<style>body{{margin:0}}#before,#control,#after{{display:block;width:100px;height:30px;padding:0;border:0;margin:0}}#before{{margin-bottom:{bottom}px}}#control{{margin-top:{top}px;margin-bottom:{bottom}px}}#after{{margin-top:{top}px}}</style><div id=before></div><{tag} id=control></{tag}><div id=after></div>"
+            ), 400.0);
+            for width in [400.0, 380.0, 400.0] {
+                let before = crate::dom::query_selector(&doc.root, "#before").unwrap();
+                let control = crate::dom::query_selector(&doc.root, "#control").unwrap();
+                let after = crate::dom::query_selector(&doc.root, "#after").unwrap();
+                assert!((control.layout.border_rect.y - before.layout.border_rect.bottom() - gap as f32).abs() < 0.1,
+                    "{tag} leading adjoining margins {bottom}/{top}: {:?} {:?}", before.layout.border_rect, control.layout.border_rect);
+                assert!((after.layout.border_rect.y - control.layout.border_rect.bottom() - gap as f32).abs() < 0.1,
+                    "{tag} trailing adjoining margins {bottom}/{top}: {:?} {:?}", control.layout.border_rect, after.layout.border_rect);
+                let mut engine = LayoutEngine::new();
+                engine.viewport_h = 900.0;
+                engine.layout(&mut doc, width);
+            }
+        }
+    }
+}
+
+#[test]
+fn native_text_control_preserves_matching_authored_foreground_and_background() {
     use crate::renderer::display_list::PaintCmd;
     use crate::renderer::display_list_builder::build_display_list;
 
@@ -595,7 +618,7 @@ fn native_text_control_remains_readable_when_foreground_equals_background() {
         PaintCmd::FormElement { color, value, .. } if value == "visible" => Some(*color),
         _ => None,
     }).expect("text input paint command");
-    assert_eq!(color, Color::WHITE);
+    assert_eq!(color, Color::rgb(141, 12, 12));
 }
 
 #[test]

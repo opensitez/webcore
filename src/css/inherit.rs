@@ -373,4 +373,5 @@ pub(crate) fn copy_property_from_style(
             }
         }
     }
+    super::apply::record_physical_box_declaration(style, properties::resolve(prop));
 }

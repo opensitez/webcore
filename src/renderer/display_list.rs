@@ -201,6 +201,7 @@ pub enum PaintCmd {
     /// List marker: 0=disc, 1=circle, 2=square, 3=text, 4=image URL in `text`.
     ListMarker {
         marker_type: u8,
+        text_align: crate::types::TextAlign,
         x: f32,
         y: f32,
         size: f32,
@@ -226,6 +227,8 @@ pub enum PaintCmd {
         font_family: String,
         color: Color,
         text_indent: f32,
+        text_align: crate::types::TextAlign,
+        direction: crate::types::Direction,
         placeholder_color: Color,
         file_button_color: Color,
         file_button_background: Color,

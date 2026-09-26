@@ -336,6 +336,8 @@ pub fn finalize_logical(style: &mut ComputedStyle) {
 
     for (slot, len) in decls {
         match slot {
+            LogicalSlot::MarginPhysical(side) => set_margin(style, side, len),
+            LogicalSlot::PaddingPhysical(side) => set_padding(style, side, len),
             LogicalSlot::MarginInlineStart => set_margin(style, i_start, len),
             LogicalSlot::MarginInlineEnd => set_margin(style, i_end, len),
             LogicalSlot::MarginBlockStart => set_margin(style, b_start, len),
@@ -560,6 +562,37 @@ pub fn apply_property_by_id_str(
         return;
     }
     (property_defs::get(id).apply)(style, v);
+    record_physical_box_declaration(style, id);
+}
+
+/// Keep physical margin/padding writes ordered with deferred logical writes.
+/// Mapping either family early would use a potentially unfinished direction.
+pub(crate) fn record_physical_box_declaration(
+    style: &mut ComputedStyle,
+    id: properties::PropertyId,
+) {
+    use properties::PropertyId::*;
+    if style.rare().logical_box.is_empty() {
+        return;
+    }
+    if matches!(id, Margin | Padding) {
+        for &longhand in property_defs::get(id).longhands {
+            record_physical_box_declaration(style, longhand);
+        }
+        return;
+    }
+    let (slot, value) = match id {
+        MarginTop => (LogicalSlot::MarginPhysical(PhysicalSide::Top), style.margin_top.clone()),
+        MarginRight => (LogicalSlot::MarginPhysical(PhysicalSide::Right), style.margin_right.clone()),
+        MarginBottom => (LogicalSlot::MarginPhysical(PhysicalSide::Bottom), style.margin_bottom.clone()),
+        MarginLeft => (LogicalSlot::MarginPhysical(PhysicalSide::Left), style.margin_left.clone()),
+        PaddingTop => (LogicalSlot::PaddingPhysical(PhysicalSide::Top), style.padding_top.clone()),
+        PaddingRight => (LogicalSlot::PaddingPhysical(PhysicalSide::Right), style.padding_right.clone()),
+        PaddingBottom => (LogicalSlot::PaddingPhysical(PhysicalSide::Bottom), style.padding_bottom.clone()),
+        PaddingLeft => (LogicalSlot::PaddingPhysical(PhysicalSide::Left), style.padding_left.clone()),
+        _ => return,
+    };
+    style.rare_mut().logical_box.push((slot, value));
 }
 
 /// Reset a property to its initial value, descending into a SHORTHAND's
@@ -600,6 +633,7 @@ fn reset_to_initial(style: &mut ComputedStyle, id: properties::PropertyId) {
     }
     let default_style = ComputedStyle::default();
     (def.copy)(style, &default_style);
+    record_physical_box_declaration(style, id);
 }
 
 fn note_specified_svg_paint(style: &mut ComputedStyle, id: properties::PropertyId) {
@@ -677,6 +711,7 @@ fn apply_length_value(
         TextUnderlineOffset => style.text_underline_offset = l.clone(),
         _ => return false, // Unhandled — caller falls back to string path
     }
+    record_physical_box_declaration(style, id);
     true
 }
 
@@ -736,56 +771,101 @@ pub fn parse_css_filter_with_current_color(
     v: &str,
     current_color: crate::types::Color,
 ) -> crate::types::CssFilters {
+    parse_css_filter_checked(v, current_color).unwrap_or_default()
+}
+
+pub(crate) fn parse_css_filter_checked(
+    v: &str,
+    current_color: crate::types::Color,
+) -> Option<crate::types::CssFilters> {
+    let initial_font = crate::types::ComputedStyle::INITIAL_FONT_SIZE_PX;
+    parse_css_filter_resolved(v, current_color, &|length| {
+        length.resolve_vp(initial_font, 0.0, initial_font, 0.0, 0.0)
+    })
+}
+
+pub(crate) fn finalize_filter_values(
+    style: &mut crate::types::ComputedStyle,
+    resolve_length: &impl Fn(&crate::types::CssLength) -> f32,
+) {
+    if !style.rare().filter.is_empty() {
+        if let Some(filters) = parse_css_filter_resolved(&style.rare().filter, style.color, resolve_length) {
+            style.rare_mut().filter = filters.to_css();
+            style.css_filter = filters;
+        }
+    }
+    if !style.rare().backdrop_filter.is_empty() {
+        if let Some(filters) = parse_css_filter_resolved(&style.rare().backdrop_filter, style.color, resolve_length) {
+            style.rare_mut().backdrop_filter = filters.to_css();
+        }
+    }
+}
+
+pub(crate) fn parse_css_filter_resolved(
+    v: &str,
+    current_color: crate::types::Color,
+    resolve_length: &impl Fn(&crate::types::CssLength) -> f32,
+) -> Option<crate::types::CssFilters> {
     use crate::types::{CssFilters, FilterOp};
-    fn filter_number(arg: &str, default: f32) -> f32 {
+    fn filter_number(arg: &str, default: f32) -> Option<f32> {
         let arg = arg.trim();
         if arg.is_empty() {
-            return default;
+            return Some(default);
         }
-        if let Some(n) = arg.strip_suffix('%') {
-            n.trim().parse::<f32>().unwrap_or(default) / 100.0
+        let value = if super::is_math_function(arg) {
+            super::parse_math_alpha(arg)?
+        } else if let Some(n) = arg.strip_suffix('%') {
+            n.trim().parse::<f32>().ok()? / 100.0
         } else {
-            arg.parse::<f32>().unwrap_or(default)
-        }
+            arg.parse::<f32>().ok()?
+        };
+        (value.is_finite() && (value >= 0.0 || super::is_math_function(arg)))
+            .then_some(value.max(0.0))
     }
-    fn clamped_unit(arg: &str, default: f32) -> f32 {
-        filter_number(arg, default).clamp(0.0, 1.0)
+    fn clamped_unit(arg: &str, default: f32) -> Option<f32> {
+        filter_number(arg, default).map(|n| n.min(1.0))
     }
-    fn filter_length_px(arg: &str, default: f32) -> f32 {
+    let filter_length_px = |arg: &str, default: f32| -> Option<f32> {
         let arg = arg.trim();
         if arg.is_empty() {
-            return default;
+            return Some(default);
         }
-        crate::css::value_parse::parse_length(arg).resolve_vp(16.0, 0.0, 16.0, 800.0, 600.0)
-    }
-    fn filter_angle_deg(arg: &str, default: f32) -> f32 {
+        let length = crate::css::value_parse::parse_length_checked(arg)?;
+        if length.is_auto() || length.has_percentage()
+            || matches!(length, crate::types::CssLength::None | crate::types::CssLength::Content | crate::types::CssLength::Stretch)
+            || arg.parse::<f32>().is_ok_and(|v| v != 0.0) { return None; }
+        Some(resolve_length(&length))
+    };
+    fn filter_angle_deg(arg: &str, default: f32) -> Option<f32> {
         let arg = arg.trim();
         if arg.is_empty() {
-            return default;
+            return Some(default);
         }
+        if super::is_math_function(arg) { return super::parse_math_angle_deg(arg); }
         let lower = arg.to_ascii_lowercase();
         let num = |suffix: &str| {
             lower
                 .trim_end_matches(suffix)
                 .parse::<f32>()
-                .unwrap_or(default)
+                .ok()
         };
         if lower.ends_with("turn") {
-            num("turn") * 360.0
+            num("turn").map(|n| n * 360.0)
         } else if lower.ends_with("grad") {
-            num("grad") * 0.9
+            num("grad").map(|n| n * 0.9)
         } else if lower.ends_with("rad") {
-            num("rad") * 180.0 / std::f32::consts::PI
+            num("rad").map(f32::to_degrees)
         } else if lower.ends_with("deg") {
             num("deg")
         } else {
-            lower.parse::<f32>().unwrap_or(default)
+            lower.parse::<f32>().ok().filter(|n| *n == 0.0)
         }
     }
     let mut ops = Vec::new();
-    if v.trim() == "none" {
-        return CssFilters::default();
+    if v.trim().eq_ignore_ascii_case("none") {
+        return Some(CssFilters::default());
     }
+    if v.trim().is_empty() { return None; }
     let mut rest = v.trim();
     while !rest.is_empty() {
         rest = rest.trim_start();
@@ -794,42 +874,45 @@ pub fn parse_css_filter_with_current_color(
         }
         let paren_pos = match rest.find('(') {
             Some(p) => p,
-            None => break,
+            None => return None,
         };
         let func = rest[..paren_pos].trim().to_ascii_lowercase();
-        let after_paren = &rest[paren_pos + 1..];
-        let close = after_paren.find(')').unwrap_or(after_paren.len());
-        let arg_str = after_paren[..close].trim();
-        rest = if close + 1 < after_paren.len() {
-            &after_paren[close + 1..]
-        } else {
-            ""
-        };
+        let (arg_str, after_func) = super::transform_parse::consume_parenthesized(&rest[paren_pos..])?;
+        rest = after_func;
         match func.as_str() {
-            "blur" => ops.push(FilterOp::Blur(filter_length_px(arg_str, 0.0))),
-            "brightness" => ops.push(FilterOp::Brightness(filter_number(arg_str, 1.0).max(0.0))),
-            "contrast" => ops.push(FilterOp::Contrast(filter_number(arg_str, 1.0).max(0.0))),
-            "grayscale" => ops.push(FilterOp::Grayscale(clamped_unit(arg_str, 1.0))),
-            "hue-rotate" => ops.push(FilterOp::HueRotate(filter_angle_deg(arg_str, 0.0))),
-            "invert" => ops.push(FilterOp::Invert(clamped_unit(arg_str, 1.0))),
-            "opacity" => ops.push(FilterOp::Opacity(clamped_unit(arg_str, 1.0))),
-            "saturate" => ops.push(FilterOp::Saturate(filter_number(arg_str, 1.0).max(0.0))),
-            "sepia" => ops.push(FilterOp::Sepia(clamped_unit(arg_str, 1.0))),
+            "blur" => {
+                let radius = filter_length_px(arg_str, 0.0)?;
+                if radius < 0.0 && !super::is_math_function(arg_str.trim()) { return None; }
+                ops.push(FilterOp::Blur(radius.max(0.0)));
+            }
+            "brightness" => ops.push(FilterOp::Brightness(filter_number(arg_str, 1.0)?)),
+            "contrast" => ops.push(FilterOp::Contrast(filter_number(arg_str, 1.0)?)),
+            "grayscale" => ops.push(FilterOp::Grayscale(clamped_unit(arg_str, 1.0)?)),
+            "hue-rotate" => ops.push(FilterOp::HueRotate(filter_angle_deg(arg_str, 0.0)?)),
+            "invert" => ops.push(FilterOp::Invert(clamped_unit(arg_str, 1.0)?)),
+            "opacity" => ops.push(FilterOp::Opacity(clamped_unit(arg_str, 1.0)?)),
+            "saturate" => ops.push(FilterOp::Saturate(filter_number(arg_str, 1.0)?)),
+            "sepia" => ops.push(FilterOp::Sepia(clamped_unit(arg_str, 1.0)?)),
             "drop-shadow" => {
-                let parts: Vec<&str> = arg_str.split_whitespace().collect();
+                let parts = super::split_css_values(arg_str);
                 let mut lengths = Vec::new();
                 let mut color = None;
                 for part in parts {
                     if color.is_none() {
-                        if let Some(c) = parse_color(part) {
+                        if let Some(c) = if part.eq_ignore_ascii_case("currentcolor") { Some(current_color) } else { parse_color(&part) } {
                             color = Some(c);
                             continue;
                         }
                     }
-                    lengths.push(filter_length_px(part, 0.0));
+                    let mut length = filter_length_px(&part, 0.0)?;
+                    if lengths.len() == 2 && length < 0.0 {
+                        if !super::is_math_function(&part) { return None; }
+                        length = 0.0;
+                    }
+                    lengths.push(length);
                 }
                 if lengths.len() < 2 || lengths.len() > 3 {
-                    return CssFilters::default();
+                    return None;
                 }
                 ops.push(FilterOp::DropShadow {
                     dx: lengths[0],
@@ -838,10 +921,10 @@ pub fn parse_css_filter_with_current_color(
                     color: color.unwrap_or(current_color),
                 });
             }
-            _ => return CssFilters::default(),
+            _ => return None,
         }
     }
-    CssFilters { ops }
+    Some(CssFilters { ops })
 }
 
 /// Resolve `var(--name)` and `var(--name, fallback)` references in a CSS value.
@@ -1140,11 +1223,12 @@ fn unescape_css_string(s: &str) -> String {
             }
             if !hex.is_empty() {
                 // Optional trailing whitespace is consumed after hex escape
-                if let Some(&' ') = chars.peek() {
-                    chars.next();
+                if chars.peek().is_some_and(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c')) {
+                    let whitespace = chars.next();
+                    if whitespace == Some('\r') && chars.peek() == Some(&'\n') { chars.next(); }
                 }
                 if let Ok(cp) = u32::from_str_radix(&hex, 16) {
-                    if let Some(uc) = char::from_u32(cp) {
+                    if let Some(uc) = char::from_u32(cp).filter(|ch| *ch != '\0') {
                         out.push(uc);
                         continue;
                     }
@@ -1152,6 +1236,8 @@ fn unescape_css_string(s: &str) -> String {
                 // Invalid code point — output replacement character
                 out.push('\u{FFFD}');
             } else if let Some(next) = chars.next() {
+                if next == '\r' && chars.peek() == Some(&'\n') { chars.next(); }
+                if matches!(next, '\n' | '\r' | '\x0c') { continue; }
                 // Escaped literal character (e.g. \\ → \, \" → ")
                 out.push(next);
             }
@@ -1160,6 +1246,35 @@ fn unescape_css_string(s: &str) -> String {
         }
     }
     out
+}
+
+pub(crate) fn consume_css_string(source: &str) -> Option<(String, &str)> {
+    let quote = source.chars().next()?;
+    if !matches!(quote, '\'' | '"') { return None; }
+    let mut escaped = false;
+    let mut chars = source[1..].char_indices().peekable();
+    while let Some((index, ch)) = chars.next() {
+        if escaped {
+            escaped = false;
+            if ch.is_ascii_hexdigit() {
+                for _ in 1..6 {
+                    if chars.peek().is_some_and(|(_, ch)| ch.is_ascii_hexdigit()) { chars.next(); }
+                    else { break; }
+                }
+                if chars.peek().is_some_and(|(_, ch)| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c')) {
+                    let whitespace = chars.next().map(|(_, ch)| ch);
+                    if whitespace == Some('\r') && chars.peek().is_some_and(|(_, ch)| *ch == '\n') { chars.next(); }
+                }
+            } else if ch == '\r' && chars.peek().is_some_and(|(_, ch)| *ch == '\n') { chars.next(); }
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == quote {
+            return Some((unescape_css_string(&source[1..index + 1]), &source[index + 2..]));
+        } else if matches!(ch, '\n' | '\r' | '\x0c') {
+            return None;
+        }
+    }
+    None
 }
 
 pub fn resolve_content_value(v: &str) -> String {
@@ -1178,26 +1293,15 @@ pub(crate) fn resolve_content_value_with_context(
         "close-quote" => quote_string(quotes, false),
         "no-open-quote" | "no-close-quote" => String::new(),
         _ => {
-            // Quoted string: "text" or 'text'
-            if (v.starts_with('"') && v.ends_with('"'))
-                || (v.starts_with('\'') && v.ends_with('\''))
-            {
-                return unescape_css_string(&v[1..v.len() - 1]);
-            }
             // Multiple tokens (e.g. '"foo" open-quote'): concatenate resolved parts
             let mut out = String::new();
             let mut rest = v;
             while !rest.is_empty() {
                 rest = rest.trim_start();
                 if rest.starts_with('"') || rest.starts_with('\'') {
-                    let q = &rest[..1];
-                    if let Some(end) = rest[1..].find(q) {
-                        out.push_str(&unescape_css_string(&rest[1..end + 1]));
-                        rest = &rest[end + 2..];
-                    } else {
-                        out.push_str(&unescape_css_string(&rest[1..]));
-                        break;
-                    }
+                    let Some((text, tail)) = consume_css_string(rest) else { break; };
+                    out.push_str(&text);
+                    rest = tail;
                 } else {
                     // keyword/function token
                     let end = content_token_end(rest);
@@ -1255,6 +1359,7 @@ fn visible_content_value(value: &str) -> &str {
 }
 
 fn quote_string(quotes: Option<&[String]>, open: bool) -> String {
+    if quotes.is_some_and(|items| items.is_empty()) { return String::new(); }
     quotes
         .and_then(|items| items.get(if open { 0 } else { 1 }))
         .cloned()
@@ -2514,7 +2619,13 @@ pub fn apply_font_shorthand(style: &mut ComputedStyle, v: &str) {
     let mut byte_pos = 0usize;
 
     // Walk tokens to find the font-size token (first length/keyword that can be a size).
-    for tok in v.split_whitespace() {
+    for part in v.split_inclusive(char::is_whitespace) {
+        let token_start = byte_pos;
+        byte_pos += part.len();
+        let tok = part.trim_end();
+        if tok.is_empty() {
+            continue;
+        }
         // Handle "size/line-height" as a single token.
         let size_tok = if tok.contains('/') {
             tok.splitn(2, '/').next().unwrap_or(tok)
@@ -2537,7 +2648,7 @@ pub fn apply_font_shorthand(style: &mut ComputedStyle, v: &str) {
                     style.font_size = size;
                 }
             }
-            size_found_at = Some(byte_pos + tok.len());
+            size_found_at = Some(token_start + tok.len());
             break;
         }
 
@@ -2594,7 +2705,6 @@ pub fn apply_font_shorthand(style: &mut ComputedStyle, v: &str) {
             }
             _ => {}
         }
-        byte_pos += tok.len() + 1; // +1 for the space
     }
 
     // Everything after the size (and optional /lh) token is the font-family list.

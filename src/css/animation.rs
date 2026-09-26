@@ -293,6 +293,7 @@ fn tokenize_anim(s: &str) -> Vec<String> {
 }
 
 pub fn parse_time_ms(s: &str) -> Option<f32> {
+    if let Some(value) = super::calc::parse_math_time_ms(s) { return Some(value); }
     if let Some(ms) = s.strip_suffix("ms") {
         ms.trim().parse::<f32>().ok()
     } else if let Some(sec) = s.strip_suffix('s') {

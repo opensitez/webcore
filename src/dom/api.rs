@@ -855,7 +855,8 @@ impl Document {
 
     /// `font-size` on the root element — what `rem` resolves against.
     pub(crate) fn root_font_px(&self) -> f32 {
-        self.root.style.font_size.resolve(16.0, 16.0, 16.0)
+        let initial = crate::types::ComputedStyle::INITIAL_FONT_SIZE_PX;
+        self.root.style.font_size.resolve_vp(initial, initial, initial, self.viewport_w, self.viewport_h)
     }
 
     /// The origin a POSITIONED box's insets are measured from: the nearest
@@ -1567,7 +1568,9 @@ impl Document {
     pub fn set_viewport(&mut self, width: f32, height: f32) {
         self.viewport_w = width;
         self.viewport_h = height;
-        crate::layout::LayoutEngine::new().layout(self, width);
+        let mut engine = crate::layout::LayoutEngine::new();
+        engine.viewport_h = height;
+        engine.layout(self, width);
     }
 }
 

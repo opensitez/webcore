@@ -3,13 +3,64 @@
 use super::harness::*;
 use crate::css::{
     PseudoElement, Stylesheet, apply_property, parse_declarations, parse_selector,
-    parse_stylesheet, resolve_content_value, resolve_counters_in_content,
+    parse_stylesheet, parse_length_checked, resolve_content_value, resolve_counters_in_content,
 };
 use crate::frame::EngineFrame;
 use crate::html::parse_html;
 use crate::renderer::display_list::PaintCmd;
 use crate::renderer::display_list_builder::build_display_list;
 use crate::types::*;
+
+#[test]
+fn shared_parent_styles_do_not_skip_descendant_cascade() {
+    let mut root = WebCore::new("main");
+    root.node_id = 1;
+    for index in 0..3 {
+        let mut parent = WebCore::new("section");
+        parent.node_id = 2 + index * 2;
+        let mut child = WebCore::new("span");
+        child.node_id = 3 + index * 2;
+        child.text = "Label".to_string();
+        parent.children.push(child);
+        root.children.push(parent);
+    }
+    for (color, extra_rules) in [("red", 0), ("blue", 0), ("red", 1001), ("blue", 1001)] {
+        let mut sheet = Stylesheet::default();
+        sheet.parse_and_add(&format!(
+            "section {{color:{color};quotes:none}} span {{font-size:24px;background:yellow}}"
+        ));
+        for i in 0..extra_rules { sheet.parse_and_add(&format!(".unused{i} {{color:green}}")); }
+        sheet.rebuild_index();
+        crate::css::apply_cascade(&mut root, &sheet, None, 16.0);
+        for parent in &root.children {
+            let child = &parent.children[0];
+            assert_eq!(child.style.font_size, CssLength::Px(24.0), "descendant {}", child.node_id);
+            assert_eq!(child.style.color, parent.style.color);
+            assert_eq!(child.style.rare().quotes, Some(Vec::new()));
+            assert_eq!(child.style.background_color, Color {r:255,g:255,b:0,a:255});
+        }
+    }
+}
+
+#[test]
+fn shared_leaf_styles_do_not_skip_counter_effects() {
+    let mut root = WebCore::new("main");
+    root.node_id = 1;
+    for i in 0..3 {
+        let mut node = WebCore::new("i");
+        node.node_id = i + 2;
+        root.children.push(node);
+    }
+    let mut output = WebCore::new("p");
+    output.node_id = 5;
+    root.children.push(output);
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add("main{counter-reset:n}i{counter-increment:n}p::before{content:counter(n)}");
+    sheet.rebuild_index();
+    crate::css::apply_cascade(&mut root, &sheet, None, 16.0);
+    let output = root.children.last().unwrap();
+    assert_eq!(output.style.before_content, "3");
+}
 
 #[test]
 fn negative_margin_can_reduce_atomic_inline_advance_to_zero() {
@@ -1500,7 +1551,7 @@ fn background_size_longhand_uses_shared_size_parser() {
 
     apply_property(&mut style, "background-size", "10cqw 2rem");
     assert_eq!(style.background_size, BackgroundSize::Explicit);
-    assert_eq!(style.background_size_w, CssLength::Vw(10.0));
+    assert_eq!(style.background_size_w, CssLength::Cqw(10.0));
     assert_eq!(style.background_size_h, CssLength::Rem(2.0));
 }
 
@@ -1773,6 +1824,21 @@ fn font_shorthand_accepts_numeric_weight_range() {
 }
 
 #[test]
+fn font_shorthand_tracks_family_offset_through_whitespace() {
+    for gap in [" ", "   ", "\t", "\n\t "] {
+        let mut style = ComputedStyle::default();
+        apply_property(&mut style, "font", &format!(
+            "italic{gap}700{gap}20px/24px{gap}\"Example Family\", sans-serif"
+        ));
+        assert_eq!(style.font_style, FontStyle::Italic);
+        assert_eq!(style.font_weight, FontWeight::Value(700));
+        assert_eq!(style.font_size, CssLength::Px(20.0));
+        assert_eq!(style.line_height, CssLength::Px(24.0));
+        assert_eq!(style.font_family, "Example Family, sans-serif");
+    }
+}
+
+#[test]
 fn font_shorthand_resolves_nested_custom_property_token() {
     let doc = parse_and_layout(
         r#"<style>
@@ -1829,7 +1895,7 @@ fn font_shorthand_resolves_nested_custom_property_token() {
             .iter()
             .any(|(_, idx, _)| doc.stylesheet.rules[*idx]
                 .original_selector
-                .contains("neo-font-v2-heading-2xl-bold-cond")),
+                .contains("neo-font-v2-heading-xl-bold-cond")),
         "font utility did not match; matched selectors: {:?}",
         matched
             .matched
@@ -1839,10 +1905,10 @@ fn font_shorthand_resolves_nested_custom_property_token() {
     );
     assert_eq!(
         crate::css::resolve_var_references(
-            "var(--font-v2-heading-2xl-bold-cond)",
+            "var(--headline)",
             &doc.stylesheet.variables
         ),
-        "700 2.5rem/1.15 GT America Condensed"
+        "700  20px/24px  \"GT America\", sans-serif"
     );
 
     assert_eq!(h.style.font_weight, FontWeight::Value(700));
@@ -3492,6 +3558,206 @@ fn counters_function_joins_nested_counter_scopes() {
 }
 
 #[test]
+fn aspect_ratio_math_uses_top_level_separator_and_rejects_invalid_values() {
+    let mut style = ComputedStyle::default();
+    for (source, expected) in [
+        ("calc(8 / 2) / sqrt(4)", Some(2.0)),
+        ("auto calc(3 + 1) / 2", Some(2.0)),
+        ("sqrt(9) / calc(1 + 1) auto", Some(1.5)),
+        ("calc(16 / 9)", Some(16.0 / 9.0)),
+        ("0 / 2", None), ("2 / 0", None),
+    ] {
+        apply_property(&mut style, "aspect-ratio", source);
+        assert_eq!(style.aspect_ratio, expected, "{source}");
+    }
+    for source in ["garbage / 2", "4 / garbage", "2 / 3 / 4", "-2 / 1",
+        "auto auto", "2 auto / 1", "calc(2px) / 1", ""] {
+        style.aspect_ratio = Some(3.0);
+        apply_property(&mut style, "aspect-ratio", source);
+        assert_eq!(style.aspect_ratio, Some(3.0), "invalid: {source}");
+    }
+    let doc = parse_and_layout("<div id=a style='width:240px;aspect-ratio:calc(8 / 2) / sqrt(4)'></div>", 800.0);
+    let a = crate::dom::query_selector(&doc.root, "#a").unwrap();
+    assert_eq!(a.layout.content_rect.h, 120.0);
+    let doc = parse_and_layout("<style>#a{width:240px;aspect-ratio:3;aspect-ratio:garbage / 2}#b{width:240px;aspect-ratio:3!important;aspect-ratio:garbage / 2!important}</style><div id=a></div><div id=b></div><div id=c style='width:240px;aspect-ratio:3;aspect-ratio:garbage / 2'></div>", 800.0);
+    for id in ["#a", "#b", "#c"] {
+        let node = crate::dom::query_selector(&doc.root, id).unwrap();
+        assert_eq!(node.layout.content_rect.h, 80.0, "{id}");
+    }
+}
+
+#[test]
+fn css_math_serialization_round_trips_dimensions_and_fractional_lengths() {
+    for source in [
+        "0.125px", "-0.75px", "calc(50% - 0.25px)",
+        "calc(2 * min(20%, 3em))", "calc((100% - 2em) / 3)",
+        "round(up, 10% + 1em, 2px)", "mod(70% - 3px, 2em)",
+        "rem(70% - 3px, 2em)", "abs(10% - 2em)",
+        "calc(sign(10% - 2em) * 1px)", "hypot(10%, 2em)",
+        "calc(sin(30deg) * 10%)", "calc(cos(.5turn) * 2em)",
+        "calc(tan(45deg) * 3px)", "calc(asin(1) / 1deg * 1px)",
+        "calc(acos(0) / 1deg * 1px)", "calc(atan(1) / 1rad * 1px)",
+        "calc(atan2(10%, 2em) / 1deg * 1px)",
+        "calc(pow(2, 3) * 1px)", "calc(sqrt(9) * 1px)",
+        "calc(log(exp(2)) * 1px)", "calc(1s / 250ms * 2px)",
+        "calc(2khz / 500hz * 2px)", "calc(192dpi / 1dppx * 2px)",
+        "clamp(none, 50% + 2px, none)", "min(0px, 1em)",
+    ] {
+        let original = parse_length_checked(source).unwrap_or_else(|| panic!("input: {source}"));
+        let serialized = crate::html::serializer::serialize_length(&original);
+        let reparsed = parse_length_checked(&serialized)
+            .unwrap_or_else(|| panic!("invalid serialization: {source} -> {serialized}"));
+        for (font, basis) in [(16.0, 100.0), (30.0, 600.0)] {
+            let expected = original.resolve_vp(font, basis, 20.0, 800.0, 600.0);
+            let actual = reparsed.resolve_vp(font, basis, 20.0, 800.0, 600.0);
+            assert!((actual - expected).abs() < 0.001, "{source} -> {serialized}: {actual} != {expected}");
+        }
+    }
+}
+
+#[test]
+fn cssom_nonlinear_math_keeps_percentage_dependency() {
+    let mut doc = parse_html("<div id=a style='font-size:20px;background-size:round(up, 50% + 1em, 3px) auto'></div>");
+    doc.set_viewport(800.0, 600.0);
+    let a = doc.get_element_by_id("a").unwrap();
+    let computed = doc.computed_style_property(a, "background-size");
+    let value = parse_length_checked(&computed).unwrap_or_else(|| panic!("{computed}"));
+    assert!(value.has_percentage(), "computed value lost its percentage: {computed}");
+    assert_eq!(value.resolve(20.0, 100.0, 16.0), 72.0);
+    assert_eq!(value.resolve(20.0, 200.0, 16.0), 120.0);
+}
+
+#[test]
+fn css_math_numeric_properties_use_typed_values_and_integer_rounding() {
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "flex-grow", "sqrt(9)");
+    apply_property(&mut style, "flex-shrink", "calc(1 / 2)");
+    apply_property(&mut style, "order", "calc(-1.5)");
+    apply_property(&mut style, "z-index", "calc(2.5)");
+    assert_eq!(style.flex_grow, 3.0);
+    assert_eq!(style.flex_shrink, 0.5);
+    assert_eq!(style.order, -1);
+    assert_eq!(style.z_index, 3);
+    assert!(!style.z_index_is_auto);
+    apply_property(&mut style, "flex-grow", "calc(2px)");
+    apply_property(&mut style, "order", "1.5");
+    assert_eq!(style.flex_grow, 3.0);
+    assert_eq!(style.order, -1);
+    apply_property(&mut style, "flex", "sqrt(4) calc(1 / 2) 30px");
+    assert_eq!(style.flex_grow, 2.0);
+    assert_eq!(style.flex_shrink, 0.5);
+    assert_eq!(style.flex_basis, CssLength::Px(30.0));
+    apply_property(&mut style, "flex-grow", "-3");
+    assert_eq!(style.flex_grow, 2.0);
+    apply_property(&mut style, "flex-grow", "calc(-3)");
+    assert_eq!(style.flex_grow, 0.0);
+    apply_property(&mut style, "columns", "calc(1 + 2) min(20em, 300px)");
+    assert_eq!(style.column_count, Some(3));
+    assert_eq!(style.column_width.resolve(20.0, 800.0, 16.0), 300.0);
+    apply_property(&mut style, "column-count", "0");
+    assert_eq!(style.column_count, Some(3));
+    apply_property(&mut style, "column-count", "calc(0)");
+    assert_eq!(style.column_count, Some(1));
+    apply_property(&mut style, "widows", "sqrt(9)");
+    apply_property(&mut style, "orphans", "calc(1.5)");
+    assert_eq!((style.widows, style.orphans), (3, 2));
+
+    let doc = parse_and_layout("<style>#a{flex-grow:sqrt(9);flex-shrink:calc(1 / 2);order:calc(-1.5);z-index:calc(2.5)}</style><div id=a>a</div>", 400.0);
+    let a = crate::dom::query_selector(&doc.root, "#a").unwrap();
+    assert_eq!((a.style.flex_grow, a.style.flex_shrink, a.style.order, a.style.z_index), (3.0, 0.5, -1, 3));
+}
+
+#[test]
+fn css_math_functions_resolve_mixed_units_and_precedence() {
+    for (value, expected) in [
+        ("calc(1e2px + 2 * 3px)", 106.0),
+        ("min(100% - 20px, 15em)", 300.0),
+        ("clamp(none, 50% + 10px, 15em)", 210.0),
+        ("round(up, 1em + 3px, 5px)", 25.0),
+        ("mod(-23px, 1em)", 17.0),
+        ("rem(-23px, 1em)", -3.0),
+        ("hypot(3em, 80px)", 100.0),
+        ("abs(1em - 50px)", 30.0),
+        ("calc(sign(1em - 50px) * 10px)", -10.0),
+        ("calc(sin(30deg) * 100px)", 50.0),
+        ("calc(sqrt(9) * pow(2, 3) * 1px)", 24.0),
+        ("calc(1in / 48px * 2em)", 80.0),
+        ("calc(atan2(20px, 1em) / 1deg * 1px)", 45.0),
+        ("calc(cos(0turn) * 10px)", 10.0),
+        ("calc(tan(45deg) * 10px)", 10.0),
+        ("calc(asin(1) / 1deg * 1px)", 90.0),
+        ("calc(acos(0) / 1deg * 1px)", 90.0),
+        ("calc(atan(1) / 1deg * 1px)", 45.0),
+        ("calc(log(8, 2) * 10px)", 30.0),
+        ("calc(log(exp(2)) * 10px)", 20.0),
+        ("calc(sin(pi / 2) * 10px)", 10.0),
+        ("round(down, -23px, 5px)", -25.0),
+        ("round(to-zero, -23px, 5px)", -20.0),
+        ("round(nearest, -22.5px, 5px)", -20.0),
+        ("calc(round(2.5) * 10px)", 30.0),
+        ("MAX(2em, 30px)", 40.0),
+    ] {
+        let parsed = parse_length_checked(value).unwrap_or_else(|| panic!("rejected {value}"));
+        let actual = parsed.resolve_vp(20.0, 400.0, 16.0, 1000.0, 600.0);
+        assert!((actual - expected).abs() < 0.01, "{value}: {actual}, expected {expected}");
+    }
+}
+
+#[test]
+fn css_math_resolves_in_property_consumers() {
+    let doc = parse_and_layout(r#"<style>
+       #math { width:min(100% - 20px, 15em); font-size:20px;
+         opacity:calc(25% + 25%); line-height:sqrt(4);
+         transform:rotate(calc(.25turn + 90deg)) scale(sqrt(4));
+         animation-duration:calc(1s + 250ms); }
+    </style><div style='width:400px'><div id=math>math</div></div>"#, 800.0);
+    let node = crate::dom::query_selector(&doc.root, "#math").unwrap();
+    assert!((node.layout.content_rect.w - 300.0).abs() < 0.1);
+    assert_eq!(node.style.opacity, 0.5);
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "opacity", "0.4");
+    apply_property(&mut style, "opacity", "calc(25% + 0.25)");
+    assert_eq!(style.opacity, 0.4, "incompatible opacity types must not replace the previous value");
+    assert_eq!(node.style.line_height, CssLength::Em(2.0));
+    assert_eq!(crate::css::parse_time_ms("calc(1s + 250ms)"), Some(1250.0));
+    let transform = crate::css::parse_css_transform("rotate(calc(.25turn + 90deg)) scale(sqrt(4))");
+    assert!(matches!(transform.ops[0], TransformOp::Rotate(angle) if (angle - 180.0).abs() < 0.01));
+    assert!(matches!(transform.ops[1], TransformOp::Scale(2.0, 2.0)));
+}
+
+#[test]
+fn css_math_rejects_incompatible_dimensions_and_incomplete_input() {
+    for value in ["calc(1px + 2)", "calc(1px * 2px)", "calc(1px +)", "calc(1px garbage)", "calc(1px+ 2px)", "min(1px, 2s)", "sqrt(4px)", "round(10px)", "clamp(1px, 2px)"] {
+        assert!(parse_length_checked(value).is_none(), "accepted {value}");
+    }
+}
+
+#[test]
+fn implicit_counters_continue_across_siblings_without_escaping_parent() {
+    let doc = parse_and_layout(r#"<style>
+        .item { counter-increment: popular; display:flex }
+        .item::before { content: counter(popular) }
+        .set { counter-set: assigned 7 }
+        .next { counter-increment: assigned }
+        .next::before { content: counter(assigned) }
+    </style>
+    <section><h2>Popular</h2><ol style='counter-reset:none'>
+      <li class=item id=a>one</li><li class=item id=b>two</li>
+      <li class=item id=c>three<div class=item id=nested>four</div></li>
+      <li class=item id=d>five</li>
+    </ol></section>
+    <section><div class=item id=separate>one</div></section>
+    <section><div class=set></div><div class=next id=setnext>eight</div></section>"#, 800.0);
+    for (id, expected) in [("#a", "1"), ("#b", "2"), ("#c", "3"), ("#nested", "4"), ("#d", "5"), ("#separate", "1"), ("#setnext", "8")] {
+        let node = crate::dom::query_selector(&doc.root, id).unwrap();
+        let text = node.children.iter().find(|child| child.tag == "::before")
+            .map(|pseudo| pseudo.text.as_str())
+            .unwrap_or(&node.style.before_content);
+        assert_eq!(text, expected, "{id}");
+    }
+}
+
+#[test]
 fn counter_reset_then_increment_starts_generated_content_at_one() {
     let html = r#"<style>
               ol { counter-reset: item; }
@@ -3580,6 +3846,69 @@ fn generated_quotes_use_computed_quotes_property() {
         texts.iter().any(|text| text.contains("]")),
         "close-quote should use the computed quotes property; painted texts were {texts:?}"
     );
+}
+
+#[test]
+fn generated_quotes_follow_pseudo_cascade_and_inheritance() {
+    let inherited = r#"<style>
+        p { quotes: "[" "]"; }
+        p::before { content: open-quote; }
+        p::after { content: close-quote; }
+        </style><p>Ada</p>"#;
+    assert_eq!(build_display_texts(inherited).concat(), "[Ada]");
+
+    let overridden = r#"<style>
+        p { quotes: "[" "]"; }
+        p::before { content: open-quote; quotes: "(" ")" !important; }
+        p::before { quotes: "{" "}"; }
+        p::after { content: close-quote; quotes: "<" ">"; }
+        </style><p>Ada</p>"#;
+    assert_eq!(build_display_texts(overridden).concat(), "(Ada>");
+
+    let marker = r#"<style>
+        li { quotes: "[" "]"; }
+        li::marker { content: open-quote "*" close-quote; quotes: "(" ")"; }
+        </style><ul><li>Ada</li></ul>"#;
+    assert_eq!(build_display_markers(marker), vec!["[*]"]);
+}
+
+#[test]
+fn quotes_none_auto_and_escaped_pairs_remain_distinct() {
+    let mut doc = parse_html(r#"<style>
+        #none { quotes:none; } #auto { quotes:auto; }
+        #pairs { quotes:"\22" "\5c"; } #controls { quotes:"\a" "\7f"; }
+        </style><div id=none><span id=child>Inherited</span></div>
+        <div id=auto></div><div id=pairs></div><div id=controls></div>"#);
+    doc.set_viewport(800.0, 600.0);
+    for (id, expected) in [("none", "none"), ("child", "none"), ("auto", "auto"),
+        ("pairs", r#""\"" "\\""#), ("controls", r#""\a " "\7f ""#)] {
+        let node = doc.get_element_by_id(id).unwrap();
+        assert_eq!(doc.computed_style_property(node, "quotes"), expected, "{id}");
+    }
+    let texts = build_display_texts(r#"<style>
+        p { quotes:none; } p::before { content:open-quote; }
+        p::after { content:close-quote; }
+        </style><p>Silent</p>"#);
+    assert_eq!(texts.concat(), "Silent");
+    let texts = build_display_texts(r#"<style>
+        p { quotes:none; } p::before { quotes:auto; content:open-quote; }
+        p::after { content:close-quote; }
+        </style><p>Auto</p>"#);
+    assert_eq!(texts.concat(), "\u{201c}Auto");
+    let texts = build_display_texts(r#"<style>
+        p { quotes:"\22" "\5c"; }
+        p::before { content:open-quote "a\"b" "c"; }
+        p::after { content:"d" close-quote; }
+        </style><p>X</p>"#);
+    assert_eq!(texts.concat(), "\"a\"bcXd\\");
+    let mut style = ComputedStyle::default();
+    crate::css::apply_property(&mut style, "quotes", r#""[" "]" "<" ">""#);
+    let pairs = style.rare().quotes.clone();
+    for invalid in ["", "bogus", r#""odd""#, r#""a" "b" garbage"#, "\"unterminated", "\"a\nb\" \"c\""] {
+        crate::css::apply_property(&mut style, "quotes", invalid);
+        assert_eq!(style.rare().quotes, pairs, "invalid quotes must preserve previous value: {invalid}");
+    }
+    assert_eq!(crate::css::resolve_content_value("\"\\41\tB\" \"\\0 \" \"a\\\nb\""), "AB\u{fffd}ab");
 }
 
 #[test]
@@ -3703,6 +4032,66 @@ fn presentational_hints_sit_between_ua_and_author_rules() {
         TextAlign::Right,
         "author CSS should outrank the align presentational hint"
     );
+}
+
+#[test]
+fn html_list_numbering_hints_share_css_counters() {
+    for direction in ["ltr", "rtl"] {
+        let html = format!("<ol dir={direction} start=' +4 items'><li>four</li><li value='123 items'>explicit</li><li>next</li><li value='-2'>negative</li><li value=invalid>next negative</li></ol>");
+        assert_eq!(build_display_markers(&html), ["4.", "123.", "124.", "-2.", "-1."]);
+    }
+    assert_eq!(build_display_markers(
+        "<style>ol{counter-reset:list-item 20}li{counter-set:list-item 8}</style><ol start=4><li value=123>eight</li></ol>"
+    ), ["8."]);
+    assert_eq!(build_display_markers(
+        "<style>li{counter-increment:other}</style><ol start=3><li>three</li><li>four</li></ol>"
+    ), ["3.", "4."]);
+    assert_eq!(build_display_markers(
+        "<div style='counter-reset:list-item 7'><p style='display:list-item;list-style-type:decimal'>eight</p><p style='display:list-item;list-style-type:decimal'>nine</p></div>"
+    ), ["8.", "9."]);
+    assert_eq!(build_display_markers(
+        "<style>ul{list-style-type:decimal}</style><ol start=4><li>outer<ul><li>inner</li><li>inner two</li></ul></li><li>outer next</li></ol>"
+    ), ["4.", "1.", "2.", "5."]);
+    assert_eq!(build_display_markers(
+        "<style>li{counter-increment:list-item 2}</style><ol><li>two</li><li value=10>ten</li><li>twelve</li></ol>"
+    ), ["2.", "10.", "12."]);
+}
+
+#[test]
+fn ua_list_indentation_follows_inline_direction() {
+    for (direction, rtl) in [("ltr", false), ("rtl", true)] {
+        let doc = parse_and_layout(&format!(
+            "<div dir={direction}><ol id=ol><li>one</li></ol><ul id=ul><li>one</li></ul><menu id=menu><li>one</li></menu><dir id=dir><li>one</li></dir><dl><dt>term</dt><dd id=dd>description</dd></dl></div>"
+        ), 800.0);
+        for id in ["#ol", "#ul", "#menu", "#dir"] {
+            let node = crate::dom::query_selector(&doc.root, id).unwrap();
+            let (start, end) = if rtl {
+                (&node.style.padding_right, &node.style.padding_left)
+            } else {
+                (&node.style.padding_left, &node.style.padding_right)
+            };
+            assert_eq!(*start, CssLength::Px(40.0), "{direction} {id}");
+            assert!(matches!(end, CssLength::Zero | CssLength::Px(0.0)), "{direction} {id}: {end:?}");
+        }
+        let dd = crate::dom::query_selector(&doc.root, "#dd").unwrap();
+        let start = if rtl { &dd.style.margin_right } else { &dd.style.margin_left };
+        assert_eq!(*start, CssLength::Px(40.0), "{direction} dd");
+    }
+}
+
+#[test]
+fn physical_and_logical_spacing_share_cascade_order() {
+    let doc = parse_and_layout(
+        "<style>*{margin:0;padding:0}.parent{padding-right:9px}#a{padding-inline-start:30px;padding-left:5px;direction:rtl}#b{padding-inline-start:30px;padding-right:5px;direction:rtl}#c{padding-right:5px;padding-inline-start:30px;direction:rtl}#d{padding-inline-start:30px;padding:initial;direction:rtl}#e{padding-inline-start:30px;padding-right:inherit;direction:rtl}#f{padding-inline-start:30px!important;padding-right:5px;direction:rtl}#g{margin-inline-start:30px;margin-right:5px;direction:rtl}</style><ul id=reset><li>item</li></ul><div class=parent><div id=a></div><div id=b></div><div id=c></div><div id=d></div><div id=e></div><div id=f></div><div id=g></div></div>",
+        800.0,
+    );
+    let node = |id| crate::dom::query_selector(&doc.root, id).unwrap();
+    for (id, left, right) in [("#a", 5.0, 30.0), ("#b", 0.0, 5.0), ("#c", 0.0, 30.0), ("#d", 0.0, 0.0), ("#e", 0.0, 9.0), ("#f", 0.0, 30.0), ("#reset", 0.0, 0.0)] {
+        let rect = &node(id).layout;
+        assert!((rect.content_rect.x - rect.padding_rect.x - left).abs() < 0.1, "{id} left");
+        assert!((rect.padding_rect.right() - rect.content_rect.right() - right).abs() < 0.1, "{id} right");
+    }
+    assert_eq!(node("#g").style.margin_right, CssLength::Px(5.0));
 }
 
 #[test]
@@ -4465,6 +4854,93 @@ fn css_vertical_align_property() {
 }
 
 #[test]
+fn cssom_math_preserves_percentages_until_used_value_resolution() {
+    let mut doc = parse_html(r#"<html><head><style>
+      html{font-size:20px}body{font-size:30px}
+      #a{background-size:calc(50% - 2em) min(50%, 3rem);
+        max-width:clamp(1em, 50%, 10rem);min-width:min-content;
+        flex-basis:calc(25% + 1rem);column-gap:calc(10% + 2px);left:calc(10% + 2em)}
+    </style></head><body><div id=a>math</div></body></html>"#);
+    doc.set_viewport(800.0, 600.0);
+    let a = doc.get_element_by_id("a").unwrap();
+    for (property, expected) in [
+        ("background-size", "calc(50% - 60px) min(50%, 60px)"),
+        ("max-width", "clamp(30px, 50%, 200px)"),
+        ("min-width", "min-content"),
+        ("flex-basis", "calc(25% + 20px)"),
+        ("column-gap", "calc(10% + 2px)"),
+        ("left", "calc(10% + 60px)"),
+    ] {
+        assert_eq!(doc.computed_style_property(a, property), expected, "{property}");
+    }
+}
+
+#[test]
+fn cssom_lengths_use_element_root_and_viewport_context() {
+    let mut doc = parse_html(r#"<html><head><style>
+      html{font-size:20px}body{font-size:30px}
+      #a{background-size:2em 3rem;vertical-align:2em;row-gap:10vh;column-gap:calc(1rem + 2vw)}
+      #a::before{content:'x';font-size:2em}
+    </style></head><body><span id=a>text</span></body></html>"#);
+    doc.set_viewport(800.0, 600.0);
+    let a = doc.get_element_by_id("a").unwrap();
+    for (property, expected) in [("background-size", "60px 60px"), ("vertical-align", "60px"), ("row-gap", "60px"), ("column-gap", "36px")] {
+        assert_eq!(doc.computed_style_property(a, property), expected, "{property}");
+    }
+    assert_eq!(doc.computed_style_pseudo_property(a, "::before", "font-size"), "60px");
+    assert_eq!(doc.viewport(), (800.0, 600.0));
+    doc.set_viewport(1000.0, 400.0);
+    assert_eq!(doc.computed_style_property(a, "row-gap"), "40px");
+    assert_eq!(doc.computed_style_property(a, "column-gap"), "40px");
+    assert_eq!(doc.viewport(), (1000.0, 400.0));
+}
+
+#[test]
+fn css_math_layout_recomputes_mixed_units_on_resize() {
+    let mut doc = parse_html(r#"<html><head><style>
+      html {font-size:20px}
+      #container {width:400px;height:200px}
+      #child {font-size:30px;width:calc(50% + 2em + 1rem + 5vw);
+        height:calc(50% - 1em + 10vh)}
+    </style></head><body><div id=container><div id=child>math</div></div></body></html>"#);
+    let child = doc.get_element_by_id("child").unwrap();
+    for (width, height, expected_width, expected_height) in [
+        (800.0, 600.0, 320.0, 130.0),
+        (1000.0, 400.0, 330.0, 110.0),
+    ] {
+        doc.set_viewport(width, height);
+        let rect = doc.get_bounding_client_rect(child).unwrap();
+        assert!((rect.w - expected_width).abs() < 0.01, "width: {}", rect.w);
+        assert!((rect.h - expected_height).abs() < 0.01, "height: {}", rect.h);
+    }
+}
+
+#[test]
+fn css_math_percentage_height_uses_definite_height_or_auto() {
+    let doc = parse_and_layout(r#"<style>
+      .child {height:min(50% + 10px, 150px)}
+    </style><div style='width:400px;height:200px'><div id=definite class=child></div></div>
+    <div style='width:400px'><div id=indefinite class=child><div style='height:25px'></div></div></div>"#, 800.0);
+    let definite = crate::dom::query_selector(&doc.root, "#definite").unwrap();
+    let indefinite = crate::dom::query_selector(&doc.root, "#indefinite").unwrap();
+    assert_eq!(definite.layout.content_rect.h, 110.0);
+    assert_eq!(indefinite.layout.content_rect.h, 25.0);
+}
+
+#[test]
+fn cssom_relative_insets_use_containing_axes_and_preserve_declared_edges() {
+    let mut doc = parse_html("<div style='width:300px;height:100px'><div id=a style='position:relative;left:50%;top:50%'>a</div><div id=b style='position:relative;direction:rtl;left:10px;right:20px'>b</div></div>");
+    doc.set_viewport(800.0, 600.0);
+    let a = doc.get_element_by_id("a").unwrap();
+    let b = doc.get_element_by_id("b").unwrap();
+    assert_eq!(doc.computed_style_property(a, "left"), "150px");
+    assert_eq!(doc.computed_style_property(a, "top"), "50px");
+    assert_eq!(doc.computed_style_property(a, "bottom"), "-50px");
+    assert_eq!(doc.computed_style_property(b, "left"), "10px");
+    assert_eq!(doc.computed_style_property(b, "right"), "20px");
+}
+
+#[test]
 fn cssom_vertical_align_serializes_lengths_and_percentages() {
     let mut renderer = crate::Renderer::new();
     let mut doc = renderer.load_html(
@@ -4627,11 +5103,16 @@ fn standards_known_pseudo_elements_do_not_drop_rules() {
             .iter()
             .any(|r| r.pseudo_element == PseudoElement::FirstLetter)
     );
+    assert!(ss.rules.iter().any(|r| {
+        r.is_slotted
+            && r.pseudo_element == PseudoElement::None
+            && r.slotted_slot_selector.is_some()
+    }));
     assert!(
         ss.rules
             .iter()
             .filter(|r| {
-                !matches!(
+                !r.is_slotted && !matches!(
                     r.pseudo_element,
                     PseudoElement::Backdrop
                         | PseudoElement::FileSelectorButton
@@ -5954,6 +6435,65 @@ fn computed_style_can_read_stored_pseudo_element_styles() {
         d.computed_style_pseudo_property(dialog, "::backdrop", "background-color"),
         "rgba(1, 2, 3, 0.5)"
     );
+}
+
+#[test]
+fn pseudo_filter_lengths_use_pseudo_font_root_and_viewport() {
+    use crate::types::{Color, FilterOp};
+    let mut doc = parse_html(r#"<html><head><style>
+      html{font-size:20px}#a{font-size:30px}
+      #a::before{content:'before';font-size:2em;filter:blur(calc(1em + 1rem + 1vw)) drop-shadow(1em 1rem);color:rgb(10,20,30)}
+      #a::after{content:'after';backdrop-filter:blur(calc(1em + 1rem + 1vh))}
+    </style></head><body><div id=a>text</div></body></html>"#);
+    doc.set_viewport(800.0,600.0);
+    let a = doc.get_node(doc.get_element_by_id("a").unwrap()).unwrap();
+    let before = a.style.before_style.as_ref().unwrap();
+    assert!(matches!(before.css_filter.ops[0], FilterOp::Blur(v) if v == 88.0), "{:?}", before.css_filter);
+    assert!(matches!(before.css_filter.ops[1], FilterOp::DropShadow {dx,dy,color,..} if dx == 60.0 && dy == 20.0 && color == Color::rgb(10,20,30)));
+    let after = a.style.after_style.as_ref().unwrap();
+    assert_eq!(after.rare().backdrop_filter, "blur(56px)");
+}
+
+#[test]
+fn filter_lengths_resolve_in_element_context_and_inherit_computed_values() {
+    use crate::types::{Color, FilterOp};
+    let mut doc = parse_html(r#"<html><head><style>
+      html{font-size:20px}
+      #a{font-size:30px;filter:blur(calc(1em + 1rem + 1vw)) drop-shadow(1em 1rem 1vh);color:rgb(10,20,30)}
+      #b{font-size:60px;filter:inherit}
+      #c{font-size:30px;backdrop-filter:blur(calc(1em + 1rem + 1vw))}
+    </style></head><body><div id=a><div id=b>child</div></div><div id=c>backdrop</div></body></html>"#);
+    for (w, h, blur, shadow_blur) in [(800.0,600.0,58.0,6.0), (1000.0,400.0,60.0,4.0)] {
+        doc.set_viewport(w, h);
+        for id in ["a", "b"] {
+            let node = doc.get_node(doc.get_element_by_id(id).unwrap()).unwrap();
+            assert!(matches!(node.style.css_filter.ops[0], FilterOp::Blur(v) if v == blur), "{id}: {:?}", node.style.css_filter);
+            assert!(matches!(node.style.css_filter.ops[1], FilterOp::DropShadow {dx,dy,blur,color} if dx == 30.0 && dy == 20.0 && blur == shadow_blur && color == Color::rgb(10,20,30)), "{id}: {:?}", node.style.css_filter);
+        }
+        let c = doc.get_element_by_id("c").unwrap();
+        assert_eq!(doc.get_node(c).unwrap().style.rare().backdrop_filter, format!("blur({blur}px)"));
+    }
+}
+
+#[test]
+fn filter_math_and_nested_colors_reach_filter_operations() {
+    use crate::types::{Color, FilterOp};
+    let filters = crate::css::parse_css_filter("brightness(sqrt(4)) contrast(calc(50% + 25%)) hue-rotate(calc(.25turn + 90deg)) blur(calc(1px + 2px)) drop-shadow(rgb(10, 20, 30) calc(1px + 2px) -2px 4px)");
+    assert_eq!(filters.ops.len(), 5);
+    assert!(matches!(filters.ops[0], FilterOp::Brightness(v) if v == 2.0));
+    assert!(matches!(filters.ops[1], FilterOp::Contrast(v) if v == 0.75));
+    assert!(matches!(filters.ops[2], FilterOp::HueRotate(v) if (v - 180.0).abs() < 0.001));
+    assert!(matches!(filters.ops[3], FilterOp::Blur(v) if v == 3.0));
+    assert!(matches!(filters.ops[4], FilterOp::DropShadow {dx,dy,blur,color} if dx == 3.0 && dy == -2.0 && blur == 4.0 && color == Color::rgb(10,20,30)));
+    let mut style = ComputedStyle::default();
+    for bad in ["brightness(oops)", "brightness(-1)", "blur(10%)", "hue-rotate(2)",
+        "blur(2px) garbage", "blur(calc(2px)", "drop-shadow(1px 2px -3px)"] {
+        apply_property(&mut style, "filter", "brightness(2)");
+        apply_property(&mut style, "filter", bad);
+        assert!(matches!(style.css_filter.ops.as_slice(), [FilterOp::Brightness(v)] if *v == 2.0), "{bad}");
+    }
+    let filters = crate::css::parse_css_filter("brightness(calc(-1)) opacity(calc(150%)) blur(calc(-1px))");
+    assert!(matches!(filters.ops.as_slice(), [FilterOp::Brightness(a), FilterOp::Opacity(b), FilterOp::Blur(c)] if *a == 0.0 && *b == 1.0 && *c == 0.0));
 }
 
 #[test]
@@ -11734,6 +12274,32 @@ fn unsupported_transform_function_invalidates_the_declaration() {
 }
 
 #[test]
+fn transform_math_validates_dimensions_and_keeps_both_skew_axes() {
+    use crate::types::TransformOp;
+    let parse = crate::css::parse_css_transform_checked;
+    let value = parse("scale(calc(100% + 50%), sqrt(4)) skew(calc(15deg + .125turn), 30deg)").unwrap();
+    assert!(matches!(value.ops[0], TransformOp::Scale(x, y) if x == 1.5 && y == 2.0));
+    let TransformOp::Matrix(a, b, c, d, e, f) = value.ops[1] else { panic!("expected skew matrix") };
+    assert_eq!((a, d, e, f), (1.0, 1.0, 0.0, 0.0));
+    assert!((b - 30.0_f32.to_radians().tan()).abs() < 0.001);
+    assert!((c - 60.0_f32.to_radians().tan()).abs() < 0.001);
+    assert!(parse("rotate(0) skew(0, 0) translate(0) scaleX(50%)").is_some());
+    assert!(parse("matrix(calc(1in / 48px), 0, 0, 1, sqrt(9), 4)").is_some());
+    let mut style = ComputedStyle::default();
+    crate::css::apply_property(&mut style, "transform", "translateX(12px)");
+    for invalid in ["", "scale()", "scale(1,,2)", "scale(1,)", "scale(1 2)",
+        "scale(1,2,3)", "scale(2px)", "scale(calc(1 + 50%))", "rotate(90)",
+        "rotate(bogusdeg)", "rotate(calc(1px))", "rotate(1deg, 2deg)", "rotate(1deg + 2deg)",
+        "translate(auto)", "translate(3)", "translate(calc(1px + 1s))",
+        "translateZ(10%)", "matrix(1,0,0,1,0)", "matrix(1,0,0,1,0,1px)",
+        "skew(10deg, bogus)", "translateX(4px) scale(bogus)"] {
+        assert!(parse(invalid).is_none(), "must reject {invalid}");
+        crate::css::apply_property(&mut style, "transform", invalid);
+        assert_eq!(style.transform, "translateX(12px)", "preserve fallback for {invalid}");
+    }
+}
+
+#[test]
 fn transform_parser_keeps_nested_env_and_calc_arguments_intact() {
     use crate::types::{CssLength, TransformOp};
 
@@ -11757,6 +12323,97 @@ fn transform_parser_keeps_nested_env_and_calc_arguments_intact() {
     let (x, y) = crate::css::parse_transform_origin("env(--ox, calc(4px + 2px)) top");
     assert!((x.resolve_vp(16.0, 100.0, 16.0, 800.0, 600.0) - 6.0).abs() < 0.1);
     assert_eq!(y, CssLength::Percent(0.0));
+}
+
+#[test]
+fn emergency_wrapping_preserves_words_graphemes_and_nowrap() {
+    use unicode_segmentation::UnicodeSegmentation;
+    for mode in ["anywhere", "break-word"] {
+        let text = "a\u{0301}a\u{0301}a\u{0301}a\u{0301}a\u{0301}a\u{0301}";
+        let mut renderer = crate::Renderer::new();
+        let mut doc = renderer.load_html(&format!(
+            "<style>div{{font:16px/20px monospace;overflow-wrap:{mode}}}</style><div id=words style='width:65px'>aaa bbbb</div><div id=clusters style='width:20px'>{text}</div><div id=nowrap style='width:20px;white-space:nowrap'>abcdefgh</div><div id=hyphen style='width:25px'>abcdefgh-ijklmnop</div>"
+        ), 400.0);
+        let mut pm = tiny_skia::Pixmap::new(400, 400).unwrap();
+        renderer.render(&mut doc, &mut pm, 1.0);
+        let words = crate::dom::query_selector(&doc.root, "#words").unwrap();
+        assert_eq!(words.layout.line_cache.len(), 2, "{mode}");
+        assert_eq!(words.layout.line_cache[0].text_length, 3, "prefer normal word boundary");
+        assert_eq!(words.layout.line_cache[1].text_length, 4, "do not split a word fitting the next line");
+        let clusters = crate::dom::query_selector(&doc.root, "#clusters").unwrap();
+        let boundaries: Vec<_> = text.grapheme_indices(true).map(|(i, _)| i).chain(std::iter::once(text.len())).collect();
+        assert!(clusters.layout.line_cache.len() > 1);
+        for line in &clusters.layout.line_cache {
+            assert!(boundaries.contains(&line.text_start));
+            assert!(boundaries.contains(&(line.text_start + line.text_length)));
+        }
+        let nowrap = crate::dom::query_selector(&doc.root, "#nowrap").unwrap();
+        assert_eq!(nowrap.layout.line_cache.len(), 1);
+        let hyphen = crate::dom::query_selector(&doc.root, "#hyphen").unwrap();
+        assert!(hyphen.layout.line_cache.len() > 2, "long hyphenated segments also need emergency breaks");
+    }
+}
+
+#[test]
+fn break_all_preserves_graphemes_and_respects_nowrap() {
+    use unicode_segmentation::UnicodeSegmentation;
+
+    for text in ["a\u{0301}a\u{0301}a\u{0301}a\u{0301}", "\u{1f469}\u{200d}\u{1f4bb}\u{1f469}\u{200d}\u{1f4bb}"] {
+        let mut renderer = crate::Renderer::new();
+        let mut doc = renderer.load_html(&format!(
+            "<style>div{{font:16px/20px monospace;word-break:break-all;width:12px}}</style><div id=wrap>{text}</div><div id=nowrap style='white-space:nowrap'>{text}</div><div id=pre style='white-space:pre'>{text}</div>"
+        ), 400.0);
+        let mut pm = tiny_skia::Pixmap::new(400, 400).unwrap();
+        renderer.render(&mut doc, &mut pm, 1.0);
+        let boundaries: Vec<_> = text.grapheme_indices(true).map(|(i, _)| i)
+            .chain(std::iter::once(text.len())).collect();
+        let wrapped = crate::dom::query_selector(&doc.root, "#wrap").unwrap();
+        assert!(wrapped.layout.line_cache.len() > 1);
+        for line in &wrapped.layout.line_cache {
+            assert!(boundaries.contains(&line.text_start));
+            assert!(boundaries.contains(&(line.text_start + line.text_length)));
+        }
+        for selector in ["#nowrap", "#pre"] {
+            let node = crate::dom::query_selector(&doc.root, selector).unwrap();
+            assert_eq!(node.layout.line_cache.len(), 1, "{selector}: {text}");
+        }
+    }
+}
+
+#[test]
+fn overflow_wrap_min_content_distinguishes_anywhere_from_break_word() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<style>.box{font:16px/20px monospace;width:min-content}.any{overflow-wrap:anywhere}.word{overflow-wrap:break-word}.legacy{word-break:break-word}.nowrap{white-space:nowrap}</style><div class='box' id=normal>abcdefgh</div><div class='box any' id=any>abcdefgh</div><div class='box word' id=word>abcdefgh</div><div class='box legacy' id=legacy>abcdefgh</div><div class='box any nowrap' id=nowrap>abcdefgh</div><div class='box any' id=nested><span>abcdefgh</span></div>",
+        400.0,
+    );
+    let mut pm = tiny_skia::Pixmap::new(400, 800).unwrap();
+    renderer.render(&mut doc, &mut pm, 1.0);
+    let width = |id| crate::dom::query_selector(&doc.root, id).unwrap().layout.content_rect.w;
+    let normal = width("#normal");
+    assert!(normal > 50.0);
+    let anywhere = width("#any");
+    assert!(anywhere < normal / 4.0, "anywhere min-content: {anywhere}, normal: {normal}");
+    assert!((width("#word") - normal).abs() < 1.0, "break-word must not lower min-content");
+    assert!((width("#nowrap") - normal).abs() < 1.0, "nowrap suppresses emergency opportunities");
+    assert!((width("#legacy") - anywhere).abs() < 1.0, "legacy word-break behaves as overflow-wrap:anywhere");
+    assert!((width("#nested") - anywhere).abs() < 1.0, "nested inline text shares the intrinsic break path");
+}
+
+#[test]
+fn overflow_wrap_intrinsics_reach_flex_and_grid_auto_minimums() {
+    for display in ["flex", "grid"] {
+        let mut renderer = crate::Renderer::new();
+        let mut doc = renderer.load_html(&format!(
+            "<style>.container{{display:{display};width:40px;font:16px/20px monospace}}.any{{overflow-wrap:anywhere}}.word{{overflow-wrap:break-word}}</style><div class=container><span id=any class=any>abcdefgh</span></div><div class=container><span id=word class=word>abcdefgh</span></div>"
+        ), 400.0);
+        let mut pm = tiny_skia::Pixmap::new(400, 400).unwrap();
+        renderer.render(&mut doc, &mut pm, 1.0);
+        let any = crate::dom::query_selector(&doc.root, "#any").unwrap();
+        let word = crate::dom::query_selector(&doc.root, "#word").unwrap();
+        assert!(any.layout.content_rect.w <= 40.5, "{display}: anywhere must fit the container, got {}", any.layout.content_rect.w);
+        assert!(word.layout.content_rect.w > 60.0, "{display}: break-word must retain the word's automatic minimum, got {}", word.layout.content_rect.w);
+    }
 }
 
 #[test]
@@ -11976,4 +12633,31 @@ fn block_before_pseudo_on_inline_anchor_materializes_icon_box() {
         },
         "attribute + :is(...) pseudo selector should cascade onto the generated icon"
     );
+}
+#[test]
+fn individual_transforms_accept_typed_math_and_mixed_units() {
+    use crate::css::transform_parse::{parse_individual_translate, parse_individual_rotate, parse_individual_scale};
+    use crate::types::TransformOp;
+    let transform = parse_individual_translate("calc(50% - 2em + 1rem) min(10vh, 40px)").unwrap();
+    let TransformOp::Translate(x, y) = &transform.ops[0] else { panic!("expected translation") };
+    assert_eq!(x.resolve_vp(30.0, 200.0, 20.0, 800.0, 600.0), 60.0);
+    assert_eq!(x.resolve_vp(20.0, 400.0, 10.0, 800.0, 600.0), 170.0);
+    assert_eq!(y.resolve_vp(30.0, 200.0, 20.0, 800.0, 600.0), 40.0);
+    assert_eq!(y.resolve_vp(30.0, 200.0, 20.0, 800.0, 200.0), 20.0);
+    let rotate = parse_individual_rotate("calc(.25turn + 90deg)").unwrap();
+    assert!(matches!(rotate.ops[0], TransformOp::Rotate(n) if (n - 180.0).abs() < 0.001));
+    for value in ["sqrt(4) calc(25% + 25%)", "200% 50%"] {
+        let scale = parse_individual_scale(value).unwrap();
+        assert!(matches!(scale.ops[0], TransformOp::Scale(x, y) if x == 2.0 && y == 0.5));
+    }
+    for value in ["auto", "10", "calc(1px + 1s)", "1px 2px 3%", "1px, 2px"] {
+        assert!(parse_individual_translate(value).is_none(), "{value}");
+    }
+    for value in ["calc(1px)", "45", "10deg 20deg"] {
+        assert!(parse_individual_rotate(value).is_none(), "{value}");
+    }
+    for value in ["calc(1px)", "1 2 3 4", "calc(1 + 50%)"] {
+        assert!(parse_individual_scale(value).is_none(), "{value}");
+    }
+    assert!(parse_individual_scale("none").unwrap().ops.is_empty());
 }

@@ -67,8 +67,9 @@ pub fn is_author_origin(specificity: u32) -> bool {
 /// depending on whether `border-top: none` happened to be applied before or
 /// after the `border` shorthand it was written to override.
 ///
-/// A Vec keeps the order the parser saw. `insert` drops any earlier entry for
-/// the same property and appends, because a re-declared property takes the
+/// A Vec keeps the order the parser saw, including fallback declarations whose
+/// replacements may be invalid. Programmatic `insert` drops earlier entries for
+/// the same property and appends, because a replaced property takes the
 /// LATER position: in `border-top: dashed; border: 5px; border-top: none` the
 /// winning `border-top` is the one after the shorthand.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -87,8 +88,14 @@ impl Declarations {
         self.entries.push((prop, value));
     }
 
+    /// Source parsing retains fallback declarations until property validation
+    /// during application. A malformed later value must not erase its fallback.
+    pub(crate) fn append_source(&mut self, prop: String, value: String) {
+        self.entries.push((prop, value));
+    }
+
     pub fn get(&self, prop: &str) -> Option<&String> {
-        self.entries.iter().find(|(k, _)| k == prop).map(|(_, v)| v)
+        self.entries.iter().rev().find(|(k, _)| k == prop).map(|(_, v)| v)
     }
 
     pub fn contains_key(&self, prop: &str) -> bool {
@@ -381,14 +388,14 @@ pub(crate) fn pre_parse_value(id: properties::PropertyId, val: &str) -> crate::t
             }
         }
         FlexGrow | FlexShrink => {
-            if let Ok(n) = v.parse::<f32>() {
+            if let Some(n) = super::calc::parse_nonnegative_number(v) {
                 return CssValue::Number(n);
             }
         }
 
         // ── Integer properties ──
         ZIndex | Order => {
-            if let Ok(n) = v.parse::<i32>() {
+            if let Some(n) = super::calc::parse_css_integer(v) {
                 return CssValue::Integer(n);
             }
         }

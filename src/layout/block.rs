@@ -1013,8 +1013,10 @@ pub fn layout_block_with_fc(
                 grid_child_mut(node, path),
                 &child_c(child_content_w, content_x, content_y + child_y),
             );
-            // Shrink-to-fit for auto-width floats
-            if grid_child_ref(node, path).style.width.is_auto() {
+            // Tables already shrink using their column widths and border spacing.
+            if grid_child_ref(node, path).style.width.is_auto()
+                && grid_child_ref(node, path).style.display != Display::Table
+            {
                 let ch = grid_child_ref(node, path);
                 let max_line_w = ch
                     .layout
@@ -2048,23 +2050,24 @@ fn make_anonymous_block(parent: &WebCore) -> WebCore {
 /// Recursively unwraps any synthetic `anonymous-block` elements in the tree
 /// so that cascading and re-layout operate on clean, idempotent DOM structures.
 pub fn unwrap_all_anonymous_blocks(node: &mut WebCore) {
-    if let Some(ref mut shadow) = node.shadow_root {
-        for child in &mut shadow.children {
-            unwrap_all_anonymous_blocks(child);
-        }
-    }
-    for child in &mut node.children {
-        unwrap_all_anonymous_blocks(child);
-    }
-    if node.children.iter().any(|c| c.tag == "anonymous-block") {
-        let old_children = std::mem::take(&mut node.children);
-        for child in old_children {
-            if child.tag == "anonymous-block" {
-                node.children.extend(child.children);
-            } else {
-                node.children.push(child);
+    let mut pending = vec![node];
+    while let Some(node) = pending.pop() {
+        // Flatten here before borrowing children for traversal. Repeating also
+        // removes nested synthetic wrappers while preserving sibling order.
+        while node.children.iter().any(|c| c.tag == "anonymous-block") {
+            let old_children = std::mem::take(&mut node.children);
+            for child in old_children {
+                if child.tag == "anonymous-block" {
+                    node.children.extend(child.children);
+                } else {
+                    node.children.push(child);
+                }
             }
         }
+        if let Some(shadow) = &mut node.shadow_root {
+            pending.extend(shadow.children.iter_mut());
+        }
+        pending.extend(node.children.iter_mut());
     }
 }
 

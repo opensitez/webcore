@@ -1407,7 +1407,11 @@ pub fn layout_table(
                 _ => 0.0,
             };
 
-            let cell_x = grid_content_x + col_x[c];
+            let cell_x = grid_content_x + if node.style.direction == Direction::RTL {
+                table_width - col_x[c] - cell_w
+            } else {
+                col_x[c]
+            };
 
             // Position cell: shift entire subtree from layout position to final grid position
             {

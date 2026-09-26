@@ -52,7 +52,8 @@ pub struct RareStyle {
     pub transitions: Vec<ParsedTransition>,
     pub font_variation_settings: Vec<(String, f32)>,
     pub font_feature_settings: Vec<(String, u32)>,
-    pub quotes: Vec<String>,
+    /// None is `auto`; an empty list is `none`; other lists contain quote pairs.
+    pub quotes: Option<Vec<String>>,
     pub content: String,
     pub filter: String,
     pub backdrop_filter: String,
@@ -133,7 +134,7 @@ impl RareStyle {
         transitions: Vec::new(),
         font_variation_settings: Vec::new(),
         font_feature_settings: Vec::new(),
-        quotes: Vec::new(),
+        quotes: None,
         content: String::new(),
         filter: String::new(),
         backdrop_filter: String::new(),
@@ -149,6 +150,11 @@ impl RareStyle {
 }
 
 impl ComputedStyle {
+    pub fn has_transform(&self) -> bool {
+        !self.css_transform.ops.is_empty() || !self.css_translate.ops.is_empty()
+            || !self.css_rotate.ops.is_empty() || !self.css_scale.ops.is_empty()
+    }
+
     /// Read the rare properties. Never allocates.
     pub fn rare(&self) -> &RareStyle {
         static EMPTY: RareStyle = RareStyle::EMPTY;

@@ -65,36 +65,8 @@ fn parse_length_inner(v: &str) -> CssLength {
     if let Some(inner) = v.strip_prefix("env(").and_then(|s| s.strip_suffix(')')) {
         return parse_env_length(inner);
     }
-    if let Some(inner) = v.strip_prefix("calc(").and_then(|s| s.strip_suffix(')')) {
-        return parse_calc(inner);
-    }
-    // CSS min()/max()/clamp() — proper AST with lazy resolution at layout time
-    if let Some(inner) = v.strip_prefix("min(").and_then(|s| s.strip_suffix(')')) {
-        let args = split_top_level_commas(inner);
-        if args.len() >= 2 {
-            let vals: Vec<CssLength> = args.iter().map(|a| parse_length(a.trim())).collect();
-            return CssLength::Min(Box::new(vals));
-        }
-        return parse_length(inner);
-    }
-    if let Some(inner) = v.strip_prefix("max(").and_then(|s| s.strip_suffix(')')) {
-        let args = split_top_level_commas(inner);
-        if args.len() >= 2 {
-            let vals: Vec<CssLength> = args.iter().map(|a| parse_length(a.trim())).collect();
-            return CssLength::Max(Box::new(vals));
-        }
-        return parse_length(inner);
-    }
-    if let Some(inner) = v.strip_prefix("clamp(").and_then(|s| s.strip_suffix(')')) {
-        let args = split_top_level_commas(inner);
-        if args.len() == 3 {
-            let min = parse_length(args[0].trim());
-            let val = parse_length(args[1].trim());
-            let max = parse_length(args[2].trim());
-            return CssLength::Clamp(Box::new([min, val, max]));
-        }
-        // Fallback: treat as calc
-        return parse_length(inner);
+    if super::calc::is_math_function(v) {
+        return super::calc::parse_math_length(v);
     }
     // ⛔ Split the NUMBER from the UNIT, then match the unit exactly. A chain of
     // `ends_with` cannot do this safely, because unit names nest: `in` is a
@@ -1041,7 +1013,9 @@ fn split_color_components(inner: &str) -> Vec<String> {
 /// An alpha component: a number, or a percentage.
 fn parse_alpha(s: &str) -> u8 {
     let s = s.trim();
-    let v = if let Some(p) = s.strip_suffix('%') {
+    let v = if let Some(value) = super::calc::parse_math_alpha(s) {
+        value
+    } else if let Some(p) = s.strip_suffix('%') {
         p.parse::<f32>().unwrap_or(100.0) / 100.0
     } else {
         s.parse::<f32>().unwrap_or(1.0)
@@ -1052,6 +1026,7 @@ fn parse_alpha(s: &str) -> u8 {
 /// A hue in degrees, accepting the angle units CSS Values 4 §7.1 defines.
 fn parse_hue_deg(s: &str) -> f32 {
     let s = s.trim().to_ascii_lowercase();
+    if let Some(value) = super::calc::parse_math_angle_deg(&s).or_else(|| super::calc::parse_calc_number(&s)) { return value; }
     if let Some(v) = s.strip_suffix("turn") {
         return v.parse::<f32>().unwrap_or(0.0) * 360.0;
     }

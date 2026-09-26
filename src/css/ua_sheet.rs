@@ -102,11 +102,12 @@ dialog:modal { position: fixed; }
 pre, listing, plaintext, xmp { display: block; font-family: monospace; white-space: pre; margin-top: 1em; margin-bottom: 1em; }
 hr  { display: block; margin-top: 0.5em; margin-bottom: 0.5em; margin-left: auto; margin-right: auto; height: 0; border-top-width: 1px; border-top-style: solid; border-top-color: silver; overflow: hidden; }
 dl, ol, ul, menu, dir { display: block; margin-top: 1em; margin-bottom: 1em; }
-ol, ul, menu { padding-left: 40px; }
+ol, ul, menu { padding-inline-start: 40px; }
+ol, ul, menu { counter-reset: list-item; }
 menu { list-style-type: disc; }
-dir  { list-style-type: disc; padding-left: 40px; }
+dir  { list-style-type: disc; padding-inline-start: 40px; }
 dd, dt { display: block; }
-dd { margin-left: 40px; }
+dd { margin-inline-start: 40px; }
 li { display: list-item; }
 ol { list-style-type: decimal; }
 ul { list-style-type: disc; }

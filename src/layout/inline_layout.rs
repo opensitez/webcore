@@ -295,7 +295,7 @@ pub fn layout_inline_block(
                 &Constraints::new(content_w, content_x, content_y, font_px, root_font_px),
             );
             // Shrink-to-fit for auto-width floats
-            if children[ci].style.width.is_auto() {
+            if children[ci].style.width.is_auto() && children[ci].style.display != Display::Table {
                 let max_line_w = children[ci]
                     .layout
                     .line_cache
@@ -1216,6 +1216,25 @@ pub fn layout_inline_block(
             }
         }
 
+        // RTL text can span several items after an atomic inline box. Its
+        // paint origin is the leftmost retained text, not the first logical
+        // word (which is the rightmost one).
+        if is_rtl && line_items.iter().any(|item| matches!(item.kind, InlineItemKind::Atomic { .. })) {
+            let mut prefix = 0.0;
+            let mut text_left = f32::INFINITY;
+            for item in line_items {
+                if let InlineItemKind::Text { text_start, text_len, .. } = &item.kind {
+                    if *text_start + *text_len > text_s && *text_start < text_e {
+                        text_left = text_left.min((line_w_total - prefix - item.advance).max(0.0));
+                    }
+                }
+                prefix += item.advance;
+            }
+            if text_left.is_finite() {
+                text_x_off = text_left;
+            }
+        }
+
         let mut ll = LayoutLine {
             text_start: text_s,
             text_length: text_e.saturating_sub(text_s),
@@ -1976,6 +1995,13 @@ pub enum InlineItemKind {
     Float { path: Vec<usize> },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmergencyBreak {
+    None,
+    WrapOnly,
+    MinContent,
+}
+
 #[derive(Debug, Clone)]
 pub struct InlineItem {
     pub kind: InlineItemKind,
@@ -1985,6 +2011,7 @@ pub struct InlineItem {
     pub height: f32,
     pub is_space: bool,
     pub breakable: bool,
+    pub emergency_break: EmergencyBreak,
 }
 
 fn inline_item_has_visible_flow_content(item: &InlineItem) -> bool {
@@ -2096,6 +2123,7 @@ fn collect_items_inner(
             height: 0.0,
             is_space: false,
             breakable: false,
+            emergency_break: EmergencyBreak::None,
         });
         return;
     }
@@ -2110,6 +2138,7 @@ fn collect_items_inner(
             height: 0.0,
             is_space: false,
             breakable: false,
+            emergency_break: EmergencyBreak::None,
         });
         return;
     }
@@ -2226,6 +2255,7 @@ fn collect_items_inner(
             height: line_h,
             is_space: false,
             breakable: false,
+            emergency_break: EmergencyBreak::None,
         });
         return;
     }
@@ -2310,6 +2340,7 @@ fn collect_items_inner(
             height: box_h,
             is_space: false,
             breakable: true,
+            emergency_break: EmergencyBreak::None,
         });
         *previous_collapsible_space = false;
         return;
@@ -2411,6 +2442,7 @@ fn collect_items_inner(
             height: 0.0,
             is_space: false,
             breakable: false,
+            emergency_break: EmergencyBreak::None,
         });
     }
 
@@ -2482,6 +2514,7 @@ fn collect_items_inner(
             height: 0.0,
             is_space: false,
             breakable: false,
+            emergency_break: EmergencyBreak::None,
         });
     }
     // CSS background-color is not inherited, but an inline element's background
@@ -2533,6 +2566,7 @@ fn emit_generated_inline_content(
             height: 0.0,
             is_space: false,
             breakable: false,
+            emergency_break: EmergencyBreak::None,
         });
     }
     let start = *text_offset;
@@ -2588,6 +2622,7 @@ fn emit_generated_inline_content(
                 height: 0.0,
                 is_space: false,
                 breakable: false,
+                emergency_break: EmergencyBreak::None,
             });
         }
     }
@@ -2611,6 +2646,7 @@ fn emit_generated_inline_content(
             height: 0.0,
             is_space: false,
             breakable: false,
+            emergency_break: EmergencyBreak::None,
         });
     }
 }
@@ -2709,12 +2745,14 @@ fn tokenize_text(
         let is_space = ch.is_some_and(|c| !is_nl && c.is_ascii_whitespace());
 
         if (at_end || is_space || is_nl) && i > word_start {
+            let first_word_item = items.len();
             // Emit word — use cached measurement to avoid redundant font shaping
             let word = &text[word_start..i];
             let break_before_word = (word_start > 0 || *previous_collapsible_space)
                 && !matches!(white_space, WhiteSpace::Nowrap | WhiteSpace::Pre);
             *previous_collapsible_space = false;
-            let break_inside_word = matches!(word_break, WordBreak::BreakAll);
+            let break_inside_word = matches!(word_break, WordBreak::BreakAll)
+                && !matches!(white_space, WhiteSpace::Nowrap | WhiteSpace::Pre);
             let has_subword_breaks = word.chars().any(|ch| {
                 (ch == '\u{00ad}' && hyphens != Hyphens::None)
                     || ch == '-'
@@ -2725,9 +2763,9 @@ fn tokenize_text(
                             || (ch >= '\u{f900}' && ch <= '\u{faff}')))
             });
             if break_inside_word {
-                for (rel, ch) in word.char_indices() {
-                    let next = rel + ch.len_utf8();
-                    let part = &word[rel..next];
+                use unicode_segmentation::UnicodeSegmentation;
+                for (rel, part) in word.grapheme_indices(true) {
+                    let next = rel + part.len();
                     let (w, _) = measure_transformed(engine, part);
                     items.push(InlineItem {
                         kind: InlineItemKind::Text {
@@ -2741,6 +2779,7 @@ fn tokenize_text(
                         height: line_h,
                         is_space: false,
                         breakable: break_before_word || rel > 0,
+                        emergency_break: EmergencyBreak::None,
                     });
                 }
             } else if has_subword_breaks {
@@ -2764,6 +2803,7 @@ fn tokenize_text(
                                 height: line_h,
                                 is_space: false,
                                 breakable: starts_after_break,
+                                emergency_break: EmergencyBreak::None,
                             });
                         }
                         segment_start = next_rel;
@@ -2790,6 +2830,7 @@ fn tokenize_text(
                                 height: line_h,
                                 is_space: false,
                                 breakable: starts_after_break,
+                                emergency_break: EmergencyBreak::None,
                             });
                             segment_start = rel;
                             starts_after_break = true;
@@ -2809,6 +2850,7 @@ fn tokenize_text(
                                 height: line_h,
                                 is_space: false,
                                 breakable: starts_after_break,
+                                emergency_break: EmergencyBreak::None,
                             });
                             segment_start = next_rel;
                             starts_after_break = true;
@@ -2830,6 +2872,7 @@ fn tokenize_text(
                         height: line_h,
                         is_space: false,
                         breakable: starts_after_break,
+                        emergency_break: EmergencyBreak::None,
                     });
                 }
             } else {
@@ -2846,7 +2889,43 @@ fn tokenize_text(
                     height: line_h,
                     is_space: false,
                     breakable: break_before_word,
+                    emergency_break: EmergencyBreak::None,
                 });
+            }
+            if !matches!(white_space, WhiteSpace::Nowrap | WhiteSpace::Pre)
+                && (matches!(overflow_wrap, OverflowWrap::Anywhere | OverflowWrap::BreakWord)
+                    || word_break == WordBreak::BreakWord)
+            {
+                use unicode_segmentation::UnicodeSegmentation;
+                let word_items: Vec<_> = items.drain(first_word_item..).collect();
+                for item in word_items {
+                    let InlineItemKind::Text { text_start, text_len, .. } = &item.kind else {
+                        items.push(item);
+                        continue;
+                    };
+                    let start = *text_start;
+                    let segment = &text[start - base_offset..start - base_offset + text_len];
+                    for (offset, grapheme) in segment.grapheme_indices(true) {
+                        let mut part = item.clone();
+                        if let InlineItemKind::Text { text_start, text_len, .. } = &mut part.kind {
+                            *text_start = start + offset;
+                            *text_len = grapheme.len();
+                        }
+                        let (width, tracking) = measure_transformed(engine, grapheme);
+                        part.advance = width + tracking;
+                        part.breakable = offset == 0 && item.breakable;
+                        part.emergency_break = if offset == 0 {
+                            EmergencyBreak::None
+                        } else if overflow_wrap == OverflowWrap::Anywhere
+                            || word_break == WordBreak::BreakWord
+                        {
+                            EmergencyBreak::MinContent
+                        } else {
+                            EmergencyBreak::WrapOnly
+                        };
+                        items.push(part);
+                    }
+                }
             }
         }
         if at_end {
@@ -2870,6 +2949,7 @@ fn tokenize_text(
                 height: line_h,
                 is_space: false,
                 breakable: false,
+                emergency_break: EmergencyBreak::None,
             });
             items.push(InlineItem {
                 kind: InlineItemKind::Break,
@@ -2879,6 +2959,7 @@ fn tokenize_text(
                 height: line_h,
                 is_space: false,
                 breakable: false,
+                emergency_break: EmergencyBreak::None,
             });
             i += ch_len;
             word_start = i;
@@ -2922,6 +3003,7 @@ fn tokenize_text(
                 height: line_h,
                 is_space: !preserve_spaces,
                 breakable: !matches!(white_space, WhiteSpace::Nowrap | WhiteSpace::Pre),
+                emergency_break: EmergencyBreak::None,
             });
             *previous_collapsible_space = collapsible_space;
             i += ch_len; // consume exactly one space character
@@ -2956,6 +3038,7 @@ fn break_one_line(
 
     let mut cur_w = 0.0f32;
     let mut last_bp: Option<usize> = None; // items index of last break opportunity
+    let mut emergency_bp: Option<usize> = None;
 
     while i < items.len() {
         let item = &items[i];
@@ -2977,8 +3060,11 @@ fn break_one_line(
         // inline-level boxes mark one after the box, but only after this item
         // has actually fit; otherwise the overflowing item would be included
         // on the previous line.
-        if item.breakable && !matches!(item.kind, InlineItemKind::Atomic { .. }) {
+        if item.breakable && i > line_start && !matches!(item.kind, InlineItemKind::Atomic { .. }) {
             last_bp = Some(i);
+        }
+        if item.emergency_break != EmergencyBreak::None && i > line_start {
+            emergency_bp = Some(i);
         }
 
         let new_w = cur_w + item.advance;
@@ -2998,7 +3084,7 @@ fn break_one_line(
                     continue;
                 }
             }
-            if let Some(bp) = last_bp {
+            if let Some(bp) = last_bp.or(emergency_bp) {
                 // Trim trailing spaces from line
                 let mut line_end = bp;
                 while line_end > line_start && items[line_end - 1].is_space {
@@ -4396,7 +4482,7 @@ fn prelayout_nested_inline_blocks(
                 None => Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
             };
             engine.layout_box(&mut children[ci], &child_constraints);
-            if children[ci].style.width.is_auto() {
+            if children[ci].style.width.is_auto() && children[ci].style.display != Display::Table {
                 let max_line_w = children[ci]
                     .layout
                     .line_cache

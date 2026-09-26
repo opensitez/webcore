@@ -14,6 +14,13 @@
 use crate::types::Document;
 
 impl Document {
+    fn computed_font_px(&self, id: u32) -> f32 {
+        let root = self.root_font_px();
+        self.get_computed_style(id).map(|style|
+            style.font_size.resolve_vp(root, root, root, self.viewport_w, self.viewport_h)
+        ).unwrap_or(root)
+    }
+
     /// `getComputedStyle(element).getPropertyValue(property)` — the RESOLVED
     /// value, in used units.
     ///
@@ -24,7 +31,9 @@ impl Document {
     /// property against the cascade is a larger job than this.
     pub fn computed_style_property(&mut self, id: u32, property: &str) -> String {
         let width = self.viewport_w;
-        crate::layout::LayoutEngine::new().layout(self, width);
+        let mut engine = crate::layout::LayoutEngine::new();
+        engine.viewport_h = self.viewport_h;
+        engine.layout(self, width);
         let rect = self.get_bounding_client_rect(id);
         let property = property.to_ascii_lowercase();
         // **An inset is the used value only when the element is POSITIONED**
@@ -56,25 +65,30 @@ impl Document {
             let Some(style) = self.get_computed_style(id) else {
                 return String::new();
             };
-            let font_px = style.font_size.resolve(16.0, 16.0, 16.0);
-            let resolve = |l: &crate::types::CssLength| -> Option<f32> {
+            let font_px = self.computed_font_px(id);
+            let Some(node) = self.get_node(id) else { return String::new(); };
+            let resolve = |l: &crate::types::CssLength, basis: Option<f32>| -> Option<f32> {
+                if l.has_percentage() && basis.is_none() { return None; }
                 match l {
                     crate::types::CssLength::Auto | crate::types::CssLength::None => None,
-                    other => Some(other.resolve(font_px, self.viewport_w, self.root_font_px())),
+                    other => Some(other.resolve_vp(font_px, basis.unwrap_or(0.0), self.root_font_px(), self.viewport_w, self.viewport_h)),
                 }
             };
-            let vertical = resolve(&style.top)
-                .or_else(|| resolve(&style.bottom).map(|v| -v))
-                .unwrap_or(0.0);
-            let horizontal = resolve(&style.left)
-                .or_else(|| resolve(&style.right).map(|v| -v))
-                .unwrap_or(0.0);
-            return match property.as_str() {
-                "top" => px(vertical),
-                "bottom" => px(-vertical),
-                "left" => px(horizontal),
-                _ => px(-horizontal),
+            let width = Some(node.layout.last_containing_width);
+            let height = node.layout.last_containing_height;
+            let top = resolve(&style.top, height);
+            let bottom = resolve(&style.bottom, height);
+            let left = resolve(&style.left, width);
+            let right = resolve(&style.right, width);
+            // CSSOM preserves declared opposing offsets; only an auto edge
+            // takes the negated value of its opposite edge.
+            let (edge, opposite) = match property.as_str() {
+                "top" => (top, bottom),
+                "bottom" => (bottom, top),
+                "left" => (left, right),
+                _ => (right, left),
             };
+            return px(edge.or_else(|| opposite.map(|v| -v)).unwrap_or(0.0));
         }
         if inset && !positioned {
             let style = match self.get_computed_style(id) {
@@ -87,19 +101,14 @@ impl Document {
                 "right" => style.right.clone(),
                 _ => style.bottom.clone(),
             };
-            let font_px = style.font_size.resolve(16.0, 16.0, 16.0);
+            let font_px = self.computed_font_px(id);
             // `auto` is the initial value and stays the word — it is not a
             // length and serialising it as `0px` would claim the box was
             // placed. Percentages stay percentages, as the spec's computed
             // value for an inset does.
-            return match declared {
-                crate::types::CssLength::Auto => "auto".to_string(),
-                crate::types::CssLength::Percent(p) => format!("{p}%"),
-                other => format!(
-                    "{}px",
-                    other.resolve(font_px, self.viewport_w, self.root_font_px())
-                ),
-            };
+            return serialize_computed_length(&declared, &|value| {
+                value.resolve_vp(font_px, 0.0, self.root_font_px(), self.viewport_w, self.viewport_h)
+            });
         }
         if matches!(
             property.as_str(),
@@ -167,7 +176,9 @@ impl Document {
         property: &str,
     ) -> String {
         let width = self.viewport_w;
-        crate::layout::LayoutEngine::new().layout(self, width);
+        let mut engine = crate::layout::LayoutEngine::new();
+        engine.viewport_h = self.viewport_h;
+        engine.layout(self, width);
         let Some(node) = self.get_node(id).or_else(|| self.find_webcore(id)) else {
             return String::new();
         };
@@ -213,7 +224,10 @@ impl Document {
             "display" => serialize_display(style.display),
             "color" => serialize_color(style.color),
             "background-color" => serialize_color(style.background_color),
-            "font-size" => format!("{}px", style.font_size.resolve(16.0, 16.0, 16.0)),
+            "font-size" => {
+                let origin_font = self.computed_font_px(id);
+                px(style.font_size.resolve_vp(origin_font, origin_font, self.root_font_px(), self.viewport_w, self.viewport_h))
+            },
             "font-weight" => style.font_weight.value().to_string(),
             "font-style" => match style.font_style {
                 crate::types::FontStyle::Normal => "normal",
@@ -222,6 +236,7 @@ impl Document {
             }
             .to_string(),
             "font-family" => serialize_font_family_list(&style.font_family),
+            "quotes" => serialize_quotes(style.rare().quotes.as_deref()),
             _ => String::new(),
         }
     }
@@ -248,20 +263,12 @@ impl Document {
     fn resolved_from_cascade(&self, id: u32, property: &str) -> Option<String> {
         use crate::types::*;
         let s = self.get_computed_style(id)?;
-        let font_px = s.font_size.resolve(16.0, 16.0, 16.0);
+        let font_px = self.computed_font_px(id);
         let vw = self.viewport_w;
         let root_px = self.root_font_px();
-        let len = |l: &CssLength| -> String {
-            match l {
-                CssLength::Auto => "auto".to_string(),
-                // The `max-*` initial value is its own variant, and it
-                // serializes as the keyword — `resolve` would answer `0px`,
-                // which is the opposite of "no limit".
-                CssLength::None => "none".to_string(),
-                CssLength::Percent(p) => format!("{p}%"),
-                other => format!("{}px", other.resolve(font_px, vw, root_px)),
-            }
-        };
+        let len = |l: &CssLength| serialize_computed_length(l, &|value: &CssLength| {
+            value.resolve_vp(font_px, 0.0, root_px, vw, self.viewport_h)
+        });
         let is_flex_item = self
             .parent_element(id)
             .and_then(|parent| self.get_computed_style(parent))
@@ -327,6 +334,7 @@ impl Document {
             }
             .to_string(),
             "font-family" => serialize_font_family_list(&s.font_family),
+            "quotes" => serialize_quotes(s.rare().quotes.as_deref()),
             "text-align" => serialize_text_align(s.text_align),
             "visibility" => {
                 if s.visibility {
@@ -574,7 +582,7 @@ impl Document {
             "mask-origin" => rare_or(&s.rare().mask_origin, "border-box"),
             "mask-composite" => rare_or(&s.rare().mask_composite, "add"),
             "mask" => serialize_mask(s),
-            "vertical-align" => serialize_vertical_align(&s.vertical_align),
+            "vertical-align" => serialize_vertical_align(&s.vertical_align, &len),
             "float" => serialize_float(s.float),
             "flex-direction" => serialize_flex_direction(s.flex_direction),
             "justify-content" => serialize_justify_content(s.justify_content),
@@ -607,7 +615,7 @@ impl Document {
                 len(&s.background_position_x),
                 len(&s.background_position_y)
             ),
-            "background-size" => serialize_background_size(s),
+            "background-size" => serialize_background_size(s, &len),
             "background-repeat" => serialize_background_repeat(s.background_repeat),
             "background-attachment" => serialize_background_attachment(s.background_attachment),
             "background-origin" => serialize_background_clip(s.background_origin),
@@ -705,17 +713,27 @@ fn px(v: f32) -> String {
     format!("{}px", if v == 0.0 { 0.0 } else { v })
 }
 
-fn serialize_computed_length(l: &crate::types::CssLength) -> String {
-    match l {
-        crate::types::CssLength::Percent(p) => format!("{p}%"),
-        crate::types::CssLength::Auto => "auto".to_string(),
-        crate::types::CssLength::None => "none".to_string(),
-        other => px(other.resolve(16.0, 0.0, 16.0)),
+fn serialize_quotes(quotes: Option<&[String]>) -> String {
+    match quotes {
+        None => "auto".to_string(),
+        Some([]) => "none".to_string(),
+        Some(pairs) => pairs.iter().map(|s| format!("\"{}\"", serialize_css_string(s)))
+            .collect::<Vec<_>>().join(" "),
     }
 }
 
 fn serialize_css_string(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    use std::fmt::Write;
+    let mut result = String::new();
+    for ch in s.chars() {
+        match ch {
+            '\0' => result.push('\u{fffd}'),
+            '\x01'..='\x1f' | '\x7f' => { let _ = write!(result, "\\{:x} ", ch as u32); }
+            '"' | '\\' => { result.push('\\'); result.push(ch); }
+            _ => result.push(ch),
+        }
+    }
+    result
 }
 
 fn radius_pair<F>(len: &F, x: &crate::types::CssLength, y: &crate::types::CssLength) -> String
@@ -768,14 +786,58 @@ fn serialize_background_image(s: &crate::types::ComputedStyle) -> String {
     "none".to_string()
 }
 
-fn serialize_background_size(s: &crate::types::ComputedStyle) -> String {
+// Computed lengths retain percentages; only a property's used-value path
+// supplies a percentage basis. Resolving with zero isolates absolute terms.
+fn serialize_computed_length(
+    value: &crate::types::CssLength,
+    resolve: &impl Fn(&crate::types::CssLength) -> f32,
+) -> String {
+    use crate::types::CssLength;
+    match value {
+        CssLength::Auto => "auto".into(),
+        CssLength::None => "none".into(),
+        CssLength::Content => "content".into(),
+        CssLength::MinContent => "min-content".into(),
+        CssLength::MaxContent => "max-content".into(),
+        CssLength::FitContent => "fit-content".into(),
+        CssLength::Stretch => "stretch".into(),
+        CssLength::FitContentArg(arg) => format!("fit-content({})", serialize_computed_length(arg, resolve)),
+        CssLength::Percent(p) => format!("{p}%"),
+        CssLength::Calc(terms) if terms[0] != 0.0 => {
+            let absolute = resolve(value);
+            let sign = if absolute < 0.0 { "-" } else { "+" };
+            format!("calc({}% {sign} {})", terms[0], px(absolute.abs()))
+        }
+        CssLength::CalcExpr(node) if value.has_percentage() => format!("calc({})",
+            crate::css::serialize_calculation(node, &|value| serialize_computed_length(value, resolve))),
+        CssLength::Min(args) | CssLength::Max(args) if value.has_percentage() => {
+            let name = if matches!(value, CssLength::Min(_)) { "min" } else { "max" };
+            let args: Vec<_> = args.iter().map(|arg| serialize_computed_length(arg, resolve)).collect();
+            format!("{name}({})", args.join(", "))
+        }
+        CssLength::Clamp(args) if value.has_percentage() => {
+            let args: Vec<_> = args.iter().enumerate().map(|(i, arg)| {
+                if (i == 0 && matches!(arg, CssLength::Px(v) if *v == f32::NEG_INFINITY))
+                    || (i == 2 && matches!(arg, CssLength::Px(v) if *v == f32::INFINITY)) {
+                    "none".into()
+                } else {
+                    serialize_computed_length(arg, resolve)
+                }
+            }).collect();
+            format!("clamp({})", args.join(", "))
+        }
+        _ => px(resolve(value)),
+    }
+}
+
+fn serialize_background_size(s: &crate::types::ComputedStyle, len: &impl Fn(&crate::types::CssLength) -> String) -> String {
     match s.background_size {
         crate::types::BackgroundSize::Auto => "auto".to_string(),
         crate::types::BackgroundSize::Cover => "cover".to_string(),
         crate::types::BackgroundSize::Contain => "contain".to_string(),
         crate::types::BackgroundSize::Explicit => {
-            let width = serialize_computed_length(&s.background_size_w);
-            let height = serialize_computed_length(&s.background_size_h);
+            let width = len(&s.background_size_w);
+            let height = len(&s.background_size_h);
             if height == "auto" {
                 width
             } else {
@@ -1276,7 +1338,7 @@ fn serialize_white_space(v: crate::types::WhiteSpace) -> String {
     .to_string()
 }
 
-fn serialize_vertical_align(v: &crate::types::VerticalAlign) -> String {
+fn serialize_vertical_align(v: &crate::types::VerticalAlign, len: &impl Fn(&crate::types::CssLength) -> String) -> String {
     use crate::types::VerticalAlign as V;
     match v {
         V::Baseline => "baseline".to_string(),
@@ -1287,7 +1349,7 @@ fn serialize_vertical_align(v: &crate::types::VerticalAlign) -> String {
         V::TextBottom => "text-bottom".to_string(),
         V::Sub => "sub".to_string(),
         V::Super => "super".to_string(),
-        V::Length(l) => serialize_computed_length(l),
+        V::Length(l) => len(l),
     }
 }
 

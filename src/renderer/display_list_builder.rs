@@ -863,7 +863,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     let blend = blend_mode_to_u8(eff_style.mix_blend_mode);
     let stacking = (eff_style.is_positioned() && !eff_style.z_index_is_auto)
         || eff_style.opacity < 1.0
-        || !eff_style.css_transform.ops.is_empty()
+        || eff_style.has_transform()
         || !eff_style.css_filter.ops.is_empty()
         || !eff_style.rare().backdrop_filter.is_empty()
         || eff_style.will_change_transform
@@ -895,7 +895,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     // not the scroll-adjusted position (px, py). The scroll offset is applied
     // separately by the replay's global transform. This prevents transforms from
     // shifting when the user scrolls.
-    let has_transform = !eff_style.css_transform.ops.is_empty() || eff_style.will_change_transform;
+    let has_transform = eff_style.has_transform() || eff_style.will_change_transform;
     if has_transform {
         let source_rect = match eff_style.transform_box.as_str() {
             "content-box" => node.layout.content_rect,
@@ -955,11 +955,11 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     let clip_path_rect = clip_path_rect(eff_style, node.layout.border_rect, sx, sy, font_px, ctx.transform_ctx.root_font_px);
     let clip_path_polygon =
         clip_path_polygon_points(eff_style, node.layout.border_rect, sx, sy, font_px, ctx.transform_ctx.root_font_px);
-    if let Some((rect, radius)) = clip_path_rect {
+    if let Some((rect, radius, radius_y)) = clip_path_rect {
         list.push(PaintCmd::PushClip {
             rect,
             radius,
-            radius_y: radius,
+            radius_y,
         });
     } else if let Some(points) = clip_path_polygon.as_ref() {
         list.push(PaintCmd::PushClipPath {
@@ -1691,7 +1691,6 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         // ── (m) List markers ─────────────────────────────────────────────────
         if paint_self
             && node.style.display == Display::ListItem
-            && !node.layout.line_cache.is_empty()
         {
             build_list_marker(node, list, ctx, eff_sx, eff_sy);
         }
@@ -2933,7 +2932,24 @@ fn build_list_marker(
         None => (node.layout.content_rect.x, fallback_line_y, fallback_line_h),
     };
     let inside = node.style.list_style_position == ListStylePosition::Inside;
+    let rtl = node.style.direction == Direction::RTL;
+    let line_right = node.layout.line_cache.first()
+        .map(|line| line.x + line.width)
+        .unwrap_or_else(|| node.layout.content_rect.right());
+    let shape_x = if rtl {
+        if inside { line_right - sx - 4.0 } else { line_right - sx + 10.0 }
+    } else if inside {
+        line_x - sx + 4.0
+    } else {
+        line_x - sx - 10.0
+    };
     let c = ms.map(|s| s.color).unwrap_or(node.style.color);
+    let text_align = if rtl == inside { TextAlign::Right } else { TextAlign::Left };
+    let text_x = if rtl {
+        line_right - sx + if inside { 0.0 } else { 4.0 }
+    } else {
+        line_x - sx - if inside { 0.0 } else { 4.0 }
+    };
     let marker_family = ms
         .map(|s| s.font_family.clone())
         .unwrap_or_else(|| node.style.font_family.clone());
@@ -2959,14 +2975,10 @@ fn build_list_marker(
                 .max(font_px * 1.2)
         });
     if !node.style.marker_content.is_empty() {
-        let mx = if inside {
-            line_x - sx
-        } else {
-            line_x - sx - 4.0
-        };
         list.push(PaintCmd::ListMarker {
             marker_type: 3,
-            x: mx,
+            text_align,
+            x: text_x,
             y: line_y - sy,
             size: 0.0,
             color: c,
@@ -2989,13 +3001,16 @@ fn build_list_marker(
             let (image_w, image_h) = match &image {
                 ImageRef::Owned(_, w, h) | ImageRef::Shared(_, w, h) => (*w as f32, *h as f32),
             };
-            let mx = if inside {
+            let mx = if rtl {
+                line_right - sx - if inside { image_w } else { 0.0 }
+            } else if inside {
                 line_x - sx
             } else {
                 line_x - sx - image_w
             };
             list.push(PaintCmd::ListMarker {
                 marker_type: 4,
+                text_align: TextAlign::Left,
                 x: mx,
                 y: line_y - sy + (line_h - image_h) / 2.0,
                 size: image_w.max(image_h),
@@ -3014,14 +3029,11 @@ fn build_list_marker(
 
     match node.style.list_style_type {
         ListStyleType::Disc => {
-            let bx = if inside {
-                line_x - sx + 4.0
-            } else {
-                line_x - sx - 10.0
-            };
+            let bx = shape_x;
             let by = line_y - sy + line_h / 2.0;
             list.push(PaintCmd::ListMarker {
                 marker_type: 0,
+                text_align: TextAlign::Left,
                 x: bx,
                 y: by,
                 size: 3.0,
@@ -3036,14 +3048,11 @@ fn build_list_marker(
             });
         }
         ListStyleType::Circle => {
-            let bx = if inside {
-                line_x - sx + 4.0
-            } else {
-                line_x - sx - 10.0
-            };
+            let bx = shape_x;
             let by = line_y - sy + line_h / 2.0;
             list.push(PaintCmd::ListMarker {
                 marker_type: 1,
+                text_align: TextAlign::Left,
                 x: bx,
                 y: by,
                 size: 3.0,
@@ -3058,14 +3067,11 @@ fn build_list_marker(
             });
         }
         ListStyleType::Square => {
-            let bx = if inside {
-                line_x - sx + 4.0
-            } else {
-                line_x - sx - 10.0
-            };
+            let bx = shape_x;
             let by = line_y - sy + line_h / 2.0;
             list.push(PaintCmd::ListMarker {
                 marker_type: 2,
+                text_align: TextAlign::Left,
                 x: bx,
                 y: by,
                 size: 6.0,
@@ -3097,19 +3103,11 @@ fn build_list_marker(
         | ListStyleType::KatakanaIroha
         | ListStyleType::CjkDecimal => {
             let marker = format_list_marker(node.style.list_style_type, node.style.list_index);
-            let mx = if inside {
-                line_x - sx
-            } else {
-                // marker_w not available here (we don't have font shaping).
-                // Use an approximate offset that matches the render_box convention:
-                // mx = first_line.x - sx - marker_w - 4.0
-                // Since we can't measure, emit marker text and let replay handle positioning.
-                line_x - sx - 4.0
-            };
             let my = line_y - sy;
             list.push(PaintCmd::ListMarker {
                 marker_type: 3,
-                x: mx,
+                text_align,
+                x: text_x,
                 y: my,
                 size: 0.0,
                 color: c,
@@ -3123,20 +3121,18 @@ fn build_list_marker(
             });
         }
         ListStyleType::DisclosureOpen | ListStyleType::DisclosureClosed => {
-            let mx = if inside {
-                line_x - sx
-            } else {
-                line_x - sx - 4.0
-            };
             let my = line_y - sy;
             let text = if matches!(node.style.list_style_type, ListStyleType::DisclosureOpen) {
                 "\u{25be}"
+            } else if rtl {
+                "\u{25c2}"
             } else {
                 "\u{25b8}"
             };
             list.push(PaintCmd::ListMarker {
                 marker_type: 3,
-                x: mx,
+                text_align,
+                x: text_x,
                 y: my,
                 size: 0.0,
                 color: c,
@@ -3175,23 +3171,6 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32, 
 
     let cr = node.layout.content_rect;
     let font_px = node.style.font_size_px(root_font_px, root_font_px).max(1.0);
-    let mut value_color = node.style.color;
-    let background = node.style.background_color;
-    if matches!(tag, "input" | "textarea")
-        && value_color.a == 255
-        && background.a == 255
-        && (value_color.r, value_color.g, value_color.b)
-            == (background.r, background.g, background.b)
-    {
-        let brightness = 299u32 * background.r as u32
-            + 587u32 * background.g as u32
-            + 114u32 * background.b as u32;
-        value_color = if brightness < 128_000 {
-            Color::WHITE
-        } else {
-            Color::BLACK
-        };
-    }
     let value = if tag == "select" {
         // The shown text is "the label of an option of which selectedness is
         // set to true" (HTML §15.5.16) — SELECTEDNESS, not the `selected`
@@ -3253,7 +3232,9 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32, 
         font_size: font_px,
         font_weight: node.style.font_weight.value(),
         font_family: node.style.font_family.clone(),
-        color: value_color,
+        color: node.style.color,
+        text_align: node.style.text_align,
+        direction: node.style.direction,
         text_indent: node.style.text_indent.resolve_vp(
             font_px,
             cr.w,
@@ -3498,7 +3479,7 @@ fn clip_path_rect(
     scroll_y: f32,
     font_px: f32,
     root_font_px: f32,
-) -> Option<(Rect, [f32; 4])> {
+) -> Option<(Rect, [f32; 4], [f32; 4])> {
     match style.clip_path.kind {
         ClipPathKind::Inset => {
             let top = style
@@ -3527,10 +3508,11 @@ fn clip_path_rect(
                     h,
                 ),
                 [0.0; 4],
+                [0.0; 4],
             ))
         }
         ClipPathKind::Circle => {
-            let reference = border_rect.w.min(border_rect.h);
+            let reference = border_rect.w.hypot(border_rect.h) / std::f32::consts::SQRT_2;
             let r = style
                 .clip_path
                 .circle_radius
@@ -3548,6 +3530,7 @@ fn clip_path_rect(
                     .resolve(font_px, border_rect.h, root_font_px);
             Some((
                 Rect::new(cx - r - scroll_x, cy - r - scroll_y, r * 2.0, r * 2.0),
+                [r; 4],
                 [r; 4],
             ))
         }
@@ -3574,7 +3557,8 @@ fn clip_path_rect(
                     .resolve(font_px, border_rect.h, root_font_px);
             Some((
                 Rect::new(cx - rx - scroll_x, cy - ry - scroll_y, rx * 2.0, ry * 2.0),
-                [rx.min(ry); 4],
+                [rx; 4],
+                [ry; 4],
             ))
         }
         _ => None,
@@ -4423,7 +4407,7 @@ fn creates_stacking_context(node: &WebCore) -> bool {
     let eff_style = &node.style;
     (eff_style.is_positioned() && !eff_style.z_index_is_auto)
         || eff_style.opacity < 1.0
-        || !eff_style.css_transform.ops.is_empty()
+        || eff_style.has_transform()
         || !eff_style.css_filter.ops.is_empty()
         || !eff_style.rare().backdrop_filter.is_empty()
         || eff_style.will_change_transform

@@ -1384,9 +1384,9 @@ pub fn parse_declarations_important(block: &str) -> (Declarations, Declarations)
             let value = strip_important(raw_value);
             if !prop.is_empty() && !value.is_empty() {
                 if is_important {
-                    important.insert(prop, value);
+                    important.append_source(prop, value);
                 } else {
-                    normal.insert(prop, value);
+                    normal.append_source(prop, value);
                 }
             }
         }

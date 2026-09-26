@@ -988,7 +988,10 @@ fn inline_items_min_content_advance(items: &[inline_layout::InlineItem]) -> f32 
             continue;
         }
 
-        if item.breakable && segment_width > 0.0 {
+        if (item.breakable
+            || item.emergency_break == inline_layout::EmergencyBreak::MinContent)
+            && segment_width > 0.0
+        {
             max_width = max_width.max(segment_width);
             segment_width = 0.0;
         }
@@ -1454,7 +1457,7 @@ fn resolve_box_vp_query(
     // percentage heights are treated as auto.
     let content_height = if style.height.is_auto() || inline_ignores_size {
         None
-    } else if matches!(style.height, CssLength::Percent(_)) {
+    } else if style.height.has_percentage() {
         match containing_h {
             Some(ch) => {
                 let mut h = style
@@ -2341,6 +2344,13 @@ impl LayoutEngine {
             let text = &node.text;
             if text.is_empty() {
                 return 0.0;
+            }
+            if node.style.overflow_wrap == OverflowWrap::Anywhere
+                || node.style.word_break == WordBreak::BreakWord
+            {
+                if let Some(width) = self.inline_items_min_content_width(node, font_px, root_font_px) {
+                    return width;
+                }
             }
             if matches!(node.style.white_space, WhiteSpace::Nowrap | WhiteSpace::Pre) {
                 let text = if matches!(node.style.white_space, WhiteSpace::Nowrap) {
@@ -4021,7 +4031,7 @@ impl LayoutEngine {
         // including when CSS gives the image a definite percentage width.
         if has_intrinsic
             && ih > 0.0
-            && matches!(node.style.height, CssLength::Percent(_))
+            && node.style.height.has_percentage()
             && c.available_height.is_none()
             && rbox.content_height.is_none()
         {
@@ -4143,6 +4153,10 @@ impl LayoutEngine {
                 rbox.margin_left,
                 rbox.margin_right,
             );
+            // Replaced controls have no descendant margins to collapse with,
+            // but their own margins still adjoin normal-flow block siblings.
+            node.layout.collapsed_margin_top = rbox.margin_top;
+            node.layout.collapsed_margin_bottom = rbox.margin_bottom;
             node.layout.scroll_width = final_w;
             node.layout.scroll_height = final_h;
             node.layout.scroll_left = 0.0;

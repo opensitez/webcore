@@ -2453,7 +2453,16 @@ fn tree_has_duplicate_node_ids(root: &crate::types::WebCore) -> bool {
     walk(root, &mut seen)
 }
 
-pub(crate) fn apply_cascade_inner(
+struct CascadedNodeState {
+    root_font_px: f32,
+    local_vars: Option<HashMap<String, String>>,
+    counters_pushed: Vec<String>,
+    own_counter_names: HashSet<String>,
+}
+
+// Keep the per-element style temporaries out of the recursive traversal frame.
+#[inline(never)]
+fn apply_cascade_node(
     root: &mut crate::types::WebCore,
     stylesheet: &Stylesheet,
     parent_style: Option<&ComputedStyle>,
@@ -2479,11 +2488,11 @@ pub(crate) fn apply_cascade_inner(
     prev_siblings: &[SiblingInfo],
     next_siblings: &[SiblingInfo],
     next_sibling_nodes: &[&crate::types::WebCore],
-    share_cache: &mut ShareCache,
+    _share_cache: &mut ShareCache,
     // Selector matches computed off-thread by the parallel pass, keyed by
     // `node_id`. `None`, or a miss, means match inline — never "no rules".
     precomputed: Option<&MatchMap>,
-) {
+) -> Option<CascadedNodeState> {
     // Guard against stack overflow on deeply nested DOMs.
     if ancestors.len() >= MAX_CASCADE_DEPTH {
         // Just inherit from parent and stop — the page may render slightly wrong
@@ -2491,7 +2500,7 @@ pub(crate) fn apply_cascade_inner(
         if let Some(p) = parent_style {
             std::sync::Arc::make_mut(&mut root.style).inherit_from(p);
         }
-        return;
+        return None;
     }
 
     // Text and comment nodes are not elements — they inherit from their
@@ -2507,14 +2516,14 @@ pub(crate) fn apply_cascade_inner(
             saved_display
         };
         std::sync::Arc::make_mut(&mut root.style).display = display;
-        return;
+        return None;
     }
 
     // Synthetic ::before/::after children already have their computed pseudo
     // style set from the originating element. Recascading them as normal
     // children would overwrite pseudo-specific font/color/content rules.
     if root.tag == "::before" || root.tag == "::after" {
-        return;
+        return None;
     }
 
     // ⚠ A style-sharing stub stood here: four bindings feeding an EMPTY `if`,
@@ -3136,6 +3145,11 @@ pub(crate) fn apply_cascade_inner(
     // `currentColor` resolves against this element's own `color`, which is only
     // final now — css-color-4 §6.2.
     crate::css::finalize_current_color(&mut style);
+    // Filter lengths and currentColor depend on the final element context.
+    // Keep the computed text too: explicit inheritance copies computed values.
+    crate::css::finalize_filter_values(&mut style, &|length| {
+        length.resolve_vp(font_px, 0.0, root_font_px, vw, vh)
+    });
     // Flow-relative box properties map onto physical sides using the FINAL
     // `direction` and `writing-mode` — css-logical-1 §4.
     crate::css::finalize_logical(&mut style);
@@ -3204,26 +3218,30 @@ pub(crate) fn apply_cascade_inner(
     let mut counters_pushed: Vec<String> = Vec::new();
     fn increment_counter(
         counters: &mut HashMap<String, Vec<i32>>,
-        counters_pushed: &mut Vec<String>,
+        counters_pushed: Option<&mut Vec<String>>,
         name: &str,
         delta: i32,
     ) {
         let stack = counters.entry(name.to_string()).or_insert_with(|| {
-            counters_pushed.push(name.to_string());
+            if let Some(pushed) = counters_pushed {
+                pushed.push(name.to_string());
+            }
             vec![0]
         });
         if let Some(top) = stack.last_mut() {
-            *top += delta;
+            *top = top.saturating_add(delta);
         }
     }
     fn set_counter(
         counters: &mut HashMap<String, Vec<i32>>,
-        counters_pushed: &mut Vec<String>,
+        counters_pushed: Option<&mut Vec<String>>,
         name: &str,
         value: i32,
     ) {
         let stack = counters.entry(name.to_string()).or_insert_with(|| {
-            counters_pushed.push(name.to_string());
+            if let Some(pushed) = counters_pushed {
+                pushed.push(name.to_string());
+            }
             vec![0]
         });
         if let Some(top) = stack.last_mut() {
@@ -3237,25 +3255,20 @@ pub(crate) fn apply_cascade_inner(
             .push(*val);
         counters_pushed.push(name.clone());
     }
-    // `ol` implicitly resets the `list-item` counter
-    if root.tag == "ol" && root.style.counter_reset.is_empty() {
-        counters
-            .entry("list-item".to_string())
-            .or_insert_with(Vec::new)
-            .push(0);
-        counters_pushed.push("list-item".to_string());
-    }
     for (name, val) in &root.style.counter_increment {
-        increment_counter(counters, &mut counters_pushed, name, *val);
+        increment_counter(counters, None, name, *val);
+    }
+    // CSS Lists: the implicit increment is appended to counter-increment,
+    // before counter-set, unless the author specified a list-item increment.
+    if root.style.display == Display::ListItem
+        && !root.style.counter_increment.iter().any(|(name, _)| name == "list-item")
+    {
+        increment_counter(counters, None, "list-item", 1);
     }
     for (name, val) in &root.style.counter_set {
-        set_counter(counters, &mut counters_pushed, name, *val);
+        set_counter(counters, None, name, *val);
     }
-    // `li` implicitly increments the `list-item` counter
-    if root.tag == "li" && root.style.counter_increment.is_empty() {
-        increment_counter(counters, &mut counters_pushed, "list-item", 1);
-    }
-    if root.tag == "li" {
+    if root.style.display == Display::ListItem {
         if let Some(value) = counters
             .get("list-item")
             .and_then(|stack| stack.last())
@@ -3288,15 +3301,15 @@ pub(crate) fn apply_cascade_inner(
             counters_pushed.push(name.clone());
         }
         for (name, val) in &ps.counter_increment {
-            increment_counter(counters, &mut counters_pushed, name, *val);
+            increment_counter(counters, Some(&mut counters_pushed), name, *val);
         }
         for (name, val) in &ps.counter_set {
-            set_counter(counters, &mut counters_pushed, name, *val);
+            set_counter(counters, Some(&mut counters_pushed), name, *val);
         }
         let resolved_content = resolve_content_value_with_context(
             &txt,
             Some(&root.attributes),
-            Some(&root.style.rare().quotes),
+            ps.rare().quotes.as_deref(),
         );
         std::sync::Arc::make_mut(&mut root.style).before_content =
             resolve_counters_in_content(&resolved_content, counters);
@@ -3317,15 +3330,15 @@ pub(crate) fn apply_cascade_inner(
             counters_pushed.push(name.clone());
         }
         for (name, val) in &ps.counter_increment {
-            increment_counter(counters, &mut counters_pushed, name, *val);
+            increment_counter(counters, Some(&mut counters_pushed), name, *val);
         }
         for (name, val) in &ps.counter_set {
-            set_counter(counters, &mut counters_pushed, name, *val);
+            set_counter(counters, Some(&mut counters_pushed), name, *val);
         }
         let resolved_content = resolve_content_value_with_context(
             &txt,
             Some(&root.attributes),
-            Some(&root.style.rare().quotes),
+            ps.rare().quotes.as_deref(),
         );
         std::sync::Arc::make_mut(&mut root.style).after_content =
             resolve_counters_in_content(&resolved_content, counters);
@@ -3357,10 +3370,12 @@ pub(crate) fn apply_cascade_inner(
         &stylesheet.rules,
     ) {
         if let Some(txt) = txt {
+            // `quotes` is not an applicable marker-box property; use the
+            // originating element's inherited quote pairs (CSS Lists 3).
             let resolved_content = resolve_content_value_with_context(
                 &txt,
                 Some(&root.attributes),
-                Some(&root.style.rare().quotes),
+                root.style.rare().quotes.as_deref(),
             );
             std::sync::Arc::make_mut(&mut root.style).marker_content =
                 resolve_counters_in_content(&resolved_content, counters);
@@ -3437,14 +3452,75 @@ pub(crate) fn apply_cascade_inner(
             let resolved = resolve_content_value_with_context(
                 &authored_content,
                 Some(&root.attributes),
-                Some(&root.style.rare().quotes),
+                root.style.rare().quotes.as_deref(),
             );
             std::sync::Arc::make_mut(&mut root.style).rare_mut().content =
                 resolve_counters_in_content(&resolved, counters);
         }
     }
 
+    {
+        let style = std::sync::Arc::make_mut(&mut root.style);
+        for pseudo in [
+            &mut style.before_style, &mut style.after_style,
+            &mut style.selection_style, &mut style.placeholder_style,
+            &mut style.marker_style, &mut style.backdrop_style,
+            &mut style.file_selector_button_style, &mut style.details_content_style,
+            &mut style.spelling_error_style, &mut style.grammar_error_style,
+            &mut style.first_line_style, &mut style.first_letter_style,
+        ].into_iter().flatten() {
+            let pseudo_font = pseudo.font_size.resolve_vp(font_px, font_px, root_font_px, vw, vh);
+            crate::css::finalize_filter_values(pseudo, &|length| {
+                length.resolve_vp(pseudo_font, 0.0, root_font_px, vw, vh)
+            });
+        }
+    }
     build_pseudo_element_boxes(root);
+
+    // An implicitly instantiated counter belongs to its element and following
+    // siblings, not just its descendants. Keep it until the parent finishes
+    // its children; counters first created below this element cannot escape it.
+    let own_counter_names: HashSet<String> = counters.keys().cloned().collect();
+
+    Some(CascadedNodeState {
+        root_font_px, local_vars: local_vars_owned, counters_pushed, own_counter_names,
+    })
+}
+
+pub(crate) fn apply_cascade_inner(
+    root: &mut crate::types::WebCore,
+    stylesheet: &Stylesheet,
+    parent_style: Option<&ComputedStyle>,
+    root_font_px: f32,
+    ancestors: &mut Vec<AncestorInfo>,
+    child_index: usize,
+    sibling_count: usize,
+    type_child_index: usize,
+    type_sibling_count: usize,
+    vw: f32,
+    vh: f32,
+    focused_box: u32,
+    keyboard_focus: bool,
+    target_id: u32,
+    document_url: &str,
+    inherited_vars: &HashMap<String, String>,
+    candidates_buf: &mut Vec<usize>,
+    counters: &mut HashMap<String, Vec<i32>>,
+    hover_chain: &std::collections::HashSet<u32>,
+    focus_within_chain: &std::collections::HashSet<u32>,
+    prev_siblings: &[SiblingInfo],
+    next_siblings: &[SiblingInfo],
+    next_sibling_nodes: &[&crate::types::WebCore],
+    share_cache: &mut ShareCache,
+    precomputed: Option<&MatchMap>,
+) {
+    let Some(state) = apply_cascade_node(root, stylesheet, parent_style, root_font_px,
+        ancestors, child_index, sibling_count, type_child_index, type_sibling_count,
+        vw, vh, focused_box, keyboard_focus, target_id, document_url, inherited_vars,
+        candidates_buf, counters, hover_chain, focus_within_chain, prev_siblings,
+        next_siblings, next_sibling_nodes, share_cache, precomputed) else { return; };
+    let CascadedNodeState { root_font_px, local_vars, counters_pushed, own_counter_names } = state;
+    let local_vars = local_vars.as_ref().unwrap_or(inherited_vars);
 
 	    ancestors.push(AncestorInfo {
 	        tag: root.tag.clone(),
@@ -3616,6 +3692,10 @@ pub(crate) fn apply_cascade_inner(
                 cascade_stylesheet.candidate_rules_need_selector_context(candidates_buf);
             let can_share = child.is_element()
                 && child.tag != "::before" && child.tag != "::after"
+                // This cache hit replaces the whole node visit, not just its
+                // declaration calculation. Descendants still require cascade.
+                && child.children.is_empty()
+                && child.shadow_root.is_none()
                 && !is_projected_child
                 && parent_node_id != 0
                 && !child.attributes.contains_key("id")
@@ -3721,7 +3801,13 @@ pub(crate) fn apply_cascade_inner(
                 );
             }
             // Cache style for sharing with future siblings
-            if can_share && !share_cache.contains_key(&share_key) {
+            if can_share && !share_cache.contains_key(&share_key)
+                && child.style.counter_reset.is_empty()
+                && child.style.counter_increment.is_empty()
+                && child.style.counter_set.is_empty()
+                && child.style.display != Display::ListItem
+                && child.style.before_style.is_none()
+                && child.style.after_style.is_none() {
                 share_cache.insert(share_key, child.style.clone());
             }
         }
@@ -3825,6 +3911,8 @@ pub(crate) fn apply_cascade_inner(
 
     ancestors.pop();
 
+    counters.retain(|name, _| own_counter_names.contains(name));
+
     // Pop counters that were reset at this level
     for name in counters_pushed.iter().rev() {
         if let Some(stack) = counters.get_mut(name) {
@@ -3891,6 +3979,18 @@ fn apply_presentational_hints(
 ) {
     for (attr, val) in root.attributes.iter() {
         match attr.as_str() {
+            "value" if root.tag == "li" => {
+                if let Some(value) = crate::html::forms::parse_integer(val) {
+                    let value = value.clamp(i32::MIN as i64, i32::MAX as i64);
+                    apply_property(style, "counter-set", &format!("list-item {value}"));
+                }
+            }
+            "start" if root.tag == "ol" && !root.attributes.contains_key("reversed") => {
+                if let Some(value) = crate::html::forms::parse_integer(val) {
+                    let value = value.saturating_sub(1).clamp(i32::MIN as i64, i32::MAX as i64);
+                    apply_property(style, "counter-reset", &format!("list-item {value}"));
+                }
+            }
             "align" => match val.as_str() {
                 "center" => apply_property(style, "text-align", "center"),
                 "right" => apply_property(style, "text-align", "right"),

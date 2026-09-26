@@ -283,6 +283,144 @@ fn rtl_mixed_inline_text_commands_stay_inside_line_box() {
 }
 
 #[test]
+fn rtl_atomic_prefix_does_not_shift_multiple_words_outside_line() {
+    let (frame, list) = build_full(
+        r#"<style>body{margin:0}#line{direction:rtl;width:320px;font:16px/26px Arial}#icon{display:inline-block;width:30px;height:20px}</style><div id=line><span id=icon></span>ليكون أول نوع جديد من السنانير منذ مئة سنة</div>"#,
+    );
+    let node = crate::dom::query_selector(&frame.doc.root, "#line").unwrap();
+    let line = &node.layout.line_cache[0];
+    assert!(line.text_x_offset.abs() < 0.1,
+        "all words, not just the first, determine the RTL origin: {line:?}");
+    for command in &list.commands {
+        if let PaintCmd::Text { x, text, .. } = command {
+            assert!(*x >= line.x - 0.1 && *x < 320.0,
+                "text outside RTL line: {text} at {x}");
+        }
+    }
+}
+
+#[test]
+fn rtl_list_bullets_paint_on_inline_start_side() {
+    for kind in ["disc", "circle", "square"] {
+        for direction in ["ltr", "rtl"] {
+            let (frame, list) = build(&format!(
+                "<style>body{{margin:40px}}li{{direction:{direction};width:200px;list-style:{kind};font:16px/26px Arial}}</style><ul><li id=item>List item</li></ul>"
+            ));
+            let item = crate::dom::query_selector(&frame.doc.root, "#item").unwrap();
+            let line = &item.layout.line_cache[0];
+            let x = list.commands.iter().find_map(|cmd| match cmd {
+                PaintCmd::ListMarker { x, .. } => Some(*x),
+                _ => None,
+            }).expect("list marker");
+            assert!(if direction == "rtl" { x > line.x + line.width } else { x < line.x },
+                "{direction} {kind}: marker {x} must be on inline-start side of {line:?}");
+        }
+    }
+}
+
+#[test]
+fn outside_text_markers_do_not_overlap_list_content_in_either_direction() {
+    for direction in ["ltr", "rtl"] {
+        for custom in ["", "li::marker{content:'LONG ';color:red}"] {
+            let (frame, list) = build(&format!(
+                "<style>body{{margin:80px}}ol{{margin:0;padding:0}}li{{direction:{direction};width:200px;font:16px/26px Arial}}li::marker{{color:red}}{custom}</style><ol start=123><li id=item>Item text</li></ol>"
+            ));
+            let item = crate::dom::query_selector(&frame.doc.root, "#item").unwrap();
+            let mut pixmap = tiny_skia::Pixmap::new(400, 160).unwrap();
+            let mut fonts = cosmic_text::FontSystem::new();
+            let mut cache = cosmic_text::SwashCache::new();
+            replay_with_text(&list, &mut pixmap, 1.0, &mut fonts, &mut cache);
+            let xs: Vec<_> = pixmap.data().chunks_exact(4).enumerate()
+                .filter(|(_, p)| p[0] > 0 && p[1] == 0 && p[2] == 0 && p[3] > 0)
+                .map(|(i, _)| i % 400).collect();
+            assert!(!xs.is_empty(), "{direction} marker must paint");
+            assert!(if direction == "rtl" {
+                *xs.iter().min().unwrap() as f32 >= item.layout.content_rect.right()
+            } else {
+                (*xs.iter().max().unwrap() as f32) < item.layout.content_rect.x
+            }, "{direction} {custom}: marker {:?}..{:?} overlaps {:?}", xs.iter().min(), xs.iter().max(), item.layout.content_rect);
+        }
+    }
+}
+
+#[test]
+fn list_image_markers_follow_direction_and_position() {
+    for rtl in [false, true] {
+        for inside in [false, true] {
+            let direction = if rtl { "rtl" } else { "ltr" };
+            let position = if inside { "inside" } else { "outside" };
+            let list = list_marker_with_example_base(&format!(
+                "<style>*{{margin:0;padding:0}}body{{margin:100px}}li{{width:200px;direction:{direction};list-style-position:{position};list-style-image:url(silicon.png)}}</style><ul><li>item</li></ul>"
+            ));
+            let (x, width) = list.commands.iter().find_map(|cmd| match cmd {
+                PaintCmd::ListMarker { marker_type:4, x, image:Some(image), .. } => {
+                    let width = match image { ImageRef::Owned(_, w, _) | ImageRef::Shared(_, w, _) => *w as f32 };
+                    Some((*x, width))
+                }
+                _ => None,
+            }).expect("decoded marker");
+            let expected = if rtl {
+                300.0 - if inside { width } else { 0.0 }
+            } else {
+                100.0 - if inside { 0.0 } else { width }
+            };
+            assert!((x - expected).abs() < 0.1, "{direction} {position}: {x} != {expected}");
+        }
+    }
+}
+
+#[test]
+fn closed_disclosure_marker_points_toward_inline_end() {
+    for (direction, expected) in [("ltr", "\u{25b8}"), ("rtl", "\u{25c2}")] {
+        let (_, list) = build(&format!(
+            "<li style='direction:{direction};list-style-type:disclosure-closed'>Item</li>"
+        ));
+        assert!(list.commands.iter().any(|cmd| matches!(cmd,
+            PaintCmd::ListMarker { text, .. } if text == expected
+        )));
+    }
+}
+
+#[test]
+fn text_controls_preserve_authored_color_even_when_background_matches() {
+    for markup in ["<input value='ABC'>", "<textarea>ABC</textarea>"] {
+        for color in ["black", "white", "#345678"] {
+            let (frame, list) = build(&format!(
+                "<style>input,textarea{{appearance:none;color:{color};background:{color};width:200px;height:30px;border:0;padding:0}}</style>{markup}"
+            ));
+            let node = crate::dom::query_selector(&frame.doc.root, "input,textarea").unwrap();
+            let painted = list.commands.iter().find_map(|cmd| match cmd {
+                PaintCmd::FormElement { color, .. } => Some(*color),
+                _ => None,
+            }).expect("form paint command");
+            assert_eq!(painted, node.style.color,
+                "paint must use the cascaded color, not a contrast heuristic: {markup} {color}");
+        }
+    }
+}
+
+#[test]
+fn text_input_values_and_placeholders_respect_rtl_start_alignment() {
+    for attribute in ["value", "placeholder"] {
+        for direction in ["ltr", "rtl"] {
+            let (_, list) = build(&format!(
+                "<style>body{{margin:0}}input{{direction:{direction};text-align:start;appearance:none;width:200px;height:30px;padding:0;border:0;color:red;background:transparent}}input::placeholder{{color:red}}</style><input {attribute}='ABC'>"
+            ));
+            let mut pixmap = tiny_skia::Pixmap::new(220, 40).unwrap();
+            let mut fonts = cosmic_text::FontSystem::new();
+            let mut cache = cosmic_text::SwashCache::new();
+            replay_with_text(&list, &mut pixmap, 1.0, &mut fonts, &mut cache);
+            let xs: Vec<_> = pixmap.data().chunks_exact(4).enumerate()
+                .filter(|(_, p)| p[0] > 0 && p[1] == 0 && p[2] == 0 && p[3] > 0)
+                .map(|(i, _)| i % 220).collect();
+            assert!(!xs.is_empty(), "{attribute} must paint");
+            assert!(if direction == "rtl" { *xs.iter().min().unwrap() > 150 } else { *xs.iter().max().unwrap() < 50 },
+                "{attribute} {direction} wrong text bounds: {:?}..{:?}", xs.iter().min(), xs.iter().max());
+        }
+    }
+}
+
+#[test]
 fn flex_anchor_direct_text_child_emits_text_command() {
     let (_frame, list) = build_full(
         r#"<html dir="rtl"><body style="margin:0">
@@ -1926,7 +2064,7 @@ fn clip_path_inset_and_circle_emit_display_list_clips() {
            <div style="width:100px;height:80px;clip-path:circle(25% at 50% 50%)">x</div>"#,
     );
     let has_circle_clip = circle.commands.iter().any(|cmd| {
-        matches!(cmd, PaintCmd::PushClip { radius, .. } if radius.iter().all(|r| (*r - 20.0).abs() < 0.5))
+        matches!(cmd, PaintCmd::PushClip { radius, .. } if radius.iter().all(|r| (*r - (8200.0_f32).sqrt() * 0.25).abs() < 0.01))
     });
     assert!(has_circle_clip, "circle clip should map to a rounded clip");
 
@@ -1935,12 +2073,13 @@ fn clip_path_inset_and_circle_emit_display_list_clips() {
            <div style="width:120px;height:80px;clip-path:ellipse(40px 20px at 50% 50%)">x</div>"#,
     );
     let has_ellipse_clip = ellipse.commands.iter().any(|cmd| {
-        matches!(cmd, PaintCmd::PushClip { rect, radius, .. }
+        matches!(cmd, PaintCmd::PushClip { rect, radius, radius_y }
             if (rect.x - 20.0).abs() < 0.5
                 && (rect.y - 20.0).abs() < 0.5
                 && (rect.w - 80.0).abs() < 0.5
                 && (rect.h - 40.0).abs() < 0.5
-                && radius.iter().all(|r| (*r - 20.0).abs() < 0.5))
+                && radius.iter().all(|r| (*r - 40.0).abs() < 0.5)
+                && radius_y.iter().all(|r| (*r - 20.0).abs() < 0.5))
     });
     assert!(
         has_ellipse_clip,
@@ -1971,6 +2110,32 @@ fn clip_path_inset_and_circle_emit_display_list_clips() {
         0,
         "paint outside the polygon should be clipped"
     );
+}
+
+#[test]
+fn clip_shape_pixels_and_hits_agree_on_non_square_boxes() {
+    for (shape, inside, outside) in [
+        ("ellipse(80px 20px at 50% 50%)", (100, 50), (40, 35)),
+        ("circle(50% at 50% 50%)", (165, 50), (190, 50)),
+    ] {
+        let mut renderer = Renderer::new();
+        let doc = renderer.load_html(&format!(
+            "<html><head><style>body{{margin:0}}#shape{{width:200px;height:100px;background:red;clip-path:{shape}}}</style></head><body><div id=shape></div></body></html>"
+        ), 800.0);
+        let list = build_display_list(&doc.root, 800.0, 600.0);
+        let id = doc.get_element_by_id("shape").unwrap();
+        let mut pixmap = tiny_skia::Pixmap::new(200, 100).unwrap();
+        replay(&list, &mut pixmap, 1.0);
+        for (point, expected) in [(inside, true), (outside, false)] {
+            let pixel = &pixmap.data()[(point.1 * 200 + point.0) * 4..][..4];
+            assert_eq!(pixel[0] > 200 && pixel[1] < 30 && pixel[3] > 200, expected,
+                "{shape} pixel at {point:?}: {pixel:?}");
+            assert_eq!(doc.element_from_point(point.0 as f32, point.1 as f32) == Some(id), expected,
+                "{shape} DOM hit at {point:?}");
+            assert_eq!(crate::layout::hit_test::hit_test_box_at(&doc.root, (point.0 as f32, point.1 as f32), 0) == id, expected,
+                "{shape} layout hit at {point:?}");
+        }
+    }
 }
 
 #[test]
@@ -2620,6 +2785,8 @@ fn replay_scrolls_form_element_content() {
         font_family: "Arial".to_string(),
         color: Color::BLACK,
         text_indent: 0.0,
+        text_align: crate::types::TextAlign::Start,
+        direction: crate::types::Direction::LTR,
         placeholder_color: Color::rgba(0, 0, 0, 128),
         file_button_color: Color::BLACK,
         file_button_background: Color::TRANSPARENT,
@@ -4286,6 +4453,8 @@ fn appearance_none_checkbox_does_not_paint_native_chrome() {
         font_family: "Arial".to_string(),
         color: Color::BLACK,
         text_indent: 0.0,
+        text_align: crate::types::TextAlign::Start,
+        direction: crate::types::Direction::LTR,
         placeholder_color: Color::rgba(0, 0, 0, 128),
         file_button_color: Color::BLACK,
         file_button_background: Color::TRANSPARENT,
@@ -4325,6 +4494,8 @@ fn form_labels_respect_text_indent_and_control_clipping() {
         font_family: "Arial".to_string(),
         color: Color::BLACK,
         text_indent: -1000.0,
+        text_align: crate::types::TextAlign::Start,
+        direction: crate::types::Direction::LTR,
         placeholder_color: Color::BLACK,
         file_button_color: Color::BLACK,
         file_button_background: Color::TRANSPARENT,
@@ -5322,6 +5493,7 @@ fn list_style_image_marker_decodes_and_paints_resolved_image() {
     let paint_list = DisplayList {
         commands: vec![PaintCmd::ListMarker {
             marker_type: 4,
+            text_align: crate::types::TextAlign::Left,
             x: 4.0,
             y: 4.0,
             size: 12.0,
@@ -5351,6 +5523,7 @@ fn list_style_image_marker_preserves_intrinsic_aspect_ratio() {
     let paint_list = DisplayList {
         commands: vec![PaintCmd::ListMarker {
             marker_type: 4,
+            text_align: crate::types::TextAlign::Left,
             x: 4.0,
             y: 4.0,
             size: 8.0,
@@ -5378,6 +5551,7 @@ fn circle_list_marker_paints_a_hollow_circle() {
     let list = DisplayList {
         commands: vec![PaintCmd::ListMarker {
             marker_type: 1,
+            text_align: crate::types::TextAlign::Left,
             x: 12.0,
             y: 12.0,
             size: 6.0,

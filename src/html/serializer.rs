@@ -48,7 +48,7 @@ pub fn serialize_length(len: &CssLength) -> String {
         CssLength::FitContentArg(a) => format!("fit-content({})", serialize_length(a)),
         CssLength::None => String::new(),
         CssLength::Zero => String::new(),
-        CssLength::Px(v) => format!("{}px", *v as i32),
+        CssLength::Px(v) => crate::css::serialize_math_literal(*v, "px"),
         CssLength::Em(v) => format!("{}em", v),
         CssLength::Rem(v) => format!("{}rem", v),
         CssLength::Percent(v) => format!("{}%", v),
@@ -77,23 +77,30 @@ pub fn serialize_length(len: &CssLength) -> String {
             }
         }
         CssLength::Min(vals) => {
-            let inner: Vec<String> = vals.iter().map(|v| serialize_length(v)).collect();
+            let inner: Vec<String> = vals.iter().map(serialize_calculation_length).collect();
             format!("min({})", inner.join(", "))
         }
         CssLength::Max(vals) => {
-            let inner: Vec<String> = vals.iter().map(|v| serialize_length(v)).collect();
+            let inner: Vec<String> = vals.iter().map(serialize_calculation_length).collect();
             format!("max({})", inner.join(", "))
         }
         CssLength::Clamp(parts) => {
             let (min, val, max) = (&parts[0], &parts[1], &parts[2]);
             format!(
                 "clamp({}, {}, {})",
-                serialize_length(min),
-                serialize_length(val),
-                serialize_length(max)
+                if matches!(min, CssLength::Px(v) if *v == f32::NEG_INFINITY) { "none".into() } else { serialize_calculation_length(min) },
+                serialize_calculation_length(val),
+                if matches!(max, CssLength::Px(v) if *v == f32::INFINITY) { "none".into() } else { serialize_calculation_length(max) }
             )
         }
-        CssLength::CalcExpr(_) => "calc(...)".to_string(),
+        CssLength::CalcExpr(node) => format!("calc({})", crate::css::serialize_calculation(node, &serialize_calculation_length)),
+    }
+}
+
+fn serialize_calculation_length(value: &CssLength) -> String {
+    match value {
+        CssLength::Zero => "0px".into(),
+        _ => serialize_length(value),
     }
 }
 
