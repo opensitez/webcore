@@ -145,10 +145,16 @@ impl TileManager {
         let max_dist = (self.viewport.w + self.viewport.h) * 2.0; // 2x viewport diagonal
 
         self.tiles.retain(|&(tx, ty), _| {
+            let tile_left = tx as f32 * TILE_SIZE;
+            let tile_top = ty as f32 * TILE_SIZE;
+            let visible = tile_left < self.viewport.right()
+                && tile_left + TILE_SIZE > self.viewport.x
+                && tile_top < self.viewport.bottom()
+                && tile_top + TILE_SIZE > self.viewport.y;
             let tile_cx = tx as f32 * TILE_SIZE + TILE_SIZE / 2.0;
             let tile_cy = ty as f32 * TILE_SIZE + TILE_SIZE / 2.0;
             let dist = ((tile_cx - center_x).powi(2) + (tile_cy - center_y).powi(2)).sqrt();
-            dist < max_dist
+            visible || dist < max_dist
         });
     }
 
@@ -314,6 +320,18 @@ mod tests {
 
         tm.evict_distant();
         assert!(tm.tile_count() < 2, "distant tile should be evicted");
+    }
+
+    #[test]
+    fn eviction_keeps_a_visible_tile_in_a_small_viewport() {
+        let mut tm = TileManager::new();
+        tm.doc_width = 50.0;
+        tm.doc_height = 50.0;
+        tm.update_viewport(Rect::new(0.0, 0.0, 50.0, 50.0), 1.0);
+        tm.ensure_tile(0, 0);
+        tm.mark_clean(0, 0);
+        tm.evict_distant();
+        assert!(tm.tiles.contains_key(&(0, 0)));
     }
 
     #[test]

@@ -28,11 +28,13 @@ pub(crate) fn parse_calc(expr: &str) -> CssLength {
     // the `vw` slot answers the wrong axis on every landscape viewport
     // (css-values-4 §6.1.2). The tree keeps each term as a `CssLength`, which
     // knows its own axis at resolve time.
-    let has_vmin_vmax = {
+    let has_axis_dependent_unit = {
         let l = expr.to_ascii_lowercase();
-        l.contains("vmin") || l.contains("vmax")
+        ["vmin", "vmax", "cqw", "cqh", "cqi", "cqb", "cqmin", "cqmax"]
+            .iter()
+            .any(|unit| l.contains(unit))
     };
-    if has_vmin_vmax
+    if has_axis_dependent_unit
         || expr.contains("env(")
         || expr.contains("min(")
         || expr.contains("max(")

@@ -752,29 +752,24 @@ fn parse_stylesheet_inner(
                     }
                 }
             } else if at_lower.starts_with("@container") {
-                // @container [name] (condition) { ... }
-                // Extract optional container name and condition string.
+                // Each comma-separated alternative may name a different
+                // container, so preserve the complete header for evaluation.
                 let header = at_header["@container".len()..].trim();
-                let header_lower = header.to_ascii_lowercase();
-                let (cname, cond) = if header.starts_with('(')
-                    || header_lower.starts_with("style(")
-                    || header_lower.starts_with("not ")
-                {
-                    (String::new(), header.to_string())
-                } else if let Some(paren) = header.find('(') {
-                    (
-                        header[..paren].trim().to_string(),
-                        header[paren..].trim().to_string(),
-                    )
-                } else {
-                    (String::new(), header.to_string())
-                };
+                let first = crate::css::value_parse::split_top_level_commas(header)
+                    .into_iter()
+                    .next()
+                    .unwrap_or(header);
+                let (cname, _) = crate::css::container::parse_container_branch_header(first);
                 if let Some(mut inner_rules) =
                     parse_stylesheet_inner(inner_block, parent_media, parent_layer)
                 {
                     for r in &mut inner_rules {
-                        r.container_condition = cond.clone();
-                        r.container_name = cname.clone();
+                        let inner =
+                            std::mem::replace(&mut r.container_condition, header.to_string());
+                        if !inner.is_empty() {
+                            r.nested_container_conditions.insert(0, inner);
+                        }
+                        r.container_name = cname.to_string();
                     }
                     for r in inner_rules {
                         rules.push(r);

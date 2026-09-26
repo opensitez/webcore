@@ -9,12 +9,12 @@ use std::collections::{HashMap, HashSet};
 
 // ─── CSS Filter ───────────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct CssFilters {
     pub ops: Vec<FilterOp>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum FilterOp {
     Blur(f32),
     Brightness(f32),

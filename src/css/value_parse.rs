@@ -188,12 +188,12 @@ fn parse_length_inner(v: &str) -> CssLength {
         // inline axis is the width and the block axis the height.
         "vi" => CssLength::Vw(n),
         "vb" => CssLength::Vh(n),
-        // Inline container units retain their identity through the cascade;
-        // the layout resolver supplies the containing inline size.
-        "cqw" | "cqi" => CssLength::Cqi(n),
-        "cqh" | "cqb" => CssLength::Vh(n),
-        "cqmin" => CssLength::Vmin(n),
-        "cqmax" => CssLength::Vmax(n),
+        "cqw" => CssLength::Cqw(n),
+        "cqh" => CssLength::Cqh(n),
+        "cqi" => CssLength::Cqi(n),
+        "cqb" => CssLength::Cqb(n),
+        "cqmin" => CssLength::Cqmin(n),
+        "cqmax" => CssLength::Cqmax(n),
         _ => CssLength::Auto,
     };
 }

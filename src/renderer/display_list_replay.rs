@@ -452,6 +452,7 @@ fn replay_commands_inner(
         .into_iter()
         .collect();
     let mut layer_stack: Vec<Layer> = Vec::new();
+    let mut opacity_surface_pool: Vec<Pixmap> = Vec::new();
     let mut mask_stack: Vec<(Rect, ImageRef)> = Vec::new();
     let mut text_gradient_stack: Vec<&PaintCmd> = Vec::new();
 
@@ -936,7 +937,8 @@ fn replay_commands_inner(
             }
 
             PaintCmd::PushOpacity { alpha } => {
-                if let Some(layer_pixmap) = Pixmap::new(pw, ph) {
+                if let Some(mut layer_pixmap) = opacity_surface_pool.pop().or_else(|| Pixmap::new(pw, ph)) {
+                    layer_pixmap.fill(tiny_skia::Color::TRANSPARENT);
                     layer_stack.push(Layer {
                         pixmap: layer_pixmap,
                         blend_mode: 0,
@@ -963,6 +965,7 @@ fn replay_commands_inner(
                         Transform::identity(),
                         None,
                     );
+                    opacity_surface_pool.push(layer.pixmap);
                 }
             }
 
@@ -1639,9 +1642,7 @@ fn replay_commands_inner(
                                 if let Some(img_pixmap) =
                                     tiny_skia::PixmapRef::from_bytes(rgba, iw, ih)
                                 {
-                                    let sx = side / iw as f32;
-                                    let sy = side / ih as f32;
-                                    let img_ts = ts.pre_translate(*x, *y).pre_scale(sx, sy);
+                                    let img_ts = ts.pre_translate(*x, *y);
                                     target.draw_pixmap(
                                         0,
                                         0,

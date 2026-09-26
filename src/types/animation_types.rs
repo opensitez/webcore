@@ -85,7 +85,7 @@ pub enum AnimationComposition {
 }
 
 /// A fully parsed CSS `animation` shorthand or sub-property group.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ParsedAnimation {
     pub name: String,
     pub duration_ms: f32,
@@ -100,7 +100,7 @@ pub struct ParsedAnimation {
 }
 
 /// A fully parsed CSS `transition` shorthand or sub-property group.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ParsedTransition {
     pub property: String,
     pub duration_ms: f32,

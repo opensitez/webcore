@@ -381,6 +381,32 @@ fn pixel(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8, u8) {
 }
 
 #[test]
+fn fixed_segment_layer_preserves_stacking_while_document_scrolls() {
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
+        "<style>html,body{margin:0}body{height:600px;background:#f00}header{position:fixed;z-index:1;top:0;left:0;width:100px;height:20px;background:#00f}main{margin-top:40px;height:400px;background:#0f0}</style><header></header><main></main>",
+        100.0,
+    );
+    let mut pixmap = Pixmap::new(100, 100).unwrap();
+    renderer.render(&mut doc, &mut pixmap, 1.0);
+    assert!(renderer.memory_stats().cached_surface_bytes > 0);
+    assert_eq!(pixel(&pixmap, 10, 10), (0, 0, 255, 255));
+    assert_eq!(pixel(&pixmap, 10, 50), (0, 255, 0, 255));
+
+    let fixed_bytes = renderer.memory_stats().cached_surface_bytes;
+    renderer.invalidate_display_list();
+    assert_eq!(renderer.memory_stats().cached_surface_bytes, fixed_bytes);
+    renderer.render(&mut doc, &mut pixmap, 1.0);
+    assert_eq!(pixel(&pixmap, 10, 10), (0, 0, 255, 255));
+
+    doc.scroll_y = 100.0;
+    renderer.render(&mut doc, &mut pixmap, 1.0);
+    assert!(renderer.memory_stats().cached_surface_bytes > 0);
+    assert_eq!(pixel(&pixmap, 10, 10), (0, 0, 255, 255));
+    assert_eq!(pixel(&pixmap, 10, 50), (0, 255, 0, 255));
+}
+
+#[test]
 fn gradient_background_clip_text_paints_glyphs_not_the_box() {
     let html = r#"
         <style>
@@ -1633,6 +1659,28 @@ fn render_opacity_composites_descendants_as_one_group() {
     );
 }
 
+#[test]
+fn nested_opacity_groups_composite_once_per_element() {
+    let html = r#"<style>*{margin:0;padding:0}body{background:white}
+           .outer{position:relative;opacity:.5;width:40px;height:40px}
+           .inner{opacity:.5;background:red;width:40px;height:40px}
+           </style><div class="outer"><div class="inner"></div></div>"#;
+    let mut tiled_renderer = Renderer::new();
+    let mut tiled_doc = tiled_renderer.load_html(html, 50.0);
+    let mut pm = Pixmap::new(50, 50).unwrap();
+    tiled_renderer.render(&mut tiled_doc, &mut pm, 1.0);
+    let mut direct_renderer = Renderer::new();
+    direct_renderer.use_tiles = false;
+    let mut direct_doc = direct_renderer.load_html(html, 50.0);
+    let mut direct = Pixmap::new(50, 50).unwrap();
+    direct_renderer.render(&mut direct_doc, &mut direct, 1.0);
+    for (path, image) in [("tiled", &pm), ("direct", &direct)] {
+        let (r, g, b, _) = pixel(image, 20, 20);
+        assert!(r > 245 && (175..=205).contains(&g) && (175..=205).contains(&b),
+            "{path} nested 50% groups should paint red at 25% over white, got {r},{g},{b}");
+    }
+}
+
 // ── Absolute all-auto insets inside flex container: positioned inside container ──
 
 /// Regression: position:absolute children with all insets auto inside a flex container
@@ -2494,7 +2542,7 @@ fn padded_story_title_wraps_before_reserved_right_controls() {
 #[test]
 fn inline_run_boundaries_preserve_collapsed_spaces() {
     use crate::renderer::display_list::PaintCmd;
-    use crate::renderer::display_list_builder::build_display_list_full;
+    use crate::renderer::display_list_builder::build_display_list_full_with_font_system;
 
     let mut renderer = Renderer::new();
     let mut doc = renderer.load_html(
@@ -2510,7 +2558,7 @@ fn inline_run_boundaries_preserve_collapsed_spaces() {
     );
     let mut pm = tiny_skia::Pixmap::new(900, 120).unwrap();
     renderer.render(&mut doc, &mut pm, 1.0);
-    let list = build_display_list_full(
+    let list = build_display_list_full_with_font_system(
         &doc.root,
         900.0,
         120.0,
@@ -2520,6 +2568,7 @@ fn inline_run_boundaries_preserve_collapsed_spaces() {
         0,
         &std::collections::HashSet::new(),
         "",
+        Some(&mut renderer.font_system),
     );
     let painted = list
         .commands
@@ -2531,18 +2580,32 @@ fn inline_run_boundaries_preserve_collapsed_spaces() {
         .collect::<Vec<_>>()
         .join("");
 
-    assert!(
-        painted.contains("against slowing"),
-        "space after inline em was lost: {painted:?}"
-    );
-    assert!(
-        painted.contains("posted on"),
-        "space after inline link was lost: {painted:?}"
-    );
-    assert!(
-        painted.contains("manual \"for"),
-        "space after inline link before quote was lost: {painted:?}"
-    );
+    for (left, right) in [("against", "slowing"), ("posted", "on X"), ("37-page training manual", "\"for")] {
+        let measure = |text: &str, size, weight, style, family: &str, fonts: &mut cosmic_text::FontSystem| {
+            crate::layout::inline_layout::measure_text_width_weighted(
+                text, size, Some(fonts), crate::types::FontWeight::Value(weight),
+                match style {
+                    1 => crate::types::FontStyle::Italic,
+                    2 => crate::types::FontStyle::Oblique,
+                    _ => crate::types::FontStyle::Normal,
+                },
+                1.0, family, 100.0,
+            )
+        };
+        let mut left_edge = None;
+        let mut right_edge = None;
+        for command in &list.commands {
+            if let PaintCmd::Text { x, text, font_size, font_weight, font_style, font_family, .. } = command {
+                if text.trim_end().ends_with(left) {
+                    left_edge = Some(*x + measure(text.trim_end(), *font_size, *font_weight, *font_style, font_family, &mut renderer.font_system));
+                }
+                if let Some(index) = text.find(right) {
+                    right_edge = Some(*x + measure(&text[..index], *font_size, *font_weight, *font_style, font_family, &mut renderer.font_system));
+                }
+            }
+        }
+        assert!(right_edge.unwrap() > left_edge.unwrap(), "missing visible gap between {left:?} and {right:?}: {painted:?}");
+    }
 
     let mut against = None;
     let mut slowing = None;
@@ -2591,7 +2654,7 @@ fn inline_run_boundaries_preserve_collapsed_spaces() {
     let against_w = crate::layout::inline_layout::measure_text_width_weighted(
         &against_text,
         against_size,
-        None,
+        Some(&mut renderer.font_system),
         weight,
         style,
         1.0,
@@ -2608,7 +2671,7 @@ fn inline_run_boundaries_preserve_collapsed_spaces() {
         + crate::layout::inline_layout::measure_text_width_weighted(
             &slowing_prefix,
             slowing_size,
-            None,
+            Some(&mut renderer.font_system),
             slowing_prefix_weight,
             slowing_prefix_style,
             1.0,
@@ -2821,6 +2884,40 @@ fn inline_child_first_word_after_space_can_wrap_ltr_and_rtl() {
             || (arabic_link_x - arabic_lead_x).abs() > 20.0,
         "long RTL link after a space must not collapse onto preceding text: lead=({arabic_lead_x},{arabic_lead_y}) link=({arabic_link_x},{arabic_link_y})"
     );
+}
+
+#[test]
+fn rtl_inline_style_runs_keep_visual_order_and_colors() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list_full_with_font_system;
+    use crate::types::Color;
+
+    let mut renderer = Renderer::new();
+    let doc = renderer.load_html(
+        r#"<style>body{margin:0}p{direction:rtl;width:480px;font:16px Arial}span{color:red}a{color:blue}b{color:green}</style><p><span>فاز</span> <a>النص العربي</a> <b>اليوم</b></p>"#,
+        500.0,
+    );
+    let list = build_display_list_full_with_font_system(
+        &doc.root, 500.0, 100.0, 0.0, 0.0, 0, 0,
+        &Default::default(), "", Some(&mut renderer.font_system),
+    );
+    let run = |word: &str| {
+        list.commands.iter().find_map(|command| match command {
+            PaintCmd::Text { x, y, text, color, .. } if text.contains(word) => {
+                Some((*x, *y, *color))
+            }
+            _ => None,
+        }).expect("styled RTL run must be painted")
+    };
+    let first = run("فاز");
+    let middle = run("النص العربي");
+    let last = run("اليوم");
+    assert!(last.0 < middle.0 && middle.0 < first.0);
+    assert_eq!(first.1, middle.1);
+    assert_eq!(middle.1, last.1);
+    assert_eq!(first.2, Color::rgb(255, 0, 0));
+    assert_eq!(middle.2, Color::rgb(0, 0, 255));
+    assert_eq!(last.2, Color::rgb(0, 128, 0));
 }
 
 #[test]
@@ -3063,7 +3160,7 @@ fn punctuation_after_italic_inline_does_not_get_word_gap() {
 #[test]
 fn newline_after_inline_link_collapses_to_visible_space() {
     use crate::renderer::display_list::PaintCmd;
-    use crate::renderer::display_list_builder::build_display_list_full;
+    use crate::renderer::display_list_builder::build_display_list_full_with_font_system;
 
     let mut renderer = Renderer::new();
     let mut doc = renderer.load_html(
@@ -3079,7 +3176,7 @@ is a volcano in the southern Peruvian <a>Andes</a>, rising above <a>Arequipa</a>
     );
     let mut pixmap = tiny_skia::Pixmap::new(700, 90).unwrap();
     renderer.render(&mut doc, &mut pixmap, 1.0);
-    let list = build_display_list_full(
+    let list = build_display_list_full_with_font_system(
         &doc.root,
         700.0,
         90.0,
@@ -3089,6 +3186,7 @@ is a volcano in the southern Peruvian <a>Andes</a>, rising above <a>Arequipa</a>
         0,
         &std::collections::HashSet::new(),
         "",
+        Some(&mut renderer.font_system),
     );
 
     let mut misti = None;
@@ -3131,7 +3229,7 @@ is a volcano in the southern Peruvian <a>Andes</a>, rising above <a>Arequipa</a>
         + crate::layout::inline_layout::measure_text_width_weighted(
             &misti_text,
             misti_size,
-            None,
+            Some(&mut renderer.font_system),
             crate::types::FontWeight::Value(misti_weight as u16),
             style,
             1.0,

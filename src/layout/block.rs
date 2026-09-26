@@ -763,6 +763,13 @@ pub fn layout_block_with_fc(
     } else {
         content_w
     };
+    let _query_container_scope = engine.enter_query_container(
+        &node.style,
+        content_w,
+        rbox.content_height,
+        font_px,
+        root_font_px,
+    );
 
     // Auto margin centering (CSS 2.1 §10.3.3 / css-sizing): resolve after
     // min/max-width clamping so `width:auto; max-width:...; margin:0 auto`
@@ -1235,7 +1242,11 @@ pub fn layout_block_with_fc(
             // Compute child_y from normal flow position BEFORE relative offset,
             // so that relative positioning doesn't shift subsequent siblings.
             let ch = grid_child_ref(node, path);
-            child_y = ch.layout.margin_rect.y - content_y + ch.layout.margin_rect.h;
+            // Descendant margins can collapse through this child without
+            // appearing in its own margin rect. Carry that effective margin
+            // once, so sibling collapse and parent-bottom collapse consume
+            // the same quantity rather than subtracting it from box height.
+            child_y = ch.layout.border_rect.bottom() - content_y + child_bottom_margin;
             prev_bottom_margin = child_bottom_margin;
             last_in_flow_path = Some(path.clone());
             block_in_flow_paths.push(path.clone());
@@ -1508,7 +1519,11 @@ pub fn layout_block_with_fc(
     } else {
         0.0
     };
-    let natural_h = child_y.max(float_bottom).max(inline_bottom);
+    let natural_h = if node.style.contain_size || node.style.container_type == ContainerType::Size {
+        engine.contained_intrinsic_height(&node.style, font_px, root_font_px)
+    } else {
+        child_y.max(float_bottom).max(inline_bottom)
+    };
 
     let content_h = match rbox.content_height {
         Some(h) => h,

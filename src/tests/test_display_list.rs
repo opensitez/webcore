@@ -22,6 +22,34 @@ fn build(html: &str) -> (EngineFrame, DisplayList) {
 }
 
 #[test]
+fn empty_positioned_bullet_and_wrapped_link_border() {
+    for direction in ["ltr", "rtl"] {
+        let (_, list) = build(&format!(
+            "<style>body{{margin:40px;direction:{direction}}}li{{position:relative;width:140px;list-style:none;font:16px/26px Arial}}li::before{{content:'';position:absolute;top:8px;inset-inline-start:-16px;border:3px solid #3f3f42;border-radius:50%;background:#3f3f42}}a{{color:#222;border-bottom:1px solid #b80000;text-decoration:none}}</style><ul><li><a>Several words make this link wrap across lines</a></li></ul>"
+        ));
+        let bullet = list.commands.iter().find_map(|cmd| match cmd {
+            PaintCmd::Border { rect, widths, colors, radii, radii_y, .. }
+                if widths[0] == 3.0 && colors[0].r == 63 => {
+                    assert_eq!(*radii, [3.0; 4], "bullet horizontal radii");
+                    assert_eq!(*radii_y, [3.0; 4], "bullet vertical radii");
+                    Some(rect)
+                },
+            _ => None,
+        }).expect("bullet border");
+        assert!((bullet.w - 6.0).abs() < 0.1 && (bullet.h - 6.0).abs() < 0.1,
+            "{direction}: empty bullet must not stretch: {bullet:?}");
+        let borders: Vec<_> = list.commands.iter().filter_map(|cmd| match cmd {
+            PaintCmd::Border { rect, widths, colors, .. }
+                if widths[2] == 1.0 && colors[2].r == 184 => Some(rect),
+            _ => None,
+        }).collect();
+        assert!(borders.len() >= 2, "{direction}: each wrapped line needs its red border: {borders:?}");
+        assert!(borders.iter().all(|r| r.h <= 27.1 && r.w <= 141.0),
+            "{direction}: borders must follow individual fragments: {borders:?}");
+    }
+}
+
+#[test]
 fn auto_z_positioned_content_paints_after_earlier_fixed_layer() {
     let (_, list) = build(
         "<style>body{margin:0}.overlay{position:fixed;inset:0;background:#fff}.row{position:relative}</style><div class=overlay></div><div class=row>Message subject</div>",
@@ -161,7 +189,7 @@ fn block_pseudo_child_and_following_text_are_painted() {
 
 #[test]
 fn absolutely_positioned_block_pseudo_text_is_painted() {
-    let (_frame, list) = build_full(
+    let (frame, list) = build_full(
         r#"<body style="margin:0">
              <style>
              .switch { position:relative; display:block; width:45px; height:25px; }
@@ -200,9 +228,16 @@ fn absolutely_positioned_block_pseudo_text_is_painted() {
             }
             _ => None,
         })
-        .expect("positioned block ::before generated content should paint as text");
+        .unwrap_or_else(|| panic!(
+            "positioned block ::before generated content should paint as text: {:?}; pseudo={:?}",
+            list.commands,
+            find_node_by_tag(&frame.doc.root, "::before").map(|n| (
+                &n.text, &n.style.rare().content, &n.layout.line_cache, &n.layout.inline_runs
+            ))
+        ));
 
-    let text_w = moon.2 * 0.55;
+    let pseudo = find_node_by_tag(&frame.doc.root, "::before").unwrap();
+    let text_w = pseudo.layout.line_cache.first().expect("generated text line").width;
     let text_center_x = moon.0 + text_w * 0.5;
     let text_center_y = moon.1 + moon.3 * 0.5;
     assert!(
@@ -890,20 +925,23 @@ fn absolute_inline_external_after_icon_uses_static_inline_position() {
 
 #[test]
 fn inline_svg_uses_css_animated_fill_when_rasterized() {
-    let (_, list) = build(
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
         r#"<style>
+             body { margin: 0; }
              @keyframes icon-fill { from { fill: rgb(255, 0, 0); } to { fill: rgb(0, 0, 255); } }
              svg { fill: rgb(0, 0, 255); animation: icon-fill 10s linear; }
            </style>
            <svg style="width:20px;height:20px" viewBox="0 0 20 20">
              <rect x="0" y="0" width="20" height="20"/>
            </svg>"#,
+        20.0,
     );
-
-    let (data, w, h) =
-        first_image_data(&list).expect("inline SVG should rasterize to an image command");
-    assert_eq!((w, h), (20, 20));
-    let idx = ((10 * w + 10) * 4) as usize;
+    assert!(!doc.animation_overrides.is_empty(), "CSS animation should be sampled");
+    let mut pixmap = tiny_skia::Pixmap::new(20, 20).unwrap();
+    renderer.render(&mut doc, &mut pixmap, 1.0);
+    let data = pixmap.data();
+    let idx = ((10 * pixmap.width() + 10) * 4) as usize;
     assert!(
         data[idx] > 200 && data[idx + 1] < 50 && data[idx + 2] < 50 && data[idx + 3] > 200,
         "center pixel should use animated fill at animation start, got rgba({}, {}, {}, {})",
@@ -1637,6 +1675,50 @@ fn opacity_produces_push_pop() {
         .iter()
         .any(|cmd| matches!(cmd, PaintCmd::PushOpacity { alpha } if (*alpha - 0.5).abs() < 0.01));
     assert!(has_op, "opacity should produce PushOpacity");
+}
+
+#[test]
+fn nested_opacity_emits_nested_groups_around_child_fill() {
+    let (_, list) = build(
+        r#"<style>*{margin:0;padding:0}.outer{position:relative;opacity:.5;width:40px;height:40px}
+           .inner{opacity:.5;background:red;width:40px;height:40px}</style>
+           <div class="outer"><div class="inner"></div></div>"#,
+    );
+    let mut depth = 0;
+    let mut red_depth = None;
+    let mut pushes = 0;
+    let mut pops = 0;
+    for cmd in &list.commands {
+        match cmd {
+            PaintCmd::PushOpacity { .. } => { depth += 1; pushes += 1; }
+            PaintCmd::PopOpacity => { depth -= 1; pops += 1; }
+            PaintCmd::FillRect { color, .. } if color.r > 200 && color.g < 50 => {
+                red_depth = Some(depth);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!((pushes, pops, depth, red_depth), (2, 2, 0, Some(2)));
+    let mut pixmap = tiny_skia::Pixmap::new(50, 50).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let pixel = &pixmap.data()[(20 * 50 + 20) * 4..][..4];
+    assert!(pixel[0] > 0 && pixel[3] > 0, "nested opacity should replay its child fill, got {pixel:?}");
+    let mut tile = tiny_skia::Pixmap::new(512, 512).unwrap();
+    replay_tile_with_scroll_and_transform_overrides(
+        &list,
+        &mut tile,
+        1.0,
+        &mut cosmic_text::FontSystem::new(),
+        &mut cosmic_text::SwashCache::new(),
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        None,
+    );
+    let tile_pixel = &tile.data()[(20 * 512 + 20) * 4..][..4];
+    assert!(tile_pixel[0] > 0 && tile_pixel[3] > 0,
+        "tile replay should retain nested opacity content, got {tile_pixel:?}");
 }
 
 #[test]
@@ -5140,8 +5222,9 @@ fn individual_transform_properties_compose_before_transform() {
 
 #[test]
 fn list_style_image_emits_image_marker_command() {
-    let (_, list) =
-        build(r#"<ul><li style="list-style-image:url(marker.svg); width:100px">item</li></ul>"#);
+    let list = list_marker_with_example_base(
+        r#"<ul><li style="list-style-image:url(silicon.png); width:100px">item</li></ul>"#,
+    );
     let marker = list.commands.iter().find_map(|cmd| match cmd {
         PaintCmd::ListMarker {
             marker_type, text, ..
@@ -5150,15 +5233,16 @@ fn list_style_image_emits_image_marker_command() {
     });
     assert_eq!(
         marker,
-        Some("marker.svg"),
+        Some("silicon.png"),
         "list-style-image should survive marker generation as an image marker"
     );
 }
 
 #[test]
 fn list_style_shorthand_url_emits_image_marker_command() {
-    let (_, list) =
-        build(r#"<ul><li style="list-style:url(icon.png); width:100px">item</li></ul>"#);
+    let list = list_marker_with_example_base(
+        r#"<ul><li style="list-style:url(silicon.png); width:100px">item</li></ul>"#,
+    );
     assert!(
         list.commands.iter().any(|cmd| matches!(
             cmd,
@@ -5166,10 +5250,41 @@ fn list_style_shorthand_url_emits_image_marker_command() {
                 marker_type: 4,
                 text,
                 ..
-            } if text == "icon.png"
+            } if text == "silicon.png"
         )),
         "list-style shorthand URL should feed list-style-image"
     );
+}
+
+fn list_marker_with_example_base(html: &str) -> DisplayList {
+    let base = format!("{}/examples/", env!("CARGO_MANIFEST_DIR"));
+    let doc = parse_html_with_base(html, &base);
+    let mut frame = EngineFrame::new(doc, 800.0, 600.0);
+    frame.update_frame();
+    build_display_list_full(
+        &frame.doc.root,
+        800.0,
+        600.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        &base,
+    )
+}
+
+#[test]
+fn missing_list_style_image_uses_list_style_type_fallback() {
+    let (_, list) = build(
+        r#"<ul><li style="list-style-image:url(missing-marker.png);list-style-type:square">item</li></ul>"#,
+    );
+    assert!(list.commands.iter().any(|cmd| matches!(cmd,
+        PaintCmd::ListMarker { marker_type: 2, .. }
+    )));
+    assert!(!list.commands.iter().any(|cmd| matches!(cmd,
+        PaintCmd::ListMarker { marker_type: 4, .. }
+    )));
 }
 
 #[test]
@@ -5229,6 +5344,33 @@ fn list_style_image_marker_decodes_and_paints_resolved_image() {
         .chunks_exact(4)
         .any(|px| px[0] > 200 && px[1] < 80 && px[2] < 80 && px[3] > 200);
     assert!(painted_red, "image marker replay should paint its bitmap");
+}
+
+#[test]
+fn list_style_image_marker_preserves_intrinsic_aspect_ratio() {
+    let paint_list = DisplayList {
+        commands: vec![PaintCmd::ListMarker {
+            marker_type: 4,
+            x: 4.0,
+            y: 4.0,
+            size: 8.0,
+            color: Color::rgba(0, 0, 0, 255),
+            text: String::new(),
+            image: Some(ImageRef::Owned(vec![255, 0, 0, 255].repeat(8 * 4), 8, 4)),
+            font_family: String::new(),
+            font_size: 16.0,
+            font_weight: 400,
+            font_style: 0,
+            line_height: 20.0,
+        }],
+        has_scroll_dependent_sticky: false,
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(24, 24).unwrap();
+    replay(&paint_list, &mut pixmap, 1.0);
+    let pixel = |x: usize, y: usize| &pixmap.data()[(y * 24 + x) * 4..][..4];
+    assert!(pixel(10, 6)[0] > 200, "intrinsic marker width should paint");
+    assert_eq!(pixel(10, 10)[3], 0, "intrinsic marker height should not stretch");
 }
 
 #[test]

@@ -55,7 +55,12 @@ pub fn serialize_length(len: &CssLength) -> String {
         CssLength::Vw(v) => format!("{}vw", v),
         CssLength::Vmin(v) => format!("{}vmin", v),
         CssLength::Vmax(v) => format!("{}vmax", v),
+        CssLength::Cqw(v) => format!("{}cqw", v),
+        CssLength::Cqh(v) => format!("{}cqh", v),
         CssLength::Cqi(v) => format!("{}cqi", v),
+        CssLength::Cqb(v) => format!("{}cqb", v),
+        CssLength::Cqmin(v) => format!("{}cqmin", v),
+        CssLength::Cqmax(v) => format!("{}cqmax", v),
         CssLength::Vh(v) => format!("{}vh", v),
         CssLength::Calc(c) => {
             let labels = ["%", "px", "em", "rem", "vw", "vh"];

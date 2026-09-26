@@ -475,7 +475,7 @@ fn background_clip_rect_for_node(node: &WebCore, sx: f32, sy: f32) -> Rect {
 }
 
 fn resolved_border_radii_for_node(node: &WebCore, root_font_px: f32) -> ([f32; 4], [f32; 4]) {
-    let p = node.layout.padding_rect;
+    let p = node.layout.border_rect;
     let font_px = node.style.font_size_px(root_font_px, root_font_px).max(1.0);
     let radii = [
         node.style
@@ -667,40 +667,8 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     // `border-radius: 16px 16px 0 0` — the top-rounded card — came out rounded
     // all round, and the same corrupted array feeds the border stroke and the
     // overflow clip.
-    let r_tl = node
-        .style
-        .border_top_left_radius
-        .resolve(font_px, pr.w, ctx.transform_ctx.root_font_px);
-    let r_tr = node
-        .style
-        .border_top_right_radius
-        .resolve(font_px, pr.w, ctx.transform_ctx.root_font_px);
-    let r_br = node
-        .style
-        .border_bottom_right_radius
-        .resolve(font_px, pr.w, ctx.transform_ctx.root_font_px);
-    let r_bl = node
-        .style
-        .border_bottom_left_radius
-        .resolve(font_px, pr.w, ctx.transform_ctx.root_font_px);
-    let r_tl_y = node
-        .style
-        .border_top_left_radius_y
-        .resolve(font_px, pr.h, ctx.transform_ctx.root_font_px);
-    let r_tr_y = node
-        .style
-        .border_top_right_radius_y
-        .resolve(font_px, pr.h, ctx.transform_ctx.root_font_px);
-    let r_br_y = node
-        .style
-        .border_bottom_right_radius_y
-        .resolve(font_px, pr.h, ctx.transform_ctx.root_font_px);
-    let r_bl_y = node
-        .style
-        .border_bottom_left_radius_y
-        .resolve(font_px, pr.h, ctx.transform_ctx.root_font_px);
-    let radii_arr = [r_tl, r_tr, r_br, r_bl];
-    let radii_y_arr = [r_tl_y, r_tr_y, r_br_y, r_bl_y];
+    let (radii_arr, radii_y_arr) =
+        resolved_border_radii_for_node(node, ctx.transform_ctx.root_font_px);
 
     // ── Hover / active / visited check ───────────────────────────────────────
     // Hover is applied by the cascade/layout pass. Applying `hover_style` again
@@ -909,12 +877,13 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         });
     }
 
-    // ── Opacity ──────────────────────────────────────────────────────────────
-    //
-    // Paint commands below already fold `eff_style.opacity` into their color
-    // alpha. Emitting an additional full-viewport opacity layer here made every
-    // semi-transparent element allocate and composite a whole pixmap during
-    // replay, and also applied opacity twice.
+    // Opacity applies to the completed stacking context, including overlapping
+    // descendants. Individual paint colors retain their own alpha.
+    if eff_style.opacity < 1.0 {
+        list.push(PaintCmd::PushOpacity {
+            alpha: eff_style.opacity,
+        });
+    }
 
     // ── Blend mode ───────────────────────────────────────────────────────────
     if blend != 0 {
@@ -1052,28 +1021,21 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     let bg_clip_rect = background_box(eff_style.background_clip);
     let bg_origin_rect = background_box(eff_style.background_origin);
     let raw_bg = eff_style.background_color;
-    let clipped_background_color = Color::rgba(
-        raw_bg.r,
-        raw_bg.g,
-        raw_bg.b,
-        (raw_bg.a as f32 * eff_style.opacity) as u8,
-    );
+    let clipped_background_color = raw_bg;
     // `background-repeat` decides, per axis, whether the image (or gradient)
     // tiles out of the positioning area to cover the painting area.
     let (bg_repeat_x_mode, bg_repeat_y_mode) = node.style.background_repeat.axis_modes();
 
-    // ── (b) Background color (opacity applied to alpha) ──────────────────────
+    // ── (b) Background color ────────────────────────────────────────────────
     {
         let is_inline_with_text = matches!(node.style.display, Display::Inline)
             && !node.is_image_element()
             && inline_has_non_empty_text(node);
-        let opacity = eff_style.opacity;
         if raw_bg.a > 0
             && !is_inline_with_text
             && eff_style.background_clip != BackgroundClip::Text
         {
-            let alpha = ((raw_bg.a as f32) * opacity) as u8;
-            let bg = Color::rgba(raw_bg.r, raw_bg.g, raw_bg.b, alpha);
+            let bg = raw_bg;
             if paint_self {
                 list.push(PaintCmd::FillRect {
                     // A colour has no image to position, so `background-origin`
@@ -1093,7 +1055,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         && node.style.gradient_type != GradientType::None
         && node.style.rare().gradient_stops.len() >= 2
     {
-        let opacity = eff_style.opacity;
+        let opacity = 1.0;
         let grad_type_u8 = match node.style.gradient_type {
             GradientType::Linear => 1u8,
             GradientType::Radial => 2u8,
@@ -1197,7 +1159,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     if paint_self {
         for layer in &eff_style.rare().additional_background_layers {
             if layer.gradient_type != GradientType::None && layer.gradient_stops.len() >= 2 {
-                let opacity = eff_style.opacity;
+                let opacity = 1.0;
                 let grad_type_u8 = match layer.gradient_type {
                     GradientType::Linear => 1u8,
                     GradientType::Radial => 2u8,
@@ -1384,7 +1346,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                     styles,
                     radii: [0.0; 4],
                     radii_y: [0.0; 4],
-                    opacity: eff_style.opacity,
+                    opacity: 1.0,
                 });
             }
         }
@@ -1451,7 +1413,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                     border_image_rect,
                     border_image_widths,
                     &eff_style.border_image_source,
-                    eff_style.opacity,
+                    1.0,
                 )
             {
                 painted_border_image = true;
@@ -1481,15 +1443,45 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                     .enumerate()
                     .any(|(side, width)| *width > 0.0 && border_colors[side].a > 0)
                 {
-                    list.push(PaintCmd::Border {
-                        rect: border_rect,
-                        widths: border_widths,
-                        colors: border_colors,
-                        styles: border_styles,
-                        radii: radii_arr,
-                        radii_y: radii_y_arr,
-                        opacity: eff_style.opacity,
-                    });
+                    if node.layout.inline_client_rects.is_empty() {
+                        list.push(PaintCmd::Border {
+                            rect: border_rect,
+                            widths: border_widths,
+                            colors: border_colors,
+                            styles: border_styles,
+                            radii: radii_arr,
+                            radii_y: radii_y_arr,
+                            opacity: 1.0,
+                        });
+                    } else {
+                        // Inline borders follow each line fragment, not the union
+                        // rectangle spanning the intervening line boxes.
+                        let fragments = &node.layout.inline_client_rects;
+                        for (index, fragment) in fragments.iter().enumerate() {
+                            let rtl = eff_style.direction == Direction::RTL;
+                            let left_edge = if rtl { index + 1 == fragments.len() } else { index == 0 };
+                            let right_edge = if rtl { index == 0 } else { index + 1 == fragments.len() };
+                            let mut widths = border_widths;
+                            if !left_edge { widths[3] = 0.0; }
+                            if !right_edge { widths[1] = 0.0; }
+                            let left = if left_edge { node.layout.resolved_pad_left + widths[3] } else { 0.0 };
+                            let right = if right_edge { node.layout.resolved_pad_right + widths[1] } else { 0.0 };
+                            list.push(PaintCmd::Border {
+                                rect: Rect::new(
+                                    fragment.x - eff_sx - left,
+                                    fragment.y - eff_sy - node.layout.resolved_pad_top - bw[0],
+                                    fragment.w + left + right,
+                                    fragment.h + node.layout.resolved_pad_top + node.layout.resolved_pad_bottom + bw[0] + bw[2],
+                                ),
+                                widths,
+                                colors: border_colors,
+                                styles: border_styles,
+                                radii: radii_arr,
+                                radii_y: radii_y_arr,
+                                opacity: 1.0,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -1982,6 +1974,9 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     if blend != 0 {
         list.push(PaintCmd::PopBlendMode);
     }
+    if eff_style.opacity < 1.0 {
+        list.push(PaintCmd::PopOpacity);
+    }
     if stacking {
         list.push(PaintCmd::EndStackingContext);
     }
@@ -2185,7 +2180,7 @@ fn build_inline_text(
         return;
     }
 
-    let opacity = eff_style.opacity;
+    let opacity = 1.0;
     let root_font_px = ctx.transform_ctx.root_font_px;
     let fallback_font_px = node.style.font_size_px(root_font_px, root_font_px).max(1.0);
     let fallback_letter_spc = node
@@ -2247,14 +2242,7 @@ fn build_inline_text(
         let mut chunks: Vec<Chunk> = Vec::new();
 
         let has_rtl_visual_segments = line.visual_segments.iter().any(|vs| (vs.level & 1) != 0);
-        let touched_inline_runs = node
-            .layout
-            .inline_runs
-            .iter()
-            .filter(|run| run.text_offset < line_end && run.text_offset + run.length > line_start)
-            .count();
         let use_bidi_visual_segments = has_rtl_visual_segments
-            && touched_inline_runs <= 1
             && !node.layout.inline_runs.is_empty();
         if use_bidi_visual_segments {
             // BiDi: use visual segment order
@@ -2262,28 +2250,6 @@ fn build_inline_text(
                 let seg_s = vs.logical_start;
                 let seg_e = vs.logical_start + vs.length;
                 let is_rtl = (vs.level & 1) != 0;
-                if is_rtl {
-                    let mut s = seg_s;
-                    let mut e = seg_e.min(flat.len());
-                    while s < e && matches!(flat.as_bytes()[s], b' ' | b'\t' | b'\n' | b'\r') {
-                        s += 1;
-                    }
-                    while e > s && matches!(flat.as_bytes()[e - 1], b' ' | b'\t' | b'\n' | b'\r') {
-                        e -= 1;
-                    }
-                    if s < e {
-                        chunks.push(Chunk {
-                            s,
-                            e,
-                            run_idx: None,
-                            rtl: true,
-                            visual_x: Some(vs.x),
-                            visual_w: vs.width,
-                            starts_visual_segment: true,
-                        });
-                    }
-                    continue;
-                }
                 let mut seg_chunks: Vec<Chunk> = Vec::new();
                 for (ri, run) in node.layout.inline_runs.iter().enumerate() {
                     let rs = run.text_offset;
@@ -2303,15 +2269,6 @@ fn build_inline_text(
                     }
                 }
                 if is_rtl {
-                    // Trim leading whitespace from last chunk (becomes visual-first after reversal)
-                    if let Some(last) = seg_chunks.last_mut() {
-                        while last.s < last.e
-                            && last.s < flat.len()
-                            && matches!(flat.as_bytes()[last.s], b' ' | b'\t' | b'\n' | b'\r')
-                        {
-                            last.s += 1;
-                        }
-                    }
                     seg_chunks.reverse();
                 }
                 for chunk in &mut seg_chunks {
@@ -3025,29 +2982,34 @@ fn build_list_marker(
     }
 
     if !node.style.list_style_image.is_empty() {
-        let mx = if inside {
-            line_x - sx
-        } else {
-            line_x - sx - font_px
-        };
         let image =
             crate::html::load_paint_image_from_src(&node.style.list_style_image, ctx.base_url)
                 .map(|(data, w, h)| ImageRef::Shared(data, w, h));
-        list.push(PaintCmd::ListMarker {
-            marker_type: 4,
-            x: mx,
-            y: line_y - sy,
-            size: font_px,
-            color: c,
-            text: node.style.list_style_image.clone(),
-            image,
-            font_family: marker_family.clone(),
-            font_size: font_px,
-            font_weight: marker_weight,
-            font_style: marker_style,
-            line_height: fallback_line_h,
-        });
-        return;
+        if let Some(image) = image {
+            let (image_w, image_h) = match &image {
+                ImageRef::Owned(_, w, h) | ImageRef::Shared(_, w, h) => (*w as f32, *h as f32),
+            };
+            let mx = if inside {
+                line_x - sx
+            } else {
+                line_x - sx - image_w
+            };
+            list.push(PaintCmd::ListMarker {
+                marker_type: 4,
+                x: mx,
+                y: line_y - sy + (line_h - image_h) / 2.0,
+                size: image_w.max(image_h),
+                color: c,
+                text: node.style.list_style_image.clone(),
+                image: Some(image),
+                font_family: marker_family.clone(),
+                font_size: font_px,
+                font_weight: marker_weight,
+                font_style: marker_style,
+                line_height: fallback_line_h,
+            });
+            return;
+        }
     }
 
     match node.style.list_style_type {
@@ -3230,7 +3192,6 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32, 
             Color::BLACK
         };
     }
-    value_color.a = ((value_color.a as f32) * node.style.opacity).round() as u8;
     let value = if tag == "select" {
         // The shown text is "the label of an option of which selectedness is
         // set to true" (HTML §15.5.16) — SELECTEDNESS, not the `selected`

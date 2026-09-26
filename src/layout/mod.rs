@@ -1358,13 +1358,36 @@ pub fn resolve_box_vp(
     viewport_h: f32,
     containing_h: Option<f32>,
 ) -> ResolvedBox {
+    resolve_box_vp_query(
+        style,
+        parent_font_px,
+        containing_w,
+        root_font_px,
+        viewport_w,
+        viewport_h,
+        containing_h,
+        QueryContainerSizes::default(),
+    )
+}
+
+fn resolve_box_vp_query(
+    style: &ComputedStyle,
+    parent_font_px: f32,
+    containing_w: f32,
+    root_font_px: f32,
+    viewport_w: f32,
+    viewport_h: f32,
+    containing_h: Option<f32>,
+    query: QueryContainerSizes,
+) -> ResolvedBox {
     let res = |l: &CssLength| {
-        l.resolve_vp(
+        l.resolve_query_vp(
             parent_font_px,
             containing_w,
             root_font_px,
             viewport_w,
             viewport_h,
+            query,
         )
     };
     let _font_px = style.font_size_px(parent_font_px, root_font_px);
@@ -1436,7 +1459,7 @@ pub fn resolve_box_vp(
             Some(ch) => {
                 let mut h = style
                     .height
-                    .resolve_vp(parent_font_px, ch, root_font_px, viewport_w, viewport_h)
+                    .resolve_query_vp(parent_font_px, ch, root_font_px, viewport_w, viewport_h, query)
                     .max(0.0);
                 if style.box_sizing == BoxSizing::BorderBox {
                     h = (h - pad_top - pad_bottom - border_top - border_bottom).max(0.0);
@@ -1490,6 +1513,7 @@ pub struct LayoutEngine {
     pub viewport_w: f32,
     /// Logical viewport height (for vh units).
     pub viewport_h: f32,
+    query_container_sizes: Cell<QueryContainerSizes>,
     /// Reference to a font system for accurate measurement.
     pub font_system: Option<*mut cosmic_text::FontSystem>,
     /// Custom component registry for custom tags
@@ -1539,16 +1563,83 @@ pub struct LayoutEngine {
     text_width_cache: std::cell::RefCell<HashMap<u64, f32>>,
 }
 
+pub(crate) struct QueryContainerScope<'a> {
+    cell: &'a Cell<QueryContainerSizes>,
+    previous: QueryContainerSizes,
+}
+
+impl Drop for QueryContainerScope<'_> {
+    fn drop(&mut self) {
+        self.cell.set(self.previous);
+    }
+}
+
 /// Maximum layout recursion depth to prevent stack overflow.
 const MAX_LAYOUT_DEPTH: usize = 400;
 const MAX_TEXT_WIDTH_CACHE_ENTRIES: usize = 65_536;
 
 impl LayoutEngine {
+    pub(crate) fn contained_intrinsic_height(
+        &self,
+        style: &ComputedStyle,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> f32 {
+        if style.contain_intrinsic_height.is_none() || style.contain_intrinsic_height.is_auto() {
+            0.0
+        } else {
+            self.res_len(&style.contain_intrinsic_height, font_px, 0.0, root_font_px).max(0.0)
+        }
+    }
+
+    fn enter_query_writing_mode(&self, style: &ComputedStyle) -> QueryContainerScope<'_> {
+        let previous = self.query_container_sizes.get();
+        let mut current = previous;
+        current.fallback_vertical = style.writing_mode != WritingMode::HorizontalTB;
+        self.query_container_sizes.set(current);
+        QueryContainerScope { cell: &self.query_container_sizes, previous }
+    }
+
+    pub(crate) fn enter_query_container(
+        &self,
+        style: &ComputedStyle,
+        width: f32,
+        height: Option<f32>,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> QueryContainerScope<'_> {
+        let previous = self.query_container_sizes.get();
+        let mut current = previous;
+        let vertical = style.writing_mode != WritingMode::HorizontalTB;
+        let height = height.unwrap_or_else(|| self.contained_intrinsic_height(style, font_px, root_font_px));
+        match style.container_type {
+            ContainerType::Normal => {}
+            ContainerType::InlineSize => {
+                if vertical {
+                    current.height = Some(height);
+                    current.inline = Some(height);
+                } else {
+                    current.width = Some(width);
+                    current.inline = Some(width);
+                }
+            }
+            ContainerType::Size => {
+                current.width = Some(width);
+                current.height = Some(height);
+                current.inline = Some(if vertical { height } else { width });
+                current.block = Some(if vertical { width } else { height });
+            }
+        }
+        self.query_container_sizes.set(current);
+        QueryContainerScope { cell: &self.query_container_sizes, previous }
+    }
+
     pub fn new() -> Self {
         Self {
             root_font_px: crate::types::ComputedStyle::INITIAL_FONT_SIZE_PX,
             viewport_w: 900.0,
             viewport_h: 700.0,
+            query_container_sizes: Cell::new(QueryContainerSizes::default()),
             font_system: None,
             component_registry: ComponentRegistry::default(),
             scale: 1.0,
@@ -1778,7 +1869,7 @@ impl LayoutEngine {
         containing_w: f32,
         root_font_px: f32,
     ) -> ResolvedBox {
-        resolve_box_vp(
+        resolve_box_vp_query(
             style,
             font_px,
             containing_w,
@@ -1786,6 +1877,7 @@ impl LayoutEngine {
             self.viewport_w,
             self.viewport_h,
             None,
+            self.query_container_sizes.get(),
         )
     }
 
@@ -1798,12 +1890,13 @@ impl LayoutEngine {
         containing: f32,
         root_font_px: f32,
     ) -> f32 {
-        len.resolve_vp(
+        len.resolve_query_vp(
             font_px,
             containing,
             root_font_px,
             self.viewport_w,
             self.viewport_h,
+            self.query_container_sizes.get(),
         )
     }
 
@@ -1929,7 +2022,7 @@ impl LayoutEngine {
             if len.is_auto() || len.has_percentage() {
                 return 0.0;
             }
-            len.resolve_vp(font_px, 0.0, root_font_px, self.viewport_w, self.viewport_h)
+            self.res_len(len, font_px, 0.0, root_font_px)
         };
         let h = definite(&node.style.height);
         if h > 0.0 {
@@ -2615,7 +2708,10 @@ impl LayoutEngine {
                         child_main = mw;
                     }
                 }
-                let contribution = if ch.style.is_inline_level() {
+                let contribution = if ch.style.is_inline_level()
+                    && ch.style.width.is_auto()
+                    && inline_subtree_has_non_whitespace_text(ch)
+                {
                     (child_main + child_outer).ceil() + 1.0
                 } else {
                     child_main + child_outer
@@ -2673,7 +2769,10 @@ impl LayoutEngine {
                     min_w + child_outer
                 });
             }
-            if ch.style.is_inline_level() || !matches!(ch.style.float, Float::None) {
+            if (ch.style.is_inline_level() || !matches!(ch.style.float, Float::None))
+                && ch.style.width.is_auto()
+                && inline_subtree_has_non_whitespace_text(ch)
+            {
                 cw = cw.ceil() + 1.0;
             }
             if !matches!(ch.style.float, Float::None) {
@@ -2749,7 +2848,7 @@ impl LayoutEngine {
         if !self.inline_subtree_can_use_item_intrinsic(node, font_px, root_font_px, true) {
             return None;
         }
-        if matches!(node.style.display, Display::InlineBlock)
+        if self.is_atomic_inline_for_intrinsic(node, font_px, root_font_px)
             && (!node.text.is_empty()
                 || !node.style.before_content.is_empty()
                 || !node.style.after_content.is_empty())
@@ -2761,7 +2860,7 @@ impl LayoutEngine {
         let mut runs = Vec::new();
         let mut text_offset = 0usize;
         let mut previous_collapsible_space = false;
-        if matches!(node.style.display, Display::InlineBlock)
+        if self.is_atomic_inline_for_intrinsic(node, font_px, root_font_px)
             || matches!(node.style.position, Position::Absolute | Position::Fixed)
         {
             for (idx, child) in node.effective_children().iter().enumerate() {
@@ -2828,7 +2927,7 @@ impl LayoutEngine {
         if !self.inline_subtree_can_use_item_intrinsic(node, font_px, root_font_px, true) {
             return None;
         }
-        if matches!(node.style.display, Display::InlineBlock)
+        if self.is_atomic_inline_for_intrinsic(node, font_px, root_font_px)
             && (!node.text.is_empty()
                 || !node.style.before_content.is_empty()
                 || !node.style.after_content.is_empty())
@@ -2840,7 +2939,7 @@ impl LayoutEngine {
         let mut runs = Vec::new();
         let mut text_offset = 0usize;
         let mut previous_collapsible_space = false;
-        if matches!(node.style.display, Display::InlineBlock)
+        if self.is_atomic_inline_for_intrinsic(node, font_px, root_font_px)
             || matches!(node.style.position, Position::Absolute | Position::Fixed)
         {
             for (idx, child) in node.effective_children().iter().enumerate() {
@@ -3478,8 +3577,9 @@ impl LayoutEngine {
         // whose conditions match the computed dimensions of container ancestors, then
         // re-layout until dependent container sizes settle.
         if self.cached_has_container_q {
+            let mut applied_rules = std::collections::HashMap::new();
             for _ in 0..4 {
-                let changed = crate::css::apply_container_cascade_tree(
+                let changed = crate::css::apply_container_cascade_tree_with_state(
                     &mut doc.root,
                     &doc.stylesheet,
                     &[],
@@ -3493,6 +3593,7 @@ impl LayoutEngine {
                     self.viewport_h,
                     doc.focused_box,
                     doc.keyboard_focus,
+                    &mut applied_rules,
                 );
                 if !changed {
                     break;
@@ -3779,6 +3880,7 @@ impl LayoutEngine {
         }
 
         self.layout_depth.set(depth + 1);
+        let _query_writing_mode_scope = self.enter_query_writing_mode(&node.style);
 
         perf::record_layout_call();
         perf::record_depth(depth as u32);
@@ -3797,13 +3899,7 @@ impl LayoutEngine {
         let (intrinsic_w_override, intrinsic_h_override) = if has_intrinsic {
             if node.style.width.is_auto() && !node.style.height.is_auto() {
                 let containing_h = c.forced_height.or(c.available_height).unwrap_or(0.0);
-                let mut h = node.style.height.resolve_vp(
-                    font_px,
-                    containing_h,
-                    root_font_px,
-                    self.viewport_w,
-                    self.viewport_h,
-                );
+                let mut h = self.res_len(&node.style.height, font_px, containing_h, root_font_px);
                 let h_override = if h <= 0.0 && node.style.height.has_percentage() && ih > 0.0 {
                     h = ih;
                     Some(ih)
@@ -3813,20 +3909,8 @@ impl LayoutEngine {
                 let w = if ih > 0.0 { (h * iw / ih).round() } else { iw };
                 (Some(w), h_override)
             } else if node.style.height.is_auto() && !node.style.width.is_auto() {
-                let mut w = node.style.width.resolve_vp(
-                    font_px,
-                    containing_w,
-                    root_font_px,
-                    self.viewport_w,
-                    self.viewport_h,
-                );
-                let max_w = node.style.max_width.resolve_vp(
-                    font_px,
-                    containing_w,
-                    root_font_px,
-                    self.viewport_w,
-                    self.viewport_h,
-                );
+                let mut w = self.res_len(&node.style.width, font_px, containing_w, root_font_px);
+                let max_w = self.res_len(&node.style.max_width, font_px, containing_w, root_font_px);
                 if max_w > 0.0 && w > max_w {
                     w = max_w;
                 }
@@ -3844,24 +3928,12 @@ impl LayoutEngine {
                 } else {
                     (iw, ih)
                 };
-                let max_w = node.style.max_width.resolve_vp(
-                    font_px,
-                    containing_w,
-                    root_font_px,
-                    self.viewport_w,
-                    self.viewport_h,
-                );
+                let max_w = self.res_len(&node.style.max_width, font_px, containing_w, root_font_px);
                 if max_w > 0.0 && w > max_w {
                     h = (max_w * ih / iw).round();
                     w = max_w;
                 }
-                let max_h = node.style.max_height.resolve_vp(
-                    font_px,
-                    0.0,
-                    root_font_px,
-                    self.viewport_w,
-                    self.viewport_h,
-                );
+                let max_h = self.res_len(&node.style.max_height, font_px, 0.0, root_font_px);
                 if max_h > 0.0 && h > max_h {
                     w = (max_h * iw / ih).round();
                     h = max_h;
@@ -3874,7 +3946,7 @@ impl LayoutEngine {
             (None, None)
         };
 
-        let mut rbox = resolve_box_vp(
+        let mut rbox = resolve_box_vp_query(
             &node.style,
             font_px,
             containing_w,
@@ -3882,22 +3954,13 @@ impl LayoutEngine {
             self.viewport_w,
             self.viewport_h,
             c.available_height,
+            self.query_container_sizes.get(),
         );
         if node.style.display == Display::Inline
             && has_block_children(node)
             && !node.style.width.is_auto()
         {
-            let mut w = node
-                .style
-                .width
-                .resolve_vp(
-                    font_px,
-                    containing_w,
-                    root_font_px,
-                    self.viewport_w,
-                    self.viewport_h,
-                )
-                .max(0.0);
+            let mut w = self.res_len(&node.style.width, font_px, containing_w, root_font_px).max(0.0);
             if node.style.box_sizing == BoxSizing::BorderBox {
                 w = (w
                     - rbox.padding_left
@@ -3910,17 +3973,7 @@ impl LayoutEngine {
         }
         if node.style.display == Display::Inline && is_inline_replaced_or_native_control(node) {
             if !node.style.width.is_auto() {
-                let mut w = node
-                    .style
-                    .width
-                    .resolve_vp(
-                        font_px,
-                        containing_w,
-                        root_font_px,
-                        self.viewport_w,
-                        self.viewport_h,
-                    )
-                    .max(0.0);
+                let mut w = self.res_len(&node.style.width, font_px, containing_w, root_font_px).max(0.0);
                 if node.style.box_sizing == BoxSizing::BorderBox {
                     w = (w
                         - rbox.padding_left
@@ -3933,17 +3986,7 @@ impl LayoutEngine {
             }
             if !node.style.height.is_auto() {
                 let basis_h = c.forced_height.or(c.available_height).unwrap_or(0.0);
-                let mut h = node
-                    .style
-                    .height
-                    .resolve_vp(
-                        font_px,
-                        basis_h,
-                        root_font_px,
-                        self.viewport_w,
-                        self.viewport_h,
-                    )
-                    .max(0.0);
+                let mut h = self.res_len(&node.style.height, font_px, basis_h, root_font_px).max(0.0);
                 if node.style.box_sizing == BoxSizing::BorderBox {
                     h = (h
                         - rbox.padding_top
@@ -4707,7 +4750,7 @@ pub fn layout_positioned_static(
     // constrained by having both left and right set.
     if constrained_w.is_none() && node.style.width.is_auto() {
         let intrinsic_w = engine.max_content_width(node, font_px, root_font_px);
-        if intrinsic_w > 0.0 && intrinsic_w < layout_w {
+        if intrinsic_w < layout_w {
             let shrink_w = intrinsic_w
                 + node.layout.resolved_pad_left
                 + node.layout.resolved_pad_right

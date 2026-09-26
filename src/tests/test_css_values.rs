@@ -1,7 +1,7 @@
 //! Tests for CSS value AST: min(), max(), clamp(), calc() with proper resolution.
 
 use crate::css::{parse_color, parse_length};
-use crate::types::{BorderStyle, Color, CssLength, Display};
+use crate::types::{BorderStyle, Color, CssLength, Display, QueryContainerSizes};
 
 fn resolve(val: &CssLength, containing: f32, vw: f32) -> f32 {
     val.resolve_vp(16.0, containing, 16.0, vw, 600.0)
@@ -36,17 +36,54 @@ fn parse_vw() {
 
 #[test]
 fn container_query_units_parse_to_axis_lengths() {
-    assert_eq!(parse_length("5cqw"), CssLength::Cqi(5.0));
+    assert_eq!(parse_length("5cqw"), CssLength::Cqw(5.0));
     assert_eq!(parse_length("5cqi"), CssLength::Cqi(5.0));
-    assert_eq!(parse_length("5cqh"), CssLength::Vh(5.0));
-    assert_eq!(parse_length("5cqb"), CssLength::Vh(5.0));
-    assert_eq!(parse_length("5cqmin"), CssLength::Vmin(5.0));
-    assert_eq!(parse_length("5cqmax"), CssLength::Vmax(5.0));
+    assert_eq!(parse_length("5cqh"), CssLength::Cqh(5.0));
+    assert_eq!(parse_length("5cqb"), CssLength::Cqb(5.0));
+    assert_eq!(parse_length("5cqmin"), CssLength::Cqmin(5.0));
+    assert_eq!(parse_length("5cqmax"), CssLength::Cqmax(5.0));
 }
 
 #[test]
-fn container_inline_unit_uses_containing_size_not_viewport() {
-    assert!((resolve(&parse_length("143cqi"), 325.0, 1366.0) - 464.75).abs() < 0.01);
+fn container_units_use_viewport_without_an_eligible_container() {
+    assert!((resolve(&parse_length("143cqi"), 325.0, 1366.0) - 1953.38).abs() < 0.01);
+    assert!((resolve(&parse_length("10cqb"), 325.0, 1366.0) - 60.0).abs() < 0.01);
+}
+
+#[test]
+fn container_units_resolve_their_distinct_axes() {
+    let query = QueryContainerSizes {
+        width: Some(400.0),
+        height: Some(300.0),
+        inline: Some(300.0),
+        block: Some(400.0),
+        fallback_vertical: false,
+    };
+    for (unit, expected) in [
+        ("10cqw", 40.0),
+        ("10cqh", 30.0),
+        ("10cqi", 30.0),
+        ("10cqb", 40.0),
+        ("10cqmin", 30.0),
+        ("10cqmax", 40.0),
+        ("calc(5cqw + 5cqh)", 35.0),
+    ] {
+        let actual = parse_length(unit).resolve_query_vp(16.0, 0.0, 16.0, 800.0, 600.0, query);
+        assert!((actual - expected).abs() < 0.01, "{unit}: {actual} != {expected}");
+    }
+}
+
+#[test]
+fn logical_container_units_fall_back_to_vertical_viewport_axes() {
+    let query = QueryContainerSizes {
+        fallback_vertical: true,
+        ..Default::default()
+    };
+    let resolve = |value| parse_length(value).resolve_query_vp(16.0, 0.0, 16.0, 800.0, 600.0, query);
+    assert_eq!(resolve("10cqi"), 60.0);
+    assert_eq!(resolve("10cqb"), 80.0);
+    assert_eq!(resolve("10cqw"), 80.0);
+    assert_eq!(resolve("10cqh"), 60.0);
 }
 
 #[test]

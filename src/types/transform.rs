@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 // ─── CSS Transform ────────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct CssTransform {
     pub ops: Vec<TransformOp>,
 }
@@ -35,7 +35,7 @@ impl Default for TransformCtx {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TransformOp {
     // ⛔ LENGTHS, not resolved pixels. A `translate()` argument is a
     // `<length-percentage>`, and its percentage refers to the REFERENCE BOX

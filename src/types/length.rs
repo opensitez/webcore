@@ -28,9 +28,13 @@ pub enum CssLength {
     Vmin(f32),
     /// `vmax` — 1% of the LARGER viewport axis.
     Vmax(f32),
-    /// Percentage of the query container's inline size. Layout supplies the
-    /// containing inline size for directly contained query descendants.
+    /// Query-container units retain their axis until layout selects an eligible ancestor.
+    Cqw(f32),
+    Cqh(f32),
     Cqi(f32),
+    Cqb(f32),
+    Cqmin(f32),
+    Cqmax(f32),
     // ── The four rare variants below are BOXED, and the reason is size ──
     // `CssLength` appears 53 times in `ComputedStyle`, so its width dominates:
     // an inline `Calc([f32; 6])` (24 bytes) or a three-Box `Clamp` (24 bytes)
@@ -73,6 +77,15 @@ pub enum CssLength {
     None,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct QueryContainerSizes {
+    pub width: Option<f32>,
+    pub height: Option<f32>,
+    pub inline: Option<f32>,
+    pub block: Option<f32>,
+    pub fallback_vertical: bool,
+}
+
 /// Expression node for calc() with nested min/max/clamp.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CalcNode {
@@ -92,22 +105,44 @@ impl CalcNode {
         vw: f32,
         vh: f32,
     ) -> f32 {
+        self.resolve_query_vp(
+            parent_font_px,
+            containing_px,
+            root_font_px,
+            vw,
+            vh,
+            QueryContainerSizes::default(),
+        )
+    }
+
+    pub fn resolve_query_vp(
+        &self,
+        parent_font_px: f32,
+        containing_px: f32,
+        root_font_px: f32,
+        vw: f32,
+        vh: f32,
+        query: QueryContainerSizes,
+    ) -> f32 {
         match self {
-            CalcNode::Value(v) => v.resolve_vp(parent_font_px, containing_px, root_font_px, vw, vh),
+            CalcNode::Value(v) => {
+                v.resolve_query_vp(parent_font_px, containing_px, root_font_px, vw, vh, query)
+            }
             CalcNode::Add(a, b) => {
-                a.resolve_vp(parent_font_px, containing_px, root_font_px, vw, vh)
-                    + b.resolve_vp(parent_font_px, containing_px, root_font_px, vw, vh)
+                a.resolve_query_vp(parent_font_px, containing_px, root_font_px, vw, vh, query)
+                    + b.resolve_query_vp(parent_font_px, containing_px, root_font_px, vw, vh, query)
             }
             CalcNode::Sub(a, b) => {
-                a.resolve_vp(parent_font_px, containing_px, root_font_px, vw, vh)
-                    - b.resolve_vp(parent_font_px, containing_px, root_font_px, vw, vh)
+                a.resolve_query_vp(parent_font_px, containing_px, root_font_px, vw, vh, query)
+                    - b.resolve_query_vp(parent_font_px, containing_px, root_font_px, vw, vh, query)
             }
             CalcNode::Mul(a, f) => {
-                a.resolve_vp(parent_font_px, containing_px, root_font_px, vw, vh) * f
+                a.resolve_query_vp(parent_font_px, containing_px, root_font_px, vw, vh, query) * f
             }
             CalcNode::Div(a, f) => {
                 if *f != 0.0 {
-                    a.resolve_vp(parent_font_px, containing_px, root_font_px, vw, vh) / f
+                    a.resolve_query_vp(parent_font_px, containing_px, root_font_px, vw, vh, query)
+                        / f
                 } else {
                     0.0
                 }
@@ -144,6 +179,25 @@ impl CssLength {
         viewport_w: f32,
         viewport_h: f32,
     ) -> f32 {
+        self.resolve_query_vp(
+            parent_font_px,
+            containing_px,
+            root_font_px,
+            viewport_w,
+            viewport_h,
+            QueryContainerSizes::default(),
+        )
+    }
+
+    pub fn resolve_query_vp(
+        &self,
+        parent_font_px: f32,
+        containing_px: f32,
+        root_font_px: f32,
+        viewport_w: f32,
+        viewport_h: f32,
+        query: QueryContainerSizes,
+    ) -> f32 {
         match self {
             CssLength::Px(v) => *v,
             CssLength::Em(v) => v * parent_font_px,
@@ -153,7 +207,20 @@ impl CssLength {
             CssLength::Vh(v) => v / 100.0 * viewport_h,
             CssLength::Vmin(v) => v / 100.0 * viewport_w.min(viewport_h),
             CssLength::Vmax(v) => v / 100.0 * viewport_w.max(viewport_h),
-            CssLength::Cqi(v) => v / 100.0 * containing_px,
+            CssLength::Cqw(v) => v / 100.0 * query.width.unwrap_or(viewport_w),
+            CssLength::Cqh(v) => v / 100.0 * query.height.unwrap_or(viewport_h),
+            CssLength::Cqi(v) => v / 100.0 * query.inline.unwrap_or(if query.fallback_vertical { viewport_h } else { viewport_w }),
+            CssLength::Cqb(v) => v / 100.0 * query.block.unwrap_or(if query.fallback_vertical { viewport_w } else { viewport_h }),
+            CssLength::Cqmin(v) => {
+                let inline = query.inline.unwrap_or(if query.fallback_vertical { viewport_h } else { viewport_w });
+                let block = query.block.unwrap_or(if query.fallback_vertical { viewport_w } else { viewport_h });
+                v / 100.0 * inline.min(block)
+            }
+            CssLength::Cqmax(v) => {
+                let inline = query.inline.unwrap_or(if query.fallback_vertical { viewport_h } else { viewport_w });
+                let block = query.block.unwrap_or(if query.fallback_vertical { viewport_w } else { viewport_h });
+                v / 100.0 * inline.max(block)
+            }
             CssLength::Calc(c) => {
                 c[0] / 100.0 * containing_px
                     + c[1]
@@ -162,59 +229,65 @@ impl CssLength {
                     + c[4] / 100.0 * viewport_w
                     + c[5] / 100.0 * viewport_h
             }
-            CssLength::CalcExpr(node) => node.resolve_vp(
+            CssLength::CalcExpr(node) => node.resolve_query_vp(
                 parent_font_px,
                 containing_px,
                 root_font_px,
                 viewport_w,
                 viewport_h,
+                query,
             ),
             CssLength::Min(vals) => vals
                 .iter()
                 .map(|v| {
-                    v.resolve_vp(
+                    v.resolve_query_vp(
                         parent_font_px,
                         containing_px,
                         root_font_px,
                         viewport_w,
                         viewport_h,
+                        query,
                     )
                 })
                 .fold(f32::INFINITY, f32::min),
             CssLength::Max(vals) => vals
                 .iter()
                 .map(|v| {
-                    v.resolve_vp(
+                    v.resolve_query_vp(
                         parent_font_px,
                         containing_px,
                         root_font_px,
                         viewport_w,
                         viewport_h,
+                        query,
                     )
                 })
                 .fold(f32::NEG_INFINITY, f32::max),
             CssLength::Clamp(parts) => {
                 let (min, val, max) = (&parts[0], &parts[1], &parts[2]);
-                let min_v = min.resolve_vp(
+                let min_v = min.resolve_query_vp(
                     parent_font_px,
                     containing_px,
                     root_font_px,
                     viewport_w,
                     viewport_h,
+                    query,
                 );
-                let val_v = val.resolve_vp(
+                let val_v = val.resolve_query_vp(
                     parent_font_px,
                     containing_px,
                     root_font_px,
                     viewport_w,
                     viewport_h,
+                    query,
                 );
-                let max_v = max.resolve_vp(
+                let max_v = max.resolve_query_vp(
                     parent_font_px,
                     containing_px,
                     root_font_px,
                     viewport_w,
                     viewport_h,
+                    query,
                 );
                 val_v.max(min_v).min(max_v)
             }

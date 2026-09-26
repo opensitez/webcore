@@ -116,6 +116,7 @@ impl Document {
             live_region_snapshots: HashMap::new(),
             live_regions_initialized: false,
             layout_generation: 0,
+            scroll_height_cache: std::cell::Cell::new(None),
             pending_images: None,
             image_load_errors: Vec::new(),
             images_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -885,6 +886,26 @@ impl Document {
         let mut max_bottom = 0.0;
         walk_scroll(root, &mut max_bottom, true, false);
         max_bottom
+    }
+
+    pub fn cached_scroll_height(&self) -> f32 {
+        if !self.style_dirty
+            && !self.root.layout.layout_dirty
+            && !self.root.has_dirty_layout_descendant
+            && let Some((generation, height)) = self.scroll_height_cache.get()
+            && generation == self.layout_generation
+        {
+            return height;
+        }
+        let height = Self::scroll_height(&self.root);
+        if !self.style_dirty
+            && !self.root.layout.layout_dirty
+            && !self.root.has_dirty_layout_descendant
+        {
+            self.scroll_height_cache
+                .set(Some((self.layout_generation, height)));
+        }
+        height
     }
 
     pub fn viewport_y_scroll_locked(&self) -> bool {

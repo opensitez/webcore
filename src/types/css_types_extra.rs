@@ -344,7 +344,7 @@ impl Default for ContainerType {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClipPath {
     pub kind: ClipPathKind,
     // inset(top right bottom left)

@@ -190,7 +190,7 @@ fn rect_intersects(a: Rect, b: Rect) -> bool {
 }
 
 fn retained_paint_band_for_doc(doc: &Document, viewport_w: f32, viewport_h: f32) -> Rect {
-    let doc_h = Document::scroll_height(&doc.root).max(viewport_h);
+    let doc_h = doc.cached_scroll_height().max(viewport_h);
     let overscan = (viewport_h * 8.0).max(6000.0);
     let top = (doc.scroll_y - overscan).max(0.0);
     let bottom = (doc.scroll_y + viewport_h + overscan).min(doc_h);
@@ -354,6 +354,9 @@ fn animation_transform_matrices(
     viewport_w: f32,
     viewport_h: f32,
 ) -> std::collections::HashMap<u32, [f32; 6]> {
+    if overrides.is_empty() {
+        return std::collections::HashMap::new();
+    }
     fn walk(
         node: &WebCore,
         overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
@@ -453,7 +456,8 @@ impl Renderer {
 
     pub fn invalidate_display_list(&mut self) {
         self.display_list_dirty = true;
-        self.paint_segments = None;
+        // Keep the old segments until the rebuilt list can identify which
+        // raster layers are unchanged. Changed layers are discarded there.
         self.paint_only_display_list_dirty = false;
         self.cached_paint_top = 0.0;
         self.cached_paint_bottom = 0.0;
@@ -894,7 +898,18 @@ impl Renderer {
             .as_ref()
             .map(|surface| surface.data().len())
             .unwrap_or(0);
-        let cached_surface_bytes = 0;
+        let cached_surface_bytes = self
+            .paint_segments
+            .as_ref()
+            .map(|segments| {
+                segments
+                    .segments
+                    .iter()
+                    .filter_map(|segment| segment.fixed_surface.as_ref())
+                    .map(|(surface, _)| surface.data().len())
+                    .sum()
+            })
+            .unwrap_or(0);
         let mut tile_surface_bytes: usize = self
             .tile_manager
             .tiles
@@ -1390,7 +1405,7 @@ impl Renderer {
         let view_w = w / zoom;
         let view_h = h / zoom;
         self.viewport_h = view_h;
-        let doc_h = crate::types::Document::scroll_height(&doc.root);
+        let doc_h = doc.cached_scroll_height();
         let doc_w = doc.root.layout.margin_rect.w;
         doc.scroll_y = doc.scroll_y.max(0.0).min((doc_h - view_h).max(0.0));
         doc.scroll_x = doc.scroll_x.max(0.0).min((doc_w - view_w).max(0.0));
@@ -1402,12 +1417,15 @@ impl Renderer {
         let editor_overlay_active =
             doc.editor.has_focus && (doc.editor.caret_box.is_some() || doc.editor.has_selection());
         let viewport = Rect::new(doc.scroll_x, doc.scroll_y, view_w, view_h);
-        let visible_animation_ids =
+        let visible_animation_ids = if doc.animation_overrides.is_empty() {
+            std::collections::HashSet::new()
+        } else {
             animation_override_rects_with_ids(&doc.root, &doc.animation_overrides)
                 .into_iter()
                 .filter(|(_, rect)| rect_intersects(*rect, viewport))
                 .map(|(id, _)| id)
-                .collect::<std::collections::HashSet<_>>();
+                .collect::<std::collections::HashSet<_>>()
+        };
         let visible_transform_only_animation = animation_overrides_are_transform_only_for_ids(
             &doc.animation_overrides,
             &visible_animation_ids,
@@ -1566,9 +1584,28 @@ impl Renderer {
             if !animation_restore.is_empty() {
                 crate::css::restore_animation_overrides(&mut doc.root, animation_restore);
             }
-            self.paint_segments = self.use_tiles.then(|| {
+            let mut paint_segments = self.use_tiles.then(|| {
                 compositor::PaintSegments::from_display_list(&list, view_w, doc_h)
             }).flatten();
+            let previous_segment_count = self
+                .paint_segments
+                .as_ref()
+                .map_or(0, |segments| segments.segments.len());
+            let mut retained_segment_count = 0;
+            if let (Some(new), Some(previous)) =
+                (&mut paint_segments, self.paint_segments.take())
+            {
+                retained_segment_count = new.retain_unchanged_rasters(previous);
+            }
+            if trace_render {
+                eprintln!(
+                    "[webcore render] paint_segments previous={} current={} retained={}",
+                    previous_segment_count,
+                    paint_segments.as_ref().map_or(0, |segments| segments.segments.len()),
+                    retained_segment_count,
+                );
+            }
+            self.paint_segments = paint_segments;
             self.cached_display_list = Some(list);
             self.cached_paint_top = paint_top;
             self.cached_paint_bottom = paint_bottom;
@@ -1663,7 +1700,7 @@ impl Renderer {
                 }
             }
         }
-        if dirty_paint_only {
+        if dirty_paint_only && !used_dirty_surface {
             if let (Some(surface), Some(list)) = (
                 self.cached_content_surface.as_ref(),
                 self.cached_display_list.as_ref(),
@@ -1875,27 +1912,80 @@ impl Renderer {
                         if segment.fixed {
                             let fixed_start =
                                 crate::profile::is_enabled().then(std::time::Instant::now);
-                            if animation_transform_overrides.is_empty() {
-                                display_list_replay::replay_commands_with_scroll(
-                                    &segment.list.commands,
-                                    pixmap,
-                                    tile_scale,
-                                    &mut self.font_system,
-                                    &mut self.swash_cache,
-                                    0.0,
-                                    0.0,
-                                );
+                            // Backdrop effects need the real destination; other fixed
+                            // segments can be composited from a retained viewport layer.
+                            if !animation_transform_overrides.is_empty()
+                                || segment.backdrop_dependent
+                            {
+                                segment.fixed_surface = None;
+                                if animation_transform_overrides.is_empty() {
+                                    display_list_replay::replay_commands_with_scroll(
+                                        &segment.list.commands,
+                                        pixmap,
+                                        tile_scale,
+                                        &mut self.font_system,
+                                        &mut self.swash_cache,
+                                        0.0,
+                                        0.0,
+                                    );
+                                } else {
+                                    display_list_replay::replay_commands_with_scroll_and_transform_overrides(
+                                        &segment.list.commands,
+                                        pixmap,
+                                        tile_scale,
+                                        &mut self.font_system,
+                                        &mut self.swash_cache,
+                                        0.0,
+                                        0.0,
+                                        &animation_transform_overrides,
+                                    );
+                                }
                             } else {
-                                display_list_replay::replay_commands_with_scroll_and_transform_overrides(
-                                    &segment.list.commands,
-                                    pixmap,
-                                    tile_scale,
-                                    &mut self.font_system,
-                                    &mut self.swash_cache,
-                                    0.0,
-                                    0.0,
-                                    &animation_transform_overrides,
+                                let cache_matches = segment.fixed_surface.as_ref().is_some_and(
+                                    |(surface, cached_scale)| {
+                                        surface.width() == pixmap.width()
+                                            && surface.height() == pixmap.height()
+                                            && (cached_scale - tile_scale).abs() < 0.001
+                                    },
                                 );
+                                if !cache_matches {
+                                    segment.fixed_surface = None;
+                                    if let Some(mut surface) =
+                                        Pixmap::new(pixmap.width(), pixmap.height())
+                                    {
+                                        surface.fill(tiny_skia::Color::TRANSPARENT);
+                                        display_list_replay::replay_commands_with_scroll(
+                                            &segment.list.commands,
+                                            &mut surface,
+                                            tile_scale,
+                                            &mut self.font_system,
+                                            &mut self.swash_cache,
+                                            0.0,
+                                            0.0,
+                                        );
+                                        segment.fixed_surface = Some((surface, tile_scale));
+                                    }
+                                }
+                                if let Some((surface, _)) = &segment.fixed_surface {
+                                    pixmap.draw_pixmap(
+                                        0,
+                                        0,
+                                        surface.as_ref(),
+                                        &tiny_skia::PixmapPaint::default(),
+                                        Transform::identity(),
+                                        None,
+                                    );
+                                } else {
+                                    display_list_replay::replay_commands_with_scroll(
+                                        &segment.list.commands,
+                                        pixmap,
+                                        tile_scale,
+                                        &mut self.font_system,
+                                        &mut self.swash_cache,
+                                        0.0,
+                                        0.0,
+                                    );
+                                }
                             }
                             if let Some(started) = fixed_start {
                                 crate::profile::record(

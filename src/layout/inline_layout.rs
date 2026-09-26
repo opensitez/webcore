@@ -135,6 +135,13 @@ pub fn layout_inline_block(
         }
     };
     let content_w = raw_w.max(min_w).min(max_w);
+    let _query_container_scope = engine.enter_query_container(
+        &node.style,
+        content_w,
+        rbox.content_height,
+        font_px,
+        root_font_px,
+    );
 
     // Auto margin centering (CSS 2.1 §10.3.3)
     // Applies only to block-level non-replaced elements in normal flow.
@@ -1475,6 +1482,14 @@ pub fn layout_inline_block(
                 let rb = engine.res_box(&target.style, child_font_px, 0.0, root_font_px);
                 target.layout.content_rect = rect;
                 target.layout.inline_client_rects = rects;
+                target.layout.resolved_pad_top = rb.padding_top;
+                target.layout.resolved_pad_right = rb.padding_right;
+                target.layout.resolved_pad_bottom = rb.padding_bottom;
+                target.layout.resolved_pad_left = rb.padding_left;
+                target.layout.resolved_border_top = rb.border_top;
+                target.layout.resolved_border_right = rb.border_right;
+                target.layout.resolved_border_bottom = rb.border_bottom;
+                target.layout.resolved_border_left = rb.border_left;
                 target.layout.padding_rect = Rect::new(
                     rect.x - rb.padding_left,
                     rect.y - rb.padding_top,
@@ -1616,6 +1631,7 @@ fn reset_empty_inline_flow_box(
 fn is_empty_inline_flow_box(node: &WebCore) -> bool {
     node.style.display == Display::Inline
         && !node.is_text_node()
+        && !is_atomic_inline_replaced(node)
         && node.tag != "br"
         && node.text.trim().is_empty()
         && node.children.iter().all(|child| {
@@ -2069,7 +2085,9 @@ fn collect_items_inner(
     // Absolutely/fixed positioned elements are out of flow, but an inline
     // formatting context still establishes their static position when all
     // inset offsets are auto. Keep a zero-width marker at the insertion point.
-    if matches!(node.style.position, Position::Absolute | Position::Fixed) {
+    if !node.is_text_node()
+        && matches!(node.style.position, Position::Absolute | Position::Fixed)
+    {
         items.push(InlineItem {
             kind: InlineItemKind::OutOfFlow { path: current_path },
             advance: 0.0,
@@ -2083,7 +2101,7 @@ fn collect_items_inner(
     }
 
     // ── Float ─────────────────────────────────────────────────────────────
-    if !matches!(node.style.float, crate::types::Float::None) {
+    if !node.is_text_node() && !matches!(node.style.float, crate::types::Float::None) {
         items.push(InlineItem {
             kind: InlineItemKind::Float { path: current_path },
             advance: 0.0,

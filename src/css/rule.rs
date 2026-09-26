@@ -182,9 +182,11 @@ pub struct CssRule {
     /// declaration beat every layered one. Kept on the rule so the cascade's
     /// sort is a field read rather than a name lookup per comparison.
     pub layer_rank: u32,
-    pub media_condition: String,             // non-empty if inside @media
-    pub container_condition: String,         // non-empty if inside @container
-    pub container_name: String,              // optional container name (empty = unnamed)
+    pub media_condition: String,     // non-empty if inside @media
+    pub container_condition: String, // non-empty if inside @container
+    /// Headers nested inside `container_condition`, from outermost to innermost.
+    pub nested_container_conditions: Vec<String>,
+    pub container_name: String, // optional container name (empty = unnamed)
     pub scope_selector: Option<CssSelector>, // @scope root selector, when present
     pub scope_limit_selector: Option<CssSelector>, // @scope limit selector from `to (...)`
     pub scopes: Vec<ScopeFrame>,             // Nested scope frames, from outermost to innermost
@@ -219,6 +221,7 @@ impl Default for CssRule {
             specificity: 0,
             media_condition: String::new(),
             container_condition: String::new(),
+            nested_container_conditions: Vec::new(),
             container_name: String::new(),
             scope_selector: None,
             scope_limit_selector: None,

@@ -101,6 +101,7 @@ pub fn layout_grid_subgrid(
     font_px: f32,
     root_font_px: f32,
 ) -> f32 {
+    let track_lengths = GridTrackLengthContext::from_engine(engine);
     let content_x = x + rbox.margin_left + rbox.border_left + rbox.padding_left;
     let content_y = y + rbox.margin_top + rbox.border_top + rbox.padding_top;
 
@@ -125,6 +126,7 @@ pub fn layout_grid_subgrid(
             cw,
             font_px,
             root_font_px,
+            track_lengths,
         );
         let gap = engine.res_len(&node.style.column_gap, font_px, cw, root_font_px);
         let n = tracks.len().max(1);
@@ -139,6 +141,7 @@ pub fn layout_grid_subgrid(
             root_font_px,
             &dummy_widths,
             &dummy_widths,
+            track_lengths,
         );
         let x_offsets: Vec<f32> = {
             let mut xs = Vec::with_capacity(px.len());
@@ -154,6 +157,13 @@ pub fn layout_grid_subgrid(
 
     let content_w: f32 =
         col_px.iter().sum::<f32>() + col_gap * col_px.len().saturating_sub(1) as f32;
+    let _query_container_scope = engine.enter_query_container(
+        &node.style,
+        content_w,
+        rbox.content_height,
+        font_px,
+        root_font_px,
+    );
     let n_cols = col_px.len().max(1);
     // --- Collect visible items ---
     let mut item_indices: Vec<Vec<usize>> = collect_grid_children(node)
@@ -350,7 +360,7 @@ pub fn layout_grid_subgrid(
         // Apply explicit row track sizes
         for (ri, track) in node.style.rare().grid_template_rows.iter().enumerate() {
             if ri < heights.len() {
-                let px = track_to_px(track, content_w, font_px, root_font_px);
+                let px = track_to_px_with_context(track, content_w, font_px, root_font_px, track_lengths);
                 if px > 0.0 && px > heights[ri] {
                     heights[ri] = px;
                 }
@@ -470,7 +480,7 @@ pub fn layout_grid_subgrid(
             row_y: &row_y_local, row_h: &row_heights,
         }),
     );
-    finish_grid(node, rbox, content_x, content_y, content_w, ch)
+    finish_grid(engine, node, rbox, content_x, content_y, content_w, ch, font_px, root_font_px)
 }
 
 /// CSS Grid layout.
@@ -482,6 +492,7 @@ pub fn layout_grid(
     rbox: &ResolvedBox,
     c: &Constraints,
 ) -> f32 {
+    let track_lengths = GridTrackLengthContext::from_engine(engine);
     unwrap_all_anonymous_blocks(node);
 
     let containing_w = c.available_width;
@@ -502,6 +513,36 @@ pub fn layout_grid(
         content_w =
             engine.intrinsic_width(&kind, node, content_w, font_px, root_font_px, containing_w);
     }
+    let mut resolved_box = *rbox;
+    resolved_box.content_width = Some(content_w);
+    engine.clamp_resolved_content_width(
+        &mut resolved_box, node, containing_w, font_px, root_font_px,
+    );
+    content_w = resolved_box.content_width.unwrap();
+    if node.style.display == Display::Grid
+        && matches!(node.style.float, Float::None)
+        && !c.force_independent_formatting_context
+        && c.forced_width.is_none()
+    {
+        let left_auto = node.style.margin_left.is_auto();
+        let right_auto = node.style.margin_right.is_auto();
+        if left_auto || right_auto {
+            let border_w = content_w + rbox.padding_left + rbox.padding_right
+                + rbox.border_left + rbox.border_right;
+            let free = (containing_w - border_w
+                - if left_auto { 0.0 } else { rbox.margin_left }
+                - if right_auto { 0.0 } else { rbox.margin_right }).max(0.0);
+            if left_auto && right_auto {
+                resolved_box.margin_left = free / 2.0;
+                resolved_box.margin_right = free / 2.0;
+            } else if left_auto {
+                resolved_box.margin_left = free;
+            } else {
+                resolved_box.margin_right = free;
+            }
+        }
+    }
+    let rbox = &resolved_box;
     let content_x = x + rbox.margin_left + rbox.border_left + rbox.padding_left;
     let content_y = y + rbox.margin_top + rbox.border_top + rbox.padding_top;
 
@@ -518,8 +559,16 @@ pub fn layout_grid(
         font_px,
         root_font_px,
         col_gap_for_count,
+        track_lengths,
     );
     let row_tracks = node.style.rare().grid_template_rows.clone();
+    let _query_container_scope = engine.enter_query_container(
+        &node.style,
+        content_w,
+        rbox.content_height,
+        font_px,
+        root_font_px,
+    );
 
     // Collect visible items (non-abs-positioned)
     // CSS Grid §4: whitespace-only anonymous grid items are not rendered
@@ -562,7 +611,7 @@ pub fn layout_grid(
     if n_items == 0 {
         let ch = rbox.content_height.unwrap_or(0.0);
         node.layout.layout_dirty = false;
-        let result = finish_grid(node, rbox, content_x, content_y, content_w, ch);
+        let result = finish_grid(engine, node, rbox, content_x, content_y, content_w, ch, font_px, root_font_px);
         layout_abs_children(engine, node, font_px, root_font_px, None);
         return result;
     }
@@ -946,7 +995,7 @@ pub fn layout_grid(
     if n_rows == 0 {
         let ch = rbox.content_height.unwrap_or(0.0);
         node.layout.layout_dirty = false;
-        let result = finish_grid(node, rbox, content_x, content_y, content_w, ch);
+        let result = finish_grid(engine, node, rbox, content_x, content_y, content_w, ch, font_px, root_font_px);
         layout_abs_children(engine, node, font_px, root_font_px, None);
         return result;
     }
@@ -1073,6 +1122,7 @@ pub fn layout_grid(
         root_font_px,
         &col_content_widths,
         &col_min_widths,
+        track_lengths,
     );
     let n_cols_actual = col_px.len();
     // justify-content: compute extra horizontal space distribution
@@ -1270,7 +1320,7 @@ pub fn layout_grid(
         if ri < row_heights.len() {
             match track.kind {
                 GridTrackKind::MinMax => {
-                    let min_h = track_to_px(
+                    let min_h = track_to_px_with_context(
                         &grid_track_component(
                             track.min_kind,
                             track.min_value,
@@ -1279,8 +1329,9 @@ pub fn layout_grid(
                         row_pct_basis,
                         font_px,
                         root_font_px,
+                        track_lengths,
                     );
-                    let max_h = track_to_px(
+                    let max_h = track_to_px_with_context(
                         &grid_track_component(
                             track.max_kind,
                             track.max_value,
@@ -1289,6 +1340,7 @@ pub fn layout_grid(
                         row_pct_basis,
                         font_px,
                         root_font_px,
+                        track_lengths,
                     );
                     let mut h = row_heights[ri].max(min_h);
                     if max_h > 0.0 {
@@ -1306,7 +1358,7 @@ pub fn layout_grid(
                 // below FORCED a 50px row to `fit-content(200px)`.
                 GridTrackKind::FitContent => {}
                 _ => {
-                    let px = track_to_px(track, row_pct_basis, font_px, root_font_px);
+                    let px = track_to_px_with_context(track, row_pct_basis, font_px, root_font_px, track_lengths);
                     if px > 0.0 {
                         // Fixed/percent tracks set exact height; fr/auto use content
                         match track.kind {
@@ -1331,17 +1383,19 @@ pub fn layout_grid(
         let ar = &node.style.grid_auto_rows;
         if ar.kind == GridTrackKind::MinMax {
             // minmax(min, max): enforce min as floor, max as ceiling
-            let min_h = track_to_px(
+            let min_h = track_to_px_with_context(
                 &grid_track_component(ar.min_kind, ar.min_value, ar.min_calc_length.clone()),
                 row_pct_basis,
                 font_px,
                 root_font_px,
+                track_lengths,
             );
-            let max_h = track_to_px(
+            let max_h = track_to_px_with_context(
                 &grid_track_component(ar.max_kind, ar.max_value, ar.max_calc_length.clone()),
                 row_pct_basis,
                 font_px,
                 root_font_px,
+                track_lengths,
             );
             for r in n_explicit_rows..n_rows {
                 let mut h = row_heights[r].max(min_h);
@@ -1355,7 +1409,7 @@ pub fn layout_grid(
             // row tracks above. `track_to_px` returns X, which would have
             // forced every implicit row up to the limit.
         } else {
-            let auto_h = track_to_px(ar, row_pct_basis, font_px, root_font_px);
+            let auto_h = track_to_px_with_context(ar, row_pct_basis, font_px, root_font_px, track_lengths);
             if auto_h > 0.0 {
                 for r in n_explicit_rows..n_rows {
                     if auto_h > row_heights[r] {
@@ -1670,7 +1724,7 @@ pub fn layout_grid(
     node.layout.collapsed_margin_bottom = rbox.margin_bottom;
     node.layout.layout_dirty = false;
 
-    let result = finish_grid(node, rbox, content_x, content_y, content_w, ch);
+    let result = finish_grid(engine, node, rbox, content_x, content_y, content_w, ch, font_px, root_font_px);
     layout_abs_children(
         engine, node, font_px, root_font_px,
         Some(AbsGridAreas {
@@ -1955,6 +2009,34 @@ fn ensure_row(occ: &mut Vec<Vec<bool>>, row: usize, n_cols: usize) {
 
 // ─── Track resolution ────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy)]
+struct GridTrackLengthContext {
+    query: QueryContainerSizes,
+    viewport_w: f32,
+    viewport_h: f32,
+}
+
+impl GridTrackLengthContext {
+    fn from_engine(engine: &LayoutEngine) -> Self {
+        Self {
+            query: engine.query_container_sizes.get(),
+            viewport_w: engine.viewport_w,
+            viewport_h: engine.viewport_h,
+        }
+    }
+
+    fn resolve(self, length: &CssLength, font_px: f32, container: f32, root_font_px: f32) -> f32 {
+        length.resolve_query_vp(
+            font_px,
+            container,
+            root_font_px,
+            self.viewport_w,
+            self.viewport_h,
+            self.query,
+        )
+    }
+}
+
 /// Resolve auto-repeat and other tracks to a final list.
 fn resolve_track_sizes(
     tracks: &[GridTrackSize],
@@ -1962,8 +2044,9 @@ fn resolve_track_sizes(
     container: f32,
     font_px: f32,
     root_font_px: f32,
+    lengths: GridTrackLengthContext,
 ) -> Vec<GridTrackSize> {
-    resolve_track_sizes_with_gap(tracks, auto_repeat, container, font_px, root_font_px, 0.0)
+    resolve_track_sizes_with_gap(tracks, auto_repeat, container, font_px, root_font_px, 0.0, lengths)
 }
 
 fn resolve_track_sizes_with_gap(
@@ -1973,6 +2056,7 @@ fn resolve_track_sizes_with_gap(
     font_px: f32,
     root_font_px: f32,
     gap: f32,
+    lengths: GridTrackLengthContext,
 ) -> Vec<GridTrackSize> {
     let mut result = Vec::new();
     for t in tracks {
@@ -1990,15 +2074,15 @@ fn resolve_track_sizes_with_gap(
                                 rt.min_value,
                                 rt.min_calc_length.clone(),
                             );
-                            let min_px = track_to_px(&min_t, container, font_px, root_font_px);
+                            let min_px = track_to_px_with_context(&min_t, container, font_px, root_font_px, lengths);
                             if min_px > 0.0 {
                                 min_px
                             } else {
-                                track_to_px(rt, container, font_px, root_font_px).max(50.0)
+                                track_to_px_with_context(rt, container, font_px, root_font_px, lengths).max(50.0)
                             }
                         }
                         _ => {
-                            let px = track_to_px(rt, container, font_px, root_font_px);
+                            let px = track_to_px_with_context(rt, container, font_px, root_font_px, lengths);
                             if px > 0.0 { px } else { 50.0 }
                         }
                     };
@@ -2030,15 +2114,15 @@ fn resolve_track_sizes_with_gap(
                 GridTrackKind::MinMax => {
                     let min_t =
                         grid_track_component(rt.min_kind, rt.min_value, rt.min_calc_length.clone());
-                    let min_px = track_to_px(&min_t, container, font_px, root_font_px);
+                    let min_px = track_to_px_with_context(&min_t, container, font_px, root_font_px, lengths);
                     if min_px > 0.0 {
                         min_px
                     } else {
-                        track_to_px(rt, container, font_px, root_font_px).max(50.0)
+                        track_to_px_with_context(rt, container, font_px, root_font_px, lengths).max(50.0)
                     }
                 }
                 _ => {
-                    let px = track_to_px(rt, container, font_px, root_font_px);
+                    let px = track_to_px_with_context(rt, container, font_px, root_font_px, lengths);
                     if px > 0.0 { px } else { 50.0 }
                 }
             };
@@ -2060,6 +2144,26 @@ fn resolve_track_sizes_with_gap(
 
 /// Convert a single track to approximate pixel value for auto-fill estimation.
 pub fn track_to_px(track: &GridTrackSize, container: f32, font_px: f32, root_font_px: f32) -> f32 {
+    track_to_px_with_context(
+        track,
+        container,
+        font_px,
+        root_font_px,
+        GridTrackLengthContext {
+            query: QueryContainerSizes::default(),
+            viewport_w: 0.0,
+            viewport_h: 0.0,
+        },
+    )
+}
+
+fn track_to_px_with_context(
+    track: &GridTrackSize,
+    container: f32,
+    font_px: f32,
+    root_font_px: f32,
+    lengths: GridTrackLengthContext,
+) -> f32 {
     match track.kind {
         GridTrackKind::Fixed => track.value,
         GridTrackKind::Percent => track.value / 100.0 * container,
@@ -2072,7 +2176,7 @@ pub fn track_to_px(track: &GridTrackSize, container: f32, font_px: f32, root_fon
                 track.max_value,
                 track.max_calc_length.clone(),
             );
-            track_to_px(&max_t, container, font_px, root_font_px)
+            track_to_px_with_context(&max_t, container, font_px, root_font_px, lengths)
         }
         GridTrackKind::FitContent => {
             // fit-content(X) = min(max-content, max(min-content, X))
@@ -2083,7 +2187,7 @@ pub fn track_to_px(track: &GridTrackSize, container: f32, font_px: f32, root_fon
                 track
                     .max_calc_length
                     .as_ref()
-                    .map(|l| l.resolve(font_px, container, root_font_px))
+                    .map(|l| lengths.resolve(l, font_px, container, root_font_px))
                     .unwrap_or(track.value)
             } else {
                 track.value
@@ -2092,7 +2196,7 @@ pub fn track_to_px(track: &GridTrackSize, container: f32, font_px: f32, root_fon
         GridTrackKind::Subgrid => 0.0,
         GridTrackKind::Calc => {
             if let Some(ref len) = track.calc_length {
-                len.resolve(font_px, container, root_font_px)
+                lengths.resolve(len, font_px, container, root_font_px)
             } else {
                 0.0
             }
@@ -2142,6 +2246,7 @@ fn resolve_to_pixels(
     root_font_px: f32,
     content_widths: &[f32],
     min_widths: &[f32],
+    lengths: GridTrackLengthContext,
 ) -> Vec<f32> {
     let effective_n = tracks.len().max(n_cols);
     let total_gap = gap * effective_n.saturating_sub(1) as f32;
@@ -2196,7 +2301,7 @@ fn resolve_to_pixels(
                 let px = t
                     .calc_length
                     .as_ref()
-                    .map(|l| l.resolve(font_px, container, root_font_px))
+                    .map(|l| lengths.resolve(l, font_px, container, root_font_px))
                     .unwrap_or(0.0);
                 base[i] = px;
                 limit[i] = px;
@@ -2236,6 +2341,7 @@ fn resolve_to_pixels(
                     root_font_px,
                     mn,
                     mx,
+                    lengths,
                 );
                 base[i] = mn;
                 limit[i] = mx.min(clamp.max(mn));
@@ -2252,6 +2358,7 @@ fn resolve_to_pixels(
                     root_font_px,
                     mn,
                     mx,
+                    lengths,
                 );
                 if t.max_kind == GridTrackKind::Fractional {
                     is_fr[i] = true;
@@ -2271,6 +2378,7 @@ fn resolve_to_pixels(
                             root_font_px,
                             mn,
                             mx,
+                            lengths,
                         )
                     };
                     if t.max_kind == GridTrackKind::Auto {
@@ -2379,12 +2487,13 @@ fn resolve_track_component_px(
     root_font_px: f32,
     min_content: f32,
     max_content: f32,
+    lengths: GridTrackLengthContext,
 ) -> f32 {
     match kind {
         GridTrackKind::Fixed => value,
         GridTrackKind::Percent => value / 100.0 * container,
         GridTrackKind::Calc => calc_length
-            .map(|l| l.resolve(font_px, container, root_font_px))
+            .map(|l| lengths.resolve(l, font_px, container, root_font_px))
             .unwrap_or(fallback_value),
         GridTrackKind::MinContent => min_content,
         GridTrackKind::MaxContent => max_content,
@@ -2513,14 +2622,23 @@ fn grid_inline_alignment_offset(
 // ─── finish & abs children ───────────────────────────────────────────────────
 
 fn finish_grid(
+    engine: &LayoutEngine,
     node: &mut WebCore,
     rbox: &ResolvedBox,
     content_x: f32,
     content_y: f32,
     content_w: f32,
     content_h: f32,
+    font_px: f32,
+    root_font_px: f32,
 ) -> f32 {
-    let ch = rbox.content_height.unwrap_or(content_h);
+    let ch = rbox.content_height.unwrap_or_else(|| {
+        if node.style.contain_size || node.style.container_type == ContainerType::Size {
+            engine.contained_intrinsic_height(&node.style, font_px, root_font_px)
+        } else {
+            content_h
+        }
+    });
     node.layout.content_rect = Rect::new(content_x, content_y, content_w, ch);
     node.layout.padding_rect = Rect::new(
         content_x - rbox.padding_left,

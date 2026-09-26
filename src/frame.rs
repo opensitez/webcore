@@ -1720,7 +1720,7 @@ fn animation_overrides_are_transform_only(
 }
 
 fn retained_paint_band(doc: &Document, viewport_h: f32) -> crate::types::Rect {
-    let doc_h = crate::types::Document::scroll_height(&doc.root).max(viewport_h);
+    let doc_h = doc.cached_scroll_height().max(viewport_h);
     let overscan = (viewport_h * 8.0).max(6000.0);
     let top = (doc.scroll_y - overscan).max(0.0);
     let bottom = (doc.scroll_y + viewport_h + overscan).min(doc_h);

@@ -77,6 +77,38 @@ fn recascade_with_hover(doc: &mut Document, hovered_id: &str) {
 }
 
 #[test]
+fn hover_dirty_walk_keeps_type_index_after_skipping_siblings() {
+    let mut doc = layout_html(
+        r#"
+        <style>li:nth-of-type(3):hover .panel { display: block; }</style>
+        <ul>
+          <li id="first"><span class="panel">one</span></li>
+          <li id="second"><span class="panel">two</span></li>
+          <li id="third"><span class="panel">three</span></li>
+          <li id="fourth"><span class="panel">four</span></li>
+        </ul>
+        "#,
+        800.0,
+    );
+    let hovered = find_by_id(&doc.root, "third").unwrap().node_id;
+    let new_chain = crate::css::build_hover_chain(&doc.root, hovered);
+    crate::css::mark_hover_dirty(
+        &mut doc.root,
+        &doc.stylesheet,
+        &Default::default(),
+        &new_chain,
+        doc.stylesheet.has_hover_descendant_rules,
+        &doc.hover_sensitive_nodes,
+    );
+    assert!(find_by_id(&doc.root, "third").unwrap().cascade_dirty);
+    assert!(find_descendant_tag(find_by_id(&doc.root, "third").unwrap(), "span")
+        .unwrap()
+        .cascade_dirty);
+    assert!(!find_by_id(&doc.root, "first").unwrap().cascade_dirty);
+    assert!(!find_by_id(&doc.root, "fourth").unwrap().cascade_dirty);
+}
+
+#[test]
 fn mouse_leave_preserves_previous_hover_for_recascade() {
     let mut doc = layout_html(
         r##"

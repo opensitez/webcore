@@ -27,7 +27,7 @@ pub const CURRENT_COLOR_SVG_STROKE: u16 = 1 << 9;
 pub const SPECIFIED_SVG_FILL: u16 = 1 << 0;
 pub const SPECIFIED_SVG_STROKE: u16 = 1 << 1;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RareStyle {
     /// Which colour properties were declared as `currentColor`, as a bitmask
     /// over `CURRENT_COLOR_*`.
@@ -90,7 +90,7 @@ pub struct RareStyle {
     pub additional_background_layers: Vec<BackgroundLayer>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BackgroundLayer {
     pub image_url: String,
     pub gradient_type: GradientType,
@@ -170,7 +170,7 @@ impl ComputedStyle {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ComputedStyle {
     /// The properties almost nothing sets — `arenaplan.md` item 2.
     ///
@@ -595,7 +595,7 @@ impl Default for ContentVisibility {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BoxShadow {
     pub offset_x: f32,
     pub offset_y: f32,
@@ -652,7 +652,7 @@ impl Default for GradientRadialSize {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GradientStop {
     pub color: Color,
     pub position: f32, // 0.0..1.0
@@ -669,7 +669,7 @@ impl Default for TextOverflow {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TextShadow {
     pub offset_x: f32,
     pub offset_y: f32,

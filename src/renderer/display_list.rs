@@ -15,7 +15,7 @@
 use crate::types::{Color, GradientDirection, Rect, TextUnderlinePosition};
 
 /// A single paint command in the display list.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PaintCmd {
     /// Fill a rectangle with a solid color.
     FillRect {
@@ -317,7 +317,7 @@ pub enum PaintCmd {
 }
 
 /// Text decoration info for a text run.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextDecoration {
     pub underline: bool,
     pub overline: bool,
@@ -331,7 +331,7 @@ pub struct TextDecoration {
 }
 
 /// Reference to image data — avoids cloning large pixel buffers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ImageRef {
     /// Inline RGBA data (for small images or when we need ownership).
     Owned(Vec<u8>, u32, u32), // (rgba_data, width, height)

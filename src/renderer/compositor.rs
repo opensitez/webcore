@@ -16,7 +16,9 @@ use super::tiles::TileManager;
 pub struct PaintSegment {
     pub list: DisplayList,
     pub fixed: bool,
+    pub backdrop_dependent: bool,
     pub tiles: TileManager,
+    pub fixed_surface: Option<(tiny_skia::Pixmap, f32)>,
 }
 
 /// Ordered document and viewport paint layers. Splitting at fixed-position
@@ -97,7 +99,9 @@ impl PaintSegments {
             .map(|fixed| PaintSegment {
                 list: DisplayList::new(),
                 fixed,
+                backdrop_dependent: false,
                 tiles: TileManager::new(),
+                fixed_surface: None,
             })
             .collect();
         for (cmd, owner) in list.commands.iter().zip(owners) {
@@ -112,12 +116,22 @@ impl PaintSegments {
         segments.retain(|segment| {
             segment.list.commands.iter().any(|cmd| !paint_segment_structure(cmd))
         });
+        for segment in &mut segments {
+            segment.backdrop_dependent = segment.list.commands.iter().any(|cmd| {
+                matches!(
+                    cmd,
+                    PaintCmd::BackdropFilter { .. } | PaintCmd::PushBlendMode { .. }
+                )
+            });
+        }
         Some(Self { segments })
     }
 
     pub fn invalidate_all(&mut self) {
         for segment in &mut self.segments {
-            if !segment.fixed {
+            if segment.fixed {
+                segment.fixed_surface = None;
+            } else {
                 segment.tiles.invalidate_all();
             }
         }
@@ -125,10 +139,39 @@ impl PaintSegments {
 
     pub fn invalidate_rect(&mut self, rect: &Rect) {
         for segment in &mut self.segments {
-            if !segment.fixed {
+            if segment.fixed {
+                segment.fixed_surface = None;
+            } else {
                 segment.tiles.invalidate_rect(rect);
             }
         }
+    }
+
+    /// Reuse identical paint layers without retaining stale backdrop effects.
+    pub fn retain_unchanged_rasters(&mut self, previous: Self) -> usize {
+        if self.segments.len() != previous.segments.len()
+            || self
+                .segments
+                .iter()
+                .zip(&previous.segments)
+                .any(|(new, old)| new.fixed != old.fixed)
+        {
+            return 0;
+        }
+
+        let mut retained = 0;
+        let mut backdrop_changed = false;
+        for (new, old) in self.segments.iter_mut().zip(previous.segments) {
+            let unchanged = new.list.commands == old.list.commands;
+            if unchanged && !(new.backdrop_dependent && backdrop_changed) {
+                new.tiles = old.tiles;
+                new.fixed_surface = old.fixed_surface;
+                retained += 1;
+            } else {
+                backdrop_changed = true;
+            }
+        }
+        retained
     }
 }
 
@@ -543,6 +586,78 @@ fn length(text: &str, reference: f32) -> Option<f32> {
 mod tests {
     use super::*;
     use crate::load_html;
+
+    fn two_layer_paint_list(
+        document_color: crate::types::Color,
+        fixed_color: crate::types::Color,
+    ) -> DisplayList {
+        let mut list = DisplayList::new();
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+            color: document_color,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        list.push(PaintCmd::BeginFixedPosition);
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(0.0, 0.0, 20.0, 20.0),
+            color: fixed_color,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        list.push(PaintCmd::EndFixedPosition);
+        list
+    }
+
+    #[test]
+    fn rebuilt_paint_segments_retain_only_unchanged_rasters() {
+        use crate::types::Color;
+
+        let list = two_layer_paint_list(Color::WHITE, Color::rgb(0, 0, 255));
+        let mut previous = PaintSegments::from_display_list(&list, 200.0, 100.0).unwrap();
+        let document = previous.segments.iter_mut().find(|segment| !segment.fixed).unwrap();
+        document.tiles.update_viewport(Rect::new(0.0, 0.0, 100.0, 100.0), 1.0);
+        assert!(document.tiles.ensure_tile(0, 0));
+        document.tiles.mark_clean(0, 0);
+        previous.segments.iter_mut().find(|segment| segment.fixed).unwrap().fixed_surface =
+            Some((tiny_skia::Pixmap::new(100, 100).unwrap(), 1.0));
+
+        let changed_fixed = two_layer_paint_list(Color::WHITE, Color::rgb(255, 0, 0));
+        let mut rebuilt = PaintSegments::from_display_list(&changed_fixed, 200.0, 100.0).unwrap();
+        rebuilt.retain_unchanged_rasters(previous);
+        let document = rebuilt.segments.iter().find(|segment| !segment.fixed).unwrap();
+        assert!(!document.tiles.tiles.get(&(0, 0)).unwrap().dirty);
+        assert!(rebuilt.segments.iter().find(|segment| segment.fixed).unwrap().fixed_surface.is_none());
+
+        let changed_document = two_layer_paint_list(Color::rgb(0, 255, 0), Color::rgb(255, 0, 0));
+        let mut rebuilt_again = PaintSegments::from_display_list(&changed_document, 200.0, 100.0).unwrap();
+        rebuilt_again.retain_unchanged_rasters(rebuilt);
+        assert!(rebuilt_again.segments.iter().find(|segment| !segment.fixed).unwrap().tiles.tiles.is_empty());
+    }
+
+    #[test]
+    fn changed_backdrop_invalidates_an_unchanged_dependent_segment() {
+        use crate::types::Color;
+
+        let mut list = two_layer_paint_list(Color::WHITE, Color::rgb(0, 0, 255));
+        list.push(PaintCmd::BackdropFilter {
+            rect: Rect::new(0.0, 0.0, 100.0, 100.0),
+            filters: vec![(0, 4.0, 0.0, 0.0, Color::WHITE)],
+        });
+        let mut previous = PaintSegments::from_display_list(&list, 200.0, 100.0).unwrap();
+        let dependent = previous.segments.last_mut().unwrap();
+        assert!(dependent.backdrop_dependent);
+        dependent.tiles.update_viewport(Rect::new(0.0, 0.0, 100.0, 100.0), 1.0);
+        dependent.tiles.ensure_tile(0, 0);
+        dependent.tiles.mark_clean(0, 0);
+
+        if let PaintCmd::FillRect { color, .. } = &mut list.commands[0] {
+            *color = Color::rgb(255, 0, 0);
+        }
+        let mut rebuilt = PaintSegments::from_display_list(&list, 200.0, 100.0).unwrap();
+        rebuilt.retain_unchanged_rasters(previous);
+        assert!(rebuilt.segments.last().unwrap().tiles.tiles.is_empty());
+    }
 
     #[test]
     fn empty_fixed_layers_do_not_create_paint_segments() {

@@ -366,6 +366,13 @@ pub fn layout_flex(
     );
     let gap_main = if is_row { column_gap } else { row_gap };
     let gap_cross = if is_row { row_gap } else { column_gap };
+    let _query_container_scope = engine.enter_query_container(
+        &node.style,
+        content_w,
+        rbox.content_height,
+        font_px,
+        root_font_px,
+    );
 
     // ── Collect flex items ────────────────────────────────────────────────────
 
@@ -530,12 +537,11 @@ pub fn layout_flex(
                     if child.style.height.is_auto() {
                         None
                     } else {
-                        let raw = child.style.height.resolve_vp(
+                        let raw = engine.res_len(
+                            &child.style.height,
                             child_font,
                             rbox.content_height.unwrap_or(0.0),
                             root_font_px,
-                            engine.viewport_w,
-                            engine.viewport_h,
                         );
                         let cb = if child.style.box_sizing == BoxSizing::BorderBox {
                             (raw - irb.border_top
@@ -551,12 +557,11 @@ pub fn layout_flex(
                 } else if child.style.width.is_auto() {
                     None
                 } else {
-                    let raw = child.style.width.resolve_vp(
+                    let raw = engine.res_len(
+                        &child.style.width,
                         child_font,
                         content_w,
                         root_font_px,
-                        engine.viewport_w,
-                        engine.viewport_h,
                     );
                     let cb = if child.style.box_sizing == BoxSizing::BorderBox {
                         (raw - irb.border_left
@@ -647,7 +652,8 @@ pub fn layout_flex(
                 )
             }
         } else if !child.style.flex_basis.is_auto() && !basis_is_percent_auto {
-            let raw = child.style.flex_basis.resolve_vp(
+            let raw = engine.res_len(
+                &child.style.flex_basis,
                 child_font,
                 if is_row {
                     content_w
@@ -655,8 +661,6 @@ pub fn layout_flex(
                     rbox.content_height.unwrap_or(0.0)
                 },
                 root_font_px,
-                engine.viewport_w,
-                engine.viewport_h,
             );
             if child.style.box_sizing == BoxSizing::BorderBox {
                 if is_row {
@@ -676,12 +680,11 @@ pub fn layout_flex(
                 raw.max(0.0)
             }
         } else if is_row && !child.style.width.is_auto() {
-            let raw = child.style.width.resolve_vp(
+            let raw = engine.res_len(
+                &child.style.width,
                 child_font,
                 content_w,
                 root_font_px,
-                engine.viewport_w,
-                engine.viewport_h,
             );
             if child.style.box_sizing == BoxSizing::BorderBox {
                 (raw - irb.border_left - irb.border_right - irb.padding_left - irb.padding_right)
@@ -691,12 +694,11 @@ pub fn layout_flex(
             }
         } else if !is_row && !child.style.height.is_auto() {
             let main_ref = rbox.content_height.unwrap_or(0.0);
-            let raw = child.style.height.resolve_vp(
+            let raw = engine.res_len(
+                &child.style.height,
                 child_font,
                 main_ref,
                 root_font_px,
-                engine.viewport_w,
-                engine.viewport_h,
             );
             if child.style.box_sizing == BoxSizing::BorderBox {
                 (raw - irb.border_top - irb.border_bottom - irb.padding_top - irb.padding_bottom)
@@ -744,12 +746,11 @@ pub fn layout_flex(
         };
         let max_main: f32 = if is_row {
             if !child.style.max_width.is_none() && !child.style.max_width.is_auto() {
-                let v = child.style.max_width.resolve_vp(
+                let v = engine.res_len(
+                    &child.style.max_width,
                     child_font,
                     content_w,
                     root_font_px,
-                    engine.viewport_w,
-                    engine.viewport_h,
                 );
                 (v - bb_main).max(0.0)
             } else {
@@ -757,12 +758,11 @@ pub fn layout_flex(
             }
         } else {
             if !child.style.max_height.is_none() && !child.style.max_height.is_auto() {
-                let v = child.style.max_height.resolve_vp(
+                let v = engine.res_len(
+                    &child.style.max_height,
                     child_font,
                     0.0,
                     root_font_px,
-                    engine.viewport_w,
-                    engine.viewport_h,
                 );
                 (v - bb_main).max(0.0)
             } else {
@@ -802,12 +802,11 @@ pub fn layout_flex(
                 } else {
                     rbox.content_height.unwrap_or(0.0)
                 };
-                let v = len.resolve_vp(
+                let v = engine.res_len(
+                    len,
                     child_font,
                     basis,
                     root_font_px,
-                    engine.viewport_w,
-                    engine.viewport_h,
                 );
                 Some((v - bb_main).max(0.0))
             } else {
@@ -828,12 +827,11 @@ pub fn layout_flex(
 
         let min_main: f32 = if is_row {
             if !child.style.min_width.is_auto() {
-                let v = child.style.min_width.resolve_vp(
+                let v = engine.res_len(
+                    &child.style.min_width,
                     child_font,
                     content_w,
                     root_font_px,
-                    engine.viewport_w,
-                    engine.viewport_h,
                 );
                 (v - bb_main).max(0.0)
             } else if child.style.overflow_x != Overflow::Visible {
@@ -847,12 +845,11 @@ pub fn layout_flex(
             }
         } else {
             if !child.style.min_height.is_auto() {
-                let v = child.style.min_height.resolve_vp(
+                let v = engine.res_len(
+                    &child.style.min_height,
                     child_font,
                     0.0,
                     root_font_px,
-                    engine.viewport_w,
-                    engine.viewport_h,
                 );
                 (v - bb_main).max(0.0)
             } else if child.style.overflow_y != Overflow::Visible {
@@ -1770,6 +1767,13 @@ pub fn layout_flex(
         max_main.max(0.0)
     };
 
+    let content_h = if rbox.content_height.is_none()
+        && (node.style.contain_size || node.style.container_type == ContainerType::Size)
+    {
+        engine.contained_intrinsic_height(&node.style, font_px, root_font_px)
+    } else {
+        content_h
+    };
     let content_h = content_h.max(flex_min_h).min(flex_max_h).max(0.0);
     finish_flex(node, rbox, content_x, content_y, content_w, content_h);
 

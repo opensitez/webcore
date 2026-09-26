@@ -2,6 +2,27 @@ use crate::layout::LayoutEngine;
 use crate::tests::harness::{find_box, parse, parse_and_layout};
 use crate::types::*;
 
+#[test]
+fn auto_width_grid_respects_max_width_and_centers_tracks() {
+    for direction in ["ltr", "rtl"] {
+        let doc = parse_and_layout(&format!(
+            "<style>*{{margin:0;padding:0;box-sizing:border-box}}\
+             #grid{{display:grid;direction:{direction};max-width:600px;\
+             margin:0 auto;padding:0 20px;column-gap:20px;grid-template-columns:1fr 1fr}}\
+             #grid>div{{height:30px}}</style>\
+             <div id='grid'><div id='first'></div><div id='second'></div></div>"), 1000.0);
+        let grid = find_by_id(&doc.root, "grid").unwrap().layout.border_rect;
+        let first = find_by_id(&doc.root, "first").unwrap().layout.border_rect;
+        let second = find_by_id(&doc.root, "second").unwrap().layout.border_rect;
+        assert!((grid.w - 600.0).abs() < 0.1, "{direction}: {grid:?}");
+        assert!((grid.x - 200.0).abs() < 0.1, "{direction}: {grid:?}");
+        assert!((first.w - 270.0).abs() < 0.1, "{direction}: {first:?}");
+        assert!((second.w - 270.0).abs() < 0.1, "{direction}: {second:?}");
+        let expected_first = if direction == "rtl" { 510.0 } else { 220.0 };
+        assert!((first.x - expected_first).abs() < 0.1, "{direction}: {first:?}");
+    }
+}
+
 pub fn find_by_id<'a>(node: &'a WebCore, id: &str) -> Option<&'a WebCore> {
     find_box(node, &|b| {
         b.attributes.get("id").map(|s| s == id).unwrap_or(false)

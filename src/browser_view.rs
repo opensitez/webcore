@@ -1118,7 +1118,6 @@ impl BrowserView {
         let needs_redraw = if self.stream_frame.is_some() {
             let (stream_needs_wake, stream_needs_redraw) = self.stream_idle_state();
             if scroll_priority {
-                self.scroll_priority_frame = false;
                 self.next_frame_deadline = None;
                 event_loop.set_control_flow(ControlFlow::WaitUntil(
                     Instant::now() + Duration::from_millis(1),
@@ -1162,9 +1161,6 @@ impl BrowserView {
         };
         let needs_redraw = if self.stream_frame.is_some() {
             let (_, stream_needs_redraw) = self.stream_idle_state();
-            if scroll_priority {
-                self.scroll_priority_frame = false;
-            }
             scroll_priority || stream_layout_changed || stream_needs_redraw
         } else {
             false
@@ -1206,7 +1202,10 @@ impl BrowserView {
         // have to consume already-queued interaction style work. Otherwise a
         // hover/focus change can set stream_needs_layout and then render the
         // stale display list forever until an unrelated resource tick happens.
-        if self.stream_needs_layout && !self.defer_queued_html_layout() {
+        if self.stream_needs_layout
+            && !self.scroll_priority_frame
+            && !self.defer_queued_html_layout()
+        {
             self.ensure_streamed_layout_current();
         }
         let width_px = target.width().max(1);
@@ -1252,6 +1251,7 @@ impl BrowserView {
             }
         }
         crate::profile::finish_scroll_paint();
+        self.scroll_priority_frame = false;
     }
 
     pub fn handle_mouse_move(&mut self, x: f32, y: f32) -> bool {
@@ -1354,7 +1354,7 @@ impl BrowserView {
         wheel.delta_y = dy;
         wheel.target = doc.hovered_box;
         let mut changed = doc.dispatch_input_event(wheel).0;
-        let max_y = (Document::scroll_height(&doc.root) - height).max(0.0);
+        let max_y = (doc.cached_scroll_height() - height).max(0.0);
         let old = (doc.scroll_x, doc.scroll_y);
         doc.scroll_x = (doc.scroll_x + dx).max(0.0);
         doc.scroll_y = (doc.scroll_y + dy).clamp(0.0, max_y);
@@ -1387,7 +1387,7 @@ impl BrowserView {
         let Some(doc) = self.active_doc_mut() else {
             return false;
         };
-        let max_y = (Document::scroll_height(&doc.root) - height).max(0.0);
+        let max_y = (doc.cached_scroll_height() - height).max(0.0);
         let old = (doc.scroll_x, doc.scroll_y);
         doc.scroll_x = x.max(0.0);
         doc.scroll_y = y.clamp(0.0, max_y);
@@ -2173,6 +2173,20 @@ mod tests {
         assert!(
             view.stream_needs_layout,
             "dirty work should be scheduled for the browser frame loop"
+        );
+
+        assert!(view.drive_idle_for_test());
+        let mut target = Pixmap::new(480, 320).unwrap();
+        view.paint_into(&mut target, 0, 0, 1.0);
+        assert!(
+            view.stream_frame.as_ref().unwrap().doc.style_dirty,
+            "the scroll presentation must not consume queued style/layout work"
+        );
+        assert!(!view.scroll_priority_frame);
+        assert!(view.drive_idle_for_test());
+        assert!(
+            !view.stream_frame.as_ref().unwrap().doc.style_dirty,
+            "the following frame should process the queued work"
         );
     }
 

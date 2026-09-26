@@ -422,6 +422,7 @@ fn parse_html_full(
         live_region_snapshots: std::collections::HashMap::new(),
         live_regions_initialized: false,
         layout_generation: 0,
+        scroll_height_cache: std::cell::Cell::new(None),
         pending_images: None,
         image_load_errors: Vec::new(),
         images_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),

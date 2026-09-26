@@ -310,6 +310,9 @@ pub struct Document {
     /// Monotonically increasing counter bumped after every layout pass.
     /// Used by the Renderer to detect when the display list cache is stale.
     pub layout_generation: u64,
+    /// Scroll extent is stable between layout generations; scroll input must not
+    /// walk the full DOM just to clamp a viewport offset.
+    pub(crate) scroll_height_cache: std::cell::Cell<Option<(u64, f32)>>,
 
     // ── Async image loading ─────────────────────────────────────────────────
     /// Receiver for images arriving from background fetch threads.
@@ -833,6 +836,7 @@ impl Clone for Document {
             live_region_snapshots: self.live_region_snapshots.clone(),
             live_regions_initialized: self.live_regions_initialized,
             layout_generation: self.layout_generation,
+            scroll_height_cache: std::cell::Cell::new(self.scroll_height_cache.get()),
             // Async image state is not cloned — cloned docs start with no pending fetches.
             pending_images: None,
             image_load_errors: self.image_load_errors.clone(),

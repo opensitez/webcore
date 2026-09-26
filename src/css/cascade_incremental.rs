@@ -91,17 +91,18 @@ pub fn mark_hover_dirty(
         ancestors.push(anc);
 
         let child_count = node.children.len();
+        let mut type_counts = HashMap::new();
+        for child in &node.children {
+            *type_counts.entry(child.tag.clone()).or_insert(0usize) += 1;
+        }
+        let mut type_indices = HashMap::new();
         for i in 0..child_count {
-            let child_tag = node.children[i].tag.clone();
-            let mut t_idx = 0usize;
-            let mut t_count = 0usize;
-            for (j, sib) in node.children.iter().enumerate() {
-                if sib.tag == child_tag {
-                    if j == i {
-                        t_idx = t_count;
-                    }
-                    t_count += 1;
-                }
+            let child = &node.children[i];
+            let t_idx = *type_indices.entry(child.tag.clone()).or_insert(0usize);
+            let t_count = type_counts[child.tag.as_str()];
+            *type_indices.get_mut(child.tag.as_str()).unwrap() += 1;
+            if !path.contains(&child.node_id) {
+                continue;
             }
             let child = &mut node.children[i];
             if walk(

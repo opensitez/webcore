@@ -159,6 +159,25 @@ fn nested_scroll_container_contents_do_not_inflate_document_scroll_height() {
 }
 
 #[test]
+fn scroll_extent_cache_tracks_layout_generation_and_dirty_tree() {
+    let mut doc = layout("<body><div style='height:500px'></div></body>");
+    let initial = doc.cached_scroll_height();
+    assert_eq!(doc.cached_scroll_height(), initial);
+    assert_eq!(doc.scroll_height_cache.get(), Some((doc.layout_generation, initial)));
+
+    let body = doc.root.children.iter_mut().find(|node| node.tag == "body").unwrap();
+    body.layout.margin_rect.h += 200.0;
+    doc.root.has_dirty_layout_descendant = true;
+    assert!(doc.cached_scroll_height() > initial);
+
+    doc.root.has_dirty_layout_descendant = false;
+    doc.layout_generation += 1;
+    let updated = doc.cached_scroll_height();
+    assert!(updated > initial);
+    assert_eq!(doc.scroll_height_cache.get(), Some((doc.layout_generation, updated)));
+}
+
+#[test]
 fn contents_wrappers_and_blank_text_do_not_inflate_document_scroll_height() {
     let mut doc = Document::new();
     doc.root.layout.margin_rect = Rect::new(0.0, 0.0, 400.0, 300.0);

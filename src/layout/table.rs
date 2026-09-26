@@ -705,6 +705,13 @@ pub fn layout_table(
             table_width = max_w;
         }
     }
+    let _query_container_scope = engine.enter_query_container(
+        &node.style,
+        table_width,
+        rbox.content_height,
+        font_px,
+        root_font_px,
+    );
 
     // CSS table fixup: internal table boxes with invalid parents/children get
     // anonymous table/row/cell wrappers, matching the CSS table model.

@@ -2667,7 +2667,7 @@ impl Document {
 
     /// Programmatic viewport scroll. Honors root `scroll-behavior:smooth`.
     pub fn viewport_scroll_to(&mut self, x: f32, y: f32, viewport_w: f32, viewport_h: f32) -> bool {
-        let doc_h = crate::types::Document::scroll_height(&self.root);
+        let doc_h = self.cached_scroll_height();
         let doc_w = self.root.layout.margin_rect.w;
         let old_x = self.scroll_x;
         let old_y = self.scroll_y;

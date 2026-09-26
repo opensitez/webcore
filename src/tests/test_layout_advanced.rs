@@ -7,6 +7,50 @@ use crate::layout::LayoutEngine;
 use crate::types::*;
 
 #[test]
+fn blockified_button_intrinsics_do_not_depend_on_previous_geometry() {
+    for label in ["Add Tree", "<span>Add</span> Tree"] {
+        let mut doc = parse(&format!(
+            "<style>#button{{display:block;white-space:normal;padding:6px 12px;border:1px solid}}</style>\
+             <button id='button'>{label}</button>"
+        ));
+        let mut engine = LayoutEngine::new();
+        let button = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|v| v == "button")).unwrap();
+        let cold_min = engine.min_content_width(button, 16.0, 16.0);
+        let cold_max = engine.max_content_width(button, 16.0, 16.0);
+        assert!(cold_min > 0.0 && cold_max > cold_min, "{label}: {cold_min}, {cold_max}");
+        engine.layout(&mut doc, 600.0);
+        let button = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|v| v == "button")).unwrap();
+        assert!((engine.min_content_width(button, 16.0, 16.0) - cold_min).abs() < 0.1);
+        assert!((engine.max_content_width(button, 16.0, 16.0) - cold_max).abs() < 0.1);
+    }
+}
+
+#[test]
+fn nested_collapsed_bottom_margin_preserves_metadata_height() {
+    for direction in ["ltr", "rtl"] {
+        let html = format!(
+            "<style>*{{margin:0;padding:0}}body{{direction:{direction}}}\
+             li{{list-style:none}}#author{{height:26px;padding-bottom:24px}}\
+             #date{{height:20px}}#reading{{height:20px;margin:8px 0 16px}}</style>\
+             <section id='metadata'><ul><li id='author'>Author</li>\
+             <li><div id='date'>Date</div></li>\
+             <li><div id='reading'>Reading time</div></li></ul></section>\
+             <p id='intro'>Opening paragraph</p>"
+        );
+        let doc = parse_and_layout(&html, 600.0);
+        let get = |id: &str| find_box(&doc.root, &|b| {
+            b.attributes.get("id").is_some_and(|v| v == id)
+        }).unwrap().layout.border_rect;
+        let metadata = get("metadata");
+        let reading = get("reading");
+        let intro = get("intro");
+        assert!((metadata.h - 98.0).abs() < 0.1, "{direction}: {metadata:?}");
+        assert!((intro.y - reading.bottom() - 16.0).abs() < 0.1,
+            "{direction}: reading={reading:?}, intro={intro:?}");
+    }
+}
+
+#[test]
 fn flex_items_reserve_min_width_of_percentage_width_children() {
     let doc = parse_and_layout(
         "<style>*{margin:0;padding:0}ul{display:flex;width:500px;list-style:none}\
@@ -114,11 +158,10 @@ fn block_before_pseudo_on_flex_item_consumes_flow_height() {
         .iter()
         .find(|child| child.tag == "::before")
         .expect("block ::before on a flex item should materialize as a layout child");
-    let text = promo
-        .children
-        .iter()
-        .find(|child| child.tag == "#text")
-        .expect("authored link text should remain after generated label");
+    let text = find_box(promo, &|child| {
+        child.tag == "#text" && child.text.contains("Draft. Trade. Win.")
+    })
+    .expect("authored link text should remain after generated label");
     assert!(
         text.layout.content_rect.y
             >= before.layout.content_rect.y + before.layout.content_rect.h - 0.5,
@@ -332,14 +375,32 @@ fn inline_replaced_image_uses_percent_width_and_css_aspect_ratio() {
     .unwrap();
     assert!(
         (img.layout.border_rect.w - 320.0).abs() < 0.5,
-        "inline replaced image should use the containing width; got {}",
-        img.layout.border_rect.w
+        "inline replaced image should use the containing width; got {}, computed width={:?}, last containing width={}",
+        img.layout.border_rect.w,
+        img.style.width,
+        img.layout.last_containing_width,
     );
     assert!(
         (img.layout.border_rect.h - 180.0).abs() < 0.5,
         "inline replaced image should transfer height from aspect-ratio; got {}",
         img.layout.border_rect.h
     );
+}
+
+#[test]
+fn inline_replaced_control_keeps_explicit_size_inside_label() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        r#"<style>input { display:inline; width:80px; height:24px }</style>
+           <label><input id="field" type="text"></label>"#,
+        400.0,
+    );
+    let input = find_box(&doc.root, &|node| {
+        node.tag == "input" && node.attributes.get("id") == Some(&"field".to_string())
+    })
+    .unwrap();
+    assert!((input.layout.border_rect.w - 80.0).abs() < 0.5);
+    assert!((input.layout.border_rect.h - 24.0).abs() < 0.5);
 }
 
 #[test]
@@ -450,11 +511,11 @@ fn text_wrap_balance_rebalances_last_line_width() {
             * {{ margin: 0; padding: 0; }}
             #box {{
                 width: 165px;
-                font: 16px sans-serif;
+                font: 16px monospace;
                 text-wrap: {wrap};
             }}
             </style>
-            <div id="box">alpha beta gamma delta epsilon</div>
+            <div id="box">aaaaaa aaaaaa aa aaaaaa aa</div>
             "#
         )
     };
@@ -472,11 +533,14 @@ fn text_wrap_balance_rebalances_last_line_width() {
 
     assert_eq!(normal.layout.line_cache.len(), 2);
     assert_eq!(balanced.layout.line_cache.len(), 2);
+    assert_eq!(balanced.style.text_wrap, "balance");
     let normal_last = normal.layout.line_cache.last().unwrap().width;
     let balanced_last = balanced.layout.line_cache.last().unwrap().width;
     assert!(
         balanced_last > normal_last + 20.0,
-        "balanced text should avoid a short leftover line: normal={normal_last}, balanced={balanced_last}"
+        "balanced text should avoid a short leftover line: normal={:?}, balanced={:?}",
+        normal.layout.line_cache.iter().map(|line| line.width).collect::<Vec<_>>(),
+        balanced.layout.line_cache.iter().map(|line| line.width).collect::<Vec<_>>()
     );
 }
 
@@ -489,11 +553,11 @@ fn text_wrap_pretty_avoids_single_word_last_line_when_possible() {
             * {{ margin: 0; padding: 0; }}
             #box {{
                 width: 165px;
-                font: 16px sans-serif;
+                font: 16px monospace;
                 text-wrap: {wrap};
             }}
             </style>
-            <div id="box">alpha beta gamma delta epsilon</div>
+            <div id="box">aaaaaa aaaaaa aa aaaaaa</div>
             "#
         )
     };
@@ -511,6 +575,7 @@ fn text_wrap_pretty_avoids_single_word_last_line_when_possible() {
 
     assert_eq!(normal.layout.line_cache.len(), 2);
     assert_eq!(pretty.layout.line_cache.len(), 2);
+    assert_eq!(pretty.style.text_wrap, "pretty");
     let normal_last = normal.layout.line_cache.last().unwrap().width;
     let pretty_last = pretty.layout.line_cache.last().unwrap().width;
     assert!(

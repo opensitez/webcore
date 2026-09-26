@@ -18,6 +18,112 @@ pub struct ContainerEntry {
     pub style: std::sync::Arc<crate::types::ComputedStyle>,
 }
 
+pub(crate) struct AppliedContainerStyle {
+    base: std::sync::Arc<ComputedStyle>,
+    rules: Vec<usize>,
+}
+
+struct ContainerConditionBranch<'a> {
+    name: &'a str,
+    condition: &'a str,
+    required_type: Option<crate::types::ContainerType>,
+}
+
+pub(crate) fn parse_container_branch_header(header: &str) -> (&str, &str) {
+    let header = header.trim();
+    if header.starts_with('(') {
+        return ("", header);
+    }
+    let end = header
+        .char_indices()
+        .find(|(_, ch)| ch.is_whitespace() || *ch == '(')
+        .map(|(index, _)| index)
+        .unwrap_or(header.len());
+    let first = &header[..end];
+    if first.eq_ignore_ascii_case("style")
+        || first.eq_ignore_ascii_case("not")
+        || first.eq_ignore_ascii_case("and")
+        || first.eq_ignore_ascii_case("or")
+    {
+        return ("", header);
+    }
+    let condition = header[end..].trim();
+    if condition.is_empty() {
+        (first, "")
+    } else {
+        (first, condition)
+    }
+}
+
+fn query_container_type(condition: &str) -> Option<crate::types::ContainerType> {
+    let lower = condition.to_ascii_lowercase();
+    let mut outside_style = String::with_capacity(lower.len());
+    let mut rest = lower.as_str();
+    while let Some(start) = rest.find("style(") {
+        outside_style.push_str(&rest[..start]);
+        let body = &rest[start + "style(".len()..];
+        let mut depth = 1usize;
+        let mut end = body.len();
+        for (index, ch) in body.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = index + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest = &body[end..];
+    }
+    outside_style.push_str(rest);
+    if ["height", "block-size", "aspect-ratio", "orientation"]
+        .iter()
+        .any(|feature| outside_style.contains(feature))
+    {
+        Some(crate::types::ContainerType::Size)
+    } else if ["width", "inline-size"]
+        .iter()
+        .any(|feature| outside_style.contains(feature))
+    {
+        Some(crate::types::ContainerType::InlineSize)
+    } else {
+        None
+    }
+}
+
+fn container_condition_matches(
+    branches: &[ContainerConditionBranch<'_>],
+    containers: &[ContainerEntry],
+) -> bool {
+    branches.iter().any(|branch| {
+        let container = containers.iter().rev().find(|container| {
+            (branch.name.is_empty() || container.name == branch.name)
+                && match branch.required_type {
+                    Some(crate::types::ContainerType::Size) => {
+                        container.container_type == crate::types::ContainerType::Size
+                    }
+                    Some(crate::types::ContainerType::InlineSize) => {
+                        container.container_type != crate::types::ContainerType::Normal
+                    }
+                    _ => true,
+                }
+        });
+        container.is_some_and(|container| {
+            evaluate_container_for_type_and_style(
+                branch.condition,
+                container.width,
+                container.height,
+                container.container_type,
+                Some(&container.style),
+            )
+        })
+    })
+}
+
 /// Walk `node` and all its descendants applying any `@container` rules whose
 /// condition matches the nearest container ancestor in `container_stack`.
 ///
@@ -41,10 +147,68 @@ pub fn apply_container_cascade_tree(
     focused_box: u32,
     keyboard_focus: bool,
 ) -> bool {
+    let mut applied_rules = HashMap::new();
+    apply_container_cascade_tree_with_state(
+        node,
+        stylesheet,
+        container_stack,
+        ancestors,
+        child_index,
+        sibling_count,
+        type_child_index,
+        type_sibling_count,
+        root_font_px,
+        vw,
+        vh,
+        focused_box,
+        keyboard_focus,
+        &mut applied_rules,
+    )
+}
+
+pub(crate) fn apply_container_cascade_tree_with_state(
+    node: &mut crate::types::WebCore,
+    stylesheet: &Stylesheet,
+    container_stack: &[ContainerEntry],
+    ancestors: &[AncestorInfo],
+    child_index: usize,
+    sibling_count: usize,
+    type_child_index: usize,
+    type_sibling_count: usize,
+    root_font_px: f32,
+    vw: f32,
+    vh: f32,
+    focused_box: u32,
+    keyboard_focus: bool,
+    applied_rules: &mut HashMap<u32, AppliedContainerStyle>,
+) -> bool {
     // Create owned Vecs once at the top level; the recursive inner function
     // reuses them via push/pop so no per-node heap allocation is needed.
     let mut cs = container_stack.to_vec();
     let mut anc = ancestors.to_vec();
+    let conditions = stylesheet
+        .rules
+        .iter()
+        .map(|rule| {
+            std::iter::once(&rule.container_condition)
+                .chain(&rule.nested_container_conditions)
+                .filter(|header| !header.is_empty())
+                .map(|header| {
+                    crate::css::value_parse::split_top_level_commas(header)
+                        .into_iter()
+                        .map(|branch| {
+                            let (name, condition) = parse_container_branch_header(branch);
+                            ContainerConditionBranch {
+                                name,
+                                condition,
+                                required_type: query_container_type(condition),
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
     apply_container_cascade_inner(
         node,
         stylesheet,
@@ -59,6 +223,8 @@ pub fn apply_container_cascade_tree(
         vh,
         focused_box,
         keyboard_focus,
+        applied_rules,
+        &conditions,
     )
 }
 
@@ -76,6 +242,8 @@ fn apply_container_cascade_inner(
     vh: f32,
     focused_box: u32,
     keyboard_focus: bool,
+    applied_rules: &mut HashMap<u32, AppliedContainerStyle>,
+    conditions: &[Vec<Vec<ContainerConditionBranch<'_>>>],
 ) -> bool {
     use crate::types::ContainerType;
 
@@ -101,34 +269,18 @@ fn apply_container_cascade_inner(
             next_siblings: &[],
             next_sibling_nodes: &[],
         };
-        let mut cont_matched: Vec<(u32, Declarations)> = Vec::new();
-        for rule in &stylesheet.rules {
+        let mut cont_matched: Vec<(usize, u32, Declarations)> = Vec::new();
+        for (rule_index, rule) in stylesheet.rules.iter().enumerate() {
             if rule.container_condition.is_empty() {
                 continue;
             }
             if !rule.media_condition.is_empty() && !evaluate_media(&rule.media_condition, vw, vh) {
                 continue;
             }
-            // Find nearest container that matches the rule's name
-            let ctx = if rule.container_name.is_empty() {
-                container_stack.last()
-            } else {
-                container_stack
-                    .iter()
-                    .rev()
-                    .find(|c| c.name == rule.container_name)
-            };
-            let ctx = match ctx {
-                Some(c) => c,
-                None => continue,
-            };
-            if !evaluate_container_for_type_and_style(
-                &rule.container_condition,
-                ctx.width,
-                ctx.height,
-                ctx.container_type,
-                Some(&ctx.style),
-            ) {
+            if !conditions[rule_index]
+                .iter()
+                .all(|branches| container_condition_matches(branches, container_stack))
+            {
                 continue;
             }
             // Full selector matching (same logic as apply_cascade_inner)
@@ -158,30 +310,45 @@ fn apply_container_cascade_inner(
                         for (k, v) in &rule.important_declarations {
                             merged.insert(k.clone(), v.clone());
                         }
-                        cont_matched.push((rule.specificity, merged));
+                        cont_matched.push((rule_index, rule.specificity, merged));
                     }
                     break;
                 }
             }
         }
-        if !cont_matched.is_empty() {
-            changed = true;
-            cont_matched.sort_by_key(|(sp, _)| *sp);
-            for (_, decls) in &cont_matched {
-                for (prop, val) in decls {
-                    let resolved = resolve_var_references(val, &stylesheet.variables);
-                    apply_property(std::sync::Arc::make_mut(&mut node.style), prop, &resolved);
+        cont_matched.sort_by_key(|(_, specificity, _)| *specificity);
+        let matched_rules = cont_matched
+            .iter()
+            .map(|(index, _, _)| *index)
+            .collect::<Vec<_>>();
+        if !matched_rules.is_empty() || applied_rules.contains_key(&node.node_id) {
+            let entry = applied_rules
+                .entry(node.node_id)
+                .or_insert_with(|| AppliedContainerStyle {
+                    base: node.style.clone(),
+                    rules: Vec::new(),
+                });
+            if entry.rules != matched_rules {
+                let mut candidate = entry.base.clone();
+                for (_, _, decls) in &cont_matched {
+                    for (prop, val) in decls {
+                        let resolved = resolve_var_references(val, &stylesheet.variables);
+                        apply_property(std::sync::Arc::make_mut(&mut candidate), prop, &resolved);
+                    }
+                }
+                entry.rules = matched_rules;
+                if candidate.as_ref() != node.style.as_ref() {
+                    node.style = candidate;
+                    node.layout.layout_dirty = true;
+                    changed = true;
                 }
             }
-            // Mark layout dirty so the subtree pruning doesn't suppress the
-            // geometry changes caused by these newly applied container rules.
-            node.layout.layout_dirty = true;
         }
     }
 
     // Update container stack: if this element is a container, push it
     // Push this element as a container ancestor (if it qualifies), recurse, pop.
-    let pushed_container = !matches!(node.style.container_type, ContainerType::Normal);
+    let pushed_container = !node.tag.starts_with('#');
     if pushed_container {
         container_stack.push(ContainerEntry {
             width: node.layout.content_rect.w,
@@ -248,6 +415,8 @@ fn apply_container_cascade_inner(
             vh,
             focused_box,
             keyboard_focus,
+            applied_rules,
+            conditions,
         );
         if c {
             changed = true;
