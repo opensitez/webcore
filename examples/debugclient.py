@@ -214,6 +214,11 @@ class DebugClient:
 
     # ── Chrome comparison ────────────────────────────────────────────────
 
+    def compare_page(self, selector=None, tolerance=1.0, sync_viewport=False):
+        """Compare the current page/subtrees against the --chrome reference."""
+        from page_compare import run
+        return run(self, selector, tolerance, sync_viewport)
+
     def sync(self, chrome_port=9223):
         """Sync scroll position to Chrome reference window via CDP."""
         scroll_y = self._send({"cmd": "scroll", "dy": 0}).get('scroll_y', 0)
@@ -684,7 +689,10 @@ def _interactive(port):
 
 if __name__ == '__main__':
     args = sys.argv[1:]
-    if args and args[0] == 'send':
+    if args and args[0] == 'compare':
+        from page_compare import main
+        main(args[1:])
+    elif args and args[0] == 'send':
         port = int(args[1]) if len(args) > 1 else 9222
         cmd = args[2] if len(args) > 2 else '{}'
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

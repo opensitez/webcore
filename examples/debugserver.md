@@ -9,7 +9,7 @@ cargo run --release --example browser -- --debug-port 9222 https://example.com
 # Headless mode (no window, for CI/scripting)
 cargo run --release --example browser -- --headless https://example.com
 
-# With Chrome comparison
+# With Chrome comparison (JavaScript disabled in the separate Chrome instance)
 cargo run --release --example browser -- --debug-port 9222 --chrome https://example.com
 
 # Opt-in loading and rendering profile in the GUI
@@ -80,7 +80,7 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 ### Navigation
 | Command | Example |
 |---------|---------|
-| `screenshot` | `{"cmd":"screenshot","out":"/tmp/page.png"}`; add `"scale":2` to exercise the same HiDPI raster path as a Retina GUI window |
+| `screenshot` | `{"cmd":"screenshot","out":"/tmp/page.png"}` repaints the browser content; add `"scale":2` for HiDPI. In GUI mode, `"presented":true` saves the last presented full-window frame without repainting, useful for transient stale-surface bugs. |
 | `navigate` | `{"cmd":"navigate","url":"https://example.com"}` |
 | `tabs` | `{"cmd":"tabs"}` — list open demo-browser tabs |
 | `switch-tab` | `{"cmd":"switch-tab","index":0}` — switch the active demo-browser tab |
@@ -88,6 +88,13 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 | `resize` | `{"cmd":"resize","width":800,"height":600}` |
 | `viewport` | `{"cmd":"viewport"}` — returns width, height, scroll, doc_height |
 | `quit` | `{"cmd":"quit"}` — stop the debugged browser process |
+
+`computed` element records also expose `scroll.left`, `scroll.top`,
+`scroll.width` and `scroll.height` in CSS pixels. For an overflow container,
+use `hover` to place the pointer over its content, then `scroll` with `dy` to
+exercise wheel routing into that container; `viewport.scroll_y` can remain zero
+while the element's `scroll.top` changes. The `scroll_paint` profiler includes
+these nested wheel updates.
 
 ### Finding & Querying
 | Command | Example |
@@ -108,7 +115,7 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 | `inspect` | `{"cmd":"inspect","selector":".sidebar"}` |
 | `inspect-node` | `{"cmd":"inspect-node","nid":42}` — by node_id; image nodes include decoded `image` metadata (`src`, natural width/height, byte count) when available |
 | `deep` | `{"cmd":"deep","selector":"td"}` — full dump |
-| `computed` | `{"cmd":"computed","selector":"h1"}` — includes `node_id`, box geometry, display/flex fields, `direction`, `writing_mode`, resolved padding/margins |
+| `computed` | `{"cmd":"computed","selector":"h1"}` — includes `node_id`, box geometry, display/flex fields, grid line placement and order, `direction`, `writing_mode`, resolved padding/margins |
 | `css` | `{"cmd":"css","selector":"td","props":"display,width"}` — also supports debug fields such as `svg-path`, `svg-fill-stored`, `svg-stroke-stored`, `svg-paint-flags`, and `matched-rule-count` |
 | `resolve-css` | `{"cmd":"resolve-css","value":"var(--brand)"}` — resolve CSS variable references against the active stylesheet |
 | `stylesheet-vars` | `{"cmd":"stylesheet-vars","query":"--brand","limit":20}` — list active stylesheet custom properties after viewport-aware resolution |
@@ -124,6 +131,7 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 | `display-list-stats` | `{"cmd":"display-list-stats"}` — command counts for the current viewport paint-band display list, including text, image, clip, transform, layer, and mask commands plus `paint_top`/`paint_bottom` |
 | `image-states` | `{"cmd":"image-states","limit":80}` — DOM image/background/mask state, including source URLs, `srcset`, node IDs, element/background/mask decoded state, natural sizes, byte counts, layout rects, pending-channel/in-flight status, and load errors |
 | `resource-states` | `{"cmd":"resource-states"}` — loading flag plus pending CSS/image/font resource state, stylesheet counts, and document height |
+| `font-faces` | `{"cmd":"font-faces"}` — parsed `@font-face` families and sources, with exact-family availability in the renderer's font database |
 | `stylesheet-slots` | `{"cmd":"stylesheet-slots"}` — document stylesheet order, linked/inline slots, resolved stylesheet URLs, and per-slot loaded rule counts for debugging cascade/resource ordering |
 | `memory-stats` | `{"cmd":"memory-stats"}` — browser-owned memory accounting plus OS process RSS/VSZ; includes retained viewport/content surfaces, tile surfaces, display-list command count with inline/heap/text/image/vector byte estimates, raw resource cache, parsed CSS cache, decoded image cache, DOM node/image/style counts, estimated DOM/layout/computed-style/line-cache/matched-rule/stylesheet bytes, and unique decoded DOM image buffers |
 | `animated-images` | `{"cmd":"animated-images"}` — list animated image nodes, frame counts, layout rects, clip band, and whether the engine currently considers them visible |
@@ -176,7 +184,7 @@ WEBCORE_TRACE_IDLE=1 cargo run --release --example browser -- --cached https://e
 WEBCORE_TRACE_RENDER=1 cargo run --release --example browser -- --cached https://example.com
 ```
 
-`WEBCORE_TRACE_IDLE` reports why the engine requested work (`stylesheet`, `image-layout`, `image-paint`, `font`, `css-animation-paint`, `css-animation-layout`, `animated-image`, etc.) and whether more timed work is pending. `WEBCORE_TRACE_RENDER` splits each render into display-list build and replay time, and reports whether the renderer-owned backing surface was reused.
+`WEBCORE_TRACE_IDLE` reports why the engine requested work (`stylesheet`, `image-layout`, `image-paint`, `font`, `css-animation-paint`, `css-animation-layout`, `animated-image`, etc.) and whether more timed work is pending. `WEBCORE_TRACE_RENDER` splits each render into display-list build and replay time, reports whether the renderer-owned backing surface was reused, and counts paint segments retained across a display-list rebuild.
 
 `--profile` is disabled by default. It records timing across loader and rendering threads, prints a cumulative console summary every five seconds while the GUI draws, and enables the `profile` debug command:
 
@@ -188,9 +196,111 @@ python3 examples/debugclient.py send 9222 '{"cmd":"profile","reset":true}'
 
 The profile reports HTML load and streamed parse, CSS load and parse, image load and decode, resource polling, cascade, geometry, frame updates, display-list recording, tile raster/composite, direct replay, full render, demo-browser draw, and `scroll_paint`. Each phase has `count`, cumulative `total_ms`, and slowest `max_ms`. `scroll_paint` measures from the first wheel, scrollbar, or programmatic scroll change awaiting a frame through completion of the next viewport paint; it includes scheduling delay but not OS compositor presentation. Divide `total_ms` by `count` for the mean scroll latency, and use `max_ms` to spot freezes. Resource entries are the 128 slowest observed document, stylesheet, and image loads, with URL, bytes where known, source, and elapsed time. `network` means an actual HTTP request; `load` includes cache/local/document delivery; `network+consume` includes streaming CSS callbacks and parsing. Phase timers are inclusive and can overlap, so do not add their totals to infer page wall time. The profiler resets on navigation; `"reset":true` also clears the current window without navigating. Use a release GUI run for realistic scroll timings.
 
+`image_decode` also includes background expansion of animated GIF/WebP frames,
+not just the initial preview. That work runs on image workers; its elapsed time
+must not be interpreted as UI blocking time. Compare it with `frame_update`
+and the responsiveness of the presented GUI. For HiDPI paint bugs, capture
+`screenshot` with `presented:true`: the default 1x debug repaint can hide a
+device-scale clipping error that is visible in the actual window.
+
 Viewport rendering uses cached raster tiles by default. Set `WEBCORE_DISABLE_TILES=1` when comparing against the full-display-list replay path during scroll debugging.
+The `fixed_replay` and `content_cache` phases break out fixed-position layer painting and retained-surface copying from `render`.
+`raster_image`, `raster_text`, `raster_shadow`, and `raster_layer` break down
+executed paint commands inside tile/direct replay. Culled commands are excluded;
+`raster_layer` measures opacity/filter/blend/mask allocation and compositing;
+`raster_clip` measures clip-mask construction, intersection and stack cleanup.
+These nested timings must not be added to their enclosing raster/render totals.
+Command timing is disabled unless `--profile` is enabled.
+When comparing performance runs, also record `viewport`: its `scale` is page
+zoom, while GUI `device_scale` is the display's physical-pixel scale. A 2x
+display paints four times as many pixels at the same CSS viewport size.
 
 ### Chrome Comparison (requires `--chrome`)
+
+#### Whole-page or subtree value comparison
+
+Run one GUI pair on the page, then compare their current live state:
+
+```sh
+./target/release/examples/browser --cached --chrome --debug-port 9222 --chrome-port 9223 http://localhost/websites/telquel.html
+python3 examples/debugclient.py compare 9222 --out /tmp/page-differences.json
+python3 examples/debugclient.py compare 9222 --selector '.article-important' --out /tmp/section-differences.json
+python3 examples/debugclient.py compare 9222 --only missing --limit 10 --out /tmp/missing-elements.json
+python3 examples/debugclient.py compare 9222 --only visibility
+python3 examples/debugclient.py compare 9222 --sync-viewport --out /tmp/aligned-differences.json
+```
+
+The client compares the **whole light DOM by default**, including offscreen
+elements. A selector includes every matching element and its descendants.
+`--tolerance 1` sets geometry tolerance in CSS pixels; `--limit 20` only limits
+console output, never the complete JSON file. Repeat after hover or scroll-back
+to compare those states. The command is read-only: it does not navigate, change
+styles, synchronize scroll, or wait for a presumed final rendering state.
+The explicit `--sync-viewport` option is the exception: it sets Chrome's emulated
+CSS viewport to Webcore's width/height (desktop, DPR 1) and synchronizes scroll
+before capturing Chrome. It does not reload or modify the page DOM. This avoids
+browser-toolbar height differences producing responsive-layout noise.
+
+Reports include both property values, Webcore node IDs, full element paths,
+matched/unmatched counts, property frequency counts, and environment warnings.
+Position differences with the same displacement as a matched parent are annotated
+`same_offset_as_parent` and excluded from the independent-difference count when
+they are the element's only differences. They remain in the full report.
+Matching reserves unique IDs first, then unique tag/direct-text/key-attribute
+signatures, globally unique class/container signatures, paths relative to
+unique-ID ancestors, paths below already matched parents, and DOM paths (not anonymous
+layout wrappers). Content signatures tolerate inserted siblings; ambiguous
+repeated content is not guessed. Class token order does not affect identity.
+Unmatched means **no confident match**, not proof that the parser dropped a node.
+Parser differences, different resources or DOM mutations can also cause it.
+Ancestors are listed before descendants to
+help locate upstream causes. `style-or-cascade` and `layout-or-resource` are
+triage hints, not proven root causes. Follow up using `inspect-node`, `rules`,
+`css`, and `chrome-eval` on the reported element.
+
+The `triage` list groups unmatched descendants under their first unmatched
+ancestor (with a descendant count), suppresses pure inherited offsets, and
+prioritizes unmatched/visibility issues before style and layout differences.
+Non-rendering metadata elements are lower priority in that list.
+The complete `differences` list remains intact. `--only missing|visibility|styles|layout`
+filters console output, not the saved file. Element descriptions include tag,
+ID/classes, direct-text excerpts (160 Unicode characters), and selected attributes
+(`href`, `src`, `alt`, `aria-label`, `role`, `name`, `type`). Reports can contain
+page text and URLs; treat them like other page-debugging artifacts.
+
+`visibility-mismatch` means matched elements differ in suppression by
+`display:none`, zero opacity on an ancestor, or computed visibility; it is not
+a hit-test, clipping or pixel-visibility verdict. Image decode differences carry
+both resource URLs/dimensions so a failed reference image is distinguishable
+from a Webcore decoder failure. Changes to text and selected attributes on
+confidently matched nodes are reported separately from geometry.
+Webcore currently exposes visibility as a boolean, losing the distinction between
+`hidden` and `collapse`. Comparison checks visible/non-visible and emits a coverage
+warning for Chrome `collapse` elements, rather than falsely claiming to verify
+their collapse-specific layout behavior.
+
+Compared values include border-box geometry, resolved margins/padding, display,
+position, float, font size/weight/family, direction, writing mode, text alignment,
+overflow, flex alignment, opacity, colors and image decode availability. Geometry
+is omitted for Chrome elements without boxes or under transforms because Chrome
+client rectangles are transformed while Webcore layout rectangles are not.
+Authored auto/percentage sizes are not compared directly against Chrome's used
+pixel sizes. Viewport/scroll differences, loading state, font readiness, empty
+selections and different URLs are explicitly reported. A snapshot is diagnostic,
+not an atomic cross-process capture or a conformance verdict.
+
+Current limitations: no shadow-tree, pseudo-element, text-run/line-wrap, clipping,
+or pixel comparison; property coverage is the explicit set above, not every CSS
+property. Missing resources in Chrome can affect results. Resource/style changes
+between the two snapshots can also produce transient differences. The existing
+screenshot comparison remains separate.
+
+`compare-snapshot` is the GUI server's bulk Webcore snapshot endpoint:
+`{"cmd":"compare-snapshot"}` or
+`{"cmd":"compare-snapshot","selector":"main"}`. The Python client performs
+matching and diffing outside the browser render loop; instrumentation has no
+normal-frame cost when it is not requested.
+
 | Command | Example |
 |---------|---------|
 | `chrome-screenshot` | `{"cmd":"chrome-screenshot","out":"/tmp/chrome.png"}` |

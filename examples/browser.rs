@@ -2345,8 +2345,17 @@ fn dbg_computed_json(node: &webcore::WebCore) -> String {
     );
     let _ = write!(
         buf,
+        r#","grid_placement":{{"column":[{},{}],"row":[{},{}],"order":{}}}"#,
+        s.grid_column_start,
+        s.grid_column_end,
+        s.grid_row_start,
+        s.grid_row_end,
+        s.order
+    );
+    let _ = write!(
+        buf,
         r#","font_size":{:.1},"font_weight":{},"font_family":{}"#,
-        s.font_size_px(16.0, 16.0),
+        s.font_size_px(webcore::ComputedStyle::INITIAL_FONT_SIZE_PX, webcore::ComputedStyle::INITIAL_FONT_SIZE_PX),
         dbg_json_escape(&format!("{:?}", s.font_weight)),
         dbg_json_escape(&s.font_family)
     );
@@ -2423,6 +2432,10 @@ fn dbg_computed_json(node: &webcore::WebCore) -> String {
         r#","checked":{},"selected":{},"dirty_checked":{},"dirty_selected":{}"#,
         node.checkedness, node.selectedness, node.dirty_checked, node.dirty_selectedness
     );
+    let _ = write!(buf,
+        r#", "scroll":{{"left":{:.2},"top":{:.2},"width":{:.2},"height":{:.2}}}"#,
+        node.layout.scroll_left, node.layout.scroll_top,
+        node.layout.scroll_width, node.layout.scroll_height);
     let _ = write!(
         buf,
         r#","border_collapse":{},"matched_rules":{},"line_count":{}}}"#,
@@ -2688,6 +2701,79 @@ impl BrowserApp {
 
     fn dispatch_debug_cmd(&mut self, cmd: &str, line: &str) -> String {
         match cmd {
+            "compare-snapshot" => {
+                let Some(doc) = self.tabs[self.active].view.document() else {
+                    return r#"{"ok":false,"error":"no document"}"#.into();
+                };
+                let selector = dbg_json_str(line, "selector");
+                let roots: std::collections::HashSet<u32> = selector.as_ref().map(|sel| {
+                    dbg_select_composed_with_pseudo(&doc.root, doc, sel).iter().map(|n| n.node_id).collect()
+                }).unwrap_or_default();
+                let mut id_counts = std::collections::HashMap::new();
+                let mut hidden_nodes = std::collections::HashMap::new();
+                Document::walk_all(&doc.root, &mut |n| {
+                    if n.style.display == Display::None || n.style.opacity == 0.0 {
+                        hidden_nodes.insert(n.node_id, if n.style.display == Display::None { "display:none" } else { "opacity:0" });
+                    }
+                    if let Some(id) = n.attributes.get("id").filter(|id| !id.is_empty()) {
+                        *id_counts.entry(id.clone()).or_insert(0usize) += 1;
+                    }
+                });
+                let mut elements = Vec::new();
+                Document::walk_all(&doc.root, &mut |node| {
+                    use webcore::dom::arena::{NodeId, NodeType};
+                    let Some(dom) = doc.arena.try_get(NodeId(node.node_id)) else { return; };
+                    if dom.node_type != NodeType::Element { return; }
+                    let mut selected = selector.is_none();
+                    let mut path = Vec::new();
+                    let mut anchor = String::new();
+                    let mut hidden_by = if node.style.visibility { String::new() } else { "visibility:hidden".to_string() };
+                    let mut current = NodeId(node.node_id);
+                    while let Some(n) = doc.arena.try_get(current) {
+                        selected |= roots.contains(&current.0);
+                        if hidden_by.is_empty() {
+                            if let Some(reason) = hidden_nodes.get(&current.0) {
+                                hidden_by = format!("{reason} on {} (node {})", n.tag, current.0);
+                            }
+                        }
+                        if anchor.is_empty() {
+                            if let Some(id) = n.attributes.get("id").filter(|id| id_counts.get(*id) == Some(&1)) {
+                                let suffix = path.iter().rev().cloned().collect::<Vec<_>>().join(" > ");
+                                anchor = format!("{}|{}", id.len(), id);
+                                anchor.push_str(&suffix);
+                            }
+                        }
+                        if n.node_type == NodeType::Element {
+                            let mut index = 1;
+                            let mut sibling = n.prev_sibling;
+                            while let Some(s) = doc.arena.try_get(sibling) {
+                                if s.node_type == NodeType::Element && s.tag == n.tag { index += 1; }
+                                sibling = s.prev_sibling;
+                            }
+                            path.push(format!("{}:nth-of-type({index})", n.tag));
+                        }
+                        current = n.parent;
+                    }
+                    if !selected { return; }
+                    path.reverse();
+                    let s = &node.style;
+                    let text = doc.arena.children(NodeId(node.node_id)).filter_map(|id| {
+                        let n = doc.arena.get(id);
+                        (n.node_type == NodeType::Text).then_some(n.text.as_str())
+                    }).collect::<Vec<_>>().join(" ");
+                    let text = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(160).collect::<String>();
+                    let attrs = ["href", "src", "alt", "aria-label", "role", "name", "type"].iter().filter_map(|key| {
+                        dom.attributes.get(*key).map(|value| format!("{}:{}", dbg_json_escape(key), dbg_json_escape(value)))
+                    }).collect::<Vec<_>>().join(",");
+                    elements.push(format!(r#"{{"path":{},"anchor":{},"text":{},"hidden_by":{},"attrs":{{{}}},"computed":{},"colors":{{"color":[{},{},{},{}],"background":[{},{},{},{}]}},"image":{{"src":{},"width":{},"height":{},"decoded":{}}}}}"#,
+                        dbg_json_escape(&path.join(" > ")), dbg_json_escape(&anchor), dbg_json_escape(&text), dbg_json_escape(&hidden_by), attrs, dbg_computed_json(node),
+                        s.color.r,s.color.g,s.color.b,s.color.a,
+                        s.background_color.r,s.background_color.g,s.background_color.b,s.background_color.a,
+                        dbg_json_escape(&node.resolved_src),node.image_width,node.image_height,node.image_data.is_some()));
+                });
+                format!(r#"{{"ok":true,"url":{},"loading":{},"chrome_port":{},"elements":[{}]}}"#,
+                    dbg_json_escape(&self.tabs[self.active].url),self.tabs[self.active].loading,self.chrome_port,elements.join(","))
+            }
             "chrome-eval" => {
                 if self.chrome_port == 0 {
                     return r#"{"ok":false,"error":"start GUI with --chrome"}"#.to_string();
@@ -2753,6 +2839,21 @@ impl BrowserApp {
             // ── Screenshot ───────────────────────────────────────────────────
             "screenshot" => {
                 let path = dbg_json_str(line, "out").unwrap_or_else(|| "snapshot.png".to_string());
+                if dbg_json_bool(line, "presented").unwrap_or(false) {
+                    return match self.platform.as_ref() {
+                        Some(platform) => match platform.save_presented_png(&path) {
+                            Ok((width, height)) => format!(
+                                r#"{{"ok":true,"path":{},"width":{},"height":{},"presented":true}}"#,
+                                dbg_json_escape(&path), width, height,
+                            ),
+                            Err(error) => format!(
+                                r#"{{"ok":false,"error":{}}}"#,
+                                dbg_json_escape(&error),
+                            ),
+                        },
+                        None => r#"{"ok":false,"error":"no GUI surface"}"#.to_string(),
+                    };
+                }
                 let scale = dbg_json_num(line, "scale")
                     .map(|v| v.clamp(0.25, 4.0) as f32)
                     .unwrap_or(1.0);
@@ -3975,6 +4076,27 @@ impl BrowserApp {
                     webcore::Document::scroll_height(&doc.root),
                 )
             }
+            "font-faces" => {
+                let Some((doc, renderer)) = self.tabs[self.active].view.document_and_renderer_mut() else {
+                    return r#"{"ok":false,"error":"no document"}"#.to_string();
+                };
+                let faces: Vec<_> = doc.stylesheet.font_faces.iter().map(|face| {
+                    let family = face.family.trim().trim_matches(['\'', '"']);
+                    let query = fontdb::Query {
+                        families: &[fontdb::Family::Name(family)],
+                        weight: fontdb::Weight::NORMAL,
+                        stretch: fontdb::Stretch::Normal,
+                        style: fontdb::Style::Normal,
+                    };
+                    format!(
+                        r#"{{"family":{},"src":{},"available":{}}}"#,
+                        dbg_json_escape(family),
+                        dbg_json_escape(&face.src),
+                        renderer.font_system.db().query(&query).is_some(),
+                    )
+                }).collect();
+                format!(r#"{{"ok":true,"count":{},"faces":[{}]}}"#, faces.len(), faces.join(","))
+            }
             "stylesheet-slots" => {
                 let Some(doc) = self.tabs[self.active].view.document() else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
@@ -3982,7 +4104,7 @@ impl BrowserApp {
                 let mut slots = Vec::new();
                 for (idx, sheet) in doc.document_stylesheets.iter().enumerate() {
                     match sheet {
-                        webcore::types::DocumentStylesheet::Inline { css } => {
+                        webcore::types::DocumentStylesheet::Inline { css, .. } => {
                             slots.push(format!(
                                 r#"{{"idx":{},"kind":"inline","css_len":{},"loaded_rules":null}}"#,
                                 idx,
@@ -4088,7 +4210,7 @@ impl BrowserApp {
                         let mut sheets = Vec::new();
                         for (idx, sheet) in sr.document_stylesheets.iter().enumerate() {
                             match sheet {
-                                webcore::types::DocumentStylesheet::Inline { css } => {
+                                webcore::types::DocumentStylesheet::Inline { css, .. } => {
                                     sheets.push(format!(
                                         r#"{{"idx":{},"kind":"inline","css_len":{}}}"#,
                                         idx,
@@ -4704,13 +4826,14 @@ impl BrowserApp {
                     .map(|d| Document::scroll_height(&d.root))
                     .unwrap_or(0.0);
                 format!(
-                    r#"{{"ok":true,"width":{:.0},"height":{:.0},"scroll_x":{:.1},"scroll_y":{:.1},"doc_height":{:.0},"scale":{:.1}}}"#,
+                    r#"{{"ok":true,"width":{:.0},"height":{:.0},"scroll_x":{:.1},"scroll_y":{:.1},"doc_height":{:.0},"scale":{:.1},"device_scale":{}}}"#,
                     self.width,
                     self.content_h(),
                     scroll_x,
                     scroll_y,
                     doc_h,
-                    self.tabs[self.active].view.zoom()
+                    self.tabs[self.active].view.zoom(),
+                    self.platform.as_ref().map(|p| p.scale_factor()).unwrap_or(1.0)
                 )
             }
             // ── Accessibility tree ───────────────────────────────────────────
@@ -5791,6 +5914,7 @@ fn main() {
                     .arg(format!("--remote-debugging-port={chrome_port}"))
                     .arg(format!("--window-size={},{}", width as u32, height as u32))
                     .arg("--disable-extensions")
+                    .arg("--blink-settings=scriptEnabled=false")
                     .arg("--no-first-run")
                     .arg("--no-default-browser-check")
                     .arg(format!("--user-data-dir=/tmp/browser-chrome-{chrome_port}"))
@@ -5842,7 +5966,7 @@ fn run_headless(
                 .arg(format!("--window-size={},{}", width as u32, height as u32))
                 .arg("--disable-extensions")
                 .arg("--disable-gpu")
-                .arg("--disable-javascript")
+                .arg("--blink-settings=scriptEnabled=false")
                 .arg("--no-first-run")
                 .arg("--no-default-browser-check")
                 .arg(format!(
