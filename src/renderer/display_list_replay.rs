@@ -1911,14 +1911,21 @@ fn replay_commands_inner(
                         }
                     }
                     ("select", _) => {
-                        let control_clip = build_clip_mask_with_transform(
+                        // The transformed rectangle is in scaled logical coordinates,
+                        // while clip masks and glyph coverage use device pixels.
+                        let mut control_clip = build_clip_mask_with_transform(
                             &rect,
                             &[0.0; 4],
                             &[0.0; 4],
                             pw,
                             ph,
-                            Transform::identity(),
+                            Transform::from_scale(scale, scale),
                         );
+                        if let (Some(control), Some(ancestor)) = (&mut control_clip, clip_mask) {
+                            for (dst, src) in control.data_mut().iter_mut().zip(ancestor.data()) {
+                                *dst = (*dst as u16 * *src as u16 / 255) as u8;
+                            }
+                        }
                         if !*appearance_none {
                             // Draw dropdown chevron arrow using the element's text color
                             let arrow_x = rect.x + rect.w - 14.0;
@@ -4532,10 +4539,11 @@ fn build_polygon_clip_mask_with_transform(
     ph: u32,
     ts: Transform,
 ) -> Option<tiny_skia::Mask> {
-    if points.len() < 3 {
-        return None;
-    }
     let mut mask = tiny_skia::Mask::new(pw, ph)?;
+    if points.len() < 3 {
+        // A valid degenerate polygon clips everything, rather than disabling clipping.
+        return Some(mask);
+    }
     let mut pb = PathBuilder::new();
     let (x0, y0) = points[0];
     pb.move_to(x0, y0);

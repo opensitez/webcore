@@ -197,7 +197,7 @@ fn style_string_bytes(style: &crate::types::ComputedStyle) -> usize {
     add!(grid_row_start_name);
     add!(grid_row_end_name);
     add!(grid_area);
-    add!(text_overflow_string);
+    bytes = bytes.saturating_add(style.text_overflow.heap_bytes());
     add!(font_variant_alternates);
     add!(font_variant_caps);
     add!(font_variant_east_asian);

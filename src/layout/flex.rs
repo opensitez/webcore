@@ -1,5 +1,5 @@
 use super::Constraints;
-use crate::layout::block::unwrap_all_anonymous_blocks;
+use crate::layout::block::unwrap_anonymous_children;
 use crate::layout::{
     LayoutEngine, ResolvedBox, clear_layout_subtree, layout_positioned, shift_rects,
 };
@@ -184,7 +184,7 @@ pub fn layout_flex(
     rbox: &ResolvedBox,
     c: &Constraints,
 ) -> f32 {
-    unwrap_all_anonymous_blocks(node);
+    unwrap_anonymous_children(node);
 
     let containing_w = c.available_width;
     let x = c.x;

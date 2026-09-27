@@ -1,7 +1,7 @@
 use super::Constraints;
 #[allow(unused_imports)]
 use crate::css::parse_single_track;
-use crate::layout::block::{apply_relative_offset, unwrap_all_anonymous_blocks};
+use crate::layout::block::{apply_relative_offset, unwrap_anonymous_children};
 use crate::layout::{LayoutEngine, ResolvedBox, layout_positioned, shift_rects};
 use crate::types::*;
 
@@ -210,7 +210,11 @@ pub fn layout_grid_subgrid(
 
     for (ii, path) in item_indices.iter().enumerate() {
         let child = grid_child_ref(node, path);
-        let n_sub_rows = node.style.rare().grid_template_rows.len();
+        let n_sub_rows = if row_is_sub {
+            ctx.inherited_row_heights().len()
+        } else {
+            node.style.rare().grid_template_rows.len()
+        };
         let (cs, ce, rs, re) = resolve_placement(
             child,
             &area_map,
@@ -323,12 +327,22 @@ pub fn layout_grid_subgrid(
         }
         auto_col += span_col;
     }
-    let n_rows = max_row.max(1);
+    // CSS Grid 2: a subgridded axis has no implicit tracks. Resolve the
+    // hypothetical placement, then clamp it to the inherited explicit grid.
+    let n_rows = if row_is_sub {
+        ctx.inherited_row_heights().len().max(1)
+    } else {
+        max_row.max(1)
+    };
 
     // --- Row axis ---
     let (row_heights, row_y_local, row_gap) = if row_is_sub {
         (
-            ctx.inherited_row_heights().to_vec(),
+            {
+                let mut rows = ctx.inherited_row_heights().to_vec();
+                rows.resize(n_rows, 0.0);
+                rows
+            },
             ctx.local_row_y(),
             ctx.row_gap,
         )
@@ -493,7 +507,7 @@ pub fn layout_grid(
     c: &Constraints,
 ) -> f32 {
     let track_lengths = GridTrackLengthContext::from_engine(engine);
-    unwrap_all_anonymous_blocks(node);
+    unwrap_anonymous_children(node);
 
     let containing_w = c.available_width;
     let x = c.x;

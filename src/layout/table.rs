@@ -197,56 +197,37 @@ fn anonymous_table_cell(parent: &WebCore) -> WebCore {
     anonymous_table_box(parent, "anonymous-table-cell", Display::TableCell)
 }
 
-fn append_unwrapped_anonymous_table_child(child: WebCore, out: &mut Vec<WebCore>) {
-    match child.tag.as_str() {
-        "anonymous-table" => {
-            for table_child in child.children {
-                append_unwrapped_anonymous_table_child(table_child, out);
+fn unwrap_anonymous_outer_tables(node: &mut WebCore) {
+    let mut work = vec![node];
+    while let Some(node) = work.pop() {
+        while node.children.iter().any(|child| matches!(child.tag.as_str(), "anonymous-table" | "anonymous-table-row")) {
+            let old_children = std::mem::take(&mut node.children);
+            for child in old_children {
+                if matches!(child.tag.as_str(), "anonymous-table" | "anonymous-table-row") {
+                    node.children.extend(child.children);
+                } else {
+                    node.children.push(child);
+                }
             }
         }
-        "anonymous-table-row" => {
-            out.extend(child.children);
-        }
-        _ => out.push(child),
-    }
-}
-
-fn unwrap_anonymous_outer_tables(node: &mut WebCore) {
-    for child in &mut node.children {
-        unwrap_anonymous_outer_tables(child);
-    }
-    if node.children.iter().any(|child| {
-        matches!(
-            child.tag.as_str(),
-            "anonymous-table" | "anonymous-table-row"
-        )
-    }) {
-        let old_children = std::mem::take(&mut node.children);
-        let mut new_children = Vec::with_capacity(old_children.len());
-        for child in old_children {
-            append_unwrapped_anonymous_table_child(child, &mut new_children);
-        }
-        node.children = new_children;
+        work.extend(node.children.iter_mut());
     }
 }
 
 fn unwrap_anonymous_table_row_cells(row: &mut WebCore) {
-    for child in &mut row.children {
-        unwrap_anonymous_table_row_cells(child);
-    }
-    if row
-        .children
-        .iter()
-        .any(|child| child.tag == "anonymous-table-cell")
-    {
-        let old_children = std::mem::take(&mut row.children);
-        for child in old_children {
-            if child.tag == "anonymous-table-cell" {
-                row.children.extend(child.children);
-            } else {
-                row.children.push(child);
+    let mut work = vec![row];
+    while let Some(node) = work.pop() {
+        while node.children.iter().any(|child| child.tag == "anonymous-table-cell") {
+            let old_children = std::mem::take(&mut node.children);
+            for child in old_children {
+                if child.tag == "anonymous-table-cell" {
+                    node.children.extend(child.children);
+                } else {
+                    node.children.push(child);
+                }
             }
         }
+        work.extend(node.children.iter_mut());
     }
 }
 

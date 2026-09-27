@@ -144,14 +144,16 @@ impl CssMathFunction {
                     };
                 }
                 if a % step == 0.0 { return a; }
-                let quotient = a / step;
+                // Two finite f32 values can have a quotient outside f32's
+                // range even when their rounded result is representable.
+                let quotient = f64::from(a) / f64::from(step);
                 let rounded = match strategy {
                     CssRoundingStrategy::Nearest => (quotient + 0.5).floor(),
                     CssRoundingStrategy::Up => quotient.ceil(),
                     CssRoundingStrategy::Down => quotient.floor(),
                     CssRoundingStrategy::ToZero => quotient.trunc(),
                 };
-                if rounded == 0.0 { 0.0f32.copysign(a) } else { rounded * step }
+                if rounded == 0.0 { 0.0f32.copysign(a) } else { (rounded * f64::from(step)) as f32 }
             }
             Mod | Rem => {
                 if b == 0.0 || a.is_infinite() { return f32::NAN; }
@@ -187,7 +189,7 @@ mod math_edge_tests {
         for strategy in [CssRoundingStrategy::Nearest, CssRoundingStrategy::Up,
             CssRoundingStrategy::Down, CssRoundingStrategy::ToZero] {
             for value in [1.0, -1.0] {
-                assert_eq!(CssMathFunction::Round(strategy).evaluate(&[value, 3.0e-39]), value);
+                assert_eq!(CssMathFunction::Round(strategy).evaluate(&[value, 3.0e-40]), value);
             }
         }
     }
@@ -397,7 +399,7 @@ impl CssLength {
                     viewport_h,
                     query,
                 );
-                val_v.max(min_v).min(max_v)
+                CssMathFunction::Clamp.evaluate(&[min_v, val_v, max_v])
             }
             CssLength::Auto => 0.0,
             // Not lengths. The flex algorithm reads these before it ever asks

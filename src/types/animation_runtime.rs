@@ -49,6 +49,7 @@ fn keyframes_with_synthesized_endpoints(
             0,
             KeyframeStop {
                 offset: 0.0,
+                timing_fn: None,
                 properties,
             },
         );
@@ -64,8 +65,20 @@ fn keyframes_with_synthesized_endpoints(
             .collect();
         out.push(KeyframeStop {
             offset: 1.0,
+            timing_fn: None,
             properties,
         });
+    }
+    // Endpoints are synthesized per property, even when other properties
+    // already supplied an explicit 0% or 100% stop.
+    for endpoint in [0, out.len() - 1] {
+        for prop in &animated_props {
+            if !out[endpoint].properties.iter().any(|(name, _)| name == prop) {
+                if let Some(value) = underlying.get(prop) {
+                    out[endpoint].properties.push((prop.clone(), value.clone()));
+                }
+            }
+        }
     }
     out
 }
@@ -424,12 +437,22 @@ impl Document {
                     FillMode::Backwards | FillMode::Both
                 ) {
                     if let Some(kf) = keyframes.get(&state.animation.name) {
-                        if let Some(first) = kf.first() {
+                        if let Some(node) = find_node_by_id(&self.root, state.element_id) {
+                            let underlying = extract_transitionable_style(&node.style);
+                            let mut stops = keyframes_with_synthesized_endpoints(kf, &underlying);
+                            let initial_font_px = ComputedStyle::INITIAL_FONT_SIZE_PX;
+                            let root_font_px = self.root.style.font_size_px(initial_font_px, initial_font_px);
+                            resolve_keyframe_values_for_element(&mut stops, node, root_font_px, self.viewport_w, self.viewport_h);
+                            let endpoint = if matches!(state.animation.direction, AnimDirection::Reverse | AnimDirection::AlternateReverse) {
+                                stops.last()
+                            } else { stops.first() };
+                            // During the delay, fill uses the directed endpoint without easing.
+                            let properties = endpoint.map(|stop| stop.properties.clone()).unwrap_or_default();
                             let entry = self
                                 .animation_overrides
                                 .entry(state.element_id)
                                 .or_default();
-                            entry.extend(first.properties.clone());
+                            entry.extend(compose_animation_properties(properties, &underlying, &state.animation.composition));
                         }
                     }
                 }
@@ -504,7 +527,7 @@ impl Document {
                             }
                         };
                         let props = compose_animation_properties(
-                            interpolate_keyframe_stops(&stops, final_t),
+                            interpolate_keyframe_stops_with_easing(&stops, final_t, &state.animation.timing_fn),
                             &underlying,
                             &state.animation.composition,
                         );
@@ -558,7 +581,6 @@ impl Document {
                     }
                 }
             };
-            let eased = apply_easing(&state.animation.timing_fn, effective_t);
 
             if let Some(kf) = keyframes.get(&state.animation.name) {
                 let underlying = find_node_by_id(&self.root, state.element_id)
@@ -577,7 +599,7 @@ impl Document {
                     );
                 }
                 let props = compose_animation_properties(
-                    interpolate_keyframe_stops(&stops, eased),
+                    interpolate_keyframe_stops_with_easing(&stops, effective_t, &state.animation.timing_fn),
                     &underlying,
                     &state.animation.composition,
                 );

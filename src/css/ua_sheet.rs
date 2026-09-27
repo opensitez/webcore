@@ -166,8 +166,10 @@ tbody[hidden], thead[hidden], tfoot[hidden], tr[hidden], col[hidden], colgroup[h
 button, input[type=submit], input[type=button], input[type=reset] {
   display: inline-flex; align-items: center; justify-content: center;
   padding: 1px 6px; cursor: default; background-color: #e8e8e8; border: 1px solid #767676;
-  white-space: nowrap; border-radius: 3px; box-sizing: border-box;
+  border-radius: 3px; box-sizing: border-box;
 }
+button { white-space: normal; align-content: center; }
+input[type=submit], input[type=button], input[type=reset] { white-space: nowrap; }
 button:hover, input[type=submit]:hover, input[type=button]:hover, input[type=reset]:hover {
   background-color: #e0e0e0; border-color: #666;
 }
@@ -191,13 +193,10 @@ input { display: inline-block; width: 200px; min-height: 2.2em; padding: 0 6px; 
    height here: author styles such as Bootstrap's `.btn` must be able to size
    the control from their own line-height and padding. */
 input[type=submit], input[type=button], input[type=reset] { width: auto; border: 1px solid #767676; padding: 3px 8px; background-color: #e8e8e8; }
-select { display: inline-block; width: 200px; padding: 0 6px; border: 1px solid #ababab; border-radius: 3px; box-sizing: border-box; vertical-align: middle; background-color: #ffffff; color: #000000; }
-/* A CLOSED select is one row tall. A list box — `size` above one, or
-   `multiple` — is as tall as its rows, and that height depends on a NUMBER,
-   which CSS cannot express: it arrives as a presentational hint from the
-   `size` attribute. The hint has to be the only thing setting the height, so
-   this rule must not match a list box. */
-select:not([size]):not([multiple]) { height: 2.2em; }
+select { display: inline-block; padding: 0 6px; border: 1px solid #ababab; border-radius: 3px; box-sizing: border-box; vertical-align: middle; background-color: #ffffff; color: #000000; }
+/* Closed selects keep automatic dimensions: layout measures their option
+   labels and lets flex/grid stretch the block axis. Multi-row list boxes
+   receive their row-dependent height from the size/multiple hint. */
 option, optgroup { display: none; }
 textarea { display: inline-block; white-space: pre-wrap; width: 200px; height: 3em; padding: 2px; border: 1px solid #767676; box-sizing: border-box; }
 input[type=range] { width: 160px; height: 1.2em; border: none; padding: 0; }

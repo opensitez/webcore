@@ -7,6 +7,123 @@ use crate::layout::LayoutEngine;
 use crate::types::*;
 
 #[test]
+fn absolute_stretch_accounts_for_positive_and_negative_margins() {
+    let doc = parse_and_layout("<style>#outer{position:relative;width:1020px;height:390px}#box{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;margin:290px 175px -95px;padding:10px 65px;border:5px solid;box-sizing:border-box}#title{width:500px;height:120px}</style><div id=outer><div id=box><div id=title></div></div></div>", 1280.0);
+    let get = |id: &str| find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == id)).unwrap();
+    let outer = get("outer").layout.content_rect;
+    let rect = get("box").layout.border_rect;
+    assert!((rect.w - 670.0).abs() < 0.1, "{rect:?}");
+    assert!((rect.h - 195.0).abs() < 0.1, "{rect:?}");
+    assert!((rect.x - outer.x - 175.0).abs() < 0.1);
+    assert!((rect.y - outer.y - 290.0).abs() < 0.1);
+    let title = get("title").layout.border_rect;
+    assert!((title.x - (rect.x + (rect.w - title.w) / 2.0)).abs() < 0.1);
+}
+
+#[test]
+fn contents_text_wraps_beside_float() {
+    let doc = parse_and_layout("<style>#row{width:220px}time{float:left;width:35px;height:21px;margin-right:4px}a{display:contents}</style><div id=row><time>17:30</time><a>News text wraps beside the timestamp and continues below it.</a></div>", 500.0);
+    let row = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "row")).unwrap();
+    let time = find_box(row, &|n| n.tag == "time").unwrap();
+    let first = row.layout.line_cache.first().expect("text should join the inline formatting context");
+    assert!(first.x >= time.layout.border_rect.right() + 3.9, "line {:?}, float {:?}", first.x, time.layout.border_rect);
+}
+
+#[test]
+fn malformed_selector_list_does_not_generate_global_pseudo_boxes() {
+    let doc = parse_and_layout("<style>* zoom 1,:after{display:table;clear:both;content:''}</style><div id=target>Visible</div>", 500.0);
+    let node = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "target")).unwrap();
+    assert!(node.style.after_content.is_empty());
+    assert!(node.children.iter().all(|n| n.tag != "::after"));
+    for invalid in ["1", "-1", ".1", "#1", ".", "div?"] {
+        assert!(!crate::css::parse_selector(invalid).valid, "{invalid}");
+    }
+    for valid in [r"\31 ", r".\31 name", r"#\31 ", "--custom", ".éclair"] {
+        assert!(crate::css::parse_selector(valid).valid, "{valid}");
+    }
+}
+
+#[test]
+fn flex_clearfix_text_survives_repeated_layout() {
+    let mut doc = parse_html("<style>ul{display:flex}li::after{content:'';display:table;clear:both}</style><ul><li id=item><a>Accueil</a></li></ul>");
+    let mut engine = LayoutEngine::new();
+    for _ in 0..3 {
+        engine.layout(&mut doc, 800.0);
+        let item = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "item")).unwrap();
+        fn has_lines(n: &WebCore) -> bool {
+            !n.layout.line_cache.is_empty() || n.children.iter().any(has_lines)
+        }
+        assert!(has_lines(item), "clearfix menu item lost its text layout");
+    }
+}
+
+#[test]
+fn indefinite_percentage_image_height_tracks_clamped_width() {
+    let doc = parse_and_layout("<style>.cover{width:65px}img{display:block;width:auto;height:100%;max-width:100%}</style><div class=cover><span><img id=cover width=650 height=870></span></div>", 800.0);
+    let image = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "cover")).unwrap();
+    assert!((image.layout.content_rect.w - 65.0).abs() < 0.1);
+    assert!((image.layout.content_rect.h - 87.0).abs() < 0.1, "{:?}", image.layout.content_rect);
+}
+
+#[test]
+fn inline_block_descendant_stays_with_positioned_container() {
+    let mut doc = parse_html("<style>*::after{content:'';display:table;clear:both}#outer{position:relative;margin-top:600px;width:320px;height:403px}a{position:absolute;right:0;top:6px;width:285px;height:382px}img{display:block;max-width:100%;height:auto}</style><div id=outer><a><span><img id=pic width=1181 height=1574></span></a></div>");
+    let mut engine = LayoutEngine::new();
+    for _ in 0..3 {
+        engine.layout(&mut doc, 800.0);
+        let image = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "pic")).unwrap();
+        let anchor = find_box(&doc.root, &|n| n.tag == "a").unwrap();
+        assert!((image.layout.content_rect.y - anchor.layout.content_rect.y).abs() < 0.1, "image {:?}, anchor {:?}", image.layout.content_rect, anchor.layout.content_rect);
+    }
+}
+
+#[test]
+fn empty_inline_block_does_not_split_icon_row() {
+    for nested in [false, true] {
+        let items = "<i id=first></i> <i></i> <span id=empty></span> <i></i> <i id=last></i>";
+        let content = if nested { format!("<a>{items}</a>") } else { items.to_string() };
+        let doc = parse_and_layout(&format!("<style>body{{margin:0}}#row{{width:300px;text-align:right}}i{{display:inline-block;width:50px;height:50px}}#empty{{display:inline-block}}</style><div id=row>{content}</div>"), 500.0);
+        let get = |id: &str| find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == id)).unwrap();
+        assert_eq!(get("empty").layout.content_rect.w, 0.0, "nested={nested}");
+        assert!((get("first").layout.border_rect.y - get("last").layout.border_rect.y).abs() < 0.1, "icons wrapped, nested={nested}");
+    }
+}
+
+#[test]
+fn inline_size_containment_preserves_auto_block_size() {
+    let doc = parse_and_layout("<div id=box style='contain:inline-size'><div style='height:40px'></div></div>", 400.0);
+    let node = find_box(&doc.root, &|node| node.attributes.get("id").is_some_and(|id| id == "box")).unwrap();
+    assert_eq!(node.layout.content_rect.h, 40.0);
+}
+
+#[test]
+fn anonymous_blocks_only_inherit_inherited_properties() {
+    let mut parent = WebCore::new("section");
+    let style = std::sync::Arc::make_mut(&mut parent.style);
+    apply_property(style, "color", "red");
+    apply_property(style, "font-size", "24px");
+    apply_property(style, "opacity", "0.5");
+    apply_property(style, "overflow", "hidden");
+    apply_property(style, "transform", "translateX(10px)");
+    apply_property(style, "contain", "style paint");
+    style.before_content = "must not duplicate".into();
+    let mut block = WebCore::new("div");
+    std::sync::Arc::make_mut(&mut block.style).display = Display::Block;
+    let mut inline = WebCore::new("span");
+    inline.text = "text".into();
+    parent.children.extend([block, inline]);
+    crate::layout::block::wrap_mixed_children_in_anonymous_blocks(&mut parent);
+    let anon = parent.children.iter().find(|node| node.tag == "anonymous-block").unwrap();
+    assert_eq!(anon.style.color, parent.style.color);
+    assert_eq!(anon.style.font_size, parent.style.font_size);
+    assert_eq!(anon.style.opacity, ComputedStyle::default().opacity);
+    assert_eq!(anon.style.overflow_x, Overflow::Visible);
+    assert!(!anon.style.contain_style && !anon.style.contain_paint);
+    assert!(anon.style.before_content.is_empty());
+    assert_eq!(anon.style.transform, ComputedStyle::default().transform);
+}
+
+#[test]
 fn anonymous_block_cleanup_handles_deep_trees_without_recursion() {
     let mut root = WebCore::new("leaf");
     for i in 0..4096 {
@@ -63,6 +180,68 @@ fn floated_auto_table_keeps_inline_images_on_one_max_content_line() {
     let doc = renderer.load_html(&html, 800.0);
     let cell = crate::dom::query_selector(&doc.root, "#icons").unwrap();
     assert_eq!(cell.layout.line_cache.len(), 1, "max-content table must not wrap its icons: {:?}", cell.layout);
+}
+
+#[test]
+fn subgrid_row_placement_cannot_create_implicit_tracks() {
+    let doc = parse_and_layout("<style>body{margin:0}#parent{display:grid;width:200px;grid-template-rows:40px}#sub{display:grid;grid-template-rows:subgrid}#child{grid-row:2 / 7}</style><div id=parent><div id=sub><div id=child>Item</div></div></div>", 800.0);
+    let sub = crate::dom::query_selector(&doc.root, "#sub").unwrap();
+    let child = crate::dom::query_selector(&doc.root, "#child").unwrap();
+    assert!((child.layout.border_rect.y - sub.layout.content_rect.y).abs() < 0.1);
+    assert!(child.layout.border_rect.h <= sub.layout.content_rect.h + 0.1);
+}
+
+#[test]
+fn single_row_select_uses_intrinsic_label_width_and_flex_stretch() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html("<style>body{margin:0}section{display:flex;height:40px;width:300px}select{appearance:none;padding:0 20px;border:0;font:12px/16px sans-serif}</style><section><select id=s size=1><option>All Categories</option></select></section>", 800.0);
+    let select = crate::dom::query_selector(&doc.root, "#s").unwrap();
+    assert!(select.style.height.is_auto());
+    assert!(select.style.width.is_auto());
+    assert!((select.layout.border_rect.h - 40.0).abs() < 0.1, "{:?}", select.layout.border_rect);
+    assert!(select.layout.border_rect.w > 70.0 && select.layout.border_rect.w < 150.0, "{:?}", select.layout.border_rect);
+}
+
+#[test]
+fn block_align_content_centers_contents_as_a_unit() {
+    for (alignment, offset) in [("center", 30.0), ("end", 60.0), ("space-around", 30.0)] {
+        let doc = parse_and_layout(&format!(
+            "<style>body{{margin:0}}#box{{height:100px;align-content:{alignment}}}#box div{{height:20px}}</style><section id=box><div id=a></div><div id=b></div></section>"
+        ), 800.0);
+        let get = |id: &str| find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|v| v == id)).unwrap().layout.border_rect;
+        assert!((get("a").y - get("box").y - offset).abs() < 0.1, "{alignment}");
+        assert!((get("b").y - get("a").y - 20.0).abs() < 0.1);
+    }
+    let doc = parse_and_layout("<style>body{margin:0}button{display:block;width:160px;height:44px;padding:0;border:0}span{display:block;height:20px}</style><button id=box><span id=label>Search</span></button>", 800.0);
+    let button = crate::dom::query_selector(&doc.root, "#box").unwrap();
+    let label = crate::dom::query_selector(&doc.root, "#label").unwrap();
+    assert!((label.layout.border_rect.y - button.layout.content_rect.y - 12.0).abs() < 0.1);
+}
+
+#[test]
+fn button_label_wraps_by_default_in_narrow_container() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html("<style>body{margin:0}.parent{width:2px}button{display:flex;padding:0;border:0}span{display:flex;min-width:50px;height:40px;align-items:center}i{width:12px;flex-shrink:0}</style><div class=parent><button id=b><span id=label>Shop by category</span><i></i></button></div>", 800.0);
+    let button = crate::dom::query_selector(&doc.root, "#b").unwrap();
+    let label = crate::dom::query_selector(&doc.root, "#label").unwrap();
+    assert_eq!(label.style.white_space, WhiteSpace::Normal);
+    assert!(button.layout.border_rect.w >= 62.0 && button.layout.border_rect.w < 100.0, "{:?}", button.layout.border_rect);
+}
+
+#[test]
+fn auto_width_flex_button_uses_fit_content_instead_of_parent_width() {
+    for width in [2, 400] {
+        let doc = parse_and_layout(&format!(
+            "<style>body{{margin:0}}.parent{{width:{width}px;margin-left:100px}}\
+             button{{display:flex;justify-content:flex-end;padding:0;border:0;min-width:0}}\
+             span{{width:50px;flex-shrink:0}}i{{width:12px;flex-shrink:0}}</style>\
+             <div class=parent><button id=button><span>Label</span><i></i></button></div>"
+        ), 800.0);
+        let button = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|v| v == "button")).unwrap();
+        assert!((button.layout.content_rect.w - 62.0).abs() < 0.1, "parent {width}: {:?}", button.layout.content_rect);
+        let label = find_box(button, &|b| b.tag == "span").unwrap();
+        assert!((label.layout.border_rect.x - button.layout.content_rect.x).abs() < 0.1);
+    }
 }
 
 #[test]

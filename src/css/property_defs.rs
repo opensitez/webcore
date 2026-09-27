@@ -232,6 +232,14 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             copy: copy_svg_stroke,
             longhands: &[],
         },
+        StrokeWidth => &PropertyDef {
+            id: StrokeWidth,
+            name: "stroke-width",
+            inherited: true,
+            apply: apply_svg_stroke_width,
+            copy: copy_svg_stroke_width,
+            longhands: &[],
+        },
         Opacity => &PropertyDef {
             id: Opacity,
             name: "opacity",
@@ -3039,6 +3047,7 @@ pub const INHERITED_IDS: &[PropertyId] = &[
     PropertyId::Color,
     PropertyId::Fill,
     PropertyId::Stroke,
+    PropertyId::StrokeWidth,
     PropertyId::FontSize,
     PropertyId::FontFamily,
     PropertyId::FontWeight,
@@ -3307,6 +3316,25 @@ fn apply_opacity(s: &mut ComputedStyle, v: &str) {
         super::calc::parse_math_alpha(v)
     };
     if let Some(op) = op { s.opacity = op.clamp(0.0, 1.0); }
+}
+
+fn apply_svg_stroke_width(s: &mut ComputedStyle, v: &str) {
+    if let Some(length) = parse_length_checked(v) {
+        let valid = match &length {
+            CssLength::Px(n) | CssLength::Em(n) | CssLength::Rem(n) | CssLength::Percent(n)
+            | CssLength::Vw(n) | CssLength::Vh(n) | CssLength::Vmin(n) | CssLength::Vmax(n)
+            | CssLength::Cqw(n) | CssLength::Cqh(n) | CssLength::Cqi(n) | CssLength::Cqb(n)
+            | CssLength::Cqmin(n) | CssLength::Cqmax(n) => n.is_finite() && *n >= 0.0,
+            CssLength::Zero | CssLength::Calc(_) | CssLength::CalcExpr(_)
+            | CssLength::Min(_) | CssLength::Max(_) | CssLength::Clamp(_) => true,
+            _ => false,
+        };
+        if valid { s.rare_mut().svg_stroke_width = Some(length); }
+    }
+}
+
+fn copy_svg_stroke_width(d: &mut ComputedStyle, s: &ComputedStyle) {
+    d.rare_mut().svg_stroke_width = s.rare().svg_stroke_width.clone();
 }
 
 fn copy_color(d: &mut ComputedStyle, s: &ComputedStyle) {
@@ -4538,75 +4566,26 @@ fn apply_text_underline_position(s: &mut ComputedStyle, v: &str) {
     };
 }
 fn apply_text_overflow(s: &mut ComputedStyle, v: &str) {
-    let tokens = split_text_overflow_tokens(v);
-    if tokens.is_empty() || tokens.len() > 2 {
-        s.text_overflow = TextOverflow::Clip;
-        s.text_overflow_string.clear();
-        return;
+    fn marker(source: &str) -> Option<(TextOverflow, &str)> {
+        if source.starts_with(['\'', '"']) {
+            let (text, rest) = super::apply::consume_css_string(source)?;
+            return Some((TextOverflow::String(text), rest));
+        }
+        let end = source.find(char::is_whitespace).unwrap_or(source.len());
+        let value = match source[..end].to_ascii_lowercase().as_str() {
+            "clip" => TextOverflow::Clip,
+            "ellipsis" => TextOverflow::Ellipsis,
+            _ => return None,
+        };
+        Some((value, &source[end..]))
     }
-
-    let end_marker = tokens.last().map(String::as_str).unwrap_or("clip");
-    match end_marker {
-        "ellipsis" => {
-            s.text_overflow = TextOverflow::Ellipsis;
-            s.text_overflow_string.clear();
-        }
-        "clip" => {
-            s.text_overflow = TextOverflow::Clip;
-            s.text_overflow_string.clear();
-        }
-        marker if is_quoted_css_string(marker) => {
-            s.text_overflow = TextOverflow::Ellipsis;
-            s.text_overflow_string = crate::css::resolve_content_value(marker);
-        }
-        _ => {
-            s.text_overflow = TextOverflow::Clip;
-            s.text_overflow_string.clear();
-        }
-    }
-}
-
-fn split_text_overflow_tokens(v: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut chars = v.trim().chars().peekable();
-    while let Some(ch) = chars.peek().copied() {
-        if ch.is_whitespace() {
-            chars.next();
-            continue;
-        }
-        if ch == '"' || ch == '\'' {
-            let quote = ch;
-            let mut token = String::new();
-            token.push(chars.next().unwrap());
-            let mut escaped = false;
-            for c in chars.by_ref() {
-                token.push(c);
-                if escaped {
-                    escaped = false;
-                } else if c == '\\' {
-                    escaped = true;
-                } else if c == quote {
-                    break;
-                }
-            }
-            tokens.push(token);
-        } else {
-            let mut token = String::new();
-            while let Some(c) = chars.peek().copied() {
-                if c.is_whitespace() {
-                    break;
-                }
-                token.push(c);
-                chars.next();
-            }
-            tokens.push(token);
-        }
-    }
-    tokens
-}
-
-fn is_quoted_css_string(v: &str) -> bool {
-    (v.starts_with('"') && v.ends_with('"')) || (v.starts_with('\'') && v.ends_with('\''))
+    let Some((first, rest)) = marker(v.trim()) else { return; };
+    let value = if rest.trim().is_empty() { first } else {
+        let Some((second, rest)) = marker(rest.trim_start()) else { return; };
+        if !rest.trim().is_empty() { return; }
+        TextOverflow::Pair(Box::new([first, second]))
+    };
+    s.text_overflow = value;
 }
 fn apply_text_wrap(s: &mut ComputedStyle, v: &str) {
     apply_keyword_list(
@@ -4674,8 +4653,7 @@ fn copy_text_wrap(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.text_wrap = s.text_wrap.clone();
 }
 fn copy_text_overflow(d: &mut ComputedStyle, s: &ComputedStyle) {
-    d.text_overflow = s.text_overflow;
-    d.text_overflow_string = s.text_overflow_string.clone();
+    d.text_overflow = s.text_overflow.clone();
 }
 fn copy_text_shadow(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.text_shadow = s.text_shadow.clone();
@@ -7833,13 +7811,13 @@ fn copy_column_span(d: &mut ComputedStyle, s: &ComputedStyle) {
 // ── Counter ─────────────────────────────────────────────────────────────────
 
 fn apply_counter_reset(s: &mut ComputedStyle, v: &str) {
-    s.counter_reset = super::parse_counter_list_with_default(v, 0);
+    if let Some(value) = super::apply::parse_counter_reset_checked(v) { s.counter_reset = value; }
 }
 fn apply_counter_increment(s: &mut ComputedStyle, v: &str) {
-    s.counter_increment = super::parse_counter_list(v);
+    if let Some(value) = super::apply::parse_counter_list_checked(v, 1) { s.counter_increment = value; }
 }
 fn apply_counter_set(s: &mut ComputedStyle, v: &str) {
-    s.counter_set = super::parse_counter_list_with_default(v, 0);
+    if let Some(value) = super::apply::parse_counter_list_checked(v, 0) { s.counter_set = value; }
 }
 
 fn copy_counter_reset(d: &mut ComputedStyle, s: &ComputedStyle) {
@@ -8101,17 +8079,45 @@ fn apply_forced_color_adjust(s: &mut ComputedStyle, v: &str) {
 // ── Containment ─────────────────────────────────────────────────────────────
 
 fn apply_contain(s: &mut ComputedStyle, v: &str) {
-    let is_strict = v == "strict";
-    let is_content = v == "content";
-    s.contain_layout = v.contains("layout") || is_strict || is_content;
-    s.contain_paint = v.contains("paint") || is_strict || is_content;
-    s.contain_size = v.contains("size") || is_strict;
+    let value = v.trim().to_ascii_lowercase();
+    let tokens: Vec<_> = value.split_ascii_whitespace().collect();
+    let (size, inline_size, layout, style, paint, serialized) = match tokens.as_slice() {
+        ["none"] => (false, false, false, false, false, String::new()),
+        ["strict"] => (true, false, true, true, true, value.clone()),
+        ["content"] => (false, false, true, true, true, value.clone()),
+        [] => return,
+        _ => {
+            let mut seen = std::collections::HashSet::new();
+            for token in &tokens {
+                if !matches!(*token, "size" | "inline-size" | "layout" | "style" | "paint")
+                    || !seen.insert(*token) { return; }
+            }
+            if seen.contains("size") && seen.contains("inline-size") { return; }
+            let ordered: Vec<_> = ["size", "inline-size", "layout", "style", "paint"]
+                .into_iter().filter(|token| seen.contains(token)).collect();
+            (seen.contains("size"), seen.contains("inline-size"), seen.contains("layout"),
+                seen.contains("style"), seen.contains("paint"), ordered.join(" "))
+        }
+    };
+    s.contain_size = size;
+    s.contain_inline_size = inline_size;
+    s.contain_layout = layout;
+    s.contain_style = style;
+    s.contain_paint = paint;
+    if !serialized.is_empty() || !s.rare().contain.is_empty() {
+        s.rare_mut().contain = serialized;
+    }
 }
 
 fn copy_contain(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.contain_layout = s.contain_layout;
     d.contain_paint = s.contain_paint;
     d.contain_size = s.contain_size;
+    d.contain_inline_size = s.contain_inline_size;
+    d.contain_style = s.contain_style;
+    if !s.rare().contain.is_empty() || !d.rare().contain.is_empty() {
+        d.rare_mut().contain = s.rare().contain.clone();
+    }
 }
 
 fn apply_content_visibility(s: &mut ComputedStyle, v: &str) {

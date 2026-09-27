@@ -264,7 +264,7 @@ pub fn apply_cascade_parallel(
 
     let mut ancestors: Vec<AncestorInfo> = Vec::new();
     let mut candidates_buf: Vec<usize> = Vec::new();
-    let mut counters: HashMap<String, Vec<i32>> = HashMap::new();
+    let mut counters = crate::css::cascade::CounterState::default();
     let mut share_cache = crate::css::cascade::ShareCache::new();
     apply_cascade_inner(
         root,
@@ -293,4 +293,5 @@ pub fn apply_cascade_parallel(
         &mut share_cache,
         Some(&match_map),
     );
+    crate::css::cascade::resolve_document_generated_content(root, stylesheet);
 }

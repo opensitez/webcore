@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Mixed-unit CSS animation regression</title>
+<style>
+body { margin: 24px; font: 20px/1.5 sans-serif; }
+.track { width: 400px; height: 70px; margin-bottom: 24px; background: #eee; }
+.box { width: 200px; height: 40px; background: #257b66; color: white;
+       font-size: 30px; animation: move 2s linear -1s paused both; }
+#percentage { animation-name: percentage; }
+#absolute { animation-name: absolute; }
+@keyframes move { from { transform: translateX(1em); } to { transform: translateX(20px); } }
+@keyframes percentage { from { transform: translateX(10px); } to { transform: translateX(50%); } }
+@keyframes absolute { from { transform: translateX(1in); } to { transform: translateX(48px); } }
+</style>
+<h1>Mixed-unit animation midpoints</h1>
+<div class="track"><div class="box" id="font">25px offset</div></div>
+<div class="track"><div class="box" id="percentage">55px offset</div></div>
+<div class="track"><div class="box" id="absolute">72px offset</div></div>

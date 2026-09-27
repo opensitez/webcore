@@ -119,8 +119,9 @@ pub fn resolve_bidi_line(
         let mut run_start = 0usize;
         let mut cur_lv = bidi.levels[0].number();
         for ci in 1..=char_count {
-            let next_lv = if ci < bidi.levels.len() {
-                bidi.levels[ci].number()
+            // unicode-bidi levels are indexed by UTF-8 byte, not character.
+            let next_lv = if ci < char_count {
+                bidi.levels[char_bytes[ci]].number()
             } else {
                 cur_lv
             };

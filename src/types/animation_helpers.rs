@@ -435,75 +435,39 @@ fn transition_text_decoration_style(style: TextDecorationStyle) -> String {
     .to_string()
 }
 
-/// Find the two surrounding keyframe stops for `t` and return interpolated properties.
+/// Sample each property's own keyframe intervals (CSS Animations 1).
 pub(crate) fn interpolate_keyframe_stops(stops: &[KeyframeStop], t: f32) -> Vec<(String, String)> {
-    if stops.is_empty() {
-        return Vec::new();
-    }
-    if stops.len() == 1 {
-        return stops[0].properties.clone();
-    }
+    interpolate_keyframe_stops_with_easing(stops, t, &EasingFn::Linear)
+}
 
-    // Find surrounding stops.
-    let (from, to, local_t) = if t <= stops[0].offset {
-        (&stops[0], &stops[0], 0.0f32)
-    } else if t >= stops[stops.len() - 1].offset {
-        let last = &stops[stops.len() - 1];
-        (last, last, 1.0f32)
-    } else {
-        let mut fi = 0usize;
-        for i in 0..stops.len() - 1 {
-            if t >= stops[i].offset && t <= stops[i + 1].offset {
-                fi = i;
-                break;
+pub(crate) fn interpolate_keyframe_stops_with_easing(
+    stops: &[KeyframeStop],
+    t: f32,
+    default_easing: &EasingFn,
+) -> Vec<(String, String)> {
+    let mut properties = Vec::new();
+    for stop in stops {
+        for (name, _) in &stop.properties {
+            if !properties.contains(&name.as_str()) { properties.push(name.as_str()); }
+        }
+    }
+    properties.into_iter().filter_map(|property| {
+        let mut track = stops.iter().filter_map(|stop| {
+            stop.properties.iter().find(|(name, _)| name == property)
+                .map(|(_, value)| (stop, value))
+        });
+        let mut from = track.next()?;
+        if t < from.0.offset { return Some((property.to_owned(), from.1.clone())); }
+        for to in track {
+            if t < to.0.offset {
+                let progress = (t - from.0.offset) / (to.0.offset - from.0.offset);
+                let eased = apply_easing(from.0.timing_fn.as_ref().unwrap_or(default_easing), progress);
+                return Some((property.to_owned(), interpolate_property_value(property, from.1, to.1, eased)));
             }
+            from = to;
         }
-        let ti = fi + 1;
-        let range = stops[ti].offset - stops[fi].offset;
-        let lt = if range > 1e-6 {
-            (t - stops[fi].offset) / range
-        } else {
-            0.0
-        };
-        (&stops[fi], &stops[ti], lt)
-    };
-
-    let mut props = Vec::new();
-    for (prop, _) in &from.properties {
-        if !props.iter().any(|p: &String| p == prop) {
-            props.push(prop.clone());
-        }
-    }
-    for (prop, _) in &to.properties {
-        if !props.iter().any(|p| p == prop) {
-            props.push(prop.clone());
-        }
-    }
-
-    let mut result = Vec::new();
-    for prop in props {
-        let from_val = from
-            .properties
-            .iter()
-            .find(|(p, _)| p == &prop)
-            .map(|(_, v)| v.as_str());
-        let to_val = to
-            .properties
-            .iter()
-            .find(|(p, _)| p == &prop)
-            .map(|(_, v)| v.as_str());
-        let fallback = from_val.or(to_val).unwrap_or("");
-        result.push((
-            prop.clone(),
-            interpolate_property_value(
-                &prop,
-                from_val.unwrap_or(fallback),
-                to_val.unwrap_or(fallback),
-                local_t,
-            ),
-        ));
-    }
-    result
+        Some((property.to_owned(), from.1.clone()))
+    }).collect()
 }
 
 /// Interpolate a named CSS property between two value strings.

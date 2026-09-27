@@ -920,6 +920,28 @@ fn inline_svg_preserves_current_color_path_over_default_fill() {
 }
 
 #[test]
+fn inline_svg_use_resolves_symbols_in_other_inline_svg() {
+    let (_, list) = build(r##"<svg style="display:none"><defs>
+        <symbol id="shared" viewBox="0 0 12 12"><rect width="12" height="12"/></symbol>
+        </defs></svg><svg style="width:12px;height:12px;fill:red"><use href="#shared"/></svg>"##);
+    let (data, w, h) = first_image_data(&list).expect("visible SVG");
+    assert_eq!((w, h), (12, 12));
+    assert!(data.chunks_exact(4).any(|pixel| pixel[0] > 200 && pixel[3] > 200));
+}
+
+#[test]
+fn inline_svg_css_zero_stroke_width_suppresses_inherited_outline() {
+    for width in ["0", "0px", "calc(1px - 1px)"] {
+        let (_, list) = build(&format!(
+            "<style>svg{{stroke:red;stroke-width:{width};fill:none;width:24px;height:24px}}</style>\
+             <svg viewBox='0 0 24 24'><circle cx='12' cy='12' r='8'/></svg>"
+        ));
+        let (data, _, _) = first_image_data(&list).expect("SVG raster");
+        assert!(data.chunks_exact(4).all(|px| px[3] == 0), "{width}");
+    }
+}
+
+#[test]
 fn inline_svg_root_stroke_current_color_survives_dom_style() {
     let (_, list) = build(
         r#"<style>svg.search { color: rgb(164, 206, 254); }</style>
@@ -2110,6 +2132,19 @@ fn clip_path_inset_and_circle_emit_display_list_clips() {
         0,
         "paint outside the polygon should be clipped"
     );
+}
+
+#[test]
+fn degenerate_polygon_clip_hides_paint() {
+    for shape in ["polygon(0 0)", "polygon(0 0, 0 0)", "polygon(0 0, 100% 100%)"] {
+        let (_, list) = build(&format!(
+            "<style>body{{margin:0}}</style><div style='width:100px;height:100px;background:red;clip-path:{shape}'></div>"
+        ));
+        assert!(list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::PushClipPath { .. })), "{shape}");
+        let mut pixmap = tiny_skia::Pixmap::new(120, 120).unwrap();
+        replay(&list, &mut pixmap, 1.0);
+        assert!(pixmap.data().chunks_exact(4).all(|pixel| pixel[3] == 0), "{shape} must have no visible fill area");
+    }
 }
 
 #[test]
@@ -4539,6 +4574,34 @@ fn form_labels_respect_text_indent_and_control_clipping() {
 }
 
 #[test]
+fn select_default_label_paints_at_device_scale() {
+    let (_, list) = build(r#"<select style="position:absolute;left:200px;top:40px;width:150px;height:40px;appearance:none;border:0;background:transparent;color:black"><option>All Categories</option></select>"#);
+    let command = list.commands.iter().find(|cmd| matches!(cmd, PaintCmd::FormElement { tag, .. } if tag == "select")).unwrap().clone();
+    assert!(matches!(&command, PaintCmd::FormElement { value, selected: 0, .. } if value == "All Categories"));
+    let mut isolated = DisplayList::new();
+    isolated.push(command);
+    let mut fonts = cosmic_text::FontSystem::new();
+    let mut cache = cosmic_text::SwashCache::new();
+    for scale in [1.0, 2.0] {
+        let mut pixels = tiny_skia::Pixmap::new((500.0 * scale) as u32, (150.0 * scale) as u32).unwrap();
+        pixels.fill(tiny_skia::Color::WHITE);
+        replay_with_text(&isolated, &mut pixels, scale, &mut fonts, &mut cache);
+        assert!(pixels.data().chunks_exact(4).any(|p| p[0] < 128), "selected label missing at scale {scale}");
+        let mut clipped = DisplayList::new();
+        clipped.push(PaintCmd::PushClip {
+            rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        clipped.push(isolated.commands[0].clone());
+        clipped.push(PaintCmd::PopClip);
+        pixels.fill(tiny_skia::Color::WHITE);
+        replay_with_text(&clipped, &mut pixels, scale, &mut fonts, &mut cache);
+        assert!(pixels.data().chunks_exact(4).all(|p| p[0] == 255), "selected label escaped ancestor clip at scale {scale}");
+    }
+}
+
+#[test]
 fn overflow_clip_margin_expands_the_paint_clip_rect() {
     let (_, list) = build(
         r#"<style>*{margin:0;padding:0}</style>
@@ -4881,6 +4944,69 @@ fn text_overflow_two_value_custom_marker_truncates_display_text() {
         "text-overflow two-value syntax should emit truncated text with the end marker; commands were {:?}",
         list.commands
     );
+}
+
+#[test]
+fn text_overflow_keeps_complete_graphemes_inside_marker_budget() {
+    use unicode_segmentation::UnicodeSegmentation;
+    for source in ["abcdefghijk", "a\u{301}a\u{301}a\u{301}a\u{301}a\u{301}"] {
+        for width in [40.0, 55.0] {
+            let (_, list) = build(&format!(
+                "<style>*{{margin:0;padding:0}}div{{width:{width}px;font:20px monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}</style><div>{source}</div>"
+            ));
+            let text = list.commands.iter().find_map(|cmd| match cmd {
+                PaintCmd::Text { text, .. } if text.ends_with('…') => Some(text.as_str()),
+                _ => None,
+            }).expect("ellipsis command");
+            let prefix = text.strip_suffix('…').unwrap();
+            assert!(prefix.is_empty() || source.grapheme_indices(true).any(|(offset, cluster)| offset + cluster.len() == prefix.len()),
+                "ellipsis split a grapheme: {text:?}");
+            let measured = crate::layout::inline_layout::measure_text_width_weighted(
+                text, 20.0, None, crate::types::FontWeight::Normal, crate::types::FontStyle::Normal, 1.0, "monospace", 1.0,
+            );
+            assert!(measured <= width + 0.1, "ellipsis clipped at {width}px: {text:?} occupies {measured}px");
+        }
+    }
+}
+
+#[test]
+fn text_overflow_reserves_the_markers_letter_spacing() {
+    let (_, list) = build("<style>*{margin:0;padding:0}div{width:80px;font:20px monospace;letter-spacing:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}</style><div>abcdefghijk</div>");
+    let text = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Text { text, .. } if text.ends_with('…') => Some(text.as_str()),
+        _ => None,
+    }).expect("ellipsis command");
+    let measured = crate::layout::inline_layout::measure_text_width_weighted(
+        text, 20.0, None, crate::types::FontWeight::Normal, crate::types::FontStyle::Normal, 1.0, "monospace", 1.0,
+    ) + text.chars().count().saturating_sub(1) as f32 * 4.0;
+    assert!(measured <= 80.1, "tracking clips the ellipsis: {text:?} occupies {measured}px");
+
+    let mut renderer = Renderer::new();
+    let width = crate::layout::inline_layout::measure_text_width_weighted(
+        "abcd…", 20.0, Some(&mut renderer.font_system), crate::types::FontWeight::Normal,
+        crate::types::FontStyle::Normal, 1.0, "monospace", 1.0,
+    ) + 4.0 * 4.0 + 0.5;
+    let doc = renderer.load_html(&format!("<style>*{{margin:0;padding:0}}div{{width:{width}px;font:20px monospace;letter-spacing:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}</style><div>abcdefghijk</div>"), 800.0);
+    let list = build_display_list_full_with_font_system(
+        &doc.root, 800.0, 600.0, 0.0, 0.0, 0, 0, &std::collections::HashSet::new(), "",
+        Some(&mut renderer.font_system as *mut _),
+    );
+    assert!(list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == "abcd…")),
+        "must not reserve unused tracking after the last marker glyph");
+}
+
+#[test]
+fn empty_text_overflow_string_clips_at_grapheme_boundaries_without_ellipsis() {
+    use unicode_segmentation::UnicodeSegmentation;
+    let source = "a\u{301}a\u{301}a\u{301}a\u{301}a\u{301}";
+    let (_, list) = build(&format!("<style>*{{margin:0;padding:0}}div{{width:40px;font:20px monospace;white-space:nowrap;overflow:hidden;text-overflow:\"\"}}</style><div>{source}</div>"));
+    let text = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Text { text, .. } => Some(text.as_str()),
+        _ => None,
+    }).expect("text command");
+    assert!(!text.contains('…'), "empty marker must not become ellipsis: {text:?}");
+    assert!(text.len() < source.len(), "must truncate rather than clip mid-glyph");
+    assert!(source.grapheme_indices(true).any(|(offset, cluster)| offset + cluster.len() == text.len()));
 }
 
 #[test]

@@ -3153,6 +3153,28 @@ fn tiny_animated_gif_with_delay(delay_ms: u32) -> Vec<u8> {
 }
 
 #[test]
+fn animated_image_expansion_keeps_preview_until_worker_completes() {
+    let crate::html::DecodedImage::Animated(mut animated) =
+        crate::html::decode_image_bytes_ex(&tiny_animated_gif()).unwrap()
+    else { panic!("expected animated GIF") };
+    let preview = animated.frames[0].pixels.clone();
+    assert!(!crate::html::poll_animated_image_expansion(&mut animated, 1, 1));
+    assert!(std::sync::Arc::ptr_eq(&preview, &animated.frames[0].pixels));
+    assert_eq!(animated.frames.len(), 1);
+    assert!(animated.pending_decode.is_some());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !crate::html::poll_animated_image_expansion(&mut animated, 1, 1) {
+        assert!(std::time::Instant::now() < deadline, "animation worker did not publish");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(animated.pending_decode.is_none());
+    assert!(animated.fully_decoded);
+    assert_eq!(animated.frames.len(), 2);
+    assert_eq!(&animated.frames[0].pixels[..4], &[255, 0, 0, 255]);
+    assert_eq!(&animated.frames[1].pixels[..4], &[0, 0, 255, 255]);
+}
+
+#[test]
 fn gif_decode_preserves_animation_frames() {
     let decoded = crate::html::decode_image_bytes_ex(&tiny_animated_gif()).unwrap();
     let crate::html::DecodedImage::Animated(mut animated) = decoded else {
@@ -3222,6 +3244,14 @@ fn single_frame_data_gif_decodes_as_raster_image() {
     assert_eq!((w, h), (1, 1));
 }
 
+fn wait_for_animation_frames(doc: &mut crate::types::Document, now: std::time::Instant) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !doc.tick_animated_images(now) {
+        assert!(std::time::Instant::now() < deadline, "animation worker did not publish");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn animated_image_tick_advances_rendered_pixels_without_layout() {
     let decoded = crate::html::decode_image_bytes_ex(&tiny_animated_gif()).unwrap();
@@ -3232,7 +3262,7 @@ fn animated_image_tick_advances_rendered_pixels_without_layout() {
     let mut doc = crate::types::Document::new();
     doc.root.children.push(node);
     let start = doc.root.children[0].animated_image_last_tick.unwrap();
-    assert!(doc.tick_animated_images(start));
+    wait_for_animation_frames(&mut doc, start);
     let start_pixels = doc.root.children[0].image_data.clone().unwrap();
     let now = start + std::time::Duration::from_millis(25);
 
@@ -3254,7 +3284,7 @@ fn animated_image_tick_respects_declared_frame_delay() {
     let mut doc = crate::types::Document::new();
     doc.root.children.push(node);
     let start = doc.root.children[0].animated_image_last_tick.unwrap();
-    assert!(doc.tick_animated_images(start));
+    wait_for_animation_frames(&mut doc, start);
     let start_pixels = doc.root.children[0].image_data.clone().unwrap();
 
     assert!(!doc.tick_animated_images(start + std::time::Duration::from_millis(100)));
@@ -3277,7 +3307,7 @@ fn animated_image_tick_catches_up_without_discarding_elapsed_time() {
     node.animated_image_last_tick = Some(start);
     let mut doc = crate::types::Document::new();
     doc.root.children.push(node);
-    assert!(doc.tick_animated_images(start));
+    wait_for_animation_frames(&mut doc, start);
 
     assert!(doc.tick_animated_images(start + std::time::Duration::from_millis(65)));
     assert_eq!(doc.root.children[0].animated_image_frame, 1);
@@ -3301,8 +3331,9 @@ fn animated_image_tick_reports_the_image_paint_rect() {
 
     let mut doc = crate::types::Document::new();
     doc.root.children.push(node);
-    let now = doc.root.children[0].animated_image_last_tick.unwrap()
-        + std::time::Duration::from_millis(25);
+    let start = doc.root.children[0].animated_image_last_tick.unwrap();
+    wait_for_animation_frames(&mut doc, start);
+    let now = start + std::time::Duration::from_millis(25);
 
     let tick = doc.tick_animated_images_in_viewport_detailed(now, 0.0, 200.0);
     assert!(tick.changed_any);

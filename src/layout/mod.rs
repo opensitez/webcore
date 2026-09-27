@@ -1814,6 +1814,17 @@ impl LayoutEngine {
         font_px: f32,
         root_font_px: f32,
     ) -> Option<f32> {
+        if node.tag == "select" {
+            let label_width = crate::html::forms::list_of_options(node).into_iter()
+                .map(|option| self.measure_text_cached_with_stretch(
+                    &crate::html::forms::option_label(option), font_px,
+                    node.style.font_weight, node.style.font_style,
+                    &node.style.font_family, node.style.font_stretch,
+                ))
+                .fold(0.0, f32::max);
+            let indicator_width = if node.style.appearance == "none" { 0.0 } else { font_px };
+            return Some(label_width + indicator_width);
+        }
         if node.tag != "input" || !crate::types::is_text_input(node) {
             return None;
         }
@@ -2225,7 +2236,11 @@ impl LayoutEngine {
         parent_font_px: f32,
         root_font_px: f32,
     ) -> Option<f32> {
-        if !node.is_pseudo_element() || !node.text.is_empty() || node.style.width.is_auto() {
+        if !node.is_pseudo_element()
+            || !node.text.is_empty()
+            || node.style.width.is_auto()
+            || node.style.display == Display::Inline
+        {
             return None;
         }
         if node.style.width.has_percentage() {
@@ -2265,6 +2280,7 @@ impl LayoutEngine {
 
         // Explicit width → use that directly
         if honor_width
+            && !(node.is_pseudo_element() && node.style.display == Display::Inline)
             && !node.style.width.is_auto()
             && (!node.style.width.has_percentage() || width_basis.is_some())
         {
@@ -2523,6 +2539,7 @@ impl LayoutEngine {
         }
 
         if honor_width
+            && !(node.is_pseudo_element() && node.style.display == Display::Inline)
             && !node.style.width.is_auto()
             && (!node.style.width.has_percentage() || width_basis.is_some())
         {
@@ -2718,14 +2735,7 @@ impl LayoutEngine {
                         child_main = mw;
                     }
                 }
-                let contribution = if ch.style.is_inline_level()
-                    && ch.style.width.is_auto()
-                    && inline_subtree_has_non_whitespace_text(ch)
-                {
-                    (child_main + child_outer).ceil() + 1.0
-                } else {
-                    child_main + child_outer
-                };
+                let contribution = child_main + child_outer;
                 total += contribution;
                 if count > 0 {
                     total += gap;
@@ -2778,12 +2788,6 @@ impl LayoutEngine {
                 } else {
                     min_w + child_outer
                 });
-            }
-            if (ch.style.is_inline_level() || !matches!(ch.style.float, Float::None))
-                && ch.style.width.is_auto()
-                && inline_subtree_has_non_whitespace_text(ch)
-            {
-                cw = cw.ceil() + 1.0;
             }
             if !matches!(ch.style.float, Float::None) {
                 float_sum += cw;
@@ -4024,6 +4028,24 @@ impl LayoutEngine {
             rbox.content_height = Some(h);
         }
 
+        if node.tag == "select" && node.style.width.is_auto() {
+            rbox.content_width = self.text_control_intrinsic_content_width(node, font_px, root_font_px);
+        }
+
+        // HTML button layout uses fit-content for an automatic inline size,
+        // including a block-level flex/grid button inside a narrow parent.
+        if node.tag == "button"
+            && node.style.width.is_auto()
+            && node.style.writing_mode == WritingMode::HorizontalTB
+            && c.forced_width.is_none()
+        {
+            let available = (containing_w - rbox.margin_left - rbox.margin_right
+                - rbox.padding_left - rbox.padding_right - rbox.border_left - rbox.border_right).max(0.0);
+            rbox.content_width = Some(self.intrinsic_width(
+                &CssLength::FitContent, node, available, font_px, root_font_px, containing_w,
+            ));
+        }
+
         self.clamp_resolved_content_width(&mut rbox, node, containing_w, font_px, root_font_px);
 
         // A percentage height in an auto-height containing block computes to
@@ -4033,7 +4055,7 @@ impl LayoutEngine {
             && ih > 0.0
             && node.style.height.has_percentage()
             && c.available_height.is_none()
-            && rbox.content_height.is_none()
+            && (rbox.content_height.is_none() || intrinsic_h_override.is_some())
         {
             rbox.content_height = Some(rbox.content_width.unwrap_or(iw) * ih / iw);
         }
@@ -4117,7 +4139,7 @@ impl LayoutEngine {
                         _ => 200.0,
                     }
                 }
-                "select" => 200.0,
+                "select" => self.text_control_intrinsic_content_width(node, font_px, root_font_px).unwrap_or(0.0),
                 "textarea" => 200.0,
                 "progress" | "meter" => 160.0,
                 _ => 0.0,
@@ -4381,13 +4403,7 @@ impl LayoutEngine {
                 // floated (no inline content to lay out). When floats and inline
                 // content coexist, inline layout handles them via Float items.
                 let children = node.effective_children();
-                let has_any_inline = children.iter().any(|c| {
-                    !matches!(c.style.display, Display::None)
-                        && !matches!(c.style.position, Position::Absolute | Position::Fixed)
-                        && matches!(c.style.float, Float::None)
-                        && c.style.is_inline_level()
-                        && !(c.tag == "#text" && c.text.chars().all(|ch| ch.is_ascii_whitespace()))
-                });
+                let has_any_inline = has_in_flow_inline_children(node);
                 let has_only_floats = !has_any_inline
                     && children.iter().any(|c| {
                         !matches!(c.style.display, Display::None)
@@ -4401,6 +4417,8 @@ impl LayoutEngine {
                         | Display::InlineFlex
                         | Display::InlineGrid
                 ) && node.text.is_empty()
+                    && node.style.before_content.is_empty()
+                    && node.style.after_content.is_empty()
                     && children.iter().all(|c| {
                         matches!(c.style.display, Display::None)
                             || matches!(c.style.position, Position::Absolute | Position::Fixed)
@@ -4523,6 +4541,19 @@ fn clear_layout_dirty_flags(node: &mut WebCore) {
             clear_layout_dirty_flags(child);
         }
     }
+}
+
+fn has_in_flow_inline_children(node: &WebCore) -> bool {
+    node.effective_children().iter().any(|child| {
+        if child.style.display == Display::Contents {
+            return has_in_flow_inline_children(child);
+        }
+        child.style.display != Display::None
+            && !matches!(child.style.position, Position::Absolute | Position::Fixed)
+            && child.style.float == Float::None
+            && child.style.is_inline_level()
+            && !(child.is_text_node() && child.text.chars().all(|ch| ch.is_ascii_whitespace()))
+    })
 }
 
 pub fn has_block_children(node: &WebCore) -> bool {
@@ -4704,7 +4735,8 @@ pub fn layout_positioned_static(
             engine.viewport_h,
             Some(containing_h),
         );
-        let w = (containing_w - l - r - rbox_inner.inner_h_space()).max(0.0);
+        let w = (containing_w - l - r - rbox_inner.margin_left
+            - rbox_inner.margin_right - rbox_inner.inner_h_space()).max(0.0);
         Some(w)
     } else {
         None
@@ -4734,7 +4766,8 @@ pub fn layout_positioned_static(
             engine.viewport_h,
             Some(containing_h),
         );
-        let h = (containing_h - t - b - rbox_inner.inner_v_space()).max(0.0);
+        let h = (containing_h - t - b - rbox_inner.margin_top
+            - rbox_inner.margin_bottom - rbox_inner.inner_v_space()).max(0.0);
         Some(h)
     } else {
         None

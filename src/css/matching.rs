@@ -1159,96 +1159,25 @@ fn is_local_link(tag: &str, attrs: &crate::dom::attrs::AttrMap, document_url: &s
 fn has_descendant_matching(
     node: &crate::types::WebCore,
     sel: &CssSelector,
-    focused_box: u32,
+    ctx: &MatchContext,
 ) -> bool {
-    // A leading child combinator restricts the search to the anchor's own
-    // children; a leading descendant combinator, or none, searches the subtree.
-    if let Some(SelectorPart::Combinator(c)) = sel.parts.first() {
-        match c {
-            Combinator::Child => {
-                let rest = &sel.parts[1..];
-                let empty_hover = std::collections::HashSet::new();
-                let empty_focus = std::collections::HashSet::new();
-                return node
-                    .children
-                    .iter()
-                    .filter(|c| c.is_element())
-                    .any(|child| {
-                        let ctx = MatchContext {
-                            focused_box,
-                            keyboard_focus: false,
-                            type_child_index: 0,
-                            type_sibling_count: 1,
-                            html_box: Some(child),
-                            hover_chain: &empty_hover,
-                            focus_within_chain: &empty_focus,
-                            element_id: child.node_id,
-                            scope_root_id: 0,
-                            target_id: 0,
-                            document_url: "",
-                            prev_siblings: &[],
-                            next_siblings: &[],
-                            next_sibling_nodes: &[],
-                        };
-                        matches_selector_with_ancestors(
-                            rest,
-                            &child.tag,
-                            &child.attributes,
-                            0,
-                            1,
-                            &[],
-                            &ctx,
-                        )
-                    });
-            }
-            // ⛔ A leading `+`/`~` relates to the anchor's SIBLINGS, which are
-            // not reachable from here — this function only sees the subtree.
-            // Not supported; it answers false rather than pretending.
-            Combinator::AdjacentSibling | Combinator::GeneralSibling | Combinator::Column => {
-                return false;
-            }
-            Combinator::Descendant => {
-                let mut stripped = sel.clone();
-                stripped.parts.remove(0);
-                return has_descendant_matching(node, &stripped, focused_box);
-            }
-        }
+    // Match the terminal compound at every descendant, but anchor the first
+    // relation to this node. Restricting candidates to immediate children
+    // incorrectly rejects :has(> A > B) because B is not an immediate child.
+    let mut parts = vec![SelectorPart::PseudoClass("scope".into())];
+    if !matches!(sel.parts.first(), Some(SelectorPart::Combinator(_))) {
+        parts.push(SelectorPart::Combinator(Combinator::Descendant));
     }
-    let empty_hover = std::collections::HashSet::new();
-    let empty_focus = std::collections::HashSet::new();
-    for child in &node.children {
-        let ctx = MatchContext {
-            focused_box,
-            keyboard_focus: false,
-            type_child_index: 0,
-            type_sibling_count: 1,
-            html_box: Some(child),
-            hover_chain: &empty_hover,
-            focus_within_chain: &empty_focus,
-            element_id: child.node_id,
-            scope_root_id: 0,
-            target_id: 0,
-            document_url: "",
-            prev_siblings: &[],
-            next_siblings: &[],
-            next_sibling_nodes: &[],
-        };
-        if matches_selector_with_ancestors(
-            &sel.parts,
-            &child.tag,
-            &child.attributes,
-            0,
-            1,
-            &[],
-            &ctx,
-        ) {
-            return true;
-        }
-        if has_descendant_matching(child, sel, focused_box) {
-            return true;
-        }
-    }
-    false
+    parts.extend(sel.parts.iter().cloned());
+    let mut ancestors = vec![AncestorInfo {
+        tag: node.tag.clone(), attributes: node.attributes.clone(),
+        child_index: 0, sibling_count: 1,
+        type_child_index: ctx.type_child_index, type_sibling_count: ctx.type_sibling_count,
+        node_id: node.node_id, prev_siblings: ctx.prev_siblings.to_vec(),
+    }];
+    let anchored = MatchContext { scope_root_id: node.node_id, ..*ctx };
+    node.children.iter().filter(|child| child.is_element()).any(|child|
+        matches_element_or_descendant(child, &parts, &mut ancestors, &anchored))
 }
 
 fn matches_element_or_descendant(
@@ -1257,20 +1186,18 @@ fn matches_element_or_descendant(
     ancestors: &mut Vec<AncestorInfo>,
     ctx: &MatchContext,
 ) -> bool {
-    let empty_hover = std::collections::HashSet::new();
-    let empty_focus = std::collections::HashSet::new();
     let elem_ctx = MatchContext {
         focused_box: ctx.focused_box,
-        keyboard_focus: false,
+        keyboard_focus: ctx.keyboard_focus,
         type_child_index: 0,
         type_sibling_count: 1,
         html_box: Some(elem),
-        hover_chain: &empty_hover,
-        focus_within_chain: &empty_focus,
+        hover_chain: ctx.hover_chain,
+        focus_within_chain: ctx.focus_within_chain,
         element_id: elem.node_id,
-        scope_root_id: 0,
-        target_id: 0,
-        document_url: "",
+        scope_root_id: ctx.scope_root_id,
+        target_id: ctx.target_id,
+        document_url: ctx.document_url,
         prev_siblings: &[],
         next_siblings: &[],
         next_sibling_nodes: &[],
@@ -1333,50 +1260,15 @@ fn has_relative_matching(
                     });
             }
             Combinator::Child => {
-                let rest = &sel.parts[1..];
-                let empty_hover = std::collections::HashSet::new();
-                let empty_focus = std::collections::HashSet::new();
-                return node
-                    .children
-                    .iter()
-                    .filter(|c| c.is_element())
-                    .any(|child| {
-                        let sub_ctx = MatchContext {
-                            focused_box: ctx.focused_box,
-                            keyboard_focus: false,
-                            type_child_index: 0,
-                            type_sibling_count: 1,
-                            html_box: Some(child),
-                            hover_chain: &empty_hover,
-                            focus_within_chain: &empty_focus,
-                            element_id: child.node_id,
-                            scope_root_id: 0,
-                            target_id: 0,
-                            document_url: "",
-                            prev_siblings: &[],
-                            next_siblings: &[],
-                            next_sibling_nodes: &[],
-                        };
-                        matches_selector_with_ancestors(
-                            rest,
-                            &child.tag,
-                            &child.attributes,
-                            0,
-                            1,
-                            &[],
-                            &sub_ctx,
-                        )
-                    });
+                return has_descendant_matching(node, sel, ctx);
             }
             Combinator::Column => return false,
             Combinator::Descendant => {
-                let mut stripped = sel.clone();
-                stripped.parts.remove(0);
-                return has_descendant_matching(node, &stripped, ctx.focused_box);
+                return has_descendant_matching(node, sel, ctx);
             }
         }
     }
-    has_descendant_matching(node, sel, ctx.focused_box)
+    has_descendant_matching(node, sel, ctx)
 }
 
 /// Evaluate CSS An+B formula against a 1-based position.

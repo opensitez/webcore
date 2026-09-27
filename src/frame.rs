@@ -2405,6 +2405,23 @@ mod tests {
     }
 
     #[test]
+    fn streaming_append_keeps_clearfix_after_all_columns() {
+        let mut frame = EngineFrame::empty(800.0, 600.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(br#"<html><head><style>#row{width:600px}#row::after{content:"";display:table;clear:both}.column{float:left;width:250px;height:100px}</style></head><body><div id="row"><div class="column">First</div>"#);
+        frame.update_frame();
+        frame.feed_html_chunk(br#"<div class="column">Second</div></div><div id="next">Next</div></body></html>"#);
+        frame.finish_loading();
+        frame.update_frame();
+        let row = crate::tests::harness::find_box(&frame.doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "row")).unwrap();
+        assert_eq!(row.children.last().unwrap().tag, "::after");
+        let columns: Vec<_> = row.children.iter().filter(|n| n.attributes.get("class").is_some_and(|s| s == "column")).collect();
+        assert_eq!(columns.len(), 2);
+        assert!((columns[0].layout.border_rect.y - columns[1].layout.border_rect.y).abs() < 0.1);
+        assert!((row.layout.content_rect.h - 100.0).abs() < 0.1);
+    }
+
+    #[test]
     fn streaming_frame_preserves_loaded_generated_pseudo_mask_across_recascade() {
         let mut frame = EngineFrame::empty(320.0, 240.0);
         frame.start_streaming("https://example.test/");

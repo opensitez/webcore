@@ -546,8 +546,6 @@ fn outer_parens_enclose(s: &str) -> bool {
 }
 
 fn supports_declaration_matches(prop: &str, value: &str) -> bool {
-    use crate::types::CssValue;
-
     if value.is_empty() {
         return false;
     }
@@ -567,7 +565,7 @@ fn supports_declaration_matches(prop: &str, value: &str) -> bool {
     ) {
         return true;
     }
-    if value.contains("var(") || !crate::css::property_defs::get(id).longhands.is_empty() {
+    if value.contains("var(") {
         return true;
     }
 
@@ -575,7 +573,7 @@ fn supports_declaration_matches(prop: &str, value: &str) -> bool {
         return supports_content_value(value);
     }
 
-    !matches!(crate::css::pre_parse_value(id, value), CssValue::Raw(_))
+    super::supports::declaration_value(id, value)
 }
 
 fn supports_font_format(format: &str) -> bool {
@@ -1527,11 +1525,13 @@ pub fn parse_selector(s: &str) -> CssSelector {
             }
             '#' => {
                 chars.next();
+                valid &= starts_css_ident(&chars);
                 let id = read_ident(&mut chars);
                 parts.push(SelectorPart::Id(id));
             }
             '.' => {
                 chars.next();
+                valid &= starts_css_ident(&chars);
                 let cls = read_ident(&mut chars);
                 parts.push(SelectorPart::Class(cls));
             }
@@ -1541,6 +1541,7 @@ pub fn parse_selector(s: &str) -> CssSelector {
                 if is_elem {
                     chars.next();
                 }
+                valid &= starts_css_ident(&chars);
                 let name = read_ident(&mut chars);
                 // consume optional (...)
                 if chars.peek() == Some(&'(') {
@@ -1679,6 +1680,7 @@ pub fn parse_selector(s: &str) -> CssSelector {
                 parts.push(SelectorPart::Universal);
             }
             _ => {
+                valid &= starts_css_ident(&chars);
                 let tag = read_ident(&mut chars);
                 if !tag.is_empty() {
                     parts.push(SelectorPart::Tag(tag.to_ascii_lowercase()));
@@ -1692,6 +1694,22 @@ pub fn parse_selector(s: &str) -> CssSelector {
     CssSelector::new_checked(parts, valid)
 }
 
+fn starts_css_ident(chars: &std::iter::Peekable<std::str::Chars>) -> bool {
+    let mut chars = chars.clone();
+    let name_start = |c: char| c.is_ascii_alphabetic() || c == '_' || !c.is_ascii();
+    let valid_escape = |c: Option<char>| c.is_some_and(|c| !matches!(c, '\n' | '\r' | '\x0c'));
+    match chars.next() {
+        Some('-') => match chars.next() {
+            Some('\\') => valid_escape(chars.next()),
+            Some(c) => c == '-' || name_start(c),
+            None => false,
+        },
+        Some('\\') => valid_escape(chars.next()),
+        Some(c) => name_start(c),
+        None => false,
+    }
+}
+
 fn read_ident(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
     let mut s = String::new();
     while let Some(&c) = chars.peek() {
@@ -1700,7 +1718,7 @@ fn read_ident(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
             if let Some(escaped) = read_css_ident_escape(chars) {
                 s.push(escaped);
             }
-        } else if c.is_alphanumeric() || c == '-' || c == '_' {
+        } else if c.is_ascii_alphanumeric() || !c.is_ascii() || c == '-' || c == '_' {
             s.push(c);
             chars.next();
         } else {
@@ -1710,7 +1728,7 @@ fn read_ident(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
     s
 }
 
-fn read_css_ident_escape(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<char> {
+pub(crate) fn read_css_ident_escape(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<char> {
     let &first = chars.peek()?;
     if first == '\n' || first == '\r' || first == '\x0c' {
         return None;

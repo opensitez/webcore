@@ -18,7 +18,7 @@ use crate::css::{
 };
 use crate::svg::animation::{WEBCORE_ANIMATED_ATTR_NS, WEBCORE_ANIMATED_ATTR_PREFIX};
 use crate::svg::condition;
-use crate::types::{Color, Direction, Overflow, SPECIFIED_SVG_FILL, SPECIFIED_SVG_STROKE, WebCore};
+use crate::types::{Color, Direction, Overflow, SPECIFIED_SVG_FILL, SPECIFIED_SVG_STROKE, SPECIFIED_SVG_STROKE_WIDTH, WebCore};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use tiny_skia::{
@@ -168,6 +168,7 @@ pub(crate) fn rasterize_svg_document_to_rgba_with_vars(
         stroke,
         custom_props,
         None,
+        None,
     )
 }
 
@@ -181,6 +182,7 @@ pub(crate) fn rasterize_svg_document_to_rgba_with_dom(
     stroke: Option<Color>,
     custom_props: &HashMap<String, String>,
     dom_root: Option<&WebCore>,
+    document_ids: Option<&HashMap<String, &SvgNode>>,
 ) -> Option<Vec<u8>> {
     if width == 0 || height == 0 {
         return None;
@@ -206,6 +208,9 @@ pub(crate) fn rasterize_svg_document_to_rgba_with_dom(
         Transform::from_row(sx, 0.0, 0.0, sy, 0.0, 0.0)
     };
     let mut id_map = HashMap::new();
+    if let Some(ids) = document_ids {
+        id_map.extend(ids.iter().map(|(id, node)| (id.clone(), *node)));
+    }
     collect_id_nodes(&doc.root, &mut id_map);
     let styles = collect_style_rules(&doc.root);
     let mut initial_state = PaintState::default();
@@ -246,6 +251,29 @@ fn collect_id_nodes<'a>(node: &'a SvgNode, ids: &mut HashMap<String, &'a SvgNode
     for child in &node.children {
         collect_id_nodes(child, ids);
     }
+}
+
+/// Same-document SVG references can target a different inline SVG, including
+/// hidden symbol libraries. Image documents remain isolated from this scope.
+pub(crate) fn document_svg_ids(root: &WebCore) -> HashMap<String, &SvgNode> {
+    let mut ids = HashMap::new();
+    let mut nodes = vec![root];
+    while let Some(node) = nodes.pop() {
+        if node.tag == "svg" {
+            if let Some(doc) = node.svg_document.as_ref() {
+                let mut svg_nodes = vec![&doc.root];
+                while let Some(svg) = svg_nodes.pop() {
+                    if let Some(id) = svg.attr("id") {
+                        ids.entry(id.to_string()).or_insert(svg);
+                    }
+                    svg_nodes.extend(svg.children.iter().rev());
+                }
+                continue;
+            }
+        }
+        nodes.extend(node.children.iter().rev());
+    }
+    ids
 }
 
 fn collect_style_rules(node: &SvgNode) -> Vec<CssRule> {
@@ -2114,6 +2142,13 @@ fn apply_dom_computed_style(
     let style = node.style.as_ref();
     let font_px = style.font_size_px(state.font_size, 16.0);
     let specified_svg_paint = style.rare().specified_svg_paint_props;
+    if specified_svg_paint & SPECIFIED_SVG_STROKE_WIDTH != 0 {
+        // SVG percentages use the normalized diagonal of the current viewport.
+        let basis = state.viewport_width.hypot(state.viewport_height) / std::f32::consts::SQRT_2;
+        state.stroke_width = style.rare().svg_stroke_width.as_ref()
+            .map(|width| width.resolve(font_px, basis, font_px).max(0.0))
+            .unwrap_or(1.0);
+    }
     state.visible = state.visible && style.visibility;
     state.current_color = style.color;
     if specified_svg_paint & SPECIFIED_SVG_FILL != 0 {

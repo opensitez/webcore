@@ -8,10 +8,11 @@ use crate::types::{
     BackgroundClip, BackgroundRepeat, BackgroundSize, BorderStyle, ClipPathKind, Color,
     ComputedStyle, ContentVisibility, CssLength, Direction, Display, FontStyle,
     GradientRadialShape, GradientRadialSize, GradientType, ListStylePosition, ListStyleType,
-    MixBlendMode, Overflow, Position, Resize, TextAlign, TextDecorationStyle, TextOverflow,
+    MixBlendMode, Overflow, Position, Resize, TextAlign, TextDecorationStyle,
     TextTransform, WhiteSpace,
 };
 use crate::types::{Rect, WebCore};
+use unicode_segmentation::UnicodeSegmentation;
 
 struct BackgroundImagePaint<'a> {
     data: std::sync::Arc<Vec<u8>>,
@@ -145,6 +146,7 @@ fn root_font_size_px(root: &WebCore) -> f32 {
 
 /// Build a display list from a laid-out box tree.
 pub fn build_display_list(root: &WebCore, viewport_w: f32, viewport_h: f32) -> DisplayList {
+    let svg_ids = crate::svg::document_svg_ids(root);
     let visited = std::collections::HashSet::new();
     // Use full document extent as clip — viewport culling is done at replay time.
     // Building with viewport clip causes scrolled-to content to be missing.
@@ -159,6 +161,7 @@ pub fn build_display_list(root: &WebCore, viewport_w: f32, viewport_h: f32) -> D
         hovered_id: 0,
         active_id: 0,
         visited_hrefs: &visited,
+        svg_ids: &svg_ids,
         base_url: "",
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         paint_clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
@@ -216,6 +219,7 @@ pub fn build_display_list_full_with_font_system(
     font_system: Option<*mut cosmic_text::FontSystem>,
 ) -> DisplayList {
     let doc_h = crate::types::Document::scroll_height(root).max(viewport_h);
+    let svg_ids = crate::svg::document_svg_ids(root);
     let ctx = BuildContext {
         // ⛔ The list is built in DOCUMENT coordinates so replay can translate
         // it to any scroll position. The caller's scroll is kept only for
@@ -229,6 +233,7 @@ pub fn build_display_list_full_with_font_system(
         hovered_id,
         active_id,
         visited_hrefs,
+        svg_ids: &svg_ids,
         base_url,
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         paint_clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
@@ -297,6 +302,7 @@ pub fn build_display_list_viewport_with_font_system(
     font_system: Option<*mut cosmic_text::FontSystem>,
 ) -> DisplayList {
     let doc_h = crate::types::Document::scroll_height(root).max(viewport_h);
+    let svg_ids = crate::svg::document_svg_ids(root);
     let paint_top = paint_top.max(0.0);
     let paint_bottom = paint_bottom.max(paint_top).min(doc_h.max(viewport_h));
     let paint_clip = Rect::new(
@@ -315,6 +321,7 @@ pub fn build_display_list_viewport_with_font_system(
         hovered_id,
         active_id,
         visited_hrefs,
+        svg_ids: &svg_ids,
         base_url,
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         paint_clip,
@@ -352,6 +359,7 @@ fn is_scroll_container(style: &ComputedStyle) -> bool {
 
 #[derive(Clone, Copy)]
 struct BuildContext<'a> {
+    svg_ids: &'a std::collections::HashMap<String, &'a crate::svg::SvgNode>,
     scroll_x: f32,
     scroll_y: f32,
     /// The live scroll offset, for `position: sticky` ONLY.
@@ -1576,6 +1584,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         hovered_id: ctx.hovered_id,
         active_id: ctx.active_id,
         visited_hrefs: ctx.visited_hrefs,
+        svg_ids: ctx.svg_ids,
         base_url: ctx.base_url,
         clip: child_clip,
         paint_clip: ctx.paint_clip,
@@ -1823,6 +1832,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                                         stroke,
                                         &node.style.custom_props,
                                         Some(node),
+                                        Some(ctx.svg_ids),
                                     )
                                 } else {
                                     crate::svg::rasterize_svg_document_to_rgba(
@@ -1867,8 +1877,8 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         }
 
         // ── (q) Children: normal flow, then explicit z-index descendants ────
-        // Skip ::before/::after (handled as inline text in steps j/l above).
-            // Fixed boxes are deferred with other positioned descendants.
+        // Plain inline pseudo text is handled above. Materialized atomic and
+        // block pseudo boxes paint like other children; fixed boxes are deferred.
         {
             let eff_children = node.effective_children();
             let is_renderable = |c: &WebCore| -> bool {
@@ -1883,8 +1893,10 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                                     | Display::Grid
                                     | Display::InlineGrid
                             ) || node.layout.line_cache.is_empty())))
-                    && (c.tag != "::before" || c.style.is_positioned() || c.style.is_block_level())
-                    && (c.tag != "::after" || c.style.is_positioned() || c.style.is_block_level())
+                    && (!matches!(c.tag.as_str(), "::before" | "::after")
+                        || c.style.is_positioned()
+                        || c.style.is_block_level()
+                        || matches!(c.style.display, Display::InlineBlock | Display::InlineFlex | Display::InlineGrid))
                     && c.style.position != Position::Fixed
             };
 
@@ -1903,7 +1915,21 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             normal_ctx.suppress_deferred_z_descendants = suppress_z || !deferred_z.is_empty();
 
             if !matches!(node.tag.as_str(), "input" | "select" | "textarea" | "progress" | "meter") {
+                let mut contents_work = Vec::new();
                 for child in eff_children {
+                    if child.style.display == Display::Contents {
+                        contents_work.extend(child.effective_children().iter().rev());
+                        while let Some(descendant) = contents_work.pop() {
+                            if descendant.style.display == Display::Contents {
+                                contents_work.extend(descendant.effective_children().iter().rev());
+                            } else if is_renderable(descendant) {
+                                // Text flattened into our line cache is already
+                                // painted here, just like direct text children.
+                                build_for_box(descendant, list, &normal_ctx);
+                            }
+                        }
+                        continue;
+                    }
                     if is_renderable(child) {
                         build_for_box(child, list, &normal_ctx);
                     }
@@ -2548,13 +2574,9 @@ fn build_inline_text(
             let overflow_marker = if line_clamp_marker {
                 "…"
             } else {
-                match node.style.text_overflow {
-                    TextOverflow::Ellipsis if node.style.text_overflow_string.is_empty() => "…",
-                    TextOverflow::Ellipsis => node.style.text_overflow_string.as_str(),
-                    TextOverflow::Clip => "",
-                }
+                node.style.text_overflow.right_marker().unwrap_or("")
             };
-            if !overflow_marker.is_empty()
+            if (line_clamp_marker || node.style.text_overflow.right_marker().is_some())
                 && (overflow_clips || line_clamp_marker)
                 && !chunk.rtl
                 && (line.width > node.layout.content_rect.w || line_clamp_marker)
@@ -2572,7 +2594,8 @@ fn build_inline_text(
                     style_ref.font_style,
                     &style_ref.font_family,
                     style_ref.font_stretch,
-                );
+                ) + run_letter_spc * overflow_marker.chars().count().saturating_sub(1) as f32
+                    + run_word_spc * overflow_marker.chars().filter(|ch| *ch == ' ').count() as f32;
                 let budget = (available - marker_width).max(0.0);
                 let full_width = measure_paint_text_width(
                     ctx,
@@ -2582,7 +2605,8 @@ fn build_inline_text(
                     style_ref.font_style,
                     &style_ref.font_family,
                     style_ref.font_stretch,
-                );
+                ) + run_letter_spc * draw_text.chars().count().saturating_sub(1) as f32
+                    + run_word_spc * draw_text.chars().filter(|ch| *ch == ' ').count() as f32;
                 if line_clamp_marker && full_width <= budget {
                     draw_text.push_str(overflow_marker);
                 } else {
@@ -2594,10 +2618,10 @@ fn build_inline_text(
                     {
                         let base_x = line.char_x[start_off];
                         let mut cut = s;
-                        for (rel, ch) in flat[s..e].char_indices() {
-                            let off = start_off + rel;
+                        for (rel, cluster) in flat[s..e].grapheme_indices(true) {
+                            let off = start_off + rel + cluster.len();
                             if off < line.char_x.len() && line.char_x[off] - base_x <= budget {
-                                cut = s + rel + ch.len_utf8();
+                                cut = s + rel + cluster.len();
                             } else {
                                 break;
                             }
@@ -2612,8 +2636,8 @@ fn build_inline_text(
                         }
                     } else {
                         let mut cut = s;
-                        for (rel, ch) in flat[s..e].char_indices() {
-                            let next = s + rel + ch.len_utf8();
+                        for (rel, cluster) in flat[s..e].grapheme_indices(true) {
+                            let next = s + rel + cluster.len();
                             let candidate =
                                 apply_text_transform(&flat[s..next], style_ref.text_transform);
                             let width = measure_paint_text_width(
@@ -2624,7 +2648,8 @@ fn build_inline_text(
                                 style_ref.font_style,
                                 &style_ref.font_family,
                                 style_ref.font_stretch,
-                            );
+                            ) + run_letter_spc * candidate.chars().count() as f32
+                                + run_word_spc * candidate.chars().filter(|ch| *ch == ' ').count() as f32;
                             if width <= budget {
                                 cut = next;
                             } else {
@@ -3573,7 +3598,7 @@ fn clip_path_polygon_points(
     font_px: f32,
     root_font_px: f32,
 ) -> Option<Vec<(f32, f32)>> {
-    if style.clip_path.kind != ClipPathKind::Polygon || style.clip_path.points.len() < 3 {
+    if style.clip_path.kind != ClipPathKind::Polygon {
         return None;
     }
     Some(

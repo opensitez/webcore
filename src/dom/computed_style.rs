@@ -323,6 +323,7 @@ impl Document {
                 .svg_stroke
                 .map(serialize_color)
                 .unwrap_or_else(|| "none".to_string()),
+            "stroke-width" => s.rare().svg_stroke_width.as_ref().map(len).unwrap_or_else(|| "1px".to_string()),
             "font-size" => format!("{font_px}px"),
             // ⛔ A NUMBER, not the keyword: `font-weight: bold` serializes as
             // `"700"` (measured).
@@ -535,15 +536,7 @@ impl Document {
                 serialize_font_synthesis_longhand(s.font_synthesis_position)
             }
             "text-decoration-skip-ink" => s.text_decoration_skip_ink.clone(),
-            "text-overflow" => match s.text_overflow {
-                crate::types::TextOverflow::Clip => "clip".to_string(),
-                crate::types::TextOverflow::Ellipsis if s.text_overflow_string.is_empty() => {
-                    "ellipsis".to_string()
-                }
-                crate::types::TextOverflow::Ellipsis => {
-                    format!("\"{}\"", serialize_css_string(&s.text_overflow_string))
-                }
-            },
+            "text-overflow" => serialize_text_overflow(&s.text_overflow),
             "text-emphasis-style" => s.text_emphasis_style.clone(),
             "text-emphasis-color" => s
                 .text_emphasis_color
@@ -567,6 +560,15 @@ impl Document {
             }
             "list-style-position" => serialize_list_style_position(s.list_style_position),
             "list-style-image" => serialize_list_style_image(&s.list_style_image),
+            "counter-reset" => if s.counter_reset.is_empty() { "none".to_owned() } else {
+                s.counter_reset.iter().map(|reset| {
+                    let name = serialize_identifier(&reset.name);
+                    let name = if reset.reversed { format!("reversed({name})") } else { name };
+                    match reset.value { Some(value) => format!("{name} {value}"), None => name }
+                }).collect::<Vec<_>>().join(" ")
+            },
+            "counter-increment" => serialize_counters(&s.counter_increment),
+            "counter-set" => serialize_counters(&s.counter_set),
             "mask-image" => {
                 if s.rare().mask_image_url.is_empty() {
                     "none".to_string()
@@ -597,6 +599,7 @@ impl Document {
             "flex-shrink" => trim_f32(s.flex_shrink),
             "flex-basis" => len(&s.flex_basis),
             "order" => s.order.to_string(),
+            "contain" => if s.rare().contain.is_empty() { "none".to_string() } else { s.rare().contain.clone() },
             "content-visibility" => match s.content_visibility {
                 ContentVisibility::Visible => "visible",
                 ContentVisibility::Auto => "auto",
@@ -713,12 +716,51 @@ fn px(v: f32) -> String {
     format!("{}px", if v == 0.0 { 0.0 } else { v })
 }
 
+fn serialize_counters(counters: &[(String, i32)]) -> String {
+    if counters.is_empty() { return "none".to_owned(); }
+    counters.iter().map(|(name, value)| format!("{} {value}", serialize_identifier(name)))
+        .collect::<Vec<_>>().join(" ")
+}
+
+fn serialize_identifier(identifier: &str) -> String {
+    use std::fmt::Write;
+    let mut output = String::new();
+    let first = identifier.chars().next();
+    for (index, c) in identifier.chars().enumerate() {
+        if c == '\0' {
+            output.push('\u{fffd}');
+        } else if c.is_ascii_control()
+            || (c.is_ascii_digit() && (index == 0 || (index == 1 && first == Some('-'))))
+        {
+            write!(output, "\\{:x} ", c as u32).unwrap();
+        } else if c == '-' && identifier.len() == 1 {
+            output.push_str("\\-");
+        } else if !c.is_ascii() || c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+            output.push(c);
+        } else {
+            output.push('\\');
+            output.push(c);
+        }
+    }
+    output
+}
+
 fn serialize_quotes(quotes: Option<&[String]>) -> String {
     match quotes {
         None => "auto".to_string(),
         Some([]) => "none".to_string(),
         Some(pairs) => pairs.iter().map(|s| format!("\"{}\"", serialize_css_string(s)))
             .collect::<Vec<_>>().join(" "),
+    }
+}
+
+fn serialize_text_overflow(value: &crate::types::TextOverflow) -> String {
+    use crate::types::TextOverflow;
+    match value {
+        TextOverflow::Clip => "clip".into(),
+        TextOverflow::Ellipsis => "ellipsis".into(),
+        TextOverflow::String(text) => format!("\"{}\"", serialize_css_string(text)),
+        TextOverflow::Pair(edges) => format!("{} {}", serialize_text_overflow(&edges[0]), serialize_text_overflow(&edges[1])),
     }
 }
 

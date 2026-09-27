@@ -641,6 +641,7 @@ fn note_specified_svg_paint(style: &mut ComputedStyle, id: properties::PropertyI
     match id {
         Fill => style.rare_mut().specified_svg_paint_props |= SPECIFIED_SVG_FILL,
         Stroke => style.rare_mut().specified_svg_paint_props |= SPECIFIED_SVG_STROKE,
+        StrokeWidth => style.rare_mut().specified_svg_paint_props |= SPECIFIED_SVG_STROKE_WIDTH,
         _ => {}
     }
 }
@@ -1286,50 +1287,68 @@ pub(crate) fn resolve_content_value_with_context(
     attrs: Option<&crate::dom::attrs::AttrMap>,
     quotes: Option<&[String]>,
 ) -> String {
-    let v = visible_content_value(v.trim()).trim();
-    match v {
-        "none" | "normal" => String::new(),
-        "open-quote" => quote_string(quotes, true),
-        "close-quote" => quote_string(quotes, false),
-        "no-open-quote" | "no-close-quote" => String::new(),
-        _ => {
-            // Multiple tokens (e.g. '"foo" open-quote'): concatenate resolved parts
-            let mut out = String::new();
-            let mut rest = v;
-            while !rest.is_empty() {
-                rest = rest.trim_start();
-                if rest.starts_with('"') || rest.starts_with('\'') {
-                    let Some((text, tail)) = consume_css_string(rest) else { break; };
-                    out.push_str(&text);
-                    rest = tail;
-                } else {
-                    // keyword/function token
-                    let end = content_token_end(rest);
-                    let tok = &rest[..end];
-                    match tok {
-                        "open-quote" => out.push_str(&quote_string(quotes, true)),
-                        "close-quote" => out.push_str(&quote_string(quotes, false)),
-                        "no-open-quote" | "no-close-quote" => {}
-                        _ => {
-                            if (tok.starts_with("counter(") || tok.starts_with("counters("))
-                                && tok.ends_with(')')
-                            {
-                                out.push('\x01');
-                                out.push_str(tok);
-                                out.push('\x01');
-                            } else if tok.starts_with("attr(") && tok.ends_with(')') {
-                                if let Some(attrs) = attrs {
-                                    out.push_str(&resolve_attr_content(tok, attrs));
-                                }
-                            }
+    render_content_parts(&parse_content_parts(v, attrs), quotes, &mut 0)
+}
+
+pub(crate) fn parse_content_parts(
+    v: &str,
+    attrs: Option<&crate::dom::attrs::AttrMap>,
+) -> Vec<crate::types::GeneratedContentPart> {
+    use crate::types::GeneratedContentPart::{Text, Quote};
+    let mut rest = visible_content_value(v.trim()).trim();
+    let mut parts = Vec::new();
+    while !rest.is_empty() {
+        rest = rest.trim_start();
+        if rest.is_empty() { break; }
+        if rest.starts_with('"') || rest.starts_with('\'') {
+            let Some((text, tail)) = consume_css_string(rest) else { break; };
+            parts.push(Text(text));
+            rest = tail;
+        } else {
+            let end = content_token_end(rest);
+            let tok = &rest[..end];
+            match tok {
+                "open-quote" => parts.push(Quote { open: true, emit: true }),
+                "close-quote" => parts.push(Quote { open: false, emit: true }),
+                "no-open-quote" => parts.push(Quote { open: true, emit: false }),
+                "no-close-quote" => parts.push(Quote { open: false, emit: false }),
+                _ => {
+                    if (tok.starts_with("counter(") || tok.starts_with("counters(")) && tok.ends_with(')') {
+                        parts.push(Text(format!("\x01{tok}\x01")));
+                    } else if tok.starts_with("attr(") && tok.ends_with(')') {
+                        if let Some(attrs) = attrs {
+                            parts.push(Text(resolve_attr_content(tok, attrs)));
                         }
                     }
-                    rest = &rest[end..];
                 }
             }
-            out
+            rest = &rest[end..];
         }
     }
+    parts
+}
+
+pub(crate) fn render_content_parts(
+    parts: &[crate::types::GeneratedContentPart],
+    quotes: Option<&[String]>,
+    depth: &mut usize,
+) -> String {
+    use crate::types::GeneratedContentPart::{Text, Quote};
+    let mut out = String::new();
+    for part in parts {
+        match part {
+            Text(text) => out.push_str(text),
+            Quote { open, emit } => {
+                if !open {
+                    if *depth == 0 { continue; }
+                    *depth -= 1;
+                }
+                if *emit { out.push_str(&quote_string(quotes, *open, *depth)); }
+                if *open { *depth = depth.saturating_add(1); }
+            }
+        }
+    }
+    out
 }
 
 fn visible_content_value(value: &str) -> &str {
@@ -1358,10 +1377,10 @@ fn visible_content_value(value: &str) -> &str {
     value
 }
 
-fn quote_string(quotes: Option<&[String]>, open: bool) -> String {
+fn quote_string(quotes: Option<&[String]>, open: bool, depth: usize) -> String {
     if quotes.is_some_and(|items| items.is_empty()) { return String::new(); }
     quotes
-        .and_then(|items| items.get(if open { 0 } else { 1 }))
+        .and_then(|items| items.get(depth.min((items.len() / 2).saturating_sub(1)) * 2 + usize::from(!open)))
         .cloned()
         .unwrap_or_else(|| if open { "\u{201C}" } else { "\u{201D}" }.to_string())
 }
@@ -1794,28 +1813,108 @@ const KATAKANA_IROHA: &[&str] = &[
 /// The default value is property-specific: counter-increment defaults omitted
 /// integers to 1, while counter-reset and counter-set default them to 0.
 pub fn parse_counter_list_with_default(v: &str, default_value: i32) -> Vec<(String, i32)> {
-    if v == "none" {
-        return Vec::new();
+    parse_counter_list_checked(v, default_value).unwrap_or_default()
+}
+
+pub(crate) fn parse_counter_list_checked(v: &str, default_value: i32) -> Option<Vec<(String, i32)>> {
+    Some(parse_counter_declarations(v, default_value, false)?.into_iter().map(|reset| (reset.name, reset.value.unwrap_or(default_value))).collect())
+}
+
+pub(crate) fn parse_counter_reset_checked(v: &str) -> Option<Vec<crate::types::CounterReset>> {
+    parse_counter_declarations(v, 0, true)
+}
+
+fn parse_counter_declarations(v: &str, default_value: i32, allow_reversed: bool) -> Option<Vec<crate::types::CounterReset>> {
+    fn space(c: char) -> bool { matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c') }
+    fn start(c: char) -> bool { c.is_ascii_alphabetic() || c == '_' || !c.is_ascii() }
+    fn identifier(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+        let first = *chars.peek()?;
+        let mut look = chars.clone();
+        look.next();
+        if !(start(first) || first == '\\' || (first == '-' && look.peek().is_some_and(|c| start(*c) || matches!(c, '-' | '\\')))) {
+            return None;
+        }
+        let mut name = String::new();
+        while let Some(&c) = chars.peek() {
+            if c == '\\' {
+                chars.next();
+                name.push(super::parser::read_css_ident_escape(chars)?);
+            } else if start(c) || c.is_ascii_digit() || c == '-' {
+                name.push(c);
+                chars.next();
+            } else { break; }
+        }
+        Some(name)
     }
+    let mut chars = v.chars().peekable();
     let mut result = Vec::new();
-    let toks: Vec<&str> = v.split_whitespace().collect();
-    let mut i = 0;
-    while i < toks.len() {
-        let name = toks[i].to_string();
-        i += 1;
-        let val = if i < toks.len() {
-            if let Ok(n) = toks[i].parse::<i32>() {
-                i += 1;
-                n
-            } else {
-                default_value
+    loop {
+        while chars.peek().is_some_and(|c| space(*c)) { chars.next(); }
+        if chars.peek().is_none() { break; }
+        let mut name = identifier(&mut chars)?;
+        let reversed = allow_reversed && name.eq_ignore_ascii_case("reversed") && chars.peek() == Some(&'(');
+        if reversed {
+            chars.next();
+            while chars.peek().is_some_and(|c| space(*c)) { chars.next(); }
+            name = identifier(&mut chars)?;
+            while chars.peek().is_some_and(|c| space(*c)) { chars.next(); }
+            if chars.next() != Some(')') { return None; }
+        }
+        if name.eq_ignore_ascii_case("none") {
+            if reversed { return None; }
+            while chars.peek().is_some_and(|c| space(*c)) { chars.next(); }
+            return (result.is_empty() && chars.peek().is_none()).then(Vec::new);
+        }
+        if matches!(name.to_ascii_lowercase().as_str(), "initial" | "inherit" | "unset" | "revert" | "revert-layer" | "default") {
+            return None;
+        }
+        while chars.peek().is_some_and(|c| space(*c)) { chars.next(); }
+        let mut val = if reversed { None } else { Some(default_value) };
+        let mut function = chars.clone();
+        let mut expression = String::new();
+        while function.peek().is_some_and(|c| c.is_ascii_alphabetic() || *c == '-') {
+            expression.push(function.next().unwrap());
+        }
+        if function.peek() == Some(&'(') {
+            let mut depth = 0usize;
+            for c in function.by_ref() {
+                expression.push(c);
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 { break; }
+                    }
+                    _ => {},
+                }
             }
-        } else {
-            default_value
-        };
-        result.push((name, val));
+            if depth != 0 { return None; }
+            val = Some(super::calc::parse_css_integer(&expression)?);
+            chars = function;
+            result.push(crate::types::CounterReset { name, value: val, reversed, html_list_start: false });
+            continue;
+        }
+        let mut number = chars.clone();
+        let negative = number.peek() == Some(&'-');
+        if matches!(number.peek(), Some('+' | '-')) { number.next(); }
+        if number.peek().is_some_and(|c| c.is_ascii_digit()) {
+            // Saturate while scanning, rather than interpreting an overflowing
+            // integer as another counter name.
+            let limit = if negative { i32::MAX as u64 + 1 } else { i32::MAX as u64 };
+            let mut magnitude = 0u64;
+            while let Some(digit) = number.peek().and_then(|c| c.to_digit(10)) {
+                magnitude = (magnitude * 10 + u64::from(digit)).min(limit);
+                number.next();
+            }
+            if number.peek().is_some_and(|c| !space(*c)) { return None; }
+            val = Some(if negative { -(magnitude as i64) as i32 } else { magnitude as i32 });
+            chars = number;
+        } else if chars.peek().is_some_and(|c| !space(*c) && !start(*c) && !matches!(c, '-' | '\\')) {
+            return None;
+        }
+        result.push(crate::types::CounterReset { name, value: val, reversed, html_list_start: false });
     }
-    result
+    (!result.is_empty()).then_some(result)
 }
 
 pub fn parse_counter_list(v: &str) -> Vec<(String, i32)> {

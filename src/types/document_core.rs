@@ -565,7 +565,7 @@ impl Document {
                     if animated.source_bytes.is_some() && !animated.fully_decoded {
                         let target_width = node.layout.border_rect.w.ceil().max(1.0) as u32;
                         let target_height = node.layout.border_rect.h.ceil().max(1.0) as u32;
-                        if crate::html::expand_animated_image_to_size(
+                        if crate::html::poll_animated_image_expansion(
                             animated,
                             target_width,
                             target_height,

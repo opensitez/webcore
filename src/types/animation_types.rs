@@ -16,6 +16,8 @@ pub struct KeyframeStop {
     pub offset: f32,
     /// CSS property/value pairs declared at this stop.
     pub properties: Vec<(String, String)>,
+    /// Easing for intervals starting at this stop; omission uses the animation's easing.
+    pub timing_fn: Option<EasingFn>,
 }
 
 /// CSS easing function (timing function).

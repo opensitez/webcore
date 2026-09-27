@@ -7,7 +7,28 @@ use crate::dom::*;
 use crate::html::*;
 use std::collections::{HashMap, HashSet};
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum GeneratedContentPart {
+    Text(String),
+    Quote { open: bool, emit: bool },
+}
+
 // ─── Computed Style ───────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CounterReset {
+    pub name: String,
+    pub value: Option<i32>,
+    pub reversed: bool,
+    /// HTML's default reversed-list start counts owned items, not CSS counter operations.
+    pub html_list_start: bool,
+}
+
+impl CounterReset {
+    pub fn normal(name: impl Into<String>, value: i32) -> Self {
+        Self { name: name.into(), value: Some(value), reversed: false, html_list_start: false }
+    }
+}
 
 /// The rarely-set half of a computed style, kept behind a `Box`.
 ///
@@ -26,6 +47,7 @@ pub const CURRENT_COLOR_SVG_FILL: u16 = 1 << 8;
 pub const CURRENT_COLOR_SVG_STROKE: u16 = 1 << 9;
 pub const SPECIFIED_SVG_FILL: u16 = 1 << 0;
 pub const SPECIFIED_SVG_STROKE: u16 = 1 << 1;
+pub const SPECIFIED_SVG_STROKE_WIDTH: u16 = 1 << 2;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RareStyle {
@@ -43,6 +65,7 @@ pub struct RareStyle {
     /// needs this to avoid overwriting presentation attributes with inherited
     /// DOM computed paint.
     pub specified_svg_paint_props: u16,
+    pub svg_stroke_width: Option<CssLength>,
     pub grid_template_columns: Vec<GridTrackSize>,
     pub grid_template_rows: Vec<GridTrackSize>,
     pub grid_template_areas: Vec<Vec<String>>,
@@ -55,6 +78,10 @@ pub struct RareStyle {
     /// None is `auto`; an empty list is `none`; other lists contain quote pairs.
     pub quotes: Option<Vec<String>>,
     pub content: String,
+    /// Parsed counter and quote operations retained for document-order updates.
+    pub content_template: Vec<GeneratedContentPart>,
+    /// Canonical authored containment keywords; empty is the initial `none`.
+    pub contain: String,
     pub filter: String,
     pub backdrop_filter: String,
     pub mask_image_url: String,
@@ -120,6 +147,7 @@ impl RareStyle {
     pub const EMPTY: RareStyle = RareStyle {
         current_color_props: 0,
         specified_svg_paint_props: 0,
+        svg_stroke_width: None,
         logical_box: Vec::new(),
         logical_borders: Vec::new(),
         logical_corners: Vec::new(),
@@ -136,6 +164,8 @@ impl RareStyle {
         font_feature_settings: Vec::new(),
         quotes: None,
         content: String::new(),
+        content_template: Vec::new(),
+        contain: String::new(),
         filter: String::new(),
         backdrop_filter: String::new(),
         mask_image_url: String::new(),
@@ -340,7 +370,6 @@ pub struct ComputedStyle {
 
     // Text effects
     pub text_overflow: TextOverflow,
-    pub text_overflow_string: String,
     pub text_shadow: Option<TextShadow>,
     pub small_caps: bool,
     pub font_variant_alternates: String,
@@ -504,6 +533,8 @@ pub struct ComputedStyle {
     pub contain_layout: bool,
     pub contain_paint: bool,
     pub contain_size: bool,
+    pub contain_inline_size: bool,
+    pub contain_style: bool,
     pub content_visibility: ContentVisibility,
     pub contain_intrinsic_width: CssLength,
     pub contain_intrinsic_height: CssLength,
@@ -571,7 +602,7 @@ pub struct ComputedStyle {
     pub color_scheme: String,
 
     // Counters
-    pub counter_reset: Vec<(String, i32)>,
+    pub counter_reset: Vec<CounterReset>,
     pub counter_increment: Vec<(String, i32)>,
     pub counter_set: Vec<(String, i32)>,
 
@@ -664,10 +695,31 @@ pub struct GradientStop {
     pub position: f32, // 0.0..1.0
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TextOverflow {
     Clip,
     Ellipsis,
+    String(String),
+    /// Two-value syntax names the physical left and right edges.
+    Pair(Box<[TextOverflow; 2]>),
+}
+impl TextOverflow {
+    pub(crate) fn right_marker(&self) -> Option<&str> {
+        match self {
+            Self::Clip => None,
+            Self::Ellipsis => Some("…"),
+            Self::String(text) => Some(text),
+            Self::Pair(edges) => edges[1].right_marker(),
+        }
+    }
+
+    pub(crate) fn heap_bytes(&self) -> usize {
+        match self {
+            Self::String(text) => text.capacity(),
+            Self::Pair(edges) => std::mem::size_of_val(&**edges) + edges.iter().map(Self::heap_bytes).sum::<usize>(),
+            _ => 0,
+        }
+    }
 }
 impl Default for TextOverflow {
     fn default() -> Self {

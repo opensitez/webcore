@@ -1,0 +1,30 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Multicolumn balancing regressions</title>
+<style>
+body { margin: 24px; font: 16px sans-serif; }
+.columns { columns: 2; column-gap: 0; width: 200px; margin-bottom: 24px; }
+.columns > div { break-inside: avoid; background: #9ed9c3; }
+.columns > div:nth-child(even) { background: #b9c9ee; }
+.span { column-span: all; height: 20px; background: #f5b96f !important; }
+.auto { column-fill: auto; }
+</style>
+<h1>Uneven atomic items</h1>
+<div class="columns" id="uneven">
+  <div id="a" style="height:80px">A</div>
+  <div id="b" style="height:40px">B</div>
+  <div id="c" style="height:40px">C</div>
+  <div id="d" style="height:40px">D</div>
+</div>
+<h2>Balanced rows around a spanner</h2>
+<div class="columns" id="balanced">
+  <div style="height:100px">A</div><div style="height:100px">B</div>
+  <div class="span">Spanner</div>
+  <div style="height:20px">C</div><div style="height:20px">D</div>
+</div>
+<h2>Auto fill still balances before a spanner</h2>
+<div class="columns auto" id="auto">
+  <div style="height:100px">A</div><div style="height:100px">B</div>
+  <div class="span">Spanner</div>
+  <div style="height:20px">C</div><div style="height:20px">D</div>
+</div>

@@ -511,6 +511,7 @@ pub mod property_defs;
 pub mod rule;
 pub mod selector;
 pub mod stylesheet;
+mod supports;
 pub mod transform_parse;
 pub mod ua_sheet;
 pub mod value_parse;

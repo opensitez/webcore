@@ -923,7 +923,7 @@ pub fn apply_cascade_vp_hover_target_url(
     // instead of O(nodes × depth).
     let mut ancestors: Vec<AncestorInfo> = Vec::new();
     let mut candidates_buf: Vec<usize> = Vec::new();
-    let mut counters: HashMap<String, Vec<i32>> = HashMap::new();
+    let mut counters = CounterState::default();
     let mut share_cache: ShareCache = HashMap::new();
     apply_cascade_inner(
         root,
@@ -952,6 +952,7 @@ pub fn apply_cascade_vp_hover_target_url(
         &mut share_cache,
         None,
     );
+    resolve_document_generated_content(root, stylesheet);
 }
 
 /// Build a ComputedStyle for a ::before/::after pseudo-element.
@@ -1379,6 +1380,235 @@ fn blockify_flex_or_grid_item(style: &mut ComputedStyle) {
     };
 }
 
+/// Counters and quotes follow document order independently of style matching.
+/// Clean siblings can change when an earlier element's counter operations change.
+pub(crate) fn resolve_document_generated_content(root: &mut crate::types::WebCore, stylesheet: &Stylesheet) {
+    let mut pending = vec![&*root];
+    let mut automatic = false;
+    while let Some(node) = pending.pop() {
+        if node.style.display == Display::None { continue; }
+        automatic = std::iter::once(&*node.style)
+            .chain(node.style.before_style.as_deref())
+            .chain(node.style.after_style.as_deref())
+            .chain(node.style.marker_style.as_deref())
+            .any(|style| style.counter_reset.iter().any(|reset| reset.value.is_none() && !reset.html_list_start));
+        if automatic { break; }
+        pending.extend(node.children.iter());
+        if let Some(shadow) = &node.shadow_root { pending.extend(shadow.children.iter()); }
+    }
+    let initial_values = if automatic {
+        replay_document_generated_content(root, stylesheet, Vec::new(), true)
+    } else { Vec::new() };
+    replay_document_generated_content(root, stylesheet, initial_values, false);
+}
+
+fn replay_document_generated_content(root: &mut crate::types::WebCore, stylesheet: &Stylesheet, initial_values: Vec<i32>, collecting: bool) -> Vec<i32> {
+    fn html_list_initial(node: &crate::types::WebCore) -> Option<i32> {
+        if !node.style.counter_reset.iter().any(|reset| reset.html_list_start) { return None; }
+        let mut count = 0i32;
+        let mut pending: Vec<_> = node.children.iter().collect();
+        while let Some(child) = pending.pop() {
+            if child.style.display == Display::None { continue; }
+            if matches!(child.tag.as_str(), "ol" | "ul" | "menu") { continue; }
+            if child.tag == "li" { count = count.saturating_add(1); }
+            pending.extend(child.children.iter());
+        }
+        // The shared counter machinery decrements before painting the first item.
+        Some(count.saturating_add(1))
+    }
+    fn dirty(layout: &mut crate::types::LayoutBox, descendants: &mut bool) {
+        layout.layout_dirty = true;
+        layout.intrinsic_dirty = true;
+        layout.paint_dirty = true;
+        layout.line_cache.clear();
+        layout.cached_intrinsic_w.set(f32::NAN);
+        *descendants = true;
+    }
+    fn expand(
+        owner: &mut std::sync::Arc<ComputedStyle>,
+        pseudo: &str,
+        depth: &mut usize,
+        counters: &mut CounterState,
+    ) -> bool {
+        let style = match pseudo {
+            "::before" => owner.before_style.as_deref(),
+            "::after" => owner.after_style.as_deref(),
+            _ => owner.marker_style.as_deref(),
+        };
+        let Some(style) = style else { return false; };
+        if style.display == Display::None { return false; }
+        counters.apply_element(style);
+        if counters.collecting { return false; }
+        if style.rare().content_template.is_empty() { return false; }
+        let text = render_counter_content(&style.rare().content_template, style.rare().quotes.as_deref(), depth, &counters.values);
+        {
+            let current = match pseudo {
+                "::before" => &owner.before_content,
+                "::after" => &owner.after_content,
+                _ => &owner.marker_content,
+            };
+            if *current == text { return false; }
+            let style = std::sync::Arc::make_mut(owner);
+            match pseudo {
+                "::before" => style.before_content = text,
+                "::after" => style.after_content = text,
+                _ => style.marker_content = text,
+            }
+        }
+        true
+    }
+    fn anonymous(node: &crate::types::WebCore) -> bool {
+        matches!(node.tag.as_str(), "anonymous-block" | "anonymous-table" | "anonymous-table-row" | "anonymous-table-cell")
+    }
+    fn materialized_pseudos(node: &crate::types::WebCore) -> (bool, bool) {
+        let mut found = (false, false);
+        if node.style.before_style.is_none() && node.style.after_style.is_none() { return found; }
+        let mut pending: Vec<_> = node.children.iter().collect();
+        while let Some(child) = pending.pop() {
+            match child.tag.as_str() {
+                "::before" => found.0 = true,
+                "::after" => found.1 = true,
+                _ if anonymous(child) => pending.extend(child.children.iter()),
+                _ => {},
+            }
+        }
+        found
+    }
+    enum Visit<'a> {
+        Enter(&'a mut crate::types::WebCore),
+        Exit {
+            style: &'a mut std::sync::Arc<ComputedStyle>,
+            layout: &'a mut crate::types::LayoutBox,
+            descendants: &'a mut bool,
+            materialized_after: bool,
+            revision: usize,
+            contained_depth: Option<usize>,
+            anonymous: bool,
+        },
+    }
+    let mut work = vec![Visit::Enter(root)];
+    let mut depth = 0;
+    let mut revision = 0;
+    let mut counters = CounterState { collecting, initial_values, ..CounterState::default() };
+    while let Some(visit) = work.pop() {
+        match visit {
+            Visit::Enter(node) => {
+                if node.style.display == Display::None { continue; }
+                if matches!(node.tag.as_str(), "::before" | "::after") {
+                    counters.apply_element(&node.style);
+                    let template = &node.style.rare().content_template;
+                    if !collecting && !template.is_empty() {
+                        let text = render_counter_content(template, node.style.rare().quotes.as_deref(), &mut depth, &counters.values);
+                        // Flex/grid pseudo-elements own an anonymous text item.
+                        let target = if node.text.is_empty() && node.children.first().is_some_and(|c| c.tag == "#text") {
+                            &mut node.children[0]
+                        } else { &mut *node };
+                        if target.text != text {
+                            target.text = text;
+                            dirty(&mut target.layout, &mut target.has_dirty_layout_descendant);
+                            dirty(&mut node.layout, &mut node.has_dirty_layout_descendant);
+                            revision += 1;
+                        }
+                    }
+                    continue;
+                }
+                let initial_revision = revision;
+                let anonymous = anonymous(node);
+                let (materialized_before, materialized_after) = if anonymous { (false, false) } else { materialized_pseudos(node) };
+                if !anonymous { counters.apply_element_with_list_start(&node.style, html_list_initial(node)); }
+                if !collecting && !anonymous && node.style.display == Display::ListItem {
+                    let value = counters.values.get("list-item").and_then(|v| v.last()).copied().unwrap_or(0);
+                    let marker = resolve_custom_counter_style_marker(stylesheet, &node.style.custom_list_style_type, value);
+                    if node.style.list_index != value || marker.as_ref().is_some_and(|m| *m != node.style.marker_content) {
+                        let style = std::sync::Arc::make_mut(&mut node.style);
+                        style.list_index = value;
+                        if let Some(marker) = marker { style.marker_content = marker; }
+                        revision += 1;
+                    }
+                }
+                let contained_depth = (!anonymous && node.style.contain_style && node.style.display != Display::Contents).then_some(depth);
+                if !anonymous { counters.enter_children(); }
+                if contained_depth.is_some() { counters.enter_containment(); }
+                if !anonymous { revision += usize::from(expand(&mut node.style, "::marker", &mut depth, &mut counters)); }
+                if !anonymous && !materialized_before { revision += usize::from(expand(&mut node.style, "::before", &mut depth, &mut counters)); }
+                let base = work.len();
+                let mut before_shadow = None;
+                for child in node.children.iter_mut().rev() {
+                    if node.shadow_root.is_some() && child.tag == "::before" {
+                        before_shadow = Some(child);
+                    } else if node.shadow_root.is_none() || child.tag == "::after" {
+                        work.push(Visit::Enter(child));
+                    }
+                }
+                if let Some(shadow) = &mut node.shadow_root {
+                    for child in shadow.children.iter_mut().rev() { work.push(Visit::Enter(child)); }
+                }
+                if let Some(before) = before_shadow { work.push(Visit::Enter(before)); }
+                // Keep the owner's exit below its children without retaining a
+                // recursive stack frame or borrowing the whole owner twice.
+                work.insert(base, Visit::Exit {
+                    style: &mut node.style, layout: &mut node.layout,
+                    descendants: &mut node.has_dirty_layout_descendant,
+                    materialized_after, revision: initial_revision,
+                    contained_depth,
+                    anonymous,
+                });
+            }
+            Visit::Exit { style, layout, descendants, materialized_after, revision: initial_revision, contained_depth, anonymous } => {
+                if !anonymous {
+                    if !materialized_after { revision += usize::from(expand(style, "::after", &mut depth, &mut counters)); }
+                    counters.exit_children();
+                }
+                if let Some(entry_depth) = contained_depth {
+                    depth = entry_depth;
+                    counters.exit_containment();
+                }
+                if revision != initial_revision { dirty(layout, descendants); }
+            }
+        }
+    }
+    counters.automatic.iter().map(|initial| initial.total.saturating_add(initial.last_increment_negated)
+        .clamp(i32::MIN as i64, i32::MAX as i64) as i32).collect()
+}
+
+fn resolve_generated_content(
+    text: &str,
+    attrs: &crate::dom::attrs::AttrMap,
+    style: &mut ComputedStyle,
+    counters: &HashMap<String, Vec<i32>>,
+) -> String {
+    let parts = parse_content_parts(text, Some(attrs));
+    let resolved = render_counter_content(&parts, style.rare().quotes.as_deref(), &mut 0, counters);
+    if parts.iter().any(|part| match part {
+        crate::types::GeneratedContentPart::Quote { .. } => true,
+        crate::types::GeneratedContentPart::Text(text) => text.contains('\x01'),
+    }) {
+        style.rare_mut().content_template = parts;
+    }
+    resolved
+}
+
+fn render_counter_content(
+    template: &[crate::types::GeneratedContentPart],
+    quotes: Option<&[String]>,
+    depth: &mut usize,
+    counters: &HashMap<String, Vec<i32>>,
+) -> String {
+    let mut out = String::new();
+    for part in template {
+        match part {
+            crate::types::GeneratedContentPart::Text(text) if text.contains('\x01') => {
+                out.push_str(&resolve_counters_in_content(text, counters));
+            }
+            crate::types::GeneratedContentPart::Text(text) => out.push_str(text),
+            crate::types::GeneratedContentPart::Quote { .. } => {
+                out.push_str(&render_content_parts(std::slice::from_ref(part), quotes, depth));
+            }
+        }
+    }
+    out
+}
+
 pub(crate) fn build_pseudo_style_shared(
     matched: &mut Vec<(u32, usize, Option<u32>)>,
     base: &ComputedStyle,
@@ -1495,9 +1725,9 @@ pub(crate) fn build_pseudo_style_shared(
 /// debug build does not reuse stack slots between sibling scopes. Only a
 /// real function boundary pops them (`arenaplan.md` item 3).
 pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
-    fn wrap_flex_pseudo_text(pseudo_box: &mut crate::types::WebCore) {
-        if pseudo_box.text.is_empty()
-            || !matches!(pseudo_box.style.display, Display::Flex | Display::InlineFlex)
+    fn wrap_layout_item_pseudo_text(pseudo_box: &mut crate::types::WebCore) {
+        if (pseudo_box.text.is_empty() && pseudo_box.style.rare().content_template.is_empty())
+            || !matches!(pseudo_box.style.display, Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid)
         {
             return;
         }
@@ -1556,6 +1786,8 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         root.style.display,
         Display::Grid | Display::InlineGrid | Display::Flex | Display::InlineFlex
     );
+    let has_block_children = (root.style.before_style.is_some() || root.style.after_style.is_some())
+        && crate::layout::inline_layout::has_in_flow_block_children(root);
     let pseudo_needs_inline_box = |style: Option<&Box<ComputedStyle>>| {
         style.as_ref().is_some_and(|ps| {
             matches!(
@@ -1576,7 +1808,7 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
     let before_generated = root.style.before_style.is_some();
     let before_is_atomic_inline = pseudo_needs_inline_box(root.style.before_style.as_ref());
     if before_generated
-        && (is_grid_or_flex || before_is_positioned || before_is_block || before_is_atomic_inline)
+        && (is_grid_or_flex || has_block_children || before_is_positioned || before_is_block || before_is_atomic_inline)
     {
         let existing = root.children.iter().position(|c| c.tag == "::before");
         let existing_node = existing.and_then(|idx| root.children.get(idx));
@@ -1601,14 +1833,13 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         {
             std::sync::Arc::make_mut(&mut pseudo_box.style).display = Display::Block;
         }
-        wrap_flex_pseudo_text(&mut pseudo_box);
+        wrap_layout_item_pseudo_text(&mut pseudo_box);
         preserve_loaded_pseudo_resources(&mut pseudo_box, existing_node);
         mark_pseudo_layout_dirty(&mut pseudo_box);
         if let Some(idx) = existing {
-            root.children[idx] = pseudo_box;
-        } else {
-            root.children.insert(0, pseudo_box);
+            root.children.remove(idx);
         }
+        root.children.insert(0, pseudo_box);
         mark_pseudo_layout_dirty(root);
         std::sync::Arc::make_mut(&mut root.style).before_content = String::new();
     } else {
@@ -1624,7 +1855,7 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
     let after_generated = root.style.after_style.is_some();
     let after_is_atomic_inline = pseudo_needs_inline_box(root.style.after_style.as_ref());
     if after_generated
-        && (is_grid_or_flex || after_is_positioned || after_is_block || after_is_atomic_inline)
+        && (is_grid_or_flex || has_block_children || after_is_positioned || after_is_block || after_is_atomic_inline)
     {
         let existing = root.children.iter().position(|c| c.tag == "::after");
         let existing_node = existing.and_then(|idx| root.children.get(idx));
@@ -1649,14 +1880,13 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         {
             std::sync::Arc::make_mut(&mut pseudo_box.style).display = Display::Block;
         }
-        wrap_flex_pseudo_text(&mut pseudo_box);
+        wrap_layout_item_pseudo_text(&mut pseudo_box);
         preserve_loaded_pseudo_resources(&mut pseudo_box, existing_node);
         mark_pseudo_layout_dirty(&mut pseudo_box);
         if let Some(idx) = existing {
-            root.children[idx] = pseudo_box;
-        } else {
-            root.children.push(pseudo_box);
+            root.children.remove(idx);
         }
+        root.children.push(pseudo_box);
         mark_pseudo_layout_dirty(root);
         std::sync::Arc::make_mut(&mut root.style).after_content = String::new();
     } else {
@@ -2453,11 +2683,167 @@ fn tree_has_duplicate_node_ids(root: &crate::types::WebCore) -> bool {
     walk(root, &mut seen)
 }
 
+#[derive(Default)]
+struct AutomaticCounterInitial {
+    total: i64,
+    last_increment_negated: i64,
+    stopped: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct CounterScope {
+    reversed: bool,
+    automatic: Option<usize>,
+}
+
+#[derive(Default)]
+pub(crate) struct CounterState {
+    values: HashMap<String, Vec<i32>>,
+    // Outer instances remain readable; only instances above this depth may
+    // be changed by descendants of a style-containment boundary.
+    boundaries: Vec<HashMap<String, usize>>,
+    sibling_scopes: Vec<HashMap<String, CounterScope>>,
+    collecting: bool,
+    next_automatic: usize,
+    initial_values: Vec<i32>,
+    automatic: Vec<AutomaticCounterInitial>,
+}
+
+impl CounterState {
+    fn enter_containment(&mut self) {
+        self.boundaries.push(self.values.iter().map(|(name, stack)| (name.clone(), stack.len())).collect());
+    }
+
+    fn exit_containment(&mut self) {
+        self.boundaries.pop().expect("balanced counter containment");
+    }
+
+    fn ensure_scope(&mut self) {
+        if self.sibling_scopes.is_empty() { self.sibling_scopes.push(HashMap::new()); }
+    }
+
+    fn enter_children(&mut self) {
+        self.ensure_scope();
+        self.sibling_scopes.push(HashMap::new());
+    }
+
+    fn exit_children(&mut self) {
+        let names = self.sibling_scopes.pop().expect("balanced counter scope");
+        for (name, _) in names {
+            if let Some(stack) = self.values.get_mut(&name) {
+                stack.pop();
+                if stack.is_empty() { self.values.remove(&name); }
+            }
+        }
+    }
+
+    fn reset(&mut self, name: &str, value: Option<i32>, reversed: bool) {
+        self.ensure_scope();
+        let automatic = value.is_none().then(|| {
+            let id = self.next_automatic;
+            self.next_automatic += 1;
+            if self.collecting { self.automatic.push(AutomaticCounterInitial::default()); }
+            id
+        });
+        let value = value.unwrap_or_else(|| automatic.and_then(|id| self.initial_values.get(id).copied()).unwrap_or(0));
+        let fresh = self.sibling_scopes.last_mut().unwrap().insert(name.to_owned(), CounterScope { reversed, automatic }).is_none();
+        let stack = self.values.entry(name.to_owned()).or_default();
+        // Same-level resets replace a sibling's instance, not an ancestor's.
+        if !fresh { stack.pop(); }
+        stack.push(value);
+    }
+
+    fn writable_counter(&mut self, name: &str) -> (&mut i32, bool) {
+        self.ensure_scope();
+        let boundary_depth = self.boundaries.last().and_then(|b| b.get(name)).copied().unwrap_or(0);
+        let stack = self.values.entry(name.to_owned()).or_default();
+        let created = stack.len() <= boundary_depth;
+        if created {
+            stack.push(0);
+            self.sibling_scopes.last_mut().unwrap().insert(name.to_owned(), CounterScope::default());
+        }
+        (stack.last_mut().expect("counter instantiated"), created)
+    }
+
+    fn record_initial_operation(&mut self, name: &str, increment: i64, set: Option<i32>) {
+        if !self.collecting { return; }
+        let Some(id) = self.sibling_scopes.iter().rev().find_map(|scope| scope.get(name)).and_then(|scope| scope.automatic) else { return; };
+        let initial = &mut self.automatic[id];
+        if initial.stopped { return; }
+        if increment != 0 { initial.last_increment_negated = -increment; }
+        if let Some(value) = set {
+            initial.total = initial.total.saturating_add(i64::from(value));
+            initial.stopped = true;
+        } else {
+            initial.total = initial.total.saturating_sub(increment);
+        }
+    }
+
+    fn apply_element(&mut self, style: &ComputedStyle) {
+        self.apply_element_with_list_start(style, None);
+    }
+
+    fn apply_element_with_list_start(&mut self, style: &ComputedStyle, html_list_start: Option<i32>) {
+        // Published CSS Lists 3 inheritance: parent counters take priority over
+        // same-name instances from a sibling. Containment-local instances are
+        // the writable scope root, so they continue through that subtree.
+        if let Some(scope) = self.sibling_scopes.last_mut() {
+            scope.retain(|name, _| {
+                let Some(stack) = self.values.get_mut(name) else { return false; };
+                let contained_root = self.boundaries.last().and_then(|b| b.get(name))
+                    .is_some_and(|depth| *depth + 1 == stack.len());
+                if stack.len() > 1 && !contained_root {
+                    stack.pop();
+                    false
+                } else { true }
+            });
+        }
+        for reset in &style.counter_reset {
+            let value = if reset.html_list_start { html_list_start.or(reset.value) } else { reset.value };
+            self.reset(&reset.name, value, reset.reversed);
+        }
+        for (name, delta) in &style.counter_increment {
+            let (value, _) = self.writable_counter(name);
+            *value = value.saturating_add(*delta);
+        }
+        if self.collecting {
+            for (index, (name, _)) in style.counter_increment.iter().enumerate() {
+                if style.counter_increment[..index].iter().any(|(previous, _)| previous == name) { continue; }
+                let increment = style.counter_increment.iter().filter(|(other, _)| other == name)
+                    .fold(0i64, |sum, (_, delta)| sum.saturating_add(i64::from(*delta)));
+                let set = style.counter_set.iter().rev().find(|(other, _)| other == name).map(|(_, value)| *value);
+                self.record_initial_operation(name, increment, set);
+            }
+        }
+        if style.display == Display::ListItem
+            && !style.counter_increment.iter().any(|(name, _)| name == "list-item")
+        {
+            let reversed = self.sibling_scopes.iter().rev().find_map(|scope| scope.get("list-item")).is_some_and(|scope| scope.reversed);
+            let (value, created) = self.writable_counter("list-item");
+            let increment = if reversed && !created { -1 } else { 1 };
+            *value = value.saturating_add(increment);
+            let set = style.counter_set.iter().rev().find(|(name, _)| name == "list-item").map(|(_, value)| *value);
+            self.record_initial_operation("list-item", i64::from(increment), set);
+        }
+        for (name, new_value) in &style.counter_set {
+            *self.writable_counter(name).0 = *new_value;
+        }
+        if self.collecting {
+            for (index, (name, value)) in style.counter_set.iter().enumerate() {
+                if style.counter_set[index + 1..].iter().any(|(other, _)| other == name)
+                    || style.counter_increment.iter().any(|(other, _)| other == name)
+                    || (name == "list-item" && style.display == Display::ListItem) { continue; }
+                self.record_initial_operation(name, 0, Some(*value));
+            }
+        }
+    }
+}
+
 struct CascadedNodeState {
     root_font_px: f32,
     local_vars: Option<HashMap<String, String>>,
-    counters_pushed: Vec<String>,
-    own_counter_names: HashSet<String>,
+    counter_containment: bool,
+    pending_after: Option<String>,
 }
 
 // Keep the per-element style temporaries out of the recursive traversal frame.
@@ -2482,7 +2868,7 @@ fn apply_cascade_node(
     document_url: &str,
     inherited_vars: &HashMap<String, String>,
     candidates_buf: &mut Vec<usize>,
-    counters: &mut HashMap<String, Vec<i32>>,
+    counters: &mut CounterState,
     hover_chain: &std::collections::HashSet<u32>,
     focus_within_chain: &std::collections::HashSet<u32>,
     prev_siblings: &[SiblingInfo],
@@ -3214,62 +3600,11 @@ fn apply_cascade_node(
     // Build full ComputedStyle for ::before / ::after pseudo-elements.
     // Each inherits from the element's computed style, then has its own declarations applied.
     // ── CSS counters: reset, increment, then resolve counter() in content ──
-    // Track which counters were reset at this level so we can pop them later.
-    let mut counters_pushed: Vec<String> = Vec::new();
-    fn increment_counter(
-        counters: &mut HashMap<String, Vec<i32>>,
-        counters_pushed: Option<&mut Vec<String>>,
-        name: &str,
-        delta: i32,
-    ) {
-        let stack = counters.entry(name.to_string()).or_insert_with(|| {
-            if let Some(pushed) = counters_pushed {
-                pushed.push(name.to_string());
-            }
-            vec![0]
-        });
-        if let Some(top) = stack.last_mut() {
-            *top = top.saturating_add(delta);
-        }
-    }
-    fn set_counter(
-        counters: &mut HashMap<String, Vec<i32>>,
-        counters_pushed: Option<&mut Vec<String>>,
-        name: &str,
-        value: i32,
-    ) {
-        let stack = counters.entry(name.to_string()).or_insert_with(|| {
-            if let Some(pushed) = counters_pushed {
-                pushed.push(name.to_string());
-            }
-            vec![0]
-        });
-        if let Some(top) = stack.last_mut() {
-            *top = value;
-        }
-    }
-    for (name, val) in &root.style.counter_reset {
-        counters
-            .entry(name.clone())
-            .or_insert_with(Vec::new)
-            .push(*val);
-        counters_pushed.push(name.clone());
-    }
-    for (name, val) in &root.style.counter_increment {
-        increment_counter(counters, None, name, *val);
-    }
-    // CSS Lists: the implicit increment is appended to counter-increment,
-    // before counter-set, unless the author specified a list-item increment.
-    if root.style.display == Display::ListItem
-        && !root.style.counter_increment.iter().any(|(name, _)| name == "list-item")
-    {
-        increment_counter(counters, None, "list-item", 1);
-    }
-    for (name, val) in &root.style.counter_set {
-        set_counter(counters, None, name, *val);
-    }
+    // Element-created instances live through following siblings. Descendant
+    // instances are removed when this element's child scope finishes.
+    counters.apply_element(&root.style);
     if root.style.display == Display::ListItem {
-        if let Some(value) = counters
+        if let Some(value) = counters.values
             .get("list-item")
             .and_then(|stack| stack.last())
             .copied()
@@ -3285,36 +3620,24 @@ fn apply_cascade_node(
         }
     }
 
-    if let Some((Some(txt), ps)) = build_pseudo_style_shared(
+    let counter_containment = root.style.contain_style
+        && !matches!(root.style.display, Display::None | Display::Contents);
+    counters.enter_children();
+    if counter_containment { counters.enter_containment(); }
+
+    if let Some((Some(txt), mut ps)) = build_pseudo_style_shared(
         &mut before_matched,
         &root.style,
         &local_vars,
         &root.attributes,
         &stylesheet.rules,
     ) {
-        // ::before may carry counter-increment/counter-reset — apply before resolving content
-        for (name, val) in &ps.counter_reset {
-            counters
-                .entry(name.clone())
-                .or_insert_with(Vec::new)
-                .push(*val);
-            counters_pushed.push(name.clone());
-        }
-        for (name, val) in &ps.counter_increment {
-            increment_counter(counters, Some(&mut counters_pushed), name, *val);
-        }
-        for (name, val) in &ps.counter_set {
-            set_counter(counters, Some(&mut counters_pushed), name, *val);
-        }
-        let resolved_content = resolve_content_value_with_context(
-            &txt,
-            Some(&root.attributes),
-            ps.rare().quotes.as_deref(),
-        );
-        std::sync::Arc::make_mut(&mut root.style).before_content =
-            resolve_counters_in_content(&resolved_content, counters);
+        counters.apply_element(&ps);
+        let resolved_content = resolve_generated_content(&txt, &root.attributes, &mut ps, &counters.values);
+        std::sync::Arc::make_mut(&mut root.style).before_content = resolved_content;
         std::sync::Arc::make_mut(&mut root.style).before_style = Some(ps);
     }
+    let mut pending_after = None;
     if let Some((Some(txt), ps)) = build_pseudo_style_shared(
         &mut after_matched,
         &root.style,
@@ -3322,26 +3645,7 @@ fn apply_cascade_node(
         &root.attributes,
         &stylesheet.rules,
     ) {
-        for (name, val) in &ps.counter_reset {
-            counters
-                .entry(name.clone())
-                .or_insert_with(Vec::new)
-                .push(*val);
-            counters_pushed.push(name.clone());
-        }
-        for (name, val) in &ps.counter_increment {
-            increment_counter(counters, Some(&mut counters_pushed), name, *val);
-        }
-        for (name, val) in &ps.counter_set {
-            set_counter(counters, Some(&mut counters_pushed), name, *val);
-        }
-        let resolved_content = resolve_content_value_with_context(
-            &txt,
-            Some(&root.attributes),
-            ps.rare().quotes.as_deref(),
-        );
-        std::sync::Arc::make_mut(&mut root.style).after_content =
-            resolve_counters_in_content(&resolved_content, counters);
+        pending_after = Some(txt);
         std::sync::Arc::make_mut(&mut root.style).after_style = Some(ps);
     }
     if let Some((_, ps)) = build_pseudo_style_shared(
@@ -3362,7 +3666,7 @@ fn apply_cascade_node(
     ) {
         std::sync::Arc::make_mut(&mut root.style).placeholder_style = Some(ps);
     }
-    if let Some((txt, ps)) = build_pseudo_style_shared(
+    if let Some((txt, mut ps)) = build_pseudo_style_shared(
         &mut marker_matched,
         &root.style,
         &local_vars,
@@ -3372,13 +3676,9 @@ fn apply_cascade_node(
         if let Some(txt) = txt {
             // `quotes` is not an applicable marker-box property; use the
             // originating element's inherited quote pairs (CSS Lists 3).
-            let resolved_content = resolve_content_value_with_context(
-                &txt,
-                Some(&root.attributes),
-                root.style.rare().quotes.as_deref(),
-            );
-            std::sync::Arc::make_mut(&mut root.style).marker_content =
-                resolve_counters_in_content(&resolved_content, counters);
+            ps.rare_mut().quotes = root.style.rare().quotes.clone();
+            let resolved_content = resolve_generated_content(&txt, &root.attributes, &mut ps, &counters.values);
+            std::sync::Arc::make_mut(&mut root.style).marker_content = resolved_content;
         }
         std::sync::Arc::make_mut(&mut root.style).marker_style = Some(ps);
     }
@@ -3455,7 +3755,7 @@ fn apply_cascade_node(
                 root.style.rare().quotes.as_deref(),
             );
             std::sync::Arc::make_mut(&mut root.style).rare_mut().content =
-                resolve_counters_in_content(&resolved, counters);
+                resolve_counters_in_content(&resolved, &counters.values);
         }
     }
 
@@ -3475,15 +3775,8 @@ fn apply_cascade_node(
             });
         }
     }
-    build_pseudo_element_boxes(root);
-
-    // An implicitly instantiated counter belongs to its element and following
-    // siblings, not just its descendants. Keep it until the parent finishes
-    // its children; counters first created below this element cannot escape it.
-    let own_counter_names: HashSet<String> = counters.keys().cloned().collect();
-
     Some(CascadedNodeState {
-        root_font_px, local_vars: local_vars_owned, counters_pushed, own_counter_names,
+        root_font_px, local_vars: local_vars_owned, counter_containment, pending_after,
     })
 }
 
@@ -3505,7 +3798,7 @@ pub(crate) fn apply_cascade_inner(
     document_url: &str,
     inherited_vars: &HashMap<String, String>,
     candidates_buf: &mut Vec<usize>,
-    counters: &mut HashMap<String, Vec<i32>>,
+    counters: &mut CounterState,
     hover_chain: &std::collections::HashSet<u32>,
     focus_within_chain: &std::collections::HashSet<u32>,
     prev_siblings: &[SiblingInfo],
@@ -3519,7 +3812,7 @@ pub(crate) fn apply_cascade_inner(
         vw, vh, focused_box, keyboard_focus, target_id, document_url, inherited_vars,
         candidates_buf, counters, hover_chain, focus_within_chain, prev_siblings,
         next_siblings, next_sibling_nodes, share_cache, precomputed) else { return; };
-    let CascadedNodeState { root_font_px, local_vars, counters_pushed, own_counter_names } = state;
+    let CascadedNodeState { root_font_px, local_vars, counter_containment, pending_after } = state;
     let local_vars = local_vars.as_ref().unwrap_or(inherited_vars);
 
 	    ancestors.push(AncestorInfo {
@@ -3550,7 +3843,7 @@ pub(crate) fn apply_cascade_inner(
         document_url: &str,
         inherited_vars: &HashMap<String, String>,
         candidates_buf: &mut Vec<usize>,
-        counters: &mut HashMap<String, Vec<i32>>,
+        counters: &mut CounterState,
         hover_chain: &std::collections::HashSet<u32>,
         focus_within_chain: &std::collections::HashSet<u32>,
         share_cache: &mut ShareCache,
@@ -3911,17 +4204,20 @@ pub(crate) fn apply_cascade_inner(
 
     ancestors.pop();
 
-    counters.retain(|name, _| own_counter_names.contains(name));
-
-    // Pop counters that were reset at this level
-    for name in counters_pushed.iter().rev() {
-        if let Some(stack) = counters.get_mut(name) {
-            stack.pop();
-            if stack.is_empty() {
-                counters.remove(name);
-            }
+    if let Some(content) = pending_after {
+        let style = std::sync::Arc::make_mut(&mut root.style);
+        if let Some(ps) = style.after_style.as_mut() {
+            counters.apply_element(ps);
+            style.after_content = resolve_generated_content(&content, &root.attributes, ps, &counters.values);
         }
     }
+
+    // Child display values must be resolved before choosing whether generated
+    // inline content needs anonymous line boxes around block children.
+    build_pseudo_element_boxes(root);
+
+    counters.exit_children();
+    if counter_containment { counters.exit_containment(); }
 }
 
 fn apply_form_sizing_hints_after_ua(
@@ -3985,10 +4281,22 @@ fn apply_presentational_hints(
                     apply_property(style, "counter-set", &format!("list-item {value}"));
                 }
             }
-            "start" if root.tag == "ol" && !root.attributes.contains_key("reversed") => {
+            "start" if root.tag == "ol" => {
                 if let Some(value) = crate::html::forms::parse_integer(val) {
-                    let value = value.saturating_sub(1).clamp(i32::MIN as i64, i32::MAX as i64);
-                    apply_property(style, "counter-reset", &format!("list-item {value}"));
+                    let reversed = root.attributes.contains_key("reversed");
+                    let value = if reversed { value.saturating_add(1) } else { value.saturating_sub(1) }
+                        .clamp(i32::MIN as i64, i32::MAX as i64);
+                    let name = if reversed { "reversed(list-item)" } else { "list-item" };
+                    apply_property(style, "counter-reset", &format!("{name} {value}"));
+                }
+            }
+            "reversed" if root.tag == "ol" => {
+                let start = root.attributes.get("start").and_then(|value| crate::html::forms::parse_integer(value));
+                if start.is_none() {
+                    apply_property(style, "counter-reset", "reversed(list-item)");
+                    if let Some(reset) = style.counter_reset.first_mut() {
+                        reset.html_list_start = true;
+                    }
                 }
             }
             "align" => match val.as_str() {
@@ -4020,8 +4328,10 @@ fn apply_presentational_hints(
                 }
                 "select" => {
                     let rows = val.trim().parse::<f32>().unwrap_or(1.0).max(1.0);
-                    let height = if rows > 1.0 { rows * 1.2 + 0.5 } else { 2.2 };
-                    apply_property(style, "height", &format!("{height}em"));
+                    if rows > 1.0 {
+                        let height = rows * 1.2 + 0.5;
+                        apply_property(style, "height", &format!("{height}em"));
+                    }
                 }
                 "input" => {
                     if let Ok(chars) = val.trim().parse::<f32>() {

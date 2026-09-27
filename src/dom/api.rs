@@ -1931,8 +1931,12 @@ impl Document {
         });
         let mut appended_index = None;
         if let Some(parent) = self.find_webcore_mut(parent_id) {
-            appended_index = Some(parent.children.len());
-            parent.children.push(child_box);
+            // Generated content is not a DOM child. A streamed append belongs
+            // before the existing ::after box, including clearfixs.
+            let index = parent.children.iter().position(|node| node.tag == "::after")
+                .unwrap_or(parent.children.len());
+            appended_index = Some(index);
+            parent.children.insert(index, child_box);
             parent.layout.layout_dirty = true;
             parent.layout.intrinsic_dirty = true;
             parent.has_dirty_layout_descendant = true;

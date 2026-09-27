@@ -443,6 +443,7 @@ fn keyframe_timing_function_is_not_an_animated_property() {
     "#,
     );
     let stops = kf.get("bounce").expect("keyframes extracted");
+    assert_eq!(stops[0].timing_fn, Some(EasingFn::EaseIn));
     let from = stops
         .iter()
         .find(|stop| stop.offset == 0.0)
@@ -541,10 +542,12 @@ fn interpolate_stops_at_start() {
     let stops = vec![
         KeyframeStop {
             offset: 0.0,
+            timing_fn: None,
             properties: vec![("opacity".into(), "0".into())],
         },
         KeyframeStop {
             offset: 1.0,
+            timing_fn: None,
             properties: vec![("opacity".into(), "1".into())],
         },
     ];
@@ -566,10 +569,12 @@ fn interpolate_stops_at_end() {
     let stops = vec![
         KeyframeStop {
             offset: 0.0,
+            timing_fn: None,
             properties: vec![("opacity".into(), "0".into())],
         },
         KeyframeStop {
             offset: 1.0,
+            timing_fn: None,
             properties: vec![("opacity".into(), "1".into())],
         },
     ];
@@ -587,10 +592,12 @@ fn interpolate_stops_midpoint() {
     let stops = vec![
         KeyframeStop {
             offset: 0.0,
+            timing_fn: None,
             properties: vec![("opacity".into(), "0".into())],
         },
         KeyframeStop {
             offset: 1.0,
+            timing_fn: None,
             properties: vec![("opacity".into(), "1".into())],
         },
     ];
@@ -609,10 +616,12 @@ fn visibility_keyframes_are_visible_between_endpoints() {
     let stops = vec![
         KeyframeStop {
             offset: 0.0,
+            timing_fn: None,
             properties: vec![("visibility".into(), "hidden".into())],
         },
         KeyframeStop {
             offset: 1.0,
+            timing_fn: None,
             properties: vec![("visibility".into(), "visible".into())],
         },
     ];
@@ -630,14 +639,17 @@ fn interpolate_stops_between_non_zero_stops() {
     let stops = vec![
         KeyframeStop {
             offset: 0.0,
+            timing_fn: None,
             properties: vec![("opacity".into(), "0".into())],
         },
         KeyframeStop {
             offset: 0.5,
+            timing_fn: None,
             properties: vec![("opacity".into(), "0.5".into())],
         },
         KeyframeStop {
             offset: 1.0,
+            timing_fn: None,
             properties: vec![("opacity".into(), "1".into())],
         },
     ];
@@ -657,14 +669,17 @@ fn keyframe_properties_present_only_later_do_not_disappear() {
     let stops = vec![
         KeyframeStop {
             offset: 0.0,
+            timing_fn: None,
             properties: vec![("left".into(), "0px".into())],
         },
         KeyframeStop {
             offset: 0.5,
+            timing_fn: None,
             properties: vec![("top".into(), "10px".into())],
         },
         KeyframeStop {
             offset: 1.0,
+            timing_fn: None,
             properties: vec![("left".into(), "100px".into())],
         },
     ];
@@ -1084,6 +1099,50 @@ fn keyframe_transform_resolves_element_variables_and_mixed_units() {
     let translate_x: f32 = transform.strip_prefix("matrix(").unwrap()
         .trim_end_matches(')').split(',').nth(4).unwrap().parse().unwrap();
     assert!((translate_x - 336.0).abs() < 1.0, "expected midpoint from -128px to +800px, got {transform}");
+}
+
+#[test]
+fn keyframe_segments_use_local_easing_and_independent_property_tracks() {
+    fn sample(frames: &str, animation: &str, millis: u64, property: &str) -> f32 {
+        let html = format!("<style>@keyframes probe{{{frames}}} #box{{position:relative;left:0px;top:0px;opacity:0;animation:probe 1s {animation}}}</style><div id=box>sample</div>");
+        let mut doc = parse_html(&html);
+        LayoutEngine::new().layout(&mut doc, 800.0);
+        let id = doc.query_selector("#box").unwrap();
+        let start = doc.active_animations[0].start_time;
+        doc.tick_animations(start + Duration::from_millis(millis));
+        doc.animation_overrides_for(id).unwrap().iter()
+            .find(|(name, _)| name == property).unwrap().1
+            .trim_end_matches("px").parse().unwrap()
+    }
+    let frames = "0%{opacity:0}50%{opacity:.4}100%{opacity:1}";
+    assert!((sample(frames, "steps(2,end) both", 250, "opacity") - 0.2).abs() < 0.001);
+    assert!((sample(frames, "steps(2,end) both", 750, "opacity") - 0.7).abs() < 0.001);
+    let local = "0%{opacity:0;animation-timing-function:step-start}50%{opacity:.4;animation-timing-function:linear}100%{opacity:1;animation-timing-function:step-end}";
+    assert!((sample(local, "step-end both", 250, "opacity") - 0.4).abs() < 0.001);
+    assert!((sample(local, "step-end both", 750, "opacity") - 0.7).abs() < 0.001);
+    assert!((sample(local, "step-end reverse both", 250, "opacity") - 0.7).abs() < 0.001);
+    assert!((sample(local, "step-end 1.75 both", 2000, "opacity") - 0.7).abs() < 0.001);
+    let sparse = "0%{left:0px}50%{top:10px}100%{left:100px}";
+    for millis in [250, 750] {
+        assert!((sample(sparse, "linear both", millis, "left") - millis as f32 / 10.0).abs() < 0.001);
+        assert!((sample(sparse, "linear both", millis, "top") - 5.0).abs() < 0.001);
+    }
+    assert!((sample(local, "step-end .5s backwards", 250, "opacity") - 0.0).abs() < 0.001);
+    assert!((sample(local, "step-end .5s reverse backwards", 250, "opacity") - 1.0).abs() < 0.001);
+    assert!((sample(sparse, "linear .5s backwards", 250, "top") - 0.0).abs() < 0.001);
+}
+
+#[test]
+fn keyframe_easing_merges_duplicate_offsets_and_ignores_invalid_descriptors() {
+    for invalid in ["bogus", "steps(0,end)", "steps(1,jump-none)", "steps(2,other)", "cubic-bezier(2,0,1,1)", "linear(0)"] {
+        let frames = extract_keyframes(&format!("@keyframes probe{{0%{{opacity:0;animation-timing-function:step-start}}0%{{left:0px;animation-timing-function:{invalid}}}100%{{opacity:1}}}}"));
+        let stop = &frames["probe"][0];
+        assert_eq!(stop.timing_fn, Some(EasingFn::StepStart), "{invalid}");
+        assert_eq!(stop.properties.len(), 2);
+    }
+    let frames = extract_keyframes("@keyframes probe{0%,50%{opacity:0;animation-timing-function:ease-in}50%{animation-timing-function:linear}100%{opacity:1}}");
+    assert_eq!(frames["probe"][0].timing_fn, Some(EasingFn::EaseIn));
+    assert_eq!(frames["probe"][1].timing_fn, Some(EasingFn::Linear));
 }
 
 #[test]

@@ -27,6 +27,7 @@ pub fn collapse_two(a: f32, b: f32) -> f32 {
 /// Mirrors C++ EstablishesBFC.
 pub fn establishes_bfc(style: &ComputedStyle) -> bool {
     matches!(style.float, Float::Left | Float::Right)
+        || style.align_content != AlignContent::Stretch
         || !matches!(style.overflow_x, Overflow::Visible)
         || !matches!(style.overflow_y, Overflow::Visible)
         || matches!(
@@ -223,26 +224,6 @@ pub fn compute_intrinsic_width(node: &WebCore) -> f32 {
     let result = compute_intrinsic_width_inner(node);
     node.layout.cached_intrinsic_w.set(result);
     result
-}
-
-fn shrink_to_fit_slop(node: &WebCore) -> f32 {
-    if node.style.aspect_ratio.is_some()
-        && node.style.width.is_auto()
-        && !node.style.height.is_auto()
-        && !matches!(node.style.height, CssLength::Percent(_))
-    {
-        0.0
-    } else if !node.layout.line_cache.is_empty()
-        && node
-            .layout
-            .line_cache
-            .iter()
-            .all(|line| line.text_length == 0)
-    {
-        0.0
-    } else {
-        1.0
-    }
 }
 
 fn compute_intrinsic_width_inner(node: &WebCore) -> f32 {
@@ -1033,8 +1014,7 @@ pub fn layout_block_with_fc(
                 };
                 if intrinsic_w > 0.0 && intrinsic_w < child_content_w {
                     let irb = grid_child_ref(node, path);
-                    let shrink_w = intrinsic_w.ceil()
-                        + shrink_to_fit_slop(irb)
+                    let shrink_w = intrinsic_w
                         + irb.layout.resolved_pad_left
                         + irb.layout.resolved_pad_right
                         + irb.layout.resolved_border_left
@@ -1297,8 +1277,7 @@ pub fn layout_block_with_fc(
                         engine.max_content_width(ch, font_px, root_font_px)
                     };
                     if intrinsic_w > 0.0 {
-                        let shrink_w = intrinsic_w.ceil()
-                            + shrink_to_fit_slop(ch)
+                        let shrink_w = intrinsic_w
                             + ch.layout.resolved_pad_left
                             + ch.layout.resolved_pad_right
                             + ch.layout.resolved_border_left
@@ -1560,6 +1539,25 @@ pub fn layout_block_with_fc(
     } else {
         content_h
     };
+
+    // CSS Align: a block's contents align as one subject, not as separately
+    // distributed children. Implicit safe alignment keeps overflowing content reachable.
+    if node.style.writing_mode == WritingMode::HorizontalTB {
+        let spare = (content_h - natural_h).max(0.0);
+        let offset = match node.style.align_content {
+            AlignContent::Center | AlignContent::SpaceAround | AlignContent::SpaceEvenly => spare / 2.0,
+            AlignContent::FlexEnd => spare,
+            _ => 0.0,
+        };
+        if offset != 0.0 {
+            for child in node.effective_children_mut() {
+                if !matches!(child.style.position, Position::Absolute | Position::Fixed) {
+                    shift_rects(child, 0.0, offset);
+                }
+            }
+            for line in &mut node.layout.line_cache { line.y += offset; }
+        }
+    }
 
     // ─── Build rects ──────────────────────────────────────────────────────────
     build_box_rects(
@@ -2016,31 +2014,11 @@ fn has_renderable_content(anon: &WebCore) -> bool {
 
 fn make_anonymous_block(parent: &WebCore) -> WebCore {
     let mut anon = WebCore::new("anonymous-block");
-    let mut style = (*parent.style).clone();
+    // CSS 2.1 anonymous boxes inherit inherited properties only; all other
+    // properties have their initial values, not the parent's decorations/content.
+    let mut style = ComputedStyle::default();
+    style.inherit_from(&parent.style);
     style.display = Display::Block;
-    style.margin_top = CssLength::Px(0.0);
-    style.margin_bottom = CssLength::Px(0.0);
-    style.margin_left = CssLength::Px(0.0);
-    style.margin_right = CssLength::Px(0.0);
-    style.padding_top = CssLength::Px(0.0);
-    style.padding_bottom = CssLength::Px(0.0);
-    style.padding_left = CssLength::Px(0.0);
-    style.padding_right = CssLength::Px(0.0);
-    style.border_top_width = CssLength::Px(0.0);
-    style.border_bottom_width = CssLength::Px(0.0);
-    style.border_left_width = CssLength::Px(0.0);
-    style.border_right_width = CssLength::Px(0.0);
-    style.background_color = Color::TRANSPARENT;
-    style.box_shadow = Vec::new();
-    style.position = Position::Static;
-    style.float = Float::None;
-    style.clear = Clear::None;
-    style.width = CssLength::Auto;
-    style.height = CssLength::Auto;
-    style.min_width = CssLength::Auto;
-    style.min_height = CssLength::Auto;
-    style.max_width = CssLength::None;
-    style.max_height = CssLength::None;
     anon.style = std::sync::Arc::new(style);
     anon.node_id = 0;
     anon.layout.layout_dirty = true;
@@ -2054,16 +2032,7 @@ pub fn unwrap_all_anonymous_blocks(node: &mut WebCore) {
     while let Some(node) = pending.pop() {
         // Flatten here before borrowing children for traversal. Repeating also
         // removes nested synthetic wrappers while preserving sibling order.
-        while node.children.iter().any(|c| c.tag == "anonymous-block") {
-            let old_children = std::mem::take(&mut node.children);
-            for child in old_children {
-                if child.tag == "anonymous-block" {
-                    node.children.extend(child.children);
-                } else {
-                    node.children.push(child);
-                }
-            }
-        }
+        unwrap_anonymous_children(node);
         if let Some(shadow) = &mut node.shadow_root {
             pending.extend(shadow.children.iter_mut());
         }
@@ -2071,7 +2040,36 @@ pub fn unwrap_all_anonymous_blocks(node: &mut WebCore) {
     }
 }
 
+pub(crate) fn unwrap_anonymous_children(node: &mut WebCore) {
+    while node.children.iter().any(|c| c.tag == "anonymous-block") {
+        // The removed fragment owned the inline layout. Its parent cannot
+        // reuse geometry until that text layout has been reconstructed.
+        node.layout.layout_dirty = true;
+        let old_children = std::mem::take(&mut node.children);
+        for child in old_children {
+            if child.tag == "anonymous-block" {
+                node.children.extend(child.children);
+            } else {
+                node.children.push(child);
+            }
+        }
+    }
+}
+
 pub fn wrap_mixed_children_in_anonymous_blocks(node: &mut WebCore) {
+    // Most blocks do not need normalization. Keep their path outside the
+    // frame that owns/moves WebCore boxes, especially during deep layout.
+    if !node.children.iter().any(|child| child.tag == "anonymous-block")
+        && (!node.children.iter().any(is_in_flow_block)
+            || !node.children.iter().any(|child| is_in_flow_inline(child)
+                && !(child.is_text_node() && child.text.chars().all(|ch| ch.is_ascii_whitespace())))) {
+        return;
+    }
+    wrap_mixed_children_in_anonymous_blocks_inner(node);
+}
+
+#[inline(never)]
+fn wrap_mixed_children_in_anonymous_blocks_inner(node: &mut WebCore) {
     // First, unwrap any anonymous blocks from a previous layout pass so that
     // re-layout is idempotent and doesn't create nested anonymous blocks.
     if node.children.iter().any(|c| c.tag == "anonymous-block") {

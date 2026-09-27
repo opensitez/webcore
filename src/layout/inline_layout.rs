@@ -248,15 +248,14 @@ pub fn layout_inline_block(
                 let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
                 {
                     let irb = &children[ci];
-                    let shrink_w = intrinsic_w.ceil()
-                        + shrink_to_fit_slop(irb)
+                    let shrink_w = intrinsic_w
                         + irb.layout.resolved_pad_left
                         + irb.layout.resolved_pad_right
                         + irb.layout.resolved_border_left
                         + irb.layout.resolved_border_right
                         + irb.layout.resolved_margin_left
                         + irb.layout.resolved_margin_right;
-                    if shrink_w > 0.0
+                    if (shrink_w > 0.0 || !is_atomic_inline_replaced(&children[ci]))
                         && (shrink_w < content_w
                             || matches!(
                                 children[ci].style.white_space,
@@ -307,8 +306,7 @@ pub fn layout_inline_block(
                 let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
                 if intrinsic_w > 0.0 && intrinsic_w < content_w {
                     let irb = &children[ci];
-                    let shrink_w = intrinsic_w.ceil()
-                        + shrink_to_fit_slop(irb)
+                    let shrink_w = intrinsic_w
                         + irb.layout.resolved_pad_left
                         + irb.layout.resolved_pad_right
                         + irb.layout.resolved_border_left
@@ -4056,7 +4054,10 @@ fn align_char_x_to_inline_items(line: &mut LayoutLine, items: &[InlineItem]) {
         return;
     }
     let text_budget = (line.width - line.text_x_offset).max(0.0);
-    if line.char_x.last().is_some_and(|end| *end <= text_budget + 2.0) {
+    // Shaping sees only the flat text, not atomic inline boxes between runs.
+    // Even when the text fits, its caret origins must include those advances.
+    if !items.iter().any(|item| matches!(item.kind, InlineItemKind::Atomic { .. }))
+        && line.char_x.last().is_some_and(|end| *end <= text_budget + 2.0) {
         return;
     }
     let shaped = line.char_x.clone();
@@ -4415,26 +4416,6 @@ fn push_flat_rendered_text(out: &mut String, text: &str, style: &ComputedStyle) 
 
 // ─── Recursive inline-block pre-layout ───────────────────────────────────────
 
-fn shrink_to_fit_slop(node: &WebCore) -> f32 {
-    if node.style.aspect_ratio.is_some()
-        && node.style.width.is_auto()
-        && !node.style.height.is_auto()
-        && !matches!(node.style.height, CssLength::Percent(_))
-    {
-        0.0
-    } else if !node.layout.line_cache.is_empty()
-        && node
-            .layout
-            .line_cache
-            .iter()
-            .all(|line| line.text_length == 0)
-    {
-        0.0
-    } else {
-        1.0
-    }
-}
-
 fn shrink_to_fit_intrinsic_width(line_w: f32, max_content_w: f32) -> f32 {
     if max_content_w > 0.0 {
         max_content_w
@@ -4493,8 +4474,7 @@ fn prelayout_nested_inline_blocks(
                     engine.max_content_width(&children[ci], font_px, root_font_px);
                 let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
                 let fc = &children[ci];
-                let shrink_w = intrinsic_w.ceil()
-                    + shrink_to_fit_slop(fc)
+                let shrink_w = intrinsic_w
                     + fc.layout.resolved_pad_left
                     + fc.layout.resolved_pad_right
                     + fc.layout.resolved_border_left
@@ -4547,15 +4527,14 @@ fn prelayout_nested_inline_blocks(
                         engine.max_content_width(&children[ci], font_px, root_font_px);
                     let intrinsic_w = shrink_to_fit_intrinsic_width(max_line_w, max_content_w);
                     let gc = &children[ci];
-                    let shrink_w = intrinsic_w.ceil()
-                        + shrink_to_fit_slop(gc)
+                    let shrink_w = intrinsic_w
                         + gc.layout.resolved_pad_left
                         + gc.layout.resolved_pad_right
                         + gc.layout.resolved_border_left
                         + gc.layout.resolved_border_right
                         + gc.layout.resolved_margin_left
                         + gc.layout.resolved_margin_right;
-                    if shrink_w > 0.0
+                    if (shrink_w > 0.0 || !is_atomic_inline_replaced(&children[ci]))
                         && (shrink_w < content_w
                             || matches!(
                                 children[ci].style.white_space,
@@ -4579,6 +4558,14 @@ fn prelayout_nested_inline_blocks(
             }
             continue;
         }
+        // Block-in-inline wrappers are laid out as a unit by the direct-child
+        // pass. Moving their descendants first corrupts the cached subtree
+        // coordinates if that unit can subsequently reuse its layout.
+        if children[ci].style.display == Display::Inline
+            && has_in_flow_block_children(&children[ci])
+        {
+            continue;
+        }
         if matches!(children[ci].style.display, Display::Inline | Display::Contents) {
             let child_font_px = children[ci].style.font_size_px(font_px, root_font_px);
             prelayout_nested_inline_blocks(
@@ -4593,7 +4580,7 @@ fn prelayout_nested_inline_blocks(
     }
 }
 
-fn has_in_flow_block_children(node: &WebCore) -> bool {
+pub(crate) fn has_in_flow_block_children(node: &WebCore) -> bool {
     node.effective_children().iter().any(|c| {
         if matches!(c.style.display, Display::None) {
             return false;

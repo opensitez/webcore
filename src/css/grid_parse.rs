@@ -199,7 +199,7 @@ pub fn parse_track_list_with_names(
 }
 
 /// Tokenize a track list, keeping repeat(...) and [...] as single tokens.
-fn tokenize_track_list(v: &str) -> Vec<String> {
+pub(super) fn tokenize_track_list(v: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut paren_depth = 0usize;

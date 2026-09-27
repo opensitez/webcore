@@ -369,7 +369,7 @@ pub fn apply_cascade_incremental(
 ) {
     let mut ancestors: Vec<AncestorInfo> = Vec::new();
     let mut candidates_buf: Vec<usize> = Vec::new();
-    let mut counters: HashMap<String, Vec<i32>> = HashMap::new();
+    let mut counters = crate::css::cascade::CounterState::default();
     let focus_within_chain = build_hover_chain(root, focused_box);
     apply_cascade_incremental_walk(
         root,
@@ -391,6 +391,7 @@ pub fn apply_cascade_incremental(
         hover_chain,
         &focus_within_chain,
     );
+    crate::css::cascade::resolve_document_generated_content(root, stylesheet);
 }
 
 fn apply_cascade_incremental_walk(
@@ -409,7 +410,7 @@ fn apply_cascade_incremental_walk(
     keyboard_focus: bool,
     inherited_vars: &HashMap<String, String>,
     candidates_buf: &mut Vec<usize>,
-    counters: &mut HashMap<String, Vec<i32>>,
+    counters: &mut crate::css::cascade::CounterState,
     hover_chain: &std::collections::HashSet<u32>,
     focus_within_chain: &std::collections::HashSet<u32>,
 ) {

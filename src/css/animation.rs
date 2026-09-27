@@ -10,8 +10,12 @@ use std::collections::{HashMap, HashSet};
 
 /// Parse an `animation-timing-function` value into an `EasingFn`.
 pub fn parse_easing(s: &str) -> EasingFn {
-    let s = s.trim();
-    match s {
+    parse_easing_checked(s).unwrap_or(EasingFn::Ease)
+}
+
+pub(crate) fn parse_easing_checked(s: &str) -> Option<EasingFn> {
+    let s = s.trim().to_ascii_lowercase();
+    Some(match s.as_str() {
         "linear" => EasingFn::Linear,
         "ease" => EasingFn::Ease,
         "ease-in" => EasingFn::EaseIn,
@@ -20,57 +24,31 @@ pub fn parse_easing(s: &str) -> EasingFn {
         "step-start" => EasingFn::StepStart,
         "step-end" => EasingFn::StepEnd,
         s if s.starts_with("cubic-bezier(") => {
-            let inner = s
-                .strip_prefix("cubic-bezier(")
-                .unwrap_or("")
-                .strip_suffix(')')
-                .unwrap_or("");
-            let parts: Vec<f32> = inner
-                .split(',')
-                .filter_map(|p| p.trim().parse().ok())
-                .collect();
-            if parts.len() == 4 {
-                EasingFn::CubicBezier(parts[0], parts[1], parts[2], parts[3])
-            } else {
-                EasingFn::Ease
-            }
+            let inner = s.strip_prefix("cubic-bezier(")?.strip_suffix(')')?;
+            let parts: Vec<f32> = inner.split(',').map(|p| p.trim().parse().ok()).collect::<Option<_>>()?;
+            if parts.len() != 4 || parts.iter().any(|n| !n.is_finite())
+                || !(0.0..=1.0).contains(&parts[0]) || !(0.0..=1.0).contains(&parts[2]) { return None; }
+            EasingFn::CubicBezier(parts[0], parts[1], parts[2], parts[3])
         }
         s if s.starts_with("steps(") => {
-            let inner = s
-                .strip_prefix("steps(")
-                .unwrap_or("")
-                .strip_suffix(')')
-                .unwrap_or("");
-            let mut it = inner.splitn(2, ',');
-            let count = it
-                .next()
-                .and_then(|p| p.trim().parse::<u32>().ok())
-                .unwrap_or(1);
-            // css-easing-2 §2.3 — four step positions. `start`/`end` are the
-            // level-1 spellings of `jump-start`/`jump-end`.
-            let pos = match it.next().map(|p| p.trim().to_ascii_lowercase()).as_deref() {
-                Some("start") | Some("jump-start") => StepPosition::JumpStart,
-                Some("jump-none") => StepPosition::JumpNone,
+            let inner = s.strip_prefix("steps(")?.strip_suffix(')')?;
+            let mut parts = inner.split(',');
+            let count = parts.next()?.trim().parse::<u32>().ok()?;
+            let position = match parts.next().map(str::trim) {
+                Some("start" | "jump-start") => StepPosition::JumpStart,
+                None | Some("end" | "jump-end") => StepPosition::JumpEnd,
+                Some("jump-none") if count > 1 => StepPosition::JumpNone,
                 Some("jump-both") => StepPosition::JumpBoth,
-                _ => StepPosition::JumpEnd,
+                _ => return None,
             };
-            EasingFn::Steps(count, pos)
+            if count == 0 || parts.next().is_some() { return None; }
+            EasingFn::Steps(count, position)
         }
-        // `linear()` — css-easing-2 §2.1. Unrecognised, it fell through every
-        // arm of the animation parser and was taken for the ANIMATION NAME.
         s if s.starts_with("linear(") => {
-            let inner = s
-                .strip_prefix("linear(")
-                .unwrap_or("")
-                .strip_suffix(')')
-                .unwrap_or("");
-            match parse_linear_points(inner) {
-                Some(pts) => EasingFn::LinearPoints(pts),
-                None => EasingFn::Linear,
-            }
+            EasingFn::LinearPoints(parse_linear_points(s.strip_prefix("linear(")?.strip_suffix(')')?)?)
         }
-        _ => EasingFn::Ease,
-    }
+        _ => return None,
+    })
 }
 
 /// Parse an `animation` shorthand value (comma-separated list of animations).
@@ -323,9 +301,12 @@ fn parse_linear_points(inner: &str) -> Option<Vec<(f32, f32)>> {
     for entry in inner.split(',') {
         let mut toks = entry.split_whitespace();
         let out: f32 = toks.next()?.parse().ok()?;
+        if !out.is_finite() { return None; }
         let mut had_pos = false;
-        for t in toks {
+        for (index, t) in toks.enumerate() {
+            if index >= 2 { return None; }
             let p = t.strip_suffix('%')?.parse::<f32>().ok()? / 100.0;
+            if !p.is_finite() { return None; }
             pts.push((out, Some(p)));
             had_pos = true;
         }

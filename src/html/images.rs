@@ -317,6 +317,7 @@ pub struct AnimatedImage {
     pub frames: Vec<AnimatedImageFrame>,
     pub source_bytes: Option<std::sync::Arc<Vec<u8>>>,
     pub fully_decoded: bool,
+    pub(crate) pending_decode: Option<std::sync::Arc<std::sync::OnceLock<AnimatedImage>>>,
 }
 
 impl AnimatedImage {
@@ -475,6 +476,7 @@ where
         frames: out,
         source_bytes: if has_more_frames { source_bytes } else { None },
         fully_decoded,
+        pending_decode: None,
     })
 }
 
@@ -526,6 +528,34 @@ mod animated_resize_tests {
     }
 }
 
+/// Publish completed animation frames without waiting for a decoder on the UI thread.
+pub(crate) fn poll_animated_image_expansion(
+    animated: &mut AnimatedImage,
+    target_width: u32,
+    target_height: u32,
+) -> bool {
+    if let Some(pending) = animated.pending_decode.as_ref() {
+        let ready = pending.get().cloned();
+        if let Some(decoded) = ready {
+            *animated = decoded;
+            return true;
+        }
+        return false;
+    }
+    if animated.fully_decoded || animated.source_bytes.is_none() {
+        return false;
+    }
+    let mut decoding = animated.clone();
+    let pending = std::sync::Arc::new(std::sync::OnceLock::new());
+    animated.pending_decode = Some(pending.clone());
+    crate::spawn_image_resource_task(move || {
+        let _profile = crate::profile::span(crate::profile::Phase::ImageDecode);
+        expand_animated_image_to_size(&mut decoding, target_width, target_height);
+        let _ = pending.set(decoding);
+    });
+    false
+}
+
 pub(crate) fn expand_animated_image_to_size(
     animated: &mut AnimatedImage,
     target_width: u32,
@@ -569,6 +599,9 @@ pub(crate) fn expand_animated_image_to_size(
 }
 
 pub(crate) fn collapse_animated_image(animated: &mut AnimatedImage, current_frame: usize) -> bool {
+    // Dropping the publication slot lets an offscreen decode result be freed
+    // by its worker instead of retaining all frames for an invisible image.
+    animated.pending_decode = None;
     if !animated.fully_decoded || animated.source_bytes.is_none() || animated.frames.len() <= 1 {
         return false;
     }

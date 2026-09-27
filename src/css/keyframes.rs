@@ -112,6 +112,8 @@ fn parse_keyframe_stops(block: &str) -> Vec<KeyframeStop> {
         s = rest;
 
         let (props, _) = parse_declarations_important(decl_block);
+        let timing_fn = props.get("animation-timing-function")
+            .and_then(|value| super::animation::parse_easing_checked(value));
         let prop_vec: Vec<(String, String)> = props
             .iter()
             .filter_map(|(k, v)| {
@@ -155,7 +157,7 @@ fn parse_keyframe_stops(block: &str) -> Vec<KeyframeStop> {
             let Some(offset) = keyframe_selector_offset(sel) else {
                 continue;
             };
-            merge_keyframe_stop(&mut stops, offset, &prop_vec);
+            merge_keyframe_stop(&mut stops, offset, &prop_vec, timing_fn.as_ref());
         }
     }
 
@@ -187,11 +189,13 @@ fn merge_keyframe_stop(
     stops: &mut Vec<KeyframeStop>,
     offset: f32,
     properties: &[(String, String)],
+    timing_fn: Option<&EasingFn>,
 ) {
     if let Some(stop) = stops
         .iter_mut()
         .find(|s| (s.offset - offset).abs() < 0.0001)
     {
+        if let Some(timing_fn) = timing_fn { stop.timing_fn = Some(timing_fn.clone()); }
         for (name, value) in properties {
             if let Some((_, existing)) = stop.properties.iter_mut().find(|(k, _)| k == name) {
                 *existing = value.clone();
@@ -203,6 +207,7 @@ fn merge_keyframe_stop(
         stops.push(KeyframeStop {
             offset,
             properties: properties.to_vec(),
+            timing_fn: timing_fn.cloned(),
         });
     }
 }

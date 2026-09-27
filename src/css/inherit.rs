@@ -137,6 +137,7 @@ fn is_inherited_css_prop(prop: &str) -> bool {
             | "cursor"
             | "fill"
             | "stroke"
+            | "stroke-width"
     )
 }
 
@@ -329,8 +330,7 @@ pub(crate) fn copy_property_from_style(
         }
         "vertical-align" => style.vertical_align = parent.vertical_align.clone(),
         "text-overflow" => {
-            style.text_overflow = parent.text_overflow;
-            style.text_overflow_string = parent.text_overflow_string.clone();
+            style.text_overflow = parent.text_overflow.clone();
         }
         "word-break" => style.word_break = parent.word_break,
         "overflow-wrap" => style.overflow_wrap = parent.overflow_wrap,

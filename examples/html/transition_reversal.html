@@ -1,0 +1,15 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Transition reversal</title>
+<style>
+  body { font: 20px sans-serif; margin: 40px; }
+  .track { width: 500px; height: 100px; background: #ddd; margin: 24px 0; }
+  .box { width: 100px; height: 100px; background: #168b70;
+    transform: translateX(0px); transition: transform 4s linear; }
+  .track:hover .box { transform: translateX(400px); }
+  #eased .box { transition-timing-function: cubic-bezier(.333333, 0, .666667, 0); }
+</style>
+<h1>Transition reversal</h1>
+<p>Hover a track, leave before completion, and hover again.</p>
+<div id="linear" class="track"><div class="box"></div></div>
+<div id="eased" class="track"><div class="box"></div></div>

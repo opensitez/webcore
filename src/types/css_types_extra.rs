@@ -535,7 +535,6 @@ impl Default for ComputedStyle {
             outline_offset: 0.0,
 
             text_overflow: TextOverflow::Clip,
-            text_overflow_string: String::new(),
             text_shadow: None,
             small_caps: false,
             font_variant_alternates: String::from("normal"),
@@ -662,6 +661,8 @@ impl Default for ComputedStyle {
             contain_layout: false,
             contain_paint: false,
             contain_size: false,
+            contain_inline_size: false,
+            contain_style: false,
             content_visibility: ContentVisibility::Visible,
             contain_intrinsic_width: CssLength::None,
             contain_intrinsic_height: CssLength::None,
