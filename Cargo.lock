@@ -3875,6 +3875,7 @@ dependencies = [
  "symphonia",
  "tiny-skia 0.12.0",
  "unicode-bidi",
+ "unicode-segmentation",
  "winit",
 ]
 

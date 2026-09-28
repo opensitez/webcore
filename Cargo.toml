@@ -81,6 +81,7 @@ swash = "0.2"
 # pixels, which is the only export route the spec gives a `<canvas>`.
 base64 = "0.21"
 unicode-bidi = "0.3"
+unicode-segmentation = "1.13.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 encoding_rs = "0.8"
 rand = "0.8"
