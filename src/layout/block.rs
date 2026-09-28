@@ -1113,13 +1113,15 @@ pub fn layout_block_with_fc(
             }
 
             let child = grid_child_ref(node, path);
-            // Incremental layout: skip clean children whose containing width hasn't changed.
+            // Both containing dimensions must match: percentage-height children
+            // need layout when a flex stretch establishes their height.
             // Just reposition them at the current child_y.
             let can_skip = !child.layout.layout_dirty
                 && !child.has_dirty_descendant
                 && !child.has_dirty_layout_descendant
                 && child.layout.last_containing_width > 0.0
                 && (child.layout.last_containing_width - child_content_w).abs() < 0.01
+                && super::same_containing_height(child.layout.last_containing_height, child_h)
                 && child.layout.margin_rect.h > 0.0;
             if can_skip {
                 // Reposition only — keep cached geometry
@@ -1264,7 +1266,9 @@ pub fn layout_block_with_fc(
                 );
                 // Shrink-to-fit for inline children (inline, inline-block, inline-flex, inline-grid)
                 let ch = grid_child_ref(node, path);
-                if ch.style.width.is_auto() {
+                if ch.style.width.is_auto()
+                    && !super::inline_layout::has_percentage_width_table_child(ch)
+                {
                     let max_line_w = ch
                         .layout
                         .line_cache
@@ -1836,10 +1840,14 @@ pub fn layout_columns(
 
     // 4. First-pass layout to get child heights (with span-all flag)
     let path = distribution_path(node);
-    let mut child_heights: Vec<(f32, bool)> = Vec::new(); // (height, is_span_all)
+    let mut child_heights: Vec<(f32, bool, bool, bool)> = Vec::new();
     {
         let target = child_at_mut(node, &path);
         for child in target.children.iter_mut() {
+            if multicol_collapsed_whitespace(child) {
+                clear_layout_subtree(child);
+                continue;
+            }
             if matches!(child.style.display, Display::None) {
                 clear_layout_subtree(child);
                 continue;
@@ -1851,38 +1859,43 @@ pub fn layout_columns(
                 child,
                 &Constraints::new(col_w, content_x, content_y, font_px, root_font_px),
             );
-            child_heights.push((h, child.style.column_span_all));
+            child_heights.push((h, child.style.column_span_all,
+                matches!(child.style.break_before, BreakValue::Column | BreakValue::Always),
+                matches!(child.style.break_after, BreakValue::Column | BreakValue::Always)));
         }
     }
 
     // 5. Distribute children into columns
-    let balance = node.style.column_fill; // true = balance
-    // Exclude column-span:all children from balance total (they don't occupy a column)
-    let total_content_h: f32 = child_heights
-        .iter()
-        .filter(|(_, span)| !span)
-        .map(|(h, _)| h)
-        .sum();
-    // css-multicol-1 §7: `column-fill: balance` splits the content evenly;
-    // `column-fill: auto` fills each column to the container's own height and
-    // then moves on. That second case read `f32::MAX`, so a column could never
-    // be full and everything stacked in column one, overflowing the container.
-    let target_col_h = if balance && n_cols > 1 {
-        (total_content_h / n_cols as f32).max(1.0)
-    } else if let Some(h) = rbox.content_height {
-        h
-    } else {
-        f32::MAX
-    };
+    // A spanner ends a separately balanced column row, even with column-fill:
+    // auto. Search measured atomic items, not repeated layout passes.
+    let mut row_budgets = vec![f32::MAX; child_heights.len()];
+    let mut start = 0;
+    while start < child_heights.len() {
+        let end = (start..child_heights.len())
+            .find(|&i| child_heights[i].1).unwrap_or(child_heights.len());
+        let balanced = node.style.column_fill || end < child_heights.len();
+        let budget = if balanced {
+            balanced_column_height(&child_heights[start..end], n_cols as usize)
+                .min(rbox.content_height.unwrap_or(f32::MAX))
+        } else {
+            rbox.content_height.unwrap_or(f32::MAX)
+        };
+        row_budgets[start..end].fill(budget);
+        start = end + 1;
+    }
 
     let mut col_idx = 0usize;
     let mut col_cursor: Vec<f32> = vec![0.0; n_cols as usize];
     let mut in_flow_idx = 0usize;
+    let mut pending_column_break = false;
     // Tracks the y-offset added by column-span:all elements
     let mut span_all_y_offset = 0.0f32;
 
     let target = child_at_mut(node, &path);
     for i in 0..target.children.len() {
+        if multicol_collapsed_whitespace(&target.children[i]) {
+            continue;
+        }
         if matches!(target.children[i].style.display, Display::None) {
             clear_layout_subtree(&mut target.children[i]);
             continue;
@@ -1894,7 +1907,8 @@ pub fn layout_columns(
             continue;
         }
 
-        let (child_h, _) = child_heights[in_flow_idx];
+        let (child_h, _, _, _) = child_heights[in_flow_idx];
+        let target_col_h = row_budgets[in_flow_idx];
         in_flow_idx += 1;
 
         // column-span: all — lay out across full width, then resume all columns below it
@@ -1909,6 +1923,7 @@ pub fn layout_columns(
             span_all_y_offset += max_col_y + actual_span_h;
             col_cursor = vec![0.0; n_cols as usize];
             col_idx = 0;
+            pending_column_break = false;
             continue;
         }
 
@@ -1921,13 +1936,8 @@ pub fn layout_columns(
         // A column that has received nothing yet cannot be "too full" — the
         // check ran before anything was placed, so one item taller than the
         // average skipped its whole column and piled the rest into the last.
-        let budget = if balance {
-            target_col_h * 1.1
-        } else {
-            target_col_h
-        };
-        let overflows = col_cursor[col_idx] > 0.0 && col_cursor[col_idx] + child_h > budget;
-        if col_idx + 1 < n_cols as usize && (forced || overflows) {
+        let overflows = col_cursor[col_idx] > 0.0 && col_cursor[col_idx] + child_h > target_col_h;
+        if col_idx + 1 < n_cols as usize && (forced || pending_column_break || overflows) {
             col_idx += 1;
         }
         if col_idx >= n_cols as usize {
@@ -1962,9 +1972,7 @@ pub fn layout_columns(
             target.children[i].style.break_after,
             BreakValue::Column | BreakValue::Always
         );
-        if (forced_after || col_cursor[col_idx] >= target_col_h) && col_idx + 1 < n_cols as usize {
-            col_idx += 1;
-        }
+        pending_column_break = forced_after;
     }
 
     let max_col_y = col_cursor.iter().cloned().fold(0.0f32, f32::max);
@@ -1984,6 +1992,42 @@ pub fn layout_columns(
         cur.layout.margin_rect = span;
     }
     total_h
+}
+
+/// Minimum fitting height for the current atomic-child fragmentation model.
+/// The feasible upper bound is retained throughout the search, avoiding a
+/// rounded-down budget that would move an extra item into the final column.
+fn balanced_column_height(items: &[(f32, bool, bool, bool)], columns: usize) -> f32 {
+    let mut upper: f32 = items.iter().map(|item| item.0.max(0.0)).sum();
+    let mut lower = items.iter().map(|item| item.0.max(0.0)).fold(0.0, f32::max)
+        .max(upper / columns as f32);
+    if columns <= 1 || !upper.is_finite() { return upper; }
+    let fits = |height: f32| {
+        let mut column = 0;
+        let mut used = 0.0;
+        let mut break_after = false;
+        for &(h, _, before, after) in items {
+            if before || break_after || (used > 0.0 && used + h > height) {
+                column += 1;
+                used = 0.0;
+            }
+            if column >= columns { return false; }
+            used += h;
+            break_after = after;
+        }
+        true
+    };
+    if fits(lower) { return lower; }
+    loop {
+        let middle = lower + (upper - lower) / 2.0;
+        if middle <= lower || middle >= upper { return upper; }
+        if fits(middle) { upper = middle; } else { lower = middle; }
+    }
+}
+
+fn multicol_collapsed_whitespace(node: &WebCore) -> bool {
+    node.is_text_node() && node.text.chars().all(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c'))
+        && matches!(node.style.white_space, WhiteSpace::Normal | WhiteSpace::Nowrap)
 }
 
 fn is_in_flow_block(c: &WebCore) -> bool {
@@ -2025,14 +2069,26 @@ fn make_anonymous_block(parent: &WebCore) -> WebCore {
     anon
 }
 
-/// Recursively unwraps any synthetic `anonymous-block` elements in the tree
+/// Recursively unwraps synthetic block and table fragments in the tree
 /// so that cascading and re-layout operate on clean, idempotent DOM structures.
 pub fn unwrap_all_anonymous_blocks(node: &mut WebCore) {
     let mut pending = vec![node];
     while let Some(node) = pending.pop() {
         // Flatten here before borrowing children for traversal. Repeating also
         // removes nested synthetic wrappers while preserving sibling order.
-        unwrap_anonymous_children(node);
+        let is_fragment = |child: &WebCore| matches!(child.tag.as_str(),
+            "anonymous-block" | "anonymous-table" | "anonymous-table-row" | "anonymous-table-cell");
+        while node.children.iter().any(is_fragment) {
+            node.layout.layout_dirty = true;
+            let old_children = std::mem::take(&mut node.children);
+            for child in old_children {
+                if is_fragment(&child) {
+                    node.children.extend(child.children);
+                } else {
+                    node.children.push(child);
+                }
+            }
+        }
         if let Some(shadow) = &mut node.shadow_root {
             pending.extend(shadow.children.iter_mut());
         }

@@ -202,9 +202,10 @@ impl Document {
     }
 
     fn dispatch_element_scroll_changes(&mut self, before: &[(u32, f32, f32)]) {
-        let after = collect_element_scroll_offsets(&self.root);
+        let after: HashMap<_, _> = collect_element_scroll_offsets(&self.root)
+            .into_iter().map(|(id, x, y)| (id, (x, y))).collect();
         for (id, old_x, old_y) in before {
-            let Some((_, new_x, new_y)) = after.iter().find(|(after_id, _, _)| after_id == id)
+            let Some((new_x, new_y)) = after.get(id)
             else {
                 continue;
             };

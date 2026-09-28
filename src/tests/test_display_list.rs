@@ -1882,6 +1882,23 @@ fn nested_opacity_emits_nested_groups_around_child_fill() {
 }
 
 #[test]
+fn tile_culling_retains_transformed_and_shadow_spill_pixels() {
+    for style in [
+        "top:100px;transform:translateY(-30px);background:red",
+        "top:100px;box-shadow:0 -30px 0 red",
+    ] {
+        let (_, list) = build(&format!("<style>body{{margin:0}}div{{position:absolute;left:10px;width:20px;height:20px;{style}}}</style><div></div>"));
+        let mut tile = tiny_skia::Pixmap::new(100, 90).unwrap();
+        replay_tile_with_scroll_and_transform_overrides(
+            &list, &mut tile, 1.0, &mut cosmic_text::FontSystem::new(),
+            &mut cosmic_text::SwashCache::new(), 0.0, 0.0, 0.0, 0.0, None,
+        );
+        let pixel = tile.pixel(20, 80).unwrap();
+        assert!(pixel.red() > 200 && pixel.alpha() > 200, "paint spilling into tile lost: {style}: {pixel:?}");
+    }
+}
+
+#[test]
 fn stacking_context_for_z_index() {
     let (_, list) =
         build(r#"<div style="position: relative; z-index: 5; width: 100px; height: 50px">z</div>"#);
@@ -3308,6 +3325,22 @@ fn multiple_box_shadows_produce_separate_commands() {
 }
 
 // ── Pixel-level rendering tests ─────────────────────────────────────────────
+
+#[test]
+fn blurred_outer_shadow_does_not_fill_transparent_border_box() {
+    for extra in ["", "transform:translateX(1px)", "border-radius:20px"] {
+        let doc = parse_html(&format!("<body style='margin:0;background:white'><div style='position:absolute;left:40px;top:40px;width:100px;height:80px;box-shadow:0 0 8px black;{extra}'></div></body>"));
+        let mut frame = EngineFrame::new(doc, 200.0, 160.0);
+        frame.update_frame();
+        let mut pixmap = tiny_skia::Pixmap::new(200, 160).unwrap();
+        pixmap.fill(tiny_skia::Color::WHITE);
+        crate::Renderer::new().render(&mut frame.doc, &mut pixmap, 1.0);
+        let inside = pixmap.pixel(90, 80).unwrap();
+        let outside = pixmap.pixel(37, 80).unwrap();
+        assert_eq!(inside.red(), 255, "shadow filled interior: {extra}");
+        assert!(outside.red() < 250, "outer shadow missing: {extra}");
+    }
+}
 
 #[test]
 fn render_display_list_produces_colored_pixels() {
@@ -6019,6 +6052,16 @@ fn transparent_border_sides_shape_css_triangle() {
     let alpha = |x: usize, y: usize| pixmap.data()[(y * 20 + x) * 4 + 3];
     assert!(alpha(6, 10) > 200, "base of triangle should paint");
     assert_eq!(alpha(14, 5), 0, "triangle corner should stay transparent");
+}
+
+#[test]
+fn rounded_border_only_triangle_remains_visible() {
+    let (_, list) = build("<style>body{margin:0}div::before{content:'';position:absolute;left:10px;top:10px;width:0;height:0;border-right:40px solid #ffcc00;border-bottom:40px solid transparent;border-top-right-radius:12px}</style><div></div>");
+    let mut pixmap = tiny_skia::Pixmap::new(80, 80).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    assert!(pixmap.pixel(44, 30).unwrap().alpha() > 200, "yellow wedge must paint");
+    assert_eq!(pixmap.pixel(15, 45).unwrap().alpha(), 0, "transparent wedge");
+    assert_eq!(pixmap.pixel(49, 10).unwrap().alpha(), 0, "rounded corner");
 }
 
 #[test]

@@ -2072,7 +2072,7 @@ fn find_url_function(v: &str) -> Option<usize> {
     None
 }
 
-fn parse_url_function(v: &str) -> Option<(String, usize)> {
+pub(crate) fn parse_url_function(v: &str) -> Option<(String, usize)> {
     if !v.get(..4)?.eq_ignore_ascii_case("url(") {
         return None;
     }

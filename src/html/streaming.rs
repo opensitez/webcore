@@ -776,6 +776,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn streaming_svg_shapes_keep_animation_children() {
+        let mut parser = StreamingParser::new("");
+        let mut mutations = parser.feed_str("<svg><g><circle r='7'>");
+        mutations.extend(parser.feed_str("<animateTransform type='scale' values='0;1;0' dur='1s'/></circle><path d='M0 0'/></g></svg>"));
+        let path_for = |name: &str| mutations.iter().find_map(|m| match m {
+            DomMutation::InsertElement { tag, path, .. } if tag == name => Some(path.clone()),
+            _ => None,
+        }).unwrap();
+        let parent_for = |name: &str| mutations.iter().find_map(|m| match m {
+            DomMutation::InsertElement { tag, parent_path, .. } if tag == name => Some(parent_path.clone()),
+            _ => None,
+        }).unwrap();
+        assert_eq!(parent_for("animatetransform"), path_for("circle"));
+        assert_eq!(parent_for("path"), path_for("g"));
+    }
+
+    #[test]
     fn streaming_basic() {
         let mut parser = StreamingParser::new("");
         let mutations = parser.feed_str("<html><head><title>Test</title></head>");

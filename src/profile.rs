@@ -30,10 +30,15 @@ pub enum Phase {
     Render,
     BrowserDraw,
     ScrollPaint,
+    RasterImage,
+    RasterText,
+    RasterShadow,
+    RasterLayer,
+    RasterClip,
 }
 
 impl Phase {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 24] = [
         Self::HtmlFetch,
         Self::HtmlParse,
         Self::CssFetch,
@@ -53,6 +58,11 @@ impl Phase {
         Self::Render,
         Self::BrowserDraw,
         Self::ScrollPaint,
+        Self::RasterImage,
+        Self::RasterText,
+        Self::RasterShadow,
+        Self::RasterLayer,
+        Self::RasterClip,
     ];
 
     pub fn name(self) -> &'static str {
@@ -76,6 +86,11 @@ impl Phase {
             Self::Render => "render",
             Self::BrowserDraw => "browser_draw",
             Self::ScrollPaint => "scroll_paint",
+            Self::RasterImage => "raster_image",
+            Self::RasterText => "raster_text",
+            Self::RasterShadow => "raster_shadow",
+            Self::RasterLayer => "raster_layer",
+            Self::RasterClip => "raster_clip",
         }
     }
 }

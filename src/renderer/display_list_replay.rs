@@ -11,6 +11,7 @@ use cosmic_text::{
     SwashCache, Weight as CTextWeight,
 };
 use std::collections::HashMap;
+use std::sync::Arc;
 use tiny_skia::{
     Color as SkColor, FillRule, Paint, PathBuilder, Pixmap, Rect as SkRect, Transform,
 };
@@ -26,6 +27,107 @@ pub fn replay(list: &DisplayList, pixmap: &mut Pixmap, scale: f32) {
 /// that spill beyond them.
 const CULL_MARGIN: f32 = 512.0;
 const DIRTY_CULL_MARGIN: f32 = 64.0;
+
+#[derive(Clone)]
+struct SharedClipMask {
+    id: u64,
+    mask: Arc<tiny_skia::Mask>,
+}
+
+/// Per-replay reuse: coordinates, transforms and parent coverage are immutable
+/// here. No mask survives a frame or consumes an unbounded global cache.
+#[derive(Default)]
+struct ClipMaskCache {
+    masks: HashMap<([u32; 18], u64), (SharedClipMask, u64)>,
+    bytes: usize,
+    next_id: u64,
+    access: u64,
+}
+
+impl ClipMaskCache {
+    const MAX_BYTES: usize = 8 * 1024 * 1024;
+
+    fn share(&mut self, mask: tiny_skia::Mask) -> SharedClipMask {
+        self.next_id += 1;
+        SharedClipMask { id: self.next_id, mask: Arc::new(mask) }
+    }
+
+    fn rect(&mut self, rect: &Rect, radius: &[f32; 4], radius_y: &[f32; 4],
+        pw: u32, ph: u32, ts: Transform, parent: Option<&SharedClipMask>,
+    ) -> Option<SharedClipMask> {
+        let key = ([rect.x, rect.y, rect.w, rect.h,
+            radius[0], radius[1], radius[2], radius[3],
+            radius_y[0], radius_y[1], radius_y[2], radius_y[3],
+            ts.sx, ts.kx, ts.ky, ts.sy, ts.tx, ts.ty].map(f32::to_bits),
+            parent.map_or(0, |p| p.id));
+        self.access += 1;
+        if let Some((mask, used)) = self.masks.get_mut(&key) {
+            *used = self.access;
+            return Some(mask.clone());
+        }
+        let mut mask = build_clip_mask_with_transform(rect, radius, radius_y, pw, ph, ts)?;
+        if let Some(parent) = parent {
+            for (dst, src) in mask.data_mut().iter_mut().zip(parent.mask.data()) {
+                *dst = (*dst as u16 * *src as u16 / 255) as u8;
+            }
+        }
+        let bytes = mask.data().len();
+        let mask = self.share(mask);
+        if bytes <= Self::MAX_BYTES {
+            while self.bytes + bytes > Self::MAX_BYTES {
+                let oldest = self.masks.iter().min_by_key(|(_, (_, used))| *used)
+                    .map(|(key, _)| *key);
+                let Some(oldest) = oldest else { break; };
+                if let Some((removed, _)) = self.masks.remove(&oldest) {
+                    self.bytes -= removed.mask.data().len();
+                }
+            }
+            self.bytes += bytes;
+            self.masks.insert(key, (mask.clone(), self.access));
+        }
+        Some(mask)
+    }
+}
+
+#[test]
+fn clip_cache_preserves_transforms_radii_and_parent_coverage() {
+    let mut cache = ClipMaskCache::default();
+    let rect = Rect::new(8.25, 6.5, 34.0, 27.0);
+    let parent = cache.share(build_clip_mask_with_transform(
+        &Rect::new(0.0, 0.0, 25.0, 50.0), &[0.0; 4], &[0.0; 4],
+        64, 64, Transform::identity(),
+    ).unwrap());
+    for ts in [Transform::identity(), Transform::from_rotate(12.0),
+        Transform::from_scale(1.25, 0.75)] {
+        for radius in [[0.0; 4], [8.0, 4.0, 6.0, 2.0]] {
+            let mut expected = build_clip_mask_with_transform(
+                &rect, &radius, &radius, 64, 64, ts).unwrap();
+            for (dst, src) in expected.data_mut().iter_mut().zip(parent.mask.data()) {
+                *dst = (*dst as u16 * *src as u16 / 255) as u8;
+            }
+            let first = cache.rect(&rect, &radius, &radius, 64, 64, ts, Some(&parent)).unwrap();
+            let second = cache.rect(&rect, &radius, &radius, 64, 64, ts, Some(&parent)).unwrap();
+            assert_eq!(first.mask.data(), expected.data());
+            assert!(Arc::ptr_eq(&first.mask, &second.mask));
+            let unclipped = cache.rect(&rect, &radius, &radius, 64, 64, ts, None).unwrap();
+            assert_ne!(first.id, unclipped.id);
+        }
+    }
+}
+
+#[test]
+fn viewport_sized_nested_clip_preserves_parent_mask() {
+    let commands = vec![
+        PaintCmd::PushClip { rect: Rect::new(0.0, 0.0, 12.0, 32.0), radius: [0.0; 4], radius_y: [0.0; 4] },
+        PaintCmd::PushClip { rect: Rect::new(0.0, 0.0, 32.0, 32.0), radius: [0.0; 4], radius_y: [0.0; 4] },
+        PaintCmd::FillRect { rect: Rect::new(0.0, 0.0, 32.0, 32.0), color: Color::BLACK, radius: [0.0; 4], radius_y: [0.0; 4] },
+        PaintCmd::PopClip, PaintCmd::PopClip,
+    ];
+    let mut pixmap = Pixmap::new(32, 32).unwrap();
+    replay_commands_inner(&commands, &mut pixmap, 1.0, None, 0.0, 0.0, None, None, None);
+    assert_eq!(pixmap.pixel(5, 5).unwrap().alpha(), 255);
+    assert_eq!(pixmap.pixel(20, 5).unwrap().alpha(), 0);
+}
 
 thread_local! {
     /// (font-DB face count, shaped buffers by text+attrs). See the note at the
@@ -435,9 +537,156 @@ struct Layer {
     pixmap: Pixmap,
     blend_mode: u8,
     alpha: f32,
+    has_content: bool,
+    paint_bounds: Option<Rect>,
 }
 
 fn replay_commands_inner(
+    commands: &[PaintCmd],
+    pixmap: &mut Pixmap,
+    scale: f32,
+    text_ctx: Option<(&mut FontSystem, &mut SwashCache)>,
+    scroll_x: f32,
+    scroll_y: f32,
+    fixed_viewport_scroll: Option<(f32, f32)>,
+    dirty_clip: Option<Rect>,
+    transform_overrides: Option<&HashMap<u32, [f32; 6]>>,
+) {
+    // Damage is a set of device pixels, not an antialiased CSS clip. Match
+    // the outward rounding used when clearing the retained surface so every
+    // cleared edge pixel is completely repainted.
+    let dirty_clip = dirty_clip.map(|clip| {
+        if !scale.is_finite() || scale <= 0.0 {
+            return clip;
+        }
+        let left = (clip.x * scale).floor() / scale;
+        let top = (clip.y * scale).floor() / scale;
+        let right = (clip.right() * scale).ceil() / scale;
+        let bottom = (clip.bottom() * scale).ceil() / scale;
+        Rect::new(left, top, right - left, bottom - top)
+    });
+    // Bound intermediate opacity/blend surfaces as well as drawing. Filters
+    // retain the viewport surface because they may sample outside the damage.
+    if let Some(clip) = dirty_clip.filter(|_| {
+        scale.is_finite() && scale > 0.0 && !commands.iter().any(|cmd| {
+            matches!(cmd, PaintCmd::PushFilter { .. } | PaintCmd::BackdropFilter { .. })
+        })
+    }) {
+        let left = (clip.x * scale).floor().max(0.0).min(pixmap.width() as f32) as i32;
+        let top = (clip.y * scale).floor().max(0.0).min(pixmap.height() as f32) as i32;
+        let right = (clip.right() * scale).ceil().max(0.0).min(pixmap.width() as f32) as i32;
+        let bottom = (clip.bottom() * scale).ceil().max(0.0).min(pixmap.height() as f32) as i32;
+        let Some(rect) = tiny_skia::IntRect::from_ltrb(left, top, right, bottom) else {
+            return;
+        };
+        if let Some(mut surface) = pixmap.clone_rect(rect) {
+            let origin_x = left as f32 / scale;
+            let origin_y = top as f32 / scale;
+            replay_commands_on_surface(
+                commands, &mut surface, scale, text_ctx,
+                scroll_x + origin_x, scroll_y + origin_y,
+                Some(fixed_viewport_scroll.unwrap_or((scroll_x, scroll_y))),
+                Some(Rect { x: clip.x - origin_x, y: clip.y - origin_y, ..clip }),
+                transform_overrides,
+            );
+            // Replace rather than blend: the surface already includes the
+            // original backdrop, including its alpha.
+            let stride = pixmap.width() as usize * 4;
+            let row_bytes = surface.width() as usize * 4;
+            for (row, pixels) in surface.data().chunks_exact(row_bytes).enumerate() {
+                let start = (top as usize + row) * stride + left as usize * 4;
+                pixmap.data_mut()[start..start + row_bytes].copy_from_slice(pixels);
+            }
+            return;
+        }
+    }
+    replay_commands_on_surface(commands, pixmap, scale, text_ctx, scroll_x, scroll_y,
+        fixed_viewport_scroll, dirty_clip, transform_overrides);
+}
+
+#[test]
+fn bounded_opacity_matches_full_surface_compositing() {
+    let angle = 0.4_f32;
+    let commands = vec![
+        PaintCmd::PushTransform { node_id: 1, transform: [angle.cos(), angle.sin(), -angle.sin(), angle.cos(), 24.0, 20.0] },
+        PaintCmd::FillRect { rect: Rect::new(-20.0, -10.0, 40.0, 25.0),
+            color: crate::types::Color::rgb(200, 40, 80), radius: [3.0; 4], radius_y: [3.0; 4] },
+        PaintCmd::PopTransform,
+        PaintCmd::BeginFixedPosition,
+        PaintCmd::FillRect { rect: Rect::new(70.25, 20.5, 12.0, 8.0),
+            color: crate::types::Color::rgb(20, 100, 200), radius: [0.0; 4], radius_y: [0.0; 4] },
+        PaintCmd::EndFixedPosition,
+    ];
+    let mut grouped = vec![PaintCmd::PushOpacity { alpha: 0.37 }];
+    grouped.extend(commands.iter().cloned());
+    grouped.push(PaintCmd::PopOpacity);
+    for scale in [1.0, 1.5, 2.0] {
+        let mut layer = Pixmap::new(200, 180).unwrap();
+        replay_commands_inner(&commands, &mut layer, scale, None, 3.0, 5.0, None, None, None);
+        let mut expected = Pixmap::new(200, 180).unwrap();
+        expected.fill(tiny_skia::Color::from_rgba8(100, 90, 80, 128));
+        let mut actual = expected.clone();
+        let paint = tiny_skia::PixmapPaint { opacity: 0.37, ..Default::default() };
+        expected.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
+        replay_commands_inner(&grouped, &mut actual, scale, None, 3.0, 5.0, None, None, None);
+        assert_eq!(actual.data(), expected.data(), "scale={scale}");
+    }
+}
+
+#[test]
+fn culled_opacity_groups_preserve_nested_visible_content() {
+    let fill = |y| PaintCmd::FillRect {
+        rect: Rect::new(0.0, y, 20.0, 20.0),
+        color: crate::types::Color::rgb(255, 0, 0),
+        radius: [0.0; 4], radius_y: [0.0; 4],
+    };
+    let mut commands = Vec::new();
+    for _ in 0..1000 {
+        commands.extend([PaintCmd::PushOpacity { alpha: 0.5 }, fill(5000.0), PaintCmd::PopOpacity]);
+    }
+    commands.extend([
+        PaintCmd::PushOpacity { alpha: 0.5 },
+        PaintCmd::PushOpacity { alpha: 0.5 }, fill(0.0),
+        PaintCmd::PopOpacity, PaintCmd::PopOpacity,
+    ]);
+    let mut actual = Pixmap::new(32, 32).unwrap();
+    replay_commands_inner(&commands, &mut actual, 1.0, None, 0.0, 0.0, None, None, None);
+    let pixel = actual.pixel(10, 10).unwrap();
+    assert!((63..=65).contains(&pixel.alpha()), "nested opacity: {pixel:?}");
+    assert_eq!(pixel.red(), pixel.alpha());
+    assert_eq!(actual.pixel(30, 30).unwrap().alpha(), 0);
+}
+
+#[test]
+fn damage_surface_matches_viewport_replay_with_opacity_and_fixed_content() {
+    let fill = |rect, color| PaintCmd::FillRect {
+        rect, color, radius: [0.0; 4], radius_y: [0.0; 4],
+    };
+    let commands = vec![
+        PaintCmd::PushOpacity { alpha: 0.6 },
+        fill(Rect::new(0.0, 70.0, 100.0, 90.0), crate::types::Color::rgb(255, 0, 0)),
+        PaintCmd::BeginFixedPosition,
+        PaintCmd::PushOpacity { alpha: 0.5 },
+        fill(Rect::new(24.0, 18.0, 36.0, 38.0), crate::types::Color::rgb(0, 0, 255)),
+        PaintCmd::PopOpacity,
+        PaintCmd::EndFixedPosition,
+        PaintCmd::PopOpacity,
+    ];
+    for scale in [1.0, 1.5, 2.0] {
+        for clip in [Rect::new(20.0, 15.0, 45.0, 48.0), Rect::new(-5.5, 12.5, 80.0, 41.0)] {
+            let mut expected = Pixmap::new(200, 180).unwrap();
+            expected.fill(tiny_skia::Color::from_rgba8(20, 40, 60, 128));
+            let mut actual = expected.clone();
+            replay_commands_on_surface(&commands, &mut expected, scale, None,
+                3.0, 80.0, None, Some(clip), None);
+            replay_commands_inner(&commands, &mut actual, scale, None,
+                3.0, 80.0, None, Some(clip), None);
+            assert_eq!(actual.data(), expected.data(), "scale={scale}, clip={clip:?}");
+        }
+    }
+}
+
+fn replay_commands_on_surface(
     commands: &[PaintCmd],
     pixmap: &mut Pixmap,
     scale: f32,
@@ -458,12 +707,13 @@ fn replay_commands_inner(
     let mut clip_stack: Vec<Rect> = Vec::new();
     let pw = pixmap.width();
     let ph = pixmap.height();
-    let mut clip_mask_stack: Vec<Option<tiny_skia::Mask>> = dirty_clip
-        .map(|clip| build_viewport_clip_mask(clip, pw, ph, scale))
+    let mut clip_cache = ClipMaskCache::default();
+    let mut clip_mask_stack: Vec<Option<SharedClipMask>> = dirty_clip
+        .map(|clip| build_viewport_clip_mask(clip, pw, ph, scale).map(|m| clip_cache.share(m)))
         .into_iter()
         .collect();
     let mut layer_stack: Vec<Layer> = Vec::new();
-    let mut opacity_surface_pool: Vec<Pixmap> = Vec::new();
+    let mut opacity_surface_pool: Vec<(Pixmap, bool)> = Vec::new();
     let mut mask_stack: Vec<(Rect, ImageRef)> = Vec::new();
     let mut text_gradient_stack: Vec<&PaintCmd> = Vec::new();
 
@@ -515,6 +765,7 @@ fn replay_commands_inner(
     };
     let mut transform_depth = 0i32;
     let mut skip_clip_depth = 0u32;
+    let profile_replay = crate::profile::is_enabled();
 
     for cmd in commands {
         match cmd {
@@ -568,7 +819,24 @@ fn replay_commands_inner(
         // visible band can still be skipped. Stack commands themselves keep
         // returning `None` from `cmd_y_range`, preserving layer/clip balance.
         if let Some(bounds) = cmd_bounds(cmd) {
-            if transform_depth == 0 {
+            // These commands include their full paint extent (including shadow
+            // blur). Unlike glyph bounds, they need no extra neighboring tile.
+            // A surrounding filter can spread pixels beyond that extent.
+            let bounded_paint = filter_stack.is_empty() && matches!(cmd,
+                PaintCmd::FillRect { .. } | PaintCmd::Border { .. }
+                | PaintCmd::Image { .. } | PaintCmd::BackgroundImage { .. }
+                | PaintCmd::BoxShadow { .. });
+            if bounded_paint {
+                if let Some(bounds) = transformed_bounds_to_viewport(ts, bounds, scale) {
+                    let clip = dirty_clip.unwrap_or(Rect::new(0.0, 0.0, view_w, view_h));
+                    // Preserve one device pixel at edges for antialiasing.
+                    if rect_outside_view(bounds, clip.x - inv_scale, clip.y - inv_scale,
+                        clip.right() + inv_scale, clip.bottom() + inv_scale)
+                    {
+                        continue;
+                    }
+                }
+            } else if transform_depth == 0 {
                 if rect_outside_view(bounds, vis_left, vis_top, vis_right, vis_bot) {
                     continue;
                 }
@@ -579,7 +847,56 @@ fn replay_commands_inner(
             }
         }
         // Get the current clip mask (topmost on the stack)
-        let clip_mask = clip_mask_stack.last().and_then(|m| m.as_ref());
+        let clip_mask = clip_mask_stack.last().and_then(|m| m.as_ref()).map(|m| m.mask.as_ref());
+
+        // Stack commands are retained across viewport culling, but an opacity
+        // group containing only culled draws has nothing to composite. Mark
+        // ancestors too so nested masks/filters preserve their parent content.
+        if let Some(bounds) = cmd_bounds(cmd) {
+            let bounded = filter_stack.is_empty() && matches!(cmd,
+                PaintCmd::FillRect { .. } | PaintCmd::Border { .. }
+                | PaintCmd::Image { .. } | PaintCmd::BackgroundImage { .. });
+            let bounds = if bounded {
+                transformed_bounds_to_viewport(ts, bounds, scale)
+                    .map(|r| Rect::new(r.x * scale - 1.0, r.y * scale - 1.0,
+                        r.w * scale + 2.0, r.h * scale + 2.0))
+                    .unwrap_or(Rect::new(0.0, 0.0, pw as f32, ph as f32))
+            } else {
+                // Glyph ink, decorations, filters and shadows need conservative
+                // bounds; their layout boxes are not guaranteed paint extents.
+                Rect::new(0.0, 0.0, pw as f32, ph as f32)
+            };
+            for layer in &mut layer_stack {
+                layer.has_content = true;
+                layer.paint_bounds = Some(match layer.paint_bounds {
+                    Some(old) => {
+                        let x = old.x.min(bounds.x);
+                        let y = old.y.min(bounds.y);
+                        Rect::new(x, y, old.right().max(bounds.right()) - x,
+                            old.bottom().max(bounds.bottom()) - y)
+                    }
+                    None => bounds,
+                });
+            }
+        }
+
+        let _command_timing = if profile_replay {
+            use crate::profile::Phase;
+            let phase = match cmd {
+                PaintCmd::Image { .. } | PaintCmd::BackgroundImage { .. }
+                    | PaintCmd::BorderImage { .. } => Some(Phase::RasterImage),
+                PaintCmd::Text { .. } => Some(Phase::RasterText),
+                PaintCmd::BoxShadow { .. } | PaintCmd::TextShadow { .. } => Some(Phase::RasterShadow),
+                PaintCmd::PushOpacity { .. } | PaintCmd::PushFilter { .. }
+                    | PaintCmd::PushBlendMode { .. } | PaintCmd::PushMask { .. }
+                    | PaintCmd::PopOpacity | PaintCmd::PopFilter | PaintCmd::PopBlendMode
+                    | PaintCmd::PopMask => Some(Phase::RasterLayer),
+                PaintCmd::PushClip { .. } | PaintCmd::PushClipPath { .. }
+                    | PaintCmd::PopClip => Some(Phase::RasterClip),
+                _ => None,
+            };
+            phase.map(crate::profile::span)
+        } else { None };
 
         match cmd {
             PaintCmd::PushTextGradient { .. } => {
@@ -636,7 +953,33 @@ fn replay_commands_inner(
                 let uniform_color =
                     colors[0] == colors[1] && colors[1] == colors[2] && colors[2] == colors[3];
 
-                if max_r > 0.5
+                let collapsed_inner = rect.w <= widths[1] + widths[3]
+                    || rect.h <= widths[0] + widths[2];
+                if max_r > 0.5 && collapsed_inner {
+                    // Border-only shapes have no centerline to stroke. Keep
+                    // their side wedges and clip them to the rounded exterior.
+                    if let (Some(path), Some(mut mask)) = (
+                        rounded_rect_path_corners_xy(rect.x, rect.y, rect.w, rect.h, *radii, *radii_y),
+                        tiny_skia::Mask::new(pw, ph),
+                    ) {
+                        mask.fill_path(&path, FillRule::Winding, true, ts);
+                        if let Some(clip) = clip_mask {
+                            for (pixel, clip) in mask.data_mut().iter_mut().zip(clip.data()) {
+                                *pixel = ((*pixel as u16 * *clip as u16 + 127) / 255) as u8;
+                            }
+                        }
+                        for side in 0..4 {
+                            if widths[side] <= 0.0 || colors[side].a == 0 {
+                                continue;
+                            }
+                            if let Some(path) = border_side_path(*rect, *widths, side) {
+                                let mut paint = Paint::default();
+                                paint.set_color(to_sk_color(&apply_opacity(&colors[side], alpha)));
+                                target.fill_path(&path, &paint, FillRule::Winding, ts, Some(&mask));
+                            }
+                        }
+                    }
+                } else if max_r > 0.5
                     && uniform_width
                     && uniform_color
                     && widths[0] > 0.0
@@ -872,6 +1215,16 @@ fn replay_commands_inner(
                 radius,
                 radius_y,
             } => {
+                // Unlike glyph ink, a clip cannot paint outside its bounds.
+                // Do not rasterize neighboring rows just because text culling
+                // reserves a generous margin. Filters can spread that content.
+                if rect.w <= 0.0 || rect.h <= 0.0 || (filter_stack.is_empty()
+                    && transformed_bounds_to_viewport(ts, *rect, scale).is_some_and(|bounds|
+                        rect_outside_view(bounds, -inv_scale, -inv_scale,
+                            view_w + inv_scale, view_h + inv_scale))) {
+                    skip_clip_depth = 1;
+                    continue;
+                }
                 if transform_depth == 0 {
                     if rect.right() < vis_left
                         || rect.x > vis_right
@@ -891,23 +1244,15 @@ fn replay_commands_inner(
                 // Build a clip mask from the clip rect. A clip pushed inside a
                 // transformed stacking context lives in that same transformed
                 // coordinate space, just like the paint commands it clips.
-                let mut mask = if transform_depth == 0
+                let parent = clip_mask_stack.last().and_then(|m| m.as_ref());
+                let mask = if transform_depth == 0
                     && simple_clip_contains_viewport(
                         rect, radius, radius_y, pw, ph, scale, active_scroll_x, active_scroll_y,
                     ) {
-                    None
-                } else if transform_depth > 0 {
-                    build_clip_mask_with_transform(rect, radius, radius_y, pw, ph, ts)
+                    parent.cloned()
                 } else {
-                    build_clip_mask(rect, radius, radius_y, pw, ph, scale, active_scroll_x, active_scroll_y)
+                    clip_cache.rect(rect, radius, radius_y, pw, ph, ts, parent)
                 };
-                if let (Some(m), Some(prev)) =
-                    (&mut mask, clip_mask_stack.last().and_then(|x| x.as_ref()))
-                {
-                    for (dst, src) in m.data_mut().iter_mut().zip(prev.data().iter()) {
-                        *dst = (*dst as u16 * *src as u16 / 255) as u8;
-                    }
-                }
                 clip_mask_stack.push(mask);
             }
             PaintCmd::PushClipPath { points } => {
@@ -936,11 +1281,11 @@ fn replay_commands_inner(
                 if let (Some(m), Some(prev)) =
                     (&mut mask, clip_mask_stack.last().and_then(|x| x.as_ref()))
                 {
-                    for (dst, src) in m.data_mut().iter_mut().zip(prev.data().iter()) {
+                    for (dst, src) in m.data_mut().iter_mut().zip(prev.mask.data().iter()) {
                         *dst = (*dst as u16 * *src as u16 / 255) as u8;
                     }
                 }
-                clip_mask_stack.push(mask);
+                clip_mask_stack.push(mask.map(|m| clip_cache.share(m)));
             }
             PaintCmd::PopClip => {
                 clip_stack.pop();
@@ -948,17 +1293,26 @@ fn replay_commands_inner(
             }
 
             PaintCmd::PushOpacity { alpha } => {
-                if let Some(mut layer_pixmap) = opacity_surface_pool.pop().or_else(|| Pixmap::new(pw, ph)) {
-                    layer_pixmap.fill(tiny_skia::Color::TRANSPARENT);
+                if let Some((mut layer_pixmap, clear)) = opacity_surface_pool.pop()
+                    .or_else(|| Pixmap::new(pw, ph).map(|pm| (pm, true))) {
+                    if !clear {
+                        layer_pixmap.fill(tiny_skia::Color::TRANSPARENT);
+                    }
                     layer_stack.push(Layer {
                         pixmap: layer_pixmap,
                         blend_mode: 0,
                         alpha: alpha.clamp(0.0, 1.0),
+                        has_content: false,
+                        paint_bounds: None,
                     });
                 }
             }
             PaintCmd::PopOpacity => {
                 if let Some(layer) = layer_stack.pop() {
+                    if !layer.has_content || layer.alpha == 0.0 {
+                        opacity_surface_pool.push((layer.pixmap, !layer.has_content));
+                        continue;
+                    }
                     let target = layer_stack
                         .last_mut()
                         .map(|l| &mut l.pixmap)
@@ -968,15 +1322,21 @@ fn replay_commands_inner(
                         blend_mode: tiny_skia::BlendMode::SourceOver,
                         quality: tiny_skia::FilterQuality::Nearest,
                     };
-                    target.draw_pixmap(
-                        0,
-                        0,
-                        layer.pixmap.as_ref(),
-                        &paint,
-                        Transform::identity(),
-                        None,
+                    let bounds = layer.paint_bounds.unwrap_or(Rect::new(0.0, 0.0, pw as f32, ph as f32));
+                    let region = tiny_skia::IntRect::from_ltrb(
+                        bounds.x.floor().max(0.0).min(pw as f32) as i32,
+                        bounds.y.floor().max(0.0).min(ph as f32) as i32,
+                        bounds.right().ceil().max(0.0).min(pw as f32) as i32,
+                        bounds.bottom().ceil().max(0.0).min(ph as f32) as i32,
                     );
-                    opacity_surface_pool.push(layer.pixmap);
+                    if let Some(region) = region {
+                        if region.width() == pw && region.height() == ph {
+                            target.draw_pixmap(0, 0, layer.pixmap.as_ref(), &paint, Transform::identity(), None);
+                        } else if let Some(source) = layer.pixmap.clone_rect(region) {
+                            target.draw_pixmap(region.x(), region.y(), source.as_ref(), &paint, Transform::identity(), None);
+                        }
+                    }
+                    opacity_surface_pool.push((layer.pixmap, false));
                 }
             }
 
@@ -1011,6 +1371,8 @@ fn replay_commands_inner(
                         pixmap: layer_pixmap,
                         blend_mode: 254,
                         alpha: 1.0,
+                        has_content: false,
+                        paint_bounds: None,
                     });
                 }
             }
@@ -1084,6 +1446,8 @@ fn replay_commands_inner(
                         pixmap: layer_pixmap,
                         blend_mode: 253,
                         alpha: 1.0,
+                        has_content: false,
+                        paint_bounds: None,
                     });
                 }
             }
@@ -1113,6 +1477,8 @@ fn replay_commands_inner(
                         pixmap: layer_pixmap,
                         blend_mode: *mode,
                         alpha: 1.0,
+                        has_content: false,
+                        paint_bounds: None,
                     });
                 }
             }
@@ -1228,6 +1594,7 @@ fn replay_commands_inner(
                                     layer.fill_rect(r, &paint, local_ts, None);
                                 }
                                 crate::canvas::blur_pixmap(&mut layer, *blur);
+                                clear_outer_shadow_interior(&mut layer, *rect, *radii, *radii_y, local_ts);
                                 target.draw_pixmap(
                                     dev_left as i32,
                                     dev_top as i32,
@@ -1274,6 +1641,7 @@ fn replay_commands_inner(
                                 layer.fill_rect(r, &paint, ts, clip_mask);
                             }
                             crate::canvas::blur_pixmap(&mut layer, *blur);
+                            clear_outer_shadow_interior(&mut layer, *rect, *radii, *radii_y, ts);
                             target.draw_pixmap(
                                 0,
                                 0,
@@ -2310,13 +2678,12 @@ fn replay_commands_inner(
                     // `<button>` takes its label from its CHILDREN, which the
                     // inline text pipeline lays out and draws. Nothing to do.
                     ("button", _) => {}
-                    // Submit/button/reset labels are laid out as anonymous text
-                    // by the normal inline pipeline, so they inherit colour,
-                    // text-shadow, spacing and transforms exactly like browser
-                    // text. Drawing them again here made a second label with
-                    // widget-default colour and no CSS text effects.
+                    // An absent value gets the UA label; an explicitly empty
+                    // value paints no label.
                     ("input", "submit") | ("input", "button") | ("input", "reset") => {
-                        let label = if value.is_empty() {
+                        let label = if value.is_empty()
+                            && !attributes.iter().any(|(name, _)| name.eq_ignore_ascii_case("value"))
+                        {
                             match input_type.as_str() {
                                 "submit" => "Submit",
                                 "reset" => "Reset",
@@ -3583,15 +3950,20 @@ fn draw_text_cmd_with_gradient(
                         }
                     }
                 }
+                let spans: Vec<_> = spans.iter().flat_map(|(s, a)|
+                    crate::layout::inline_layout::css_font_spans(font_system, s, font_family, a)
+                ).collect();
                 buf.set_rich_text(
                     font_system,
-                    spans.iter().map(|(s, a)| (*s, a.clone())),
+                    spans.iter().map(|(s, a)| (*s, a.as_attrs())),
                     &attrs,
                     Shaping::Advanced,
                     None,
                 );
             } else {
-                buf.set_text(font_system, text_for_shape, &attrs, Shaping::Advanced, None);
+                let spans = crate::layout::inline_layout::css_font_spans(
+                    font_system, text_for_shape, font_family, &attrs);
+                buf.set_rich_text(font_system, spans.iter().map(|(s, a)| (*s, a.as_attrs())), &attrs, Shaping::Advanced, None);
             }
             buf.shape_until_scroll(font_system, false);
             map.1.insert(key, buf);
@@ -3894,6 +4266,25 @@ fn underline_skip_ink_segments(text: &str, x: f32, width: f32) -> Vec<(f32, f32)
         out.push((start, cursor - start));
     }
     out
+}
+
+fn clear_outer_shadow_interior(
+    layer: &mut Pixmap,
+    border_rect: Rect,
+    radii: [f32; 4],
+    radii_y: [f32; 4],
+    transform: Transform,
+) {
+    // Outer shadows are clipped outside the border box even when its
+    // background is transparent. Cut out after blur, not before it.
+    let mut paint = Paint::default();
+    paint.set_color(tiny_skia::Color::BLACK);
+    paint.blend_mode = tiny_skia::BlendMode::DestinationOut;
+    if let Some(path) = rounded_rect_path_corners_xy(
+        border_rect.x, border_rect.y, border_rect.w, border_rect.h, radii, radii_y,
+    ) {
+        layer.fill_path(&path, &paint, FillRule::Winding, transform, None);
+    }
 }
 
 fn fill_outer_box_shadow_shape(

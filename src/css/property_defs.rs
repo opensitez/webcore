@@ -5810,18 +5810,24 @@ pub(crate) fn extract_image_set_url_for_device_pixel_ratio(
         .or_else(|| {
             candidates
                 .iter()
-                .max_by(|a, b| a.resolution.total_cmp(&b.resolution))
+                // min_by keeps the first equal candidate; CSS Images removes
+                // later options with the same resolution before selection.
+                .min_by(|a, b| b.resolution.total_cmp(&a.resolution))
         })
         .map(|candidate| candidate.url.clone())
 }
 
 fn parse_image_set_candidate(candidate: &str) -> Option<ImageSetCandidate> {
-    let mut url = super::extract_url(candidate).or_else(|| extract_css_string_prefix(candidate))?;
-    url = url.trim().to_string();
-    if url.is_empty() || !image_set_candidate_type_is_supported(candidate) {
+    let (url, descriptors) = if candidate.starts_with(['\'', '"']) {
+        super::apply::consume_css_string(candidate)?
+    } else {
+        let (url, consumed) = super::apply::parse_url_function(candidate)?;
+        (url, &candidate[consumed..])
+    };
+    if url.is_empty() || !image_set_candidate_type_is_supported(descriptors) {
         return None;
     }
-    let resolution = candidate
+    let resolution = descriptors
         .split_whitespace()
         .filter_map(parse_image_set_resolution_descriptor)
         .next()
@@ -5829,23 +5835,13 @@ fn parse_image_set_candidate(candidate: &str) -> Option<ImageSetCandidate> {
     Some(ImageSetCandidate { url, resolution })
 }
 
-fn extract_css_string_prefix(value: &str) -> Option<String> {
-    let quote = value.chars().next()?;
-    if quote != '"' && quote != '\'' {
-        return None;
-    }
-    let rest = &value[quote.len_utf8()..];
-    let end = rest.find(quote)?;
-    Some(rest[..end].to_string())
-}
-
 fn parse_image_set_resolution_descriptor(token: &str) -> Option<f32> {
     let token = token.trim().trim_end_matches(',');
     let lower = token.to_ascii_lowercase();
-    if let Some(value) = lower.strip_suffix('x') {
+    if let Some(value) = lower.strip_suffix("dppx") {
         return value.parse::<f32>().ok().filter(|v| *v > 0.0);
     }
-    if let Some(value) = lower.strip_suffix("dppx") {
+    if let Some(value) = lower.strip_suffix('x') {
         return value.parse::<f32>().ok().filter(|v| *v > 0.0);
     }
     if let Some(value) = lower.strip_suffix("dpi") {

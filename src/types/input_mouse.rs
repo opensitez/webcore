@@ -102,8 +102,11 @@ impl Document {
                     self.hover_suppress_count -= 1;
                 }
                 if self.hovered_box != hit_node_id {
-                    let old_hovered = self.hovered_box;
-                    self.prev_hovered_box = old_hovered;
+                    // Compare the next cascade with the last applied hover,
+                    // not an intermediate pointer event in the same frame.
+                    if !self.hover_changed {
+                        self.prev_hovered_box = self.hovered_box;
+                    }
                     self.hovered_box = hit_node_id;
                     self.hover_changed = true;
                     redraw = true;

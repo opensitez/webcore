@@ -1165,6 +1165,29 @@ fn an_unchanged_frame_and_a_scroll_are_cheap() {
 }
 
 #[test]
+fn completed_opacity_paint_survives_cached_replay() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<style>body{margin:0}.box{width:80px;height:80px;background:red}</style><div id='box' class='box'></div>",
+        320.0,
+    );
+    let id = doc.query_selector("#box").unwrap();
+    let rect = crate::types::Rect::new(0.0, 0.0, 80.0, 80.0);
+    let mut pixels = tiny_skia::Pixmap::new(320, 240).unwrap();
+    doc.animation_overrides.insert(id, vec![("opacity".into(), "0".into())]);
+    renderer.render(&mut doc, &mut pixels, 1.0);
+    doc.animation_overrides.clear();
+    renderer.invalidate_paint_rects([rect]);
+    renderer.invalidate_paint_only_display_list();
+    renderer.render(&mut doc, &mut pixels, 1.0);
+    let visible = pixels.pixel(20, 20).unwrap();
+    assert_eq!(visible.green(), 0);
+    renderer.invalidate_paint_rects([rect]);
+    renderer.render(&mut doc, &mut pixels, 1.0);
+    assert_eq!(pixels.pixel(20, 20).unwrap(), visible);
+}
+
+#[test]
 fn full_repaint_clears_animation_dirty_rects() {
     let mut r = crate::Renderer::new();
     let mut doc = r.load_html(
@@ -1191,6 +1214,85 @@ fn full_repaint_clears_animation_dirty_rects() {
         !r.paint_only_display_list_dirty_for_test(),
         "a full repaint consumes the paint-only display-list state"
     );
+}
+
+#[test]
+fn partial_transform_repaint_matches_full_repaint_across_neighboring_tracks() {
+    let html = "<style>body{margin:0;background:white}.track{margin:24.8px 0;width:500px;height:100px;background:#ddd}.box{width:100px;height:100px;background:#168b70;transform:translateX(0px)}</style><div class='track'><div class='box' id='a'></div></div><div class='track'><div class='box' id='b'></div></div>";
+    let mut renderer = crate::Renderer::new();
+    let mut reference = crate::Renderer::new();
+    let mut doc = renderer.load_html(html, 640.0);
+    let mut expected_doc = reference.load_html(html, 640.0);
+    let mut pixels = tiny_skia::Pixmap::new(640, 400).unwrap();
+    let mut expected = tiny_skia::Pixmap::new(640, 400).unwrap();
+    renderer.render(&mut doc, &mut pixels, 1.0);
+    for (a, b) in [(180, 0), (400, 120), (75, 350), (0, 400), (300, 20)] {
+        for (selector, x) in [("#a", a), ("#b", b)] {
+            let value = vec![("transform".into(), format!("translateX({x}px)"))];
+            doc.animation_overrides.insert(doc.query_selector(selector).unwrap(), value.clone());
+            expected_doc.animation_overrides.insert(expected_doc.query_selector(selector).unwrap(), value);
+        }
+        renderer.invalidate_animation_paint_rects(&doc, 640.0, 400.0);
+        renderer.render(&mut doc, &mut pixels, 1.0);
+        reference.invalidate_display_list();
+        reference.render(&mut expected_doc, &mut expected, 1.0);
+        // Fractional top/bottom edges have up to two bytes of alpha-rounding
+        // difference between tiled and direct replay. Interior pixels are exact.
+        if let Some(byte) = pixels.data().iter().zip(expected.data()).enumerate().find_map(|(i, (a, b))| {
+            let y = i / 4 / 640;
+            let tolerance = if [24, 124, 149, 249].contains(&y) { 2 } else { 0 };
+            (a.abs_diff(*b) > tolerance).then_some(i)
+        }) {
+            let x = (byte / 4 % 640) as u32;
+            let y = (byte / 4 / 640) as u32;
+            panic!("partial paint differs for tracks {a}, {b} at {x},{y}: {:?} vs {:?}", pixels.pixel(x, y), expected.pixel(x, y));
+        }
+    }
+}
+
+#[test]
+fn fractional_repaint_damage_does_not_leave_clear_color_seams() {
+    for scale in [1.0, 1.5, 2.0] {
+        let mut renderer = crate::Renderer::new();
+        let mut doc = renderer.load_html(
+            "<style>body{margin:0}#box{width:300px;height:200px;background:#168b70}</style><div id='box'></div>",
+            320.0,
+        );
+        let mut pixels = tiny_skia::Pixmap::new((320.0 * scale) as u32, (240.0 * scale) as u32).unwrap();
+        renderer.render(&mut doc, &mut pixels, scale);
+        let expected = pixels.data().to_vec();
+        for rect in [
+            crate::types::Rect::new(12.3, 20.7, 170.4, 80.2),
+            crate::types::Rect::new(5.6, 4.1, 160.3, 120.6),
+        ] {
+            renderer.invalidate_paint_rects([rect]);
+            renderer.render(&mut doc, &mut pixels, scale);
+            assert!(pixels.data() == expected, "fractional repaint changed pixels at scale {scale}");
+        }
+    }
+}
+
+#[test]
+fn translated_animation_damage_covers_the_entire_moving_box() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<style>body{margin:0;background:white}#box{width:100px;height:100px;background:red;transform:translateX(0px)}</style><div id='box'></div>",
+        640.0,
+    );
+    let id = doc.query_selector("#box").unwrap();
+    let mut pixels = tiny_skia::Pixmap::new(640, 240).unwrap();
+    doc.animation_overrides.insert(id, vec![("transform".into(), "translateX(400px)".into())]);
+    renderer.render(&mut doc, &mut pixels, 1.0);
+    for x in [150, 400, 250, 10] {
+        doc.animation_overrides.insert(id, vec![("transform".into(), format!("translateX({x}px)"))]);
+        renderer.invalidate_animation_paint_rects(&doc, 640.0, 240.0);
+        renderer.render(&mut doc, &mut pixels, 1.0);
+        for px in 0..640 {
+            let actual = pixels.pixel(px, 50).unwrap();
+            let expected_green = if (x..x + 100).contains(&px) { 0 } else { 255 };
+            assert_eq!(actual.green(), expected_green, "translation {x}, pixel {px}");
+        }
+    }
 }
 
 #[test]

@@ -1,5 +1,28 @@
 // Pixel-level render tests for blend modes, gradients, and layout.
 #[test]
+fn inline_link_becoming_flex_item_discards_old_border_fragments() {
+    use crate::renderer::display_list::{PaintCmd};
+    use crate::renderer::display_list_builder::build_display_list_full;
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"<div id="row">Prefix <a id="button" style="border:2px solid black;padding:8px">Join us</a></div>"#,
+        500.0,
+    );
+    let mut pixels = tiny_skia::Pixmap::new(500, 200).unwrap();
+    renderer.render(&mut doc, &mut pixels, 1.0);
+    let row = doc.get_element_by_id("row").unwrap();
+    doc.set_attribute(row, "style", "display:flex;justify-content:center;padding:30px");
+    renderer.layout_engine().layout(&mut doc, 500.0);
+    renderer.render(&mut doc, &mut pixels, 1.0);
+    let button = crate::dom::query_selector(&doc.root, "#button").unwrap();
+    assert!(button.layout.inline_client_rects.is_empty());
+    let expected = button.layout.border_rect;
+    let list = build_display_list_full(&doc.root, 500.0, 200.0, 0.0, 0.0, 0, 0,
+        &std::collections::HashSet::new(), "");
+    assert!(list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Border {rect, ..} if *rect == expected)));
+}
+
+#[test]
 fn flow_root_block_border_avoids_active_right_float() {
     use super::harness::{find_box, parse_and_layout};
 
@@ -2851,6 +2874,36 @@ fn inline_child_boundary_preserves_following_text_space() {
 }
 
 #[test]
+fn mixed_direction_subject_continuation_does_not_overlap_arabic() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list_full;
+
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"<div style="font:14px Arial; white-space:nowrap">Journees du Patrimoine 2026 / أيام تراث الدار البيضاء 2026 – Confirmation de presence</div>"#,
+        1200.0,
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(1200, 100).unwrap();
+    renderer.render(&mut doc, &mut pixmap, 1.0);
+    let list = build_display_list_full(
+        &doc.root, 1200.0, 100.0, 0.0, 0.0, 0, 0,
+        &std::collections::HashSet::new(), "",
+    );
+    let mut arabic_x = None;
+    let mut continuation_x = None;
+    for command in &list.commands {
+        if let PaintCmd::Text { x, text, .. } = command {
+            if text.contains("أيام") { arabic_x = Some(*x); }
+            if text.contains("Confirmation") { continuation_x = Some(*x); }
+        }
+    }
+    let arabic_x = arabic_x.expect("Arabic subject segment");
+    let continuation_x = continuation_x.expect("French continuation");
+    assert!(continuation_x > arabic_x + 50.0,
+        "continuation overlaps Arabic: Arabic={arabic_x}, continuation={continuation_x}");
+}
+
+#[test]
 fn inline_child_first_word_after_space_can_wrap_ltr_and_rtl() {
     use crate::renderer::display_list::PaintCmd;
     use crate::renderer::display_list_builder::build_display_list_full;
@@ -3368,6 +3421,29 @@ fn missing_named_font_uses_available_serif_fallback() {
     });
     let selected = id.and_then(|id| fs.db().face(id));
     assert!(selected.is_some(), "no available serif face; configured serif is {:?}", fs.db().family_name(&cosmic_text::Family::Serif));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn css_font_stack_falls_through_missing_arabic_glyphs() {
+    use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Weight};
+    let mut renderer = Renderer::new();
+    let fs = &mut renderer.font_system;
+    let stack = "Unavailable-Webfont, Helvetica Neue, Helvetica, Arial, sans-serif";
+    let text = "Latin \u{064a}\u{062a}\u{0635}\u{062f}\u{0631} \u{0627}\u{0644}\u{0622}\u{0646}";
+    let attrs = Attrs::new().family(Family::Name("Helvetica Neue")).weight(Weight(300));
+    let spans = crate::layout::inline_layout::css_font_spans(fs, text, stack, &attrs);
+    assert!(spans.iter().any(|(s, a)| s.contains("Latin") && a.as_attrs().family == Family::Name("Helvetica Neue")));
+    assert!(spans.iter().any(|(s, a)| s.contains('\u{064a}') && a.as_attrs().family == Family::Name("Arial")));
+    let mut buffer = Buffer::new(fs, Metrics::new(26.0, 39.0));
+    buffer.set_rich_text(fs, spans.iter().map(|(s, a)| (*s, a.as_attrs())), &attrs, Shaping::Advanced, None);
+    buffer.shape_until_scroll(fs, false);
+    for glyph in buffer.layout_runs().flat_map(|r| r.glyphs.iter()) {
+        if text[glyph.start..glyph.end].chars().any(|c| ('\u{0600}'..='\u{06ff}').contains(&c)) {
+            let face = fs.db().face(glyph.font_id).unwrap();
+            assert!(face.families.iter().any(|(name, _)| name == "Arial"), "unexpected Arabic fallback: {:?}", face.families);
+        }
+    }
 }
 
 // ── word-spacing and letter-spacing are MEASURED, not just painted ───────────

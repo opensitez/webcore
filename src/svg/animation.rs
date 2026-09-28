@@ -574,15 +574,24 @@ fn parse_animate_motion_rotate(raw: &str) -> Option<SvgAnimateMotionRotate> {
 }
 
 pub(crate) fn tick_svg_animations(root: &mut WebCore, now: std::time::Instant) -> bool {
+    tick_svg_animations_with_damage(root, now).0
+}
+
+pub(crate) fn tick_svg_animations_with_damage(
+    root: &mut WebCore,
+    now: std::time::Instant,
+) -> (bool, Vec<crate::types::Rect>) {
     let mut still_running = false;
-    tick_svg_animations_in_node(root, now, &mut still_running);
-    still_running
+    let mut damage = Vec::new();
+    tick_svg_animations_in_node(root, now, &mut still_running, &mut damage);
+    (still_running, damage)
 }
 
 fn tick_svg_animations_in_node(
     node: &mut WebCore,
     now: std::time::Instant,
     still_running: &mut bool,
+    damage: &mut Vec<crate::types::Rect>,
 ) {
     if let Some(doc) = node.svg_document.as_ref() {
         if document_has_svg_animations(&doc) {
@@ -594,14 +603,20 @@ fn tick_svg_animations_in_node(
                 &node.svg_animation_controls,
                 still_running,
             );
-            node.svg_animation_overrides = sampled;
+            if node.svg_animation_overrides != sampled {
+                damage.push(node.layout.border_rect);
+                node.svg_animation_overrides = sampled;
+            }
         } else {
+            if !node.svg_animation_overrides.is_empty() {
+                damage.push(node.layout.border_rect);
+            }
             node.svg_animation_overrides.clear();
             node.svg_animation_start_time = None;
         }
     }
     for child in &mut node.children {
-        tick_svg_animations_in_node(child, now, still_running);
+        tick_svg_animations_in_node(child, now, still_running, damage);
     }
 }
 

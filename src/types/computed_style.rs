@@ -180,6 +180,29 @@ impl RareStyle {
 }
 
 impl ComputedStyle {
+    /// Conservative paint-only comparison. Unlisted properties, including
+    /// typography and generated content, still require geometry/inline runs.
+    pub(crate) fn reuses_geometry_from(&self, old: &Self) -> bool {
+        if self == old {
+            return true;
+        }
+        let mut comparable = self.clone();
+        comparable.background_color = old.background_color;
+        comparable.box_shadow = old.box_shadow.clone();
+        comparable.z_index = old.z_index;
+        comparable.z_index_is_auto = old.z_index_is_auto;
+        comparable.cursor = old.cursor;
+        comparable.border_top_color = old.border_top_color;
+        comparable.border_right_color = old.border_right_color;
+        comparable.border_bottom_color = old.border_bottom_color;
+        comparable.border_left_color = old.border_left_color;
+        comparable.outline_color = old.outline_color;
+        comparable.hover_style = old.hover_style.clone();
+        comparable.active_style = old.active_style.clone();
+        comparable.visited_style = old.visited_style.clone();
+        comparable == *old
+    }
+
     pub fn has_transform(&self) -> bool {
         !self.css_transform.ops.is_empty() || !self.css_translate.ops.is_empty()
             || !self.css_rotate.ops.is_empty() || !self.css_scale.ops.is_empty()

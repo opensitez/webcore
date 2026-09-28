@@ -81,6 +81,7 @@ fn negative_margin_can_reduce_atomic_inline_advance_to_zero() {
 
 #[test]
 fn media_and_container_queries_accept_adjacent_logical_keyword() {
+    assert!(!crate::css::evaluate_media("screen and (max-width:1023px)", 1280.0, 820.0));
     let query = "(min-width:768px)and (max-width:1023px)";
     assert!(crate::css::evaluate_media(query, 900.0, 700.0));
     assert!(!crate::css::evaluate_media(query, 1280.0, 700.0));

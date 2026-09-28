@@ -398,6 +398,9 @@ pub fn wrap_orphan_table_boxes_in_anonymous_tables(node: &mut WebCore) {
     let mut current_table: Option<WebCore> = None;
     let mut current_row: Option<WebCore> = None;
     for child in old_children {
+        if current_table.is_some() && is_ignorable_table_whitespace(&child) {
+            continue;
+        }
         if matches!(child.style.display, Display::None)
             || matches!(child.style.position, Position::Absolute | Position::Fixed)
             || !is_orphan_table_internal_display(child.style.display)
@@ -1205,12 +1208,33 @@ pub fn layout_table(
                     }
                 }
 
-                // Layout cell — cell_w is already the resolved column width,
-                // so percentage widths resolve correctly against it via Constraints.
+                // The column algorithm has resolved the cell's used border-box
+                // width. Re-resolving a percentage width against cell_w would
+                // apply the percentage twice and squeeze its descendants.
                 {
+                    let cell = &row_ref(node, &row_refs[row_idx]).children[ci];
+                    let cell_box = super::resolve_box_vp_query(
+                        &cell.style,
+                        font_px,
+                        cell_w,
+                        root_font_px,
+                        engine.viewport_w,
+                        engine.viewport_h,
+                        None,
+                        engine.query_container_sizes.get(),
+                    );
+                    let content_w = (cell_w - cell_box.inner_h_space()).max(0.0);
                     engine.layout_box(
                         &mut row_ref_mut(node, &row_refs[row_idx]).children[ci],
-                        &Constraints::new(cell_w, content_x, content_y, font_px, root_font_px),
+                        &Constraints::with_forced(
+                            cell_w,
+                            content_x,
+                            content_y,
+                            font_px,
+                            root_font_px,
+                            Some(content_w),
+                            None,
+                        ),
                     );
                 }
                 let (content_h, pad_top, pad_bottom, border_top, border_bottom) = {

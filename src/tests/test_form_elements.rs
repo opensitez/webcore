@@ -535,6 +535,16 @@ fn submit_button_default_label() {
 }
 
 #[test]
+fn submit_button_explicit_empty_value_has_no_default_label() {
+    let doc = layout_html(r#"<input id="default" type="submit"><input id="empty" type="submit" value="">"#, 400.0);
+    let default = crate::dom::query_selector(&doc.root, "#default").unwrap();
+    let empty = crate::dom::query_selector(&doc.root, "#empty").unwrap();
+    assert_eq!(default.children[0].text, "Submit");
+    assert!(empty.children.iter().all(|child| child.text.is_empty()));
+    assert!(empty.layout.border_rect.w < default.layout.border_rect.w);
+}
+
+#[test]
 fn reset_button_default_label() {
     let doc = layout_html(r#"<input type="reset">"#, 400.0);
     let input = find_by_tag(&doc.root, "input").unwrap();

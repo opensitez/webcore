@@ -437,6 +437,22 @@ fn background_image_image_set_selects_supported_one_x_candidate() {
 }
 
 #[test]
+fn image_set_density_units_and_equal_density_order() {
+    use crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio as select;
+    for (source, ratio, expected) in [
+        ("image-set('two.png' 2dppx, 'one.png' 1dppx)", 1.0, "one.png"),
+        ("image-set('one.png' 1DPPX, 'two.png' 2DPPX)", 2.0, "two.png"),
+        ("image-set('first.png' 2x, 'second.png' 192dpi)", 3.0, "first.png"),
+        ("image-set('unsupported.avif' 2x type('image/avif'), 'first.png' 2x, 'second.png' 2x)", 3.0, "first.png"),
+        (r#"image-set("quo\"te.png" 1x, "other.png" 2x)"#, 1.0, "quo\"te.png"),
+        (r#"image-set("picture 3x type(unsupported).png" 1x, "other.png" 2x)"#, 1.0, "picture 3x type(unsupported).png"),
+        (r#"image-set(url("picture 3x type(unsupported).png") 1x, "other.png" 2x)"#, 1.0, "picture 3x type(unsupported).png"),
+    ] {
+        assert_eq!(select(source, ratio).as_deref(), Some(expected), "{source}");
+    }
+}
+
+#[test]
 fn background_image_image_set_selector_honors_device_pixel_ratio() {
     assert_eq!(
         crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio(

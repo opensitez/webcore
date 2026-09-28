@@ -7,6 +7,79 @@ use crate::layout::LayoutEngine;
 use crate::types::*;
 
 #[test]
+fn media_table_columns_restore_after_stepping_across_breakpoint() {
+    let mut doc = parse_html("<style>.row{display:table;width:100%}.main{display:table-cell;width:70%}.aside{display:table-cell;width:30%}@media screen and (max-width:1023px){.main,.aside{display:block;width:100%}.aside{padding-bottom:55px}}</style><div class=row><div class=main>Main</div><aside class=aside>Aside</aside></div>");
+    let mut engine = LayoutEngine::new();
+    engine.viewport_h = 820.0;
+    engine.layout(&mut doc, 900.0);
+    engine.layout(&mut doc, 1280.0);
+    let aside = find_box(&doc.root, &|n| n.attributes.get("class").is_some_and(|s| s == "aside")).unwrap();
+    assert_eq!(aside.style.display, Display::TableCell);
+    assert_eq!(aside.style.width, CssLength::Percent(30.0));
+    assert_eq!(aside.style.padding_bottom, CssLength::Zero);
+}
+
+#[test]
+fn adjacent_orphan_table_cells_share_a_row_across_whitespace() {
+    let doc = parse_and_layout("<style>body{margin:0}#host{width:1000px}#main{display:table-cell;width:70%;height:100px}#aside{display:table-cell;width:30%;height:50px}</style><div id=host><div class=clearfix></div>\n <div id=main>Main</div>\n <aside id=aside><div id=inner>Aside</div></aside>\n</div>", 1200.0);
+    let main = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "main")).unwrap();
+    let aside = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "aside")).unwrap();
+    let inner = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "inner")).unwrap();
+    assert!((main.layout.border_rect.y - aside.layout.border_rect.y).abs() < 0.1, "main={:?} aside={:?}", main.layout.border_rect, aside.layout.border_rect);
+    assert!((main.layout.border_rect.right() - aside.layout.border_rect.x).abs() < 0.1);
+    assert!((inner.layout.border_rect.w - aside.layout.content_rect.w).abs() < 0.1, "inner={:?} aside={:?}", inner.layout.border_rect, aside.layout.content_rect);
+}
+
+#[test]
+fn inline_block_with_percentage_table_uses_available_width() {
+    let doc = parse_and_layout("<style>body{margin:0}#host{width:300px}#outer{display:inline-block;margin:0 10px}#table{width:100%}</style><div id=host><span id=outer><table id=table><tr><td>Agenda</td><td>27 Septembre</td></tr></table></span></div>", 500.0);
+    let outer = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "outer")).unwrap();
+    let table = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "table")).unwrap();
+    assert_eq!(table.style.display, Display::Table);
+    assert!(table.style.width.has_percentage(), "table width={:?}", table.style.width);
+    assert_eq!(outer.children[0].style.display, Display::Table, "outer first child={}", outer.children[0].tag);
+    assert!((outer.layout.border_rect.w - 280.0).abs() < 0.5, "outer={:?}", outer.layout.border_rect);
+    assert!((table.layout.border_rect.w - 280.0).abs() < 0.5, "table={:?}", table.layout.border_rect);
+}
+
+#[test]
+fn anonymous_table_wrappers_do_not_change_selectors_on_recascade() {
+    let mut doc = parse_html("<style>body{margin:0}nav>ul{display:table;width:600px;padding:0;margin:0}nav>ul>li{display:table-cell;width:50%;color:red}nav>ul>li+li{color:blue}</style><nav><ul><li id=a>First</li><li id=b>Second</li></ul></nav>");
+    let mut engine = LayoutEngine::new();
+    for _ in 0..3 {
+        doc.style_dirty = true;
+        engine.layout(&mut doc, 800.0);
+        let a = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "a")).unwrap();
+        let b = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "b")).unwrap();
+        assert_eq!(a.style.display, Display::TableCell);
+        assert_eq!(b.style.display, Display::TableCell);
+        assert_eq!(a.style.color, Color::rgb(255, 0, 0));
+        assert_eq!(b.style.color, Color::rgb(0, 0, 255));
+        assert!((a.layout.border_rect.y - b.layout.border_rect.y).abs() < 0.1);
+    }
+}
+
+#[test]
+fn trailing_br_does_not_add_a_caret_line_to_page_content() {
+    let doc = parse_and_layout("<style>body{margin:0}p{margin:0;font-size:14px;line-height:21px}span{display:block;font-size:16px;line-height:24px}</style><p id=plain>Text<br></p><p id=mixed><span>First<br>Second<br>Third</span><br></p><p id=double>Text<br><br></p>", 800.0);
+    for (id, height) in [("plain", 21.0), ("mixed", 93.0), ("double", 42.0)] {
+        let node = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == id)).unwrap();
+        assert!((node.layout.content_rect.h - height).abs() < 0.1, "{id}: {:?}", node.layout.content_rect);
+    }
+}
+
+#[test]
+fn flex_stretches_indefinite_percentage_height_and_image_descendants() {
+    for (parent_height, expected_content) in [("", 280.0), ("height:800px", 380.0)] {
+        let doc = parse_and_layout(&format!("<style>#row{{display:flex;width:600px;{parent_height}}}#text{{width:300px;height:300px}}#column{{width:300px;height:50%;padding-bottom:20px;box-sizing:border-box}}#frame,#inner{{height:100%;min-height:21px}}#inner{{position:relative}}img{{position:absolute;width:100%;height:100%;object-fit:cover}}</style><div id=row><div id=text></div><div id=column><div id=frame><div id=inner><img id=image width=640 height=480></div></div></div></div>"), 800.0);
+        let column = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "column")).unwrap();
+        let image = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "image")).unwrap();
+        assert!((column.layout.content_rect.h - expected_content).abs() < 0.1, "{:?}", column.layout);
+        assert!((image.layout.content_rect.h - expected_content).abs() < 0.1, "{:?}", image.layout);
+    }
+}
+
+#[test]
 fn absolute_stretch_accounts_for_positive_and_negative_margins() {
     let doc = parse_and_layout("<style>#outer{position:relative;width:1020px;height:390px}#box{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;margin:290px 175px -95px;padding:10px 65px;border:5px solid;box-sizing:border-box}#title{width:500px;height:120px}</style><div id=outer><div id=box><div id=title></div></div></div>", 1280.0);
     let get = |id: &str| find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == id)).unwrap();
@@ -2209,6 +2282,66 @@ fn break_inside_avoid_keeps_plain_wrapper_in_one_column() {
 ///
 /// Confirmed against the engine (clean worktree, HEAD 98c918e): all five
 /// items currently land at the same x (column 2); column 1 gets nothing.
+#[test]
+fn multicol_adjacent_forced_breaks_share_one_boundary() {
+    let doc = parse_and_layout(r#"
+        <style>body{margin:0} #cols{columns:3;column-gap:0;width:300px}
+        #cols>div{height:40px;break-inside:avoid}</style>
+        <div id=cols><div id=a style="break-after:column"></div>
+        <div id=b style="break-before:column"></div><div id=c></div></div>"#, 500.0);
+    let a = find_by_id(&doc.root, "a").unwrap().layout.border_rect;
+    let b = find_by_id(&doc.root, "b").unwrap().layout.border_rect;
+    let c = find_by_id(&doc.root, "c").unwrap().layout.border_rect;
+    assert_eq!(b.x, a.x + 100.0);
+    assert_eq!(c.x, b.x + 100.0);
+    assert_eq!(a.y, b.y);
+    assert_eq!(b.y, c.y);
+}
+
+#[test]
+fn multicol_balances_uneven_atomic_items_without_slack() {
+    let doc = parse_and_layout(r#"
+        <style>body{margin:0} .cols{columns:2;column-gap:0;width:200px}
+        .cols>div{break-inside:avoid}</style>
+        <div class=cols id=cols><div id=a style="height:80px"></div>
+        <div id=b style="height:40px"></div><div id=c style="height:40px"></div>
+        <div id=d style="height:40px"></div></div>"#, 500.0);
+    let a = find_by_id(&doc.root, "a").unwrap().layout.border_rect;
+    let b = find_by_id(&doc.root, "b").unwrap().layout.border_rect;
+    let c = find_by_id(&doc.root, "c").unwrap().layout.border_rect;
+    assert_eq!(a.x, b.x);
+    assert_eq!(b.y, a.y + 80.0);
+    assert_eq!(c.x, a.x + 100.0);
+    assert_eq!(c.y, a.y);
+}
+
+#[test]
+fn multicol_balances_each_row_around_spanners() {
+    for fill in ["balance", "auto"] {
+        let doc = parse_and_layout(&format!(r#"
+            <style>body{{margin:0}} .cols{{columns:2;column-gap:0;width:200px;column-fill:{fill}}}
+            .cols>div{{break-inside:avoid}}</style>
+            <div class=cols><div id=a style="height:100px"></div>
+            <div id=b style="height:100px"></div><div id=span style="column-span:all;height:20px"></div>
+            <div id=c style="height:10px"></div><div id=d style="height:10px"></div></div>"#), 500.0);
+        let a = find_by_id(&doc.root, "a").unwrap().layout.border_rect;
+        let b = find_by_id(&doc.root, "b").unwrap().layout.border_rect;
+        let span = find_by_id(&doc.root, "span").unwrap().layout.border_rect;
+        let c = find_by_id(&doc.root, "c").unwrap().layout.border_rect;
+        let d = find_by_id(&doc.root, "d").unwrap().layout.border_rect;
+        assert_eq!(b.x, a.x + 100.0, "{fill}");
+        assert_eq!(span.y, a.y + 100.0, "{fill}");
+        assert_eq!(c.y, span.y + 20.0, "{fill}");
+        if fill == "balance" {
+            assert_eq!(d.x, c.x + 100.0);
+            assert_eq!(d.y, c.y);
+        } else {
+            assert_eq!(d.x, c.x);
+            assert_eq!(d.y, c.y + 10.0);
+        }
+    }
+}
+
 #[test]
 fn balance_never_starves_a_column() {
     let html = r#"

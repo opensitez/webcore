@@ -109,6 +109,62 @@ fn hover_dirty_walk_keeps_type_index_after_skipping_siblings() {
 }
 
 #[test]
+fn directory_links_keep_lines_after_hover_recascade() {
+    let mut html = String::from("<h1>Directory</h1><ul>");
+    for i in 0..172 {
+        html.push_str(&format!("<li id='item{i}'><a href='file{i}.html'>File {i}</a></li>\n"));
+    }
+    html.push_str("</ul>");
+    let mut doc = layout_html(&html, 1280.0);
+    let mut engine = LayoutEngine::new();
+    engine.viewport_h = 820.0;
+    for hovered in [3, 15, 20, 3] {
+        let r = find_by_id(&doc.root, &format!("item{hovered}")).unwrap().layout.border_rect;
+        doc.process_mouse_event(crate::dom::HtmlEventType::MouseMove, (r.x + 10.0, r.y + 5.0), 0);
+        engine.layout(&mut doc, 1280.0);
+        for i in 0..172 {
+            let item = find_by_id(&doc.root, &format!("item{i}")).unwrap();
+            assert!(!item.layout.line_cache.is_empty(), "item {i} lost its lines after hovering {hovered}");
+        }
+    }
+}
+
+#[test]
+fn coalesced_pointer_moves_clear_the_last_painted_hover() {
+    let mut doc = layout_html(
+        r#"<style>
+        body { margin: 0 }
+        .row { width: 120px; height: 40px; background: white }
+        .row:hover { background: red }
+        </style><div id="a" class="row"></div><div id="b" class="row"></div>
+        <div id="c" class="row"></div>"#,
+        800.0,
+    );
+    let mut engine = LayoutEngine::new();
+    engine.viewport_h = 900.0;
+    let point = |doc: &Document, id: &str| {
+        let r = find_by_id(&doc.root, id).unwrap().layout.border_rect;
+        (r.x + 10.0, r.y + 10.0)
+    };
+    let a = point(&doc, "a");
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseMove, a, 0);
+    engine.layout(&mut doc, 800.0);
+    let applied = doc.hovered_box;
+    for id in ["b", "c"] {
+        let p = point(&doc, id);
+        doc.process_mouse_event(crate::dom::HtmlEventType::MouseMove, p, 0);
+    }
+    assert_eq!(doc.prev_hovered_box, applied);
+    engine.layout(&mut doc, 800.0);
+    for id in ["a", "b"] {
+        assert_eq!(find_by_id(&doc.root, id).unwrap().style.background_color,
+            Color::rgb(255, 255, 255), "{id} retained an obsolete hover");
+    }
+    assert_eq!(find_by_id(&doc.root, "c").unwrap().style.background_color,
+        Color::rgb(255, 0, 0));
+}
+
+#[test]
 fn mouse_leave_preserves_previous_hover_for_recascade() {
     let mut doc = layout_html(
         r##"

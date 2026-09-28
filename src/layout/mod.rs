@@ -16,6 +16,82 @@ pub use constraints::{Constraints, FormattingContext, IntrinsicSizes};
 use crate::types::*;
 use std::cell::Cell;
 
+struct HoverGeometryEntry {
+    node_id: u32,
+    child_count: usize,
+    line_count: usize,
+    run_count: usize,
+    style: std::sync::Arc<ComputedStyle>,
+}
+
+struct HoverGeometrySnapshot(Vec<HoverGeometryEntry>);
+
+#[cfg(test)]
+mod hover_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn paint_only_hover_reuses_geometry_but_size_hover_reflows() {
+        for (declaration, requires_layout) in [
+            ("background:red;box-shadow:0 1px 3px black;z-index:2", false),
+            ("height:80px", true),
+            ("color:red", true),
+        ] {
+            let html = format!("<style>body{{margin:0}}#row{{position:relative;width:120px;height:40px}}#row:hover{{{declaration}}}@keyframes spin{{to{{transform:rotate(360deg)}}}}#spinner{{width:20px;height:20px;animation:spin 2s linear infinite}}</style><div id='row'>Message</div>Footer<div>End</div><div id='spinner'></div>");
+            let mut doc = crate::html::parse_html(&html);
+            let mut engine = LayoutEngine::new();
+            engine.viewport_h = 300.0;
+            engine.layout(&mut doc, 400.0);
+            assert!(doc.needs_animation_frame);
+            engine.layout_calls.set(0);
+            doc.process_mouse_event(crate::dom::HtmlEventType::MouseMove, (10.0, 10.0), 0);
+            engine.layout(&mut doc, 400.0);
+            assert_eq!(engine.layout_calls.get() > 0, requires_layout, "{declaration}");
+            assert!(!doc.has_dirty_layout());
+        }
+    }
+}
+
+impl HoverGeometrySnapshot {
+    fn capture(root: &WebCore) -> Option<Self> {
+        let mut entries = Vec::new();
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            if node.shadow_root.is_some() {
+                return None;
+            }
+            entries.push(HoverGeometryEntry {
+                node_id: node.node_id,
+                child_count: node.children.len(),
+                line_count: node.layout.line_cache.len(),
+                run_count: node.layout.inline_runs.len(),
+                style: node.style.clone(),
+            });
+            pending.extend(node.children.iter());
+        }
+        Some(Self(entries))
+    }
+
+    fn can_reuse(&self, root: &WebCore) -> bool {
+        let mut entries = self.0.iter();
+        let mut pending = vec![root];
+        while let Some(node) = pending.pop() {
+            let Some(entry) = entries.next() else { return false };
+            // Counter/generated-content replay can discard text layout even
+            // when it ultimately restores identical computed style values.
+            if entry.node_id != node.node_id || entry.child_count != node.children.len()
+                || entry.line_count != node.layout.line_cache.len()
+                || entry.run_count != node.layout.inline_runs.len()
+                || !node.style.reuses_geometry_from(&entry.style)
+            {
+                return false;
+            }
+            pending.extend(node.children.iter());
+        }
+        entries.next().is_none()
+    }
+}
+
 #[inline]
 pub(crate) fn is_projected_svg_descendant(node: &WebCore) -> bool {
     node.svg_tree_path
@@ -2595,7 +2671,7 @@ impl LayoutEngine {
                 .unwrap_or_default();
             if matches!(input_type.as_str(), "submit" | "reset" | "button") {
                 let label = match node.attributes.get("value").map(String::as_str) {
-                    Some(v) if !v.is_empty() => v,
+                    Some(v) => v,
                     _ => match input_type.as_str() {
                         "submit" => "Submit",
                         "reset" => "Reset",
@@ -3432,7 +3508,18 @@ impl LayoutEngine {
         // rendering may create them before the final stylesheet has arrived;
         // if they remain in the tree during a later cascade, child combinators
         // such as `.toolbar > .button` stop matching.
-        crate::layout::block::unwrap_all_anonymous_blocks(&mut doc.root);
+        let hover_only = doc.hover_changed && !doc.style_dirty
+            && self.last_cascade_vw == viewport_width
+            && self.last_geometry_viewport_h == self.viewport_h
+            && !doc.has_dirty_layout();
+        let hover_geometry = if hover_only {
+            HoverGeometrySnapshot::capture(&doc.root)
+        } else {
+            None
+        };
+        if !hover_only {
+            crate::layout::block::unwrap_all_anonymous_blocks(&mut doc.root);
+        }
 
         // Rebuild selector index if rules changed (lazy, skips if already up-to-date).
         doc.stylesheet.rebuild_index();
@@ -3553,6 +3640,9 @@ impl LayoutEngine {
         };
         self.root_font_px = root_font_px;
 
+        let hover_reuses_geometry = hover_geometry.as_ref()
+            .is_some_and(|snapshot| snapshot.can_reuse(&doc.root));
+
         // ── CSS animation / transition runtime ─────────────────────────────
         let now = std::time::Instant::now();
         doc.sync_animations(now);
@@ -3583,6 +3673,17 @@ impl LayoutEngine {
         }
         let cascade_end = std::time::Instant::now();
         self.initial_layout_done = true;
+        if hover_reuses_geometry
+            && crate::types::animation_runtime::layout_animation_values(&doc.animation_overrides).is_empty()
+        {
+            crate::css::restore_animation_overrides(&mut doc.root, animation_restore);
+            crate::css::clear_descendant_dirty(&mut doc.root);
+            clear_layout_dirty_flags(&mut doc.root);
+            doc.rebuild_node_index();
+            // Geometry is stable, but stacking/shadows/backgrounds changed.
+            doc.layout_generation = doc.layout_generation.wrapping_add(1);
+            return;
+        }
         let geometry_profile_start = crate::profile::is_enabled().then(std::time::Instant::now);
         self.layout_geometry(doc, viewport_width, root_font_px);
         self.last_geometry_viewport_h = self.viewport_h;
@@ -3803,6 +3904,11 @@ impl LayoutEngine {
         c: &Constraints,
         fc: Option<&mut FloatContext>,
     ) -> f32 {
+        // Inline fragments belong to a previous inline formatting context, not
+        // to the border box of an atomic or blockified flex/grid item.
+        if node.style.display != Display::Inline {
+            node.layout.inline_client_rects.clear();
+        }
         let containing_w = c.available_width;
         let x = c.x;
         let y = c.y;
@@ -4125,7 +4231,6 @@ impl LayoutEngine {
                             };
                             let label = node.attributes.get("value")
                                 .map(String::as_str)
-                                .filter(|value| !value.is_empty())
                                 .unwrap_or(default_label);
                             self.measure_text_cached_with_stretch(
                                 label,

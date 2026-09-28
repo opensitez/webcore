@@ -358,17 +358,26 @@ impl Document {
                     let entry = self.transition_states.entry(*elem_id).or_default();
                     let replaced = entry.iter().find(|t| t.property == prop).cloned();
                     let mut duration_ms = tr.duration_ms;
-                    let mut reversing_adjusted_start_value = prv.to_string();
+                    let mut delay_ms = tr.delay_ms;
+                    let mut reversing_adjusted_start_value = from_val.to_string();
                     let mut reversing_shortening_factor = 1.0;
                     if let Some(old) = &replaced {
-                        reversing_adjusted_start_value = old.from_value.clone();
                         if cur == old.reversing_adjusted_start_value && old.duration_ms > 0.0 {
                             let elapsed = now.duration_since(old.start_time).as_secs_f32() * 1000.0;
                             let progress =
                                 ((elapsed - old.delay_ms) / old.duration_ms).clamp(0.0, 1.0);
-                            reversing_shortening_factor =
-                                (progress * old.reversing_shortening_factor).clamp(0.0, 1.0);
+                            // CSS Transitions: travelled value distance, including the
+                            // untravelled portion from any earlier reversal.
+                            reversing_shortening_factor = (apply_easing(&old.timing_fn, progress)
+                                * old.reversing_shortening_factor
+                                + (1.0 - old.reversing_shortening_factor))
+                                .abs()
+                                .clamp(0.0, 1.0);
+                            reversing_adjusted_start_value = old.to_value.clone();
                             duration_ms = tr.duration_ms * reversing_shortening_factor;
+                            if delay_ms < 0.0 {
+                                delay_ms *= reversing_shortening_factor;
+                            }
                         }
                     }
                     let before_replace = entry.len();
@@ -384,7 +393,7 @@ impl Document {
                         reversing_shortening_factor,
                         start_time: now,
                         duration_ms,
-                        delay_ms: tr.delay_ms,
+                        delay_ms,
                         timing_fn: tr.timing_fn.clone(),
                         allow_discrete: tr.allow_discrete,
                     });

@@ -425,9 +425,6 @@ fn is_void_element(tag: &str) -> bool {
         tag,
         "area" | "base" | "br" | "col" | "embed" | "hr" | "img" | "input"
         | "link" | "meta" | "param" | "source" | "track" | "wbr"
-        // SVG void elements — never have child content
-        | "path" | "circle" | "rect" | "line" | "polygon" | "polyline"
-        | "ellipse" | "use" | "image" | "stop"
     )
 }
 

@@ -40,6 +40,7 @@ pub struct Renderer {
     display_list_dirty: bool,
     cached_layout_generation: u64,
     cached_content_surface: Option<Pixmap>,
+    cached_surface_animation_rects: Vec<Rect>,
     cached_surface_scale: f32,
     cached_surface_zoom: f32,
     cached_surface_scroll_x: f32,
@@ -246,21 +247,26 @@ fn coalesce_dirty_rects(mut rects: Vec<Rect>, viewport: Rect) -> Vec<Rect> {
 fn animation_override_rects(
     root: &WebCore,
     overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
+    viewport_w: f32,
+    viewport_h: f32,
 ) -> Vec<Rect> {
-    animation_override_rects_with_ids(root, overrides)
+    animation_override_rects_with_ids(root, overrides, viewport_w, viewport_h)
         .into_iter()
         .map(|(_, rect)| rect)
         .collect()
 }
 
-fn animation_override_rects_with_ids(
+pub(crate) fn animation_override_rects_with_ids(
     root: &WebCore,
     overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
+    viewport_w: f32,
+    viewport_h: f32,
 ) -> Vec<(u32, Rect)> {
     fn walk(
         node: &WebCore,
         overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
         out: &mut Vec<(u32, Rect)>,
+        ctx: &crate::types::TransformCtx,
     ) {
         if let Some(props) = overrides.get(&node.node_id) {
             let mut rect = node.layout.border_rect;
@@ -269,11 +275,39 @@ fn animation_override_rects_with_ids(
             }
             if rect.w <= 0.0 || rect.h <= 0.0 {
                 for child in &node.children {
-                    walk(child, overrides, out);
+                    walk(child, overrides, out, ctx);
                 }
                 return;
             }
-            if props.iter().any(|(prop, _)| prop == "transform") {
+            if let Some((_, value)) = props.iter().find(|(prop, _)| prop == "transform") {
+                let mut style = node.style.as_ref().clone();
+                crate::css::apply_property(&mut style, "transform", value);
+                let local_ctx = crate::types::TransformCtx {
+                    font_px: style.font_size_px(ctx.root_font_px, ctx.root_font_px),
+                    ..*ctx
+                };
+                let [a, b, c, d, e, f] = display_list_builder::compute_transform_matrix(
+                    &style, &node.layout.border_rect, &local_ctx,
+                );
+                // A translation can travel arbitrarily far beyond the original
+                // box. Include all transformed corners, not a fixed travel pad.
+                let corners = [
+                    (rect.x, rect.y), (rect.x + rect.w, rect.y),
+                    (rect.x, rect.y + rect.h), (rect.x + rect.w, rect.y + rect.h),
+                ];
+                let mut left = rect.x;
+                let mut top = rect.y;
+                let mut right = rect.x + rect.w;
+                let mut bottom = rect.y + rect.h;
+                for (x, y) in corners {
+                    let tx = a * x + c * y + e;
+                    let ty = b * x + d * y + f;
+                    left = left.min(tx);
+                    top = top.min(ty);
+                    right = right.max(tx);
+                    bottom = bottom.max(ty);
+                }
+                let transformed = Rect::new(left, top, right - left, bottom - top);
                 let long_inline_strip = rect.w > rect.h.max(1.0) * 8.0;
                 let pad = if long_inline_strip {
                     rect.h.max(32.0).min(192.0)
@@ -281,15 +315,24 @@ fn animation_override_rects_with_ids(
                     rect.w.max(rect.h).max(32.0).min(384.0)
                 };
                 rect = inflate_rect(rect, pad);
+                let left = rect.x.min(transformed.x);
+                let top = rect.y.min(transformed.y);
+                rect = Rect::new(left, top,
+                    (rect.x + rect.w).max(transformed.x + transformed.w) - left,
+                    (rect.y + rect.h).max(transformed.y + transformed.h) - top);
             }
             out.push((node.node_id, rect));
         }
         for child in &node.children {
-            walk(child, overrides, out);
+            walk(child, overrides, out, ctx);
         }
     }
     let mut out = Vec::new();
-    walk(root, overrides, &mut out);
+    let initial = ComputedStyle::INITIAL_FONT_SIZE_PX;
+    let root_font_px = root.style.font_size_px(initial, initial);
+    walk(root, overrides, &mut out, &crate::types::TransformCtx {
+        font_px: root_font_px, root_font_px, viewport_w, viewport_h,
+    });
     out
 }
 
@@ -430,6 +473,7 @@ impl Renderer {
             display_list_dirty: true,
             cached_layout_generation: 0,
             cached_content_surface: None,
+            cached_surface_animation_rects: Vec::new(),
             cached_surface_scale: 0.0,
             cached_surface_zoom: 0.0,
             cached_surface_scroll_x: f32::NAN,
@@ -462,16 +506,16 @@ impl Renderer {
         self.cached_paint_top = 0.0;
         self.cached_paint_bottom = 0.0;
         self.cached_content_surface = None;
+        self.cached_surface_animation_rects.clear();
         self.dirty_paint_rects.clear();
     }
 
     pub(crate) fn invalidate_paint_only_display_list(&mut self) {
         self.display_list_dirty = true;
         self.paint_only_display_list_dirty = true;
-        self.tile_manager.invalidate_all();
-        if let Some(segments) = &mut self.paint_segments {
-            segments.invalidate_all();
-        }
+        // render() invalidates tiles intersecting the accumulated damage.
+        // Clearing every tile here discarded unchanged scroll content on each
+        // image or animation frame, even for an offscreen animation.
     }
 
     #[cfg(test)]
@@ -525,7 +569,7 @@ impl Renderer {
             return false;
         }
         let viewport = Rect::new(doc.scroll_x, doc.scroll_y, viewport_w, viewport_h);
-        let rects = animation_override_rects_with_ids(&doc.root, &doc.animation_overrides)
+        let rects = animation_override_rects_with_ids(&doc.root, &doc.animation_overrides, viewport_w, viewport_h)
             .into_iter()
             .filter_map(|(_, rect)| rect_intersects(rect, viewport).then_some(rect))
             .collect::<Vec<_>>();
@@ -545,7 +589,7 @@ impl Renderer {
             return false;
         }
         let viewport = Rect::new(doc.scroll_x, doc.scroll_y, viewport_w, viewport_h);
-        let rects = animation_override_rects_with_ids(&doc.root, &doc.animation_overrides)
+        let rects = animation_override_rects_with_ids(&doc.root, &doc.animation_overrides, viewport_w, viewport_h)
             .into_iter()
             .filter_map(|(node_id, rect)| {
                 let props = doc.animation_overrides.get(&node_id)?;
@@ -670,9 +714,21 @@ impl Renderer {
             }
         }
         if doc.needs_animation_frame && !needs_relayout && !scroll_changed {
+            let previous_rects = animation_override_rects_with_ids(&doc.root, &doc.animation_overrides, viewport_w, viewport_h);
             doc.tick_animations(now);
+            let finished_rects = previous_rects.into_iter()
+                .filter_map(|(id, rect)| (!doc.animation_overrides.contains_key(&id)).then_some(rect));
+            if self.invalidate_paint_rects(finished_rects) {
+                self.invalidate_paint_only_display_list();
+                needs_redraw = true;
+            }
             let css_animations_running = doc.needs_animation_frame;
-            let svg_animations_running = crate::svg::tick_svg_animations(&mut doc.root, now);
+            let (svg_animations_running, svg_damage) =
+                crate::svg::animation::tick_svg_animations_with_damage(&mut doc.root, now);
+            if !svg_damage.is_empty() && self.invalidate_paint_rects(svg_damage) {
+                self.invalidate_paint_only_display_list();
+                needs_redraw = true;
+            }
             let media_running = doc.tick_media(now);
             if svg_animations_running {
                 doc.needs_animation_frame = true;
@@ -698,7 +754,7 @@ impl Renderer {
                 // surface and repaint only the animated boxes.
                 let viewport = Rect::new(doc.scroll_x, doc.scroll_y, viewport_w, viewport_h);
                 let visible_animation_rects =
-                    animation_override_rects_with_ids(&doc.root, &doc.animation_overrides)
+                    animation_override_rects_with_ids(&doc.root, &doc.animation_overrides, viewport_w, viewport_h)
                         .into_iter()
                         .filter(|(_, rect)| rect_intersects(*rect, viewport))
                         .collect::<Vec<_>>();
@@ -1420,7 +1476,7 @@ impl Renderer {
         let visible_animation_ids = if doc.animation_overrides.is_empty() {
             std::collections::HashSet::new()
         } else {
-            animation_override_rects_with_ids(&doc.root, &doc.animation_overrides)
+            animation_override_rects_with_ids(&doc.root, &doc.animation_overrides, view_w, view_h)
                 .into_iter()
                 .filter(|(_, rect)| rect_intersects(*rect, viewport))
                 .map(|(id, _)| id)
@@ -1479,7 +1535,13 @@ impl Renderer {
             && !scroll_outside_cached_band
             && self.cached_display_list.is_some();
 
-        let dirty_paint_rects = self.dirty_paint_rects.clone();
+        let mut dirty_paint_rects = self.dirty_paint_rects.clone();
+        if !dirty_paint_rects.is_empty() {
+            // The retained surface may contain an earlier animation sample.
+            // Erase its footprint as well as painting the new position.
+            dirty_paint_rects.extend(self.cached_surface_animation_rects.iter().copied());
+            dirty_paint_rects = coalesce_dirty_rects(dirty_paint_rects, viewport);
+        }
         if self.use_tiles {
             for rect in &dirty_paint_rects {
                 self.tile_manager.invalidate_rect(rect);
@@ -1635,16 +1697,12 @@ impl Renderer {
                 let replay_start = std::time::Instant::now();
                 pixmap.data_mut().copy_from_slice(surface.data());
                 let tile_scale = scale * zoom;
-                let mut dirty_union: Option<Rect> = None;
-                for rect in &dirty_paint_rects {
-                    dirty_union = Some(match dirty_union {
-                        Some(existing) => rect_union(existing, *rect),
-                        None => *rect,
-                    });
-                }
-                if let Some(union) = dirty_union {
-                    let clip_top = (union.y - 64.0).max(0.0);
-                    let clip_bottom = (union.bottom() + 64.0).min(doc_h.max(view_h));
+                if !dirty_paint_rects.is_empty() {
+                    // Refresh the retained command band as well as its damaged
+                    // pixels. A transient list leaves old opacity/image commands
+                    // in the cache, resurrecting them on the next tile replay.
+                    let clip_top = self.cached_paint_top;
+                    let clip_bottom = self.cached_paint_bottom;
                     let animation_restore = if doc.animation_overrides.is_empty() {
                         Vec::new()
                     } else {
@@ -1691,6 +1749,16 @@ impl Renderer {
                             );
                         }
                     }
+                    let mut segments = self.use_tiles.then(|| {
+                        compositor::PaintSegments::from_display_list(&paint_list, view_w, doc_h)
+                    }).flatten();
+                    if let (Some(new), Some(previous)) =
+                        (&mut segments, self.paint_segments.take())
+                    {
+                        new.retain_unchanged_rasters(previous);
+                    }
+                    self.paint_segments = segments;
+                    self.cached_display_list = Some(paint_list);
                     replay_ms = replay_start.elapsed().as_millis();
                     used_dirty_surface = true;
                     page_content_repainted = true;
@@ -2132,6 +2200,9 @@ impl Renderer {
         if should_cache_content_surface {
             let cache_start = crate::profile::is_enabled().then(std::time::Instant::now);
             self.cache_content_surface(pixmap);
+            self.cached_surface_animation_rects = animation_override_rects_with_ids(
+                &doc.root, &doc.animation_overrides, view_w, view_h,
+            ).into_iter().map(|(_, rect)| rect).collect();
             if let Some(started) = cache_start {
                 crate::profile::record(crate::profile::Phase::ContentCache, started.elapsed());
             }

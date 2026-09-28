@@ -673,11 +673,25 @@ fn interpolate_numeric(from: &str, to: &str, t: f32) -> String {
 
     let mut result = from.to_string();
     // Replace in reverse order so byte offsets remain valid.
-    for ((start, end, fv), (_, to_end, tv)) in from_nums.iter().zip(to_nums.iter()).rev() {
+    for ((start, end, fv), (to_start, to_end, tv)) in from_nums.iter().zip(to_nums.iter()).rev() {
         let v = lerp(*fv, *tv, t);
         let mut s = format_css_number(v);
         let from_unit = numeric_unit_after(from, *end);
         let to_unit = numeric_unit_after(to, *to_end);
+        if !from_unit.is_empty() && !to_unit.is_empty() && from_unit != to_unit {
+            let from_length = &from[*start..*end + from_unit.len()];
+            let to_length = &to[*to_start..*to_end + to_unit.len()];
+            if crate::css::parse_length_checked(from_length).is_some()
+                && crate::css::parse_length_checked(to_length).is_some()
+            {
+                // Preserve percentage/font/viewport dependencies until used
+                // value resolution, instead of adding incompatible magnitudes.
+                let value = format!("calc({from_length} * {} + {to_length} * {})",
+                    format_css_number(1.0 - t), format_css_number(t));
+                result.replace_range(*start..*end + from_unit.len(), &value);
+                continue;
+            }
+        }
         if from_unit.is_empty() && !to_unit.is_empty() && fv.abs() < 1e-6 {
             s.push_str(to_unit);
         }

@@ -405,9 +405,26 @@ impl EngineFrame {
         // 3. Check for running animations
         let mut animation_needs_layout = false;
         if self.doc.needs_animation_frame {
+            let previous_rects = crate::renderer::animation_override_rects_with_ids(
+                &self.doc.root, &self.doc.animation_overrides, self.viewport_w, self.viewport_h);
             self.doc.tick_animations(now);
+            // A removed override still needs one paint to restore the base
+            // style. Current animation targets alone omit this final frame.
+            let finished_rects = previous_rects.into_iter()
+                .filter_map(|(id, rect)| (!self.doc.animation_overrides.contains_key(&id)).then_some(rect))
+                .collect::<Vec<_>>();
+            if !finished_rects.is_empty() {
+                update.paint_rects.extend(finished_rects);
+                update.paint_only_display_list_rebuild = true;
+                self.needs_paint = true;
+            }
             let css_animations_running = self.doc.needs_animation_frame;
-            let svg_animations_running = crate::svg::tick_svg_animations(&mut self.doc.root, now);
+            let (svg_animations_running, svg_damage) =
+                crate::svg::animation::tick_svg_animations_with_damage(&mut self.doc.root, now);
+            let svg_changed = !svg_damage.is_empty();
+            if svg_changed {
+                update.paint_rects.extend(svg_damage);
+            }
             let media_running = self.doc.tick_media(now);
             if svg_animations_running {
                 self.doc.needs_animation_frame = true;
@@ -423,18 +440,16 @@ impl EngineFrame {
                 self.needs_paint = true;
                 update.rebuild_display_list = true;
             } else if !self.doc.animation_overrides.is_empty()
-                || svg_animations_running
+                || svg_changed
                 || media_running
             {
                 self.needs_paint = true;
-                if svg_animations_running
+                if svg_changed
                     || media_running
                     || !animation_overrides_are_transform_only(&self.doc.animation_overrides)
                 {
                     if !animation_needs_layout
-                        && !svg_animations_running
                         && !media_running
-                        && !animation_overrides_are_transform_only(&self.doc.animation_overrides)
                     {
                         update.paint_only_display_list_rebuild = true;
                     } else {
@@ -2553,6 +2568,27 @@ mod tests {
     }
 
     #[test]
+    fn finished_css_animation_repaints_its_base_style_once() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(br#"<style>@keyframes appear {from {opacity:0} to {opacity:1}} #hero {width:80px;height:40px;animation:appear 100s}</style><div id="hero">Hello</div>"#);
+        frame.finish_loading();
+        assert!(frame.update_frame());
+        let hero = frame.doc.get_element_by_id("hero").unwrap();
+        frame.doc.tick_animations(std::time::Instant::now());
+        assert!(frame.doc.animation_overrides.contains_key(&hero));
+        for animation in &mut frame.doc.active_animations {
+            animation.start_time = std::time::Instant::now() - std::time::Duration::from_secs(101);
+        }
+        let update = frame.update_frame_detailed();
+        assert!(update.changed);
+        assert!(update.paint_only_display_list_rebuild);
+        assert!(!update.paint_rects.is_empty());
+        assert!(!frame.doc.animation_overrides.contains_key(&hero));
+        assert!(!frame.update_frame_detailed().changed);
+    }
+
+    #[test]
     fn streamed_visible_fixed_size_image_rebuilds_current_paint_band() {
         let mut frame = EngineFrame::empty(320.0, 240.0);
         frame.start_streaming("https://example.test/");
@@ -2599,6 +2635,7 @@ mod tests {
         frame.finish_loading();
         assert!(frame.update_frame(), "initial streamed SVG should paint");
         frame.doc.needs_animation_frame = true;
+        std::thread::sleep(std::time::Duration::from_millis(20));
 
         let update = frame.update_frame_detailed();
         assert!(
@@ -2606,9 +2643,12 @@ mod tests {
             "streamed SVG animation should request a frame"
         );
         assert!(
-            update.rebuild_display_list,
-            "SVG animation samples change rasterized paint commands"
+            !update.rebuild_display_list && update.paint_only_display_list_rebuild,
+            "SVG animation should rebuild paint only in its damaged box"
         );
+        assert_eq!(update.paint_rects.len(), 1);
+        assert_eq!(update.paint_rects[0].w, 20.0);
+        assert_eq!(update.paint_rects[0].h, 20.0);
         assert!(
             frame.doc.needs_animation_frame,
             "running SVG animation should keep the browser frame clock alive"

@@ -1451,7 +1451,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                     .enumerate()
                     .any(|(side, width)| *width > 0.0 && border_colors[side].a > 0)
                 {
-                    if node.layout.inline_client_rects.is_empty() {
+                    if eff_style.display != Display::Inline || node.layout.inline_client_rects.is_empty() {
                         list.push(PaintCmd::Border {
                             rect: border_rect,
                             widths: border_widths,
@@ -1603,6 +1603,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 collect_explicit_z_descendants(
                     child,
                     child_ctx.sticky_containing_block,
+                    &mut Vec::new(),
                     &mut negative_z,
                 );
             }
@@ -1610,9 +1611,9 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             negative_z.sort_by_key(|(c, _)| c.style.z_index);
             let mut z_ctx = child_ctx;
             z_ctx.suppress_deferred_z_descendants = false;
-            for (child, containing_block) in negative_z {
-                z_ctx.sticky_containing_block = containing_block;
-                build_positioned_box(child, list, &z_ctx);
+            for (child, ancestry) in negative_z {
+                z_ctx.sticky_containing_block = ancestry.containing_block;
+                build_deferred_positioned_box(child, &ancestry.nodes, list, &z_ctx);
             }
         }
 
@@ -1906,6 +1907,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                     collect_explicit_z_descendants(
                         child,
                         child_ctx.sticky_containing_block,
+                        &mut Vec::new(),
                         &mut deferred_z,
                     );
                 }
@@ -1949,9 +1951,9 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
             });
             let mut z_ctx = child_ctx;
             z_ctx.suppress_deferred_z_descendants = false;
-            for (child, containing_block) in deferred_z {
-                z_ctx.sticky_containing_block = containing_block;
-                build_positioned_box(child, list, &z_ctx);
+            for (child, ancestry) in deferred_z {
+                z_ctx.sticky_containing_block = ancestry.containing_block;
+                build_deferred_positioned_box(child, &ancestry.nodes, list, &z_ctx);
             }
         }
     }
@@ -2482,11 +2484,10 @@ fn build_inline_text(
                     .max(run_font_px * 1.2)
             };
 
-            // Use char_x for exact x position if available.
-            // For RTL chunks, char_x byte offsets don't correspond to visual
-            // position (logical byte 0 of Arabic maps to the rightmost glyph).
-            // Use cursor_x instead, which advances in visual order.
-            let char_x_start_end = if !chunk.rtl && !line.char_x.is_empty() {
+            // A bidi boundary has two visual caret positions but char_x stores
+            // only one per logical offset. Paint bidi chunks from their visual
+            // segments, including LTR continuations after an RTL segment.
+            let char_x_start_end = if !use_bidi_visual_segments && !line.char_x.is_empty() {
                 let start_off = s.saturating_sub(line_start);
                 let end_off = e.saturating_sub(line_start);
                 if start_off < line.char_x.len() && end_off < line.char_x.len() {
@@ -2520,7 +2521,7 @@ fn build_inline_text(
             ) + run_letter_spc * draw_text.chars().count() as f32
                 + run_word_spc * draw_text.chars().filter(|&c| c == ' ').count() as f32;
 
-            let layout_advance = if !line.char_x.is_empty() {
+            let layout_advance = if !use_bidi_visual_segments && !line.char_x.is_empty() {
                 let start_off = s.saturating_sub(line_start);
                 let end_off = e.saturating_sub(line_start);
                 if start_off < line.char_x.len() && end_off < line.char_x.len() {
@@ -4468,16 +4469,68 @@ fn sticky_containing_block_for_children(node: &WebCore, inherited: Option<Rect>)
     Some(rect)
 }
 
+struct PositionedAncestry<'a> {
+    containing_block: Option<Rect>,
+    nodes: Vec<&'a WebCore>,
+}
+
+fn build_deferred_positioned_box(
+    node: &WebCore,
+    ancestors: &[&WebCore],
+    list: &mut DisplayList,
+    ctx: &BuildContext<'_>,
+) {
+    // Static ancestors skipped for z-order still scroll and clip in-flow
+    // positioned descendants. Absolute/fixed boxes retain their containing
+    // block's context rather than acquiring intermediate static clips.
+    if matches!(node.style.position, Position::Absolute | Position::Fixed) {
+        build_positioned_box(node, list, ctx);
+        return;
+    }
+    let mut local = *ctx;
+    let mut clips = 0;
+    for ancestor in ancestors {
+        if ancestor.style.display == Display::Contents { continue; }
+        let style = &ancestor.style;
+        let pr = ancestor.layout.padding_rect;
+        let scrollport = Rect::new(pr.x - local.scroll_x, pr.y - local.scroll_y, pr.w, pr.h);
+        if is_scroll_container(style) {
+            local.sticky_scroll_container = Some(StickyScrollContainer { scrollport });
+        }
+        if is_scroll_container(style) || style.contain_paint
+            || matches!(style.overflow_x, Overflow::Clip)
+            || matches!(style.overflow_y, Overflow::Clip)
+        {
+            let font = style.font_size_px(local.transform_ctx.root_font_px, local.transform_ctx.root_font_px);
+            let margin = resolve_overflow_clip_margin(style, font, pr.w, local.transform_ctx.root_font_px);
+            let rect = Rect::new(scrollport.x - margin, scrollport.y - margin,
+                scrollport.w + margin * 2.0, scrollport.h + margin * 2.0);
+            let (radius, radius_y) = resolved_border_radii_for_node(ancestor, local.transform_ctx.root_font_px);
+            list.push(PaintCmd::PushClip { rect, radius, radius_y });
+            clips += 1;
+            let x = local.clip.x.max(rect.x);
+            let y = local.clip.y.max(rect.y);
+            local.clip = Rect::new(x, y, (local.clip.right().min(rect.right()) - x).max(0.0),
+                (local.clip.bottom().min(rect.bottom()) - y).max(0.0));
+        }
+        local.scroll_x += ancestor.layout.scroll_left;
+        local.scroll_y += ancestor.layout.scroll_top;
+    }
+    build_positioned_box(node, list, &local);
+    for _ in 0..clips { list.push(PaintCmd::PopClip); }
+}
+
 fn collect_explicit_z_descendants<'a>(
     node: &'a WebCore,
     containing_block: Option<Rect>,
-    out: &mut Vec<(&'a WebCore, Option<Rect>)>,
+    ancestors: &mut Vec<&'a WebCore>,
+    out: &mut Vec<(&'a WebCore, PositionedAncestry<'a>)>,
 ) {
     if matches!(node.style.display, Display::None) {
         return;
     }
     if is_explicit_z_positioned(node) {
-        out.push((node, containing_block));
+        out.push((node, PositionedAncestry { containing_block, nodes: ancestors.clone() }));
         return;
     }
     if creates_stacking_context(node) {
@@ -4487,9 +4540,11 @@ fn collect_explicit_z_descendants<'a>(
         return;
     }
     let child_containing_block = sticky_containing_block_for_children(node, containing_block);
+    ancestors.push(node);
     for child in node.effective_children() {
-        collect_explicit_z_descendants(child, child_containing_block, out);
+        collect_explicit_z_descendants(child, child_containing_block, ancestors, out);
     }
+    ancestors.pop();
 }
 
 /// The concrete object rect for a replaced element (css-images-3 §5.5):

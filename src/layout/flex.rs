@@ -1525,8 +1525,12 @@ pub fn layout_flex(
                     // `auto` (Flexbox §5.2 / §9.4). This stretched regardless,
                     // so `<i style="height:20px">` in a 60px-tall flex row came
                     // out 60 tall — the declared height was simply discarded.
-                    let cross_is_auto =
-                        child.style.height.is_auto() && child.style.height.intrinsic().is_none();
+                    // An unresolved percentage has an automatic used height,
+                    // so it participates in cross-axis stretching too.
+                    let cross_is_auto = (child.style.height.is_auto()
+                        || (child.style.height.has_percentage()
+                            && item_available_height.is_none()))
+                        && child.style.height.intrinsic().is_none();
                     if cross_is_auto
                         && target_h > 0.0
                         && (target_h - child.layout.content_rect.h).abs() > 0.5

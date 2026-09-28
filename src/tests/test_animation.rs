@@ -461,6 +461,17 @@ fn keyframe_timing_function_is_not_an_animated_property() {
     );
 }
 
+#[test]
+fn prefixed_keyframe_timing_is_metadata_not_layout_animation() {
+    let frames = extract_keyframes("@keyframes orbit { 0% { -webkit-animation-timing-function:ease-out; transform:rotate(0deg); opacity:0 } 100% { transform:rotate(360deg); opacity:1 } }");
+    let stops = frames.get("orbit").unwrap();
+    assert_eq!(stops[0].timing_fn, Some(EasingFn::EaseOut));
+    for stop in stops {
+        assert!(!crate::types::animation_runtime::animation_properties_affect_layout(&stop.properties));
+        assert!(stop.properties.iter().all(|(name, _)| !name.contains("timing-function")));
+    }
+}
+
 // ── Value interpolation ───────────────────────────────────────────────────────
 
 #[test]
@@ -527,6 +538,23 @@ fn interpolate_value_snaps_on_mismatch() {
     assert_eq!(result, "red");
     let result2 = interpolate_value("red", "blue", 0.7);
     assert_eq!(result2, "blue");
+}
+
+#[test]
+fn mixed_unit_translation_interpolation_preserves_reference_context() {
+    use crate::types::TransformOp;
+    for (from, to, font, reference, expected) in [
+        ("1em", "20px", 30.0, 200.0, 25.0),
+        ("10px", "50%", 30.0, 200.0, 55.0),
+        ("10px", "50%", 30.0, 400.0, 105.0),
+        ("1in", "48px", 30.0, 200.0, 72.0),
+        ("-1em", "20px", 30.0, 200.0, -5.0),
+    ] {
+        let value = interpolate_value(&format!("translateX({from})"), &format!("translateX({to})"), 0.5);
+        let transform = crate::css::parse_css_transform_checked(&value).expect(&value);
+        let TransformOp::TranslateX(length) = &transform.ops[0] else { panic!("{value}") };
+        assert!((length.resolve(font, reference, font) - expected).abs() < 0.001, "{value}");
+    }
 }
 
 #[test]
@@ -1957,6 +1985,63 @@ fn sync_transitions_dispatches_transitioncancel_when_replacing_running_transitio
             .map(|state| state.to_value.as_str()),
         Some("1")
     );
+}
+
+#[test]
+fn transition_reversal_uses_eased_progress_and_scaled_negative_delay() {
+    for delay in [-100.0, 100.0] {
+        let mut doc = parse_html("<div id='box'></div>");
+        let id = doc.get_element_by_id("box").unwrap();
+        let style = std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style);
+        style.opacity = 0.0;
+        style.rare_mut().transitions.push(ParsedTransition {
+            property: "opacity".into(), duration_ms: 1000.0, delay_ms: delay,
+            timing_fn: EasingFn::Linear, allow_discrete: false,
+        });
+        let start = Instant::now();
+        // x(t) = t and y(t) = t^3: halfway in time is 1/8 in value.
+        doc.transition_states.insert(id, vec![TransitionState {
+            property: "opacity".into(), from_value: "0".into(), to_value: "1".into(),
+            reversing_adjusted_start_value: "0".into(), reversing_shortening_factor: 1.0,
+            start_time: start, duration_ms: 1000.0, delay_ms: 100.0,
+            timing_fn: EasingFn::CubicBezier(1.0 / 3.0, 0.0, 2.0 / 3.0, 0.0),
+            allow_discrete: false,
+        }]);
+        doc.animation_overrides.insert(id, vec![("opacity".into(), "0.125".into())]);
+        doc.prev_styles.insert(id, [("opacity".into(), "1".into())].into());
+        doc.sync_transitions(start + Duration::from_millis(600), true);
+        let state = &doc.transition_states[&id][0];
+        assert!((state.duration_ms - 125.0).abs() < 0.1, "{state:?}");
+        assert_eq!(state.reversing_adjusted_start_value, "1");
+        let expected_delay = if delay < 0.0 { -12.5 } else { 100.0 };
+        assert!((state.delay_ms - expected_delay).abs() < 0.1);
+    }
+}
+
+#[test]
+fn transition_repeated_reversal_keeps_logical_endpoints() {
+    let mut doc = parse_html("<div id='box'></div>");
+    let id = doc.get_element_by_id("box").unwrap();
+    let style = std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style);
+    style.opacity = 1.0;
+    style.rare_mut().transitions.push(ParsedTransition {
+        property: "opacity".into(), duration_ms: 1000.0, delay_ms: 0.0,
+        timing_fn: EasingFn::Linear, allow_discrete: false,
+    });
+    let start = Instant::now();
+    doc.transition_states.insert(id, vec![TransitionState {
+        property: "opacity".into(), from_value: "0.2".into(), to_value: "0".into(),
+        reversing_adjusted_start_value: "1".into(), reversing_shortening_factor: 0.2,
+        start_time: start, duration_ms: 200.0, delay_ms: 0.0,
+        timing_fn: EasingFn::Linear, allow_discrete: false,
+    }]);
+    doc.animation_overrides.insert(id, vec![("opacity".into(), "0.1".into())]);
+    doc.prev_styles.insert(id, [("opacity".into(), "0".into())].into());
+    doc.sync_transitions(start + Duration::from_millis(100), true);
+    let state = &doc.transition_states[&id][0];
+    assert!((state.duration_ms - 900.0).abs() < 0.1, "{state:?}");
+    assert_eq!(state.reversing_adjusted_start_value, "0");
+    assert_eq!(state.from_value, "0.1");
 }
 
 #[test]

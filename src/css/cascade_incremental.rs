@@ -421,6 +421,9 @@ fn apply_cascade_incremental_walk(
     }
 
     if node.cascade_dirty {
+        // Only this subtree will be recascaded. Unwrapping unrelated layout
+        // fragments makes every hover invalidate the rest of the document.
+        crate::layout::block::unwrap_all_anonymous_blocks(node);
         // Full re-cascade of this node (delegates to the existing cascade logic)
         // apply_cascade_inner handles this node AND recurses into all children,
         // which is correct because when a parent's hover state changes,

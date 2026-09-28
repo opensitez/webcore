@@ -228,7 +228,9 @@ pub fn layout_inline_block(
             engine.layout_box(&mut children[ci], &child_constraints);
             // Shrink-to-fit for auto-width inline-block (CSS §10.3.9):
             // InlineBlock with width:auto should size to content, not expand to fill container.
-            if children[ci].style.width.is_auto() {
+            if children[ci].style.width.is_auto()
+                && !has_percentage_width_table_child(&children[ci])
+            {
                 // Use line.width (raw text content width) not line.x + line.width - origin,
                 // because line.x includes the text-align centering offset which inflates
                 // the result when text-align:center is inherited.
@@ -1336,8 +1338,13 @@ pub fn layout_inline_block(
         cursor_y += font_px * 1.2;
     }
 
-    // Trailing empty line after <br> (for caret positioning after Enter)
-    if ends_with_break {
+    // A final <br> terminates its line; it does not create another ordinary
+    // line box. Retain the editing host's caret placeholder only for editing.
+    let editing_host = node.attributes.get("contenteditable").is_some_and(|value| {
+        value.is_empty() || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("plaintext-only")
+    });
+    if ends_with_break && editing_host {
         line_cache.push(LayoutLine {
             text_start: text_offset,
             text_length: 0,
@@ -3432,6 +3439,21 @@ fn font_family_cache_rechecks_reused_string_storage() {
     assert!(matches!(resolve_css_family(&fs, &family), ResolvedFamily::Generic("serif")));
 }
 
+#[cfg(test)]
+#[test]
+fn unavailable_font_family_uses_default_serif_unless_stack_specifies_fallback() {
+    let fs = cosmic_text::FontSystem::new();
+    let missing = "webcore-nonexistent-font-family-314159";
+    assert!(matches!(
+        resolve_css_family(&fs, missing),
+        ResolvedFamily::Generic("serif")
+    ));
+    assert!(matches!(
+        resolve_css_family(&fs, &format!("{missing}, sans-serif")),
+        ResolvedFamily::Generic("sans-serif")
+    ));
+}
+
 pub(crate) fn clear_font_family_caches() {
     FAMILY_CACHE.with(|c| c.borrow_mut().clear());
     FRONT.with(|f| f.borrow_mut().clear());
@@ -3441,6 +3463,68 @@ pub(crate) fn clear_font_family_caches() {
         a.0 = 0;
         a.1.clear();
     });
+}
+
+/// Preserve the CSS family order for missing glyphs instead of handing the
+/// entire run to system fallback after the first installed family.
+pub(crate) fn css_font_spans<'a>(
+    fs: &cosmic_text::FontSystem,
+    text: &'a str,
+    families: &str,
+    attrs: &Attrs<'_>,
+) -> Vec<(&'a str, cosmic_text::AttrsOwned)> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let clusters: Vec<_> = text.grapheme_indices(true).collect();
+    let mut chosen = vec![None; clusters.len()];
+    let mut candidates = Vec::new();
+    for part in families.split(',') {
+        let family = css_family_to_cosmic(part.trim());
+        let family = match family {
+            Family::Name(name) => {
+                let Some(canonical) = fs.db().faces().flat_map(|face| face.families.iter())
+                    .find(|(actual, _)| actual.eq_ignore_ascii_case(name)) else { continue };
+                Family::Name(&canonical.0)
+            }
+            other => other,
+        };
+        let Some(id) = fs.db().query(&fontdb::Query {
+            families: &[family], weight: attrs.weight,
+            stretch: attrs.stretch, style: attrs.style,
+        }) else { continue };
+        let mut candidate = attrs.clone().family(family);
+        fs.db().with_face_data(id, |data, index| {
+            let Some(font) = swash::FontRef::from_index(data, index as usize) else { return };
+            // Static faces must use the matched weight: otherwise cosmic-text's
+            // exact-weight fallback can skip the CSS-selected family entirely.
+            if font.variations().next().is_none() {
+                if let Some(face) = fs.db().face(id) {
+                    candidate = candidate.clone().weight(face.weight);
+                }
+            }
+            let charmap = font.charmap();
+            for (i, (_, cluster)) in clusters.iter().enumerate() {
+                if chosen[i].is_none() && cluster.chars().all(|c|
+                    c.is_control() || matches!(c, '\u{200c}' | '\u{200d}' | '\u{fe0e}' | '\u{fe0f}')
+                    || charmap.map(c) != 0)
+                {
+                    chosen[i] = Some(candidates.len());
+                }
+            }
+        });
+        candidates.push(cosmic_text::AttrsOwned::new(&candidate));
+        if chosen.iter().all(Option::is_some) { break; }
+    }
+    let mut spans = Vec::new();
+    let mut start = 0;
+    while start < clusters.len() {
+        let mut end = start + 1;
+        while end < clusters.len() && chosen[end] == chosen[start] { end += 1; }
+        let end_byte = clusters.get(end).map_or(text.len(), |(offset, _)| *offset);
+        let selected = chosen[start].map_or_else(|| cosmic_text::AttrsOwned::new(attrs), |i| candidates[i].clone());
+        spans.push((&text[clusters[start].0..end_byte], selected));
+        start = end;
+    }
+    spans
 }
 
 fn resolve_css_family_slow(fs: &cosmic_text::FontSystem, raw: &str) -> ResolvedFamily {
@@ -3506,7 +3590,7 @@ fn resolve_css_family_slow(fs: &cosmic_text::FontSystem, raw: &str) -> ResolvedF
             }
         }
     }
-    let chosen = chosen.unwrap_or(ResolvedFamily::Generic("sans-serif"));
+    let chosen = chosen.unwrap_or(ResolvedFamily::Generic("serif"));
     FAMILY_CACHE.with(|c| c.borrow_mut().insert(Box::from(raw), chosen.clone()));
     FRONT.with(|f| {
         let mut f = f.borrow_mut();
@@ -3705,7 +3789,8 @@ pub fn measure_text_width_fs_attrs(
             return 0.0;
         }
         let mut buffer = Buffer::new(fs, metrics);
-        buffer.set_text(fs, sample, attrs, Shaping::Advanced, None);
+        let spans = css_font_spans(fs, sample, font_family, attrs);
+        buffer.set_rich_text(fs, spans.iter().map(|(s, a)| (*s, a.as_attrs())), attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(fs, false);
 
         let mut max_w = 0.0f32;
@@ -4156,7 +4241,8 @@ pub fn fill_char_x_for_line(
             .style(ct_s)
             .stretch(ct_stretch)
             .family(family);
-        buf.set_text(fs, seg_text, &attrs, Shaping::Advanced, None);
+        let spans = css_font_spans(fs, seg_text, &run.style.font_family, &attrs);
+        buf.set_rich_text(fs, spans.iter().map(|(s, a)| (*s, a.as_attrs())), &attrs, Shaping::Advanced, None);
         buf.shape_until_scroll(fs, false);
 
         let mut seg_advance = 0.0f32;
@@ -4436,6 +4522,16 @@ fn is_atomic_inline_replaced(node: &WebCore) -> bool {
 /// elements (e.g. `<input>` inside `<label>`).  This ensures that when
 /// `collect_items` encounters an `InlineBlock`, its `margin_rect` is non-zero
 /// so the item gets the correct advance width and ascent.
+pub(super) fn has_percentage_width_table_child(node: &WebCore) -> bool {
+    node.effective_children().iter().any(|child| {
+        !matches!(child.style.display, Display::None)
+            && !matches!(child.style.position, Position::Absolute | Position::Fixed)
+            && matches!(child.style.float, Float::None)
+            && matches!(child.style.display, Display::Table)
+            && child.style.width.has_percentage()
+    })
+}
+
 fn prelayout_nested_inline_blocks(
     engine: &LayoutEngine,
     node: &mut WebCore,
@@ -4516,7 +4612,9 @@ fn prelayout_nested_inline_blocks(
                     None => Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
                 };
                 engine.layout_box(&mut children[ci], &child_constraints);
-                if children[ci].style.width.is_auto() {
+                if children[ci].style.width.is_auto()
+                    && !has_percentage_width_table_child(&children[ci])
+                {
                     let max_line_w = children[ci]
                         .layout
                         .line_cache

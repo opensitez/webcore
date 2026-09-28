@@ -103,6 +103,11 @@ fn blur_pixmap_full(pixmap: &mut Pixmap, radius: i32) {
     // pass, and three passes of that is visible banding on a soft shadow.
     let mut channels = to_planes(pixmap);
     channels.par_iter_mut().for_each(|plane| {
+        // A zero channel remains zero under convolution. Black shadows only
+        // need the alpha plane, not three scratch buffers and eighteen RGB passes.
+        if plane.iter().all(|&value| value == 0) {
+            return;
+        }
         let mut scratch = vec![0u32; w * h];
         for _ in 0..3 {
             box_blur_horizontal(plane, &mut scratch, w, h, radius);
@@ -298,6 +303,28 @@ pub fn shadow_layer(source: &Pixmap, color: Color, std_dev: f32) -> Option<Pixma
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_channel_blur_matches_unconditional_convolution() {
+        for color in [Color::rgba(0, 0, 0, 140), Color::rgba(255, 0, 0, 190), Color::rgba(0, 80, 210, 255)] {
+            let mut actual = Pixmap::new(41, 41).unwrap();
+            let mut paint = tiny_skia::Paint::default();
+            paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+            actual.fill_rect(tiny_skia::Rect::from_xywh(10.0, 10.0, 20.0, 20.0).unwrap(), &paint, tiny_skia::Transform::identity(), None);
+            let mut expected = actual.clone();
+            let mut channels = to_planes(&expected);
+            for plane in &mut channels {
+                let mut scratch = vec![0; 41 * 41];
+                for _ in 0..3 {
+                    box_blur_horizontal(plane, &mut scratch, 41, 41, 3);
+                    box_blur_vertical(&mut scratch, plane, 41, 41, 3);
+                }
+            }
+            from_planes(&mut expected, &channels);
+            blur_pixmap_full(&mut actual, 3);
+            assert_eq!(actual.data(), expected.data());
+        }
+    }
 
     fn opaque_square() -> Pixmap {
         let mut p = Pixmap::new(41, 41).expect("a pixmap");

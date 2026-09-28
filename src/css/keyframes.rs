@@ -113,11 +113,12 @@ fn parse_keyframe_stops(block: &str) -> Vec<KeyframeStop> {
 
         let (props, _) = parse_declarations_important(decl_block);
         let timing_fn = props.get("animation-timing-function")
+            .or_else(|| props.get("-webkit-animation-timing-function"))
             .and_then(|value| super::animation::parse_easing_checked(value));
         let prop_vec: Vec<(String, String)> = props
             .iter()
             .filter_map(|(k, v)| {
-                if k == "animation-timing-function" {
+                if matches!(k.as_str(), "animation-timing-function" | "-webkit-animation-timing-function") {
                     return None;
                 }
                 // Normalize color values to rgba() so interpolation works.

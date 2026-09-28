@@ -63,6 +63,7 @@ pub struct BrowserView {
     title: String,
     loading: bool,
     scroll_priority_frame: bool,
+    pointer_position: (f32, f32),
     next_frame_deadline: Option<Instant>,
     width: f32,
     height: f32,
@@ -450,6 +451,7 @@ impl BrowserView {
             title: String::new(),
             loading: false,
             scroll_priority_frame: false,
+            pointer_position: (0.0, 0.0),
             next_frame_deadline: None,
             width,
             height,
@@ -1255,6 +1257,7 @@ impl BrowserView {
     }
 
     pub fn handle_mouse_move(&mut self, x: f32, y: f32) -> bool {
+        self.pointer_position = (x, y);
         let width = self.width;
         let height = self.height;
         let (redraw, needs_style) = {
@@ -1304,6 +1307,7 @@ impl BrowserView {
     }
 
     pub fn handle_mouse_button(&mut self, kind: HtmlEventType, x: f32, y: f32, button: u8) -> bool {
+        self.pointer_position = (x, y);
         let width = self.width;
         let height = self.height;
         let Some(doc) = self.active_doc_mut() else {
@@ -1343,26 +1347,31 @@ impl BrowserView {
     }
 
     pub fn handle_wheel(&mut self, dx: f32, dy: f32) -> bool {
-        let height = self.height;
+        let pointer = self.pointer_position;
         let Some(doc) = self.active_doc_mut() else {
             return false;
         };
+        let doc_point = (pointer.0 + doc.scroll_x, pointer.1 + doc.scroll_y);
         let mut wheel = crate::dom::HtmlEvent::new(HtmlEventType::Wheel);
-        wheel.client_pos = (0.0, 0.0);
-        wheel.doc_pos = (doc.scroll_x, doc.scroll_y);
+        wheel.client_pos = pointer;
+        wheel.doc_pos = doc_point;
         wheel.delta_x = dx;
         wheel.delta_y = dy;
         wheel.target = doc.hovered_box;
-        let mut changed = doc.dispatch_input_event(wheel).0;
-        let max_y = (doc.cached_scroll_height() - height).max(0.0);
+        let (mut changed, wheel) = doc.dispatch_input_event(wheel);
         let old = (doc.scroll_x, doc.scroll_y);
-        doc.scroll_x = (doc.scroll_x + dx).max(0.0);
-        doc.scroll_y = (doc.scroll_y + dy).clamp(0.0, max_y);
-        if (doc.scroll_y - old.1).abs() >= 0.5 || (doc.scroll_x - old.0).abs() >= 0.5 {
+        let scrolled = !wheel.default_prevented && doc.process_wheel_event_xy(doc_point, -dx, -dy);
+        let inner_scroll = scrolled && (doc.scroll_x, doc.scroll_y) == old;
+        if scrolled {
             crate::profile::mark_scroll_input();
             self.scroll_priority_frame = true;
             self.wake();
             changed = true;
+        }
+        if inner_scroll {
+            // Inner scroll offsets are recorded in paint commands, unlike the
+            // viewport offset. Re-record, retaining unchanged paint segments.
+            self.renderer.invalidate_display_list();
         }
         if changed {
             if self
@@ -2111,6 +2120,33 @@ mod tests {
     }
 
     #[test]
+    fn browser_view_wheel_scrolls_inner_container_without_layout() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+        view.feed_streaming_chunk(base, "<!doctype html><body style='margin:0'><div id='mail' style='width:100px;height:100px;overflow:auto'><div style='position:relative;height:100px;background:red'></div><div style='position:relative;height:100px;background:blue'></div></div></body>");
+        assert!(view.update_streamed_frame_before_paint());
+        let mut target = Pixmap::new(480, 320).unwrap();
+        view.paint_into(&mut target, 0, 0, 1.0);
+        assert_eq!(target.pixel(50, 50).unwrap().red(), 255);
+        let generation = view.document().unwrap().layout_generation;
+        view.handle_mouse_move(50.0, 50.0);
+        assert!(view.handle_wheel(0.0, 60.0));
+        let doc = view.document().unwrap();
+        let id = doc.get_element_by_id("mail").unwrap();
+        assert_eq!(doc.get_node(id).unwrap().layout.scroll_top, 60.0);
+        assert_eq!(doc.scroll_y, 0.0);
+        assert_eq!(doc.layout_generation, generation);
+        view.paint_into(&mut target, 0, 0, 1.0);
+        assert_eq!(target.pixel(50, 50).unwrap().blue(), 255);
+        let outside = target.pixel(50, 150).unwrap();
+        assert_eq!((outside.red(), outside.green(), outside.blue()), (255, 255, 255),
+            "deferred positioned rows must remain clipped to the scrollport");
+        assert_eq!(view.document().unwrap().layout_generation, generation);
+    }
+
+    #[test]
     fn browser_view_scroll_priority_defers_streamed_resource_update() {
         let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
         let base = "https://example.test/";
@@ -2220,10 +2256,13 @@ mod tests {
             "scroll-priority idle must present scroll before ingesting queued HTML"
         );
 
+        // Scroll priority lasts until presentation, not just one idle callback.
+        let mut target = Pixmap::new(480, 320).unwrap();
+        view.paint_into(&mut target, 0, 0, 1.0);
         assert!(view.drive_idle_for_test());
         assert!(
             view.streamed_html_len > before_len,
-            "the following idle turn should resume normal progressive HTML ingestion"
+            "the idle turn after presenting scroll must resume HTML ingestion"
         );
     }
 
@@ -2338,6 +2377,38 @@ mod tests {
             !needs_redraw,
             "the animation clock alone should not repaint a clean streamed frame"
         );
+    }
+
+    #[test]
+    fn streamed_svg_animation_repaints_only_its_box() {
+        let mut view = BrowserView::new(240.0, 160.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(240.0, 160.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+        view.feed_streaming_chunk(base, r#"<!doctype html><body style="margin:0">
+            <svg width="40" height="40"><rect width="40" height="40" fill="red">
+            <animate attributeName="fill" values="red;blue" dur="2s" repeatCount="indefinite"/>
+            </rect></svg><div style="height:80px;background:green">Static content</div></body>"#);
+        view.stream_frame.as_mut().unwrap().finish_loading();
+        assert!(view.update_streamed_frame_before_paint());
+        let mut target = Pixmap::new(240, 160).unwrap();
+        view.paint_into(&mut target, 0, 0, 1.0);
+        let before = target.data().to_vec();
+        fn advance(node: &mut crate::types::WebCore) {
+            if node.svg_animation_start_time.is_some() {
+                node.svg_animation_start_time = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+            }
+            for child in &mut node.children { advance(child); }
+        }
+        advance(&mut view.stream_frame.as_mut().unwrap().doc.root);
+        assert!(view.update_streamed_frame_before_paint());
+        assert!(view.renderer.paint_only_display_list_dirty_for_test());
+        assert_eq!(view.renderer.dirty_paint_rect_count_for_test(), 1);
+        view.paint_into(&mut target, 0, 0, 1.0);
+        let center = (20 * 240 + 20) * 4;
+        assert_ne!(&before[center..center + 4], &target.data()[center..center + 4]);
+        assert_eq!(&before[60 * 240 * 4..], &target.data()[60 * 240 * 4..],
+            "unchanged content below the animated SVG must retain its pixels");
     }
 
     #[test]
