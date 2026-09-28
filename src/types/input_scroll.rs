@@ -178,10 +178,16 @@ impl Document {
         delta_x: f32,
         delta_y: f32,
     ) -> bool {
-        let before = collect_element_scroll_offsets(&self.root);
-        if scroll_box_at(&mut self.root, doc_pt, delta_x, delta_y) {
-            self.dispatch_element_scroll_changes(&before);
-            return true;
+        match scroll_box_at(&mut self.root, doc_pt, delta_x, delta_y) {
+            WheelScrollResult::Scrolled(node_id) => {
+                if node_id != 0 {
+                    let mut event = crate::dom::events::DomEvent::new("scroll", node_id);
+                    self.dispatch_dom_event(&mut event);
+                }
+                return true;
+            }
+            WheelScrollResult::Blocked => return false,
+            WheelScrollResult::None => {}
         }
         let old_x = self.scroll_x;
         let old_y = self.scroll_y;

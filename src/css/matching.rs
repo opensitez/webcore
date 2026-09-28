@@ -138,6 +138,8 @@ pub struct MatchContext<'a> {
     pub type_sibling_count: usize,
     /// Raw pointer to the WebCore being matched (for :has()).
     pub html_box: Option<&'a crate::types::WebCore>,
+    /// Read-only ancestor nodes during the selector pass, parallel to `ancestors`.
+    pub ancestor_nodes: &'a [&'a crate::types::WebCore],
     /// Set of node IDs on the hover chain (hovered element + all ancestors).
     /// When non-empty, :hover pseudo-class matches elements in this set.
     pub hover_chain: &'a std::collections::HashSet<u32>,
@@ -217,7 +219,8 @@ pub fn matches_selector_with_ancestors(
                             keyboard_focus: ctx.keyboard_focus,
                             type_child_index: anc.type_child_index,
                             type_sibling_count: anc.type_sibling_count,
-                            html_box: None,
+                            html_box: ctx.ancestor_nodes.get(i).copied(),
+                            ancestor_nodes: &ctx.ancestor_nodes[..i.min(ctx.ancestor_nodes.len())],
                             hover_chain: ctx.hover_chain,
                             focus_within_chain: ctx.focus_within_chain,
                             element_id: anc.node_id,
@@ -251,7 +254,8 @@ pub fn matches_selector_with_ancestors(
 	                            keyboard_focus: ctx.keyboard_focus,
 	                            type_child_index: parent.type_child_index,
 	                            type_sibling_count: parent.type_sibling_count,
-	                            html_box: None,
+	                            html_box: ctx.ancestor_nodes.last().copied(),
+	                            ancestor_nodes: &ctx.ancestor_nodes[..ctx.ancestor_nodes.len().saturating_sub(1)],
 	                            hover_chain: ctx.hover_chain,
 	                            focus_within_chain: ctx.focus_within_chain,
 	                            element_id: parent.node_id,
@@ -349,6 +353,7 @@ fn matches_sibling(
         // ⛔ Not the subject's box: `:has()` and the other box-state
         // pseudo-classes must not answer for the sibling from it.
         html_box: None,
+        ancestor_nodes: ctx.ancestor_nodes,
         hover_chain: ctx.hover_chain,
         focus_within_chain: ctx.focus_within_chain,
         element_id: sib.node_id,
@@ -866,6 +871,7 @@ pub(crate) fn matches_part_with_context(
                                 type_child_index: anc.type_child_index,
                                 type_sibling_count: anc.type_sibling_count,
                                 html_box: None,
+                                ancestor_nodes: &ctx.ancestor_nodes[..i.min(ctx.ancestor_nodes.len())],
                                 hover_chain: ctx.hover_chain,
                                 focus_within_chain: ctx.focus_within_chain,
                                 element_id: anc.node_id,
@@ -1192,6 +1198,7 @@ fn matches_element_or_descendant(
         type_child_index: 0,
         type_sibling_count: 1,
         html_box: Some(elem),
+        ancestor_nodes: &[],
         hover_chain: ctx.hover_chain,
         focus_within_chain: ctx.focus_within_chain,
         element_id: elem.node_id,

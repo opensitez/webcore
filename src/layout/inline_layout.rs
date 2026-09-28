@@ -58,16 +58,15 @@ pub fn layout_inline_block(
     let y = c.y;
     let font_px = c.parent_font_px;
     let root_font_px = c.root_font_px;
-    // Create a local float context when this box establishes a BFC; otherwise
-    // clone the parent context so inline content can avoid ancestor floats.
+    // BFC roots contain their own floats; normal-flow inline content shares
+    // its parent's float context so floats can affect later siblings.
     let mut fc_owned = FloatContext::default();
     let establishes_own_float_context = crate::layout::block::establishes_bfc(&node.style);
     let has_parent_fc = parent_float_ctx.is_some() && !establishes_own_float_context;
     let mut float_ctx: Option<&mut FloatContext> = if establishes_own_float_context {
         Some(&mut fc_owned)
     } else if let Some(fc) = parent_float_ctx {
-        fc_owned = fc.clone();
-        Some(&mut fc_owned)
+        Some(fc)
     } else {
         Some(&mut fc_owned)
     };
@@ -285,9 +284,13 @@ pub fn layout_inline_block(
             // Inline element containing block-level children (e.g. <a><strong style="display:block">).
             // Per CSS, this creates an anonymous block formatting context. We approximate by
             // pre-laying the element out as a block container so its children get proper dimensions.
+            let child_constraints = match avail_h {
+                Some(h) => Constraints::with_height(content_w, h, 0.0, 0.0, font_px, root_font_px),
+                None => Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
+            };
             engine.layout_box(
                 &mut children[ci],
-                &Constraints::new(content_w, 0.0, 0.0, font_px, root_font_px),
+                &child_constraints,
             );
         } else if !matches!(children[ci].style.float, crate::types::Float::None) {
             // Float children need to be laid out to get valid dimensions.
@@ -761,6 +764,13 @@ pub fn layout_inline_block(
                 &mut fc_right,
             );
 
+            // A block nested in an inline box participates in the surrounding
+            // block flow. Its pre-layout used the full containing width, but a
+            // preceding float can leave a narrower band for this line.
+            relayout_block_in_inline_for_float(
+                engine, node, &mut items, item_idx, fc_right - fc_left, font_px, root_font_px,
+            );
+
             // If there are floats constricting the width and the first non-space item
             // cannot fit in the available width, move the line box down past floats
             // until it fits or no more floats constrict the width (CSS 2.1 §9.5).
@@ -869,6 +879,10 @@ pub fn layout_inline_block(
                         fc_left
                     };
                     avail_w = (fc_right - temp_fc_left).max(0.0);
+
+                    relayout_block_in_inline_for_float(
+                        engine, node, &mut items, i + 1, avail_w, font_px, root_font_px,
+                    );
 
                     // Re-evaluate line break from THIS point forward
                     let (_new_start, new_end, new_next, new_break) =
@@ -1380,14 +1394,9 @@ pub fn layout_inline_block(
 
     // ── 5. Compute content height ──────────────────────────────────────────────
     let inline_h = (cursor_y - content_y).max(0.0);
-    // Include float bottom so the container encloses its floats.
-    // A BFC owner (!has_parent_fc) always contains all its floats.
-    // A non-BFC element that placed its OWN floats also needs to expand
-    // (CSS §9.5: containers with floated children don't collapse).
-    let has_own_floats = float_ctx
-        .as_ref()
-        .map_or(false, |fc| fc.floats.len() > floats_before);
-    let float_bottom = if !has_parent_fc || has_own_floats {
+    // Only a BFC root contains its floats. In normal flow they can extend
+    // beyond this box and constrain following siblings.
+    let float_bottom = if !has_parent_fc {
         if let Some(ref fc) = float_ctx {
             let offset = content_y - fc.origin_y;
             fc.floats
@@ -2025,6 +2034,49 @@ fn inline_item_has_visible_flow_content(item: &InlineItem) -> bool {
             item.kind,
             InlineItemKind::Break | InlineItemKind::Float { .. } | InlineItemKind::OutOfFlow { .. }
         )
+}
+
+fn relayout_block_in_inline_for_float(
+    engine: &LayoutEngine,
+    node: &mut WebCore,
+    items: &mut [InlineItem],
+    start: usize,
+    available: f32,
+    font_px: f32,
+    root_font_px: f32,
+) {
+    if available <= 0.0 {
+        return;
+    }
+    let Some(item) = items[start..]
+        .iter_mut()
+        .find(|item| inline_item_has_visible_flow_content(item))
+    else {
+        return;
+    };
+    let InlineItemKind::Atomic { path, .. } = &item.kind else {
+        return;
+    };
+    let Some(child) = resolve_path_mut(node, path) else {
+        return;
+    };
+    if !child.style.is_inline_level()
+        || !child.style.width.is_auto()
+        || !has_in_flow_block_children(child)
+        || item.advance <= available + 0.01
+    {
+        return;
+    }
+    engine.layout_box(
+        child,
+        &Constraints::new(available, 0.0, 0.0, font_px, root_font_px),
+    );
+    item.advance = child.layout.border_rect.w
+        + child.layout.resolved_margin_left
+        + child.layout.resolved_margin_right;
+    item.height = child.layout.margin_rect.h;
+    item.ascent = item.height;
+    item.descent = 0.0;
 }
 
 // ─── Collect inline items ────────────────────────────────────────────────────
@@ -2910,6 +2962,7 @@ fn tokenize_text(
                     };
                     let start = *text_start;
                     let segment = &text[start - base_offset..start - base_offset + text_len];
+                    let first_part = items.len();
                     for (offset, grapheme) in segment.grapheme_indices(true) {
                         let mut part = item.clone();
                         if let InlineItemKind::Text { text_start, text_len, .. } = &mut part.kind {
@@ -2929,6 +2982,16 @@ fn tokenize_text(
                             EmergencyBreak::WrapOnly
                         };
                         items.push(part);
+                    }
+                    // Character-by-character shaping omits kerning across the
+                    // emergency break opportunities. Preserve the measured
+                    // width of the unsplit run until a break is actually used.
+                    let separate_width: f32 = items[first_part..].iter().map(|part| part.advance).sum();
+                    if separate_width > 0.0 {
+                        let ratio = item.advance / separate_width;
+                        for part in &mut items[first_part..] {
+                            part.advance *= ratio;
+                        }
                     }
                 }
             }
@@ -4523,7 +4586,7 @@ fn is_atomic_inline_replaced(node: &WebCore) -> bool {
 /// `collect_items` encounters an `InlineBlock`, its `margin_rect` is non-zero
 /// so the item gets the correct advance width and ascent.
 pub(super) fn has_percentage_width_table_child(node: &WebCore) -> bool {
-    node.effective_children().iter().any(|child| {
+    matches!(node.style.display, Display::InlineBlock) && node.effective_children().iter().any(|child| {
         !matches!(child.style.display, Display::None)
             && !matches!(child.style.position, Position::Absolute | Position::Fixed)
             && matches!(child.style.float, Float::None)

@@ -162,6 +162,7 @@ pub fn build_display_list(root: &WebCore, viewport_w: f32, viewport_h: f32) -> D
         active_id: 0,
         visited_hrefs: &visited,
         svg_ids: &svg_ids,
+        subtree_bounds: None,
         base_url: "",
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         paint_clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
@@ -234,6 +235,7 @@ pub fn build_display_list_full_with_font_system(
         active_id,
         visited_hrefs,
         svg_ids: &svg_ids,
+        subtree_bounds: None,
         base_url,
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         paint_clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
@@ -251,6 +253,44 @@ pub fn build_display_list_full_with_font_system(
     build_for_box(root, &mut list, &ctx);
 
     list
+}
+
+fn collect_subtree_paint_bounds(
+    node: &WebCore,
+    bounds: &mut std::collections::HashMap<usize, Option<Rect>>,
+) -> Option<Rect> {
+    let key = node as *const WebCore as usize;
+    if node.style.display == Display::None || !node.style.visibility || node.style.opacity <= 0.0 {
+        bounds.insert(key, Some(Rect::default()));
+        return Some(Rect::default());
+    }
+
+    let escapes_layout_bounds = matches!(node.style.position, Position::Absolute | Position::Fixed | Position::Sticky)
+        || (!node.style.transform.is_empty() && node.style.transform != "none")
+        || !node.style.css_transform.ops.is_empty()
+        || !node.style.css_translate.ops.is_empty()
+        || !node.style.css_rotate.ops.is_empty()
+        || !node.style.css_scale.ops.is_empty()
+        || !node.style.box_shadow.is_empty()
+        || node.style.text_shadow.is_some()
+        || !node.style.rare().filter.is_empty()
+        || !node.style.rare().backdrop_filter.is_empty();
+    let mut extent = (!escapes_layout_bounds).then_some(node.layout.border_rect);
+    for child in node.effective_children() {
+        let child_extent = collect_subtree_paint_bounds(child, bounds);
+        extent = match (extent, child_extent) {
+            (Some(a), Some(b)) => {
+                let x = a.x.min(b.x);
+                let y = a.y.min(b.y);
+                let right = a.right().max(b.right());
+                let bottom = a.bottom().max(b.bottom());
+                Some(Rect::new(x, y, right - x, bottom - y))
+            }
+            _ => None,
+        };
+    }
+    bounds.insert(key, extent);
+    extent
 }
 
 /// Build a display list for a scroll-local paint band.
@@ -303,6 +343,8 @@ pub fn build_display_list_viewport_with_font_system(
 ) -> DisplayList {
     let doc_h = crate::types::Document::scroll_height(root).max(viewport_h);
     let svg_ids = crate::svg::document_svg_ids(root);
+    let mut subtree_bounds = std::collections::HashMap::new();
+    collect_subtree_paint_bounds(root, &mut subtree_bounds);
     let paint_top = paint_top.max(0.0);
     let paint_bottom = paint_bottom.max(paint_top).min(doc_h.max(viewport_h));
     let paint_clip = Rect::new(
@@ -322,6 +364,7 @@ pub fn build_display_list_viewport_with_font_system(
         active_id,
         visited_hrefs,
         svg_ids: &svg_ids,
+        subtree_bounds: Some(&subtree_bounds),
         base_url,
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         paint_clip,
@@ -360,6 +403,7 @@ fn is_scroll_container(style: &ComputedStyle) -> bool {
 #[derive(Clone, Copy)]
 struct BuildContext<'a> {
     svg_ids: &'a std::collections::HashMap<String, &'a crate::svg::SvgNode>,
+    subtree_bounds: Option<&'a std::collections::HashMap<usize, Option<Rect>>>,
     scroll_x: f32,
     scroll_y: f32,
     /// The live scroll offset, for `position: sticky` ONLY.
@@ -615,6 +659,17 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         return;
     }
 
+    if let Some(Some(bounds)) = ctx.subtree_bounds.and_then(|all| all.get(&(node as *const WebCore as usize))) {
+        const PAINT_OVERHANG: f32 = 256.0;
+        if bounds.right() - ctx.scroll_x + PAINT_OVERHANG < ctx.paint_clip.x
+            || bounds.bottom() - ctx.scroll_y + PAINT_OVERHANG < ctx.paint_clip.y
+            || bounds.x - ctx.scroll_x - PAINT_OVERHANG > ctx.paint_clip.right()
+            || bounds.y - ctx.scroll_y - PAINT_OVERHANG > ctx.paint_clip.bottom()
+        {
+            return;
+        }
+    }
+
     if node.tag == "#text" {
         build_laid_out_text_node(node, list, ctx, ctx.scroll_x, ctx.scroll_y, ctx.paint_clip);
         return;
@@ -650,8 +705,8 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     {
         let bx = br.x - sx;
         let by = br.y - sy;
-        if bx + br.w < ctx.clip.x
-            || by + br.h < ctx.clip.y
+        if bx + br.w < ctx.paint_clip.x
+            || by + br.h < ctx.paint_clip.y
             || bx > ctx.paint_clip.right()
             || by > ctx.paint_clip.bottom()
         {
@@ -1585,6 +1640,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
         active_id: ctx.active_id,
         visited_hrefs: ctx.visited_hrefs,
         svg_ids: ctx.svg_ids,
+        subtree_bounds: ctx.subtree_bounds,
         base_url: ctx.base_url,
         clip: child_clip,
         paint_clip: ctx.paint_clip,
@@ -4445,7 +4501,7 @@ fn creates_stacking_context(node: &WebCore) -> bool {
 fn is_explicit_z_positioned(node: &WebCore) -> bool {
     node.style.position == Position::Fixed
         || node.style.position == Position::Absolute
-        || node.style.position == Position::Relative
+        || (node.style.position == Position::Relative && !node.style.z_index_is_auto)
         || (node.style.position == Position::Sticky && !node.style.z_index_is_auto)
 }
 

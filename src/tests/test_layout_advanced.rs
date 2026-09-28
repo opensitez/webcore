@@ -7,6 +7,69 @@ use crate::layout::LayoutEngine;
 use crate::types::*;
 
 #[test]
+fn grid_justify_start_keeps_implicit_auto_track_at_intrinsic_width() {
+    for (justify, expected) in [("normal", 600.0), ("start", 180.0)] {
+        let doc = parse_and_layout(
+            &format!("<style>body{{margin:0}}#grid{{display:grid;width:600px;justify-content:{justify}}}#child{{width:180px}}</style><div id=grid><div id=item><div id=child>Headline</div></div></div>"),
+            800.0,
+        );
+        let item = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "item")).unwrap();
+        assert!((item.layout.border_rect.w - expected).abs() < 1.0, "justify={justify} item={:?}", item.layout.border_rect);
+    }
+}
+
+#[test]
+fn grown_nested_flex_item_uses_its_allocated_main_size() {
+    let doc = parse_and_layout(
+        "<style>body{margin:0}#outer{display:flex;width:600px;height:40px}#nav{width:100%;flex:1}#list{display:flex;height:40px}#list ul{display:flex;flex:1;max-width:fit-content;margin:0;padding:0}#list li{list-style:none;width:90px}#more{width:60px}#right{width:150px}</style><div id=outer><div id=nav><div id=list><ul><li>World</li><li>Politics</li><li>Sports</li></ul><div id=more>More</div></div></div><div id=right>Sign in</div></div>",
+        800.0,
+    );
+    let list = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "list")).unwrap();
+    let ul = find_box(list, &|n| n.tag == "ul").unwrap();
+    let more = find_box(list, &|n| n.attributes.get("id").is_some_and(|id| id == "more")).unwrap();
+    assert!((more.layout.border_rect.x - ul.layout.border_rect.right()).abs() < 1.0,
+        "ul={:?} more={:?}", ul.layout.border_rect, more.layout.border_rect);
+}
+
+#[test]
+fn max_content_width_contributes_to_nested_flex_intrinsic_size() {
+    let doc = parse_and_layout(
+        "<style>body{margin:0}#outer{display:flex;width:300px}#end{display:flex}#sign{display:flex;width:max-content}#sign a{word-break:break-word}</style><div id=outer><div id=end><div id=sign><a>Sign in</a></div><span>Other</span></div></div>",
+        800.0,
+    );
+    let sign = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "sign")).unwrap();
+    let end = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "end")).unwrap();
+    let engine = LayoutEngine::new();
+    assert!(engine.max_content_width(sign, 16.0, 16.0) > 35.0);
+    assert!(engine.intrinsic_sizes(sign, 16.0, 16.0).min_content > 35.0);
+    assert!(end.layout.border_rect.w > 70.0, "end={:?} sign={:?}", end.layout.border_rect, sign.layout.border_rect);
+    assert!(sign.layout.border_rect.w > 35.0, "sign={:?}", sign.layout.border_rect);
+}
+
+#[test]
+fn percent_height_image_sets_content_sized_flex_item_width() {
+    let doc = parse_and_layout(
+        "<style>body{margin:0}.bar{display:flex;height:40px}.logo{height:40px}.logo img{display:block;height:100%;width:auto}</style><div class=bar><div class=logo><a><picture><img id=mark width=176 height=208></picture></a></div><span>Navigation</span></div>",
+        800.0,
+    );
+    let mark = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "mark")).unwrap();
+    let logo = find_box(&doc.root, &|n| n.attributes.get("class").is_some_and(|s| s == "logo")).unwrap();
+    assert!((mark.layout.border_rect.h - 40.0).abs() < 0.5, "mark={:?} height={:?} logo={:?}", mark.layout.border_rect, mark.style.height, logo.layout.border_rect);
+    assert!((logo.layout.border_rect.w - 176.0 * 40.0 / 208.0).abs() < 0.5, "logo={:?} basis={:?} width={:?} height={:?}", logo.layout.border_rect, logo.style.flex_basis, logo.style.width, logo.style.height);
+}
+
+#[test]
+fn emergency_word_break_keeps_max_content_word_on_one_line() {
+    let doc = parse_and_layout(
+        "<style>body{margin:0}#label{display:flex;width:max-content;font:700 20px Georgia;word-break:break-word}</style><div id=label>AVAVAVAV</div>",
+        800.0,
+    );
+    let label = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "label")).unwrap();
+    let text = find_box(label, &|n| n.tag == "#text" && n.text.contains("AVAVAVAV")).unwrap();
+    assert_eq!(text.layout.line_cache.len(), 1, "max-content label must not wrap its word");
+}
+
+#[test]
 fn media_table_columns_restore_after_stepping_across_breakpoint() {
     let mut doc = parse_html("<style>.row{display:table;width:100%}.main{display:table-cell;width:70%}.aside{display:table-cell;width:30%}@media screen and (max-width:1023px){.main,.aside{display:block;width:100%}.aside{padding-bottom:55px}}</style><div class=row><div class=main>Main</div><aside class=aside>Aside</aside></div>");
     let mut engine = LayoutEngine::new();
@@ -35,11 +98,34 @@ fn inline_block_with_percentage_table_uses_available_width() {
     let doc = parse_and_layout("<style>body{margin:0}#host{width:300px}#outer{display:inline-block;margin:0 10px}#table{width:100%}</style><div id=host><span id=outer><table id=table><tr><td>Agenda</td><td>27 Septembre</td></tr></table></span></div>", 500.0);
     let outer = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "outer")).unwrap();
     let table = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "table")).unwrap();
+    let host = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "host")).unwrap();
     assert_eq!(table.style.display, Display::Table);
     assert!(table.style.width.has_percentage(), "table width={:?}", table.style.width);
     assert_eq!(outer.children[0].style.display, Display::Table, "outer first child={}", outer.children[0].tag);
-    assert!((outer.layout.border_rect.w - 280.0).abs() < 0.5, "outer={:?}", outer.layout.border_rect);
+    assert!((outer.layout.border_rect.w - 280.0).abs() < 0.5, "host={:?} outer={:?} outer containing={} table={:?} table containing={}", host.layout.content_rect, outer.layout.border_rect, outer.layout.last_containing_width, table.layout.border_rect, table.layout.last_containing_width);
     assert!((table.layout.border_rect.w - 280.0).abs() < 0.5, "table={:?}", table.layout.border_rect);
+}
+
+#[test]
+fn block_inside_inline_link_wraps_beside_sibling_float() {
+    let doc = parse_and_layout("<style>body{margin:0}#list{width:300px}li{list-style:none}p{margin:0;font-size:16px;line-height:20px}img{float:left;width:90px;height:120px;margin-right:10px}</style><ul id=list><li><div><a>\n <img id=cover>\n </a>\n <a><p id=title>Report on monetary policy for the current year</p></a></div></li></ul>", 500.0);
+    let cover = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "cover")).unwrap();
+    let title = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "title")).unwrap();
+    assert!(title.layout.border_rect.x >= cover.layout.margin_rect.right() - 0.5, "cover={:?}, title={:?}", cover.layout.margin_rect, title.layout.border_rect);
+    assert!((title.layout.border_rect.w - 200.0).abs() < 0.5, "cover={:?}, title={:?}", cover.layout.margin_rect, title.layout.border_rect);
+    assert!(title.layout.border_rect.h > 20.0, "title={:?}", title.layout.border_rect);
+}
+
+#[test]
+fn floats_from_short_rows_constrain_following_rows() {
+    let doc = parse_and_layout("<style>body{margin:0}ul{width:300px;padding:0}li{list-style:none}p{margin:0;font-size:16px;line-height:20px}img{float:left;width:90px;height:120px;margin-right:10px}</style><ul><li><div><a>\n<img id=cover1>\n</a><a><p id=title1>First report heading wraps here</p></a></div></li><li><div><a>\n<img id=cover2>\n</a><a><p id=title2>Second report heading wraps</p></a></div></li><li><div><a>\n<img id=cover3>\n</a><a><p id=title3>Third report heading wraps across still more lines</p></a></div></li></ul>", 500.0);
+    let get = |id: &str| find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == id)).unwrap().layout.border_rect;
+    let (cover1, title1, cover2, title2) = (get("cover1"), get("title1"), get("cover2"), get("title2"));
+    assert!((title1.w - 200.0).abs() < 0.5, "title1={title1:?}");
+    assert!((cover2.x - cover1.x - 100.0).abs() < 0.5, "cover1={cover1:?}, cover2={cover2:?}");
+    assert!((title2.w - 100.0).abs() < 0.5, "title2={title2:?}");
+    let title3 = get("title3");
+    assert!((title3.w - 100.0).abs() < 0.5, "title3={title3:?}");
 }
 
 #[test]

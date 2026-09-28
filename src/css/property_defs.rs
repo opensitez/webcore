@@ -4945,6 +4945,7 @@ fn apply_justify_content(s: &mut ComputedStyle, v: &str) {
     let (v, safe) = split_alignment(v);
     set_safety(s, SAFETY_JUSTIFY_CONTENT, safe);
     s.justify_content = match v {
+        "normal" => JustifyContent::Normal,
         "flex-end" | "end" | "self-end" => JustifyContent::FlexEnd,
         "center" => JustifyContent::Center,
         "space-between" => JustifyContent::SpaceBetween,
@@ -4953,7 +4954,7 @@ fn apply_justify_content(s: &mut ComputedStyle, v: &str) {
         // Physical, and so immune to `row-reverse`.
         "left" => JustifyContent::Left,
         "right" => JustifyContent::Right,
-        _ => JustifyContent::FlexStart,
+        _ => JustifyContent::Normal,
     };
 }
 fn apply_align_items(s: &mut ComputedStyle, v: &str) {

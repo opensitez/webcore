@@ -259,6 +259,7 @@ fn apply_container_cascade_inner(
             type_child_index,
             type_sibling_count,
             html_box: Some(node),
+            ancestor_nodes: &[],
             hover_chain: &empty_hover,
             focus_within_chain: &empty_focus,
             element_id: node.node_id,

@@ -462,7 +462,7 @@ impl EngineFrame {
         }
 
         // 4. Style + Layout (batched — all mutations since last frame processed at once)
-        if self.needs_style || self.needs_layout {
+        if !scroll_priority && (self.needs_style || self.needs_layout) {
             update.rebuild_display_list = true;
             let t0 = std::time::Instant::now();
             let style_requested = self.needs_style;
@@ -2237,6 +2237,24 @@ mod tests {
             frame.doc.pending_stylesheets.is_some(),
             "queued CSS should stay available for the next idle frame"
         );
+    }
+
+    #[test]
+    fn scroll_priority_frame_defers_pending_style_and_layout() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(b"<!doctype html><body><p>Ready</p>");
+        frame.update_frame();
+
+        frame.mark_style_dirty();
+        let generation = frame.doc.layout_generation;
+        frame.update_frame_detailed_with_scroll_priority(true);
+        assert_eq!(frame.doc.layout_generation, generation);
+        assert!(frame.needs_style || frame.needs_layout);
+
+        frame.update_frame_detailed_with_scroll_priority(false);
+        assert!(frame.doc.layout_generation > generation);
+        assert!(!frame.needs_style && !frame.needs_layout);
     }
 
     #[test]

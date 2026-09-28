@@ -271,6 +271,7 @@ fn hover_descendant_anchor_matches(
         type_child_index,
         type_sibling_count,
         html_box: Some(node),
+        ancestor_nodes: &[],
         hover_chain: &empty_hover,
         focus_within_chain: &empty_focus,
         element_id: node.node_id,
@@ -420,7 +421,15 @@ fn apply_cascade_incremental_walk(
         return;
     }
 
-    if node.cascade_dirty {
+    // Layout's anonymous table wrappers are not DOM ancestors. If a hover
+    // reaches through one, recascade from its real parent after unwrapping it;
+    // otherwise direct-child selectors see the wrapper instead of the element.
+    let dirty_through_table_wrapper = node.has_dirty_descendant
+        && node.children.iter().any(|child| {
+            matches!(child.tag.as_str(), "anonymous-table" | "anonymous-table-row" | "anonymous-table-cell")
+                && (child.cascade_dirty || child.has_dirty_descendant)
+        });
+    if node.cascade_dirty || dirty_through_table_wrapper {
         // Only this subtree will be recascaded. Unwrapping unrelated layout
         // fragments makes every hover invalidate the rest of the document.
         crate::layout::block::unwrap_all_anonymous_blocks(node);

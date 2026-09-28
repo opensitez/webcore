@@ -52,6 +52,44 @@ fn flex_item_participates(child: &WebCore) -> bool {
     !(child.tag == "#text" && child.text.chars().all(|c| c.is_ascii_whitespace()))
 }
 
+// A content-sized flex item with a definite height can transfer that height
+// through a percentage-height replaced descendant's intrinsic ratio. Intrinsic
+// widths measured without a height basis would otherwise use the natural image
+// width even though layout displays it at a much smaller height.
+fn single_replaced_width_at_height(
+    engine: &LayoutEngine,
+    node: &WebCore,
+    height: f32,
+    font_px: f32,
+    root_font_px: f32,
+) -> Option<f32> {
+    let child = if node.is_image_element() {
+        if !node.style.width.is_auto() || !node.style.height.has_percentage() {
+            return None;
+        }
+        let (natural_w, natural_h) = engine.intrinsic_dimensions(node)?;
+        let used_h = engine.res_len(&node.style.height, font_px, height, root_font_px);
+        return (natural_h > 0.0).then_some(used_h * natural_w / natural_h);
+    } else {
+        if !node.style.width.is_auto() {
+            return None;
+        }
+        let mut visible = node.effective_children().iter().filter(|child| {
+            child.style.display != Display::None
+                && !(child.tag == "#text" && child.text.trim().is_empty())
+        });
+        let child = visible.next()?;
+        if visible.next().is_some() {
+            return None;
+        }
+        if engine.res_box(&child.style, font_px, 0.0, root_font_px).h_space() != 0.0 {
+            return None;
+        }
+        child
+    };
+    single_replaced_width_at_height(engine, child, height, font_px, root_font_px)
+}
+
 fn has_rendered_flex_sibling(
     node: &WebCore,
     child_paths: &[Vec<usize>],
@@ -607,6 +645,22 @@ pub fn layout_flex(
             }
         });
 
+        let height_constrained_image_width = (is_row
+            && child.style.flex_basis.is_auto()
+            && child.style.width.is_auto()
+            && !child.style.height.is_auto()
+            && !child.style.height.has_percentage())
+            .then(|| {
+                single_replaced_width_at_height(
+                    engine,
+                    child,
+                    engine.res_len(&child.style.height, child_font, 0.0, root_font_px),
+                    child_font,
+                    root_font_px,
+                )
+            })
+            .flatten();
+
         let mut basis_main: f32 = if let Some(kind) = intrinsic_basis {
             if is_row {
                 match kind {
@@ -651,6 +705,8 @@ pub fn layout_flex(
                     root_font_px,
                 )
             }
+        } else if let Some(w) = height_constrained_image_width {
+            w
         } else if !child.style.flex_basis.is_auto() && !basis_is_percent_auto {
             let raw = engine.res_len(
                 &child.style.flex_basis,
@@ -745,14 +801,21 @@ pub fn layout_flex(
             0.0
         };
         let max_main: f32 = if is_row {
-            if !child.style.max_width.is_none() && !child.style.max_width.is_auto() {
-                let v = engine.res_len(
+            if child.style.max_width.intrinsic().is_some()
+                || (!child.style.max_width.is_none() && !child.style.max_width.is_auto()) {
+                engine.res_len_sizing(
                     &child.style.max_width,
+                    child,
+                    content_w,
                     child_font,
                     content_w,
                     root_font_px,
-                );
-                (v - bb_main).max(0.0)
+                ).unwrap_or_else(|| {
+                    let v = engine.res_len(
+                        &child.style.max_width, child_font, content_w, root_font_px,
+                    );
+                    (v - bb_main).max(0.0)
+                })
             } else {
                 f32::MAX
             }
@@ -826,20 +889,28 @@ pub fn layout_flex(
         };
 
         let min_main: f32 = if is_row {
-            if !child.style.min_width.is_auto() {
-                let v = engine.res_len(
+            if child.style.min_width.intrinsic().is_some() || !child.style.min_width.is_auto() {
+                engine.res_len_sizing(
                     &child.style.min_width,
+                    child,
+                    content_w,
                     child_font,
                     content_w,
                     root_font_px,
-                );
-                (v - bb_main).max(0.0)
+                ).unwrap_or_else(|| {
+                    let v = engine.res_len(
+                        &child.style.min_width, child_font, content_w, root_font_px,
+                    );
+                    (v - bb_main).max(0.0)
+                })
             } else if child.style.overflow_x != Overflow::Visible {
                 // overflow: hidden/scroll/auto → automatic minimum is 0
                 0.0
             } else {
                 auto_min_main(
-                    engine.min_content_width_of_content(child, font_px, root_font_px)
+                    height_constrained_image_width.unwrap_or_else(|| {
+                        engine.min_content_width_of_content(child, font_px, root_font_px)
+                    })
                         + boundary_space_main,
                 )
             }
@@ -1814,6 +1885,11 @@ fn justify_spacing(
     if n == 0 {
         return (0.0, base_gap);
     }
+    let jc = if jc == JustifyContent::Normal {
+        JustifyContent::FlexStart
+    } else {
+        jc
+    };
     // The distribution values have a fallback for the overflow case
     // (CSS Box Alignment §4.4): `space-between` behaves as `flex-start`,
     // `space-around` and `space-evenly` as `center`. Without it a negative
@@ -1849,6 +1925,7 @@ fn justify_spacing(
         jc
     };
     match jc {
+        JustifyContent::Normal => (0.0, base_gap),
         JustifyContent::FlexStart => (0.0, base_gap),
         JustifyContent::FlexEnd => (free, base_gap),
         // Physical, so they do NOT follow the walk direction: `main_start` is

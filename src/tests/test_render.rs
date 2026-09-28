@@ -430,6 +430,16 @@ fn fixed_segment_layer_preserves_stacking_while_document_scrolls() {
 }
 
 #[test]
+fn positioned_auto_ancestor_does_not_trap_high_z_descendant() {
+    let pixmap = render_html(
+        "<style>body{margin:0}header{position:relative;height:40px}nav{position:relative}#menu{position:absolute;top:40px;left:0;width:100px;height:80px;background:#0f0;z-index:100}main{position:relative;height:100px;background:#f00}</style><header><nav><div id=menu></div></nav></header><main></main>",
+        100,
+        140,
+    );
+    assert_eq!(pixel(&pixmap, 10, 50), (0, 255, 0, 255));
+}
+
+#[test]
 fn gradient_background_clip_text_paints_glyphs_not_the_box() {
     let html = r#"
         <style>

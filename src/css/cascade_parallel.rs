@@ -34,6 +34,7 @@ use std::collections::{HashMap, HashSet};
 ///
 /// The wrapper is around the BORROW, not the work item: a future field that is
 /// genuinely not `Sync` then fails to compile instead of being blessed by this.
+#[derive(Clone, Copy)]
 struct MatchNode<'a>(&'a crate::types::WebCore);
 unsafe impl Send for MatchNode<'_> {}
 unsafe impl Sync for MatchNode<'_> {}
@@ -46,6 +47,7 @@ unsafe impl Sync for MatchNode<'_> {}
 struct CascadeWorkItem<'a> {
     node: MatchNode<'a>,
     ancestors: Vec<AncestorInfo>,
+    ancestor_nodes: Vec<MatchNode<'a>>,
     child_index: usize,
     sibling_count: usize,
     type_child_index: usize,
@@ -65,6 +67,7 @@ struct CascadeWorkItem<'a> {
 fn flatten_tree_for_cascade<'a>(
     node: &'a crate::types::WebCore,
     ancestors: &mut Vec<AncestorInfo>,
+    ancestor_nodes: &mut Vec<MatchNode<'a>>,
     child_index: usize,
     sibling_count: usize,
     type_child_index: usize,
@@ -88,6 +91,7 @@ fn flatten_tree_for_cascade<'a>(
         out.push(CascadeWorkItem {
             node: MatchNode(node),
             ancestors: ancestors.clone(),
+            ancestor_nodes: ancestor_nodes.clone(),
             child_index,
             sibling_count,
             type_child_index,
@@ -109,6 +113,7 @@ fn flatten_tree_for_cascade<'a>(
 	        node_id: node.node_id,
 	        prev_siblings: siblings[..sibling_pos].to_vec(),
 	    });
+    ancestor_nodes.push(MatchNode(node));
 
     let n_children = node.children.len();
     if n_children > 0 {
@@ -166,6 +171,7 @@ fn flatten_tree_for_cascade<'a>(
             flatten_tree_for_cascade(
                 child,
                 ancestors,
+                ancestor_nodes,
                 ci,
                 ns,
                 type_counts[i],
@@ -180,6 +186,7 @@ fn flatten_tree_for_cascade<'a>(
     }
 
     ancestors.pop();
+    ancestor_nodes.pop();
 }
 
 /// Parallel cascade: match every element's selectors off-thread, then run the
@@ -205,13 +212,16 @@ pub fn apply_cascade_parallel(
     // The work items borrow `root`, so passes 1 and 2 are scoped: the immutable
     // borrow has to end before pass 3 takes the tree mutably.
     let match_map: MatchMap = {
+        let flatten_started = std::time::Instant::now();
         let mut work_items: Vec<CascadeWorkItem> = Vec::new();
         let mut ancestors: Vec<AncestorInfo> = Vec::new();
+        let mut ancestor_nodes = Vec::new();
         let no_siblings = std::sync::Arc::new(Vec::new());
         let no_sibling_nodes = std::sync::Arc::new(Vec::new());
         flatten_tree_for_cascade(
             root,
             &mut ancestors,
+            &mut ancestor_nodes,
             0,
             1,
             0,
@@ -222,8 +232,10 @@ pub fn apply_cascade_parallel(
             0,
             &mut work_items,
         );
+        crate::profile::record(crate::profile::Phase::CascadeFlatten, flatten_started.elapsed());
 
-        work_items
+        let match_started = std::time::Instant::now();
+        let matches = work_items
             .par_iter()
             .map(|item| {
                 let mut candidates_buf: Vec<usize> = Vec::new();
@@ -240,6 +252,7 @@ pub fn apply_cascade_parallel(
                     item.node.0,
                     stylesheet,
                     &item.ancestors,
+                    &item.ancestor_nodes.iter().map(|node| node.0).collect::<Vec<_>>(),
                     item.child_index,
                     item.sibling_count,
                     item.type_child_index,
@@ -259,9 +272,12 @@ pub fn apply_cascade_parallel(
                 );
                 (item.node.0.node_id, sets)
             })
-            .collect()
+            .collect();
+        crate::profile::record(crate::profile::Phase::CascadeMatch, match_started.elapsed());
+        matches
     };
 
+    let apply_started = std::time::Instant::now();
     let mut ancestors: Vec<AncestorInfo> = Vec::new();
     let mut candidates_buf: Vec<usize> = Vec::new();
     let mut counters = crate::css::cascade::CounterState::default();
@@ -294,4 +310,5 @@ pub fn apply_cascade_parallel(
         Some(&match_map),
     );
     crate::css::cascade::resolve_document_generated_content(root, stylesheet);
+    crate::profile::record(crate::profile::Phase::CascadeApply, apply_started.elapsed());
 }

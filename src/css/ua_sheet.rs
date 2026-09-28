@@ -339,6 +339,7 @@ fn matches_bare(
         type_child_index: 0,
         type_sibling_count: 1,
         html_box: node,
+        ancestor_nodes: &[],
         hover_chain: &empty,
         focus_within_chain: &empty,
         element_id: node.map(|n| n.node_id).unwrap_or(0),

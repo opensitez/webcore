@@ -272,7 +272,9 @@ pub(crate) fn update_scroll_extents_from_children(
             .children
             .iter()
             .filter(|child| {
-                !matches!(child.style.display, Display::None) && !is_layout_inert_svg_node(child)
+                !matches!(child.style.display, Display::None)
+                    && !is_layout_inert_svg_node(child)
+                    && (child.layout.margin_rect.w > 0.0 || child.layout.margin_rect.h > 0.0)
             })
             .map(|child| child.layout.margin_rect.x + child.layout.margin_rect.w - content_x)
             .fold(content_w, f32::max);
@@ -280,7 +282,9 @@ pub(crate) fn update_scroll_extents_from_children(
             .children
             .iter()
             .filter(|child| {
-                !matches!(child.style.display, Display::None) && !is_layout_inert_svg_node(child)
+                !matches!(child.style.display, Display::None)
+                    && !is_layout_inert_svg_node(child)
+                    && (child.layout.margin_rect.w > 0.0 || child.layout.margin_rect.h > 0.0)
             })
             .map(|child| child.layout.margin_rect.y + child.layout.margin_rect.h - content_y)
             .fold(content_h, f32::max);
@@ -2354,10 +2358,15 @@ impl LayoutEngine {
             return w;
         }
 
+        if honor_width && matches!(node.style.width, CssLength::MaxContent) {
+            return self.max_content_width_of_content(node, parent_font_px, root_font_px);
+        }
+
         // Explicit width → use that directly
         if honor_width
             && !(node.is_pseudo_element() && node.style.display == Display::Inline)
             && !node.style.width.is_auto()
+            && node.style.width.intrinsic().is_none()
             && (!node.style.width.has_percentage() || width_basis.is_some())
         {
             let basis = width_basis.unwrap_or(0.0);
@@ -2617,6 +2626,7 @@ impl LayoutEngine {
         if honor_width
             && !(node.is_pseudo_element() && node.style.display == Display::Inline)
             && !node.style.width.is_auto()
+            && node.style.width.intrinsic().is_none()
             && (!node.style.width.has_percentage() || width_basis.is_some())
         {
             let basis = width_basis.unwrap_or(0.0);
@@ -4461,6 +4471,9 @@ impl LayoutEngine {
         // Build child constraints from resolved font size
         let mut child_c = Constraints::new(containing_w, x, y, font_px, root_font_px);
         child_c.force_independent_formatting_context = c.force_independent_formatting_context;
+        if effective_display == Display::Inline {
+            child_c.available_height = c.available_height;
+        }
 
         let h = match effective_display {
             Display::Flex | Display::InlineFlex => flex::layout_flex(self, node, &rbox, &child_c),

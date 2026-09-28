@@ -2011,6 +2011,7 @@ fn font_shorthand_resolves_nested_custom_property_token() {
         h,
         &doc.stylesheet,
         &[],
+        &[],
         0,
         1,
         0,
@@ -8815,6 +8816,50 @@ fn has_treats_its_argument_as_relative_to_the_anchor() {
         "rgb(0, 128, 0)",
         "`:has(em)` matches at any depth"
     );
+}
+
+#[test]
+fn ancestor_has_matches_sibling_subtree_in_parallel_selector_context() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        "<div id=container><div class=lead><div class=media></div></div><div class=secondary></div></div>",
+        900.0,
+    );
+    let container = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "container")).unwrap();
+    let secondary = find_box(container, &|b| b.attributes.get("class").is_some_and(|class| class == "secondary")).unwrap();
+    let ancestors = [crate::css::AncestorInfo {
+        tag: container.tag.clone(),
+        attributes: container.attributes.clone(),
+        node_id: container.node_id,
+        ..Default::default()
+    }];
+    let empty = std::collections::HashSet::new();
+    let ancestor_nodes = [container];
+    let ctx = crate::css::MatchContext {
+        focused_box: 0,
+        keyboard_focus: false,
+        type_child_index: 0,
+        type_sibling_count: 1,
+        html_box: Some(secondary),
+        ancestor_nodes: &ancestor_nodes,
+        hover_chain: &empty,
+        focus_within_chain: &empty,
+        element_id: secondary.node_id,
+        scope_root_id: 0,
+        target_id: 0,
+        document_url: "",
+        prev_siblings: &[],
+        next_siblings: &[],
+        next_sibling_nodes: &[],
+    };
+    let selector = crate::css::parser::parse_selector(":not(:has(.lead .media)) .secondary");
+    assert!(!crate::css::matching::matches_selector_with_ancestors(
+        &selector.parts, &secondary.tag, &secondary.attributes, 0, 1, &ancestors, &ctx
+    ));
+    let positive = crate::css::parser::parse_selector(":has(.lead .media) .secondary");
+    assert!(crate::css::matching::matches_selector_with_ancestors(
+        &positive.parts, &secondary.tag, &secondary.attributes, 0, 1, &ancestors, &ctx
+    ));
 }
 
 /// The parser bug above, on its own terms: a selector that STARTS with a

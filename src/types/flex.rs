@@ -74,6 +74,7 @@ impl Default for AlignSelf {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum JustifyContent {
+    Normal,
     FlexStart,
     FlexEnd,
     Center,
@@ -89,6 +90,6 @@ pub enum JustifyContent {
 
 impl Default for JustifyContent {
     fn default() -> Self {
-        Self::FlexStart
+        Self::Normal
     }
 }

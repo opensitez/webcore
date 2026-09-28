@@ -1629,6 +1629,7 @@ impl Renderer {
             // the viewport leaves the band we rebuild a new slice instead of
             // traversing and recording the whole page.
             let font_system = Some(&mut self.font_system as *mut _);
+            let record_start = std::time::Instant::now();
             let list = display_list_builder::build_display_list_viewport_with_font_system(
                 &doc.root,
                 view_w,
@@ -1643,22 +1644,27 @@ impl Renderer {
                 &doc.base_url,
                 font_system,
             );
+            crate::profile::record(crate::profile::Phase::DisplayListRecord, record_start.elapsed());
             if !animation_restore.is_empty() {
                 crate::css::restore_animation_overrides(&mut doc.root, animation_restore);
             }
+            let segments_start = std::time::Instant::now();
             let mut paint_segments = self.use_tiles.then(|| {
                 compositor::PaintSegments::from_display_list(&list, view_w, doc_h)
             }).flatten();
+            crate::profile::record(crate::profile::Phase::DisplayListSegments, segments_start.elapsed());
             let previous_segment_count = self
                 .paint_segments
                 .as_ref()
                 .map_or(0, |segments| segments.segments.len());
             let mut retained_segment_count = 0;
+            let retain_start = std::time::Instant::now();
             if let (Some(new), Some(previous)) =
                 (&mut paint_segments, self.paint_segments.take())
             {
                 retained_segment_count = new.retain_unchanged_rasters(previous);
             }
+            crate::profile::record(crate::profile::Phase::DisplayListRetain, retain_start.elapsed());
             if trace_render {
                 eprintln!(
                     "[webcore render] paint_segments previous={} current={} retained={}",

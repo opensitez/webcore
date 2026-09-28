@@ -395,7 +395,8 @@ pub fn serialize_style_to_css(style: &ComputedStyle, _tag: &str) -> String {
         }
 
         let jc_str = match style.justify_content {
-            JustifyContent::FlexStart => "",
+            JustifyContent::Normal => "",
+            JustifyContent::FlexStart => "flex-start",
             JustifyContent::FlexEnd => "flex-end",
             JustifyContent::Center => "center",
             JustifyContent::SpaceBetween => "space-between",

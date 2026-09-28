@@ -604,7 +604,14 @@ pub fn layout_block_with_fc(
     // every row out at zero height inside a full-width row that was placed
     // perfectly. Horizontal was right and vertical was empty, which is what
     // "widths resolve against a width nobody forgot to pass" looks like.
-    let child_h = rbox.content_height;
+    // An inline wrapper is not a new height containing block. Block-level
+    // content inside it still resolves percentage height against the definite
+    // containing block supplied by its parent.
+    let child_h = if node.style.display == Display::Inline {
+        c.available_height
+    } else {
+        rbox.content_height
+    };
     let child_c = |available_width: f32, cx: f32, cy: f32| match child_h {
         Some(h) => Constraints::with_height(available_width, h, cx, cy, font_px, root_font_px),
         None => Constraints::new(available_width, cx, cy, font_px, root_font_px),
@@ -640,11 +647,15 @@ pub fn layout_block_with_fc(
                 node.style.display,
                 Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
             ) {
-                let mc = engine.max_content_width(node, font_px, root_font_px);
-                if matches!(node.style.white_space, WhiteSpace::Nowrap | WhiteSpace::Pre) {
-                    mc
+                if super::inline_layout::has_percentage_width_table_child(node) {
+                    (containing_w - rbox.h_space()).max(0.0)
                 } else {
-                    (containing_w - rbox.h_space()).max(0.0).min(mc)
+                    let mc = engine.max_content_width(node, font_px, root_font_px);
+                    if matches!(node.style.white_space, WhiteSpace::Nowrap | WhiteSpace::Pre) {
+                        mc
+                    } else {
+                        (containing_w - rbox.h_space()).max(0.0).min(mc)
+                    }
                 }
             } else {
                 (containing_w - rbox.h_space()).max(0.0)
@@ -1583,7 +1594,10 @@ pub fn layout_block_with_fc(
         let natural_scroll_w = node
             .children
             .iter()
-            .filter(|child| !matches!(child.style.display, Display::None))
+            .filter(|child| {
+                !matches!(child.style.display, Display::None)
+                    && (child.layout.margin_rect.w > 0.0 || child.layout.margin_rect.h > 0.0)
+            })
             .map(|child| child.layout.margin_rect.x + child.layout.margin_rect.w - content_x)
             .fold(content_w, f32::max);
         node.layout.scroll_height = natural_scroll_h;

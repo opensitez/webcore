@@ -7,6 +7,54 @@ use crate::css::{
 use crate::html::parse_html;
 use std::collections::HashSet;
 
+#[test]
+fn hover_recascade_unwraps_anonymous_table_ancestors() {
+    use crate::types::Display;
+
+    fn by_id_mut<'a>(node: &'a mut crate::types::WebCore, id: &str) -> Option<&'a mut crate::types::WebCore> {
+        if node.attributes.get("id").is_some_and(|value| value == id) {
+            return Some(node);
+        }
+        node.children.iter_mut().find_map(|child| by_id_mut(child, id))
+    }
+
+    let html = r#"<html><head><style>
+        nav > ul { display: table; }
+        nav > ul > li { display: table-cell; color: white; }
+        nav > ul > li:hover { color: red; }
+    </style></head><body><nav><ul id="menu"><li id="one">One</li><li id="two">Two</li><li id="three">Three</li></ul></nav></body></html>"#;
+    let mut doc = parse_html(html);
+    let empty = HashSet::new();
+    apply_cascade_vp_hover(&mut doc.root, &doc.stylesheet, None, 16.0, 800.0, 600.0, 0, false, &empty);
+    clear_cascade_dirty(&mut doc.root);
+
+    // Reproduce the table fixup left in the tree by a layout pass.
+    let menu = by_id_mut(&mut doc.root, "menu").unwrap();
+    let mut row = menu.clone();
+    row.tag = "anonymous-table-row".into();
+    row.node_id = 0;
+    let mut cell = menu.clone();
+    cell.tag = "anonymous-table-cell".into();
+    cell.node_id = 0;
+    cell.children = menu.children.drain(..2).collect();
+    row.children = vec![cell];
+    menu.children.insert(0, row);
+
+    let one_id = doc.get_element_by_id("one").unwrap();
+    let hovered = build_hover_chain(&doc.root, one_id);
+    mark_hover_dirty(&mut doc.root, &doc.stylesheet, &empty, &hovered, false, &HashSet::new());
+    apply_cascade_incremental(&mut doc.root, &doc.stylesheet, None, 16.0, 800.0, 600.0, 0, false, &hovered);
+    clear_cascade_dirty(&mut doc.root);
+    let menu = by_id(&doc.root, "menu").unwrap();
+    assert!(menu.children.iter().all(|child| child.tag == "li"));
+    assert!(menu.children.iter().all(|child| child.style.display == Display::TableCell));
+
+    mark_hover_dirty(&mut doc.root, &doc.stylesheet, &hovered, &empty, false, &HashSet::new());
+    apply_cascade_incremental(&mut doc.root, &doc.stylesheet, None, 16.0, 800.0, 600.0, 0, false, &empty);
+    let menu = by_id(&doc.root, "menu").unwrap();
+    assert!(menu.children.iter().all(|child| child.style.display == Display::TableCell));
+}
+
 /// Generate a large HTML document with N elements for benchmarking.
 fn generate_large_doc(n: usize) -> String {
     let mut html = String::from("<html><head><style>");

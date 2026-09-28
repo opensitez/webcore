@@ -46,6 +46,33 @@ fn overflow_scroll_height_computed() {
 }
 
 #[test]
+fn flex_message_pane_whitespace_does_not_create_horizontal_scrollbar() {
+    let doc = layout(
+        r#"<html><head><style>
+        * { box-sizing: border-box; }
+        .app { display: flex; width: 400px; height: 300px; }
+        .rail { width: 56px; }
+        .main { flex: 1; display: flex; flex-direction: column; }
+        .messages { flex: 1; overflow: auto; padding: 12px 16px; }
+        .msg { display: flex; gap: 12px; }
+        .body { flex: 1; min-width: 0; }
+    </style></head><body><div class="app"><div class="rail"></div><div class="main">
+      <div class="messages">
+        <div class="msg"><div class="body">A message in the pane</div></div>
+        <div class="msg"><div class="body">Another message in the pane</div></div>
+      </div>
+    </div></div></body></html>"#,
+    );
+    let pane = query(&doc, ".messages").expect("message pane");
+    assert!(
+        pane.layout.scroll_width <= pane.layout.content_rect.w + 1.0,
+        "nonpainting whitespace must not widen the pane: scroll={}, content={}",
+        pane.layout.scroll_width,
+        pane.layout.content_rect.w,
+    );
+}
+
+#[test]
 fn overflow_visible_resets_scroll() {
     // overflow:visible → no scroll extent; scroll_top stays zero.
     let doc = layout(
@@ -441,6 +468,21 @@ fn wheel_scroll_dispatches_scroll_event_on_scrolled_element() {
         1,
         "wheel-scrolled element should receive a scroll event"
     );
+}
+
+#[test]
+fn hidden_absolute_scroll_container_does_not_capture_page_wheel() {
+    let mut doc = layout(
+        r#"<html><head><style>
+        html,body{margin:0}
+        #menu{position:absolute;left:0;top:0;width:500px;height:500px;overflow:auto;visibility:hidden}
+        #inside{height:1000px}
+        #page{height:2000px}
+        </style></head><body><div id=menu><div id=inside></div></div><div id=page></div></body></html>"#,
+    );
+    assert!(doc.process_wheel_event((50.0, 50.0), -80.0));
+    assert_eq!(doc.scroll_y, 80.0);
+    assert_eq!(query(&doc, "#menu").unwrap().layout.scroll_top, 0.0);
 }
 
 #[test]

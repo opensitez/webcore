@@ -142,6 +142,7 @@ pub fn layout_grid_subgrid(
             &dummy_widths,
             &dummy_widths,
             track_lengths,
+            node.style.justify_content == JustifyContent::Normal,
         );
         let x_offsets: Vec<f32> = {
             let mut xs = Vec::with_capacity(px.len());
@@ -1137,6 +1138,7 @@ pub fn layout_grid(
         &col_content_widths,
         &col_min_widths,
         track_lengths,
+        node.style.justify_content == JustifyContent::Normal,
     );
     let n_cols_actual = col_px.len();
     // justify-content: compute extra horizontal space distribution
@@ -2261,6 +2263,7 @@ fn resolve_to_pixels(
     content_widths: &[f32],
     min_widths: &[f32],
     lengths: GridTrackLengthContext,
+    stretch_auto_tracks: bool,
 ) -> Vec<f32> {
     let effective_n = tracks.len().max(n_cols);
     let total_gap = gap * effective_n.saturating_sub(1) as f32;
@@ -2469,10 +2472,12 @@ fn resolve_to_pixels(
 
     // ── §12.7 Stretch auto Tracks ────────────────────────────────────────────
     // The remaining definite free space is divided equally among the tracks
-    // whose MAX sizing function is `auto`. `justify-content: normal` is the
-    // condition the spec names; the JustifyContent enum has no `normal`, so the
-    // inline axis always stretches, which is right for the initial value.
-    let stretch: Vec<usize> = (0..effective_n).filter(|&i| max_is_auto[i]).collect();
+    // whose MAX sizing function is `auto`, but only for `justify-content: normal`.
+    let stretch: Vec<usize> = if stretch_auto_tracks {
+        (0..effective_n).filter(|&i| max_is_auto[i]).collect()
+    } else {
+        Vec::new()
+    };
     if !stretch.is_empty() {
         let leftover = container - total_gap - base.iter().sum::<f32>();
         if leftover > 0.01 {
@@ -2791,7 +2796,7 @@ fn compute_justify_content(jc: JustifyContent, extra: f32, n: usize) -> (f32, f3
             let g = extra / (n + 1) as f32;
             (g, g)
         }
-        JustifyContent::FlexStart | JustifyContent::Left => (0.0, 0.0),
+        JustifyContent::Normal | JustifyContent::FlexStart | JustifyContent::Left => (0.0, 0.0),
     }
 }
 

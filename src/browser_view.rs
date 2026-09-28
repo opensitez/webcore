@@ -2147,6 +2147,26 @@ mod tests {
     }
 
     #[test]
+    fn browser_view_trackpad_scrolls_both_axes_of_inner_container() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+        view.feed_streaming_chunk(base, "<!doctype html><body style='margin:0'><div id='pane' style='width:100px;height:100px;overflow:auto'><div style='width:300px;height:300px;background:red'></div></div></body>");
+        assert!(view.update_streamed_frame_before_paint());
+        let generation = view.document().unwrap().layout_generation;
+        view.handle_mouse_move(50.0, 50.0);
+        assert!(view.handle_wheel(40.0, 60.0));
+        let doc = view.document().unwrap();
+        let pane = doc.get_node(doc.get_element_by_id("pane").unwrap()).unwrap();
+        assert_eq!(pane.layout.scroll_left, 40.0);
+        assert_eq!(pane.layout.scroll_top, 60.0);
+        assert_eq!(doc.scroll_x, 0.0);
+        assert_eq!(doc.scroll_y, 0.0);
+        assert_eq!(doc.layout_generation, generation);
+    }
+
+    #[test]
     fn browser_view_scroll_priority_defers_streamed_resource_update() {
         let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
         let base = "https://example.test/";

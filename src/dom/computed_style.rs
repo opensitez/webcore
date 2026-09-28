@@ -1470,6 +1470,7 @@ fn serialize_flex_direction(v: crate::types::FlexDirection) -> String {
 fn serialize_justify_content(v: crate::types::JustifyContent) -> String {
     use crate::types::JustifyContent as J;
     match v {
+        J::Normal => "normal",
         J::FlexStart => "flex-start",
         J::FlexEnd => "flex-end",
         J::Center => "center",

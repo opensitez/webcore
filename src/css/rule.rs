@@ -671,6 +671,7 @@ fn parse_align_items_keyword(v: &str) -> Option<crate::types::AlignItems> {
 fn parse_justify_content_keyword(v: &str) -> Option<crate::types::JustifyContent> {
     use crate::types::JustifyContent::*;
     Some(match v {
+        "normal" => Normal,
         "flex-start" | "start" => FlexStart,
         "flex-end" | "end" => FlexEnd,
         "center" => Center,

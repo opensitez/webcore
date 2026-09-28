@@ -9,10 +9,17 @@ use std::collections::{HashMap, HashSet};
 
 // ─── Wheel-event scroll dispatch ──────────────────────────────────────────────
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WheelScrollResult {
+    None,
+    Scrolled(u32),
+    Blocked,
+}
+
 /// Search a subtree for absolute/fixed descendants that contain `pt` and can
 /// be scrolled. Used when an in-flow ancestor fails the hit test but its
 /// absolute children may still be under the cursor.
-fn scroll_abs_in(node: &mut WebCore, pt: (f32, f32), delta_x: f32, delta_y: f32) -> bool {
+fn scroll_abs_in(node: &mut WebCore, pt: (f32, f32), delta_x: f32, delta_y: f32) -> WheelScrollResult {
     for child in &mut node.children {
         if matches!(child.style.display, Display::None) {
             continue;
@@ -20,17 +27,19 @@ fn scroll_abs_in(node: &mut WebCore, pt: (f32, f32), delta_x: f32, delta_y: f32)
         if matches!(child.style.position, Position::Absolute | Position::Fixed) {
             let mr = child.layout.margin_rect;
             if pt.0 >= mr.x && pt.0 < mr.x + mr.w && pt.1 >= mr.y && pt.1 < mr.y + mr.h {
-                if scroll_box_at(child, pt, delta_x, delta_y) {
-                    return true;
+                let result = scroll_box_at(child, pt, delta_x, delta_y);
+                if result != WheelScrollResult::None {
+                    return result;
                 }
             }
         } else {
-            if scroll_abs_in(child, pt, delta_x, delta_y) {
-                return true;
+            let result = scroll_abs_in(child, pt, delta_x, delta_y);
+            if result != WheelScrollResult::None {
+                return result;
             }
         }
     }
-    false
+    WheelScrollResult::None
 }
 
 /// Walk the box tree and scroll the *innermost* scrollable box that contains
@@ -44,9 +53,9 @@ pub(crate) fn scroll_box_at(
     pt: (f32, f32),
     delta_x: f32,
     delta_y: f32,
-) -> bool {
+) -> WheelScrollResult {
     if matches!(node.style.display, Display::None) {
-        return false;
+        return WheelScrollResult::None;
     }
 
     // Adjust pt for this node's own scroll so we can test its children,
@@ -65,8 +74,9 @@ pub(crate) fn scroll_box_at(
             // Out-of-flow boxes use the viewport coordinate rather than parent scroll.
             let mr = child.layout.margin_rect;
             if pt.0 >= mr.x && pt.0 < mr.x + mr.w && pt.1 >= mr.y && pt.1 < mr.y + mr.h {
-                if scroll_box_at(child, pt, delta_x, delta_y) {
-                    return true;
+                let result = scroll_box_at(child, pt, delta_x, delta_y);
+                if result != WheelScrollResult::None {
+                    return result;
                 }
             }
             continue;
@@ -77,23 +87,25 @@ pub(crate) fn scroll_box_at(
             && local_pt.1 >= mr.y
             && local_pt.1 < mr.y + mr.h
         {
-            if scroll_box_at(child, local_pt, delta_x, delta_y) {
-                return true;
+            let result = scroll_box_at(child, local_pt, delta_x, delta_y);
+            if result != WheelScrollResult::None {
+                return result;
             }
         } else {
             // Even though cursor is outside this in-flow child's bounds, its
             // absolute/fixed descendants may be positioned at the cursor location.
-            if scroll_abs_in(child, pt, delta_x, delta_y) {
-                return true;
+            let result = scroll_abs_in(child, pt, delta_x, delta_y);
+            if result != WheelScrollResult::None {
+                return result;
             }
         }
     }
 
     // Check whether *this* node is scrollable.
-    let can_v = delta_y.abs() > 0.1
+    let can_v = node.style.visibility && delta_y.abs() > 0.1
         && matches!(node.style.overflow_y, Overflow::Scroll | Overflow::Auto)
         && node.layout.scroll_height > node.layout.content_rect.h;
-    let can_h = delta_x.abs() > 0.1
+    let can_h = node.style.visibility && delta_x.abs() > 0.1
         && matches!(node.style.overflow_x, Overflow::Scroll | Overflow::Auto)
         && node.layout.scroll_width > node.layout.content_rect.w;
 
@@ -119,27 +131,27 @@ pub(crate) fn scroll_box_at(
     }
 
     if scrolled {
-        return true;
+        return WheelScrollResult::Scrolled(node.node_id);
     }
 
     // overscroll-behavior: if this element is a scroll container but couldn't
     // scroll (already at boundary), check whether it should swallow the event anyway.
     let is_v_container = matches!(node.style.overflow_y, Overflow::Scroll | Overflow::Auto);
     let is_h_container = matches!(node.style.overflow_x, Overflow::Scroll | Overflow::Auto);
-    if delta_y.abs() > 0.1
+    if node.style.visibility && delta_y.abs() > 0.1
         && is_v_container
         && node.style.overscroll_behavior_y != OverscrollBehavior::Auto
     {
-        return true; // Contain/None: don't chain to parent.
+        return WheelScrollResult::Blocked; // Contain/None: don't chain to parent.
     }
-    if delta_x.abs() > 0.1
+    if node.style.visibility && delta_x.abs() > 0.1
         && is_h_container
         && node.style.overscroll_behavior_x != OverscrollBehavior::Auto
     {
-        return true;
+        return WheelScrollResult::Blocked;
     }
 
-    false
+    WheelScrollResult::None
 }
 
 /// Snap the vertical scroll position of `node` to the nearest child snap point,
