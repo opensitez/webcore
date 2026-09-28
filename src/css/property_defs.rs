@@ -4146,7 +4146,9 @@ fn copy_border_left_color(d: &mut ComputedStyle, s: &ComputedStyle) {
 // ── Border radius ───────────────────────────────────────────────────────────
 
 fn apply_border_radius(s: &mut ComputedStyle, v: &str) {
-    let (horizontal, vertical) = v.split_once('/').unwrap_or((v, v));
+    let (horizontal, vertical) = find_top_level_char(v, '/')
+        .map(|index| (&v[..index], &v[index + 1..]))
+        .unwrap_or((v, v));
     let [tl, tr, br, bl] = parse_radius_set(horizontal);
     let [tl_y, tr_y, br_y, bl_y] = parse_radius_set(vertical);
     s.border_radius = tl.clone();
@@ -4300,10 +4302,15 @@ fn apply_border_image(s: &mut ComputedStyle, v: &str) {
     s.border_image_outset = String::from("0");
     s.border_image_repeat = String::from("stretch");
 
-    let mut slash_parts = v.split('/').map(str::trim);
-    let before_slash = slash_parts.next().unwrap_or("");
-    let width = slash_parts.next();
-    let outset = slash_parts.next();
+    let first_slash = find_top_level_char(v, '/');
+    let before_slash = first_slash.map_or(v, |index| &v[..index]).trim();
+    let (width, outset) = first_slash.map_or((None, None), |index| {
+        let rest = &v[index + 1..];
+        find_top_level_char(rest, '/')
+            .map_or((Some(rest.trim()), None), |second| {
+                (Some(rest[..second].trim()), Some(rest[second + 1..].trim()))
+            })
+    });
     let mut repeat_tokens = Vec::new();
 
     if let Some(width) = width.filter(|part| !part.is_empty()) {
@@ -5299,6 +5306,7 @@ fn apply_background(s: &mut ComputedStyle, v: &str) {
                     .iter()
                     .map(|layer| BackgroundLayer {
                         image_url: layer.background_image_url.clone(),
+                        image_set_source: layer.rare().background_image_set_source.clone(),
                         gradient_type: layer.gradient_type,
                         gradient_angle: layer.gradient_angle,
                         gradient_direction: layer.gradient_direction,
@@ -5347,6 +5355,7 @@ fn reset_background_fields(s: &mut ComputedStyle) {
 
 fn reset_background_image_fields(s: &mut ComputedStyle) {
     s.background_image_url.clear();
+    s.rare_mut().background_image_set_source = None;
     s.gradient_type = GradientType::None;
     s.gradient_angle = 180.0;
     s.gradient_direction = GradientDirection::Angle(180.0);
@@ -5366,6 +5375,7 @@ fn layer_has_background_image(s: &ComputedStyle) -> bool {
 
 fn copy_background_layer_fields(dst: &mut ComputedStyle, src: &ComputedStyle) {
     dst.background_image_url = src.background_image_url.clone();
+    dst.rare_mut().background_image_set_source = src.rare().background_image_set_source.clone();
     dst.gradient_type = src.gradient_type;
     dst.gradient_angle = src.gradient_angle;
     dst.gradient_direction = src.gradient_direction;
@@ -5465,6 +5475,7 @@ fn apply_background_single_layer(s: &mut ComputedStyle, v: &str) {
     if let Some((image_set, rest)) = remove_top_level_function(&v_without_image, "image-set(") {
         if let Some(url) = extract_image_set_url(&image_set) {
             s.background_image_url = url;
+            s.rare_mut().background_image_set_source = Some(image_set);
             v_without_image = rest;
         }
     }
@@ -5726,6 +5737,7 @@ fn apply_background_image(s: &mut ComputedStyle, v: &str) {
                     .iter()
                     .map(|layer| BackgroundLayer {
                         image_url: layer.background_image_url.clone(),
+                        image_set_source: layer.rare().background_image_set_source.clone(),
                         gradient_type: layer.gradient_type,
                         gradient_angle: layer.gradient_angle,
                         gradient_direction: layer.gradient_direction,
@@ -5766,6 +5778,7 @@ fn apply_single_background_image(s: &mut ComputedStyle, v: &str) {
     } else if let Some(url) = extract_image_set_url(v) {
         reset_background_image_fields(s);
         s.background_image_url = url;
+        s.rare_mut().background_image_set_source = Some(v.trim().to_string());
     } else if let Some(url) = super::extract_url(v) {
         reset_background_image_fields(s);
         s.background_image_url = url;
@@ -5825,14 +5838,24 @@ fn parse_image_set_candidate(candidate: &str) -> Option<ImageSetCandidate> {
         let (url, consumed) = super::apply::parse_url_function(candidate)?;
         (url, &candidate[consumed..])
     };
-    if url.is_empty() || !image_set_candidate_type_is_supported(descriptors) {
+    if url.is_empty() {
         return None;
     }
-    let resolution = descriptors
-        .split_whitespace()
-        .filter_map(parse_image_set_resolution_descriptor)
-        .next()
-        .unwrap_or(1.0);
+    let mut resolution = None;
+    let mut mime_type_seen = false;
+    for descriptor in super::split_shorthand_values(descriptors.trim()) {
+        if descriptor.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("type(")) {
+            if mime_type_seen || !image_set_candidate_type_is_supported(descriptor) {
+                return None;
+            }
+            mime_type_seen = true;
+        } else if resolution.is_none() {
+            resolution = Some(parse_image_set_resolution_descriptor(descriptor)?);
+        } else {
+            return None;
+        }
+    }
+    let resolution = resolution.unwrap_or(1.0);
     Some(ImageSetCandidate { url, resolution })
 }
 
@@ -5840,41 +5863,39 @@ fn parse_image_set_resolution_descriptor(token: &str) -> Option<f32> {
     let token = token.trim().trim_end_matches(',');
     let lower = token.to_ascii_lowercase();
     if let Some(value) = lower.strip_suffix("dppx") {
-        return value.parse::<f32>().ok().filter(|v| *v > 0.0);
+        return value.parse::<f32>().ok().filter(|v| v.is_finite() && *v > 0.0);
     }
     if let Some(value) = lower.strip_suffix('x') {
-        return value.parse::<f32>().ok().filter(|v| *v > 0.0);
+        return value.parse::<f32>().ok().filter(|v| v.is_finite() && *v > 0.0);
     }
     if let Some(value) = lower.strip_suffix("dpi") {
         return value
             .parse::<f32>()
             .ok()
             .map(|v| v / 96.0)
-            .filter(|v| *v > 0.0);
+            .filter(|v| v.is_finite() && *v > 0.0);
     }
     if let Some(value) = lower.strip_suffix("dpcm") {
         return value
             .parse::<f32>()
             .ok()
             .map(|v| v / 37.795_276)
-            .filter(|v| *v > 0.0);
+            .filter(|v| v.is_finite() && *v > 0.0);
     }
     None
 }
 
-fn image_set_candidate_type_is_supported(candidate: &str) -> bool {
-    let lower = candidate.to_ascii_lowercase();
-    let Some(type_start) = lower.find("type(") else {
-        return true;
-    };
-    let after_type = &candidate[type_start + "type(".len()..];
-    let Some(type_end) = after_type.find(')') else {
+fn image_set_candidate_type_is_supported(descriptor: &str) -> bool {
+    let Some(inner) = descriptor.get(5..).and_then(|value| value.strip_suffix(')')) else {
         return false;
     };
-    let mime = after_type[..type_end]
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'')
+    let Some((mime, rest)) = super::apply::consume_css_string(inner.trim()) else {
+        return false;
+    };
+    if !rest.trim().is_empty() {
+        return false;
+    }
+    let mime = mime
         .split(';')
         .next()
         .unwrap_or("")
@@ -6460,7 +6481,9 @@ fn copy_background_blend_mode(d: &mut ComputedStyle, s: &ComputedStyle) {
 
 fn apply_mask(s: &mut ComputedStyle, v: &str) {
     apply_mask_initials(s);
-    let (before, after) = v.split_once('/').unwrap_or((v, ""));
+    let (before, after) = find_top_level_char(v, '/')
+        .map(|index| (&v[..index], &v[index + 1..]))
+        .unwrap_or((v, ""));
     let mut tokens = super::split_shorthand_values(before);
     let mut after_tokens = super::split_shorthand_values(after);
     if let Some(size) = after_tokens.first() {
@@ -6471,7 +6494,7 @@ fn apply_mask(s: &mut ComputedStyle, v: &str) {
     }
     for token in tokens {
         match token {
-            "none" => s.rare_mut().mask_image_url.clear(),
+            "none" => apply_mask_image(s, "none"),
             "repeat" | "repeat-x" | "repeat-y" | "no-repeat" | "space" | "round" => {
                 apply_mask_repeat(s, &token)
             }
@@ -6503,6 +6526,7 @@ fn apply_mask(s: &mut ComputedStyle, v: &str) {
 fn apply_mask_initials(s: &mut ComputedStyle) {
     let rare = s.rare_mut();
     rare.mask_image_url.clear();
+    rare.mask_image_set_source = None;
     rare.mask_mode.clear();
     rare.mask_repeat.clear();
     rare.mask_position.clear();
@@ -6515,14 +6539,18 @@ fn apply_mask_initials(s: &mut ComputedStyle) {
 fn apply_mask_image(s: &mut ComputedStyle, v: &str) {
     if v == "none" {
         s.rare_mut().mask_image_url.clear();
+        s.rare_mut().mask_image_set_source = None;
     } else if let Some(url) = extract_image_set_url(v) {
         s.rare_mut().mask_image_url = url;
+        s.rare_mut().mask_image_set_source = Some(v.trim().to_string());
     } else if let Some(url) = super::extract_url(v) {
         s.rare_mut().mask_image_url = url;
+        s.rare_mut().mask_image_set_source = None;
     }
 }
 fn copy_mask_image(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.rare_mut().mask_image_url = s.rare().mask_image_url.clone();
+    d.rare_mut().mask_image_set_source = s.rare().mask_image_set_source.clone();
 }
 fn apply_mask_mode(s: &mut ComputedStyle, v: &str) {
     apply_keyword_list(

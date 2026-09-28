@@ -570,7 +570,9 @@ impl Document {
             "counter-increment" => serialize_counters(&s.counter_increment),
             "counter-set" => serialize_counters(&s.counter_set),
             "mask-image" => {
-                if s.rare().mask_image_url.is_empty() {
+                if let Some(source) = s.rare().mask_image_set_source.as_ref() {
+                    source.clone()
+                } else if s.rare().mask_image_url.is_empty() {
                     "none".to_string()
                 } else {
                     format!("url(\"{}\")", s.rare().mask_image_url)
@@ -809,6 +811,9 @@ fn serialize_scrollbar_color(s: &crate::types::ComputedStyle) -> String {
 }
 
 fn serialize_background_image(s: &crate::types::ComputedStyle) -> String {
+    if let Some(source) = &s.rare().background_image_set_source {
+        return source.clone();
+    }
     if !s.background_image_url.is_empty() {
         return format!(
             "url(\"{}\")",
@@ -1034,7 +1039,9 @@ fn rare_or(value: &str, initial: &str) -> String {
 }
 
 fn serialize_mask(s: &crate::types::ComputedStyle) -> String {
-    let image = if s.rare().mask_image_url.is_empty() {
+    let image = if let Some(source) = s.rare().mask_image_set_source.as_ref() {
+        source.clone()
+    } else if s.rare().mask_image_url.is_empty() {
         "none".to_string()
     } else {
         format!("url(\"{}\")", s.rare().mask_image_url)

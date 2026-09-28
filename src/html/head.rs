@@ -78,7 +78,7 @@ pub(crate) fn handle_head_tag(
             }
             parser
                 .document_stylesheets
-                .push(DocumentStylesheet::Inline { css: css.clone(), media });
+                .push(DocumentStylesheet::Inline { css: css.clone().into(), media });
             parser.push_head_node("style", attrs, css);
         }
         "title" => {

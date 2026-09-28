@@ -122,6 +122,7 @@ pub struct EngineFrame {
     scheduled_stylesheets: std::collections::HashSet<String>,
     image_tx: Option<std::sync::mpsc::SyncSender<crate::types::PendingImageResult>>,
     scheduled_images: std::collections::HashSet<String>,
+    pending_density_reselection: bool,
     cache_dir: Option<String>,
     resource_wake: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     /// Resource arrivals are bursty. Keep parsed CSS/images/fonts available
@@ -163,6 +164,7 @@ impl EngineFrame {
             scheduled_stylesheets: std::collections::HashSet::new(),
             image_tx: None,
             scheduled_images: std::collections::HashSet::new(),
+            pending_density_reselection: false,
             cache_dir: None,
             resource_wake: None,
             pending_resource_relayout: false,
@@ -473,6 +475,7 @@ impl EngineFrame {
                     .layout_no_cascade(&mut self.doc, self.viewport_w);
             }
             self.schedule_unscheduled_document_images();
+            self.pending_density_reselection = false;
             self.needs_style = false;
             self.needs_layout = false;
             self.needs_paint = true;
@@ -508,6 +511,11 @@ impl EngineFrame {
             }
         }
 
+        if self.pending_density_reselection {
+            self.schedule_unscheduled_document_images();
+            self.pending_density_reselection = false;
+        }
+
         // 5. Paint flag
         if self.needs_paint {
             self.needs_paint = false;
@@ -521,6 +529,7 @@ impl EngineFrame {
     /// Check if the engine needs a repaint without consuming the flag.
     pub fn needs_render(&self) -> bool {
         self.needs_paint
+            || self.pending_density_reselection
             || self.needs_style
             || self.needs_layout
             || self.doc.hover_changed
@@ -562,6 +571,22 @@ impl EngineFrame {
     /// Alias for set_viewport.
     pub fn resize(&mut self, w: f32, h: f32) {
         self.set_viewport(w, h);
+    }
+
+    pub fn set_device_pixel_ratio(&mut self, ratio: f32) -> bool {
+        if !ratio.is_finite() || ratio <= 0.0
+            || (self.doc.device_pixel_ratio - ratio).abs() < 0.01
+        {
+            return false;
+        }
+        self.doc.device_pixel_ratio = ratio;
+        self.scheduled_images.retain(|key| {
+            !key.starts_with("Background:")
+                && !key.starts_with("BackgroundLayer(")
+                && !key.starts_with("Mask:")
+        });
+        self.pending_density_reselection = true;
+        true
     }
 
     /// Scroll by delta. No layout needed — just repaint with new offset.
@@ -1183,6 +1208,21 @@ impl EngineFrame {
         target: crate::types::PendingImageTarget,
         url: String,
     ) {
+        let node_id = if node_id != 0 {
+            node_id
+        } else {
+            crate::types::find_node_by_path_mut(&mut self.doc.root, &path)
+                .map(|node| node.node_id)
+                .unwrap_or(0)
+        };
+        let key = if node_id != 0 {
+            format!("{target:?}:#{node_id}:{url}")
+        } else {
+            format!("{target:?}:{path:?}:{url}")
+        };
+        if url.is_empty() || !self.scheduled_images.insert(key) {
+            return;
+        }
         let url_trimmed = url.trim();
         if url_trimmed.starts_with("data:")
             && matches!(
@@ -1225,21 +1265,6 @@ impl EngineFrame {
                 }
                 Err(error) => self.doc.image_load_errors.push((path, target, url, error)),
             }
-            return;
-        }
-        let node_id = if node_id != 0 {
-            node_id
-        } else {
-            crate::types::find_node_by_path_mut(&mut self.doc.root, &path)
-                .map(|node| node.node_id)
-                .unwrap_or(0)
-        };
-        let key = if node_id != 0 {
-            format!("{target:?}:#{node_id}:{url}")
-        } else {
-            format!("{target:?}:{path:?}:{url}")
-        };
-        if url.is_empty() || !self.scheduled_images.insert(key) {
             return;
         }
         let tx = self.ensure_image_sender();
@@ -1353,6 +1378,7 @@ impl EngineFrame {
             base_url: &str,
             viewport_w: f32,
             viewport_h: f32,
+            device_pixel_ratio: f32,
             path: &mut Vec<usize>,
             out: &mut Vec<(u32, Vec<usize>, crate::types::PendingImageTarget, String)>,
         ) {
@@ -1373,7 +1399,7 @@ impl EngineFrame {
                         node.attributes.get("sizes").map(String::as_str),
                         viewport_w,
                         viewport_h,
-                        1.0,
+                        device_pixel_ratio,
                     )
                 {
                     out.push((
@@ -1406,14 +1432,16 @@ impl EngineFrame {
                 ));
             }
             if can_paint_resource
-                && node.bg_image_data.is_none()
+                && (node.bg_image_data.is_none()
+                    || node.style.rare().background_image_set_source.is_some())
                 && !node.style.background_image_url.is_empty()
             {
+                let selected = node.style.background_image_url_for_dpr(device_pixel_ratio);
                 out.push((
                     node.node_id,
                     path.clone(),
                     crate::types::PendingImageTarget::Background,
-                    crate::html::resolve_url(&node.style.background_image_url, base_url),
+                    crate::html::resolve_url(&selected, base_url),
                 ));
             }
             for (layer_index, layer) in node
@@ -1431,34 +1459,37 @@ impl EngineFrame {
                     .get(layer_index)
                     .and_then(|image| image.as_ref())
                     .is_some();
-                if can_paint_resource && !loaded {
+                if can_paint_resource && (!loaded || layer.image_set_source.is_some()) {
+                    let selected = layer.image_url_for_dpr(device_pixel_ratio);
                     out.push((
                         node.node_id,
                         path.clone(),
                         crate::types::PendingImageTarget::BackgroundLayer(layer_index),
-                        crate::html::resolve_url(&layer.image_url, base_url),
+                        crate::html::resolve_url(&selected, base_url),
                     ));
                 }
             }
             if can_paint_resource
-                && node.mask_image_data.is_none()
+                && (node.mask_image_data.is_none()
+                    || node.style.rare().mask_image_set_source.is_some())
                 && !node.style.rare().mask_image_url.is_empty()
             {
+                let selected = node.style.mask_image_url_for_dpr(device_pixel_ratio);
                 out.push((
                     node.node_id,
                     path.clone(),
                     crate::types::PendingImageTarget::Mask,
-                    crate::html::resolve_url(&node.style.rare().mask_image_url, base_url),
+                    crate::html::resolve_url(&selected, base_url),
                 ));
             }
             if let Some(shadow) = node.shadow_root.as_ref() {
                 for child in &shadow.children {
-                    collect(child, base_url, viewport_w, viewport_h, path, out);
+                    collect(child, base_url, viewport_w, viewport_h, device_pixel_ratio, path, out);
                 }
             }
             for (idx, child) in node.children.iter().enumerate() {
                 path.push(idx);
-                collect(child, base_url, viewport_w, viewport_h, path, out);
+                collect(child, base_url, viewport_w, viewport_h, device_pixel_ratio, path, out);
                 path.pop();
             }
         }
@@ -1469,6 +1500,7 @@ impl EngineFrame {
             &self.doc.base_url,
             self.viewport_w,
             self.viewport_h,
+            self.doc.device_pixel_ratio,
             &mut Vec::new(),
             &mut requests,
         );
@@ -1540,17 +1572,7 @@ impl EngineFrame {
                     }
                 }
                 DomMutation::AddStylesheet { css, media, .. } => {
-                    self.doc
-                        .document_stylesheets
-                        .push(crate::types::DocumentStylesheet::Inline {
-                            css: css.clone(),
-                            media: media.clone(),
-                        });
-                    if crate::css::evaluate_media(&media, self.doc.viewport_w, self.doc.viewport_h) {
-                        self.doc
-                            .stylesheet
-                            .parse_and_add_with_base(&css, &self.doc.base_url);
-                        self.doc.stylesheet.rebuild_index();
+                    if self.doc.add_streamed_inline_stylesheet(css.clone(), media.clone()) {
                         self.mark_style_dirty();
                         self.engine.invalidate_cascade();
                     }
@@ -1635,20 +1657,7 @@ impl EngineFrame {
                         }
                     }
                     crate::html::streaming::DomMutation::AddStylesheet { css, media, .. } => {
-                        let active = crate::css::evaluate_media(
-                            &media,
-                            self.doc.viewport_w,
-                            self.doc.viewport_h,
-                        );
-                        let css_text = css.clone();
-                        self.doc
-                            .document_stylesheets
-                            .push(crate::types::DocumentStylesheet::Inline { css, media });
-                        if active {
-                            self.doc
-                                .stylesheet
-                                .parse_and_add_with_base(&css_text, &self.doc.base_url);
-                            self.doc.stylesheet.rebuild_index();
+                        if self.doc.add_streamed_inline_stylesheet(css, media) {
                             self.mark_style_dirty();
                             self.engine.invalidate_cascade();
                         }
@@ -1863,6 +1872,12 @@ mod tests {
                 .any(|sheet| matches!(sheet, crate::types::DocumentStylesheet::Inline { css, .. } if css.contains(".a"))),
             "streaming should register inline stylesheets on the document as they arrive"
         );
+        let parsed = frame.doc.inline_stylesheet_cache[&0].sheet.clone();
+        frame.doc.reevaluate_stylesheet_media(320.0, 240.0);
+        assert!(std::sync::Arc::ptr_eq(
+            &parsed,
+            &frame.doc.inline_stylesheet_cache[&0].sheet,
+        ));
     }
 
     #[test]
@@ -2113,7 +2128,7 @@ mod tests {
     }
 
     #[test]
-    fn update_frame_polls_streamed_stylesheets_in_a_bounded_batch() {
+    fn update_frame_coalesces_ready_streamed_stylesheets() {
         let mut frame = EngineFrame::empty(320.0, 240.0);
         frame.start_streaming("https://example.test/");
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2139,13 +2154,14 @@ mod tests {
             .filter(|rule| rule.original_selector.starts_with(".stream-batch-"))
             .count();
         assert_eq!(
-            consumed, 32,
-            "active frames should not drain every pending stylesheet fragment in one UI tick"
+            consumed, 64,
+            "all ready fragments should participate in one style/layout pass"
         );
         assert!(
             frame.doc.pending_stylesheets.is_some(),
-            "remaining stylesheet fragments should stay queued for following ticks"
+            "the live receiver remains attached while its sender is open"
         );
+        assert!(!frame.doc.poll_pending_stylesheets_budgeted(usize::MAX, std::time::Duration::ZERO));
     }
 
     #[test]
@@ -2310,10 +2326,11 @@ mod tests {
         frame.feed_html_chunk(
             br#"<html><body><img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='2' height='2'/%3E"></body>"#,
         );
+        frame.update_frame();
 
         assert!(
             frame.doc.pending_images.is_some(),
-            "streamed image discovery should wire directly into document pending images"
+            "the browser frame should schedule discovered images after layout"
         );
         assert_eq!(frame.scheduled_images.len(), 1);
     }
@@ -2523,6 +2540,7 @@ mod tests {
         frame.doc.pending_images = Some(original_rx);
 
         frame.finish_loading();
+        std::sync::Arc::make_mut(&mut frame.doc.root.style).background_image_url = "memory:bg".into();
 
         assert!(
             frame.image_tx.is_some(),
@@ -2547,6 +2565,103 @@ mod tests {
             frame.doc.root.bg_image_data.is_some(),
             "late image completions sent on the original channel should still reach the document"
         );
+    }
+
+    #[test]
+    fn image_set_reselects_background_candidates_when_density_changes() {
+        let mut frame = EngineFrame::new(
+            crate::html::parse_html("<div id=hero style='width:40px;height:40px'></div>"),
+            320.0,
+            240.0,
+        );
+        frame.update_frame();
+        let hero = crate::dom::query_selector_mut(&mut frame.doc.root, "#hero").unwrap();
+        crate::css::apply_property(
+            std::sync::Arc::make_mut(&mut hero.style),
+            "background-image",
+            "image-set(url(file:///nonexistent-one.png) 1x, url(file:///nonexistent-two.png) 2x)",
+        );
+        frame.schedule_unscheduled_document_images();
+        assert!(frame.scheduled_images.iter().any(|key| key.contains("nonexistent-one.png")));
+
+        assert!(frame.set_device_pixel_ratio(2.0));
+        assert!(frame.needs_render());
+        frame.update_frame();
+        assert!(frame.scheduled_images.iter().any(|key| key.contains("nonexistent-two.png")));
+
+        assert!(frame.set_device_pixel_ratio(1.0));
+        frame.update_frame();
+        assert!(frame.scheduled_images.iter().any(|key| key.contains("nonexistent-one.png")));
+        assert!(!frame.scheduled_images.iter().any(|key| key.contains("nonexistent-two.png")));
+    }
+
+    #[test]
+    fn image_set_reselects_each_background_layer_for_density() {
+        let mut frame = EngineFrame::new(
+            crate::html::parse_html("<div id=hero style='width:40px;height:40px'></div>"),
+            320.0,
+            240.0,
+        );
+        frame.update_frame();
+        let hero = crate::dom::query_selector_mut(&mut frame.doc.root, "#hero").unwrap();
+        crate::css::apply_property(
+            std::sync::Arc::make_mut(&mut hero.style),
+            "background-image",
+            "image-set(url(file:///first-one.png) 1x, url(file:///first-two.png) 2x), image-set(url(file:///second-one.png) 1x, url(file:///second-two.png) 2x)",
+        );
+        frame.schedule_unscheduled_document_images();
+        assert!(frame.scheduled_images.iter().any(|key| key.contains("first-one.png")));
+        assert!(frame.scheduled_images.iter().any(|key| key.contains("second-one.png")));
+
+        assert!(frame.set_device_pixel_ratio(2.0));
+        frame.update_frame();
+        assert!(frame.scheduled_images.iter().any(|key| key.contains("first-two.png")));
+        assert!(frame.scheduled_images.iter().any(|key| key.contains("second-two.png")));
+        assert!(!frame.scheduled_images.iter().any(|key| key.contains("first-one.png")));
+        assert!(!frame.scheduled_images.iter().any(|key| key.contains("second-one.png")));
+    }
+
+    #[test]
+    fn image_set_reselects_mask_candidate_for_density() {
+        let mut frame = EngineFrame::new(
+            crate::html::parse_html("<div id=hero style='width:40px;height:40px'></div>"),
+            320.0,
+            240.0,
+        );
+        frame.update_frame();
+        let hero = crate::dom::query_selector_mut(&mut frame.doc.root, "#hero").unwrap();
+        crate::css::apply_property(
+            std::sync::Arc::make_mut(&mut hero.style),
+            "mask-image",
+            "image-set(url(file:///mask-one.png) 1x, url(file:///mask-two.png) 2x)",
+        );
+        frame.schedule_unscheduled_document_images();
+        assert!(frame.scheduled_images.iter().any(|key| key.contains("mask-one.png")));
+
+        assert!(frame.set_device_pixel_ratio(2.0));
+        frame.update_frame();
+        assert!(frame.scheduled_images.iter().any(|key| key.contains("mask-two.png")));
+        assert!(!frame.scheduled_images.iter().any(|key| key.contains("mask-one.png")));
+    }
+
+    #[test]
+    fn image_set_data_candidate_is_not_decoded_on_every_resource_scan() {
+        let mut frame = EngineFrame::new(
+            crate::html::parse_html("<div id=hero style='width:40px;height:40px'></div>"),
+            320.0,
+            240.0,
+        );
+        frame.update_frame();
+        let hero = crate::dom::query_selector_mut(&mut frame.doc.root, "#hero").unwrap();
+        crate::css::apply_property(
+            std::sync::Arc::make_mut(&mut hero.style),
+            "background-image",
+            "image-set(url(data:image/png;base64,AAAA) 1x)",
+        );
+        frame.schedule_unscheduled_document_images();
+        assert_eq!(frame.doc.image_load_errors.len(), 1);
+        frame.schedule_unscheduled_document_images();
+        assert_eq!(frame.doc.image_load_errors.len(), 1);
     }
 
     #[test]

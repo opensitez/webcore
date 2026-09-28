@@ -1,5 +1,7 @@
 use crate::css::apply_cascade_vp;
 use crate::layout::LayoutEngine;
+use crate::renderer::display_list::PaintCmd;
+use crate::renderer::display_list_builder::build_display_list;
 use crate::types::*;
 use crate::{Document, Renderer, parse_html};
 
@@ -3162,6 +3164,44 @@ fn placeholder_pseudo_element_sets_placeholder_color() {
             .map(|style| style.color),
         Some(Color::rgb(10, 20, 30))
     );
+}
+
+#[test]
+fn placeholder_pseudo_typography_reaches_input_and_textarea_paint() {
+    let doc = layout_html(
+        r#"<style>
+             input, textarea { font-size: 12px; font-family: Arial; }
+             input::placeholder, textarea::placeholder {
+               color: rgb(10, 20, 30); font-size: 20px; font-weight: 700;
+               font-style: italic; font-family: serif; line-height: 26px;
+               letter-spacing: 2px; word-spacing: 3px;
+             }
+           </style>
+           <input type="text" placeholder="first hint">
+           <textarea placeholder="second hint"></textarea>"#,
+        400.0,
+    );
+    let list = build_display_list(&doc.root, 400.0, 900.0);
+    let controls: Vec<_> = list.commands.iter().filter_map(|command| {
+        if let PaintCmd::FormElement { tag, font_size, placeholder_color, placeholder_typography, .. } = command {
+            (tag == "input" || tag == "textarea").then_some((font_size, placeholder_color, placeholder_typography))
+        } else {
+            None
+        }
+    }).collect();
+    assert_eq!(controls.len(), 2);
+    for (font_size, color, typography) in controls {
+        assert!((*font_size - 12.0).abs() < 0.01);
+        assert_eq!(*color, Color::rgb(10, 20, 30));
+        let typography = typography.as_ref().expect("placeholder typography");
+        assert!((typography.font_size - 20.0).abs() < 0.01);
+        assert_eq!(typography.font_weight, 700);
+        assert_eq!(typography.font_style, 1);
+        assert_eq!(typography.font_family, "serif");
+        assert!((typography.line_height - 26.0).abs() < 0.01);
+        assert!((typography.letter_spacing - 2.0).abs() < 0.01);
+        assert!((typography.word_spacing - 3.0).abs() < 0.01);
+    }
 }
 
 // ── Focus ring on tab-focused checkbox ──────────────────────────────────────

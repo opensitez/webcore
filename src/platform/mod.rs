@@ -3,6 +3,8 @@ use std::sync::Arc;
 use tiny_skia::Pixmap;
 use winit::window::Window;
 
+pub mod dialogs;
+
 pub struct Platform {
     surface: Surface<Arc<Window>, Arc<Window>>,
     window: Arc<Window>,

@@ -2365,13 +2365,9 @@ impl Renderer {
                 .scrollbar_track_color
                 .unwrap_or(Color::rgba(128, 128, 128, 40));
             let track_h = h;
-            let thumb_h = (track_h * view_h / doc_h).max(20.0);
-            let max_s = doc_h - view_h;
-            let thumb_y = if max_s > 0.0 {
-                doc.scroll_y * (track_h - thumb_h) / max_s
-            } else {
-                0.0
-            };
+            let (thumb_h, thumb_y, _) = crate::types::scrollbar_hit::viewport_scrollbar_thumb(
+                track_h, view_h, doc_h, doc.scroll_y,
+            );
             let track_x = w - scrollbar_w;
             let ts = Transform::from_scale(self.scale, self.scale);
             let mut paint = Paint::default();

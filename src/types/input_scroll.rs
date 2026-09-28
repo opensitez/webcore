@@ -94,32 +94,25 @@ impl Document {
             MouseDown => {
                 // Viewport scrollbar — right edge of window.
                 let doc_h = self.cached_scroll_height();
-                if doc_h > viewport_h && sbw > 0.0 && screen_x >= viewport_w - sbw {
+                if doc_h > viewport_h
+                    && sbw > 0.0
+                    && screen_x >= viewport_w - sbw
+                    && screen_x < viewport_w
+                    && screen_y >= 0.0
+                    && screen_y < viewport_h
+                {
                     let track_h = viewport_h;
-                    let thumb_h = (track_h * track_h / doc_h).max(20.0);
+                    let (thumb_h, thumb_y, scale) = super::scrollbar_hit::viewport_scrollbar_thumb(
+                        track_h, viewport_h, doc_h, self.scroll_y,
+                    );
                     let max_s = (doc_h - viewport_h).max(0.0);
-                    let scale = if track_h - thumb_h > 0.0 {
-                        max_s / (track_h - thumb_h)
-                    } else {
-                        0.0
-                    };
-                    let thumb_y = if max_s > 0.0 {
-                        self.scroll_y * (track_h - thumb_h) / max_s
-                    } else {
-                        0.0
-                    };
 
                     // Click in track but outside thumb → jump to that position.
                     if !(screen_y >= thumb_y && screen_y < thumb_y + thumb_h) {
                         let new_thumb_y =
-                            (screen_y - thumb_h * 0.5).max(0.0).min(track_h - thumb_h);
+                            (screen_y - thumb_h * 0.5).clamp(0.0, (track_h - thumb_h).max(0.0));
                         self.scroll_y = (new_thumb_y * scale).min(max_s).max(0.0);
                     }
-                    let thumb_y = if max_s > 0.0 {
-                        self.scroll_y * (track_h - thumb_h) / max_s
-                    } else {
-                        0.0
-                    };
                     self.scrollbar_drag = Some(ScrollbarDrag {
                         kind: ScrollbarDragKind::Viewport,
                         start_mouse_x: screen_x,
@@ -127,7 +120,6 @@ impl Document {
                         start_scroll: self.scroll_y,
                         scroll_per_px: scale,
                     });
-                    let _ = thumb_y;
                     return true;
                 }
 

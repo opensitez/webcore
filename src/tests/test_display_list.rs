@@ -3,7 +3,7 @@
 use crate::Renderer;
 use crate::frame::EngineFrame;
 use crate::html::{parse_html, parse_html_with_base};
-use crate::renderer::display_list::{DisplayList, ImageRef, PaintCmd};
+use crate::renderer::display_list::{DisplayList, ImageRef, PaintCmd, PlaceholderTypography};
 use crate::renderer::display_list_builder::{
     build_display_list, build_display_list_full, build_display_list_full_with_font_system,
 };
@@ -2840,6 +2840,7 @@ fn replay_scrolls_form_element_content() {
         text_align: crate::types::TextAlign::Start,
         direction: crate::types::Direction::LTR,
         placeholder_color: Color::rgba(0, 0, 0, 128),
+        placeholder_typography: None,
         file_button_color: Color::BLACK,
         file_button_background: Color::TRANSPARENT,
         file_button_font_size: 16.0,
@@ -2879,6 +2880,47 @@ fn replay_scrolls_form_element_content() {
         painted_at_unscrolled_position, 0,
         "form element content must not stay fixed while the page scrolls"
     );
+}
+
+#[test]
+fn placeholder_typography_changes_placeholder_paint_but_not_input_value() {
+    let (_, list) = build(r#"<input type="text" placeholder="MMMM" style="width:200px;height:50px;font-size:10px">"#);
+    let command = list.commands.iter().find(|command| matches!(command, PaintCmd::FormElement { .. }))
+        .expect("form paint command").clone();
+    let mut styled = command.clone();
+    if let PaintCmd::FormElement { placeholder_typography, .. } = &mut styled {
+        *placeholder_typography = Some(PlaceholderTypography {
+            font_size: 28.0,
+            font_weight: 700,
+            font_style: 1,
+            font_family: "serif".to_string(),
+            line_height: 34.0,
+            letter_spacing: 2.0,
+            word_spacing: 0.0,
+        });
+    }
+    let paint = |command: PaintCmd| {
+        let mut display_list = DisplayList::new();
+        display_list.push(command);
+        let mut pixmap = tiny_skia::Pixmap::new(240, 80).unwrap();
+        let mut fonts = cosmic_text::FontSystem::new();
+        let mut glyphs = cosmic_text::SwashCache::new();
+        replay_with_text(&display_list, &mut pixmap, 1.0, &mut fonts, &mut glyphs);
+        pixmap
+    };
+    let base_pixels = paint(command.clone());
+    let styled_pixels = paint(styled.clone());
+    assert_ne!(base_pixels.data(), styled_pixels.data(), "placeholder font must affect paint");
+
+    let mut value_base = command;
+    let mut value_styled = styled;
+    if let PaintCmd::FormElement { value, .. } = &mut value_base {
+        *value = "MMMM".to_string();
+    }
+    if let PaintCmd::FormElement { value, .. } = &mut value_styled {
+        *value = "MMMM".to_string();
+    }
+    assert_eq!(paint(value_base).data(), paint(value_styled).data(), "value must keep the input font");
 }
 
 #[test]
@@ -4524,6 +4566,7 @@ fn appearance_none_checkbox_does_not_paint_native_chrome() {
         text_align: crate::types::TextAlign::Start,
         direction: crate::types::Direction::LTR,
         placeholder_color: Color::rgba(0, 0, 0, 128),
+        placeholder_typography: None,
         file_button_color: Color::BLACK,
         file_button_background: Color::TRANSPARENT,
         file_button_font_size: 16.0,
@@ -4565,6 +4608,7 @@ fn form_labels_respect_text_indent_and_control_clipping() {
         text_align: crate::types::TextAlign::Start,
         direction: crate::types::Direction::LTR,
         placeholder_color: Color::BLACK,
+        placeholder_typography: None,
         file_button_color: Color::BLACK,
         file_button_background: Color::TRANSPARENT,
         file_button_font_size: 14.0,
@@ -4980,6 +5024,18 @@ fn text_overflow_two_value_custom_marker_truncates_display_text() {
 }
 
 #[test]
+fn text_overflow_mixed_styled_runs_emits_one_end_marker() {
+    let (_, list) = build(
+        "<style>*{margin:0;padding:0}div{width:75px;font:20px monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}b{color:red}</style><div>abcd<b>efghijklmnop</b></div>",
+    );
+    let markers = list.commands.iter().filter(|cmd| match cmd {
+        PaintCmd::Text { text, .. } => text.contains('…'),
+        _ => false,
+    }).count();
+    assert_eq!(markers, 1, "one clipped line must paint one end marker: {:?}", list.commands);
+}
+
+#[test]
 fn text_overflow_keeps_complete_graphemes_inside_marker_budget() {
     use unicode_segmentation::UnicodeSegmentation;
     for source in ["abcdefghijk", "a\u{301}a\u{301}a\u{301}a\u{301}a\u{301}"] {
@@ -5040,6 +5096,85 @@ fn empty_text_overflow_string_clips_at_grapheme_boundaries_without_ellipsis() {
     assert!(!text.contains('…'), "empty marker must not become ellipsis: {text:?}");
     assert!(text.len() < source.len(), "must truncate rather than clip mid-glyph");
     assert!(source.grapheme_indices(true).any(|(offset, cluster)| offset + cluster.len() == text.len()));
+}
+
+#[test]
+fn rtl_single_value_text_overflow_marks_the_physical_left_edge() {
+    let (_, list) = build(
+        "<style>*{margin:0;padding:0}div{direction:rtl;width:45px;font:20px sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}</style><div>مرحبا بالعالم الجميل</div>",
+    );
+    let marker = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Text { text, x, .. } if text == "…" => Some(*x),
+        _ => None,
+    }).expect("RTL overflow marker");
+    assert!((marker - 0.0).abs() < 0.1, "marker should sit at the physical left edge: {marker}");
+    assert!(!list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text.ends_with('…') && text != "…")),
+        "single-value RTL text-overflow must not append a right-edge marker");
+}
+
+#[test]
+fn scrolled_two_value_text_overflow_marks_the_fixed_left_edge() {
+    let mut frame = EngineFrame::new(parse_html(
+        "<style>*{margin:0;padding:0}div{width:50px;font:20px monospace;white-space:nowrap;overflow:auto;text-overflow:'<' clip}</style><div id=box>abcdefghijklmnop</div>",
+    ), 800.0, 600.0);
+    frame.update_frame();
+    let box_node = crate::dom::query_selector_mut(&mut frame.doc.root, "#box").unwrap();
+    assert!(box_node.layout.scroll_width > box_node.layout.content_rect.w);
+    box_node.layout.scroll_left = 30.0;
+    let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+    let marker_x = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Text { text, x, .. } if text == "<" => Some(*x),
+        _ => None,
+    }).expect("scrolled left-edge marker");
+    assert!((marker_x - 0.0).abs() < 0.1, "left marker must remain at the box edge: {marker_x}");
+}
+
+#[test]
+fn scrolled_two_value_text_overflow_marks_both_physical_edges() {
+    let mut frame = EngineFrame::new(parse_html(
+        "<style>*{margin:0;padding:0}div{width:50px;font:20px monospace;white-space:nowrap;overflow:auto;text-overflow:'<' '>'}</style><div id=box>abcdefghijklmnop</div>",
+    ), 800.0, 600.0);
+    frame.update_frame();
+    let box_node = crate::dom::query_selector_mut(&mut frame.doc.root, "#box").unwrap();
+    assert!(box_node.layout.scroll_width > box_node.layout.content_rect.w);
+    box_node.layout.scroll_left = 30.0;
+    let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+    let markers: Vec<_> = list.commands.iter().filter_map(|cmd| match cmd {
+        PaintCmd::Text { text, x, .. } if text == "<" || text == ">" => Some((text.as_str(), *x)),
+        _ => None,
+    }).collect();
+    assert!(markers.iter().any(|&(marker, x)| marker == "<" && x.abs() < 0.1),
+        "left marker should stay at the left edge: {markers:?}");
+    assert!(markers.iter().any(|&(marker, x)| marker == ">" && x > 30.0 && x < 50.0),
+        "right marker should stay at the right edge: {markers:?}");
+
+    let box_node = crate::dom::query_selector_mut(&mut frame.doc.root, "#box").unwrap();
+    box_node.layout.scroll_left = box_node.layout.scroll_width - box_node.layout.content_rect.w;
+    let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+    assert!(list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == "<")));
+    assert!(!list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == ">")),
+        "right marker must disappear once the right edge is fully visible");
+}
+
+#[test]
+fn left_text_overflow_marker_reserves_its_letter_spacing() {
+    fn clipped_text_start(spacing: u32) -> f32 {
+        let mut frame = EngineFrame::new(parse_html(&format!(
+            "<style>*{{margin:0;padding:0}}div{{width:50px;font:20px monospace;letter-spacing:{spacing}px;white-space:nowrap;overflow:auto;text-overflow:'<<' clip}}</style><div id=box>abcdefghijklmnop</div>"
+        )), 800.0, 600.0);
+        frame.update_frame();
+        crate::dom::query_selector_mut(&mut frame.doc.root, "#box").unwrap().layout.scroll_left = 30.0;
+        let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+        assert!(list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == "<<")));
+        list.commands.iter().find_map(|cmd| match cmd {
+            PaintCmd::PushClip { rect, .. } if rect.x > 0.0 && rect.w < 50.0 => Some(rect.x),
+            _ => None,
+        }).expect("left marker text clip")
+    }
+
+    let plain = clipped_text_start(0);
+    let spaced = clipped_text_start(4);
+    assert!((spaced - plain - 4.0).abs() < 0.1, "marker tracking must reserve one extra 4px gap: {plain} -> {spaced}");
 }
 
 #[test]

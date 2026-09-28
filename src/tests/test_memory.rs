@@ -35,11 +35,11 @@ fn the_data_model_sizes_are_what_the_plan_says() {
     // (WebCore, ComputedStyle, LayoutBox) — update deliberately, with the
     // change that moved them.
     //
-    // 2016 → 3472 → 3480, WebCore 624 → 1344: SVG document integration and
-    // later CSS standards coverage widened ComputedStyle and WebCore.
+    // Current model includes the newer layout and image-set style fields;
+    // these numbers are a measured record, not a size budget.
     // This assertion is a measured record, not a threshold; update it with the
     // feature that intentionally moves the data model.
-    assert_eq!(sizes, (1344, 3480, 224), "sizes moved");
+    assert_eq!(sizes, (1488, 3592, 280), "sizes moved");
 }
 
 #[test]
@@ -47,13 +47,11 @@ fn a_real_page_costs_what_the_plan_says() {
     let mut r = crate::Renderer::new();
     let doc = r.load_html(include_str!("../../examples/html/demo.html"), 900.0);
     let (nodes, node_bytes, distinct_styles, total) = tree_bytes(&doc.root);
-    // Before `Arc<ComputedStyle>`: 1132 nodes, 3,350,720 B, one style each.
-    //
-    // Total tracks the exact struct sizes above: 1,099 distinct styles means
-    // widening `ComputedStyle` moves this number loudly.
+    // The current demo fixture has 160 nodes/styles. Total tracks the struct
+    // sizes above, so widening WebCore or ComputedStyle changes this record.
     assert_eq!(
         (nodes, node_bytes, distinct_styles, total),
-        (1161, 1_560_384, 1128, 5_485_824),
+        (160, 238_080, 160, 812_800),
         "demo.html: nodes, node bytes, DISTINCT styles, total"
     );
 }
@@ -298,10 +296,8 @@ fn style_sharing_must_not_ignore_other_attributes() {
 
 /// `arenaplan.md` item 2's ceiling, measured rather than assumed.
 ///
-/// ⛔ **8 of 1,132 elements use ANY rare property.** The fields cost 312 B in
-/// every `ComputedStyle` regardless. Boxing them is worth about 10% of tree
-/// memory across 182 access sites — a real but modest win, and NOT the
-/// "compounds with item 1" the plan claimed, because styles are not shared.
+/// Count rare-property use in the current demo fixture. This is a measurement,
+/// not an assertion that the ratio holds for other pages.
 #[test]
 fn the_rare_property_ceiling_is_worth_measuring_before_building() {
     let mut r = crate::Renderer::new();
@@ -333,7 +329,7 @@ fn the_rare_property_ceiling_is_worth_measuring_before_building() {
     walk(&doc.root, &mut total, &mut with_rare);
     assert_eq!(
         (total, with_rare),
-        (1161, 8),
+        (160, 3),
         "rare-property usage on demo.html"
     );
 }

@@ -728,7 +728,7 @@ impl HtmlParser {
                                 self.stylesheet.parse_and_add(&normalize_css_text(&css));
                             }
                             self.document_stylesheets
-                                .push(DocumentStylesheet::Inline { css: css.clone(), media });
+                                .push(DocumentStylesheet::Inline { css: css.clone().into(), media });
                         }
                         let mut style_node = self.new_box("style");
                         style_node.text = css.clone();
@@ -1005,7 +1005,7 @@ impl HtmlParser {
                 self.stylesheet.parse_and_add(&normalize_css_text(&css));
             }
             self.document_stylesheets
-                .push(DocumentStylesheet::Inline { css: css.clone(), media });
+                .push(DocumentStylesheet::Inline { css: css.clone().into(), media });
             // The element stays in the tree — see the sibling arm in
             // `parse_children_into`.
             let mut style_node = self.new_box("style");

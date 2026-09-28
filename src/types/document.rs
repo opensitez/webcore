@@ -7,6 +7,7 @@ use crate::css::*;
 use crate::dom::*;
 use crate::html::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// The root document: box tree + stylesheet + metadata.
 /// Which popup an element opens on activation.
@@ -70,8 +71,15 @@ pub struct AnimatedImageTick {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DocumentStylesheet {
-    Inline { css: String, media: String },
+    Inline { css: Arc<str>, media: String },
     Linked { href: String, media: String },
+}
+
+#[derive(Clone)]
+pub(crate) struct CachedInlineStylesheet {
+    pub source: Arc<str>,
+    pub base_url: String,
+    pub sheet: Arc<Stylesheet>,
 }
 
 pub struct Document {
@@ -127,6 +135,7 @@ pub struct Document {
     pub linked_stylesheets: Vec<(String, String)>,
     /// All author stylesheets in document order (both `<link>` and `<style>`).
     pub document_stylesheets: Vec<DocumentStylesheet>,
+    pub(crate) inline_stylesheet_cache: HashMap<usize, CachedInlineStylesheet>,
     /// Linked author stylesheet fragments that have arrived from background
     /// fetches, keyed by their resolved URL. Exact/document-order loading
     /// rebuilds the CSSOM from `document_stylesheets` so late sheets keep
@@ -136,10 +145,9 @@ pub struct Document {
     /// slot. This is the browser-facing storage: fetches may finish in any
     /// order, but the cascade consumes slots in source order.
     pub loaded_stylesheet_slots: HashMap<usize, crate::css::Stylesheet>,
-    /// True while preserving exact document-order stylesheet rebuilds. Live
-    /// browser loading keeps this false so streamed parsed CSS fragments append
-    /// directly to the active cascade instead of cloning/rebuilding the whole
-    /// author stylesheet on every network chunk.
+    /// Preserve author stylesheet order when linked sheets arrive out of order.
+    /// The browser coalesces ready fragments per frame; parsed inline sheets
+    /// are reused across document-order rebuilds.
     pub preserve_stylesheet_document_order: bool,
     pub editor: Editor,
     /// Drawing state for the document's `<canvas>` elements, keyed by node id.
@@ -217,6 +225,8 @@ pub struct Document {
     /// Last known logical viewport size — kept in sync by LayoutEngine::layout.
     pub viewport_w: f32,
     pub viewport_h: f32,
+    /// CSS pixels to device pixels for density-dependent image resources.
+    pub device_pixel_ratio: f32,
     /// True when focus was moved by keyboard (Tab/Shift+Tab) — drives :focus-visible.
     pub keyboard_focus: bool,
     /// Caret blink epoch — reset on each keystroke so caret stays visible while typing.
@@ -775,6 +785,7 @@ impl Clone for Document {
             pending_nodes: HashMap::new(),
             linked_stylesheets: self.linked_stylesheets.clone(),
             document_stylesheets: self.document_stylesheets.clone(),
+            inline_stylesheet_cache: self.inline_stylesheet_cache.clone(),
             loaded_linked_stylesheets: self.loaded_linked_stylesheets.clone(),
             loaded_stylesheet_slots: self.loaded_stylesheet_slots.clone(),
             preserve_stylesheet_document_order: self.preserve_stylesheet_document_order,
@@ -812,6 +823,7 @@ impl Clone for Document {
             suppress_range_updates: false,
             viewport_w: self.viewport_w,
             viewport_h: self.viewport_h,
+            device_pixel_ratio: self.device_pixel_ratio,
             keyboard_focus: self.keyboard_focus,
             caret_blink_epoch: std::time::Instant::now(),
             open_select: 0,

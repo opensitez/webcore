@@ -155,8 +155,10 @@ fn trailing_br_does_not_add_a_caret_line_to_page_content() {
 }
 
 #[test]
-fn flex_stretches_indefinite_percentage_height_and_image_descendants() {
-    for (parent_height, expected_content) in [("", 280.0), ("height:800px", 380.0)] {
+fn flex_resolves_percentage_height_against_definite_container_only() {
+    // Chrome leaves the indefinite case at its 21px intrinsic minimum; the
+    // percentage is not a computed `auto` size eligible for flex stretch.
+    for (parent_height, expected_content) in [("", 21.0), ("height:800px", 380.0)] {
         let doc = parse_and_layout(&format!("<style>#row{{display:flex;width:600px;{parent_height}}}#text{{width:300px;height:300px}}#column{{width:300px;height:50%;padding-bottom:20px;box-sizing:border-box}}#frame,#inner{{height:100%;min-height:21px}}#inner{{position:relative}}img{{position:absolute;width:100%;height:100%;object-fit:cover}}</style><div id=row><div id=text></div><div id=column><div id=frame><div id=inner><img id=image width=640 height=480></div></div></div></div>"), 800.0);
         let column = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "column")).unwrap();
         let image = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "image")).unwrap();

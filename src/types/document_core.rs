@@ -52,6 +52,7 @@ impl Document {
             base_url: String::new(),
             linked_stylesheets: Vec::new(),
             document_stylesheets: Vec::new(),
+            inline_stylesheet_cache: HashMap::new(),
             loaded_linked_stylesheets: HashMap::new(),
             loaded_stylesheet_slots: HashMap::new(),
             preserve_stylesheet_document_order: true,
@@ -83,6 +84,7 @@ impl Document {
             suppress_range_updates: false,
             viewport_w: 0.0,
             viewport_h: 0.0,
+            device_pixel_ratio: 1.0,
             keyboard_focus: false,
             caret_blink_epoch: std::time::Instant::now(),
             open_select: 0,
@@ -146,6 +148,28 @@ impl Document {
     /// Returns true if the stylesheet changed and the caller should re-layout.
     pub fn poll_pending_stylesheets(&mut self) -> bool {
         self.poll_pending_stylesheets_budgeted(usize::MAX, std::time::Duration::from_secs(60))
+    }
+
+    pub(crate) fn add_streamed_inline_stylesheet(&mut self, css: String, media: String) -> bool {
+        let source: std::sync::Arc<str> = css.into();
+        let slot = self.document_stylesheets.len();
+        let active = crate::css::evaluate_media(&media, self.viewport_w, self.viewport_h);
+        self.document_stylesheets.push(DocumentStylesheet::Inline {
+            css: source.clone(),
+            media,
+        });
+        if active {
+            let mut sheet = crate::css::Stylesheet::default();
+            sheet.parse_and_add_with_base(&source, &self.base_url);
+            self.stylesheet.append_fragment(sheet.clone());
+            self.inline_stylesheet_cache.insert(slot, CachedInlineStylesheet {
+                source,
+                base_url: self.base_url.clone(),
+                sheet: std::sync::Arc::new(sheet),
+            });
+            self.stylesheet.rebuild_index();
+        }
+        active
     }
 
     /// Poll pending stylesheet work. A zero `max_time` means "drain everything
@@ -250,7 +274,23 @@ impl Document {
                     if !crate::css::evaluate_media(media, self.viewport_w, self.viewport_h) {
                         continue;
                     }
-                    self.stylesheet.parse_and_add_with_base(css, &self.base_url);
+                    let cached = self.inline_stylesheet_cache.get(&idx).is_some_and(|cached| {
+                        cached.base_url == self.base_url
+                            && (std::sync::Arc::ptr_eq(&cached.source, css)
+                                || cached.source.as_ref() == css.as_ref())
+                    });
+                    if !cached {
+                        let mut sheet = crate::css::Stylesheet::default();
+                        sheet.parse_and_add_with_base(css, &self.base_url);
+                        self.inline_stylesheet_cache.insert(idx, CachedInlineStylesheet {
+                            source: css.clone(),
+                            base_url: self.base_url.clone(),
+                            sheet: std::sync::Arc::new(sheet),
+                        });
+                    }
+                    self.stylesheet.append_fragment(
+                        (*self.inline_stylesheet_cache[&idx].sheet).clone(),
+                    );
                 }
                 DocumentStylesheet::Linked { href, media } => {
                     if !crate::css::evaluate_media(media, self.viewport_w, self.viewport_h) {
@@ -288,7 +328,7 @@ impl Document {
                 sheet.rules.len(),
                 sheet.font_faces.len(),
                 sheet.keyframes.len(),
-                sheet.raw_sources.len(),
+                sheet.source_count,
             )
         }
 
@@ -394,14 +434,14 @@ impl Document {
                 queue_drained = true;
                 break;
             };
-            let (node_id, path, target, decoded) = match result {
+            let (node_id, path, target, url, decoded) = match result {
                 PendingImageResult::Loaded {
                     node_id,
                     path,
                     target,
+                    url,
                     decoded,
-                    ..
-                } => (node_id, path, target, decoded),
+                } => (node_id, path, target, url, decoded),
                 PendingImageResult::Failed {
                     node_id,
                     path,
@@ -423,6 +463,8 @@ impl Document {
             let mut paint_rect = None;
             let loaded_path = path.clone();
             let loaded_target_kind = target;
+            let base_url = self.base_url.clone();
+            let device_pixel_ratio = self.device_pixel_ratio;
             let mut apply_to_node = |node: &mut WebCore| {
                 paint_rect = Some(match paint_rect {
                     Some(existing) => union_rect(existing, node.layout.border_rect),
@@ -444,11 +486,29 @@ impl Document {
                         loaded_target = true;
                     }
                     PendingImageTarget::Background => {
+                        let selected = node.style.background_image_url_for_dpr(device_pixel_ratio);
+                        let expected = crate::html::resolve_url(&selected, &base_url);
+                        if selected.is_empty() || (url != expected
+                            && (node.bg_image_data.is_some()
+                                || node.style.rare().background_image_set_source.is_none())) {
+                            return;
+                        }
                         if crate::html::set_decoded_bg_image_on_node(node, decoded.clone()) {
                             loaded_target = true;
                         }
                     }
                     PendingImageTarget::BackgroundLayer(layer_index) => {
+                        let Some(layer) = node.style.rare().additional_background_layers.get(layer_index) else {
+                            return;
+                        };
+                        let selected = layer.image_url_for_dpr(device_pixel_ratio);
+                        let expected = crate::html::resolve_url(&selected, &base_url);
+                        let loaded = node.additional_bg_images.get(layer_index)
+                            .and_then(|image| image.as_ref()).is_some();
+                        if selected.is_empty() || (url != expected
+                            && (loaded || layer.image_set_source.is_none())) {
+                            return;
+                        }
                         if crate::html::set_decoded_bg_image_layer_on_node(
                             node,
                             layer_index,
@@ -458,6 +518,13 @@ impl Document {
                         }
                     }
                     PendingImageTarget::Mask => {
+                        let selected = node.style.mask_image_url_for_dpr(device_pixel_ratio);
+                        let expected = crate::html::resolve_url(&selected, &base_url);
+                        if selected.is_empty() || (url != expected
+                            && (node.mask_image_data.is_some()
+                                || node.style.rare().mask_image_set_source.is_none())) {
+                            return;
+                        }
                         if let Some((data, w, h)) =
                             crate::html::decoded_image_pixels_arc(decoded.clone())
                         {
@@ -1269,7 +1336,7 @@ mod tests {
         let mut doc = Document::new();
         doc.document_stylesheets
             .push(crate::types::DocumentStylesheet::Inline {
-                css: ".wide-only { color: red }".to_string(),
+                css: ".wide-only { color: red }".into(),
                 media: "(min-width: 600px)".to_string(),
             });
         doc.viewport_w = 800.0;
@@ -1283,6 +1350,37 @@ mod tests {
     }
 
     #[test]
+    fn inline_stylesheet_parse_is_reused_and_invalidated_by_source_or_base() {
+        let mut doc = Document::new();
+        doc.base_url = "https://example.test/one/".into();
+        doc.document_stylesheets.push(DocumentStylesheet::Inline {
+            css: ".target { background-image: url(icon.svg) }".into(),
+            media: String::new(),
+        });
+        doc.rebuild_author_stylesheet_from_document_order();
+        let first = doc.inline_stylesheet_cache[&0].sheet.clone();
+        doc.rebuild_author_stylesheet_from_document_order();
+        assert!(std::sync::Arc::ptr_eq(&first, &doc.inline_stylesheet_cache[&0].sheet));
+
+        doc.document_stylesheets[0] = DocumentStylesheet::Inline {
+            css: ".updated { background-image: url(icon.svg) }".into(),
+            media: String::new(),
+        };
+        doc.rebuild_author_stylesheet_from_document_order();
+        let second = doc.inline_stylesheet_cache[&0].sheet.clone();
+        assert!(!std::sync::Arc::ptr_eq(&first, &second));
+        assert!(doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".updated"));
+        assert!(!doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".target"));
+
+        doc.base_url = "https://example.test/two/".into();
+        doc.rebuild_author_stylesheet_from_document_order();
+        assert!(!std::sync::Arc::ptr_eq(&second, &doc.inline_stylesheet_cache[&0].sheet));
+        assert!(doc.stylesheet.rules.iter().any(|rule| {
+            rule.declarations.iter().any(|(_, value)| value.contains("https://example.test/two/icon.svg"))
+        }));
+    }
+
+    #[test]
     fn pending_stylesheet_poll_preserves_document_order_not_arrival_order() {
         let mut doc = Document::new();
         doc.preserve_stylesheet_document_order = true;
@@ -1290,7 +1388,7 @@ mod tests {
         doc.base_url = "https://example.test/page/".to_string();
         doc.document_stylesheets
             .push(crate::types::DocumentStylesheet::Inline {
-                css: ".target { color: rgb(10, 0, 0) }".to_string(),
+                css: ".target { color: rgb(10, 0, 0) }".into(),
                 media: String::new(),
             });
         doc.document_stylesheets
@@ -1300,7 +1398,7 @@ mod tests {
             });
         doc.document_stylesheets
             .push(crate::types::DocumentStylesheet::Inline {
-                css: ".target { color: rgb(20, 0, 0) }".to_string(),
+                css: ".target { color: rgb(20, 0, 0) }".into(),
                 media: String::new(),
             });
         doc.document_stylesheets
@@ -1494,5 +1592,42 @@ mod tests {
         assert!(second.loaded_any);
         assert_eq!(doc.root.children[1].image_width, 1);
         assert_eq!(doc.root.children[2].image_width, 0);
+    }
+
+    #[test]
+    fn image_set_keeps_low_density_pixels_until_high_density_arrives() {
+        let mut doc = Document::new();
+        doc.base_url = "https://example.test/".into();
+        let mut node = WebCore::new("div");
+        crate::css::apply_property(
+            std::sync::Arc::make_mut(&mut node.style),
+            "background-image",
+            "image-set(url(one.png) 1x, url(two.png) 2x)",
+        );
+        doc.root.children.push(node);
+        let (tx, rx) = std::sync::mpsc::channel();
+        doc.pending_images = Some(rx);
+        let loaded = |url: &str, red: u8| PendingImageResult::Loaded {
+            node_id: 0,
+            path: vec![0],
+            target: PendingImageTarget::Background,
+            url: url.to_string(),
+            decoded: crate::html::DecodedImage::Raster(
+                std::sync::Arc::new(vec![red, 0, 0, 255]), 1, 1,
+            ),
+        };
+
+        tx.send(loaded("https://example.test/one.png", 40)).unwrap();
+        assert!(doc.poll_pending_images_budgeted(1, std::time::Duration::ZERO).loaded_any);
+        assert_eq!(doc.root.children[0].bg_image_data.as_ref().unwrap()[0], 40);
+
+        doc.device_pixel_ratio = 2.0;
+        assert_eq!(doc.root.children[0].bg_image_data.as_ref().unwrap()[0], 40);
+        tx.send(loaded("https://example.test/two.png", 90)).unwrap();
+        tx.send(loaded("https://example.test/one.png", 40)).unwrap();
+        assert!(doc.poll_pending_images_budgeted(1, std::time::Duration::ZERO).loaded_any);
+        assert_eq!(doc.root.children[0].bg_image_data.as_ref().unwrap()[0], 90);
+        assert!(!doc.poll_pending_images_budgeted(1, std::time::Duration::ZERO).loaded_any);
+        assert_eq!(doc.root.children[0].bg_image_data.as_ref().unwrap()[0], 90);
     }
 }

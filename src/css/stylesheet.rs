@@ -51,8 +51,8 @@ pub struct Stylesheet {
     /// True if any rule has :hover on a non-subject selector part (descendant hover rules).
     /// When true, descendants of hover-changed nodes must also be re-cascaded.
     pub has_hover_descendant_rules: bool,
-    /// Raw (comment-stripped) CSS sources, kept for re-extracting variables with viewport.
-    pub raw_sources: Vec<String>,
+    /// Tracks source-only sheet updates without retaining another copy of CSS text.
+    pub(crate) source_count: usize,
 }
 
 impl Stylesheet {
@@ -95,7 +95,7 @@ impl Stylesheet {
             rule.specificity = rule.specificity.saturating_add(AUTHOR_ORIGIN_BOOST);
         }
         self.rules.insert(index, rule);
-        self.raw_sources.push(cleaned);
+        self.source_count += 1;
         self.idx_dirty = true;
         Ok(index)
     }
@@ -157,7 +157,7 @@ impl Stylesheet {
     pub fn append_fragment(&mut self, mut fragment: Stylesheet) {
         let before = self.rules.len();
         self.variables.extend(fragment.variables);
-        self.raw_sources.append(&mut fragment.raw_sources);
+        self.source_count += fragment.source_count;
         self.font_faces.append(&mut fragment.font_faces);
         self.page_rules.append(&mut fragment.page_rules);
         self.counter_styles.append(&mut fragment.counter_styles);
@@ -236,7 +236,7 @@ impl Stylesheet {
         // Extract :root CSS variables. Cross-file resolution is deferred to
         // resolve_variables_for_viewport() which runs after all CSS is loaded.
         extract_root_variables_cleaned(cleaned, &mut self.variables);
-        self.raw_sources.push(cleaned.to_string());
+        self.source_count += 1;
         // Extract @font-face declarations
         extract_font_faces_cleaned(cleaned, &mut self.font_faces);
         // Preserve @page rules for print/pagination consumers.
@@ -266,13 +266,38 @@ impl Stylesheet {
         }
     }
 
-    /// Re-extract CSS variables from `:root` with viewport-aware media queries.
-    /// Call this before cascade when viewport dimensions are known, so variables
-    /// inside `@media` blocks are only extracted when the query matches.
+    /// Resolve root custom properties from parsed rules in source order. The
+    /// stylesheet parser has already evaluated @supports and retained media
+    /// conditions, so arriving fragments do not need to rescan all prior CSS.
     pub fn resolve_variables_for_viewport(&mut self, vw: f32, vh: f32) {
         self.variables.clear();
-        for src in &self.raw_sources {
-            extract_root_variables_vp(src, &mut self.variables, vw, vh);
+        for important in [false, true] {
+            for rule in &self.rules {
+                if !matches!(rule.pseudo_element, super::rule::PseudoElement::None)
+                    || !rule.container_condition.is_empty()
+                    || !rule.scopes.is_empty()
+                    || !matches!(
+                        rule.original_selector.trim().to_ascii_lowercase().as_str(),
+                        ":root" | "html" | "*"
+                    )
+                    || (vw > 0.0
+                        && !super::evaluate_media(&rule.media_condition, vw, vh))
+                {
+                    continue;
+                }
+                let declarations = if important {
+                    &rule.important_declarations
+                } else {
+                    &rule.declarations
+                };
+                for (name, value) in declarations {
+                    if name.starts_with("--")
+                        && (!value.is_empty() || !self.variables.contains_key(name))
+                    {
+                        self.variables.insert(name.clone(), value.clone());
+                    }
+                }
+            }
         }
         pre_resolve_variables(&mut self.variables);
     }

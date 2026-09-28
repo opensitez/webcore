@@ -2074,6 +2074,7 @@ fn replay_commands_on_surface(
                 text_align,
                 direction,
                 placeholder_color,
+                placeholder_typography,
                 file_button_color,
                 file_button_background,
                 file_button_font_size,
@@ -2582,19 +2583,35 @@ fn replay_commands_on_surface(
                         };
                         if !display_text.is_empty() {
                             if let Some((ref mut fs, ref mut sc)) = text_ctx {
+                                let typography = if value.is_empty() {
+                                    placeholder_typography.as_ref()
+                                } else {
+                                    None
+                                };
+                                let text_font_size = typography.map_or(*font_size, |style| style.font_size);
+                                let text_font_weight = typography.map_or(*font_weight, |style| style.font_weight);
+                                let text_font_style = typography.map_or(0, |style| style.font_style);
+                                let text_font_family = typography.map_or(font_family.as_str(), |style| style.font_family.as_str());
+                                let letter_spacing = typography.map_or(0.0, |style| style.letter_spacing);
+                                let word_spacing = typography.map_or(0.0, |style| style.word_spacing);
                                 let c = if value.is_empty() {
                                     apply_opacity(placeholder_color, a2)
                                 } else {
                                     apply_opacity(color, a2)
                                 };
                                 // Vertically center the text in the element
-                                let line_h = *font_size * 1.2;
+                                let line_h = typography.map_or(*font_size * 1.2, |style| style.line_height);
                                 let text_y = rect.y + (rect.h - line_h).max(0.0) / 2.0;
                                 let text_w = crate::layout::inline_layout::measure_text_width_fs_attrs(
-                                    fs, display_text, *font_size, cosmic_text::Weight(*font_weight),
-                                    CTextStyle::Normal, scale, font_family,
+                                    fs, display_text, text_font_size, cosmic_text::Weight(text_font_weight),
+                                    match text_font_style {
+                                        1 => CTextStyle::Italic,
+                                        2 => CTextStyle::Oblique,
+                                        _ => CTextStyle::Normal,
+                                    }, scale, text_font_family,
                                     crate::layout::inline_layout::stretch_from_percent(100.0),
-                                );
+                                ) + letter_spacing * display_text.chars().count().saturating_sub(1) as f32
+                                    + word_spacing * display_text.chars().filter(|ch| *ch == ' ').count() as f32;
                                 let rtl = *direction == crate::types::Direction::RTL;
                                 let alignment = match text_align {
                                     crate::types::TextAlign::Center => 0.5,
@@ -2613,16 +2630,16 @@ fn replay_commands_on_surface(
                                     text_x,
                                     text_y,
                                     display_text,
-                                    font_family,
-                                    *font_size,
-                                    *font_weight,
-                                    0,
+                                    text_font_family,
+                                    text_font_size,
+                                    text_font_weight,
+                                    text_font_style,
                                     100.0,
                                     line_h,
                                     &c,
                                     &super::display_list::TextDecoration::default(),
-                                    0.0,
-                                    0.0,
+                                    letter_spacing,
+                                    word_spacing,
                                     false,
                                     clip_mask,
                                 );

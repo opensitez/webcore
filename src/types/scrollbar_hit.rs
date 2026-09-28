@@ -9,6 +9,55 @@ use std::collections::{HashMap, HashSet};
 
 // ─── Per-element scrollbar hit-test ──────────────────────────────────────────
 
+pub(crate) fn viewport_scrollbar_thumb(
+    track_h: f32,
+    visible_h: f32,
+    document_h: f32,
+    scroll_y: f32,
+) -> (f32, f32, f32) {
+    if track_h <= 0.0 || visible_h <= 0.0 || document_h <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let thumb_h = (track_h * visible_h / document_h.max(visible_h))
+        .max(20.0)
+        .min(track_h);
+    let travel = (track_h - thumb_h).max(0.0);
+    let max_scroll = (document_h - visible_h).max(0.0);
+    let thumb_y = if max_scroll > 0.0 {
+        scroll_y.clamp(0.0, max_scroll) * travel / max_scroll
+    } else {
+        0.0
+    };
+    let scroll_per_px = if travel > 0.0 {
+        max_scroll / travel
+    } else {
+        0.0
+    };
+    (thumb_h, thumb_y, scroll_per_px)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::viewport_scrollbar_thumb;
+
+    #[test]
+    fn viewport_thumb_stays_inside_short_tracks() {
+        for scroll_y in [0.0, 5.0, 10.0] {
+            let (height, y, per_pixel) = viewport_scrollbar_thumb(12.0, 12.0, 22.0, scroll_y);
+            assert_eq!((height, y, per_pixel), (12.0, 0.0, 0.0));
+        }
+        assert_eq!(viewport_scrollbar_thumb(0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn viewport_thumb_position_and_drag_scale_share_geometry() {
+        let (height, y, per_pixel) = viewport_scrollbar_thumb(200.0, 200.0, 800.0, 300.0);
+        assert_eq!(height, 50.0);
+        assert_eq!(y, 75.0);
+        assert_eq!(per_pixel, 4.0);
+    }
+}
+
 /// Walk the box tree and hit-test per-element scrollbars.
 ///
 /// `sx`/`sy` are the accumulated scroll offsets for this node's ancestors,
@@ -52,22 +101,23 @@ pub(crate) fn scrollbar_hit_test(
     let cr = node.layout.content_rect;
     let pr = node.layout.padding_rect;
     let prx = pr.x - sx;
-    let cx = cr.x - sx;
     let pry = pr.y - sy;
-    let cy = cr.y - sy;
 
     let show_v = node.style.overflow_y == Overflow::Scroll
         || (node.style.overflow_y == Overflow::Auto && node.layout.scroll_height > cr.h);
     let show_h = node.style.overflow_x == Overflow::Scroll
         || (node.style.overflow_x == Overflow::Auto && node.layout.scroll_width > cr.w);
     let sbw = node.style.scrollbar_width_px();
+    let vertical_active = show_v && node.layout.scroll_height > cr.h;
+    let horizontal_active = show_h && node.layout.scroll_width > cr.w;
 
-    if show_v && node.layout.scroll_height > cr.h && sbw > 0.0 {
+    if vertical_active && sbw > 0.0 {
         // Scrollbar is at the right edge of the padding box (matches draw_scrollbars).
         let track_x = prx + pr.w - sbw;
-        if screen_x >= track_x && screen_x < prx + pr.w && screen_y >= cy && screen_y < cy + cr.h {
-            let track_h = cr.h;
-            let thumb_h = (track_h * track_h / node.layout.scroll_height).max(20.0);
+        let track_h = (pr.h - if horizontal_active { sbw } else { 0.0 }).max(0.0);
+        if track_h > 0.0 && screen_x >= track_x && screen_x < prx + pr.w && screen_y >= pry && screen_y < pry + track_h {
+            let scrollable_h = node.layout.scroll_height + (pr.h - cr.h).max(0.0);
+            let thumb_h = (track_h * pr.h / scrollable_h).max(20.0).min(track_h);
             let max_s = node.layout.scroll_height - cr.h;
             let scroll_per_px = if track_h - thumb_h > 0.0 {
                 max_s / (track_h - thumb_h)
@@ -79,7 +129,7 @@ pub(crate) fn scrollbar_hit_test(
             } else {
                 0.0
             };
-            let local_y = screen_y - cy;
+            let local_y = screen_y - pry;
 
             // Jump-scroll if click is outside the thumb.
             if !(local_y >= thumb_y && local_y < thumb_y + thumb_h) {
@@ -98,22 +148,17 @@ pub(crate) fn scrollbar_hit_test(
         }
     }
 
-    if show_h && node.layout.scroll_width > cr.w && sbw > 0.0 {
-        let track_w = (cr.w
-            - if show_v && node.layout.scroll_height > cr.h {
-                sbw
-            } else {
-                0.0
-            })
-        .max(0.0);
+    if horizontal_active && sbw > 0.0 {
+        let track_w = (pr.w - if vertical_active { sbw } else { 0.0 }).max(0.0);
         let track_y = pry + pr.h - sbw;
         if track_w > 0.0
-            && screen_x >= cx
-            && screen_x < cx + track_w
+            && screen_x >= prx
+            && screen_x < prx + track_w
             && screen_y >= track_y
             && screen_y < track_y + sbw
         {
-            let thumb_w = (track_w * cr.w / node.layout.scroll_width)
+            let scrollable_w = node.layout.scroll_width + (pr.w - cr.w).max(0.0);
+            let thumb_w = (track_w * pr.w / scrollable_w)
                 .max(20.0)
                 .min(track_w);
             let max_s = node.layout.scroll_width - cr.w;
@@ -127,7 +172,7 @@ pub(crate) fn scrollbar_hit_test(
             } else {
                 0.0
             };
-            let local_x = screen_x - cx;
+            let local_x = screen_x - prx;
 
             if !(local_x >= thumb_x && local_x < thumb_x + thumb_w) {
                 let new_thumb_x = (local_x - thumb_w * 0.5).clamp(0.0, track_w - thumb_w);

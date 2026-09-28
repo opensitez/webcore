@@ -349,9 +349,6 @@ fn stylesheet_bytes(sheet: &crate::css::Stylesheet) -> usize {
                 .capacity()
                 .saturating_mul(std::mem::size_of::<crate::css::CounterStyleRule>()),
         );
-    for source in &sheet.raw_sources {
-        bytes = bytes.saturating_add(string_bytes(source));
-    }
     for (name, value) in &sheet.variables {
         bytes = bytes
             .saturating_add(string_bytes(name))
@@ -751,6 +748,12 @@ impl BrowserView {
             let mut seen = std::collections::HashSet::<usize>::new();
             let mut seen_styles = std::collections::HashSet::<usize>::new();
             stats.stylesheet_estimated_bytes = stylesheet_bytes(&doc.stylesheet);
+            for cached in doc.inline_stylesheet_cache.values() {
+                stats.stylesheet_estimated_bytes = stats.stylesheet_estimated_bytes
+                    .saturating_add(stylesheet_bytes(&cached.sheet))
+                    .saturating_add(cached.source.len())
+                    .saturating_add(cached.base_url.capacity());
+            }
             Document::walk_all(&doc.root, &mut |node| {
                 stats.dom_nodes += 1;
                 if node.tag.eq_ignore_ascii_case("img") {
@@ -1200,6 +1203,11 @@ impl BrowserView {
     }
 
     pub fn paint_into(&mut self, target: &mut Pixmap, x: i32, y: i32, scale: f32) {
+        if let Some(frame) = self.stream_frame.as_mut() {
+            if frame.set_device_pixel_ratio(scale) {
+                self.wake();
+            }
+        }
         // Painting must not synchronously drain network/resources, but it does
         // have to consume already-queued interaction style work. Otherwise a
         // hover/focus change can set stream_needs_layout and then render the

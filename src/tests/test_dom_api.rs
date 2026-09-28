@@ -2570,6 +2570,55 @@ fn html_media_play_pause_tick_and_events_are_stateful() {
 }
 
 #[test]
+fn pointer_gesture_dispatches_one_dom_click() {
+    use crate::dom::events::ListenerOptions;
+    use std::sync::{Arc, Mutex};
+
+    let doc = parse_html(r#"<button id="target" style="width:100px;height:40px">Click</button>"#);
+    let mut frame = crate::frame::EngineFrame::new(doc, 800.0, 600.0);
+    frame.update_frame();
+    let button = frame.doc.get_element_by_id("target").unwrap();
+    let rect = frame.doc.find_webcore(button).unwrap().layout.border_rect;
+    let point = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    let clicks = Arc::new(Mutex::new(0usize));
+    let seen = clicks.clone();
+    frame.doc.add_event_listener(button, "click", Box::new(move |_, _| {
+        *seen.lock().unwrap() += 1;
+    }), ListenerOptions::default());
+
+    frame.doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, point, 0);
+    frame.doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, point, 0);
+    assert_eq!(*clicks.lock().unwrap(), 1);
+}
+
+#[test]
+fn direct_mouse_click_dispatches_once_to_target_and_ancestor() {
+    use crate::dom::events::ListenerOptions;
+    use std::sync::{Arc, Mutex};
+
+    let doc = parse_html(r#"<button id="target" style="width:100px;height:40px">Click</button>"#);
+    let mut frame = crate::frame::EngineFrame::new(doc, 800.0, 600.0);
+    frame.update_frame();
+    let button = frame.doc.get_element_by_id("target").unwrap();
+    let root = frame.doc.root.node_id;
+    let rect = frame.doc.find_webcore(button).unwrap().layout.border_rect;
+    let point = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    let calls = Arc::new(Mutex::new((0usize, 0usize)));
+
+    let target_calls = calls.clone();
+    frame.doc.add_event_listener(button, "click", Box::new(move |_, _| {
+        target_calls.lock().unwrap().0 += 1;
+    }), ListenerOptions::default());
+    let root_calls = calls.clone();
+    frame.doc.add_event_listener(root, "click", Box::new(move |_, _| {
+        root_calls.lock().unwrap().1 += 1;
+    }), ListenerOptions::default());
+
+    frame.doc.process_mouse_event(crate::dom::HtmlEventType::Click, point, 0);
+    assert_eq!(*calls.lock().unwrap(), (1, 1));
+}
+
+#[test]
 fn clicking_video_toggles_media_playback() {
     let doc = parse_html(
         r#"<video id="movie" controls width="320" height="180" src="clip.mp4"></video>"#,

@@ -547,7 +547,7 @@ impl crate::html::parser::HtmlParser {
                                 };
                                 let media = child.attributes.get("media").cloned().unwrap_or_default();
                                 shadow_stylesheets.push(
-                                    crate::types::DocumentStylesheet::Inline { css, media },
+                                    crate::types::DocumentStylesheet::Inline { css: css.into(), media },
                                 );
                             } else if child.tag == "link"
                                 && child

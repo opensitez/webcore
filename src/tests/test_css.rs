@@ -6263,6 +6263,30 @@ fn line_clamp_paints_ellipsis_on_last_visible_line() {
 }
 
 #[test]
+fn rtl_line_clamp_paints_ellipsis_at_inline_end() {
+    let mut frame = EngineFrame::new(
+        parse_html(
+            r#"<style>* { margin: 0; padding: 0; }
+               div { width: 200px; line-clamp: 1; direction: rtl; font-size: 16px; }
+               </style><div>السطر الأول<br>السطر الثاني</div>"#,
+        ),
+        240.0,
+        80.0,
+    );
+    frame.update_frame();
+    let list = build_display_list(&frame.doc.root, 240.0, 80.0);
+    let div = crate::dom::query_selector(&frame.doc.root, "div").unwrap();
+    assert!(div.layout.line_cache.iter().any(|line| line.has_clamped_continuation),
+        "layout must mark the visible RTL line as clamped: {:?}", div.layout.line_cache);
+    let marker = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::Text { text, x, .. } if text == "…" => Some(*x),
+        _ => None,
+    }).expect("RTL clamped line should paint an ellipsis");
+    assert!(marker < 10.0, "RTL inline-end marker belongs at the physical left edge: {marker}");
+    assert!(!list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text.contains("الثاني"))));
+}
+
+#[test]
 fn webkit_box_line_clamp_creates_block_with_ellipsis() {
     let mut frame = EngineFrame::new(
         parse_html(
@@ -6803,6 +6827,51 @@ fn stylesheet_root_variable_extraction_leaves_conditional_selectors_scoped() {
         !sheet.variables.contains_key("--scoped-only"),
         "descendant-scoped custom properties must not be promoted to stylesheet globals"
     );
+}
+
+#[test]
+fn stylesheet_clones_preserve_viewport_variables_without_raw_sources() {
+    let mut fragment = Stylesheet::default();
+    fragment.parse_and_add(
+        ":root { --theme: small; } @media (min-width: 700px) { :root { --theme: large; } }",
+    );
+    let original = fragment.clone();
+    assert_eq!(fragment.source_count, original.source_count);
+
+    let mut merged = Stylesheet::default();
+    merged.append_fragment(fragment);
+    assert_eq!(merged.source_count, original.source_count);
+    merged.resolve_variables_for_viewport(800.0, 600.0);
+    assert_eq!(merged.variables.get("--theme").map(String::as_str), Some("large"));
+    merged.resolve_variables_for_viewport(600.0, 600.0);
+    assert_eq!(merged.variables.get("--theme").map(String::as_str), Some("small"));
+}
+
+#[test]
+fn stylesheet_root_variables_follow_parsed_supports_media_and_priority() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add(
+        ":root { --mode: base; --accent: first !important; }\
+         @supports (display: unsupported-value) { :root { --mode: wrong; } }\
+         @media (min-width: 700px) { :root { --mode: wide; } }\
+         :root { --accent: second; }",
+    );
+    sheet.resolve_variables_for_viewport(800.0, 600.0);
+    assert_eq!(sheet.variables.get("--mode").map(String::as_str), Some("wide"));
+    assert_eq!(sheet.variables.get("--accent").map(String::as_str), Some("first"));
+    sheet.resolve_variables_for_viewport(600.0, 600.0);
+    assert_eq!(sheet.variables.get("--mode").map(String::as_str), Some("base"));
+}
+
+#[test]
+fn deleted_root_rule_no_longer_supplies_custom_properties() {
+    let mut sheet = Stylesheet::default();
+    sheet.insert_rule(":root { --deleted: red; }", 0).unwrap();
+    sheet.resolve_variables_for_viewport(800.0, 600.0);
+    assert_eq!(sheet.variables.get("--deleted").map(String::as_str), Some("red"));
+    sheet.delete_rule(0).unwrap();
+    sheet.resolve_variables_for_viewport(800.0, 600.0);
+    assert!(!sheet.variables.contains_key("--deleted"));
 }
 
 #[test]

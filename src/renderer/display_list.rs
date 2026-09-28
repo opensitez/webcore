@@ -14,6 +14,17 @@
 
 use crate::types::{Color, GradientDirection, Rect, TextUnderlinePosition};
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlaceholderTypography {
+    pub font_size: f32,
+    pub font_weight: u16,
+    pub font_style: u8,
+    pub font_family: String,
+    pub line_height: f32,
+    pub letter_spacing: f32,
+    pub word_spacing: f32,
+}
+
 /// A single paint command in the display list.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PaintCmd {
@@ -230,6 +241,7 @@ pub enum PaintCmd {
         text_align: crate::types::TextAlign,
         direction: crate::types::Direction,
         placeholder_color: Color,
+        placeholder_typography: Option<PlaceholderTypography>,
         file_button_color: Color,
         file_button_background: Color,
         file_button_font_size: f32,
@@ -501,6 +513,7 @@ impl DisplayListMemoryEstimate {
                 input_type,
                 attributes,
                 font_family,
+                placeholder_typography,
                 file_button_font_family,
                 value,
                 placeholder,
@@ -511,6 +524,9 @@ impl DisplayListMemoryEstimate {
                 self.add_string(tag);
                 self.add_string(input_type);
                 self.add_string(font_family);
+                if let Some(typography) = placeholder_typography {
+                    self.add_string(&typography.font_family);
+                }
                 self.add_string(file_button_font_family);
                 self.add_string(value);
                 self.add_string(placeholder);

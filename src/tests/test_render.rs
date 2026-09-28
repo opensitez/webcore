@@ -440,6 +440,24 @@ fn positioned_auto_ancestor_does_not_trap_high_z_descendant() {
 }
 
 #[test]
+fn auto_z_fixed_and_relative_siblings_paint_in_document_order() {
+    let css = "<style>body{margin:0}.fixed{position:fixed;top:0;left:0;width:60px;height:60px;background:#00f}.relative{position:relative;width:60px;height:60px;background:#0f0}</style>";
+    let relative_last = render_html(
+        &format!("{css}<div class=fixed></div><div class=relative></div>"),
+        80,
+        80,
+    );
+    assert_eq!(pixel(&relative_last, 10, 10), (0, 255, 0, 255));
+
+    let fixed_last = render_html(
+        &format!("{css}<div class=relative></div><div class=fixed></div>"),
+        80,
+        80,
+    );
+    assert_eq!(pixel(&fixed_last, 10, 10), (0, 0, 255, 255));
+}
+
+#[test]
 fn gradient_background_clip_text_paints_glyphs_not_the_box() {
     let html = r#"
         <style>
@@ -938,6 +956,78 @@ fn horizontal_element_scrollbar_color_paints_track_and_thumb() {
         r > 180 && g < 80 && b < 80,
         "horizontal scrollbar thumb should use scrollbar-color thumb, got rgba({r},{g},{b},_)"
     );
+}
+
+#[test]
+fn two_axis_element_scrollbars_leave_a_separate_corner() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list;
+    use crate::types::Color;
+    let doc = parse_and_layout(
+        r#"<style>
+            * { margin: 0; padding: 0; }
+            #box { width: 40px; height: 40px; overflow: scroll;
+                   scrollbar-color: red rgb(0, 255, 0); }
+            #inner { width: 120px; height: 120px; }
+           </style><div id="box"><div id="inner"></div></div>"#,
+        80.0,
+    );
+    let list = build_display_list(&doc.root, 80.0, 80.0);
+    let tracks: Vec<_> = list.commands.iter().filter_map(|command| {
+        if let PaintCmd::FillRect { rect, color, .. } = command {
+            (*color == Color::rgb(0, 255, 0)).then_some(*rect)
+        } else {
+            None
+        }
+    }).collect();
+    assert!(tracks.iter().any(|rect| rect.x == 30.0 && rect.y == 0.0 && rect.w == 10.0 && rect.h == 30.0), "vertical track: {tracks:?}");
+    assert!(tracks.iter().any(|rect| rect.x == 0.0 && rect.y == 30.0 && rect.w == 30.0 && rect.h == 10.0), "horizontal track: {tracks:?}");
+    assert!(tracks.iter().any(|rect| rect.x == 30.0 && rect.y == 30.0 && rect.w == 10.0 && rect.h == 10.0), "corner: {tracks:?}");
+}
+
+#[test]
+fn padded_scrollbar_tracks_reach_the_padding_box_corner() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list;
+    use crate::types::Color;
+
+    let doc = parse_and_layout(
+        r#"<style>
+            * { margin: 0; box-sizing: content-box; }
+            #box { width: 40px; height: 40px; padding: 10px; overflow: scroll;
+                   scrollbar-color: red rgb(0, 255, 0); }
+            #inner { width: 120px; height: 120px; }
+           </style><div id="box"><div id="inner"></div></div>"#,
+        100.0,
+    );
+    let list = build_display_list(&doc.root, 100.0, 100.0);
+    let tracks: Vec<_> = list.commands.iter().filter_map(|command| {
+        if let PaintCmd::FillRect { rect, color, .. } = command {
+            (*color == Color::rgb(0, 255, 0)).then_some(*rect)
+        } else {
+            None
+        }
+    }).collect();
+    assert!(tracks.iter().any(|r| r.x == 50.0 && r.y == 0.0 && r.w == 10.0 && r.h == 50.0), "vertical track: {tracks:?}");
+    assert!(tracks.iter().any(|r| r.x == 0.0 && r.y == 50.0 && r.w == 50.0 && r.h == 10.0), "horizontal track: {tracks:?}");
+    assert!(tracks.iter().any(|r| r.x == 50.0 && r.y == 50.0 && r.w == 10.0 && r.h == 10.0), "corner: {tracks:?}");
+
+    let box_node = crate::dom::query_selector(&doc.root, "#box").unwrap();
+    let content = box_node.layout.content_rect;
+    let padding = box_node.layout.padding_rect;
+    let expected_thumb_h = (50.0 * padding.h
+        / (box_node.layout.scroll_height + padding.h - content.h)).max(20.0).min(50.0);
+    let expected_thumb_w = (50.0 * padding.w
+        / (box_node.layout.scroll_width + padding.w - content.w)).max(20.0).min(50.0);
+    let thumbs: Vec<_> = list.commands.iter().filter_map(|command| {
+        if let PaintCmd::FillRect { rect, color, .. } = command {
+            (*color == Color::rgb(255, 0, 0)).then_some(*rect)
+        } else {
+            None
+        }
+    }).collect();
+    assert!(thumbs.iter().any(|r| r.x == 51.0 && (r.h - (expected_thumb_h - 2.0)).abs() < 0.01), "vertical thumb: {thumbs:?}");
+    assert!(thumbs.iter().any(|r| r.y == 51.0 && (r.w - (expected_thumb_w - 2.0)).abs() < 0.01), "horizontal thumb: {thumbs:?}");
 }
 
 // ── Flex nav: li items inside a flex ul must not overlap ──────────────────────

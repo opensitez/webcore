@@ -3,13 +3,13 @@
 //! Uses EXACT positions from the layout engine. Never approximates.
 //! Faithfully ports the render_box logic from mod.rs into PaintCmd recording.
 
-use super::display_list::{DisplayList, ImageRef, PaintCmd, TextDecoration};
+use super::display_list::{DisplayList, ImageRef, PaintCmd, PlaceholderTypography, TextDecoration};
 use crate::types::{
     BackgroundClip, BackgroundRepeat, BackgroundSize, BorderStyle, ClipPathKind, Color,
     ComputedStyle, ContentVisibility, CssLength, Direction, Display, FontStyle,
     GradientRadialShape, GradientRadialSize, GradientType, ListStylePosition, ListStyleType,
     MixBlendMode, Overflow, Position, Resize, TextAlign, TextDecorationStyle,
-    TextTransform, WhiteSpace,
+    TextOverflow, TextTransform, WhiteSpace,
 };
 use crate::types::{Rect, WebCore};
 use unicode_segmentation::UnicodeSegmentation;
@@ -645,6 +645,15 @@ fn node_at_relative_path<'a>(root: &'a WebCore, path: &[usize]) -> Option<&'a We
 }
 
 fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
+    build_for_box_inner(node, list, ctx, false);
+}
+
+fn build_for_box_inner(
+    node: &WebCore,
+    list: &mut DisplayList,
+    ctx: &BuildContext,
+    deferred_root: bool,
+) {
     // ── Early exits (same as render_box) ─────────────────────────────────────
     if matches!(node.style.display, Display::None) {
         return;
@@ -655,7 +664,7 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     if node.style.opacity <= 0.0 {
         return;
     }
-    if ctx.suppress_deferred_z_descendants && is_explicit_z_positioned(node) {
+    if ctx.suppress_deferred_z_descendants && !deferred_root && is_explicit_z_positioned(node) {
         return;
     }
 
@@ -2006,9 +2015,9 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
                 }
             });
             let mut z_ctx = child_ctx;
-            z_ctx.suppress_deferred_z_descendants = false;
             for (child, ancestry) in deferred_z {
                 z_ctx.sticky_containing_block = ancestry.containing_block;
+                z_ctx.suppress_deferred_z_descendants = child.style.z_index_is_auto;
                 build_deferred_positioned_box(child, &ancestry.nodes, list, &z_ctx);
             }
         }
@@ -2080,6 +2089,8 @@ fn build_element_scrollbar(
         || (matches!(style.overflow_y, Overflow::Auto) && node.layout.scroll_height > cr.h);
     let show_horizontal = matches!(style.overflow_x, Overflow::Scroll)
         || (matches!(style.overflow_x, Overflow::Auto) && node.layout.scroll_width > cr.w);
+    let vertical_active = show_vertical && node.layout.scroll_height > cr.h;
+    let horizontal_active = show_horizontal && node.layout.scroll_width > cr.w;
 
     if scrollbar_w <= 0.0 {
         return;
@@ -2092,10 +2103,11 @@ fn build_element_scrollbar(
         .scrollbar_track_color
         .unwrap_or(Color::rgba(128, 128, 128, 40));
 
-    if show_vertical && node.layout.scroll_height > cr.h {
-        let track_h = cr.h.max(0.0);
+    if vertical_active {
+        let track_h = (pr.h - if horizontal_active { scrollbar_w } else { 0.0 }).max(0.0);
         if track_h > 0.0 {
-            let thumb_h = (track_h * track_h / node.layout.scroll_height)
+            let scrollable_h = node.layout.scroll_height + (pr.h - cr.h).max(0.0);
+            let thumb_h = (track_h * pr.h / scrollable_h)
                 .max(20.0)
                 .min(track_h);
             let max_scroll = (node.layout.scroll_height - cr.h).max(0.0);
@@ -2105,7 +2117,7 @@ fn build_element_scrollbar(
                 0.0
             };
             let track_x = pr.x - sx + pr.w - scrollbar_w;
-            let track_y = cr.y - sy;
+            let track_y = pr.y - sy;
 
             list.push(PaintCmd::FillRect {
                 rect: Rect::new(track_x, track_y, scrollbar_w, track_h),
@@ -2127,16 +2139,11 @@ fn build_element_scrollbar(
         }
     }
 
-    if show_horizontal && node.layout.scroll_width > cr.w {
-        let track_w = (cr.w
-            - if show_vertical && node.layout.scroll_height > cr.h {
-                scrollbar_w
-            } else {
-                0.0
-            })
-        .max(0.0);
+    if horizontal_active {
+        let track_w = (pr.w - if vertical_active { scrollbar_w } else { 0.0 }).max(0.0);
         if track_w > 0.0 {
-            let thumb_w = (track_w * cr.w / node.layout.scroll_width)
+            let scrollable_w = node.layout.scroll_width + (pr.w - cr.w).max(0.0);
+            let thumb_w = (track_w * pr.w / scrollable_w)
                 .max(20.0)
                 .min(track_w);
             let max_scroll = (node.layout.scroll_width - cr.w).max(0.0);
@@ -2145,7 +2152,7 @@ fn build_element_scrollbar(
             } else {
                 0.0
             };
-            let track_x = cr.x - sx;
+            let track_x = pr.x - sx;
             let track_y = pr.y - sy + pr.h - scrollbar_w;
 
             list.push(PaintCmd::FillRect {
@@ -2166,6 +2173,20 @@ fn build_element_scrollbar(
                 radius_y: [3.0; 4],
             });
         }
+    }
+
+    if vertical_active && horizontal_active {
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(
+                pr.x - sx + pr.w - scrollbar_w,
+                pr.y - sy + pr.h - scrollbar_w,
+                scrollbar_w,
+                scrollbar_w,
+            ),
+            color: track_col,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
     }
 }
 
@@ -2389,6 +2410,72 @@ fn build_inline_text(
                     });
                 }
             }
+        }
+
+        let clamp_at_left = line.has_clamped_continuation && node.style.direction == Direction::RTL;
+        let left_marker = if clamp_at_left {
+            Some("…")
+        } else {
+            node.style.text_overflow.marker_at_edge(false, node.style.direction)
+        };
+        let content_left = node.layout.content_rect.x - sx + node.layout.scroll_left;
+        let line_left = lx + line.text_x_offset;
+        let left_overflow = clamp_at_left || (overflow_clips
+            && left_marker.is_some()
+            && line.width > node.layout.content_rect.w
+            && (line_left < content_left || node.style.direction == Direction::RTL));
+        let left_marker_width = if left_overflow {
+            let marker = left_marker.unwrap_or("");
+            measure_paint_text_width(
+                ctx,
+                marker,
+                fallback_font_px,
+                node.style.font_weight,
+                node.style.font_style,
+                &node.style.font_family,
+                node.style.font_stretch,
+            )
+                + fallback_letter_spc * marker.chars().count().saturating_sub(1) as f32
+                + fallback_word_spc * marker.chars().filter(|ch| *ch == ' ').count() as f32
+        } else {
+            0.0
+        };
+        let content_right = content_left + node.layout.content_rect.w;
+        let right_marker = node.style.text_overflow.marker_at_edge(true, node.style.direction);
+        let fixed_right_marker = matches!(node.style.text_overflow, TextOverflow::Pair(_))
+            && overflow_clips
+            && right_marker.is_some()
+            && line.width > node.layout.content_rect.w
+            && line_left + line.width > content_right;
+        let right_marker_width = if fixed_right_marker {
+            let marker = right_marker.unwrap_or("");
+            measure_paint_text_width(
+                ctx,
+                marker,
+                fallback_font_px,
+                node.style.font_weight,
+                node.style.font_style,
+                &node.style.font_family,
+                node.style.font_stretch,
+            ) + fallback_letter_spc * marker.chars().count().saturating_sub(1) as f32
+                + fallback_word_spc * marker.chars().filter(|ch| *ch == ' ').count() as f32
+        } else {
+            0.0
+        };
+        let text_clip_left = content_left + left_marker_width;
+        let text_clip_right = (content_right - right_marker_width).max(text_clip_left);
+        let marker_clip = left_marker_width > 0.0 || right_marker_width > 0.0;
+        if marker_clip {
+            list.push(PaintCmd::PushClip {
+                rect: Rect::new(
+                    text_clip_left,
+                    ctx.clip.y,
+                    (text_clip_right - text_clip_left).max(0.0),
+                    ctx.clip.h,
+                ),
+                radius: [0.0; 4],
+                radius_y: [0.0; 4],
+            });
         }
 
         let mut cursor_x = lx + line.text_x_offset;
@@ -2627,18 +2714,20 @@ fn build_inline_text(
             let x_pos = x_pos + leading_draw_advance + relative_dx;
             let y_pos = y_pos + relative_dy;
             let is_final_chunk = chunk_idx + 1 == chunks.len();
-            let line_clamp_marker = line.has_clamped_continuation && is_final_chunk;
+            let line_clamp_marker = line.has_clamped_continuation && is_final_chunk && !clamp_at_left;
             let overflow_marker = if line_clamp_marker {
                 "…"
             } else {
-                node.style.text_overflow.right_marker().unwrap_or("")
+                node.style.text_overflow.marker_at_edge(true, node.style.direction).unwrap_or("")
             };
-            if (line_clamp_marker || node.style.text_overflow.right_marker().is_some())
+            if !fixed_right_marker
+                && (line_clamp_marker || node.style.text_overflow.marker_at_edge(true, node.style.direction).is_some())
                 && (overflow_clips || line_clamp_marker)
                 && !chunk.rtl
                 && (line.width > node.layout.content_rect.w || line_clamp_marker)
             {
-                let content_right = node.layout.content_rect.x - sx + node.layout.content_rect.w;
+                let content_right = node.layout.content_rect.x - sx
+                    + node.layout.scroll_left + node.layout.content_rect.w;
                 if x_pos >= content_right {
                     continue;
                 }
@@ -2977,6 +3066,59 @@ fn build_inline_text(
                 cursor_x = cursor_x.max(x_pos + measured_advance);
             }
             previous_logical_end = Some(e);
+        }
+        if marker_clip {
+            list.push(PaintCmd::PopClip);
+        }
+        if left_overflow {
+            let marker = left_marker.unwrap_or("");
+            if !marker.is_empty() {
+                list.push(PaintCmd::Text {
+                    x: content_left,
+                    y: ly,
+                    text: marker.to_owned(),
+                    font_family: node.style.font_family.clone(),
+                    font_size: fallback_font_px,
+                    font_weight: node.style.font_weight.value(),
+                    font_style: match node.style.font_style {
+                        FontStyle::Italic => 1,
+                        FontStyle::Oblique => 2,
+                        _ => 0,
+                    },
+                    font_stretch: node.style.font_stretch,
+                    line_height: line.height,
+                    color: eff_style.color,
+                    decoration: TextDecoration::default(),
+                    letter_spacing: fallback_letter_spc,
+                    word_spacing: fallback_word_spc,
+                    small_caps: node.style.small_caps,
+                });
+            }
+        }
+        if fixed_right_marker {
+            let marker = right_marker.unwrap_or("");
+            if !marker.is_empty() {
+                list.push(PaintCmd::Text {
+                    x: content_right - right_marker_width,
+                    y: ly,
+                    text: marker.to_owned(),
+                    font_family: node.style.font_family.clone(),
+                    font_size: fallback_font_px,
+                    font_weight: node.style.font_weight.value(),
+                    font_style: match node.style.font_style {
+                        FontStyle::Italic => 1,
+                        FontStyle::Oblique => 2,
+                        _ => 0,
+                    },
+                    font_stretch: node.style.font_stretch,
+                    line_height: line.height,
+                    color: eff_style.color,
+                    decoration: TextDecoration::default(),
+                    letter_spacing: fallback_letter_spc,
+                    word_spacing: fallback_word_spc,
+                    small_caps: node.style.small_caps,
+                });
+            }
         }
     }
 }
@@ -3334,6 +3476,24 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32, 
                 c.a = (c.a as f32 * 0.5) as u8;
                 c
             }),
+        placeholder_typography: node.style.placeholder_style.as_ref().map(|style| {
+            let size = style.font_size_px(font_px, root_font_px).max(1.0);
+            PlaceholderTypography {
+                font_size: size,
+                font_weight: style.font_weight.value(),
+                font_style: match style.font_style {
+                    FontStyle::Italic => 1,
+                    FontStyle::Oblique => 2,
+                    _ => 0,
+                },
+                font_family: style.font_family.clone(),
+                line_height: style.line_height
+                    .resolve(size, 0.0, root_font_px)
+                    .max(size * 1.2),
+                letter_spacing: style.letter_spacing.resolve(size, 0.0, root_font_px),
+                word_spacing: style.word_spacing.resolve(size, 0.0, root_font_px),
+            }
+        }),
         file_button_color: node
             .style
             .file_selector_button_style
@@ -4463,7 +4623,7 @@ fn format_list_marker(lst: ListStyleType, index: i32) -> String {
 
 fn build_positioned_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext<'_>) {
     if node.style.position != Position::Fixed {
-        build_for_box(node, list, ctx);
+        build_for_box_inner(node, list, ctx, true);
         return;
     }
     let viewport_w = ctx.transform_ctx.viewport_w;
@@ -4477,11 +4637,11 @@ fn build_positioned_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildConte
         sticky_containing_block: None,
         clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
         paint_clip: Rect::new(0.0, 0.0, viewport_w, viewport_h),
-        suppress_deferred_z_descendants: false,
+        suppress_deferred_z_descendants: ctx.suppress_deferred_z_descendants,
         ..*ctx
     };
     list.push(PaintCmd::BeginFixedPosition);
-    build_for_box(node, list, &fixed_ctx);
+    build_for_box_inner(node, list, &fixed_ctx, true);
     list.push(PaintCmd::EndFixedPosition);
 }
 
@@ -4499,10 +4659,10 @@ fn creates_stacking_context(node: &WebCore) -> bool {
 }
 
 fn is_explicit_z_positioned(node: &WebCore) -> bool {
-    node.style.position == Position::Fixed
-        || node.style.position == Position::Absolute
-        || (node.style.position == Position::Relative && !node.style.z_index_is_auto)
-        || (node.style.position == Position::Sticky && !node.style.z_index_is_auto)
+    matches!(
+        node.style.position,
+        Position::Fixed | Position::Absolute | Position::Relative | Position::Sticky
+    )
 }
 
 fn sticky_containing_block_for_children(node: &WebCore, inherited: Option<Rect>) -> Option<Rect> {
@@ -4587,7 +4747,9 @@ fn collect_explicit_z_descendants<'a>(
     }
     if is_explicit_z_positioned(node) {
         out.push((node, PositionedAncestry { containing_block, nodes: ancestors.clone() }));
-        return;
+        if !node.style.z_index_is_auto || creates_stacking_context(node) {
+            return;
+        }
     }
     if creates_stacking_context(node) {
         return;

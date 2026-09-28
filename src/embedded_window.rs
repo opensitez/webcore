@@ -4,6 +4,7 @@
 //! embedding runtime supplies only document painting and guest callbacks.
 
 use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 
 use tiny_skia::Pixmap;
 use winit::application::ApplicationHandler;
@@ -21,7 +22,8 @@ pub trait EmbeddedPage {
     fn resize(&mut self, width: f32, height: f32);
     fn paint(&mut self, pixmap: &mut Pixmap, scale: f32);
     fn input(&mut self, event: &UiEvent);
-    fn tick(&mut self);
+    /// Return whether guest work changed the frame.
+    fn tick(&mut self) -> bool;
 }
 
 struct Shell<P> {
@@ -34,6 +36,48 @@ struct Shell<P> {
     buttons: i32,
 }
 
+fn active_slot() -> &'static Mutex<Option<Arc<Window>>> {
+    static ACTIVE: OnceLock<Mutex<Option<Arc<Window>>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(None))
+}
+
+pub fn with_active_window<T>(f: impl FnOnce(&Window) -> T) -> Option<T> {
+    active_slot().lock().ok()?.as_ref().map(|window| f(window))
+}
+
+pub fn focus() {
+    with_active_window(Window::focus_window);
+}
+
+pub fn screen_size() -> Option<(f64, f64)> {
+    with_active_window(|window| {
+        let monitor = window.current_monitor()?;
+        let size = monitor.size();
+        let scale = monitor.scale_factor();
+        Some((size.width as f64 / scale, size.height as f64 / scale))
+    }).flatten()
+}
+
+pub fn resize_to(width: f64, height: f64) {
+    with_active_window(|window| {
+        let _ = window.request_inner_size(LogicalSize::new(width, height));
+    });
+}
+
+pub fn move_to(x: f64, y: f64) {
+    with_active_window(|window| {
+        window.set_outer_position(winit::dpi::LogicalPosition::new(x, y));
+    });
+}
+
+pub fn screen_position() -> Option<(f64, f64)> {
+    with_active_window(|window| {
+        let position = window.outer_position().ok()?;
+        let scale = window.scale_factor();
+        Some((position.x as f64 / scale, position.y as f64 / scale))
+    }).flatten()
+}
+
 impl<P: EmbeddedPage> ApplicationHandler for Shell<P> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let window = Arc::new(event_loop.create_window(
@@ -44,13 +88,17 @@ impl<P: EmbeddedPage> ApplicationHandler for Shell<P> {
         let platform = Platform::new_windowed(window.clone());
         self.page.resize(platform.logical_width(), platform.logical_height());
         window.request_redraw();
+        *active_slot().lock().unwrap() = Some(window.clone());
         self.window = Some(window);
         self.platform = Some(platform);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                *active_slot().lock().unwrap() = None;
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => {
                 if let Some(platform) = self.platform.as_mut() {
                     platform.resize(size.width, size.height);
@@ -119,11 +167,11 @@ impl<P: EmbeddedPage> ApplicationHandler for Shell<P> {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.page.tick();
+        let changed = self.page.tick();
         if let Some(window) = self.window.as_ref() {
             let title = self.page.title();
             if window.title() != title { window.set_title(&title); }
-            window.request_redraw();
+            if changed { window.request_redraw(); }
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(
             std::time::Instant::now() + std::time::Duration::from_millis(16)

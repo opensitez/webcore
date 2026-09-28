@@ -141,9 +141,6 @@ fn stylesheet_cache_bytes(sheet: &css::Stylesheet) -> usize {
                 .capacity()
                 .saturating_mul(std::mem::size_of::<css::CounterStyleRule>()),
         );
-    for source in &sheet.raw_sources {
-        bytes = bytes.saturating_add(string_bytes(source));
-    }
     for (name, value) in &sheet.variables {
         bytes = bytes
             .saturating_add(string_bytes(name))
@@ -853,7 +850,9 @@ where
         let mut streamed_text = String::new();
         let streaming_result = streaming_loader(&css_url, &mut |chunk| {
             text_len += chunk.len();
-            streamed_text.push_str(chunk);
+            if emitted == 0 {
+                streamed_text.push_str(chunk);
+            }
             buffer.push_str(chunk);
             if let Some(complete_css) = drain_complete_css_text(&mut buffer) {
                 emitted += emit_css_imports(
@@ -874,6 +873,9 @@ where
                     combined.append_fragment(fragment.clone());
                     emit_fragment(fragment);
                 }
+            }
+            if emitted > 0 && !streamed_text.is_empty() {
+                streamed_text = String::new();
             }
         });
         if streaming_result.is_err() || text_len == 0 {
@@ -1607,6 +1609,7 @@ fn start_async_image_fetches_with_loader(
         &doc.base_url,
         doc.viewport_w,
         doc.viewport_h,
+        doc.device_pixel_ratio,
         &mut Vec::new(),
         &mut pending,
     );
@@ -1705,6 +1708,7 @@ fn apply_ready_cached_images(doc: &mut types::Document) {
         &doc.base_url,
         doc.viewport_w,
         doc.viewport_h,
+        doc.device_pixel_ratio,
         &mut Vec::new(),
         &mut pending,
     );
@@ -1749,6 +1753,7 @@ fn collect_remote_images(
     base_url: &str,
     viewport_w: f32,
     viewport_h: f32,
+    device_pixel_ratio: f32,
     path: &mut Vec<usize>,
     pending: &mut Vec<(u32, Vec<usize>, types::PendingImageTarget, String)>,
 ) {
@@ -1782,7 +1787,7 @@ fn collect_remote_images(
                     node.attributes.get("sizes").map(String::as_str),
                     viewport_w,
                     viewport_h,
-                    1.0,
+                    device_pixel_ratio,
                 )
                 .map(|candidate| html::resolve_url(&candidate, base_url))
             })
@@ -1807,7 +1812,8 @@ fn collect_remote_images(
         && node.bg_image_data.is_none()
         && !node.style.background_image_url.is_empty()
     {
-        let resolved = html::resolve_url(&node.style.background_image_url, base_url);
+        let selected = node.style.background_image_url_for_dpr(device_pixel_ratio);
+        let resolved = html::resolve_url(&selected, base_url);
         let url = resolved.as_str();
         if is_async_image_url(url) {
             pending.push((
@@ -1836,7 +1842,8 @@ fn collect_remote_images(
         if loaded {
             continue;
         }
-        let resolved = html::resolve_url(&layer.image_url, base_url);
+        let selected = layer.image_url_for_dpr(device_pixel_ratio);
+        let resolved = html::resolve_url(&selected, base_url);
         let url = resolved.as_str();
         if can_paint_resource && is_async_image_url(url) {
             pending.push((
@@ -1851,7 +1858,8 @@ fn collect_remote_images(
         && node.mask_image_data.is_none()
         && !node.style.rare().mask_image_url.is_empty()
     {
-        let resolved = html::resolve_url(&node.style.rare().mask_image_url, base_url);
+        let selected = node.style.mask_image_url_for_dpr(device_pixel_ratio);
+        let resolved = html::resolve_url(&selected, base_url);
         let url = resolved.as_str();
         if is_async_image_url(url) {
             pending.push((
@@ -1864,12 +1872,12 @@ fn collect_remote_images(
     }
     if let Some(shadow) = node.shadow_root.as_ref() {
         for child in &shadow.children {
-            collect_remote_images(child, base_url, viewport_w, viewport_h, path, pending);
+            collect_remote_images(child, base_url, viewport_w, viewport_h, device_pixel_ratio, path, pending);
         }
     }
     for (i, child) in node.children.iter().enumerate() {
         path.push(i);
-        collect_remote_images(child, base_url, viewport_w, viewport_h, path, pending);
+        collect_remote_images(child, base_url, viewport_w, viewport_h, device_pixel_ratio, path, pending);
         path.pop();
     }
 }

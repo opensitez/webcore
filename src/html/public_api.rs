@@ -319,7 +319,7 @@ fn parse_html_full(
     for (k, v) in parser.stylesheet.variables {
         stylesheet.variables.insert(k, v);
     }
-    stylesheet.raw_sources.extend(parser.stylesheet.raw_sources);
+    stylesheet.source_count += parser.stylesheet.source_count;
     stylesheet.keyframes.extend(parser.stylesheet.keyframes);
     // ⛔ At-rules travel with the rest. This merge carried rules, variables,
     // sources and keyframes and used to drop stylesheet-side metadata, so a web
@@ -374,6 +374,7 @@ fn parse_html_full(
         pending_nodes: std::collections::HashMap::new(),
         linked_stylesheets,
         document_stylesheets: parser.document_stylesheets,
+        inline_stylesheet_cache: std::collections::HashMap::new(),
         loaded_linked_stylesheets: std::collections::HashMap::new(),
         loaded_stylesheet_slots: std::collections::HashMap::new(),
         preserve_stylesheet_document_order: true,
@@ -398,6 +399,7 @@ fn parse_html_full(
         custom_validity: std::collections::HashMap::new(),
         viewport_w: 0.0,
         viewport_h: 0.0,
+        device_pixel_ratio: 1.0,
         keyboard_focus: false,
         caret_blink_epoch: std::time::Instant::now(),
         open_select: 0,

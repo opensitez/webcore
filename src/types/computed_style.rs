@@ -85,6 +85,7 @@ pub struct RareStyle {
     pub filter: String,
     pub backdrop_filter: String,
     pub mask_image_url: String,
+    pub mask_image_set_source: Option<String>,
     pub mask_mode: String,
     pub mask_repeat: String,
     pub mask_position: String,
@@ -92,6 +93,8 @@ pub struct RareStyle {
     pub mask_clip: String,
     pub mask_origin: String,
     pub mask_composite: String,
+    /// Authored first-layer image-set(), retained for DPR-aware resource selection.
+    pub background_image_set_source: Option<String>,
     /// Flow-relative box properties as DECLARED, resolved to physical sides
     /// only once the cascade has finished — see `finalize_logical`.
     ///
@@ -121,6 +124,7 @@ pub struct RareStyle {
 #[derive(Clone, Debug, PartialEq)]
 pub struct BackgroundLayer {
     pub image_url: String,
+    pub image_set_source: Option<String>,
     pub gradient_type: GradientType,
     pub gradient_angle: f32,
     pub gradient_direction: GradientDirection,
@@ -141,6 +145,14 @@ pub struct BackgroundLayer {
     pub origin: BackgroundClip,
     pub clip: BackgroundClip,
     pub blend_mode: String,
+}
+
+impl BackgroundLayer {
+    pub(crate) fn image_url_for_dpr(&self, dpr: f32) -> String {
+        self.image_set_source.as_deref()
+            .and_then(|source| crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio(source, dpr))
+            .unwrap_or_else(|| self.image_url.clone())
+    }
 }
 
 impl RareStyle {
@@ -169,6 +181,7 @@ impl RareStyle {
         filter: String::new(),
         backdrop_filter: String::new(),
         mask_image_url: String::new(),
+        mask_image_set_source: None,
         mask_mode: String::new(),
         mask_repeat: String::new(),
         mask_position: String::new(),
@@ -176,10 +189,23 @@ impl RareStyle {
         mask_clip: String::new(),
         mask_origin: String::new(),
         mask_composite: String::new(),
+        background_image_set_source: None,
     };
 }
 
 impl ComputedStyle {
+    pub(crate) fn mask_image_url_for_dpr(&self, dpr: f32) -> String {
+        self.rare().mask_image_set_source.as_deref()
+            .and_then(|source| crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio(source, dpr))
+            .unwrap_or_else(|| self.rare().mask_image_url.clone())
+    }
+
+    pub(crate) fn background_image_url_for_dpr(&self, dpr: f32) -> String {
+        self.rare().background_image_set_source.as_deref()
+            .and_then(|source| crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio(source, dpr))
+            .unwrap_or_else(|| self.background_image_url.clone())
+    }
+
     /// Conservative paint-only comparison. Unlisted properties, including
     /// typography and generated content, still require geometry/inline runs.
     pub(crate) fn reuses_geometry_from(&self, old: &Self) -> bool {
@@ -727,12 +753,19 @@ pub enum TextOverflow {
     Pair(Box<[TextOverflow; 2]>),
 }
 impl TextOverflow {
-    pub(crate) fn right_marker(&self) -> Option<&str> {
+    pub(crate) fn marker_at_edge(&self, right: bool, direction: Direction) -> Option<&str> {
         match self {
-            Self::Clip => None,
+            Self::Pair(edges) => edges[usize::from(right)].marker(),
+            _ if right == (direction == Direction::LTR) => self.marker(),
+            _ => None,
+        }
+    }
+
+    fn marker(&self) -> Option<&str> {
+        match self {
             Self::Ellipsis => Some("…"),
             Self::String(text) => Some(text),
-            Self::Pair(edges) => edges[1].right_marker(),
+            _ => None,
         }
     }
 

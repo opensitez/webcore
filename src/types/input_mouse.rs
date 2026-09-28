@@ -388,19 +388,11 @@ impl Document {
                         click.doc_pos = doc_pt;
                         click.client_pos = client_pos;
                         click.button = button;
-                        if self.dispatch_input_event(click).0 {
+                        let (click_handled, click) = self.dispatch_input_event(click);
+                        if click_handled {
                             redraw = true;
                         }
-                        let click_default_allowed = if hit_node_id != 0 {
-                            let mut dom_click =
-                                crate::dom::events::DomEvent::new("click", hit_node_id);
-                            if self.dispatch_dom_event(&mut dom_click) {
-                                redraw = true;
-                            }
-                            !dom_click.default_prevented()
-                        } else {
-                            true
-                        };
+                        let click_default_allowed = !click.default_prevented;
 
                         // Form element interactions
                         // The second half of the popup rule: an OPEN DROPDOWN
@@ -686,31 +678,6 @@ impl Document {
         let (handled, mut evt) = self.dispatch_input_event(evt);
         if handled {
             redraw = true;
-        }
-
-        // Also dispatch through the NodeId-based event system (capture/bubble).
-        if evt.target != 0 {
-            let mut dom_evt = crate::dom::events::DomEvent::new(etype.as_str(), evt.target);
-            dom_evt.client_x = client_pos.0;
-            dom_evt.client_y = client_pos.1;
-            dom_evt.button = button;
-            // The MODIFIERS travel with the event. They were left at their
-            // defaults, so `event.ctrlKey` was false in every listener however
-            // the user actually clicked — a ctrl-click was indistinguishable
-            // from a plain one.
-            dom_evt.ctrl_key = evt.ctrl_key;
-            dom_evt.shift_key = evt.shift_key;
-            dom_evt.alt_key = evt.alt_key;
-            dom_evt.meta_key = evt.meta_key;
-            dom_evt.related_target = evt.related_target;
-            if self.dispatch_dom_event(&mut dom_evt) {
-                redraw = true;
-            }
-            // A listener that cancelled the event must stop the default
-            // action, exactly as one registered the older way does.
-            if dom_evt.default_prevented() {
-                evt.default_prevented = true;
-            }
         }
 
         // Only perform editor/default behavior if not prevented by handlers.
