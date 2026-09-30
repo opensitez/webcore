@@ -1,3 +1,12 @@
+# 20260929 0.3.4
+- parse user agent once on init
+- do not reparse css from one page to the next 
+- streaming fixes
+- table fixes/float
+- missing canvas surface
+- events triggered twice
+- removed hardcoded dependency on widgets crate when using webcore
+
 # 20260922 0.3.3
 - demo browser
 - fixes on css transitions and animations

@@ -780,6 +780,10 @@ fn rebuild_glyf(data: &[u8], index_to_loc: i16) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut instr_at = 0usize;
     let mut glyf: Vec<u8> = Vec::with_capacity(data.len() * 2);
     let mut loca: Vec<u32> = Vec::with_capacity(num_glyphs + 1);
+    let mut end_pts: Vec<u16> = Vec::new();
+    let mut xs: Vec<i16> = Vec::new();
+    let mut ys: Vec<i16> = Vec::new();
+    let mut on_curve: Vec<bool> = Vec::new();
 
     for gid in 0..num_glyphs {
         loca.push(glyf.len() as u32);
@@ -851,7 +855,7 @@ fn rebuild_glyf(data: &[u8], index_to_loc: i16) -> Option<(Vec<u8>, Vec<u8>)> {
 
         // ── Simple glyph ─────────────────────────────────────────────────────
         let n_contours = n as usize;
-        let mut end_pts: Vec<u16> = Vec::with_capacity(n_contours);
+        end_pts.clear();
         let mut total = 0usize;
         for _ in 0..n_contours {
             let pts = n_points.u255()? as usize;
@@ -864,10 +868,12 @@ fn rebuild_glyf(data: &[u8], index_to_loc: i16) -> Option<(Vec<u8>, Vec<u8>)> {
 
         // Coordinates arrive as (flag, delta) triplets: the flag's low seven
         // bits pick how many bytes follow and how they split between x and y.
-        let mut xs: Vec<i16> = Vec::with_capacity(total);
-        let mut ys: Vec<i16> = Vec::with_capacity(total);
-        let mut on_curve: Vec<bool> = Vec::with_capacity(total);
+        xs.clear();
+        ys.clear();
+        on_curve.clear();
         let (mut x, mut y) = (0i32, 0i32);
+        let (mut x0, mut y0) = (i16::MAX, i16::MAX);
+        let (mut x1, mut y1) = (i16::MIN, i16::MIN);
         for _ in 0..total {
             let f = *flags_all.get(flags_at)?;
             flags_at += 1;
@@ -881,8 +887,16 @@ fn rebuild_glyf(data: &[u8], index_to_loc: i16) -> Option<(Vec<u8>, Vec<u8>)> {
             if y < i16::MIN as i32 || y > i16::MAX as i32 {
                 return None;
             }
-            xs.push(x as i16);
-            ys.push(y as i16);
+            let point_x = x as i16;
+            let point_y = y as i16;
+            if !has_bbox {
+                x0 = x0.min(point_x);
+                y0 = y0.min(point_y);
+                x1 = x1.max(point_x);
+                y1 = y1.max(point_y);
+            }
+            xs.push(point_x);
+            ys.push(point_y);
         }
 
         let instr_len = glyph_str.u255()? as usize;
@@ -895,10 +909,6 @@ fn rebuild_glyf(data: &[u8], index_to_loc: i16) -> Option<(Vec<u8>, Vec<u8>)> {
             glyf.extend_from_slice(bbox_vals.take(8)?);
         } else {
             // Derived from the points, which is what the encoder omitted it for.
-            let x0 = xs.iter().copied().min().unwrap_or(0);
-            let y0 = ys.iter().copied().min().unwrap_or(0);
-            let x1 = xs.iter().copied().max().unwrap_or(0);
-            let y1 = ys.iter().copied().max().unwrap_or(0);
             for v in [x0, y0, x1, y1] {
                 glyf.extend_from_slice(&v.to_be_bytes());
             }
@@ -1013,23 +1023,13 @@ fn write_simple_outline(
 
     // Deltas between consecutive points, which is what the format stores.
     let n = xs.len();
-    let mut dxs: Vec<i32> = Vec::with_capacity(n);
-    let mut dys: Vec<i32> = Vec::with_capacity(n);
-    let (mut px, mut py) = (0i32, 0i32);
-    for i in 0..n {
-        dxs.push(xs[i] as i32 - px);
-        dys.push(ys[i] as i32 - py);
-        px = xs[i] as i32;
-        py = ys[i] as i32;
-    }
-
     for i in 0..n {
         let mut f = if on_curve[i] { ON_CURVE } else { 0 };
         if has_overlap_bit && i == 0 {
             f |= OVERLAP_SIMPLE;
         }
-        let dx = dxs[i];
-        let dy = dys[i];
+        let dx = xs[i] as i32 - if i == 0 { 0 } else { xs[i - 1] as i32 };
+        let dy = ys[i] as i32 - if i == 0 { 0 } else { ys[i - 1] as i32 };
         if dx == 0 {
             f |= X_SAME_OR_POSITIVE;
         } else if (-255..=255).contains(&dx) {
@@ -1049,7 +1049,7 @@ fn write_simple_outline(
         buf.push(f);
     }
     for i in 0..n {
-        let dx = dxs[i];
+        let dx = xs[i] as i32 - if i == 0 { 0 } else { xs[i - 1] as i32 };
         if dx == 0 {
             continue;
         }
@@ -1060,7 +1060,7 @@ fn write_simple_outline(
         }
     }
     for i in 0..n {
-        let dy = dys[i];
+        let dy = ys[i] as i32 - if i == 0 { 0 } else { ys[i - 1] as i32 };
         if dy == 0 {
             continue;
         }
@@ -1075,7 +1075,7 @@ fn write_simple_outline(
 // ─── sfnt assembly ────────────────────────────────────────────────────────────
 
 /// Assemble the reconstructed tables into an sfnt file.
-fn build_sfnt(flavor: u32, mut tables: Vec<([u8; 4], Vec<u8>)>) -> Option<Vec<u8>> {
+pub(crate) fn build_sfnt(flavor: u32, mut tables: Vec<([u8; 4], Vec<u8>)>) -> Option<Vec<u8>> {
     // The directory is sorted by tag; the data may sit in any order, so it
     // follows the same one.
     tables.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1165,7 +1165,7 @@ fn find_table_record(sfnt: &[u8], tag: &[u8; 4]) -> Option<SfntTableRecord> {
     None
 }
 
-fn validate_sfnt(sfnt: &[u8]) -> Option<()> {
+pub(crate) fn validate_sfnt(sfnt: &[u8]) -> Option<()> {
     if sfnt.len() < 12 {
         return None;
     }
@@ -1243,8 +1243,61 @@ fn checksum(data: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Read, Write};
 
+    #[test]
+    #[ignore]
+    fn benchmark_woff2_decode() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../data/wpt/fonts/kinter.woff2");
+        let data = std::fs::read(path).expect("benchmark font");
+        const ITERATIONS: u32 = 20;
+        let start = std::time::Instant::now();
+        for _ in 0..ITERATIONS {
+            std::hint::black_box(decode(std::hint::black_box(&data)).expect("decode"));
+        }
+        eprintln!(
+            "WOFF2 decode: {:.2} ms/iteration",
+            start.elapsed().as_secs_f64() * 1000.0 / f64::from(ITERATIONS)
+        );
+
+        let mut reader = Reader::new(&data);
+        reader.take(12).expect("header");
+        let num_tables = reader.u16().expect("table count");
+        reader.take(6).expect("header");
+        let compressed_len = reader.u32().expect("compressed length") as usize;
+        reader.take(24).expect("header");
+        for _ in 0..num_tables {
+            let flags = reader.u8().expect("table flags");
+            let idx = (flags & 0x3f) as usize;
+            let tag: &[u8; 4] = if idx == 63 {
+                reader
+                    .take(4)
+                    .expect("table tag")
+                    .try_into()
+                    .expect("tag length")
+            } else {
+                KNOWN_TAGS[idx]
+            };
+            reader.base128().expect("table length");
+            if table_is_transformed(tag, flags >> 6).expect("table transform") {
+                reader.base128().expect("transformed length");
+            }
+        }
+        let compressed = reader.take(compressed_len).expect("Brotli stream");
+        let start = std::time::Instant::now();
+        for _ in 0..ITERATIONS {
+            let mut decoded = Vec::new();
+            brotli::Decompressor::new(compressed, 8192)
+                .read_to_end(&mut decoded)
+                .expect("decompress");
+            std::hint::black_box(decoded);
+        }
+        eprintln!(
+            "Brotli only: {:.2} ms/iteration",
+            start.elapsed().as_secs_f64() * 1000.0 / f64::from(ITERATIONS)
+        );
+    }
     fn push_base128(out: &mut Vec<u8>, value: u32) {
         assert!(value < 128);
         out.push(value as u8);
