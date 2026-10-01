@@ -1,4 +1,4 @@
-use super::{y4m::Y4mStream, MediaMetadata, StreamingVideoDecoder};
+use super::{MediaMetadata, StreamingVideoDecoder, y4m::Y4mStream};
 
 #[test]
 fn mp4_metadata_sizes_video_before_picture_arrives() {
@@ -25,10 +25,12 @@ fn decoded_frame_reaches_video_paint_data() {
     let mut doc = crate::html::parse_html("<video id=movie src=clip.y4m></video>");
     let id = doc.get_element_by_id("movie").unwrap();
     let mut stream = Y4mStream::new();
-    assert!(stream
-        .push(b"YUV4MPEG2 W2 H2 F25:1 C420\nFRAME\n\x10\x10")
-        .unwrap()
-        .is_empty());
+    assert!(
+        stream
+            .push(b"YUV4MPEG2 W2 H2 F25:1 C420\nFRAME\n\x10\x10")
+            .unwrap()
+            .is_empty()
+    );
     assert!(doc.find_webcore(id).unwrap().image_data.is_none());
     let frames = stream.push(b"\x10\x10\x80\x80").unwrap();
     assert_eq!(frames.len(), 1);
@@ -48,9 +50,11 @@ fn streamed_frame_is_painted_by_video_element() {
     let frames = stream
         .push(b"YUV4MPEG2 W2 H2 F25:1 C420\nFRAME\n\xeb\xeb\xeb\xeb\x80\x80")
         .unwrap();
-    assert!(engine
-        .doc
-        .media_present_video_frame(id, frames.into_iter().next().unwrap()));
+    assert!(
+        engine
+            .doc
+            .media_present_video_frame(id, frames.into_iter().next().unwrap())
+    );
     engine.update_frame();
     let list =
         crate::renderer::display_list_builder::build_display_list(&engine.doc.root, 200.0, 150.0);
@@ -82,10 +86,69 @@ fn playback_clock_presents_frames_at_their_timestamps() {
         &doc.find_webcore(id).unwrap().image_data.as_ref().unwrap()[..4],
         &[255, 255, 255, 255]
     );
-    assert!(doc
-        .media_states
-        .get(&id)
-        .unwrap()
-        .pending_video_frames
-        .is_empty());
+    assert!(
+        doc.media_states
+            .get(&id)
+            .unwrap()
+            .pending_video_frames
+            .is_empty()
+    );
+}
+
+#[test]
+fn playback_waits_for_first_and_subsequent_streamed_frames() {
+    let mut doc = crate::html::parse_html("<video id=movie src=clip.y4m></video>");
+    let id = doc.get_element_by_id("movie").unwrap();
+    assert!(doc.media_play(id));
+    let start = std::time::Instant::now();
+    doc.media_states.get_mut(&id).unwrap().last_tick = Some(start);
+    doc.tick_media(start + std::time::Duration::from_secs(30));
+    assert_eq!(doc.media_current_time(id), Some(0.0));
+
+    let mut stream = Y4mStream::new();
+    let first = stream
+        .push(b"YUV4MPEG2 W2 H2 F25:1 C420\nFRAME\n\x10\x10\x10\x10\x80\x80")
+        .unwrap();
+    assert!(doc.media_queue_video_frames(id, first));
+    assert_eq!(doc.media_current_time(id), Some(0.0));
+    let second = stream.push(b"FRAME\n\xeb\xeb\xeb\xeb\x80\x80").unwrap();
+    assert!(doc.media_queue_video_frames(id, second));
+    let playing = doc.media_states.get(&id).unwrap().last_tick.unwrap();
+    doc.tick_media(playing + std::time::Duration::from_millis(50));
+    assert_eq!(doc.media_current_time(id), Some(0.05));
+    assert_eq!(
+        &doc.find_webcore(id).unwrap().image_data.as_ref().unwrap()[..4],
+        &[255, 255, 255, 255]
+    );
+    doc.tick_media(playing + std::time::Duration::from_secs(10));
+    assert_eq!(doc.media_current_time(id), Some(0.05));
+}
+
+#[test]
+fn full_video_queue_does_not_drop_unpresented_frames() {
+    let mut doc = crate::html::parse_html("<video id=movie src=clip.y4m></video>");
+    let id = doc.get_element_by_id("movie").unwrap();
+    for number in 0..8 {
+        assert!(doc.media_queue_video_frames(
+            id,
+            vec![super::VideoFrame {
+                width: 1,
+                height: 1,
+                rgba: std::sync::Arc::new(vec![number, 0, 0, 255]),
+                timestamp: number as f32,
+            }]
+        ));
+    }
+    assert!(!doc.media_queue_video_frames(
+        id,
+        vec![super::VideoFrame {
+            width: 1,
+            height: 1,
+            rgba: std::sync::Arc::new(vec![8, 0, 0, 255]),
+            timestamp: 8.0,
+        }]
+    ));
+    let pending = &doc.media_states.get(&id).unwrap().pending_video_frames;
+    assert_eq!(pending.len(), 8);
+    assert_eq!(pending.front().unwrap().timestamp, 0.0);
 }

@@ -137,6 +137,7 @@ static DECODED_IMAGE_IN_FLIGHT: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<ImageDecodeState>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
+#[cfg(test)]
 pub(crate) fn cached_decoded_image(
     url: &str,
     loader: Option<&(dyn Fn(&str) -> Option<html::DecodedImage> + Send + Sync + 'static)>,

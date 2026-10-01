@@ -438,6 +438,7 @@ fn transition_text_decoration_style(style: TextDecorationStyle) -> String {
 }
 
 /// Sample each property's own keyframe intervals (CSS Animations 1).
+#[cfg(test)]
 pub(crate) fn interpolate_keyframe_stops(stops: &[KeyframeStop], t: f32) -> Vec<(String, String)> {
     interpolate_keyframe_stops_with_easing(stops, t, &EasingFn::Linear)
 }

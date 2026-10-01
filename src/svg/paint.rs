@@ -23,12 +23,110 @@ use crate::types::{
     SPECIFIED_SVG_STROKE_WIDTH, WebCore,
 };
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, LazyLock, Mutex};
 use tiny_skia::{
     FillRule, GradientStop as SkGradientStop, LineCap, LineJoin, LinearGradient, Mask, MaskType,
     Paint, Path, PathBuilder, Pixmap, PixmapPaint, PixmapRef, Point as SkPoint,
     PremultipliedColorU8, RadialGradient, SpreadMode, Stroke, StrokeDash, Transform,
 };
+
+thread_local! {
+    static SVG_TEXT_SYSTEM: RefCell<Option<(cosmic_text::FontSystem, cosmic_text::SwashCache)>> =
+        const { RefCell::new(None) };
+}
+
+struct SvgTextSystem(Option<(cosmic_text::FontSystem, cosmic_text::SwashCache)>);
+
+impl SvgTextSystem {
+    fn take() -> Self {
+        SVG_TEXT_SYSTEM.with(|slot| {
+            Self(Some(slot.borrow_mut().take().unwrap_or_else(|| {
+                (cosmic_text::FontSystem::new(), cosmic_text::SwashCache::new())
+            })))
+        })
+    }
+}
+
+impl Drop for SvgTextSystem {
+    fn drop(&mut self) {
+        if let Some(state) = self.0.take() {
+            SVG_TEXT_SYSTEM.with(|slot| *slot.borrow_mut() = Some(state));
+        }
+    }
+}
+
+const FOREIGN_OBJECT_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct ForeignObjectKey {
+    markup: String,
+    width_bits: u32,
+    height_bits: u32,
+}
+
+#[derive(Default)]
+struct ForeignObjectCache {
+    entries: HashMap<ForeignObjectKey, (Arc<Pixmap>, usize, u64)>,
+    order: VecDeque<(ForeignObjectKey, u64)>,
+    bytes: usize,
+    generation: u64,
+}
+
+impl ForeignObjectCache {
+    fn get(&mut self, key: &ForeignObjectKey) -> Option<Arc<Pixmap>> {
+        let (image, _, entry_generation) = self.entries.get_mut(key)?;
+        self.generation = self.generation.wrapping_add(1).max(1);
+        *entry_generation = self.generation;
+        self.order.push_back((key.clone(), self.generation));
+        let image = Arc::clone(image);
+        self.compact_order_if_needed();
+        Some(image)
+    }
+
+    fn insert(&mut self, key: ForeignObjectKey, image: Arc<Pixmap>) {
+        let bytes = key.markup.len().saturating_add(image.data().len());
+        if bytes > FOREIGN_OBJECT_CACHE_MAX_BYTES {
+            return;
+        }
+        if let Some((_, old_bytes, _)) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(old_bytes);
+        }
+        while self.bytes.saturating_add(bytes) > FOREIGN_OBJECT_CACHE_MAX_BYTES {
+            let Some((old_key, generation)) = self.order.pop_front() else {
+                break;
+            };
+            if self
+                .entries
+                .get(&old_key)
+                .is_some_and(|entry| entry.2 == generation)
+                && let Some((_, old_bytes, _)) = self.entries.remove(&old_key)
+            {
+                self.bytes = self.bytes.saturating_sub(old_bytes);
+            }
+        }
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.bytes += bytes;
+        self.order.push_back((key.clone(), self.generation));
+        self.entries
+            .insert(key, (image, bytes, self.generation));
+        self.compact_order_if_needed();
+    }
+
+    fn compact_order_if_needed(&mut self) {
+        if self.order.len() > self.entries.len().saturating_mul(4).saturating_add(32) {
+            self.order.retain(|(key, generation)| {
+                self.entries
+                    .get(key)
+                    .is_some_and(|entry| entry.2 == *generation)
+            });
+        }
+    }
+}
+
+static FOREIGN_OBJECT_CACHE: LazyLock<Mutex<ForeignObjectCache>> =
+    LazyLock::new(|| Mutex::new(ForeignObjectCache::default()));
 
 #[derive(Clone)]
 enum PaintSource {
@@ -864,8 +962,8 @@ fn paint_text<'a>(
     };
     cursor.x += attr_length(node, "dx", LengthAxis::X, state).unwrap_or(0.0);
     cursor.y += attr_length(node, "dy", LengthAxis::Y, state).unwrap_or(0.0);
-    let mut font_system = cosmic_text::FontSystem::new();
-    let mut swash_cache = cosmic_text::SwashCache::new();
+    let mut text_system = SvgTextSystem::take();
+    let (font_system, swash_cache) = text_system.0.as_mut().unwrap();
     if let Some(clip) = clip {
         let Some(mut layer) = Pixmap::new(pixmap.width(), pixmap.height()) else {
             return;
@@ -879,8 +977,8 @@ fn paint_text<'a>(
             styles,
             ancestors,
             &mut cursor,
-            &mut font_system,
-            &mut swash_cache,
+            font_system,
+            swash_cache,
             dom_node,
         );
         let pp = PixmapPaint::default();
@@ -895,8 +993,8 @@ fn paint_text<'a>(
             styles,
             ancestors,
             &mut cursor,
-            &mut font_system,
-            &mut swash_cache,
+            font_system,
+            swash_cache,
             dom_node,
         );
     }
@@ -1430,30 +1528,60 @@ fn paint_foreign_object(
     if w <= 0.0 || h <= 0.0 {
         return;
     }
-    let raster_w = w.ceil().max(1.0) as u32;
-    let raster_h = h.ceil().max(1.0) as u32;
-    let Some(mut layer) = Pixmap::new(raster_w, raster_h) else {
-        return;
-    };
     let fragment = foreign_object_html_fragment(node);
-    let html = format!(
-        r#"<!doctype html><html><head><style>html,body{{margin:0;padding:0;background:transparent;overflow:hidden;}}</style></head><body>{fragment}</body></html>"#
-    );
-    let mut doc = crate::load_html_vp(&html, w, h);
-    doc.scroll_x = 0.0;
-    doc.scroll_y = 0.0;
-    let mut renderer = crate::Renderer::new();
-    renderer.render(&mut doc, &mut layer, 1.0);
+    let key = ForeignObjectKey {
+        markup: fragment,
+        width_bits: w.to_bits(),
+        height_bits: h.to_bits(),
+    };
+    let dynamic = foreign_object_has_animation(node);
+    let cached = if dynamic {
+        None
+    } else {
+        FOREIGN_OBJECT_CACHE.lock().ok().and_then(|mut cache| cache.get(&key))
+    };
+    let layer = match cached {
+        Some(layer) => layer,
+        None => {
+            let Some(mut layer) = Pixmap::new(w.ceil().max(1.0) as u32, h.ceil().max(1.0) as u32)
+            else {
+                return;
+            };
+            let html = format!(
+                r#"<!doctype html><html><head><style>html,body{{margin:0;padding:0;background:transparent;overflow:hidden;}}</style></head><body>{}</body></html>"#,
+                key.markup
+            );
+            let mut doc = crate::load_html_vp(&html, w, h);
+            doc.scroll_x = 0.0;
+            doc.scroll_y = 0.0;
+            let mut renderer = crate::Renderer::new();
+            renderer.render(&mut doc, &mut layer, 1.0);
+            let layer = Arc::new(layer);
+            if !dynamic && let Ok(mut cache) = FOREIGN_OBJECT_CACHE.lock() {
+                cache.insert(key, Arc::clone(&layer));
+            }
+            layer
+        }
+    };
     let mut paint = PixmapPaint::default();
     paint.opacity = state.opacity.clamp(0.0, 1.0);
     pixmap.draw_pixmap(
         0,
         0,
-        layer.as_ref(),
+        layer.as_ref().as_ref(),
         &paint,
         transform.pre_translate(x, y),
         clip,
     );
+}
+
+fn foreign_object_has_animation(node: &SvgNode) -> bool {
+    node.animation.is_some()
+        || node.attributes.iter().any(|attr| {
+            attr.name.eq_ignore_ascii_case("style")
+                && (attr.value.contains("animation:") || attr.value.contains("transition:"))
+        })
+        || node.children.iter().any(foreign_object_has_animation)
 }
 
 fn foreign_object_html_fragment(node: &SvgNode) -> String {
@@ -5302,6 +5430,31 @@ mod tests {
         assert!(!painted_at(&data, 30, 2, 5));
         assert!(painted_at(&data, 30, 10, 8));
         assert!(!painted_at(&data, 30, 27, 8));
+    }
+
+    #[test]
+    fn foreign_object_cache_uses_markup_and_layout_size() {
+        let mut cache = ForeignObjectCache::default();
+        let key = ForeignObjectKey {
+            markup: "<div>first</div>".to_string(),
+            width_bits: 20.0f32.to_bits(),
+            height_bits: 10.0f32.to_bits(),
+        };
+        let image = Arc::new(Pixmap::new(20, 10).unwrap());
+        cache.insert(key.clone(), Arc::clone(&image));
+        assert!(Arc::ptr_eq(&cache.get(&key).unwrap(), &image));
+        assert!(cache.get(&ForeignObjectKey {
+            markup: "<div>second</div>".to_string(),
+            ..key.clone()
+        }).is_none());
+        assert!(cache.get(&ForeignObjectKey {
+            width_bits: 21.0f32.to_bits(),
+            ..key.clone()
+        }).is_none());
+        for _ in 0..100 {
+            cache.get(&key);
+        }
+        assert!(cache.order.len() <= 36);
     }
 
     #[test]

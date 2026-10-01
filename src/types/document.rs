@@ -61,7 +61,35 @@ pub enum PendingImageResult {
         error: String,
     },
 }
-pub type PendingStylesheetResult = (usize, String, crate::css::Stylesheet, String);
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum StylesheetUpdateKind {
+    Fragment,
+    Replace,
+}
+
+pub struct PendingStylesheetResult {
+    pub slot: usize,
+    pub url: String,
+    pub sheet: crate::css::Stylesheet,
+    pub media: String,
+    pub kind: StylesheetUpdateKind,
+}
+
+impl PendingStylesheetResult {
+    pub fn fragment(slot: usize, url: String, sheet: crate::css::Stylesheet, media: String) -> Self {
+        Self { slot, url, sheet, media, kind: StylesheetUpdateKind::Fragment }
+    }
+
+    pub fn replace(slot: usize, url: String, sheet: crate::css::Stylesheet, media: String) -> Self {
+        Self { slot, url, sheet, media, kind: StylesheetUpdateKind::Replace }
+    }
+}
+
+impl From<(usize, String, crate::css::Stylesheet, String)> for PendingStylesheetResult {
+    fn from((slot, url, sheet, media): (usize, String, crate::css::Stylesheet, String)) -> Self {
+        Self::fragment(slot, url, sheet, media)
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PendingImagePoll {
@@ -170,6 +198,8 @@ pub struct Document {
     /// Viewport scroll position in logical pixels (managed by Renderer::render).
     pub scroll_x: f32,
     pub scroll_y: f32,
+    /// Per-scrollport explicit scroll generations, excluding layout corrections.
+    pub(crate) scroll_action_serial: HashMap<u32, u64>,
     /// Active scrollbar drag state (None when not dragging).
     pub scrollbar_drag: Option<ScrollbarDrag>,
     pub resize_drag: Option<ResizeDrag>,
@@ -341,8 +371,9 @@ pub struct Document {
     /// Number of image fetches still in flight.
     pub images_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Receiver for linked stylesheets arriving from background fetch threads.
-    /// Each message is (document-order index, stylesheet_url, css_text, media).
     pub pending_stylesheets: Option<std::sync::mpsc::Receiver<PendingStylesheetResult>>,
+    /// Author styles present before pending fragments in documents without sheet slots.
+    pub(crate) pending_stylesheet_base: Option<crate::css::Stylesheet>,
 }
 
 impl Document {
@@ -809,6 +840,7 @@ impl Clone for Document {
             event_targets: crate::dom::events::EventTargetMap::new(), // listeners not cloned
             scroll_x: self.scroll_x,
             scroll_y: self.scroll_y,
+            scroll_action_serial: self.scroll_action_serial.clone(),
             scrollbar_drag: self.scrollbar_drag.clone(),
             resize_drag: self.resize_drag.clone(),
             hovered_box: self.hovered_box,
@@ -866,6 +898,7 @@ impl Clone for Document {
             image_load_errors: self.image_load_errors.clone(),
             images_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             pending_stylesheets: None,
+            pending_stylesheet_base: self.pending_stylesheet_base.clone(),
             on_form_event: None,
             on_navigate: None,
             on_title_change: None,

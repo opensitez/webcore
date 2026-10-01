@@ -96,6 +96,11 @@ fn mark_image_layout_path_dirty(root: &mut WebCore, node_id: u32, path: &[usize]
 }
 
 impl Document {
+    pub(crate) fn note_scroll_action(&mut self, id: u32) {
+        let serial = self.scroll_action_serial.entry(id).or_default();
+        *serial = serial.wrapping_add(1);
+    }
+
     pub fn new() -> Self {
         Self {
             root: WebCore::new("html"),
@@ -121,6 +126,7 @@ impl Document {
             event_targets: crate::dom::events::EventTargetMap::new(),
             scroll_x: 0.0,
             scroll_y: 0.0,
+            scroll_action_serial: HashMap::new(),
             scrollbar_drag: None,
             resize_drag: None,
             hovered_box: 0,
@@ -184,6 +190,7 @@ impl Document {
             image_load_errors: Vec::new(),
             images_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             pending_stylesheets: None,
+            pending_stylesheet_base: None,
         }
     }
 
@@ -324,41 +331,81 @@ impl Document {
                     break;
                 }
             }
-            results.sort_by_key(|(idx, _, _, _)| *idx);
-            for (idx, css_url, sheet, _media) in results {
+            results.sort_by_key(|update| update.slot);
+            for update in results {
+                let crate::types::PendingStylesheetResult {
+                    slot: idx,
+                    url: css_url,
+                    sheet,
+                    kind,
+                    ..
+                } = update;
+                let replace = kind == crate::types::StylesheetUpdateKind::Replace;
                 variables_changed |= sheet.may_change_root_variables();
-                let append_in_order =
+                if replace {
+                    variables_changed |= self
+                        .loaded_stylesheet_slots
+                        .get(&idx)
+                        .is_some_and(crate::css::Stylesheet::may_change_root_variables);
+                }
+                let append_in_order = !replace &&
                     !rebuild_needed && self.can_append_linked_stylesheet_fragment(idx, &css_url);
                 if append_in_order {
                     self.stylesheet.append_fragment(sheet.clone());
                 } else {
                     rebuild_needed = true;
                 }
-                match self.loaded_stylesheet_slots.entry(idx) {
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        entry.get_mut().append_fragment(sheet.clone());
-                    }
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(sheet.clone());
-                    }
-                }
-                match self.loaded_linked_stylesheets.entry(css_url) {
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        entry.get_mut().append_fragment(sheet);
-                    }
-                    std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(sheet);
-                    }
+                if replace {
+                    self.loaded_stylesheet_slots.insert(idx, sheet.clone());
+                    self.loaded_linked_stylesheets.insert(css_url, sheet);
+                } else {
+                    self.loaded_stylesheet_slots
+                        .entry(idx)
+                        .and_modify(|existing| existing.append_fragment(sheet.clone()))
+                        .or_insert_with(|| sheet.clone());
+                    self.loaded_linked_stylesheets
+                        .entry(css_url)
+                        .and_modify(|existing| existing.append_fragment(sheet.clone()))
+                        .or_insert(sheet);
                 }
                 changed = true;
             }
         } else {
             let mut processed = 0usize;
+            let mut last_slot = self.loaded_stylesheet_slots.keys().copied().max();
             loop {
                 match rx.try_recv() {
-                    Ok((_, _, sheet, _)) => {
+                    Ok(update) => {
+                        let crate::types::PendingStylesheetResult {
+                            slot,
+                            sheet,
+                            kind,
+                            ..
+                        } = update;
+                        if self.pending_stylesheet_base.is_none() {
+                            self.pending_stylesheet_base = Some(self.stylesheet.clone());
+                        }
+                        let replace = kind == crate::types::StylesheetUpdateKind::Replace;
+                        if replace {
+                            variables_changed |= self
+                                .loaded_stylesheet_slots
+                                .get(&slot)
+                                .is_some_and(crate::css::Stylesheet::may_change_root_variables);
+                        }
+                        rebuild_needed |= replace || last_slot.is_some_and(|last| slot < last);
+                        last_slot = Some(last_slot.map_or(slot, |last| last.max(slot)));
                         variables_changed |= sheet.may_change_root_variables();
-                        self.stylesheet.append_fragment(sheet);
+                        if !rebuild_needed {
+                            self.stylesheet.append_fragment(sheet.clone());
+                        }
+                        if replace {
+                            self.loaded_stylesheet_slots.insert(slot, sheet);
+                        } else {
+                            self.loaded_stylesheet_slots
+                                .entry(slot)
+                                .and_modify(|existing| existing.append_fragment(sheet.clone()))
+                                .or_insert(sheet);
+                        }
                         processed += 1;
                         changed = true;
                     }
@@ -381,6 +428,15 @@ impl Document {
         }
         if rebuild_from_document_order && rebuild_needed {
             self.rebuild_author_stylesheet_from_document_order();
+        } else if rebuild_needed {
+            if let Some(base) = &self.pending_stylesheet_base {
+                self.stylesheet = base.clone();
+                let mut slots: Vec<_> = self.loaded_stylesheet_slots.iter().collect();
+                slots.sort_by_key(|(idx, _)| **idx);
+                for (_, sheet) in slots {
+                    self.stylesheet.append_fragment(sheet.clone());
+                }
+            }
         }
         if rebuild_needed || variables_changed {
             self.stylesheet
@@ -1695,7 +1751,7 @@ mod tests {
                 format!("https://example.test/{i}.css"),
                 stylesheet_with_rule(&format!(".c{i}")),
                 String::new(),
-            ))
+            ).into())
             .unwrap();
         }
         doc.pending_stylesheets = Some(rx);
@@ -1850,14 +1906,14 @@ mod tests {
             "https://example.test/fast.css".to_string(),
             stylesheet_with_color(".target", "rgb(40, 0, 0)"),
             String::new(),
-        ))
+        ).into())
         .unwrap();
         tx.send((
             1,
             "https://example.test/slow.css".to_string(),
             stylesheet_with_color(".target", "rgb(30, 0, 0)"),
             String::new(),
-        ))
+        ).into())
         .unwrap();
         doc.pending_stylesheets = Some(rx);
 
@@ -1913,14 +1969,14 @@ mod tests {
             "https://example.test/app.css".to_string(),
             stylesheet_with_color(".target", "rgb(20, 0, 0)"),
             String::new(),
-        ))
+        ).into())
         .unwrap();
         tx.send((
             0,
             "https://example.test/app.css".to_string(),
             stylesheet_with_color(".target", "rgb(10, 0, 0)"),
             String::new(),
-        ))
+        ).into())
         .unwrap();
         doc.pending_stylesheets = Some(rx);
 
@@ -1941,6 +1997,80 @@ mod tests {
     }
 
     #[test]
+    fn pending_stylesheet_replacement_discards_partial_rules() {
+        let mut doc = Document::new();
+        doc.preserve_stylesheet_document_order = true;
+        doc.stylesheet = crate::css::ua_stylesheet();
+        doc.base_url = "https://example.test/".into();
+        doc.document_stylesheets.push(DocumentStylesheet::Linked {
+            href: "app.css".into(),
+            media: String::new(),
+        });
+        let url = "https://example.test/app.css".to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        doc.pending_stylesheets = Some(rx);
+        tx.send(crate::types::PendingStylesheetResult::fragment(
+            0,
+            url.clone(),
+            stylesheet_with_color(".target", "red"),
+            String::new(),
+        ))
+        .unwrap();
+        assert!(doc.poll_pending_stylesheets_budgeted(8, std::time::Duration::ZERO));
+        tx.send(crate::types::PendingStylesheetResult::replace(
+            0,
+            url,
+            stylesheet_with_color(".target", "blue"),
+            String::new(),
+        ))
+        .unwrap();
+        assert!(doc.poll_pending_stylesheets_budgeted(8, std::time::Duration::ZERO));
+        let colors: Vec<_> = doc
+            .stylesheet
+            .rules
+            .iter()
+            .filter(|rule| rule.original_selector == ".target")
+            .filter_map(|rule| rule.declarations.get("color"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(colors, ["blue"]);
+    }
+
+    #[test]
+    fn unordered_pending_stylesheet_replacement_discards_partial_rules() {
+        let mut doc = Document::new();
+        doc.stylesheet = crate::css::ua_stylesheet();
+        let url = "https://example.test/app.css".to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        doc.pending_stylesheets = Some(rx);
+        tx.send(crate::types::PendingStylesheetResult::fragment(
+            0,
+            url.clone(),
+            stylesheet_with_color(".target", "red"),
+            String::new(),
+        ))
+        .unwrap();
+        assert!(doc.poll_pending_stylesheets_budgeted(8, std::time::Duration::ZERO));
+        tx.send(crate::types::PendingStylesheetResult::replace(
+            0,
+            url,
+            stylesheet_with_color(".target", "blue"),
+            String::new(),
+        ))
+        .unwrap();
+        assert!(doc.poll_pending_stylesheets_budgeted(8, std::time::Duration::ZERO));
+        let colors: Vec<_> = doc
+            .stylesheet
+            .rules
+            .iter()
+            .filter(|rule| rule.original_selector == ".target")
+            .filter_map(|rule| rule.declarations.get("color"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(colors, ["blue"]);
+    }
+
+    #[test]
     fn tail_stylesheet_fragments_keep_existing_rule_storage() {
         let mut doc = Document::new();
         doc.preserve_stylesheet_document_order = true;
@@ -1958,7 +2088,7 @@ mod tests {
             url.clone(),
             stylesheet_with_rule(".first"),
             String::new(),
-        ))
+        ).into())
         .unwrap();
         assert!(doc.poll_pending_stylesheets_budgeted(8, std::time::Duration::ZERO));
         let first = doc
@@ -1969,7 +2099,7 @@ mod tests {
             .unwrap();
         let first_selector_storage = first.original_selector.as_ptr();
 
-        tx.send((0, url, stylesheet_with_rule(".second"), String::new()))
+        tx.send((0, url, stylesheet_with_rule(".second"), String::new()).into())
             .unwrap();
         assert!(doc.poll_pending_stylesheets_budgeted(8, std::time::Duration::ZERO));
         let first = doc
@@ -1996,7 +2126,7 @@ mod tests {
         let send = |css: &str| {
             let mut sheet = crate::css::Stylesheet::default();
             sheet.parse_and_add_author(css);
-            tx.send((0, String::new(), sheet, String::new())).unwrap();
+            tx.send((0, String::new(), sheet, String::new()).into()).unwrap();
         };
 
         send(":root { --brand: red !important }");
@@ -2062,7 +2192,7 @@ mod tests {
                 format!("https://example.test/{i}.css"),
                 stylesheet_with_rule(&format!(".live{i}")),
                 String::new(),
-            ))
+            ).into())
             .unwrap();
         }
         doc.pending_stylesheets = Some(rx);
@@ -2091,7 +2221,7 @@ mod tests {
                 "https://example.test/app.css".to_string(),
                 stylesheet_with_rule(&format!(".item{i}")),
                 String::new(),
-            ))
+            ).into())
             .unwrap();
         }
         doc.pending_stylesheets = Some(rx);

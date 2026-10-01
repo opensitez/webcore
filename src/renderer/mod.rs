@@ -2,6 +2,7 @@ pub mod compositor;
 pub mod display_list;
 pub mod display_list_builder;
 pub mod display_list_replay;
+mod svg_raster_cache;
 pub mod tiles;
 
 use crate::layout::inline_layout::collect_flat_text;
@@ -190,9 +191,11 @@ fn rect_intersects(a: Rect, b: Rect) -> bool {
     a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
 }
 
-fn retained_paint_band_for_doc(doc: &Document, viewport_w: f32, viewport_h: f32) -> Rect {
+pub fn retained_paint_band_for_doc(doc: &Document, viewport_w: f32, viewport_h: f32) -> Rect {
     let doc_h = doc.cached_scroll_height().max(viewport_h);
-    let overscan = (viewport_h * 8.0).max(6000.0);
+    const OVERSCAN_VIEWPORTS: f32 = 1.5;
+    const MIN_OVERSCAN_CSS_PX: f32 = 1200.0;
+    let overscan = (viewport_h * OVERSCAN_VIEWPORTS).max(MIN_OVERSCAN_CSS_PX);
     let top = (doc.scroll_y - overscan).max(0.0);
     let bottom = (doc.scroll_y + viewport_h + overscan).min(doc_h);
     Rect::new(
@@ -201,6 +204,26 @@ fn retained_paint_band_for_doc(doc: &Document, viewport_w: f32, viewport_h: f32)
         doc.root.layout.margin_rect.w.max(viewport_w).max(1.0),
         (bottom - top).max(0.0),
     )
+}
+
+#[cfg(test)]
+mod retained_paint_band_tests {
+    use super::*;
+
+    #[test]
+    fn far_offscreen_media_enters_band_only_when_scrolled_near() {
+        let mut renderer = Renderer::new();
+        let mut doc = renderer.load_html_vp(
+            "<div style='height:10000px'></div>",
+            1280.0,
+            820.0,
+        );
+        let initial = retained_paint_band_for_doc(&doc, 1280.0, 820.0);
+        assert!(initial.bottom() < 3200.0);
+        doc.scroll_y = 3000.0;
+        let scrolled = retained_paint_band_for_doc(&doc, 1280.0, 820.0);
+        assert!(scrolled.y <= 3200.0 && scrolled.bottom() > 3200.0);
+    }
 }
 
 fn rect_area(rect: Rect) -> f32 {
@@ -242,18 +265,6 @@ fn coalesce_dirty_rects(mut rects: Vec<Rect>, viewport: Rect) -> Vec<Rect> {
         return vec![viewport];
     }
     merged
-}
-
-fn animation_override_rects(
-    root: &WebCore,
-    overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
-    viewport_w: f32,
-    viewport_h: f32,
-) -> Vec<Rect> {
-    animation_override_rects_with_ids(root, overrides, viewport_w, viewport_h)
-        .into_iter()
-        .map(|(_, rect)| rect)
-        .collect()
 }
 
 pub(crate) fn animation_override_rects_with_ids(
@@ -351,18 +362,6 @@ pub(crate) fn animation_override_rects_with_ids(
     out
 }
 
-fn animation_overrides_are_transform_only(
-    overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
-) -> bool {
-    !overrides.is_empty()
-        && overrides.values().all(|props| {
-            !props.is_empty()
-                && props.iter().all(|(prop, _)| {
-                    crate::types::animation_runtime::animation_property_is_transform(prop)
-                })
-        })
-}
-
 fn animation_overrides_are_transform_only_for_ids(
     overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
     ids: &std::collections::HashSet<u32>,
@@ -374,20 +373,6 @@ fn animation_overrides_are_transform_only_for_ids(
                     && props.iter().all(|(prop, _)| {
                         crate::types::animation_runtime::animation_property_is_transform(prop)
                     })
-            })
-        })
-}
-
-fn display_list_has_transform_slots(
-    list: &display_list::DisplayList,
-    overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
-) -> bool {
-    overrides
-        .iter()
-        .filter(|(_, props)| props.iter().any(|(prop, _)| prop == "transform"))
-        .all(|(node_id, _)| {
-            list.commands.iter().chain(&list.fixed_commands).any(|cmd| {
-                matches!(cmd, display_list::PaintCmd::PushTransform { node_id: id, .. } if id == node_id)
             })
         })
 }

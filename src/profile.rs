@@ -33,6 +33,11 @@ pub enum Phase {
     FrameUpdate,
     DisplayList,
     DisplayListRecord,
+    SvgRaster,
+    SvgRasterKey,
+    SvgRasterPaint,
+    SvgRasterHit,
+    SvgRasterBypass,
     DisplayListSegments,
     DisplayListRetain,
     TileRaster,
@@ -54,7 +59,7 @@ pub enum Phase {
 }
 
 impl Phase {
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 45] = [
         Self::HtmlFetch,
         Self::HtmlParse,
         Self::CssFetch,
@@ -77,6 +82,11 @@ impl Phase {
         Self::FrameUpdate,
         Self::DisplayList,
         Self::DisplayListRecord,
+        Self::SvgRaster,
+        Self::SvgRasterKey,
+        Self::SvgRasterPaint,
+        Self::SvgRasterHit,
+        Self::SvgRasterBypass,
         Self::DisplayListSegments,
         Self::DisplayListRetain,
         Self::TileRaster,
@@ -121,6 +131,11 @@ impl Phase {
             Self::FrameUpdate => "frame_update",
             Self::DisplayList => "display_list",
             Self::DisplayListRecord => "display_list_record",
+            Self::SvgRaster => "svg_raster",
+            Self::SvgRasterKey => "svg_raster_key",
+            Self::SvgRasterPaint => "svg_raster_paint",
+            Self::SvgRasterHit => "svg_raster_hit",
+            Self::SvgRasterBypass => "svg_raster_bypass",
             Self::DisplayListSegments => "display_list_segments",
             Self::DisplayListRetain => "display_list_retain",
             Self::TileRaster => "tile_raster",

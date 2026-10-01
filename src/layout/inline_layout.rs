@@ -4004,19 +4004,6 @@ pub fn measure_text_width_fs_attrs(
     width
 }
 
-/// Map a CSS font-family string to a cosmic_text Family.
-fn cosmic_text_family(family: &str) -> cosmic_text::Family<'_> {
-    let f = family.trim().trim_matches('"').trim_matches('\'');
-    match f.to_ascii_lowercase().as_str() {
-        "monospace" | "courier" | "courier new" => cosmic_text::Family::Monospace,
-        "serif" | "times" | "times new roman" | "georgia" => cosmic_text::Family::Serif,
-        "sans-serif" | "arial" | "helvetica" => cosmic_text::Family::SansSerif,
-        "cursive" => cosmic_text::Family::Cursive,
-        "fantasy" => cosmic_text::Family::Fantasy,
-        _ => cosmic_text::Family::Name(f),
-    }
-}
-
 pub fn measure_text_width_ts(text: &str, font_px: f32, tab_size: i32) -> f32 {
     let char_w = font_px * 0.55;
     let space_w = char_w * 0.35;

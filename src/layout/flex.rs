@@ -666,6 +666,7 @@ pub fn layout_flex(
         })
         .flatten();
 
+        let mut measured_content_height = None;
         let mut basis_main: f32 = if let Some(kind) = intrinsic_basis {
             if is_row {
                 match kind {
@@ -686,7 +687,7 @@ pub fn layout_flex(
                     }
                 }
             } else {
-                measure_content_height(
+                let height = measure_content_height(
                     engine,
                     child,
                     content_w,
@@ -694,13 +695,15 @@ pub fn layout_flex(
                     content_y,
                     font_px,
                     root_font_px,
-                )
+                );
+                measured_content_height = Some(height);
+                height
             }
         } else if basis_is_content {
             if is_row {
                 engine.max_content_width_of_content(child, font_px, root_font_px)
             } else {
-                measure_content_height(
+                let height = measure_content_height(
                     engine,
                     child,
                     content_w,
@@ -708,7 +711,9 @@ pub fn layout_flex(
                     content_y,
                     font_px,
                     root_font_px,
-                )
+                );
+                measured_content_height = Some(height);
+                height
             }
         } else if let Some(w) = height_constrained_image_width {
             w
@@ -769,7 +774,7 @@ pub fn layout_flex(
                     .max_content
             } else {
                 // Column direction needs actual height — must do full layout.
-                measure_content_height(
+                let height = measure_content_height(
                     engine,
                     child,
                     content_w,
@@ -777,7 +782,9 @@ pub fn layout_flex(
                     content_y,
                     font_px,
                     root_font_px,
-                )
+                );
+                measured_content_height = Some(height);
+                height
             }
         };
         if is_row {
@@ -923,15 +930,17 @@ pub fn layout_flex(
                 // enforces it — the old deferred pass read the height back AFTER
                 // the item had already been forced to its flexed size, so it
                 // always saw that size and the minimum never applied.
-                auto_min_main(measure_content_height(
-                    engine,
-                    child,
-                    content_w,
-                    content_x,
-                    content_y,
-                    font_px,
-                    root_font_px,
-                ))
+                auto_min_main(measured_content_height.unwrap_or_else(|| {
+                    measure_content_height(
+                        engine,
+                        child,
+                        content_w,
+                        content_x,
+                        content_y,
+                        font_px,
+                        root_font_px,
+                    )
+                }))
             }
         };
         let hyp = basis_main.max(min_main).min(max_main);

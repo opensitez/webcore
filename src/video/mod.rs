@@ -9,20 +9,22 @@ mod controls;
 mod source;
 mod tracks;
 
-pub use webmedia::video::{av1, backend, h264, h264_cabac, h264_intra, h264_transform, mp4, mp4_avc, y4m};
 #[cfg(feature = "audio-symphonia")]
 pub use webmedia::video::symphonia_backend;
+pub use webmedia::video::{
+    av1, backend, h264, h264_cabac, h264_intra, h264_transform, mp4, mp4_avc, y4m,
+};
 
 use crate::types::Document;
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
+pub(crate) use controls::build_media_element;
+pub use tracks::TextTrackInfo;
 pub use webmedia::video::{
     AudioSamples, DecodedMedia, MediaDecodeError, MediaDecoder, MediaMetadata, NullMediaDecoder,
     StreamingVideoDecoder, VideoFrame,
 };
-pub(crate) use controls::build_media_element;
-pub use tracks::TextTrackInfo;
 
 #[cfg(test)]
 mod integration_tests;
@@ -293,9 +295,11 @@ impl Document {
         }
         if let Some((width, height)) = dimensions {
             if let Some(node) = self.find_webcore_mut(id) {
-                node.image_width = width;
-                node.image_height = height;
-                node.layout.intrinsic_dirty = true;
+                if node.image_width != width || node.image_height != height {
+                    node.image_width = width;
+                    node.image_height = height;
+                    node.layout.intrinsic_dirty = true;
+                }
             }
         }
         self.sync_media_render_state(id);
@@ -319,13 +323,17 @@ impl Document {
         let Some(node) = self.find_webcore_mut(id) else {
             return false;
         };
+        let dimensions_changed =
+            node.image_width != frame.width || node.image_height != frame.height;
         node.image_data = Some(frame.rgba);
         node.image_data_width = frame.width;
         node.image_data_height = frame.height;
         node.image_width = frame.width;
         node.image_height = frame.height;
         node.svg_document = None;
-        node.layout.intrinsic_dirty = true;
+        if dimensions_changed {
+            node.layout.intrinsic_dirty = true;
+        }
         self.needs_animation_frame = true;
         true
     }
@@ -334,9 +342,15 @@ impl Document {
         if self.tag_name(id) != Some("video") {
             return false;
         }
+        let needs_first_frame = self
+            .find_webcore(id)
+            .is_some_and(|node| node.image_data.is_none());
         let Some(state) = self.ensure_media_state(id) else {
             return false;
         };
+        if state.pending_video_frames.len() + frames.len() > 8 {
+            return false;
+        }
         let mut last_timestamp = state
             .pending_video_frames
             .back()
@@ -355,16 +369,13 @@ impl Document {
         }
         let first = frames.first().cloned();
         for frame in frames {
-            if state.pending_video_frames.len() == 8 {
-                state.pending_video_frames.pop_front();
-            }
             state.pending_video_frames.push_back(frame);
         }
-        if let Some(frame) = first
-            && self
-                .find_webcore(id)
-                .is_some_and(|node| node.image_data.is_none())
-        {
+        if needs_first_frame && let Some(frame) = first {
+            state.current_time = frame.timestamp;
+            if !state.paused {
+                state.last_tick = Some(Instant::now());
+            }
             self.media_present_video_frame(id, frame);
         }
         true
@@ -478,6 +489,10 @@ impl Document {
     }
 
     pub fn tick_media(&mut self, now: Instant) -> bool {
+        self.tick_media_with_frames(now).0
+    }
+
+    pub(crate) fn tick_media_with_frames(&mut self, now: Instant) -> (bool, Vec<u32>) {
         let ids: Vec<u32> = self.media_states.keys().copied().collect();
         let mut events = Vec::<(u32, &'static str)>::new();
         let mut sync_ids = Vec::<u32>::new();
@@ -486,10 +501,16 @@ impl Document {
 
         for id in ids {
             let should_loop = self.media_loop(id).unwrap_or(false);
+            let is_video = self.tag_name(id) == Some("video");
             let Some(state) = self.media_states.get_mut(&id) else {
                 continue;
             };
             if state.paused || state.ended {
+                continue;
+            }
+            if is_video && state.pending_video_frames.is_empty() {
+                state.last_tick = Some(now);
+                any_playing = true;
                 continue;
             }
             let Some(last) = state.last_tick.replace(now) else {
@@ -538,6 +559,7 @@ impl Document {
         for id in sync_ids {
             self.sync_media_render_state(id);
         }
+        let presented_ids = video_frames.iter().map(|(id, _)| *id).collect();
         for (id, frame) in video_frames {
             self.media_present_video_frame(id, frame);
         }
@@ -548,7 +570,7 @@ impl Document {
         if any_playing {
             self.needs_animation_frame = true;
         }
-        any_playing
+        (any_playing, presented_ids)
     }
 
     fn ensure_media_state(&mut self, id: u32) -> Option<&mut MediaElementState> {
@@ -594,7 +616,6 @@ impl Document {
             if selector_state_changed {
                 node.cascade_dirty = true;
             }
-            node.layout.intrinsic_dirty = true;
         }
         if selector_state_changed {
             self.style_dirty = true;

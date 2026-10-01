@@ -818,6 +818,7 @@ impl Document {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn animation_properties_affect_layout(props: &[(String, String)]) -> bool {
     props
         .iter()

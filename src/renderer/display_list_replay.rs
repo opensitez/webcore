@@ -4561,37 +4561,6 @@ fn sample_text_gradient_stops(stops: &[(Color, f32)], position: f32) -> Color {
     stops.last().map(|(color, _)| *color).unwrap_or(first)
 }
 
-/// Blit an already-shaped cosmic-text buffer onto the pixmap, source-over.
-/// Canvas and display-list text share this final glyph composition step.
-pub(crate) fn blit_shaped_buffer(
-    pixmap: &mut Pixmap,
-    font_system: &mut FontSystem,
-    swash_cache: &mut SwashCache,
-    buf: &mut Buffer,
-    _text: &str,
-    phys_x: f32,
-    phys_y: f32,
-    _letter_spacing: f32,
-    _word_spacing: f32,
-    color: CTextColor,
-    clip_mask: Option<&tiny_skia::Mask>,
-) {
-    blit_shaped_buffer_with_gradient(
-        pixmap,
-        font_system,
-        swash_cache,
-        buf,
-        _text,
-        phys_x,
-        phys_y,
-        _letter_spacing,
-        _word_spacing,
-        color,
-        clip_mask,
-        None,
-    );
-}
-
 #[allow(clippy::too_many_arguments)]
 fn blit_shaped_buffer_with_gradient(
     pixmap: &mut Pixmap,
@@ -6603,10 +6572,7 @@ fn rounded_rect_path_corners_xy(
     pb.finish()
 }
 
+#[cfg(test)]
 pub(crate) fn reduce_corner_radii(w: f32, h: f32, radii: [f32; 4]) -> [f32; 4] {
     reduce_corner_radii_xy(w, h, radii, radii).0
-}
-
-fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
-    rounded_rect_path_corners_xy(x, y, w, h, [r; 4], [r; 4])
 }

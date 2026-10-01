@@ -7,41 +7,6 @@ use crate::types::*;
 
 // ─── Apply presentational attributes ───────────────────────────────────────
 
-/// Apply a presentational hint through the element's `style` attribute,
-/// WITHOUT overwriting a declaration the author already wrote there.
-///
-/// The style attribute is the only place a parse-time value survives: the
-/// cascade rebuilds `node.style` from scratch, so writing the hint directly
-/// onto the computed style loses it to the UA sheet. Writing the attribute is
-/// therefore how the hint has to travel — but it must be written ONCE.
-/// Appending unconditionally made `rows="3"` add `height:4.2em` on every
-/// serialize → reparse cycle, so a saved-and-reloaded page grew
-/// `style="height:4.2em;height:4.2em;…"` without bound.
-///
-/// Skipping when the property is already present also gives the hint the right
-/// PRECEDENCE for free: an author's own `style="height:10px"` stays.
-fn add_presentational_style(node: &mut WebCore, prop: &str, value: &str) {
-    let existing = node.attributes.get("style").cloned().unwrap_or_default();
-    let already = existing.split(';').any(|d| {
-        d.split(':')
-            .next()
-            .map(|k| k.trim().eq_ignore_ascii_case(prop))
-            .unwrap_or(false)
-    });
-    if already {
-        return;
-    }
-    let decl = format!("{}:{}", prop, value);
-    node.attributes.insert(
-        "style",
-        if existing.trim().is_empty() {
-            decl
-        } else {
-            format!("{};{}", existing, decl)
-        },
-    );
-}
-
 pub(crate) fn supports_dimension_presentational_hint(tag: &str, attr: &str) -> bool {
     let tag = tag.to_ascii_lowercase();
     let attr = attr.to_ascii_lowercase();

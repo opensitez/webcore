@@ -6,7 +6,6 @@
 //! it existed the whole time. Call sites say `crate::html::X`, so the glob
 //! re-exports keep one path to each item.
 
-use crate::css::{apply_property, ua_stylesheet};
 use crate::types::Document;
 
 pub mod arena_wiring;
@@ -36,15 +35,15 @@ pub use doctype::*;
 pub use entities::*;
 pub use entity_decode::*;
 pub use forms::*;
-pub use head::*;
-pub use html_children::*;
+pub(crate) use head::*;
+pub(crate) use html_children::*;
 pub use images::*;
-pub use parser::*;
+pub(crate) use parser::*;
 pub use post_process::*;
-pub use presentational::*;
+pub(crate) use presentational::*;
 pub use public_api::*;
 pub use serializer::*;
 pub use streaming::*;
-pub use table_normalize::*;
-pub use tokenizer::*;
+pub(crate) use table_normalize::*;
+pub(crate) use tokenizer::*;
 pub use validity::*;

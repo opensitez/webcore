@@ -107,6 +107,7 @@ impl Document {
                             let max_s = (doc_h - viewport_h).max(0.0);
                             self.scroll_y = new_scroll.min(max_s);
                             if (self.scroll_y - old_y).abs() > 0.01 {
+                                self.note_scroll_action(0);
                                 self.fire_window_event("scroll");
                             }
                         }
@@ -138,6 +139,7 @@ impl Document {
                         }
                     }
                     if let Some(nid) = scrolled_element {
+                        self.note_scroll_action(nid);
                         let mut event = crate::dom::events::DomEvent::new("scroll", nid);
                         self.dispatch_dom_event(&mut event);
                     }
@@ -189,6 +191,7 @@ impl Document {
                     }
                 };
                 if let Some(nid) = snapped_element {
+                    self.note_scroll_action(nid);
                     let mut event = crate::dom::events::DomEvent::new("scroll", nid);
                     self.dispatch_dom_event(&mut event);
                 }
@@ -222,6 +225,7 @@ impl Document {
                             (screen_y - thumb_h * 0.5).clamp(0.0, (track_h - thumb_h).max(0.0));
                         self.scroll_y = (new_thumb_y * scale).min(max_s).max(0.0);
                         if (self.scroll_y - before).abs() > 0.01 {
+                            self.note_scroll_action(0);
                             self.fire_window_event("scroll");
                         }
                     }
@@ -289,6 +293,7 @@ impl Document {
         };
         match scroll_box_at(&mut self.root, doc_pt, delta_x, delta_y, snap_context) {
             WheelScrollResult::Scrolled(node_id) => {
+                self.note_scroll_action(node_id);
                 if node_id != 0 {
                     let mut event = crate::dom::events::DomEvent::new("scroll", node_id);
                     self.dispatch_dom_event(&mut event);
@@ -341,6 +346,7 @@ impl Document {
         self.scroll_y = next_y;
         let changed = self.scroll_x != old_x || self.scroll_y != old_y;
         if changed {
+            self.note_scroll_action(0);
             self.fire_window_event("scroll");
         }
         changed
@@ -356,6 +362,7 @@ impl Document {
                 continue;
             };
             if (new_x - old_x).abs() > 0.01 || (new_y - old_y).abs() > 0.01 {
+                self.note_scroll_action(*id);
                 let mut event = crate::dom::events::DomEvent::new("scroll", *id);
                 self.dispatch_dom_event(&mut event);
             }

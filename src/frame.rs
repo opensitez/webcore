@@ -356,8 +356,18 @@ impl EngineFrame {
                 }
             }
             if let Some(rx) = &self.video_rx {
-                let arrivals: Vec<_> = rx.try_iter().take(32).collect();
-                for arrival in arrivals {
+                for _ in 0..32 {
+                    if self
+                        .doc
+                        .media_states
+                        .values()
+                        .any(|state| state.pending_video_frames.len() >= 8)
+                    {
+                        break;
+                    }
+                    let Ok(arrival) = rx.try_recv() else {
+                        break;
+                    };
                     match arrival {
                         PendingVideoUpdate::Metadata { node_id, metadata } => {
                             if self.doc.media_apply_video_metadata(node_id, metadata) {
@@ -365,9 +375,20 @@ impl EngineFrame {
                             }
                         }
                         PendingVideoUpdate::Frames { node_id, frames } => {
+                            let needs_first_frame = self
+                                .doc
+                                .find_webcore(node_id)
+                                .is_some_and(|node| node.image_data.is_none());
                             if self.doc.media_queue_video_frames(node_id, frames) {
-                                self.needs_paint = true;
-                                update.rebuild_display_list = true;
+                                if needs_first_frame {
+                                    if let Some(rect) =
+                                        video_paint_rect(&self.doc, node_id, self.viewport_h)
+                                    {
+                                        self.needs_paint = true;
+                                        update.paint_only_display_list_rebuild = true;
+                                        update.paint_rects.push(rect);
+                                    }
+                                }
                             }
                         }
                     }
@@ -472,7 +493,12 @@ impl EngineFrame {
             if svg_changed {
                 update.paint_rects.extend(svg_damage);
             }
-            let media_running = self.doc.tick_media(now);
+            let (media_running, presented_video_ids) = self.doc.tick_media_with_frames(now);
+            let video_damage: Vec<_> = presented_video_ids
+                .into_iter()
+                .filter_map(|id| video_paint_rect(&self.doc, id, self.viewport_h))
+                .collect();
+            update.paint_rects.extend(video_damage.iter().copied());
             if svg_animations_running {
                 self.doc.needs_animation_frame = true;
             }
@@ -486,17 +512,16 @@ impl EngineFrame {
                 self.needs_layout = true;
                 self.needs_paint = true;
                 update.rebuild_display_list = true;
-            } else if !self.doc.animation_overrides.is_empty() || svg_changed || media_running {
+            } else if !self.doc.animation_overrides.is_empty()
+                || svg_changed
+                || !video_damage.is_empty()
+            {
                 self.needs_paint = true;
                 if svg_changed
-                    || media_running
+                    || !video_damage.is_empty()
                     || !animation_overrides_are_transform_only(&self.doc.animation_overrides)
                 {
-                    if !animation_needs_layout && !media_running {
-                        update.paint_only_display_list_rebuild = true;
-                    } else {
-                        update.rebuild_display_list = true;
-                    }
+                    update.paint_only_display_list_rebuild = true;
                 }
             }
             self.doc.needs_animation_frame =
@@ -1198,14 +1223,34 @@ impl EngineFrame {
                 Some(streaming_loader),
                 true,
                 |sheet| {
-                    let _ = tx.send((slot_idx, url.clone(), sheet, media.clone()));
+                    let _ = tx.send(crate::types::PendingStylesheetResult::fragment(
+                        slot_idx,
+                        url.clone(),
+                        sheet,
+                        media.clone(),
+                    ));
                     if let Some(wake) = wake.as_ref() {
                         wake();
                     }
                 },
             );
-            if loaded.emitted_fragments == 0 {
-                let _ = tx.send((slot_idx, url, loaded.sheet, media));
+            if loaded.replace_emitted || loaded.emitted_fragments == 0 {
+                let update = if loaded.replace_emitted {
+                    crate::types::PendingStylesheetResult::replace(
+                        slot_idx,
+                        url,
+                        loaded.sheet,
+                        media,
+                    )
+                } else {
+                    crate::types::PendingStylesheetResult::fragment(
+                        slot_idx,
+                        url,
+                        loaded.sheet,
+                        media,
+                    )
+                };
+                let _ = tx.send(update);
                 if let Some(wake) = wake.as_ref() {
                     wake();
                 }
@@ -1499,9 +1544,12 @@ impl EngineFrame {
                             }
                         }
                     }
-                    if !frames.is_empty() {
+                    for frame in frames {
                         if tx
-                            .send(PendingVideoUpdate::Frames { node_id, frames })
+                            .send(PendingVideoUpdate::Frames {
+                                node_id,
+                                frames: vec![frame],
+                            })
                             .is_err()
                         {
                             return;
@@ -1704,6 +1752,7 @@ impl EngineFrame {
         let mutations = parser.feed(chunk);
 
         let mut resource_hints = Vec::new();
+        let mut video_source_discovered = false;
 
         for mutation in &mutations {
             match mutation {
@@ -1720,6 +1769,7 @@ impl EngineFrame {
                         for (name, value) in attributes {
                             self.doc.set_attribute(child_id, name, value);
                         }
+                        video_source_discovered |= tag == "video" || tag == "source";
                         let base_url = self.doc.base_url.clone();
                         if let Some(node) = self.doc.find_webcore_mut(child_id) {
                             crate::html::parser::HtmlParser::post_process_node(node, &base_url);
@@ -1790,6 +1840,9 @@ impl EngineFrame {
         if !mutations.is_empty() {
             materialize_streamed_inline_svgs(&mut self.doc.root);
             self.mark_style_dirty();
+        }
+        if video_source_discovered {
+            self.schedule_unscheduled_document_videos();
         }
 
         resource_hints
@@ -1946,6 +1999,13 @@ fn retained_paint_band(doc: &Document, viewport_h: f32) -> crate::types::Rect {
 
 fn rect_intersects(a: crate::types::Rect, b: crate::types::Rect) -> bool {
     a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y
+}
+
+fn video_paint_rect(doc: &Document, id: u32, viewport_h: f32) -> Option<crate::types::Rect> {
+    let node = doc.find_webcore(id)?;
+    let rect = node.layout.border_rect;
+    (rect.w > 0.0 && rect.h > 0.0 && rect_intersects(rect, retained_paint_band(doc, viewport_h)))
+        .then_some(rect)
 }
 
 fn node_id_at_path(root: &crate::types::WebCore, path: &[usize]) -> Option<u32> {
@@ -2145,7 +2205,8 @@ mod tests {
         for i in 0..100 {
             let mut sheet = crate::css::Stylesheet::default();
             sheet.parse_and_add_author(&format!(".batch-{i} {{ color: red }}"));
-            tx.send((0, String::new(), sheet, String::new())).unwrap();
+            tx.send((0, String::new(), sheet, String::new()).into())
+                .unwrap();
         }
         frame.doc.pending_stylesheets = Some(rx);
 
@@ -2180,6 +2241,16 @@ mod tests {
             &parsed,
             &frame.doc.inline_stylesheet_cache[&0].sheet,
         ));
+    }
+
+    #[test]
+    fn streamed_video_fetch_is_scheduled_before_layout() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("/private/tmp/");
+        frame.feed_html_chunk(b"<html><body><video src='/private/tmp/missing-stream.y4m'>");
+        assert_eq!(frame.scheduled_videos.len(), 1);
+        assert!(frame.video_rx.is_some());
+        assert_eq!(frame.doc.layout_generation, 0);
     }
 
     #[test]
@@ -2469,12 +2540,15 @@ mod tests {
         for i in 0..64 {
             let mut sheet = crate::css::Stylesheet::default();
             sheet.parse_and_add_author(&format!(".stream-batch-{i} {{ color: red }}"));
-            tx.send((
-                i,
-                format!("https://example.test/{i}.css"),
-                sheet,
-                String::new(),
-            ))
+            tx.send(
+                (
+                    i,
+                    format!("https://example.test/{i}.css"),
+                    sheet,
+                    String::new(),
+                )
+                    .into(),
+            )
             .unwrap();
         }
         frame.doc.pending_stylesheets = Some(rx);
@@ -2531,12 +2605,15 @@ mod tests {
         sheet.parse_and_add_author(
             ".matin-breaking-news { margin-top: 20px; background-color: #c0000f }",
         );
-        tx.send((
-            0,
-            "https://example.test/site.css".to_string(),
-            sheet,
-            String::new(),
-        ))
+        tx.send(
+            (
+                0,
+                "https://example.test/site.css".to_string(),
+                sheet,
+                String::new(),
+            )
+                .into(),
+        )
         .unwrap();
         drop(tx);
         frame.doc.pending_stylesheets = Some(rx);
@@ -2573,12 +2650,15 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut sheet = crate::css::Stylesheet::default();
         sheet.parse_and_add_author("p{color:red}");
-        tx.send((
-            0,
-            "https://example.test/late.css".to_string(),
-            sheet,
-            String::new(),
-        ))
+        tx.send(
+            (
+                0,
+                "https://example.test/late.css".to_string(),
+                sheet,
+                String::new(),
+            )
+                .into(),
+        )
         .unwrap();
         frame.doc.pending_stylesheets = Some(rx);
 
@@ -3248,6 +3328,73 @@ mod tests {
             !update.rebuild_display_list,
             "far-offscreen image completion should wait for a later scroll-band rebuild"
         );
+    }
+
+    #[test]
+    fn streamed_video_frame_only_rebuilds_its_paint_rect() {
+        let mut frame = EngineFrame::new(
+            crate::html::parse_html("<video id=movie width=80 height=40></video>"),
+            320.0,
+            240.0,
+        );
+        let id = frame.doc.get_element_by_id("movie").unwrap();
+        frame.doc.media_apply_video_metadata(
+            id,
+            crate::video::backend::MediaMetadata {
+                duration: Some(1.0),
+                width: Some(2),
+                height: Some(2),
+                sample_rate: None,
+                channels: None,
+            },
+        );
+        frame.update_frame();
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        frame.video_rx = Some(rx);
+        tx.send(PendingVideoUpdate::Frames {
+            node_id: id,
+            frames: vec![crate::video::backend::VideoFrame {
+                width: 2,
+                height: 2,
+                rgba: std::sync::Arc::new(vec![0, 0, 0, 255].repeat(4)),
+                timestamp: 0.0,
+            }],
+        })
+        .unwrap();
+        let update = frame.update_frame_detailed();
+        assert!(update.changed);
+        assert!(update.paint_only_display_list_rebuild);
+        assert!(!update.rebuild_display_list);
+        assert_eq!(update.paint_rects.len(), 1);
+        assert!(!frame.doc.find_webcore(id).unwrap().layout.intrinsic_dirty);
+
+        tx.send(PendingVideoUpdate::Frames {
+            node_id: id,
+            frames: vec![crate::video::backend::VideoFrame {
+                width: 2,
+                height: 2,
+                rgba: std::sync::Arc::new(vec![255, 255, 255, 255].repeat(4)),
+                timestamp: 0.04,
+            }],
+        })
+        .unwrap();
+        let state = frame.doc.media_states.get_mut(&id).unwrap();
+        state.paused = false;
+        state.current_time = 0.05;
+        state.last_tick = Some(std::time::Instant::now());
+        frame.doc.needs_animation_frame = true;
+        let update = frame.update_frame_detailed();
+        assert!(update.changed);
+        assert!(update.paint_only_display_list_rebuild);
+        assert!(!update.rebuild_display_list);
+        assert_eq!(update.paint_rects.len(), 1);
+        assert!(!frame.doc.find_webcore(id).unwrap().layout.intrinsic_dirty);
+
+        let selector_transition = frame.update_frame_detailed();
+        assert!(selector_transition.rebuild_display_list);
+        let idle_tick = frame.update_frame_detailed();
+        assert!(!idle_tick.changed);
+        assert!(!idle_tick.rebuild_display_list);
     }
 
     #[test]

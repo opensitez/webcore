@@ -718,7 +718,7 @@ fn fetch_document_streaming_chunks<F>(
 where
     F: FnMut(String, String),
 {
-    let mut do_fetch = |client: &reqwest::blocking::Client,
+    let do_fetch = |client: &reqwest::blocking::Client,
                         on_chunk: &mut dyn FnMut(String, String)|
      -> Result<(String, String, bool), (String, bool)> {
         let method = reqwest::Method::from_bytes(options.request_method.as_bytes())

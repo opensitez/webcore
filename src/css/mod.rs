@@ -732,7 +732,7 @@ pub mod value_parse;
 
 pub use animation::*;
 pub use apply::*;
-pub use calc::*;
+pub(crate) use calc::*;
 pub use cascade::*;
 pub use cascade_incremental::*;
 pub use cascade_parallel::*;

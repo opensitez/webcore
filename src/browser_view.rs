@@ -2257,7 +2257,7 @@ mod tests {
             "https://example.test/late.css".to_string(),
             sheet,
             String::new(),
-        ))
+        ).into())
         .unwrap();
         view.stream_frame.as_mut().unwrap().doc.pending_stylesheets = Some(rx);
 
@@ -2410,7 +2410,7 @@ mod tests {
             "https://example.test/late.css".to_string(),
             sheet,
             String::new(),
-        ))
+        ).into())
         .unwrap();
         view.stream_frame.as_mut().unwrap().doc.pending_stylesheets = Some(rx);
 

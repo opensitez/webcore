@@ -149,6 +149,7 @@ fn root_font_size_px(root: &WebCore) -> f32 {
 /// Build a display list from a laid-out box tree.
 pub fn build_display_list(root: &WebCore, viewport_w: f32, viewport_h: f32) -> DisplayList {
     let svg_ids = crate::svg::document_svg_ids(root);
+    let svg_ids_fingerprint = super::svg_raster_cache::document_ids_fingerprint(&svg_ids);
     let visited = std::collections::HashSet::new();
     // Use full document extent as clip — viewport culling is done at replay time.
     // Building with viewport clip causes scrolled-to content to be missing.
@@ -164,6 +165,7 @@ pub fn build_display_list(root: &WebCore, viewport_w: f32, viewport_h: f32) -> D
         active_id: 0,
         visited_hrefs: &visited,
         svg_ids: &svg_ids,
+        svg_ids_fingerprint,
         subtree_bounds: None,
         base_url: "",
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
@@ -224,6 +226,7 @@ pub fn build_display_list_full_with_font_system(
 ) -> DisplayList {
     let doc_h = crate::types::Document::scroll_height(root).max(viewport_h);
     let svg_ids = crate::svg::document_svg_ids(root);
+    let svg_ids_fingerprint = super::svg_raster_cache::document_ids_fingerprint(&svg_ids);
     let ctx = BuildContext {
         // ⛔ The list is built in DOCUMENT coordinates so replay can translate
         // it to any scroll position. The caller's scroll is kept only for
@@ -238,6 +241,7 @@ pub fn build_display_list_full_with_font_system(
         active_id,
         visited_hrefs,
         svg_ids: &svg_ids,
+        svg_ids_fingerprint,
         subtree_bounds: None,
         base_url,
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
@@ -350,6 +354,7 @@ pub fn build_display_list_viewport_with_font_system(
 ) -> DisplayList {
     let doc_h = crate::types::Document::scroll_height(root).max(viewport_h);
     let svg_ids = crate::svg::document_svg_ids(root);
+    let svg_ids_fingerprint = super::svg_raster_cache::document_ids_fingerprint(&svg_ids);
     let mut subtree_bounds = std::collections::HashMap::new();
     collect_subtree_paint_bounds(root, &mut subtree_bounds);
     let paint_top = paint_top.max(0.0);
@@ -371,6 +376,7 @@ pub fn build_display_list_viewport_with_font_system(
         active_id,
         visited_hrefs,
         svg_ids: &svg_ids,
+        svg_ids_fingerprint,
         subtree_bounds: Some(&subtree_bounds),
         base_url,
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
@@ -411,6 +417,7 @@ fn is_scroll_container(style: &ComputedStyle) -> bool {
 #[derive(Clone, Copy)]
 struct BuildContext<'a> {
     svg_ids: &'a std::collections::HashMap<String, &'a crate::svg::SvgNode>,
+    svg_ids_fingerprint: u64,
     subtree_bounds: Option<&'a std::collections::HashMap<usize, Option<Rect>>>,
     scroll_x: f32,
     scroll_y: f32,
@@ -1791,6 +1798,7 @@ fn build_for_box_inner(
         active_id: ctx.active_id,
         visited_hrefs: ctx.visited_hrefs,
         svg_ids: ctx.svg_ids,
+        svg_ids_fingerprint: ctx.svg_ids_fingerprint,
         subtree_bounds: ctx.subtree_bounds,
         base_url: ctx.base_url,
         clip: child_clip,
@@ -1996,6 +2004,7 @@ fn build_for_box_inner(
                         let raster_h = cr.h.round() as u32;
                         if raster_w > 0 && raster_h > 0 {
                             let c = node.style.color;
+                            let _profile_svg = crate::profile::span(crate::profile::Phase::SvgRaster);
                             let rgba = if let Some(ref doc) = node.svg_document {
                                 let sampled_overrides;
                                 let overrides = if node.svg_animation_overrides.is_empty() {
@@ -2037,30 +2046,24 @@ fn build_for_box_inner(
                                         None,
                                     )
                                 };
-                                if node.tag == "svg" {
-                                    crate::svg::rasterize_svg_document_to_rgba_with_dom(
-                                        doc,
-                                        raster_w,
-                                        raster_h,
-                                        (node.svg_viewbox_w, node.svg_viewbox_h),
-                                        current_color,
-                                        fill,
-                                        stroke,
-                                        &node.style.custom_props,
-                                        Some(node),
-                                        Some(ctx.svg_ids),
-                                    )
-                                } else {
-                                    crate::svg::rasterize_svg_document_to_rgba(
-                                        doc,
-                                        raster_w,
-                                        raster_h,
-                                        (node.svg_viewbox_w, node.svg_viewbox_h),
-                                        current_color,
-                                        fill,
-                                        stroke,
-                                    )
-                                }
+                                let empty_props = std::collections::HashMap::new();
+                                let inline = node.tag == "svg";
+                                super::svg_raster_cache::rasterize(
+                                    node.node_id,
+                                    Some((br.y, cr.y, ctx.paint_clip.y, ctx.paint_clip.bottom())),
+                                    doc,
+                                    raster_w,
+                                    raster_h,
+                                    (node.svg_viewbox_w, node.svg_viewbox_h),
+                                    current_color,
+                                    fill,
+                                    stroke,
+                                    if inline { &node.style.custom_props } else { &empty_props },
+                                    inline.then_some(node),
+                                    inline.then_some(ctx.svg_ids),
+                                    ctx.svg_ids_fingerprint,
+                                    !overrides.is_empty(),
+                                )
                             } else {
                                 None
                             };
@@ -2077,7 +2080,7 @@ fn build_for_box_inner(
                                 list.push(PaintCmd::Image {
                                     rect: Rect::new(cr.x - eff_sx, cr.y - eff_sy, cr.w, cr.h),
                                     data: ImageRef::Shared(
-                                        std::sync::Arc::new(rgba),
+                                        rgba,
                                         raster_w,
                                         raster_h,
                                     ),

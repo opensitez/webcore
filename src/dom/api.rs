@@ -2694,6 +2694,7 @@ impl Document {
                 start_time: std::time::Instant::now(),
                 duration: std::time::Duration::from_millis(250),
             });
+            self.note_scroll_action(id);
             self.needs_animation_frame = true;
             return;
         }
@@ -2704,6 +2705,7 @@ impl Document {
         if (self.element_scroll_left(id) - old_x).abs() > 0.01
             || (self.element_scroll_top(id) - old_y).abs() > 0.01
         {
+            self.note_scroll_action(id);
             let mut event = crate::dom::events::DomEvent::new("scroll", id);
             self.dispatch_dom_event(&mut event);
         }
@@ -2754,11 +2756,13 @@ impl Document {
                 start_time: std::time::Instant::now(),
                 duration: std::time::Duration::from_millis(250),
             });
+            self.note_scroll_action(0);
             self.needs_animation_frame = true;
             return true;
         }
         self.scroll_x = target_x;
         self.scroll_y = target_y;
+        self.note_scroll_action(0);
         self.fire_window_event("scroll");
         true
     }
@@ -2800,6 +2804,7 @@ impl Document {
         }
         self.smooth_scrolls = remaining;
         for id in scrolled {
+            self.note_scroll_action(id);
             if id == 0 {
                 self.fire_window_event("scroll");
             } else {

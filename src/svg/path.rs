@@ -126,7 +126,7 @@ fn segment_length(from: (f32, f32), to: (f32, f32)) -> f32 {
     ((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt()
 }
 
-pub(crate) use webcanvas::canvas::svg_path::{MarkerSubpath, path_marker_subpaths};
+pub(crate) use webcanvas::canvas::svg_path::path_marker_subpaths;
 
 pub(crate) fn number(value: &str) -> Option<f32> {
     let token = value

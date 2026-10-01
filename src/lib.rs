@@ -9,6 +9,14 @@ static CSS_RESOURCE_POOL: std::sync::LazyLock<rayon::ThreadPool> = std::sync::La
         .expect("webcore CSS resource pool")
 });
 
+static CSS_IMPORT_POOL: std::sync::LazyLock<rayon::ThreadPool> = std::sync::LazyLock::new(|| {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(resource_pool_threads(2, 4))
+        .thread_name(|i| format!("webcore-css-import-{i}"))
+        .build()
+        .expect("webcore CSS import pool")
+});
+
 static IMAGE_RESOURCE_POOL: std::sync::LazyLock<rayon::ThreadPool> =
     std::sync::LazyLock::new(|| {
         rayon::ThreadPoolBuilder::new()
@@ -259,9 +267,11 @@ pub(crate) fn parsed_css_cache_stats() -> CacheMemoryStats {
 }
 
 pub(crate) use images::cache::{
-    cached_decoded_image, cached_decoded_image_ready, cached_decoded_image_result,
+    cached_decoded_image_ready, cached_decoded_image_result,
     cached_decoded_image_result_from_option_loader, decoded_image_cache_stats,
 };
+#[cfg(test)]
+pub(crate) use images::cache::cached_decoded_image;
 
 fn stream_stylesheet_fragments(
     css_text: &str,
@@ -477,6 +487,7 @@ fn emit_css_imports(
     streaming_loader: Option<&StreamingStylesheetLoader>,
     stack: &mut std::collections::HashSet<String>,
     parent_layer: Option<&str>,
+    stream_failed: &mut bool,
     emit: &mut impl FnMut(css::Stylesheet),
 ) -> usize {
     if stack.len() >= 32 {
@@ -518,6 +529,7 @@ fn emit_css_imports(
                 streaming_loader,
                 stack,
                 layer.as_deref(),
+                stream_failed,
                 emit,
             );
             count += stream_stylesheet_fragments(text, &url, &effective_media, |mut sheet| {
@@ -530,7 +542,7 @@ fn emit_css_imports(
         if let Some(streaming_loader) = streaming_loader {
             let mut buffer = CssStreamBuffer::default();
             let mut received = false;
-            let _result = streaming_loader(&url, &mut |chunk| {
+            let result = streaming_loader(&url, &mut |chunk| {
                 received |= !chunk.is_empty();
                 if let Some(complete) = buffer.push(chunk) {
                     consume(&complete);
@@ -543,6 +555,8 @@ fn emit_css_imports(
             } else if let Ok(imported) = loader(&url) {
                 consume(&imported);
             }
+            drop(consume);
+            *stream_failed |= result.is_err() && received;
         } else if let Ok(imported) = loader(&url) {
             consume(&imported);
         }
@@ -553,10 +567,21 @@ fn emit_css_imports(
 
 type ImportedFragment = (css::Stylesheet, std::sync::mpsc::Sender<()>);
 
-struct ImportWorker {
-    units: Option<std::sync::mpsc::Sender<String>>,
+struct ImportTask {
     fragments: std::sync::mpsc::Receiver<ImportedFragment>,
-    thread: std::thread::JoinHandle<()>,
+    stream_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+struct ImportWorker {
+    pending: std::collections::VecDeque<String>,
+    active: std::collections::VecDeque<ImportTask>,
+    closed: bool,
+    stream_failed: bool,
+    css_url: String,
+    media: css::MediaConditions,
+    loader: StylesheetLoader,
+    streaming_loader: StreamingStylesheetLoader,
+    stack: std::collections::HashSet<String>,
 }
 
 impl ImportWorker {
@@ -565,70 +590,108 @@ impl ImportWorker {
         media: css::MediaConditions,
         loader: StylesheetLoader,
         streaming_loader: StreamingStylesheetLoader,
-        mut stack: std::collections::HashSet<String>,
-    ) -> std::io::Result<Self> {
-        let (units, unit_rx) = std::sync::mpsc::channel::<String>();
-        let (fragment_tx, fragments) = std::sync::mpsc::channel::<ImportedFragment>();
-        let thread = std::thread::Builder::new()
-            .name("webcore-css-import".into())
-            .spawn(move || {
-                while let Ok(unit) = unit_rx.recv() {
-                    emit_css_imports(
-                        &unit,
-                        &css_url,
-                        &media,
-                        &loader,
-                        Some(&streaming_loader),
-                        &mut stack,
-                        None,
-                        &mut |fragment| {
-                            let (ack, received) = std::sync::mpsc::channel();
-                            if fragment_tx.send((fragment, ack)).is_ok() {
-                                let _ = received.recv();
-                            }
-                        },
-                    );
-                }
-            })?;
-        Ok(Self {
-            units: Some(units),
-            fragments,
-            thread,
-        })
+        stack: std::collections::HashSet<String>,
+    ) -> Self {
+        Self {
+            pending: std::collections::VecDeque::new(),
+            active: std::collections::VecDeque::new(),
+            closed: false,
+            stream_failed: false,
+            css_url,
+            media,
+            loader,
+            streaming_loader,
+            stack,
+        }
     }
 
-    fn send(&self, unit: String) -> Result<(), String> {
-        self.units
-            .as_ref()
-            .ok_or_else(|| "import prefix already closed".to_string())?
-            .send(unit)
-            .map_err(|_| "import worker stopped".to_string())
+    fn send(&mut self, unit: String) -> Result<(), String> {
+        if self.closed {
+            return Err("import prefix already closed".into());
+        }
+        self.pending.push_back(unit);
+        self.schedule();
+        Ok(())
     }
 
     fn close_units(&mut self) {
-        self.units.take();
+        self.closed = true;
+    }
+
+    fn schedule(&mut self) {
+        while self.active.len() < CSS_IMPORT_POOL.current_num_threads()
+            && let Some(unit) = self.pending.pop_front()
+        {
+            let (fragment_tx, fragments) = std::sync::mpsc::channel::<ImportedFragment>();
+            let stream_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let failed_for_task = stream_failed.clone();
+            let css_url = self.css_url.clone();
+            let media = self.media.clone();
+            let loader = self.loader.clone();
+            let streaming_loader = self.streaming_loader.clone();
+            let mut stack = self.stack.clone();
+            CSS_IMPORT_POOL.spawn(move || {
+                let mut failed = false;
+                emit_css_imports(
+                    &unit,
+                    &css_url,
+                    &media,
+                    &loader,
+                    Some(&streaming_loader),
+                    &mut stack,
+                    None,
+                    &mut failed,
+                    &mut |fragment| {
+                        let (ack, received) = std::sync::mpsc::channel();
+                        if fragment_tx.send((fragment, ack)).is_ok() {
+                            let _ = received.recv();
+                        }
+                    },
+                );
+                failed_for_task.store(failed, std::sync::atomic::Ordering::Release);
+            });
+            self.active.push_back(ImportTask { fragments, stream_failed });
+        }
+    }
+
+    fn finish_front(&mut self) {
+        if let Some(task) = self.active.pop_front() {
+            self.stream_failed |= task.stream_failed.load(std::sync::atomic::Ordering::Acquire);
+        }
+        self.schedule();
     }
 
     fn drain(&mut self, emit: &mut impl FnMut(css::Stylesheet)) -> bool {
         loop {
-            match self.fragments.try_recv() {
+            let Some(task) = self.active.front() else {
+                return self.closed && self.pending.is_empty();
+            };
+            match task.fragments.try_recv() {
                 Ok((fragment, ack)) => {
                     emit(fragment);
                     let _ = ack.send(());
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => return false,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => return true,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.finish_front(),
             }
         }
     }
 
-    fn finish(mut self, emit: &mut impl FnMut(css::Stylesheet)) {
+    fn finish(mut self, emit: &mut impl FnMut(css::Stylesheet)) -> bool {
         self.close_units();
-        while let Ok((fragment, ack)) = self.fragments.recv() {
-            emit(fragment);
-            let _ = ack.send(());
+        loop {
+            let Some(task) = self.active.front() else {
+                break;
+            };
+            match task.fragments.recv() {
+                Ok((fragment, ack)) => {
+                    emit(fragment);
+                    let _ = ack.send(());
+                }
+                Err(_) => self.finish_front(),
+            }
         }
-        let _ = self.thread.join();
+        self.stream_failed
     }
 }
 
@@ -855,6 +918,28 @@ pub(crate) struct CachedStylesheetLoad {
     pub sheet: css::Stylesheet,
     pub text_len: usize,
     pub emitted_fragments: usize,
+    pub replace_emitted: bool,
+}
+
+fn parse_complete_stylesheet(
+    text: &str,
+    css_url: &str,
+    media: &css::MediaConditions,
+    loader: &StylesheetLoader,
+) -> css::Stylesheet {
+    let mut sheet = css::Stylesheet::default();
+    let mut stack = std::collections::HashSet::from([css_url.to_string()]);
+    let mut stream_failed = false;
+    emit_css_imports(text, css_url, media, loader, None, &mut stack, None, &mut stream_failed, &mut |fragment| {
+        sheet.append_fragment(fragment);
+    });
+    stream_stylesheet_fragments(text, css_url, media, |fragment| {
+        sheet.append_fragment(fragment);
+    });
+    if !stylesheet_has_content(&sheet) && !text.trim().is_empty() {
+        sheet.parse_and_add_with_base_media_conditions(text, css_url, media);
+    }
+    sheet
 }
 
 pub(crate) fn load_stylesheet_cached<F>(
@@ -881,6 +966,7 @@ where
                 sheet: (*sheet).clone(),
                 text_len: 0,
                 emitted_fragments: 0,
+                replace_emitted: false,
             };
         }
     }
@@ -905,6 +991,7 @@ where
                     sheet: (**sheet).clone(),
                     text_len: 0,
                     emitted_fragments: 0,
+                    replace_emitted: false,
                 };
             }
             if let Ok(mut in_flight) = CSS_PARSE_IN_FLIGHT.lock() {
@@ -927,6 +1014,8 @@ where
     let mut combined = crate::css::Stylesheet::default();
     let mut text_len = 0usize;
     let mut emitted = 0usize;
+    let mut replace_emitted = false;
+    let mut import_stream_failed = false;
     let mut import_stack = std::collections::HashSet::from([css_url.clone()]);
     if let Some(streaming_loader) = streaming_loader {
         let mut buffer = CssStreamBuffer::default();
@@ -943,20 +1032,29 @@ where
                 }
                 if import_prefix && css_import_target(unit).is_some() {
                     if import_worker.is_none() {
-                        import_worker = ImportWorker::spawn(
+                        import_worker = Some(ImportWorker::spawn(
                             css_url.clone(),
                             media.clone(),
                             loader.clone(),
                             import_streaming_loader.clone(),
                             import_stack.clone(),
-                        )
-                        .ok();
+                        ));
                     }
-                    if import_worker
-                        .as_ref()
-                        .is_some_and(|worker| worker.send(unit.to_string()).is_ok())
-                    {
+                    let queued = import_worker
+                        .as_mut()
+                        .is_some_and(|worker| worker.send(unit.to_string()).is_ok());
+                    if queued {
                         continue;
+                    }
+                    if let Some(worker) = import_worker.take() {
+                        import_stream_failed |= worker.finish(&mut |fragment| {
+                            record_stylesheet_fragment(
+                                &mut combined,
+                                &mut emitted,
+                                &mut emit_fragment,
+                                fragment,
+                            );
+                        });
                     }
                     emit_css_imports(
                         unit,
@@ -966,6 +1064,7 @@ where
                         Some(&import_streaming_loader),
                         &mut import_stack,
                         None,
+                        &mut import_stream_failed,
                         &mut |fragment| {
                             record_stylesheet_fragment(
                                 &mut combined,
@@ -1007,7 +1106,16 @@ where
                 })
             });
             if finished {
-                import_worker.take().unwrap().finish(&mut |_| {});
+                if let Some(worker) = import_worker.take() {
+                    import_stream_failed |= worker.finish(&mut |fragment| {
+                        record_stylesheet_fragment(
+                            &mut combined,
+                            &mut emitted,
+                            &mut emit_fragment,
+                            fragment,
+                        );
+                    });
+                }
                 for fragment in pending_parent.drain(..) {
                     record_stylesheet_fragment(
                         &mut combined,
@@ -1030,7 +1138,7 @@ where
         }
         drop(process_complete_css);
         if let Some(worker) = import_worker.take() {
-            worker.finish(&mut |fragment| {
+            import_stream_failed |= worker.finish(&mut |fragment| {
                 record_stylesheet_fragment(
                     &mut combined,
                     &mut emitted,
@@ -1042,29 +1150,26 @@ where
         for fragment in pending_parent {
             record_stylesheet_fragment(&mut combined, &mut emitted, &mut emit_fragment, fragment);
         }
-        if streaming_result.is_err() || text_len == 0 {
+        if (streaming_result.is_err() || import_stream_failed) && emitted > 0 {
+            replace_emitted = true;
+            combined = match loader(&css_url) {
+                Ok(text) => {
+                    text_len = text.len();
+                    parse_complete_stylesheet(&text, &css_url, &media, &loader)
+                }
+                Err(err) => {
+                    eprintln!("  CSS failed: {css_url} ({err})");
+                    css::Stylesheet::default()
+                }
+            };
+        } else if streaming_result.is_err() || import_stream_failed || text_len == 0 {
             match loader(&css_url) {
                 Ok(text) => {
                     text_len = text.len();
-                    emitted += emit_css_imports(
-                        &text,
-                        &css_url,
-                        &media,
-                        &loader,
-                        Some(&streaming_loader),
-                        &mut import_stack,
-                        None,
-                        &mut |fragment| {
-                            combined.append_fragment(fragment.clone());
-                            emit_fragment(fragment);
-                        },
-                    );
-                    emitted += stream_stylesheet_fragments(&text, &css_url, &media, |fragment| {
-                        combined.append_fragment(fragment.clone());
-                        emit_fragment(fragment);
-                    });
-                    if emitted == 0 && !text.trim().is_empty() {
-                        combined.parse_and_add_with_base_media_conditions(&text, &css_url, &media);
+                    combined = parse_complete_stylesheet(&text, &css_url, &media, &loader);
+                    if stylesheet_has_content(&combined) {
+                        emitted += 1;
+                        emit_fragment(combined.clone());
                     }
                 }
                 Err(err) => {
@@ -1075,6 +1180,7 @@ where
     } else {
         let text = loader(&css_url).unwrap_or_default();
         text_len = text.len();
+        let mut stream_failed = false;
         emitted += emit_css_imports(
             &text,
             &css_url,
@@ -1083,6 +1189,7 @@ where
             None,
             &mut import_stack,
             None,
+            &mut stream_failed,
             &mut |fragment| {
                 combined.append_fragment(fragment.clone());
                 emit_fragment(fragment);
@@ -1119,6 +1226,7 @@ where
         sheet: combined,
         text_len,
         emitted_fragments: emitted,
+        replace_emitted,
     }
 }
 
@@ -1601,6 +1709,117 @@ mod stylesheet_loader_tests {
     }
 
     #[test]
+    fn failed_import_stream_replaces_published_rules_in_parent_sheet() {
+        let loader: StylesheetLoader = Arc::new(|url| match url {
+            "https://site.test/base.css" =>
+                Ok("@import 'theme.css'; .parent { color: blue }".into()),
+            "https://site.test/theme.css" => Ok(".theme { color: green }".into()),
+            _ => Err(format!("unexpected URL: {url}")),
+        });
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(|url, emit| match url {
+            "https://site.test/base.css" => {
+                emit("@import 'theme.css'; .parent { color: blue }");
+                Ok(())
+            }
+            "https://site.test/theme.css" => {
+                emit(".theme { color: red }");
+                Err("import interrupted".into())
+            }
+            _ => Err(format!("unexpected URL: {url}")),
+        });
+        let mut published = Vec::new();
+        let loaded = load_stylesheet_cached(
+            "test-failed-import-stream".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            Some(streaming_loader),
+            false,
+            |sheet| published.extend(sheet.rules.into_iter().map(|rule| rule.original_selector)),
+        );
+        assert!(published.iter().any(|selector| selector == ".theme"));
+        assert!(loaded.replace_emitted);
+        let colors: Vec<_> = loaded.sheet.rules.iter()
+            .filter_map(|rule| rule.declarations.get("color"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(colors, ["green", "blue"]);
+    }
+
+    #[test]
+    fn empty_failed_import_stream_uses_complete_import_without_parent_retry() {
+        let loader: StylesheetLoader = Arc::new(|url| match url {
+            "https://site.test/theme.css" => Ok(".theme { color: green }".into()),
+            _ => Err(format!("parent must not be retried: {url}")),
+        });
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(|url, emit| match url {
+            "https://site.test/base.css" => {
+                emit("@import 'theme.css'; .parent { color: blue }");
+                Ok(())
+            }
+            "https://site.test/theme.css" => Err("no imported bytes".into()),
+            _ => Err(format!("unexpected URL: {url}")),
+        });
+        let loaded = load_stylesheet_cached(
+            "test-empty-failed-import-stream".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            Some(streaming_loader),
+            false,
+            |_| {},
+        );
+        assert!(!loaded.replace_emitted);
+        let colors: Vec<_> = loaded.sheet.rules.iter()
+            .filter_map(|rule| rule.declarations.get("color"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(colors, ["green", "blue"]);
+    }
+
+    #[test]
+    fn nested_import_stream_failure_replaces_entire_parent_sheet() {
+        let loader: StylesheetLoader = Arc::new(|url| match url {
+            "https://site.test/base.css" =>
+                Ok("@import 'middle.css'; .parent { color: blue }".into()),
+            "https://site.test/middle.css" =>
+                Ok("@import 'child.css'; .middle { color: red }".into()),
+            "https://site.test/child.css" => Ok(".child { color: orange }".into()),
+            _ => Err(format!("unexpected URL: {url}")),
+        });
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(|url, emit| match url {
+            "https://site.test/base.css" => {
+                emit("@import 'middle.css'; .parent { color: blue }");
+                Ok(())
+            }
+            "https://site.test/middle.css" => {
+                emit("@import 'child.css'; .middle { color: red }");
+                Ok(())
+            }
+            "https://site.test/child.css" => {
+                emit(".child { color: green }");
+                Err("nested import interrupted".into())
+            }
+            _ => Err(format!("unexpected URL: {url}")),
+        });
+        let loaded = load_stylesheet_cached(
+            "test-failed-nested-import-stream".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            Some(streaming_loader),
+            false,
+            |_| {},
+        );
+        assert!(loaded.replace_emitted);
+        let colors: Vec<_> = loaded.sheet.rules.iter()
+            .filter_map(|rule| rule.declarations.get("color"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(colors, ["orange", "red", "blue"]);
+    }
+
+    #[test]
     fn parent_css_stream_advances_while_import_fetch_waits() {
         use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1652,6 +1871,137 @@ mod stylesheet_loader_tests {
         assert!(!import_timed_out.load(Ordering::SeqCst));
         assert_eq!(colors, ["red", "blue"]);
         assert_eq!(result.sheet.rules.len(), 2);
+    }
+
+    #[test]
+    fn sibling_imports_fetch_concurrently_but_publish_in_source_order() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let second_started = Arc::new(AtomicBool::new(false));
+        let first_timed_out = Arc::new(AtomicBool::new(false));
+        let started = second_started.clone();
+        let timed_out = first_timed_out.clone();
+        let loader: StylesheetLoader = Arc::new(|url| Err(format!("complete fetch forbidden: {url}")));
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(move |url, emit| {
+            match url {
+                "https://site.test/base.css" => {
+                    emit("@import 'first.css'; @import 'second.css'; .parent { color: blue }");
+                }
+                "https://site.test/first.css" => {
+                    for _ in 0..500 {
+                        if started.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    if !started.load(Ordering::SeqCst) {
+                        timed_out.store(true, Ordering::SeqCst);
+                    }
+                    emit(".first { color: red }");
+                }
+                "https://site.test/second.css" => {
+                    started.store(true, Ordering::SeqCst);
+                    emit(".second { color: green }");
+                }
+                _ => return Err(format!("unexpected URL: {url}")),
+            }
+            Ok(())
+        });
+        let mut published = Vec::new();
+        let loaded = load_stylesheet_cached(
+            "test-concurrent-sibling-imports".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            Some(streaming_loader),
+            false,
+            |sheet| published.extend(sheet.rules.into_iter().map(|rule| rule.original_selector)),
+        );
+        assert!(!first_timed_out.load(Ordering::SeqCst));
+        assert_eq!(published, [".first", ".second", ".parent"]);
+        assert_eq!(loaded.sheet.rules.len(), 3);
+    }
+
+    #[test]
+    fn streamed_import_after_style_rule_does_not_fetch() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let late_import_fetched = Arc::new(AtomicBool::new(false));
+        let fetched = late_import_fetched.clone();
+        let loader: StylesheetLoader = Arc::new(|url| Err(format!("complete fetch forbidden: {url}")));
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(move |url, emit| {
+            match url {
+                "https://site.test/base.css" => {
+                    emit(".title { color: blue }");
+                    emit("@import 'late.css';");
+                }
+                "https://site.test/late.css" => {
+                    fetched.store(true, Ordering::SeqCst);
+                    emit(".title { color: red }");
+                }
+                _ => return Err(format!("unexpected URL: {url}")),
+            }
+            Ok(())
+        });
+        let result = load_stylesheet_cached(
+            "test-streamed-late-import".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            Some(streaming_loader),
+            false,
+            |_| {},
+        );
+        assert!(!late_import_fetched.load(Ordering::SeqCst));
+        assert_eq!(result.sheet.rules.len(), 1);
+        assert_eq!(result.sheet.rules[0].declarations.get("color"), Some(&"blue".to_string()));
+    }
+
+    #[test]
+    fn failed_partial_stream_returns_complete_replacement_without_duplicate_emit() {
+        let loader: StylesheetLoader = Arc::new(|url| {
+            assert_eq!(url, "https://site.test/base.css");
+            Ok(".title { color: blue } .after { display: block }".into())
+        });
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(|url, emit| {
+            assert_eq!(url, "https://site.test/base.css");
+            emit(".title { color: red }");
+            Err("stream interrupted".into())
+        });
+        let mut emitted = Vec::new();
+        let loaded = load_stylesheet_cached(
+            "test-failed-partial-css-stream".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            Some(streaming_loader),
+            false,
+            |sheet| emitted.extend(sheet.rules.into_iter().map(|rule| rule.original_selector)),
+        );
+        assert_eq!(emitted, [".title"]);
+        assert!(loaded.replace_emitted);
+        assert_eq!(loaded.sheet.rules.len(), 2);
+        assert_eq!(loaded.sheet.rules[0].declarations.get("color"), Some(&"blue".to_string()));
+    }
+
+    #[test]
+    fn failed_partial_stream_and_retry_discards_published_prefix() {
+        let loader: StylesheetLoader = Arc::new(|_| Err("retry failed".into()));
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(|_, emit| {
+            emit(".title { color: red }");
+            Err("stream interrupted".into())
+        });
+        let loaded = load_stylesheet_cached(
+            "test-failed-css-retry".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            Some(streaming_loader),
+            false,
+            |_| {},
+        );
+        assert!(loaded.replace_emitted);
+        assert!(loaded.sheet.rules.is_empty());
     }
 
     #[test]
@@ -1734,6 +2084,39 @@ mod stylesheet_loader_tests {
         assert!(doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".first"));
         assert!(doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".second"));
         assert!(doc.pending_stylesheets.is_none());
+    }
+
+    #[test]
+    fn css_wait_replaces_failed_stream_before_first_paint() {
+        let loader: StylesheetLoader = Arc::new(|_| {
+            Ok(".target { color: blue }".to_string())
+        });
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(|_, emit| {
+            emit(".target { color: red }");
+            Err("interrupted stream".into())
+        });
+        let doc = load_html_reusing_with_resource_loaders_and_wait(
+            "<link rel=stylesheet href='https://css-retry.test/one.css'><div class=target>text</div>",
+            "https://css-retry.test/",
+            800.0,
+            600.0,
+            types::ComponentRegistry::default(),
+            None,
+            Some(loader),
+            Some(streaming_loader),
+            None,
+            false,
+            std::time::Duration::from_secs(1),
+        );
+        let colors: Vec<_> = doc
+            .stylesheet
+            .rules
+            .iter()
+            .filter(|rule| rule.original_selector == ".target")
+            .filter_map(|rule| rule.declarations.get("color"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(colors, ["blue"]);
     }
 
     #[test]
@@ -2012,7 +2395,7 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
     };
 
     // Channel for CSS results — fetches start during parsing via the hook.
-    let (css_tx, css_rx) = mpsc::channel::<(usize, String, crate::css::Stylesheet, String)>(); // idx, url, parsed css, media
+    let (css_tx, css_rx) = mpsc::channel::<types::PendingStylesheetResult>();
     let css_tx2 = css_tx.clone();
     let css_idx = Arc::new(AtomicUsize::new(0));
     let css_idx2 = css_idx.clone();
@@ -2055,16 +2438,25 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
                             streaming_loader,
                             cache_parsed,
                             |fragment| {
-                                let _ = sender.send((idx, abs.clone(), fragment, media.clone()));
+                                let _ = sender.send(types::PendingStylesheetResult::fragment(
+                                    idx,
+                                    abs.clone(),
+                                    fragment,
+                                    media.clone(),
+                                ));
                             },
                         );
-                        if loaded.emitted_fragments == 0 {
-                            let _ = sender.send((
-                                idx,
-                                abs.clone(),
-                                loaded.sheet.clone(),
-                                media.clone(),
-                            ));
+                        if loaded.replace_emitted || loaded.emitted_fragments == 0 {
+                            let update = if loaded.replace_emitted {
+                                types::PendingStylesheetResult::replace(
+                                    idx, abs.clone(), loaded.sheet.clone(), media.clone(),
+                                )
+                            } else {
+                                types::PendingStylesheetResult::fragment(
+                                    idx, abs.clone(), loaded.sheet.clone(), media.clone(),
+                                )
+                            };
+                            let _ = sender.send(update);
                         }
                         eprintln!(
                             "  CSS done:  {} ({:.0}ms, {} bytes)",
@@ -2086,7 +2478,7 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
     // short wait so screenshots include fast stylesheets.
     let t1 = std::time::Instant::now();
     let expected_count = css_idx.load(std::sync::atomic::Ordering::SeqCst);
-    let mut css_results: Vec<(usize, String, crate::css::Stylesheet, String)> = Vec::new();
+    let mut css_results: Vec<types::PendingStylesheetResult> = Vec::new();
     let mut css_finished = expected_count == 0;
     if !css_wait.is_zero() && !css_finished {
         let deadline = std::time::Instant::now() + css_wait;
@@ -2118,22 +2510,20 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
             std::collections::HashMap::new();
         let mut fetched_slots: std::collections::HashMap<usize, crate::css::Stylesheet> =
             std::collections::HashMap::new();
-        for (idx, css_url, sheet, _) in css_results {
-            match fetched_slots.entry(idx) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    entry.get_mut().append_fragment(sheet.clone());
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(sheet.clone());
-                }
-            }
-            match fetched_map.entry(css_url) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    entry.get_mut().append_fragment(sheet);
-                }
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(sheet);
-                }
+        for update in css_results {
+            let types::PendingStylesheetResult { slot, url, sheet, kind, .. } = update;
+            if kind == types::StylesheetUpdateKind::Replace {
+                fetched_slots.insert(slot, sheet.clone());
+                fetched_map.insert(url, sheet);
+            } else {
+                fetched_slots
+                    .entry(slot)
+                    .and_modify(|existing| existing.append_fragment(sheet.clone()))
+                    .or_insert_with(|| sheet.clone());
+                fetched_map
+                    .entry(url)
+                    .and_modify(|existing| existing.append_fragment(sheet.clone()))
+                    .or_insert(sheet);
             }
         }
         if use_cached_external_stylesheets {
@@ -2184,14 +2574,33 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
         doc.loaded_linked_stylesheets = fetched_map;
         doc.refresh_shadow_linked_stylesheets();
     } else {
-        css_results.sort_by_key(|(idx, _, _, _)| *idx);
-        for (_, css_url, sheet, media) in &css_results {
-            let _ = media;
-            doc.loaded_linked_stylesheets
-                .entry(css_url.clone())
-                .and_modify(|existing| existing.append_fragment(sheet.clone()))
-                .or_insert_with(|| sheet.clone());
-            doc.stylesheet.append_fragment(sheet.clone());
+        css_results.sort_by_key(|update| update.slot);
+        if !css_results.is_empty() {
+            doc.pending_stylesheet_base = Some(doc.stylesheet.clone());
+        }
+        for update in css_results {
+            let types::PendingStylesheetResult { slot, url, sheet, kind, .. } = update;
+            if kind == types::StylesheetUpdateKind::Replace {
+                doc.loaded_stylesheet_slots.insert(slot, sheet.clone());
+                doc.loaded_linked_stylesheets.insert(url, sheet);
+            } else {
+                doc.loaded_stylesheet_slots
+                    .entry(slot)
+                    .and_modify(|existing| existing.append_fragment(sheet.clone()))
+                    .or_insert_with(|| sheet.clone());
+                doc.loaded_linked_stylesheets
+                    .entry(url)
+                    .and_modify(|existing| existing.append_fragment(sheet.clone()))
+                    .or_insert(sheet);
+            }
+        }
+        if let Some(base) = &doc.pending_stylesheet_base {
+            doc.stylesheet = base.clone();
+            let mut slots: Vec<_> = doc.loaded_stylesheet_slots.iter().collect();
+            slots.sort_by_key(|(idx, _)| **idx);
+            for (_, sheet) in slots {
+                doc.stylesheet.append_fragment(sheet.clone());
+            }
         }
         doc.refresh_shadow_linked_stylesheets();
     }
@@ -2220,13 +2629,10 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
     html::resolve_picture_elements(&mut doc.root, &base, viewport_width, viewport_height);
 
     let t3 = std::time::Instant::now();
-    let mut owned: Option<Renderer> = None;
+    let mut owned = reuse.is_none().then(Renderer::new);
     let renderer: &mut Renderer = match reuse {
         Some(r) => r,
-        None => {
-            owned = Some(Renderer::new());
-            owned.as_mut().expect("just set")
-        }
+        None => owned.as_mut().expect("renderer allocated when not reused"),
     };
     renderer.component_registry = registry;
     {

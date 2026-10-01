@@ -45,7 +45,7 @@ struct Candidate<'a> {
 }
 
 impl Candidate<'_> {
-    fn is_viable(self, exclude_position: bool) -> bool {
+    fn is_viable(self, exclude_position: bool, ignore_geometry: bool) -> bool {
         let node = self.node;
         if node.style.display == Display::None
             || node.style.overflow_anchor == "none"
@@ -58,6 +58,9 @@ impl Candidate<'_> {
             || self.clip_top >= self.clip_bottom
         {
             return false;
+        }
+        if ignore_geometry {
+            return true;
         }
         if node.style.display == Display::Contents {
             return true;
@@ -168,7 +171,7 @@ impl ViewportAnchor {
         while let Some(index) = pending.pop() {
             let candidate = candidates[index];
             let node = candidate.node;
-            if !candidate.is_viable(index != 0) {
+            if !candidate.is_viable(index != 0, index == 0 && is_scroll_container(node)) {
                 continue;
             }
             if node.node_id == focused {
@@ -240,7 +243,9 @@ impl ViewportAnchor {
                 }
                 continue;
             }
-            if !candidate.is_viable(include_root || index != 0) {
+            // A scrollport's children use scrolled content coordinates. Its own
+            // border box need not intersect that viewing region.
+            if !candidate.is_viable(include_root || index != 0, index == 0 && !include_root) {
                 continue;
             }
             let contents = node.style.display == Display::Contents;
@@ -343,6 +348,7 @@ impl ViewportAnchor {
 struct ElementAnchor {
     scroller_id: u32,
     old_content_y: f32,
+    scroll_action_serial: u64,
     anchor: ViewportAnchor,
 }
 
@@ -350,6 +356,9 @@ pub(super) struct ElementAnchors(Vec<ElementAnchor>);
 
 impl ElementAnchors {
     pub(super) fn capture(doc: &Document) -> Self {
+        if doc.scroll_action_serial.is_empty() {
+            return Self(Vec::new());
+        }
         let mut anchors = Vec::new();
         let focused = editable_focus(doc);
         let root_font_px = doc.root.style.font_size_px(
@@ -367,14 +376,33 @@ impl ElementAnchors {
                 }
                 (node.node_id == id).then_some(ancestors)
             });
-        let mut pending = vec![(&doc.root, ComputedStyle::INITIAL_FONT_SIZE_PX)];
-        while let Some((node, parent_font_px)) = pending.pop() {
-            if node.style.display == Display::None {
+        for (&id, &serial) in &doc.scroll_action_serial {
+            if id == 0 {
+                continue;
+            }
+            let Some(path) = doc.node_index.get(&id) else {
+                continue;
+            };
+            let mut node = &doc.root;
+            let mut parent_font_px = ComputedStyle::INITIAL_FONT_SIZE_PX;
+            let mut hidden = false;
+            for step in path {
+                if node.style.display == Display::None {
+                    hidden = true;
+                    break;
+                }
+                parent_font_px = node.style.font_size_px(parent_font_px, root_font_px);
+                let Some(child) = node.children.get(*step as usize) else {
+                    hidden = true;
+                    break;
+                };
+                node = child;
+            }
+            if hidden || node.node_id != id || node.style.display == Display::None {
                 continue;
             }
             let font_px = node.style.font_size_px(parent_font_px, root_font_px);
-            if node.node_id != 0
-                && is_scroll_container(node)
+            if is_scroll_container(node)
                 && node.style.overflow_anchor != "none"
                 && node.layout.scroll_top > 0.0
                 && node.layout.content_rect.h > 0.0
@@ -422,17 +450,26 @@ impl ElementAnchors {
                     anchors.push(ElementAnchor {
                         scroller_id: node.node_id,
                         old_content_y: node.layout.content_rect.y,
+                        scroll_action_serial: serial,
                         anchor,
                     });
                 }
             }
-            pending.extend(node.children.iter().map(|child| (child, font_px)));
         }
         Self(anchors)
     }
 
     pub(super) fn adjust(self, doc: &mut Document) {
         for entry in self.0 {
+            if doc
+                .scroll_action_serial
+                .get(&entry.scroller_id)
+                .copied()
+                .unwrap_or(0)
+                != entry.scroll_action_serial
+            {
+                continue;
+            }
             if !entry.anchor.path_is_valid(doc) {
                 continue;
             }
@@ -652,6 +689,48 @@ mod tests {
     }
 
     #[test]
+    fn explicit_nested_scroll_suppresses_pending_anchor_adjustment() {
+        let (_, mut doc, _, scroller, _, anchor) = nested_page("");
+        let anchors = ElementAnchors::capture(&doc);
+        assert_eq!(anchors.0.len(), 1);
+        doc.element_scroll_to(scroller, 0.0, 180.0);
+        doc.get_box_by_id_mut(anchor).unwrap().layout.border_rect.y += 60.0;
+        anchors.adjust(&mut doc);
+        assert!((doc.element_scroll_top(scroller) - 180.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn scrolling_one_element_does_not_suppress_other_element_anchor() {
+        let mut doc = crate::html::parse_html(
+            "<style>html,body{margin:0}.port{height:100px;width:200px;overflow:auto}\
+             .before{height:100px}.anchor{height:100px}.after{height:500px}</style>\
+             <div id='a' class='port'><div class='before'></div><div id='aa' class='anchor'></div>\
+             <div class='after'></div></div>\
+             <div id='b' class='port'><div class='before'></div><div id='ba' class='anchor'></div>\
+             <div class='after'></div></div>",
+        );
+        let a = doc.query_selector("#a").unwrap();
+        let b = doc.query_selector("#b").unwrap();
+        let aa = doc.query_selector("#aa").unwrap();
+        let ba = doc.query_selector("#ba").unwrap();
+        let mut engine = LayoutEngine::new();
+        engine.viewport_h = 300.0;
+        engine.layout(&mut doc, 400.0);
+        doc.element_scroll_to(a, 0.0, 120.0);
+        doc.element_scroll_to(b, 0.0, 120.0);
+        let anchors = ElementAnchors::capture(&doc);
+        assert_eq!(anchors.0.len(), 2);
+        assert!(anchors.0.iter().any(|entry| entry.anchor.node_id == aa));
+        assert!(anchors.0.iter().any(|entry| entry.anchor.node_id == ba));
+        doc.element_scroll_to(a, 0.0, 180.0);
+        doc.get_box_by_id_mut(aa).unwrap().layout.border_rect.y += 30.0;
+        doc.get_box_by_id_mut(ba).unwrap().layout.border_rect.y += 30.0;
+        anchors.adjust(&mut doc);
+        assert!((doc.element_scroll_top(a) - 180.0).abs() < 0.5);
+        assert!((doc.element_scroll_top(b) - 150.0).abs() < 0.5);
+    }
+
+    #[test]
     fn nested_growth_does_not_move_the_viewport() {
         let (mut engine, mut doc, _, scroller, before, _) = nested_page("");
         doc.scroll_y = 50.0;
@@ -792,6 +871,26 @@ mod tests {
         doc.set_style_property(before, "height", "130px");
         engine.layout(&mut doc, 400.0);
         assert!((doc.element_scroll_top(scroller) - 110.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn editable_focus_inside_deeply_scrolled_port_takes_priority() {
+        let mut doc = crate::html::parse_html(
+            "<style>html,body{margin:0}#scroller{height:100px;width:200px;overflow:auto}\
+             #before{height:130px}#after{height:600px}</style>\
+             <div id='scroller'><div id='before'></div><input id='focus'>\
+             <div id='after'></div></div>",
+        );
+        let scroller = doc.query_selector("#scroller").unwrap();
+        let focus = doc.query_selector("#focus").unwrap();
+        let mut engine = LayoutEngine::new();
+        engine.viewport_h = 300.0;
+        engine.layout(&mut doc, 400.0);
+        doc.element_scroll_to(scroller, 0.0, 120.0);
+        doc.focused_box = focus;
+        let anchors = ElementAnchors::capture(&doc);
+        assert_eq!(anchors.0.len(), 1);
+        assert_eq!(anchors.0[0].anchor.node_id, focus);
     }
 
     #[test]
