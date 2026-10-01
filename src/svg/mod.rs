@@ -23,9 +23,12 @@ pub use geometry::{
     PreserveAspectRatio, SvgLength, SvgViewBox, has_ratio_only, has_ratio_only_from_markup,
     intrinsic_size_from_markup,
 };
-pub(crate) use paint::rasterize_svg_document_to_rgba_with_dom;
 pub(crate) use paint::document_svg_ids;
-pub use paint::{rasterize_svg_document_to_rgba, rasterize_svg_intrinsic, rasterize_svg_to_rgba};
+pub(crate) use paint::rasterize_svg_document_to_rgba_with_dom;
+pub use paint::{
+    rasterize_svg_document_intrinsic, rasterize_svg_document_to_rgba, rasterize_svg_intrinsic,
+    rasterize_svg_to_rgba,
+};
 pub use parser::{SvgParseError, parse_svg_document};
 pub use resources::load_background_images;
 pub use tree::{SvgAttribute, SvgDocument, SvgElementKind, SvgNode};

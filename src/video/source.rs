@@ -51,7 +51,7 @@ fn can_play_type_for_kind(kind: MediaKind, media_type: &str) -> &'static str {
     let playable = match kind {
         MediaKind::Video => matches!(
             lower.as_str(),
-            "video/mp4" | "video/webm" | "video/ogg" | "application/ogg"
+            "video/mp4" | "video/webm" | "video/ogg" | "application/ogg" | "video/x-yuv4mpeg2"
         ),
         MediaKind::Audio => matches!(
             lower.as_str(),

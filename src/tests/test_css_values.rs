@@ -69,7 +69,10 @@ fn container_units_resolve_their_distinct_axes() {
         ("calc(5cqw + 5cqh)", 35.0),
     ] {
         let actual = parse_length(unit).resolve_query_vp(16.0, 0.0, 16.0, 800.0, 600.0, query);
-        assert!((actual - expected).abs() < 0.01, "{unit}: {actual} != {expected}");
+        assert!(
+            (actual - expected).abs() < 0.01,
+            "{unit}: {actual} != {expected}"
+        );
     }
 }
 
@@ -79,7 +82,8 @@ fn logical_container_units_fall_back_to_vertical_viewport_axes() {
         fallback_vertical: true,
         ..Default::default()
     };
-    let resolve = |value| parse_length(value).resolve_query_vp(16.0, 0.0, 16.0, 800.0, 600.0, query);
+    let resolve =
+        |value| parse_length(value).resolve_query_vp(16.0, 0.0, 16.0, 800.0, 600.0, query);
     assert_eq!(resolve("10cqi"), 60.0);
     assert_eq!(resolve("10cqb"), 80.0);
     assert_eq!(resolve("10cqw"), 80.0);
@@ -440,16 +444,56 @@ fn background_image_image_set_selects_supported_one_x_candidate() {
 fn image_set_density_units_and_equal_density_order() {
     use crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio as select;
     for (source, ratio, expected) in [
-        ("image-set('two.png' 2dppx, 'one.png' 1dppx)", 1.0, "one.png"),
-        ("image-set('one.png' 1DPPX, 'two.png' 2DPPX)", 2.0, "two.png"),
-        ("image-set('first.png' 2x, 'second.png' 192dpi)", 3.0, "first.png"),
-        ("image-set('unsupported.avif' 2x type('image/avif'), 'first.png' 2x, 'second.png' 2x)", 3.0, "first.png"),
-        (r#"image-set("quo\"te.png" 1x, "other.png" 2x)"#, 1.0, "quo\"te.png"),
-        (r#"image-set("picture 3x type(unsupported).png" 1x, "other.png" 2x)"#, 1.0, "picture 3x type(unsupported).png"),
-        (r#"image-set(url("picture 3x type(unsupported).png") 1x, "other.png" 2x)"#, 1.0, "picture 3x type(unsupported).png"),
+        (
+            "image-set('two.png' 2dppx, 'one.png' 1dppx)",
+            1.0,
+            "one.png",
+        ),
+        (
+            "image-set('one.png' 1DPPX, 'two.png' 2DPPX)",
+            2.0,
+            "two.png",
+        ),
+        (
+            "image-set('first.png' 2x, 'second.png' 192dpi)",
+            3.0,
+            "first.png",
+        ),
+        (
+            "image-set('unsupported.avif' 2x type('image/avif'), 'first.png' 2x, 'second.png' 2x)",
+            3.0,
+            "first.png",
+        ),
+        (
+            r#"image-set("quo\"te.png" 1x, "other.png" 2x)"#,
+            1.0,
+            "quo\"te.png",
+        ),
+        (
+            r#"image-set("picture 3x type(unsupported).png" 1x, "other.png" 2x)"#,
+            1.0,
+            "picture 3x type(unsupported).png",
+        ),
+        (
+            r#"image-set(url("picture 3x type(unsupported).png") 1x, "other.png" 2x)"#,
+            1.0,
+            "picture 3x type(unsupported).png",
+        ),
     ] {
         assert_eq!(select(source, ratio).as_deref(), Some(expected), "{source}");
     }
+}
+
+#[test]
+fn image_set_calculated_resolution_selects_by_device_density() {
+    use crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio as select;
+    let source = "image-set(url(low.png) calc(96dpi), url(mid.png) min(3dppx, 192dpi), url(high.png) calc(1dppx + 2dppx))";
+    assert_eq!(select(source, 1.0).as_deref(), Some("low.png"));
+    assert_eq!(select(source, 1.5).as_deref(), Some("mid.png"));
+    assert_eq!(select(source, 2.5).as_deref(), Some("high.png"));
+
+    let invalid = "image-set(url(length.png) calc(2px), url(zero.png) calc(2dppx - 2dppx), url(valid.png) 2x)";
+    assert_eq!(select(invalid, 1.0), None);
 }
 
 #[test]
@@ -466,11 +510,61 @@ fn image_set_rejects_malformed_descriptors_instead_of_using_one_x() {
         "url(bad.png) type('image/png') extra",
     ] {
         let source = format!("image-set({candidate}, url(good.png) 2x)");
-        assert_eq!(select(&source, 1.0).as_deref(), Some("good.png"), "{source}");
+        assert_eq!(select(&source, 1.0), None, "{source}");
     }
     assert_eq!(
-        select("image-set(url(good.png) type('image/png; charset=utf-8') 2x)", 2.0)
-            .as_deref(),
+        select(
+            "image-set(url(unsupported.avif) 2x type('image/avif'), url(good.png) 1x)",
+            2.0
+        )
+        .as_deref(),
+        Some("good.png"),
+    );
+    assert_eq!(
+        select("image-set(url(unsupported.avif) type('image/avif'))", 1.0).as_deref(),
+        Some(""),
+    );
+    let mut style = crate::types::ComputedStyle::default();
+    crate::css::apply_property(&mut style, "background-image", "url(original.png)");
+    crate::css::apply_property(
+        &mut style,
+        "background-image",
+        "image-set(url(unsupported.avif) type('image/avif'))",
+    );
+    assert_eq!(style.background_image_url, "");
+    crate::css::apply_property(&mut style, "background-image", "url(original.png)");
+    crate::css::apply_property(
+        &mut style,
+        "background-image",
+        "image-set(url(bad.png) 0x, url(good.png) 2x)",
+    );
+    assert_eq!(style.background_image_url, "original.png");
+    crate::css::apply_property(
+        &mut style,
+        "background",
+        "red image-set(url(bad.png) 0x, url(good.png) 2x)",
+    );
+    assert_eq!(style.background_image_url, "original.png");
+
+    crate::css::apply_property(&mut style, "mask-image", "url(original-mask.png)");
+    crate::css::apply_property(
+        &mut style,
+        "mask-image",
+        "image-set(url(bad.png) nonsense, url(good.png) 2x)",
+    );
+    assert_eq!(style.rare().mask_image_url, "original-mask.png");
+    crate::css::apply_property(
+        &mut style,
+        "mask",
+        "image-set(url(bad.png) 0x, url(good.png) 2x) no-repeat",
+    );
+    assert_eq!(style.rare().mask_image_url, "original-mask.png");
+    assert_eq!(
+        select(
+            "image-set(url(good.png) type('image/png; charset=utf-8') 2x)",
+            2.0
+        )
+        .as_deref(),
         Some("good.png"),
     );
 }
@@ -530,23 +624,35 @@ fn background_image_image_set_works_in_multiple_layers() {
         "bottom.webp"
     );
     assert_eq!(s.background_image_url_for_dpr(2.0), "top@2x.png");
-    assert_eq!(s.rare().additional_background_layers[0].image_url_for_dpr(2.0), "bottom@2x.webp");
+    assert_eq!(
+        s.rare().additional_background_layers[0].image_url_for_dpr(2.0),
+        "bottom@2x.webp"
+    );
 }
 
 #[test]
 fn image_set_source_survives_background_shorthand_and_cssom() {
     let mut style = crate::types::ComputedStyle::default();
     let source = "image-set(url(hero.png) 1x, url(hero@2x.png) 2x)";
-    crate::css::apply_property(&mut style, "background", &format!("{source} center / cover"));
+    crate::css::apply_property(
+        &mut style,
+        "background",
+        &format!("{source} center / cover"),
+    );
     assert_eq!(style.background_image_url_for_dpr(1.0), "hero.png");
     assert_eq!(style.background_image_url_for_dpr(2.0), "hero@2x.png");
-    assert_eq!(style.rare().background_image_set_source.as_deref(), Some(source));
+    assert_eq!(
+        style.rare().background_image_set_source.as_deref(),
+        Some(source)
+    );
     crate::css::apply_property(&mut style, "background-image", "url(plain.png)");
     assert!(style.rare().background_image_set_source.is_none());
     assert_eq!(style.background_image_url_for_dpr(2.0), "plain.png");
 
     let mut frame = crate::EngineFrame::new(
-        crate::parse_html("<div id=hero style='background-image:image-set(url(one.png) 1x, url(two.png) 2x)'></div>"),
+        crate::parse_html(
+            "<div id=hero style='background-image:image-set(url(one.png) 1x, url(two.png) 2x)'></div>",
+        ),
         200.0,
         100.0,
     );
@@ -664,7 +770,10 @@ fn mask_shorthand_does_not_split_slashes_inside_image_urls() {
         "mask",
         "url('https://example.test/assets/mask.svg') center / contain no-repeat",
     );
-    assert_eq!(style.rare().mask_image_url, "https://example.test/assets/mask.svg");
+    assert_eq!(
+        style.rare().mask_image_url,
+        "https://example.test/assets/mask.svg"
+    );
     assert_eq!(style.rare().mask_position, "center");
     assert_eq!(style.rare().mask_size, "contain");
     assert_eq!(style.rare().mask_repeat, "no-repeat");
@@ -678,7 +787,10 @@ fn border_image_shorthand_does_not_split_slashes_inside_image_urls() {
         "border-image",
         "url('https://example.test/assets/border.svg') 20 / 4 / 2 round",
     );
-    assert_eq!(style.border_image_source, "url('https://example.test/assets/border.svg')");
+    assert_eq!(
+        style.border_image_source,
+        "url('https://example.test/assets/border.svg')"
+    );
     assert_eq!(style.border_image_slice, "20");
     assert_eq!(style.border_image_width, "4");
     assert_eq!(style.border_image_outset, "2");

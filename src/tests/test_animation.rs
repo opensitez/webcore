@@ -463,12 +463,20 @@ fn keyframe_timing_function_is_not_an_animated_property() {
 
 #[test]
 fn prefixed_keyframe_timing_is_metadata_not_layout_animation() {
-    let frames = extract_keyframes("@keyframes orbit { 0% { -webkit-animation-timing-function:ease-out; transform:rotate(0deg); opacity:0 } 100% { transform:rotate(360deg); opacity:1 } }");
+    let frames = extract_keyframes(
+        "@keyframes orbit { 0% { -webkit-animation-timing-function:ease-out; transform:rotate(0deg); opacity:0 } 100% { transform:rotate(360deg); opacity:1 } }",
+    );
     let stops = frames.get("orbit").unwrap();
     assert_eq!(stops[0].timing_fn, Some(EasingFn::EaseOut));
     for stop in stops {
-        assert!(!crate::types::animation_runtime::animation_properties_affect_layout(&stop.properties));
-        assert!(stop.properties.iter().all(|(name, _)| !name.contains("timing-function")));
+        assert!(
+            !crate::types::animation_runtime::animation_properties_affect_layout(&stop.properties)
+        );
+        assert!(
+            stop.properties
+                .iter()
+                .all(|(name, _)| !name.contains("timing-function"))
+        );
     }
 }
 
@@ -550,10 +558,35 @@ fn mixed_unit_translation_interpolation_preserves_reference_context() {
         ("1in", "48px", 30.0, 200.0, 72.0),
         ("-1em", "20px", 30.0, 200.0, -5.0),
     ] {
-        let value = interpolate_value(&format!("translateX({from})"), &format!("translateX({to})"), 0.5);
+        let value = interpolate_value(
+            &format!("translateX({from})"),
+            &format!("translateX({to})"),
+            0.5,
+        );
         let transform = crate::css::parse_css_transform_checked(&value).expect(&value);
-        let TransformOp::TranslateX(length) = &transform.ops[0] else { panic!("{value}") };
-        assert!((length.resolve(font, reference, font) - expected).abs() < 0.001, "{value}");
+        let TransformOp::TranslateX(length) = &transform.ops[0] else {
+            panic!("{value}")
+        };
+        assert!(
+            (length.resolve(font, reference, font) - expected).abs() < 0.001,
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn mixed_angle_units_interpolate_in_degrees() {
+    for (from, to, expected) in [
+        ("0deg", "0.5turn", 90.0),
+        ("0rad", "200grad", 90.0),
+        ("180deg", "0turn", 90.0),
+    ] {
+        let value = interpolate_value(&format!("rotate({from})"), &format!("rotate({to})"), 0.5);
+        let transform = crate::css::parse_css_transform_checked(&value).expect(&value);
+        let crate::types::TransformOp::Rotate(angle) = transform.ops[0] else {
+            panic!("{value}")
+        };
+        assert!((angle - expected).abs() < 0.001, "{value}");
     }
 }
 
@@ -1122,25 +1155,49 @@ fn keyframe_transform_resolves_element_variables_and_mixed_units() {
     let box_id = doc.query_selector("#box").unwrap();
     let start = doc.active_animations[0].start_time;
     doc.tick_animations(start + Duration::from_millis(200));
-    let transform = doc.animation_overrides_for(box_id).unwrap().iter()
-        .find(|(name, _)| name == "transform").unwrap().1.as_str();
-    let translate_x: f32 = transform.strip_prefix("matrix(").unwrap()
-        .trim_end_matches(')').split(',').nth(4).unwrap().parse().unwrap();
-    assert!((translate_x - 336.0).abs() < 1.0, "expected midpoint from -128px to +800px, got {transform}");
+    let transform = doc
+        .animation_overrides_for(box_id)
+        .unwrap()
+        .iter()
+        .find(|(name, _)| name == "transform")
+        .unwrap()
+        .1
+        .as_str();
+    let translate_x: f32 = transform
+        .strip_prefix("matrix(")
+        .unwrap()
+        .trim_end_matches(')')
+        .split(',')
+        .nth(4)
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        (translate_x - 336.0).abs() < 1.0,
+        "expected midpoint from -128px to +800px, got {transform}"
+    );
 }
 
 #[test]
 fn keyframe_segments_use_local_easing_and_independent_property_tracks() {
     fn sample(frames: &str, animation: &str, millis: u64, property: &str) -> f32 {
-        let html = format!("<style>@keyframes probe{{{frames}}} #box{{position:relative;left:0px;top:0px;opacity:0;animation:probe 1s {animation}}}</style><div id=box>sample</div>");
+        let html = format!(
+            "<style>@keyframes probe{{{frames}}} #box{{position:relative;left:0px;top:0px;opacity:0;animation:probe 1s {animation}}}</style><div id=box>sample</div>"
+        );
         let mut doc = parse_html(&html);
         LayoutEngine::new().layout(&mut doc, 800.0);
         let id = doc.query_selector("#box").unwrap();
         let start = doc.active_animations[0].start_time;
         doc.tick_animations(start + Duration::from_millis(millis));
-        doc.animation_overrides_for(id).unwrap().iter()
-            .find(|(name, _)| name == property).unwrap().1
-            .trim_end_matches("px").parse().unwrap()
+        doc.animation_overrides_for(id)
+            .unwrap()
+            .iter()
+            .find(|(name, _)| name == property)
+            .unwrap()
+            .1
+            .trim_end_matches("px")
+            .parse()
+            .unwrap()
     }
     let frames = "0%{opacity:0}50%{opacity:.4}100%{opacity:1}";
     assert!((sample(frames, "steps(2,end) both", 250, "opacity") - 0.2).abs() < 0.001);
@@ -1152,7 +1209,9 @@ fn keyframe_segments_use_local_easing_and_independent_property_tracks() {
     assert!((sample(local, "step-end 1.75 both", 2000, "opacity") - 0.7).abs() < 0.001);
     let sparse = "0%{left:0px}50%{top:10px}100%{left:100px}";
     for millis in [250, 750] {
-        assert!((sample(sparse, "linear both", millis, "left") - millis as f32 / 10.0).abs() < 0.001);
+        assert!(
+            (sample(sparse, "linear both", millis, "left") - millis as f32 / 10.0).abs() < 0.001
+        );
         assert!((sample(sparse, "linear both", millis, "top") - 5.0).abs() < 0.001);
     }
     assert!((sample(local, "step-end .5s backwards", 250, "opacity") - 0.0).abs() < 0.001);
@@ -1162,13 +1221,24 @@ fn keyframe_segments_use_local_easing_and_independent_property_tracks() {
 
 #[test]
 fn keyframe_easing_merges_duplicate_offsets_and_ignores_invalid_descriptors() {
-    for invalid in ["bogus", "steps(0,end)", "steps(1,jump-none)", "steps(2,other)", "cubic-bezier(2,0,1,1)", "linear(0)"] {
-        let frames = extract_keyframes(&format!("@keyframes probe{{0%{{opacity:0;animation-timing-function:step-start}}0%{{left:0px;animation-timing-function:{invalid}}}100%{{opacity:1}}}}"));
+    for invalid in [
+        "bogus",
+        "steps(0,end)",
+        "steps(1,jump-none)",
+        "steps(2,other)",
+        "cubic-bezier(2,0,1,1)",
+        "linear(0)",
+    ] {
+        let frames = extract_keyframes(&format!(
+            "@keyframes probe{{0%{{opacity:0;animation-timing-function:step-start}}0%{{left:0px;animation-timing-function:{invalid}}}100%{{opacity:1}}}}"
+        ));
         let stop = &frames["probe"][0];
         assert_eq!(stop.timing_fn, Some(EasingFn::StepStart), "{invalid}");
         assert_eq!(stop.properties.len(), 2);
     }
-    let frames = extract_keyframes("@keyframes probe{0%,50%{opacity:0;animation-timing-function:ease-in}50%{animation-timing-function:linear}100%{opacity:1}}");
+    let frames = extract_keyframes(
+        "@keyframes probe{0%,50%{opacity:0;animation-timing-function:ease-in}50%{animation-timing-function:linear}100%{opacity:1}}",
+    );
     assert_eq!(frames["probe"][0].timing_fn, Some(EasingFn::EaseIn));
     assert_eq!(frames["probe"][1].timing_fn, Some(EasingFn::Linear));
 }
@@ -1701,6 +1771,20 @@ fn doc_needs_animation_frame_set_by_layout() {
     );
 }
 
+#[test]
+fn hidden_subtree_does_not_start_child_animation() {
+    let html = r#"<html><head><style>
+        @keyframes spin { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
+        .hidden { display: none }
+        .spinner { animation: spin 1s linear infinite }
+    </style></head><body><div class="hidden"><div class="spinner"></div></div></body></html>"#;
+    let mut doc = parse_html(html);
+    LayoutEngine::new().layout(&mut doc, 800.0);
+
+    assert!(doc.active_animations.is_empty());
+    assert!(!doc.needs_animation_frame);
+}
+
 // ── CSS Transitions ───────────────────────────────────────────────────────────
 
 #[test]
@@ -1838,17 +1922,15 @@ fn hover_transition_reverses_to_base_style_from_current_sample() {
     doc.hover_changed = true;
     engine.layout(&mut doc, 800.0);
 
-    let start = doc
+    let sample_now = Instant::now();
+    for state in doc
         .transition_states
-        .get(&id)
-        .and_then(|states| {
-            states
-                .iter()
-                .find(|state| state.property == "background-color")
-        })
-        .expect("hover-in background transition")
-        .start_time;
-    doc.tick_animations(start + Duration::from_millis(500));
+        .get_mut(&id)
+        .expect("hover-in transitions")
+    {
+        state.start_time = sample_now - Duration::from_millis(500);
+    }
+    doc.tick_animations(sample_now);
     let sampled = doc
         .animation_overrides
         .get(&id)
@@ -1869,7 +1951,21 @@ fn hover_transition_reverses_to_base_style_from_current_sample() {
                 .find(|state| state.property == "background-color")
         })
         .expect("hover-out background transition");
-    assert_eq!(reverse.from_value, sampled);
+    let red = |value: &str| {
+        value
+            .strip_prefix("rgba(")
+            .unwrap()
+            .split(',')
+            .next()
+            .unwrap()
+            .parse::<i32>()
+            .unwrap()
+    };
+    assert!(
+        (red(&reverse.from_value) - red(&sampled)).abs() <= 4,
+        "reversal must start at the current color without a visible jump: sampled={sampled}, reverse={}",
+        reverse.from_value
+    );
     assert_eq!(reverse.to_value, "rgba(0,0,0,1.0000)");
 
     let color_reverse = doc
@@ -1921,11 +2017,60 @@ fn sync_transitions_dispatches_transitionrun_and_transitionstart_when_created() 
         Default::default(),
     );
 
-    doc.sync_transitions(Instant::now(), true);
+    doc.sync_transitions(Instant::now());
 
     assert_eq!(*seen_run.lock().unwrap(), 1);
     assert_eq!(*seen_start.lock().unwrap(), 1);
     assert!(doc.transition_states.contains_key(&id));
+}
+
+#[test]
+fn unchanged_transition_style_skips_extraction_but_mutation_and_removal_update_state() {
+    let mut doc = parse_html("<div id='box'></div>");
+    let id = doc.get_element_by_id("box").unwrap();
+    {
+        let node = doc.get_box_by_id_mut(id).unwrap();
+        let style = std::sync::Arc::make_mut(&mut node.style);
+        style.opacity = 0.0;
+        style.rare_mut().transitions.push(ParsedTransition {
+            property: "opacity".into(),
+            duration_ms: 100.0,
+            delay_ms: 0.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: false,
+        });
+    }
+    let start = Instant::now();
+    doc.sync_transitions(start);
+    doc.prev_styles
+        .get_mut(&id)
+        .unwrap()
+        .insert("sentinel".into(), "kept".into());
+    doc.sync_transitions(start + Duration::from_millis(1));
+    assert_eq!(
+        doc.prev_styles[&id].get("sentinel").map(String::as_str),
+        Some("kept")
+    );
+
+    std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style).opacity = 1.0;
+    doc.sync_transitions(start + Duration::from_millis(2));
+    assert!(!doc.prev_styles[&id].contains_key("sentinel"));
+    assert_eq!(
+        doc.transition_states[&id]
+            .iter()
+            .find(|state| state.property == "opacity")
+            .unwrap()
+            .to_value,
+        "1",
+    );
+
+    std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style)
+        .rare_mut()
+        .transitions
+        .clear();
+    doc.sync_transitions(start + Duration::from_millis(3));
+    assert!(!doc.prev_styles.contains_key(&id));
+    assert!(!doc.transition_style_refs.contains_key(&id));
 }
 
 #[test]
@@ -1975,7 +2120,7 @@ fn sync_transitions_dispatches_transitioncancel_when_replacing_running_transitio
         Default::default(),
     );
 
-    doc.sync_transitions(start + Duration::from_millis(10), true);
+    doc.sync_transitions(start + Duration::from_millis(10));
 
     assert_eq!(*seen.lock().unwrap(), 1);
     assert_eq!(
@@ -1995,21 +2140,34 @@ fn transition_reversal_uses_eased_progress_and_scaled_negative_delay() {
         let style = std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style);
         style.opacity = 0.0;
         style.rare_mut().transitions.push(ParsedTransition {
-            property: "opacity".into(), duration_ms: 1000.0, delay_ms: delay,
-            timing_fn: EasingFn::Linear, allow_discrete: false,
+            property: "opacity".into(),
+            duration_ms: 1000.0,
+            delay_ms: delay,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: false,
         });
         let start = Instant::now();
         // x(t) = t and y(t) = t^3: halfway in time is 1/8 in value.
-        doc.transition_states.insert(id, vec![TransitionState {
-            property: "opacity".into(), from_value: "0".into(), to_value: "1".into(),
-            reversing_adjusted_start_value: "0".into(), reversing_shortening_factor: 1.0,
-            start_time: start, duration_ms: 1000.0, delay_ms: 100.0,
-            timing_fn: EasingFn::CubicBezier(1.0 / 3.0, 0.0, 2.0 / 3.0, 0.0),
-            allow_discrete: false,
-        }]);
-        doc.animation_overrides.insert(id, vec![("opacity".into(), "0.125".into())]);
-        doc.prev_styles.insert(id, [("opacity".into(), "1".into())].into());
-        doc.sync_transitions(start + Duration::from_millis(600), true);
+        doc.transition_states.insert(
+            id,
+            vec![TransitionState {
+                property: "opacity".into(),
+                from_value: "0".into(),
+                to_value: "1".into(),
+                reversing_adjusted_start_value: "0".into(),
+                reversing_shortening_factor: 1.0,
+                start_time: start,
+                duration_ms: 1000.0,
+                delay_ms: 100.0,
+                timing_fn: EasingFn::CubicBezier(1.0 / 3.0, 0.0, 2.0 / 3.0, 0.0),
+                allow_discrete: false,
+            }],
+        );
+        doc.animation_overrides
+            .insert(id, vec![("opacity".into(), "0.125".into())]);
+        doc.prev_styles
+            .insert(id, [("opacity".into(), "1".into())].into());
+        doc.sync_transitions(start + Duration::from_millis(600));
         let state = &doc.transition_states[&id][0];
         assert!((state.duration_ms - 125.0).abs() < 0.1, "{state:?}");
         assert_eq!(state.reversing_adjusted_start_value, "1");
@@ -2025,23 +2183,166 @@ fn transition_repeated_reversal_keeps_logical_endpoints() {
     let style = std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style);
     style.opacity = 1.0;
     style.rare_mut().transitions.push(ParsedTransition {
-        property: "opacity".into(), duration_ms: 1000.0, delay_ms: 0.0,
-        timing_fn: EasingFn::Linear, allow_discrete: false,
+        property: "opacity".into(),
+        duration_ms: 1000.0,
+        delay_ms: 0.0,
+        timing_fn: EasingFn::Linear,
+        allow_discrete: false,
     });
     let start = Instant::now();
-    doc.transition_states.insert(id, vec![TransitionState {
-        property: "opacity".into(), from_value: "0.2".into(), to_value: "0".into(),
-        reversing_adjusted_start_value: "1".into(), reversing_shortening_factor: 0.2,
-        start_time: start, duration_ms: 200.0, delay_ms: 0.0,
-        timing_fn: EasingFn::Linear, allow_discrete: false,
-    }]);
-    doc.animation_overrides.insert(id, vec![("opacity".into(), "0.1".into())]);
-    doc.prev_styles.insert(id, [("opacity".into(), "0".into())].into());
-    doc.sync_transitions(start + Duration::from_millis(100), true);
+    doc.transition_states.insert(
+        id,
+        vec![TransitionState {
+            property: "opacity".into(),
+            from_value: "0.2".into(),
+            to_value: "0".into(),
+            reversing_adjusted_start_value: "1".into(),
+            reversing_shortening_factor: 0.2,
+            start_time: start,
+            duration_ms: 200.0,
+            delay_ms: 0.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: false,
+        }],
+    );
+    doc.animation_overrides
+        .insert(id, vec![("opacity".into(), "0.1".into())]);
+    doc.prev_styles
+        .insert(id, [("opacity".into(), "0".into())].into());
+    doc.sync_transitions(start + Duration::from_millis(100));
     let state = &doc.transition_states[&id][0];
     assert!((state.duration_ms - 900.0).abs() < 0.1, "{state:?}");
     assert_eq!(state.reversing_adjusted_start_value, "0");
     assert_eq!(state.from_value, "0.1");
+}
+
+#[test]
+fn transition_reversal_samples_value_at_style_change_between_frames() {
+    let mut doc = parse_html("<div id='box'></div>");
+    let id = doc.get_element_by_id("box").unwrap();
+    let style = std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style);
+    style.opacity = 0.0;
+    style.rare_mut().transitions.push(ParsedTransition {
+        property: "opacity".into(),
+        duration_ms: 1000.0,
+        delay_ms: 0.0,
+        timing_fn: EasingFn::Linear,
+        allow_discrete: false,
+    });
+    let start = Instant::now();
+    doc.transition_states.insert(
+        id,
+        vec![TransitionState {
+            property: "opacity".into(),
+            from_value: "0".into(),
+            to_value: "1".into(),
+            reversing_adjusted_start_value: "0".into(),
+            reversing_shortening_factor: 1.0,
+            start_time: start,
+            duration_ms: 1000.0,
+            delay_ms: 0.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: false,
+        }],
+    );
+    doc.animation_overrides
+        .insert(id, vec![("opacity".into(), "0.2".into())]);
+    doc.prev_styles
+        .insert(id, [("opacity".into(), "1".into())].into());
+
+    doc.sync_transitions(start + Duration::from_millis(600));
+    let state = &doc.transition_states[&id][0];
+    assert_eq!(state.from_value, "0.6");
+    assert!((state.duration_ms - 600.0).abs() < 0.1, "{state:?}");
+}
+
+#[test]
+fn reverting_during_transition_delay_cancels_without_starting_a_replacement() {
+    let mut doc = parse_html("<div id='box'></div>");
+    let id = doc.get_element_by_id("box").unwrap();
+    let style = std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style);
+    style.opacity = 0.0;
+    style.rare_mut().transitions.push(ParsedTransition {
+        property: "opacity".into(),
+        duration_ms: 1000.0,
+        delay_ms: 400.0,
+        timing_fn: EasingFn::Linear,
+        allow_discrete: false,
+    });
+    let start = Instant::now();
+    doc.transition_states.insert(
+        id,
+        vec![TransitionState {
+            property: "opacity".into(),
+            from_value: "0".into(),
+            to_value: "1".into(),
+            reversing_adjusted_start_value: "0".into(),
+            reversing_shortening_factor: 1.0,
+            start_time: start,
+            duration_ms: 1000.0,
+            delay_ms: 400.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: false,
+        }],
+    );
+    doc.prev_styles
+        .insert(id, [("opacity".into(), "1".into())].into());
+
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    for name in ["transitioncancel", "transitionrun", "transitionstart"] {
+        let seen = std::sync::Arc::clone(&events);
+        doc.add_event_listener(
+            id,
+            name,
+            Box::new(move |event, _| {
+                seen.lock().unwrap().push(event.event_type.clone());
+            }),
+            Default::default(),
+        );
+    }
+    doc.sync_transitions(start + Duration::from_millis(100));
+    assert!(
+        !doc.transition_states
+            .get(&id)
+            .is_some_and(|states| !states.is_empty())
+    );
+    assert_eq!(&*events.lock().unwrap(), &["transitioncancel"]);
+}
+
+#[test]
+fn removing_transition_property_cancels_a_running_transition() {
+    let mut doc = parse_html("<div id='box'></div>");
+    let id = doc.get_element_by_id("box").unwrap();
+    let start = Instant::now();
+    doc.transition_states.insert(
+        id,
+        vec![TransitionState {
+            property: "opacity".into(),
+            from_value: "0".into(),
+            to_value: "1".into(),
+            reversing_adjusted_start_value: "0".into(),
+            reversing_shortening_factor: 1.0,
+            start_time: start,
+            duration_ms: 1000.0,
+            delay_ms: 0.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: false,
+        }],
+    );
+    let cancelled = std::sync::Arc::new(std::sync::Mutex::new(0));
+    let seen = std::sync::Arc::clone(&cancelled);
+    doc.add_event_listener(
+        id,
+        "transitioncancel",
+        Box::new(move |_, _| {
+            *seen.lock().unwrap() += 1;
+        }),
+        Default::default(),
+    );
+
+    doc.sync_transitions(start + Duration::from_millis(100));
+    assert!(doc.transition_states.is_empty());
+    assert_eq!(*cancelled.lock().unwrap(), 1);
 }
 
 #[test]
@@ -2084,7 +2385,7 @@ fn reversing_transition_uses_shortened_duration() {
     prev.insert("opacity".to_string(), "1".to_string());
     doc.prev_styles.insert(id, prev);
 
-    doc.sync_transitions(start + Duration::from_millis(200), true);
+    doc.sync_transitions(start + Duration::from_millis(200));
 
     let state = doc
         .transition_states

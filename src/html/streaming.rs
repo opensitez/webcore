@@ -780,14 +780,28 @@ mod tests {
         let mut parser = StreamingParser::new("");
         let mut mutations = parser.feed_str("<svg><g><circle r='7'>");
         mutations.extend(parser.feed_str("<animateTransform type='scale' values='0;1;0' dur='1s'/></circle><path d='M0 0'/></g></svg>"));
-        let path_for = |name: &str| mutations.iter().find_map(|m| match m {
-            DomMutation::InsertElement { tag, path, .. } if tag == name => Some(path.clone()),
-            _ => None,
-        }).unwrap();
-        let parent_for = |name: &str| mutations.iter().find_map(|m| match m {
-            DomMutation::InsertElement { tag, parent_path, .. } if tag == name => Some(parent_path.clone()),
-            _ => None,
-        }).unwrap();
+        let path_for = |name: &str| {
+            mutations
+                .iter()
+                .find_map(|m| match m {
+                    DomMutation::InsertElement { tag, path, .. } if tag == name => {
+                        Some(path.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let parent_for = |name: &str| {
+            mutations
+                .iter()
+                .find_map(|m| match m {
+                    DomMutation::InsertElement {
+                        tag, parent_path, ..
+                    } if tag == name => Some(parent_path.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        };
         assert_eq!(parent_for("animatetransform"), path_for("circle"));
         assert_eq!(parent_for("path"), path_for("g"));
     }
@@ -905,7 +919,12 @@ mod tests {
         );
         let resources: Vec<_> = mutations
             .iter()
-            .filter(|m| matches!(m, DomMutation::ResourceHint { .. } | DomMutation::StylesheetHint { .. }))
+            .filter(|m| {
+                matches!(
+                    m,
+                    DomMutation::ResourceHint { .. } | DomMutation::StylesheetHint { .. }
+                )
+            })
             .collect();
         assert!(resources.len() >= 2, "should discover stylesheet and image");
     }
@@ -1118,9 +1137,8 @@ mod tests {
     #[test]
     fn streaming_style_preserves_media_condition() {
         let mut parser = StreamingParser::new("");
-        let mutations = parser.feed_str(
-            "<style media=\"(prefers-color-scheme: dark)\">body{color:white}</style>",
-        );
+        let mutations = parser
+            .feed_str("<style media=\"(prefers-color-scheme: dark)\">body{color:white}</style>");
         assert!(mutations.iter().any(|mutation| matches!(
             mutation,
             DomMutation::AddStylesheet { media, .. }
@@ -1164,7 +1182,7 @@ mod tests {
                 DomMutation::ResourceHint {
                     kind: ResourceKind::Image,
                     url
-                } if url == "https://example.com/watch/../hero.webp"
+                } if url == "https://example.com/hero.webp"
             )
         }));
     }

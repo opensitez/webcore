@@ -4,7 +4,8 @@
 use crate::html::parse_html;
 use crate::layout::LayoutEngine;
 use crate::types::{
-    Display, Document, OverscrollBehavior, Rect, ScrollSnapAlign, ScrollSnapAxis, WebCore,
+    Display, Document, OverscrollBehavior, Rect, ScrollSnapAlign, ScrollSnapAlignValue,
+    ScrollSnapAxis, WebCore,
 };
 
 // ── helpers ────────────────────────────────────────────────────────────────────
@@ -20,6 +21,93 @@ fn layout(html: &str) -> Document {
 
 fn query<'a>(doc: &'a Document, sel: &str) -> Option<&'a crate::types::WebCore> {
     crate::dom::query_selector(&doc.root, sel)
+}
+
+#[test]
+fn css_resize_drag_updates_only_requested_axes() {
+    use crate::dom::HtmlEventType;
+
+    for (mode, writing_mode, width_changes, height_changes) in [
+        ("both", "horizontal-tb", true, true),
+        ("horizontal", "horizontal-tb", true, false),
+        ("vertical", "horizontal-tb", false, true),
+        ("block", "horizontal-tb", false, true),
+        ("inline", "horizontal-tb", true, false),
+        ("block", "vertical-rl", true, false),
+        ("inline", "vertical-rl", false, true),
+        ("none", "horizontal-tb", false, false),
+    ] {
+        let mut doc = layout(&format!(
+            "<html><head><style>html,body{{margin:0}}#box{{position:absolute;left:0;top:0;width:80px;height:60px;overflow:hidden;resize:{mode};writing-mode:{writing_mode}}}</style></head><body><div id=box></div></body></html>"
+        ));
+        let box_id = doc.get_element_by_id("box").unwrap();
+        let pressed =
+            doc.process_scrollbar_event(HtmlEventType::MouseDown, 75.0, 55.0, 400.0, 300.0);
+        assert_eq!(
+            pressed,
+            mode != "none",
+            "resize press for {mode}/{writing_mode}"
+        );
+        if pressed {
+            assert!(doc.process_scrollbar_event(
+                HtmlEventType::MouseMove,
+                105.0,
+                75.0,
+                400.0,
+                300.0
+            ));
+            assert!(doc.process_scrollbar_event(HtmlEventType::MouseUp, 105.0, 75.0, 400.0, 300.0));
+            assert!(doc.resize_drag.is_none());
+        }
+        let width = doc.get_style_property(box_id, "width").unwrap_or_default();
+        let height = doc.get_style_property(box_id, "height").unwrap_or_default();
+        assert_eq!(
+            width != "",
+            width_changes,
+            "width property for {mode}: {width}"
+        );
+        assert_eq!(
+            height != "",
+            height_changes,
+            "height property for {mode}: {height}"
+        );
+    }
+}
+
+#[test]
+fn css_resize_drag_reflows_border_box_and_preserves_other_axis() {
+    use crate::dom::HtmlEventType;
+    let doc = crate::html::parse_html(
+        "<html><head><style>html,body{margin:0}#box{position:absolute;left:0;top:0;width:80px;height:60px;padding:4px;border:2px solid;box-sizing:border-box;overflow:hidden;resize:horizontal}</style></head><body><div id=box></div></body></html>",
+    );
+    let mut frame = crate::frame::EngineFrame::new(doc, 400.0, 300.0);
+    frame.update_frame();
+    let id = frame.doc.get_element_by_id("box").unwrap();
+    assert!(
+        frame
+            .doc
+            .process_scrollbar_event(HtmlEventType::MouseDown, 75.0, 55.0, 400.0, 300.0)
+    );
+    assert!(
+        frame
+            .doc
+            .process_scrollbar_event(HtmlEventType::MouseMove, 105.0, 75.0, 400.0, 300.0)
+    );
+    assert!(
+        frame
+            .doc
+            .process_scrollbar_event(HtmlEventType::MouseUp, 105.0, 75.0, 400.0, 300.0)
+    );
+    frame.update_frame();
+    let rect = frame.doc.get_node(id).unwrap().layout.border_rect;
+    assert!(
+        (rect.w - 110.0).abs() < 1.0,
+        "width should reflow: {rect:?}"
+    );
+    assert!(
+        (rect.h - 60.0).abs() < 1.0,
+        "height should remain unchanged: {rect:?}"
+    );
 }
 
 // ── 1. overflow:scroll / overflow:auto ─────────────────────────────────────────
@@ -73,8 +161,8 @@ fn flex_message_pane_whitespace_does_not_create_horizontal_scrollbar() {
 }
 
 #[test]
-fn overflow_visible_resets_scroll() {
-    // overflow:visible → no scroll extent; scroll_top stays zero.
+fn overflow_visible_reports_extent_without_scrolling() {
+    // Visible overflow contributes to scrollHeight, but the element is not a scroller.
     let doc = layout(
         r#"<html><head><style>
         #box { overflow: visible; width: 200px; height: 100px; }
@@ -86,10 +174,9 @@ fn overflow_visible_resets_scroll() {
 
     let b = query(&doc, "#box").expect("box not found");
     assert_eq!(b.layout.scroll_top, 0.0);
-    // scroll_height for a non-scroll container equals content height
     assert!(
-        b.layout.scroll_height <= b.layout.content_rect.h + 1.0,
-        "non-scroll container must not have extra scroll_height"
+        b.layout.scroll_height >= 399.0,
+        "visible overflow must contribute to scroll_height"
     );
 }
 
@@ -190,9 +277,17 @@ fn scroll_extent_cache_tracks_layout_generation_and_dirty_tree() {
     let mut doc = layout("<body><div style='height:500px'></div></body>");
     let initial = doc.cached_scroll_height();
     assert_eq!(doc.cached_scroll_height(), initial);
-    assert_eq!(doc.scroll_height_cache.get(), Some((doc.layout_generation, initial)));
+    assert_eq!(
+        doc.scroll_height_cache.get(),
+        Some((doc.layout_generation, initial))
+    );
 
-    let body = doc.root.children.iter_mut().find(|node| node.tag == "body").unwrap();
+    let body = doc
+        .root
+        .children
+        .iter_mut()
+        .find(|node| node.tag == "body")
+        .unwrap();
     body.layout.margin_rect.h += 200.0;
     doc.root.has_dirty_layout_descendant = true;
     assert!(doc.cached_scroll_height() > initial);
@@ -201,7 +296,10 @@ fn scroll_extent_cache_tracks_layout_generation_and_dirty_tree() {
     doc.layout_generation += 1;
     let updated = doc.cached_scroll_height();
     assert!(updated > initial);
-    assert_eq!(doc.scroll_height_cache.get(), Some((doc.layout_generation, updated)));
+    assert_eq!(
+        doc.scroll_height_cache.get(),
+        Some((doc.layout_generation, updated))
+    );
 }
 
 #[test]
@@ -248,13 +346,18 @@ fn inline_wrapper_with_only_hidden_and_positioned_children_has_no_scroll_extent(
 
 #[test]
 fn empty_inline_custom_elements_before_a_block_do_not_shift_it() {
-    let baseline = layout(r#"<body><div><react-partial><div><header style="height:72px"></header></div></react-partial></div></body>"#);
+    let baseline = layout(
+        r#"<body><div><react-partial><div><header style="height:72px"></header></div></react-partial></div></body>"#,
+    );
     let doc = layout(
         r#"<body><div><react-partial><div></div></react-partial><react-partial><div></div></react-partial><react-partial><div><header style="height:72px"></header></div></react-partial></div></body>"#,
     );
     let header = query(&doc, "header").unwrap();
     let baseline_header = query(&baseline, "header").unwrap();
-    assert_eq!(header.layout.border_rect.y, baseline_header.layout.border_rect.y);
+    assert_eq!(
+        header.layout.border_rect.y,
+        baseline_header.layout.border_rect.y
+    );
 }
 
 #[test]
@@ -522,6 +625,346 @@ fn horizontal_element_scrollbar_drag_updates_scroll_left() {
 }
 
 #[test]
+fn vertical_scrollbar_snaps_only_when_drag_ends() {
+    let mut doc = layout(
+        r#"<style>
+        html, body { margin:0; padding:0; }
+        #box { position:absolute; top:0; left:0; width:100px; height:100px;
+               overflow-y:scroll; scroll-snap-type:y mandatory; }
+        .item { height:100px; scroll-snap-align:start; }
+        </style><div id=box><div class=item></div><div class=item></div><div class=item></div></div>"#,
+    );
+    let box_id = query(&doc, "#box").unwrap().node_id;
+    let count = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let seen = count.clone();
+    doc.add_event_listener(
+        box_id,
+        "scroll",
+        Box::new(move |_, _| {
+            *seen.lock().unwrap() += 1;
+        }),
+        crate::dom::events::ListenerOptions::default(),
+    );
+    assert!(doc.process_scrollbar_event(
+        crate::dom::HtmlEventType::MouseDown,
+        95.0,
+        60.0,
+        400.0,
+        300.0,
+    ));
+    let held = query(&doc, "#box").unwrap().layout.scroll_top;
+    assert!(held > 100.0 && held < 200.0, "held={held}");
+    assert_eq!(*count.lock().unwrap(), 1);
+    assert!(doc.process_scrollbar_event(
+        crate::dom::HtmlEventType::MouseUp,
+        95.0,
+        60.0,
+        400.0,
+        300.0,
+    ));
+    let released = query(&doc, "#box").unwrap().layout.scroll_top;
+    assert!((released - 100.0).abs() < 0.5, "released={released}");
+    assert_eq!(*count.lock().unwrap(), 2);
+}
+
+#[test]
+fn horizontal_scrollbar_snaps_only_when_drag_ends() {
+    let mut doc = layout(
+        r#"<style>
+        html, body { margin:0; padding:0; }
+        #box { position:absolute; top:0; left:0; display:flex;
+               width:100px; height:100px; overflow-x:scroll;
+               scroll-snap-type:x mandatory; }
+        .item { flex:0 0 100px; height:70px; scroll-snap-align:start; }
+        </style><div id=box><div class=item></div><div class=item></div><div class=item></div></div>"#,
+    );
+    assert!(doc.process_scrollbar_event(
+        crate::dom::HtmlEventType::MouseDown,
+        60.0,
+        95.0,
+        400.0,
+        300.0,
+    ));
+    let held = query(&doc, "#box").unwrap().layout.scroll_left;
+    assert!(held > 100.0 && held < 200.0, "held={held}");
+    assert!(doc.process_scrollbar_event(
+        crate::dom::HtmlEventType::MouseUp,
+        60.0,
+        95.0,
+        400.0,
+        300.0,
+    ));
+    let released = query(&doc, "#box").unwrap().layout.scroll_left;
+    assert!((released - 100.0).abs() < 0.5, "released={released}");
+}
+
+#[test]
+fn element_scroll_to_snaps_to_nearest_position() {
+    let mut doc = layout(
+        r#"<style>
+        #box { overflow-y:scroll; height:100px; scroll-snap-type:y mandatory; }
+        .item { height:100px; scroll-snap-align:start; }
+        </style><div id=box><div class=item></div><div class=item></div><div class=item></div><div class=item></div></div>"#,
+    );
+    let id = query(&doc, "#box").unwrap().node_id;
+    doc.element_scroll_to(id, 0.0, 270.0);
+    assert!((doc.element_scroll_top(id) - 300.0).abs() < 0.5);
+    doc.element_scroll_to(id, 0.0, 130.0);
+    assert!((doc.element_scroll_top(id) - 100.0).abs() < 0.5);
+}
+
+#[test]
+fn element_scroll_by_stops_at_first_crossed_always_snap_point() {
+    let mut doc = layout(
+        r#"<style>
+        #box { overflow-y:scroll; height:100px; scroll-snap-type:y mandatory; }
+        .item { height:100px; scroll-snap-align:start; scroll-snap-stop:always; }
+        </style><div id=box><div class=item></div><div class=item></div><div class=item></div><div class=item></div><div class=item></div></div>"#,
+    );
+    let id = query(&doc, "#box").unwrap().node_id;
+    doc.element_scroll_by(id, 0.0, 350.0);
+    assert!((doc.element_scroll_top(id) - 100.0).abs() < 0.5);
+    doc.element_scroll_by(id, 0.0, 350.0);
+    assert!((doc.element_scroll_top(id) - 200.0).abs() < 0.5);
+}
+
+#[test]
+fn smooth_element_scroll_to_uses_snapped_target() {
+    let mut doc = layout(
+        r#"<style>
+        #box { overflow-y:scroll; height:100px; scroll-snap-type:y mandatory;
+               scroll-behavior:smooth; }
+        .item { height:100px; scroll-snap-align:start; }
+        </style><div id=box><div class=item></div><div class=item></div><div class=item></div></div>"#,
+    );
+    let id = query(&doc, "#box").unwrap().node_id;
+    doc.element_scroll_to(id, 0.0, 130.0);
+    assert_eq!(doc.smooth_scrolls.len(), 1);
+    assert!((doc.smooth_scrolls[0].target_y - 100.0).abs() < 0.5);
+}
+
+fn viewport_snap_document() -> Document {
+    layout(
+        r#"<style>
+        html, body { margin:0; padding:0; }
+        html { scroll-snap-type:y mandatory; }
+        .item { height:300px; scroll-snap-align:start; }
+        </style><main><div class=item></div><div class=item></div><div class=item></div><div class=item></div></main>"#,
+    )
+}
+
+#[test]
+fn viewport_wheel_snaps_to_descendant_area() {
+    let mut doc = viewport_snap_document();
+    assert!(doc.process_wheel_event((50.0, 50.0), -210.0));
+    assert!(
+        (doc.scroll_y - 300.0).abs() < 0.5,
+        "scroll_y={}",
+        doc.scroll_y
+    );
+}
+
+#[test]
+fn viewport_scroll_to_uses_nearest_snap_target() {
+    let mut doc = viewport_snap_document();
+    assert!(doc.viewport_scroll_to(0.0, 470.0, 400.0, 300.0));
+    assert!(
+        (doc.scroll_y - 600.0).abs() < 0.5,
+        "scroll_y={}",
+        doc.scroll_y
+    );
+}
+
+#[test]
+fn viewport_user_scroll_uses_snap_target() {
+    let mut doc = viewport_snap_document();
+    assert!(doc.scroll_viewport_by_user(0.0, 210.0, 400.0, 300.0));
+    assert!(
+        (doc.scroll_y - 300.0).abs() < 0.5,
+        "scroll_y={}",
+        doc.scroll_y
+    );
+}
+
+#[test]
+fn viewport_scrollbar_snaps_after_release() {
+    let mut doc = viewport_snap_document();
+    assert!(doc.process_scrollbar_event(
+        crate::dom::HtmlEventType::MouseDown,
+        395.0,
+        110.0,
+        400.0,
+        300.0,
+    ));
+    let held = doc.scroll_y;
+    assert!(held > 200.0 && held < 300.0, "held={held}");
+    assert!(doc.process_scrollbar_event(
+        crate::dom::HtmlEventType::MouseUp,
+        395.0,
+        110.0,
+        400.0,
+        300.0,
+    ));
+    assert!(
+        (doc.scroll_y - 300.0).abs() < 0.5,
+        "scroll_y={}",
+        doc.scroll_y
+    );
+}
+
+#[test]
+fn viewport_wheel_stops_at_first_crossed_always_snap_area() {
+    let mut doc = layout(
+        r#"<style>
+        html, body { margin:0; padding:0; }
+        html { scroll-snap-type:y mandatory; }
+        .item { height:300px; scroll-snap-align:start; scroll-snap-stop:always; }
+        </style><main><div class=item></div><div class=item></div><div class=item></div><div class=item></div></main>"#,
+    );
+    assert!(doc.process_wheel_event((50.0, 50.0), -750.0));
+    assert!(
+        (doc.scroll_y - 300.0).abs() < 0.5,
+        "scroll_y={}",
+        doc.scroll_y
+    );
+    assert!(doc.process_wheel_event((50.0, 50.0), -750.0));
+    assert!(
+        (doc.scroll_y - 600.0).abs() < 0.5,
+        "scroll_y={}",
+        doc.scroll_y
+    );
+}
+
+#[test]
+fn nested_scroll_container_snap_areas_do_not_snap_viewport() {
+    let mut doc = layout(
+        r#"<style>
+        html, body { margin:0; padding:0; }
+        html { scroll-snap-type:y mandatory; }
+        #nested { overflow-y:scroll; height:100px; }
+        .item { height:100px; scroll-snap-align:start; }
+        </style><div id=nested><div class=item></div><div class=item></div></div>
+        <div style="height:1000px"></div>"#,
+    );
+    assert!(doc.viewport_scroll_to(0.0, 150.0, 400.0, 300.0));
+    assert!(
+        (doc.scroll_y - 150.0).abs() < 0.5,
+        "scroll_y={}",
+        doc.scroll_y
+    );
+}
+
+#[test]
+fn horizontal_viewport_snap_uses_descendant_overflow_width() {
+    let mut doc = layout(
+        r#"<style>
+        html, body { margin:0; padding:0; }
+        html { scroll-snap-type:x mandatory; }
+        main { display:flex; width:1200px; }
+        .item { flex:none; width:400px; height:100px; scroll-snap-align:start; }
+        </style><main><div class=item></div><div class=item></div><div class=item></div></main>"#,
+    );
+    assert!(
+        doc.scroll_viewport_by_user(210.0, 0.0, 400.0, 300.0),
+        "root_width={} root_scroll_width={}",
+        doc.root.layout.margin_rect.w,
+        doc.root.layout.scroll_width,
+    );
+    assert!(
+        (doc.scroll_x - 400.0).abs() < 0.5,
+        "scroll_x={}",
+        doc.scroll_x
+    );
+    assert!(doc.viewport_scroll_to(750.0, 0.0, 400.0, 300.0));
+    assert!(
+        (doc.scroll_x - 800.0).abs() < 0.5,
+        "scroll_x={}",
+        doc.scroll_x
+    );
+}
+
+#[test]
+fn vertical_viewport_wheel_does_not_measure_horizontal_extent() {
+    let mut doc = viewport_snap_document();
+    assert!(doc.scroll_width_cache.get().is_none());
+    assert!(doc.process_wheel_event((50.0, 50.0), -210.0));
+    assert!(doc.scroll_width_cache.get().is_none());
+}
+
+#[test]
+fn viewport_ignores_vertical_snap_area_outside_horizontal_snapport() {
+    let mut doc = layout(
+        r#"<style>
+        html, body { margin:0; padding:0; }
+        html { scroll-snap-type:y mandatory; }
+        body { padding-top:200px; }
+        #offscreen { position:absolute; left:1000px; top:120px;
+                     width:100px; height:100px; scroll-snap-align:start; }
+        #visible { height:100px; scroll-snap-align:start; }
+        #spacer { height:1000px; }
+        </style><div id=offscreen></div><div id=visible></div><div id=spacer></div>"#,
+    );
+    let offscreen = query(&doc, "#offscreen").unwrap().layout.border_rect;
+    let visible = query(&doc, "#visible").unwrap().layout.border_rect;
+    assert!(offscreen.x >= 400.0, "offscreen={offscreen:?}");
+    assert!((offscreen.y - 120.0).abs() < 0.5, "offscreen={offscreen:?}");
+    assert!((visible.y - 200.0).abs() < 0.5, "visible={visible:?}");
+    assert!(doc.viewport_scroll_to(0.0, 140.0, 400.0, 300.0));
+    assert!(
+        (doc.scroll_y - 200.0).abs() < 0.5,
+        "scroll_y={}",
+        doc.scroll_y
+    );
+}
+
+#[test]
+fn viewport_ignores_horizontal_snap_area_outside_vertical_snapport() {
+    let mut doc = layout(
+        r#"<style>
+        html, body { margin:0; padding:0; }
+        html { scroll-snap-type:x mandatory; }
+        body { padding-left:200px; }
+        #offscreen { position:absolute; left:120px; top:1000px;
+                     width:100px; height:100px; scroll-snap-align:start; }
+        #visible { width:100px; height:100px; scroll-snap-align:start; }
+        #spacer { width:1200px; height:100px; }
+        </style><div id=offscreen></div><div id=visible></div><div id=spacer></div>"#,
+    );
+    let offscreen = query(&doc, "#offscreen").unwrap().layout.border_rect;
+    let visible = query(&doc, "#visible").unwrap().layout.border_rect;
+    assert!(offscreen.y >= 300.0, "offscreen={offscreen:?}");
+    assert!((offscreen.x - 120.0).abs() < 0.5, "offscreen={offscreen:?}");
+    assert!((visible.x - 200.0).abs() < 0.5, "visible={visible:?}");
+    assert!(doc.viewport_scroll_to(140.0, 0.0, 400.0, 300.0));
+    assert!(
+        (doc.scroll_x - 200.0).abs() < 0.5,
+        "scroll_x={}",
+        doc.scroll_x
+    );
+}
+
+#[test]
+fn viewport_rejects_snap_area_invisible_after_scroll_clamp() {
+    let mut doc = layout(
+        r#"<style>
+        html, body { margin:0; padding:0; }
+        html { scroll-snap-type:y mandatory; }
+        #offscreen { position:absolute; top:5000px; left:0;
+                     width:100px; height:100px; scroll-snap-align:start; }
+        #spacer { height:800px; }
+        </style><div id=offscreen></div><div id=spacer></div>"#,
+    );
+    let offscreen = query(&doc, "#offscreen").unwrap().layout.border_rect;
+    assert!(offscreen.y >= 5000.0, "offscreen={offscreen:?}");
+    assert!(doc.viewport_scroll_to(0.0, 400.0, 400.0, 300.0));
+    assert!(
+        (doc.scroll_y - 400.0).abs() < 0.5,
+        "scroll_y={}",
+        doc.scroll_y
+    );
+}
+
+#[test]
 fn two_axis_scrollbar_corner_does_not_start_a_vertical_drag() {
     let mut doc = layout(
         r#"<html><head><style>
@@ -534,10 +977,18 @@ fn two_axis_scrollbar_corner_does_not_start_a_vertical_drag() {
     assert!(query(&doc, "#box").unwrap().layout.scroll_width > 40.0);
     assert!(query(&doc, "#box").unwrap().layout.scroll_height > 40.0);
     assert!(!doc.process_scrollbar_event(
-        crate::dom::HtmlEventType::MouseDown, 35.0, 35.0, 400.0, 300.0,
+        crate::dom::HtmlEventType::MouseDown,
+        35.0,
+        35.0,
+        400.0,
+        300.0,
     ));
     assert!(doc.process_scrollbar_event(
-        crate::dom::HtmlEventType::MouseDown, 35.0, 5.0, 400.0, 300.0,
+        crate::dom::HtmlEventType::MouseDown,
+        35.0,
+        5.0,
+        400.0,
+        300.0,
     ));
 }
 
@@ -552,13 +1003,25 @@ fn padded_scrollbar_hit_regions_match_the_painted_tracks() {
     </style></head><body><div id="box"><div id="inner"></div></div></body></html>"#,
     );
     assert!(!doc.process_scrollbar_event(
-        crate::dom::HtmlEventType::MouseDown, 55.0, 55.0, 400.0, 300.0,
+        crate::dom::HtmlEventType::MouseDown,
+        55.0,
+        55.0,
+        400.0,
+        300.0,
     ));
     assert!(doc.process_scrollbar_event(
-        crate::dom::HtmlEventType::MouseDown, 55.0, 5.0, 400.0, 300.0,
+        crate::dom::HtmlEventType::MouseDown,
+        55.0,
+        5.0,
+        400.0,
+        300.0,
     ));
     assert!(doc.process_scrollbar_event(
-        crate::dom::HtmlEventType::MouseDown, 5.0, 55.0, 400.0, 300.0,
+        crate::dom::HtmlEventType::MouseDown,
+        5.0,
+        55.0,
+        400.0,
+        300.0,
     ));
 }
 
@@ -709,6 +1172,47 @@ fn scroll_snap_align_parsed() {
     assert_eq!(item.style.scroll_snap_align, ScrollSnapAlign::Start);
 }
 
+#[test]
+fn scroll_snap_align_preserves_block_and_inline_values() {
+    let doc =
+        layout(r#"<style>.item { scroll-snap-align: end start; }</style><div class=item></div>"#);
+    let item = crate::dom::query_selector(&doc.root, ".item").expect("item");
+    assert_eq!(
+        item.style.scroll_snap_align,
+        ScrollSnapAlign::two(ScrollSnapAlignValue::End, ScrollSnapAlignValue::Start)
+    );
+}
+
+#[test]
+fn two_value_snap_align_uses_block_value_for_vertical_scroll() {
+    let mut doc = layout(
+        r#"<style>
+        #box { display:flex; flex-direction:column; overflow-y:scroll; height:100px;
+               scroll-snap-type:y mandatory; }
+        .item { flex:none; height:80px; scroll-snap-align:end start; }
+        </style><div id=box><div class=item></div><div class=item></div><div class=item></div></div>"#,
+    );
+    let rect = query(&doc, "#box").unwrap().layout.content_rect;
+    doc.process_wheel_event((rect.x + 10.0, rect.y + 10.0), -65.0);
+    let top = query(&doc, "#box").unwrap().layout.scroll_top;
+    assert!((top - 60.0).abs() < 0.5, "scroll_top={top}");
+}
+
+#[test]
+fn two_value_snap_align_uses_inline_value_for_horizontal_scroll() {
+    let mut doc = layout(
+        r#"<style>
+        #box { display:flex; overflow-x:scroll; width:100px; height:60px;
+               scroll-snap-type:x mandatory; }
+        .item { flex:0 0 80px; height:60px; scroll-snap-align:end start; }
+        </style><div id=box><div class=item></div><div class=item></div><div class=item></div></div>"#,
+    );
+    let rect = query(&doc, "#box").unwrap().layout.content_rect;
+    doc.process_wheel_event_xy((rect.x + 10.0, rect.y + 10.0), -85.0, 0.0);
+    let left = query(&doc, "#box").unwrap().layout.scroll_left;
+    assert!((left - 80.0).abs() < 0.5, "scroll_left={left}");
+}
+
 // ── 5. scroll-snap runtime ──────────────────────────────────────────────────────
 
 #[test]
@@ -776,6 +1280,117 @@ fn proximity_snap_does_not_snap_when_far() {
         "proximity snap must not snap when far from all points, got {}",
         scroll_top
     );
+}
+
+#[test]
+fn vertical_snap_uses_scroll_margin_and_padding_not_layout_margin() {
+    let mut doc = layout(
+        r#"<style>
+        #box { display:flex; flex-direction:column; overflow-y:scroll; height:100px;
+               scroll-snap-type:y mandatory; scroll-padding-top:10px; }
+        .item { flex:none; height:100px; scroll-snap-align:start; }
+        #second { margin-top:20px; scroll-margin-top:15px; }
+        </style><div id=box><div class=item></div><div id=second class=item></div><div class=item></div></div>"#,
+    );
+    let box_rect = query(&doc, "#box").unwrap().layout.content_rect;
+    doc.process_wheel_event((box_rect.x + 10.0, box_rect.y + 10.0), -95.0);
+
+    // The second border starts at 120px: 120 - scroll-margin 15 -
+    // scroll-padding 10. Its ordinary 20px layout margin is not snap area.
+    let scroll_top = query(&doc, "#box").unwrap().layout.scroll_top;
+    assert!((scroll_top - 95.0).abs() < 0.5, "scroll_top={scroll_top}");
+}
+
+#[test]
+fn horizontal_snap_uses_scroll_margin_and_padding_not_layout_margin() {
+    let mut doc = layout(
+        r#"<style>
+        #box { display:flex; overflow-x:scroll; width:100px; height:60px;
+               scroll-snap-type:x mandatory; scroll-padding-left:20px; }
+        .item { flex:0 0 100px; height:60px; scroll-snap-align:start; }
+        #second { margin-left:15px; scroll-margin-left:10px; }
+        </style><div id=box><div class=item></div><div id=second class=item></div><div class=item></div></div>"#,
+    );
+    let box_rect = query(&doc, "#box").unwrap().layout.content_rect;
+    doc.process_wheel_event_xy((box_rect.x + 10.0, box_rect.y + 10.0), -85.0, 0.0);
+
+    let scroll_left = query(&doc, "#box").unwrap().layout.scroll_left;
+    assert!(
+        (scroll_left - 85.0).abs() < 0.5,
+        "scroll_left={scroll_left}"
+    );
+}
+
+#[test]
+fn snap_resolves_percentage_padding_and_font_relative_margin() {
+    let mut doc = layout(
+        r#"<style>
+        #box { display:flex; flex-direction:column; overflow-y:scroll; height:100px;
+               scroll-snap-type:y mandatory; scroll-padding-top:10%; }
+        .item { flex:none; height:100px; scroll-snap-align:start; }
+        #second { scroll-margin-top:1em; }
+        </style><div id=box><div class=item></div><div id=second class=item></div><div class=item></div></div>"#,
+    );
+    let box_rect = query(&doc, "#box").unwrap().layout.content_rect;
+    doc.process_wheel_event((box_rect.x + 10.0, box_rect.y + 10.0), -74.0);
+
+    let scroll_top = query(&doc, "#box").unwrap().layout.scroll_top;
+    assert!((scroll_top - 74.0).abs() < 0.5, "scroll_top={scroll_top}");
+}
+
+#[test]
+fn scroll_snap_stop_always_traps_first_crossed_point_in_both_directions() {
+    let mut doc = layout(
+        r#"<style>
+        #box { display:flex; flex-direction:column; overflow-y:scroll; height:100px;
+               scroll-snap-type:y mandatory; }
+        .item { flex:none; height:100px; scroll-snap-align:start; }
+        #second, #third { scroll-snap-stop:always; }
+        </style><div id=box><div class=item></div><div id=second class=item></div>
+        <div id=third class=item></div><div class=item></div><div class=item></div></div>"#,
+    );
+    let box_rect = query(&doc, "#box").unwrap().layout.content_rect;
+    let point = (box_rect.x + 10.0, box_rect.y + 10.0);
+
+    doc.process_wheel_event(point, -350.0);
+    assert_eq!(query(&doc, "#box").unwrap().layout.scroll_top, 100.0);
+    doc.process_wheel_event(point, -350.0);
+    assert_eq!(query(&doc, "#box").unwrap().layout.scroll_top, 200.0);
+    doc.process_wheel_event(point, 350.0);
+    assert_eq!(query(&doc, "#box").unwrap().layout.scroll_top, 100.0);
+}
+
+#[test]
+fn horizontal_scroll_snap_stop_always_traps_crossed_point() {
+    let mut doc = layout(
+        r#"<style>
+        #box { display:flex; overflow-x:scroll; width:100px; height:60px;
+               scroll-snap-type:x mandatory; }
+        .item { flex:0 0 100px; height:60px; scroll-snap-align:start; }
+        #second { scroll-snap-stop:always; }
+        </style><div id=box><div class=item></div><div id=second class=item></div>
+        <div class=item></div><div class=item></div></div>"#,
+    );
+    let box_rect = query(&doc, "#box").unwrap().layout.content_rect;
+    doc.process_wheel_event_xy((box_rect.x + 10.0, box_rect.y + 10.0), -250.0, 0.0);
+
+    assert_eq!(query(&doc, "#box").unwrap().layout.scroll_left, 100.0);
+}
+
+#[test]
+fn snapport_uses_padding_box_not_content_box() {
+    let mut doc = layout(
+        r#"<style>
+        #box { display:flex; flex-direction:column; overflow-y:scroll; height:100px;
+               padding-top:20px; scroll-padding-top:10px; scroll-snap-type:y mandatory; }
+        .item { flex:none; height:100px; scroll-snap-align:start; }
+        </style><div id=box><div class=item></div><div class=item></div><div class=item></div></div>"#,
+    );
+    let box_rect = query(&doc, "#box").unwrap().layout.content_rect;
+    doc.process_wheel_event((box_rect.x + 10.0, box_rect.y + 10.0), -110.0);
+
+    let scroll_top = query(&doc, "#box").unwrap().layout.scroll_top;
+    assert!((scroll_top - 110.0).abs() < 0.5, "scroll_top={scroll_top}");
 }
 
 // ── 6. overscroll-behavior parsing ─────────────────────────────────────────────

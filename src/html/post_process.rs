@@ -545,10 +545,12 @@ impl crate::html::parser::HtmlParser {
                                 } else {
                                     child.text.clone()
                                 };
-                                let media = child.attributes.get("media").cloned().unwrap_or_default();
-                                shadow_stylesheets.push(
-                                    crate::types::DocumentStylesheet::Inline { css: css.into(), media },
-                                );
+                                let media =
+                                    child.attributes.get("media").cloned().unwrap_or_default();
+                                shadow_stylesheets.push(crate::types::DocumentStylesheet::Inline {
+                                    css: css.into(),
+                                    media,
+                                });
                             } else if child.tag == "link"
                                 && child
                                     .attributes

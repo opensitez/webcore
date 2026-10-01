@@ -20,6 +20,27 @@ fn find_node_by_id<'a>(node: &'a WebCore, id: u32) -> Option<&'a WebCore> {
     None
 }
 
+fn transition_value_at_progress(tr: &TransitionState, progress: f32) -> String {
+    let eased = apply_easing(&tr.timing_fn, progress);
+    if tr.allow_discrete && is_discrete_transition_property(&tr.property) {
+        discrete_transition_value(&tr.property, &tr.from_value, &tr.to_value, eased)
+    } else {
+        interpolate_property_value(&tr.property, &tr.from_value, &tr.to_value, eased)
+    }
+}
+
+fn transition_value_at_time(tr: &TransitionState, now: std::time::Instant) -> String {
+    let elapsed_ms = now.duration_since(tr.start_time).as_secs_f32() * 1000.0;
+    let delayed_ms = elapsed_ms - tr.delay_ms;
+    if delayed_ms < 0.0 {
+        tr.from_value.clone()
+    } else if tr.duration_ms <= 0.0 || delayed_ms >= tr.duration_ms {
+        tr.to_value.clone()
+    } else {
+        transition_value_at_progress(tr, delayed_ms / tr.duration_ms)
+    }
+}
+
 fn keyframes_with_synthesized_endpoints(
     stops: &[KeyframeStop],
     underlying: &HashMap<String, String>,
@@ -73,7 +94,11 @@ fn keyframes_with_synthesized_endpoints(
     // already supplied an explicit 0% or 100% stop.
     for endpoint in [0, out.len() - 1] {
         for prop in &animated_props {
-            if !out[endpoint].properties.iter().any(|(name, _)| name == prop) {
+            if !out[endpoint]
+                .properties
+                .iter()
+                .any(|(name, _)| name == prop)
+            {
                 if let Some(value) = underlying.get(prop) {
                     out[endpoint].properties.push((prop.clone(), value.clone()));
                 }
@@ -106,9 +131,9 @@ fn resolve_keyframe_values_for_element(
     // loses the element's reference box. Resolve both transform endpoints to
     // matrices first; the ordinary transform interpolation path stays intact.
     let has_calculated_transform = stops.iter().any(|stop| {
-        stop.properties.iter().any(|(property, value)| {
-            property == "transform" && value.contains("calc(")
-        })
+        stop.properties
+            .iter()
+            .any(|(property, value)| property == "transform" && value.contains("calc("))
     });
     if !has_calculated_transform {
         return;
@@ -190,6 +215,9 @@ impl Document {
         let mut current: Vec<(u32, ParsedAnimation)> = Vec::new();
         let mut started_events: Vec<u32> = Vec::new();
         fn collect(node: &WebCore, out: &mut Vec<(u32, ParsedAnimation)>) {
+            if node.style.display == Display::None {
+                return;
+            }
             let id = node.node_id;
             for a in &node.style.rare().animations {
                 out.push((id, a.clone()));
@@ -199,6 +227,7 @@ impl Document {
             }
         }
         collect(&self.root, &mut current);
+
         current.retain(|(_, anim)| {
             !anim.name.is_empty()
                 && anim.name != "none"
@@ -266,14 +295,18 @@ impl Document {
     }
 
     /// Detect CSS property changes caused by the cascade and start transitions.
-    /// `cascade_ran`: true when the full cascade just ran.
-    pub fn sync_transitions(&mut self, now: std::time::Instant, cascade_ran: bool) {
-        let mut current: Vec<(u32, Vec<ParsedTransition>, HashMap<String, String>)> = Vec::new();
+    pub fn sync_transitions(&mut self, now: std::time::Instant) {
+        let mut current = Vec::new();
         let mut started_events: Vec<(u32, bool)> = Vec::new();
         let mut cancelled_events: Vec<u32> = Vec::new();
         fn collect(
             node: &WebCore,
-            out: &mut Vec<(u32, Vec<ParsedTransition>, HashMap<String, String>)>,
+            previous: &HashMap<u32, std::sync::Arc<ComputedStyle>>,
+            out: &mut Vec<(
+                u32,
+                Vec<ParsedTransition>,
+                Option<(std::sync::Arc<ComputedStyle>, HashMap<String, String>)>,
+            )>,
         ) {
             let id = node.node_id;
             if !node.style.rare().transitions.is_empty() {
@@ -281,35 +314,49 @@ impl Document {
                 // invalidation swaps `style` and `hover_style`, so `hover_style`
                 // stores the inactive side; overlaying it here reverses hover
                 // transitions and leaves stale target values behind.
-                let vals = extract_transitionable(node);
+                let vals = previous
+                    .get(&id)
+                    .is_none_or(|style| !std::sync::Arc::ptr_eq(style, &node.style))
+                    .then(|| (node.style.clone(), extract_transitionable(node)));
                 out.push((id, node.style.rare().transitions.clone(), vals));
             }
             for child in &node.children {
-                collect(child, out);
+                collect(child, previous, out);
             }
         }
-        collect(&self.root, &mut current);
+        collect(&self.root, &self.transition_style_refs, &mut current);
 
-        // When cascade ran, save the clean base styles for hover-only frames.
-        if cascade_ran {
-            fn snapshot(node: &WebCore, out: &mut HashMap<u32, HashMap<String, String>>) {
-                if !node.style.rare().transitions.is_empty() {
-                    out.insert(node.node_id, extract_transitionable(node));
+        let definitions_by_id: HashMap<u32, &[ParsedTransition]> = current
+            .iter()
+            .map(|(id, transitions, _)| (*id, transitions.as_slice()))
+            .collect();
+        self.transition_states.retain(|elem_id, states| {
+            let definitions = definitions_by_id.get(elem_id).copied();
+            states.retain(|state| {
+                let matches_property = definitions.is_some_and(|transitions| {
+                    transitions
+                        .iter()
+                        .any(|tr| tr.property == "all" || tr.property == state.property)
+                });
+                if !matches_property {
+                    cancelled_events.push(*elem_id);
                 }
-                for child in &node.children {
-                    snapshot(child, out);
-                }
-            }
-            snapshot(&self.root, &mut self.cascade_styles);
-        }
+                matches_property
+            });
+            !states.is_empty()
+        });
+        self.prev_styles
+            .retain(|id, _| definitions_by_id.contains_key(id));
+        self.transition_style_refs
+            .retain(|id, _| definitions_by_id.contains_key(id));
 
-        for (elem_id, trs, cur_vals) in &current {
-            let prev = self.prev_styles.get(elem_id).cloned().unwrap_or_default();
+        for (elem_id, trs, values) in current {
+            let Some((style, cur_vals)) = values else {
+                continue;
+            };
+            let prev = self.prev_styles.get(&elem_id);
 
             for tr in trs {
-                if tr.duration_ms <= 0.0 {
-                    continue;
-                }
                 let props: Vec<&str> = if tr.property == "all" {
                     cur_vals.keys().map(|s| s.as_str()).collect()
                 } else {
@@ -321,7 +368,7 @@ impl Document {
                         Some(v) => v.as_str(),
                         None => continue,
                     };
-                    let prv = match prev.get(prop) {
+                    let prv = match prev.and_then(|values| values.get(prop)) {
                         Some(v) => v.as_str(),
                         None => {
                             continue;
@@ -331,6 +378,16 @@ impl Document {
                         // Uncomment to debug: eprintln!("[TR-SKIP] {} same={:?}", prop, cur);
                         continue;
                     }
+                    if tr.duration_ms <= 0.0 {
+                        if let Some(states) = self.transition_states.get_mut(&elem_id) {
+                            let before = states.len();
+                            states.retain(|state| state.property != prop);
+                            if states.len() != before {
+                                cancelled_events.push(elem_id);
+                            }
+                        }
+                        continue;
+                    }
                     if is_discrete_transition_property(prop) && !tr.allow_discrete {
                         continue;
                     }
@@ -338,7 +395,7 @@ impl Document {
                     // Already transitioning to this value?
                     let already = self
                         .transition_states
-                        .entry(*elem_id)
+                        .entry(elem_id)
                         .or_default()
                         .iter()
                         .any(|t| t.property == prop && t.to_value == cur);
@@ -349,17 +406,32 @@ impl Document {
                     // If a transition is already running for this property, start the
                     // new one from the current animated value (not from prev_styles) to
                     // avoid a visual jump to the original from/to endpoint.
-                    let from_val = self
-                        .animation_overrides
-                        .get(elem_id)
-                        .and_then(|ov| ov.iter().find(|(p, _)| p == prop))
-                        .map(|(_, v)| v.as_str())
-                        .unwrap_or(prv);
-                    let entry = self.transition_states.entry(*elem_id).or_default();
-                    let replaced = entry.iter().find(|t| t.property == prop).cloned();
+                    let replaced = self
+                        .transition_states
+                        .get(&elem_id)
+                        .and_then(|states| states.iter().find(|t| t.property == prop))
+                        .cloned();
+                    let from_val = replaced
+                        .as_ref()
+                        .map(|old| transition_value_at_time(old, now))
+                        .or_else(|| {
+                            self.animation_overrides
+                                .get(&elem_id)
+                                .and_then(|ov| ov.iter().find(|(p, _)| p == prop))
+                                .map(|(_, v)| v.clone())
+                        })
+                        .unwrap_or_else(|| prv.to_string());
+                    if replaced.is_some() && from_val == cur {
+                        if let Some(states) = self.transition_states.get_mut(&elem_id) {
+                            states.retain(|state| state.property != prop);
+                        }
+                        cancelled_events.push(elem_id);
+                        continue;
+                    }
+                    let entry = self.transition_states.entry(elem_id).or_default();
                     let mut duration_ms = tr.duration_ms;
                     let mut delay_ms = tr.delay_ms;
-                    let mut reversing_adjusted_start_value = from_val.to_string();
+                    let mut reversing_adjusted_start_value = from_val.clone();
                     let mut reversing_shortening_factor = 1.0;
                     if let Some(old) = &replaced {
                         if cur == old.reversing_adjusted_start_value && old.duration_ms > 0.0 {
@@ -383,11 +455,11 @@ impl Document {
                     let before_replace = entry.len();
                     entry.retain(|t| t.property != prop);
                     if entry.len() != before_replace {
-                        cancelled_events.push(*elem_id);
+                        cancelled_events.push(elem_id);
                     }
                     entry.push(TransitionState {
                         property: prop.to_string(),
-                        from_value: from_val.to_string(),
+                        from_value: from_val,
                         to_value: cur.to_string(),
                         reversing_adjusted_start_value,
                         reversing_shortening_factor,
@@ -397,11 +469,14 @@ impl Document {
                         timing_fn: tr.timing_fn.clone(),
                         allow_discrete: tr.allow_discrete,
                     });
-                    started_events.push((*elem_id, tr.delay_ms <= 0.0));
+                    started_events.push((elem_id, tr.delay_ms <= 0.0));
                 }
             }
-            self.prev_styles.insert(*elem_id, cur_vals.clone());
+            self.prev_styles.insert(elem_id, cur_vals);
+            self.transition_style_refs.insert(elem_id, style);
         }
+        self.transition_states
+            .retain(|_, states| !states.is_empty());
 
         for target in cancelled_events {
             let mut cancel = crate::dom::events::DomEvent::new("transitioncancel", target);
@@ -450,18 +525,38 @@ impl Document {
                             let underlying = extract_transitionable_style(&node.style);
                             let mut stops = keyframes_with_synthesized_endpoints(kf, &underlying);
                             let initial_font_px = ComputedStyle::INITIAL_FONT_SIZE_PX;
-                            let root_font_px = self.root.style.font_size_px(initial_font_px, initial_font_px);
-                            resolve_keyframe_values_for_element(&mut stops, node, root_font_px, self.viewport_w, self.viewport_h);
-                            let endpoint = if matches!(state.animation.direction, AnimDirection::Reverse | AnimDirection::AlternateReverse) {
+                            let root_font_px = self
+                                .root
+                                .style
+                                .font_size_px(initial_font_px, initial_font_px);
+                            resolve_keyframe_values_for_element(
+                                &mut stops,
+                                node,
+                                root_font_px,
+                                self.viewport_w,
+                                self.viewport_h,
+                            );
+                            let endpoint = if matches!(
+                                state.animation.direction,
+                                AnimDirection::Reverse | AnimDirection::AlternateReverse
+                            ) {
                                 stops.last()
-                            } else { stops.first() };
+                            } else {
+                                stops.first()
+                            };
                             // During the delay, fill uses the directed endpoint without easing.
-                            let properties = endpoint.map(|stop| stop.properties.clone()).unwrap_or_default();
+                            let properties = endpoint
+                                .map(|stop| stop.properties.clone())
+                                .unwrap_or_default();
                             let entry = self
                                 .animation_overrides
                                 .entry(state.element_id)
                                 .or_default();
-                            entry.extend(compose_animation_properties(properties, &underlying, &state.animation.composition));
+                            entry.extend(compose_animation_properties(
+                                properties,
+                                &underlying,
+                                &state.animation.composition,
+                            ));
                         }
                     }
                 }
@@ -497,7 +592,10 @@ impl Document {
                         let mut stops = keyframes_with_synthesized_endpoints(kf, &underlying);
                         if let Some(node) = find_node_by_id(&self.root, state.element_id) {
                             let initial_font_px = ComputedStyle::INITIAL_FONT_SIZE_PX;
-                            let root_font_px = self.root.style.font_size_px(initial_font_px, initial_font_px);
+                            let root_font_px = self
+                                .root
+                                .style
+                                .font_size_px(initial_font_px, initial_font_px);
                             resolve_keyframe_values_for_element(
                                 &mut stops,
                                 node,
@@ -536,7 +634,11 @@ impl Document {
                             }
                         };
                         let props = compose_animation_properties(
-                            interpolate_keyframe_stops_with_easing(&stops, final_t, &state.animation.timing_fn),
+                            interpolate_keyframe_stops_with_easing(
+                                &stops,
+                                final_t,
+                                &state.animation.timing_fn,
+                            ),
                             &underlying,
                             &state.animation.composition,
                         );
@@ -598,7 +700,10 @@ impl Document {
                 let mut stops = keyframes_with_synthesized_endpoints(kf, &underlying);
                 if let Some(node) = find_node_by_id(&self.root, state.element_id) {
                     let initial_font_px = ComputedStyle::INITIAL_FONT_SIZE_PX;
-                    let root_font_px = self.root.style.font_size_px(initial_font_px, initial_font_px);
+                    let root_font_px = self
+                        .root
+                        .style
+                        .font_size_px(initial_font_px, initial_font_px);
                     resolve_keyframe_values_for_element(
                         &mut stops,
                         node,
@@ -608,7 +713,11 @@ impl Document {
                     );
                 }
                 let props = compose_animation_properties(
-                    interpolate_keyframe_stops_with_easing(&stops, effective_t, &state.animation.timing_fn),
+                    interpolate_keyframe_stops_with_easing(
+                        &stops,
+                        effective_t,
+                        &state.animation.timing_fn,
+                    ),
                     &underlying,
                     &state.animation.composition,
                 );
@@ -663,12 +772,7 @@ impl Document {
                 }
 
                 still_running = true;
-                let eased = apply_easing(&tr.timing_fn, progress);
-                let interp = if tr.allow_discrete && is_discrete_transition_property(&tr.property) {
-                    discrete_transition_value(&tr.property, &tr.from_value, &tr.to_value, eased)
-                } else {
-                    interpolate_property_value(&tr.property, &tr.from_value, &tr.to_value, eased)
-                };
+                let interp = transition_value_at_progress(tr, progress);
                 let entry = self.animation_overrides.entry(*elem_id).or_default();
                 entry.push((tr.property.clone(), interp));
             }

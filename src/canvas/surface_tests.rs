@@ -1,116 +1,17 @@
-//! Per-element `<canvas>` drawing state, and the fonts canvas text is drawn
-//! with.
-//!
-//! A `<canvas>` is reached from a page the way every element is —
-//! `getElementById`, then `getContext("2d")`, then draw. Each of those draw
-//! calls arrives on its own, so something has to hold the context's state
-//! between them. This is that something: one [`CanvasState`] per canvas
-//! element, keyed by node id.
-//!
-//! **The pixels are not here.** They live on the element, in
-//! `WebCore::image_data`, which the parser already allocates for a `<canvas>`
-//! and the display-list builder already knows how to paint. Keeping one
-//! bitmap rather than two is what makes `getImageData` and a rendered frame
-//! agree by construction, and the alternative — recording the calls and
-//! replaying them later — cannot answer `getImageData`, `toBlob` or
-//! `isPointInPath` at all, because at the moment the page asks there are no
-//! pixels to read.
-
-use std::collections::HashMap;
-
-use cosmic_text::{FontSystem, SwashCache};
-use tiny_skia::{IntSize, Pixmap};
-
-use super::{Canvas, CanvasState, TinySkiaCanvas};
-
-/// The drawing state of every `<canvas>` in one document.
-#[derive(Default)]
-pub struct CanvasSurfaces {
-    /// node id → the context state that survives between calls. A canvas with
-    /// no entry has never been drawn to, which is indistinguishable from one
-    /// whose state is all defaults — so entries are made on demand.
-    states: HashMap<u32, CanvasState>,
-    /// Fonts for canvas text, created on the first `fillText`.
-    ///
-    /// Separate from `Renderer::font_system` because a canvas is drawn when
-    /// the PAGE calls it and the renderer's fonts exist only while a frame is
-    /// being painted — reaching for them at call time would find nothing, and
-    /// `fillText` would silently draw nothing at all, which is the failure
-    /// that hides longest.
-    ///
-    /// Built lazily: constructing a `FontSystem` enumerates the system fonts,
-    /// and a document with no canvas text should not pay for that.
-    fonts: Option<Box<(FontSystem, SwashCache)>>,
-}
-
-// Note for anyone extending this: an entry OUTLIVES its element. Nothing here
-// is notified when a node is removed from the tree, so a page that creates and
-// discards canvases accumulates one `CanvasState` each — small, but it can
-// carry a pixmap-sized clip `Mask`. Removing an entry needs a hook on node
-// destruction, which the DOM does not have yet.
-
-impl CanvasSurfaces {
-    /// Run `f` against the canvas for `node_id`, over `pixels`.
-    ///
-    /// `pixels` is the element's own bitmap, moved in and moved back out —
-    /// `Pixmap` owns its buffer, so lending it to tiny-skia and taking it back
-    /// costs two moves and never copies the surface.
-    ///
-    /// `None` when the buffer does not match the declared size, which would
-    /// mean the element's bitmap and its `width`/`height` had drifted apart.
-    pub fn with_context<R>(
-        &mut self,
-        node_id: u32,
-        pixels: &mut Vec<u8>,
-        width: u32,
-        height: u32,
-        f: impl FnOnce(&mut dyn Canvas) -> R,
-    ) -> Option<R> {
-        let size = IntSize::from_wh(width, height)?;
-        if pixels.len() != (width as usize) * (height as usize) * 4 {
-            return None;
-        }
-        let mut pixmap = Pixmap::from_vec(std::mem::take(pixels), size)?;
-
-        let saved = self.states.remove(&node_id).unwrap_or_default();
-        let fonts = self
-            .fonts
-            .get_or_insert_with(|| Box::new((FontSystem::new(), SwashCache::new())));
-        let (font_system, swash_cache) = &mut **fonts;
-
-        let mut canvas =
-            TinySkiaCanvas::resume(&mut pixmap, saved, Some((font_system, swash_cache)));
-        let out = f(&mut canvas);
-        self.states.insert(node_id, canvas.suspend());
-
-        *pixels = pixmap.take();
-        Some(out)
-    }
-
-    /// Drop the drawing state for one canvas, so the next call starts from the
-    /// defaults.
-    ///
-    /// [HTML §4.12.5.1](https://html.spec.whatwg.org/multipage/canvas.html#the-canvas-element)
-    /// requires this whenever `width` or `height` is assigned — **even when
-    /// the value does not change** — and for `reset()`. The bitmap is cleared
-    /// by the caller that owns it; this is the other half.
-    pub fn reset(&mut self, node_id: u32) {
-        self.states.remove(&node_id);
-    }
-}
-
-impl std::fmt::Debug for CanvasSurfaces {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CanvasSurfaces")
-            .field("canvases", &self.states.len())
-            .field("fonts_loaded", &self.fonts.is_some())
-            .finish()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::canvas::{Canvas, Color, Font};
+
+    #[test]
+    fn browser_css_color_reaches_shared_canvas() {
+        let mut doc = crate::load_html("<canvas id='c' width='1' height='1'></canvas>", 800.0);
+        let id = doc.get_element_by_id("c").expect("canvas");
+        doc.with_canvas_2d(id, |ctx| {
+            ctx.set_fill_style_css("rebeccapurple");
+            ctx.fill_rect(0.0, 0.0, 1.0, 1.0);
+        });
+        assert_eq!(pixel(&doc, id, 0, 0), [102, 51, 153, 255]);
+    }
 
     /// The pixel at (x, y) of a canvas element's bitmap, as premultiplied RGBA.
     fn pixel(doc: &crate::types::Document, id: u32, x: u32, y: u32) -> [u8; 4] {
@@ -124,6 +25,28 @@ mod tests {
         let doc = crate::load_html(markup, 800.0);
         let id = doc.get_element_by_id("c").expect("canvas element");
         (doc, id)
+    }
+
+    #[test]
+    fn zero_sized_canvas_retains_state_but_exposes_no_scratch_pixels() {
+        let mut surfaces = crate::canvas::CanvasSurfaces::default();
+        let mut pixels = Vec::new();
+        surfaces
+            .with_context(7, &mut pixels, 0, 8, |ctx| {
+                ctx.set_fill_color(Color::rgb(255, 0, 0));
+                ctx.fill_rect(0.0, 0.0, 1.0, 1.0);
+            })
+            .unwrap();
+        let read = surfaces
+            .with_context(7, &mut pixels, 0, 8, |ctx| {
+                let color = ctx.drawing_state().fill.clone();
+                let read = ctx.get_image_data(0, 0, 1, 1).unwrap();
+                (color, read)
+            })
+            .unwrap();
+        assert_eq!(read.0, crate::canvas::Paint::Color(Color::rgb(255, 0, 0)));
+        assert_eq!(read.1.data, vec![0, 0, 0, 0]);
+        assert!(pixels.is_empty());
     }
 
     #[test]
@@ -195,6 +118,65 @@ mod tests {
         let data = node.image_data.as_ref().expect("bitmap");
         let inked = data.chunks_exact(4).filter(|p| p[3] > 0).count();
         assert!(inked > 200, "fillText drew {inked} opaque pixels");
+    }
+
+    #[test]
+    fn canvas_text_uses_gradient_pixels_not_a_flat_first_stop() {
+        let (mut doc, id) = canvas_doc(r#"<canvas id="c" width="200" height="60"></canvas>"#);
+        doc.with_canvas_2d(id, |ctx| {
+            let mut gradient = ctx.create_linear_gradient(0.0, 0.0, 180.0, 0.0);
+            gradient.add_color_stop(0.0, Color::rgb(255, 0, 0)).unwrap();
+            gradient.add_color_stop(1.0, Color::rgb(0, 0, 255)).unwrap();
+            ctx.set_fill_paint(&crate::canvas::Paint::Gradient(gradient));
+            ctx.set_font(&Font::new("sans-serif", 48.0));
+            ctx.fill_text("HHHH", 5.0, 45.0);
+        })
+        .unwrap();
+        let pixels = doc
+            .get_node(id)
+            .unwrap()
+            .image_data
+            .as_ref()
+            .unwrap()
+            .clone();
+        let solid: Vec<_> = pixels.chunks_exact(4).filter(|p| p[3] > 200).collect();
+        assert!(solid.len() > 100);
+        let min_red = solid.iter().map(|p| p[0]).min().unwrap();
+        let max_red = solid.iter().map(|p| p[0]).max().unwrap();
+        assert!(
+            max_red - min_red > 50,
+            "flat text fill: {min_red}..{max_red}"
+        );
+    }
+
+    #[test]
+    fn stroked_text_uses_the_gradient_across_glyph_outlines() {
+        let (mut doc, id) = canvas_doc(r#"<canvas id="c" width="200" height="60"></canvas>"#);
+        doc.with_canvas_2d(id, |ctx| {
+            let mut gradient = ctx.create_linear_gradient(0.0, 0.0, 180.0, 0.0);
+            gradient.add_color_stop(0.0, Color::rgb(255, 0, 0)).unwrap();
+            gradient.add_color_stop(1.0, Color::rgb(0, 0, 255)).unwrap();
+            ctx.set_stroke_paint(&crate::canvas::Paint::Gradient(gradient));
+            ctx.set_line_width(3.0);
+            ctx.set_font(&Font::new("sans-serif", 48.0));
+            ctx.stroke_text("HHHH", 5.0, 45.0);
+        })
+        .unwrap();
+        let pixels = doc
+            .get_node(id)
+            .unwrap()
+            .image_data
+            .as_ref()
+            .unwrap()
+            .clone();
+        let solid: Vec<_> = pixels.chunks_exact(4).filter(|p| p[3] > 200).collect();
+        assert!(solid.len() > 50);
+        let min_red = solid.iter().map(|p| p[0]).min().unwrap();
+        let max_red = solid.iter().map(|p| p[0]).max().unwrap();
+        assert!(
+            max_red - min_red > 50,
+            "flat stroke fill: {min_red}..{max_red}"
+        );
     }
 
     #[test]

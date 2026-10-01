@@ -324,6 +324,8 @@ fn transition_resize(resize: Resize) -> String {
         Resize::Both => "both",
         Resize::Horizontal => "horizontal",
         Resize::Vertical => "vertical",
+        Resize::Block => "block",
+        Resize::Inline => "inline",
     }
     .to_string()
 }
@@ -448,26 +450,41 @@ pub(crate) fn interpolate_keyframe_stops_with_easing(
     let mut properties = Vec::new();
     for stop in stops {
         for (name, _) in &stop.properties {
-            if !properties.contains(&name.as_str()) { properties.push(name.as_str()); }
+            if !properties.contains(&name.as_str()) {
+                properties.push(name.as_str());
+            }
         }
     }
-    properties.into_iter().filter_map(|property| {
-        let mut track = stops.iter().filter_map(|stop| {
-            stop.properties.iter().find(|(name, _)| name == property)
-                .map(|(_, value)| (stop, value))
-        });
-        let mut from = track.next()?;
-        if t < from.0.offset { return Some((property.to_owned(), from.1.clone())); }
-        for to in track {
-            if t < to.0.offset {
-                let progress = (t - from.0.offset) / (to.0.offset - from.0.offset);
-                let eased = apply_easing(from.0.timing_fn.as_ref().unwrap_or(default_easing), progress);
-                return Some((property.to_owned(), interpolate_property_value(property, from.1, to.1, eased)));
+    properties
+        .into_iter()
+        .filter_map(|property| {
+            let mut track = stops.iter().filter_map(|stop| {
+                stop.properties
+                    .iter()
+                    .find(|(name, _)| name == property)
+                    .map(|(_, value)| (stop, value))
+            });
+            let mut from = track.next()?;
+            if t < from.0.offset {
+                return Some((property.to_owned(), from.1.clone()));
             }
-            from = to;
-        }
-        Some((property.to_owned(), from.1.clone()))
-    }).collect()
+            for to in track {
+                if t < to.0.offset {
+                    let progress = (t - from.0.offset) / (to.0.offset - from.0.offset);
+                    let eased = apply_easing(
+                        from.0.timing_fn.as_ref().unwrap_or(default_easing),
+                        progress,
+                    );
+                    return Some((
+                        property.to_owned(),
+                        interpolate_property_value(property, from.1, to.1, eased),
+                    ));
+                }
+                from = to;
+            }
+            Some((property.to_owned(), from.1.clone()))
+        })
+        .collect()
 }
 
 /// Interpolate a named CSS property between two value strings.
@@ -681,13 +698,27 @@ fn interpolate_numeric(from: &str, to: &str, t: f32) -> String {
         if !from_unit.is_empty() && !to_unit.is_empty() && from_unit != to_unit {
             let from_length = &from[*start..*end + from_unit.len()];
             let to_length = &to[*to_start..*to_end + to_unit.len()];
+            let angle_unit = |unit: &str| matches!(unit, "deg" | "rad" | "grad" | "turn");
+            if angle_unit(from_unit) && angle_unit(to_unit) {
+                if let (Some(from_deg), Some(to_deg)) = (
+                    crate::css::calc::parse_math_angle_deg(&format!("calc({from_length})")),
+                    crate::css::calc::parse_math_angle_deg(&format!("calc({to_length})")),
+                ) {
+                    let value = format!("{}deg", format_css_number(lerp(from_deg, to_deg, t)));
+                    result.replace_range(*start..*end + from_unit.len(), &value);
+                    continue;
+                }
+            }
             if crate::css::parse_length_checked(from_length).is_some()
                 && crate::css::parse_length_checked(to_length).is_some()
             {
                 // Preserve percentage/font/viewport dependencies until used
                 // value resolution, instead of adding incompatible magnitudes.
-                let value = format!("calc({from_length} * {} + {to_length} * {})",
-                    format_css_number(1.0 - t), format_css_number(t));
+                let value = format!(
+                    "calc({from_length} * {} + {to_length} * {})",
+                    format_css_number(1.0 - t),
+                    format_css_number(t)
+                );
                 result.replace_range(*start..*end + from_unit.len(), &value);
                 continue;
             }

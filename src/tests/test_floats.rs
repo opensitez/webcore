@@ -1,7 +1,105 @@
 #[cfg(test)]
 mod tests {
+    use crate::layout::LayoutEngine;
     use crate::layout::hit_test::hit_test_box_at;
     use crate::tests::harness::parse_and_layout;
+
+    #[test]
+    fn clear_accounts_for_float_inside_cached_sibling() {
+        let html = r#"
+            <style>
+                body { margin: 0; }
+                aside { width: 300px; overflow: hidden; }
+                article { clear: left; }
+                .poll { float: left; width: 120px; height: 220px; }
+            </style>
+            <aside>
+                <article><section><div class="poll"></div></section></article>
+                <article id="next">Next</article>
+            </aside>
+        "#;
+        let mut doc = parse_and_layout(html, 300.0);
+        let first_y = crate::tests::test_grid::find_by_id(&doc.root, "next")
+            .expect("next article")
+            .layout
+            .border_rect
+            .y;
+        assert!(
+            first_y >= 220.0,
+            "clear must account for nested float: {first_y}"
+        );
+
+        let mut engine = LayoutEngine::new();
+        engine.layout(&mut doc, 300.0);
+        let next_y = crate::tests::test_grid::find_by_id(&doc.root, "next")
+            .expect("next article")
+            .layout
+            .border_rect
+            .y;
+        assert!(next_y >= 220.0, "cached sibling lost its float: {next_y}");
+    }
+
+    #[test]
+    fn full_width_float_follows_inline_block_line() {
+        let doc = parse_and_layout(
+            r#"<style>body { margin: 0; width: 300px; }
+                 #quote { display: inline-block; width: 140px; height: 36px; }
+                 #footer { float: left; clear: both; width: 300px; height: 30px; }
+               </style><section id="quote"></section><footer id="footer"></footer>"#,
+            300.0,
+        );
+        let quote = crate::tests::test_grid::find_by_id(&doc.root, "quote").unwrap();
+        let footer = crate::tests::test_grid::find_by_id(&doc.root, "footer").unwrap();
+        assert!(
+            footer.layout.border_rect.y >= quote.layout.border_rect.bottom(),
+            "full-width float must not overlap the preceding inline line: quote={:?} footer={:?}",
+            quote.layout.border_rect,
+            footer.layout.border_rect,
+        );
+    }
+
+    #[test]
+    fn full_width_float_follows_inline_block_after_block_content() {
+        let doc = parse_and_layout(
+            r#"<style>body { margin: 0; padding: 0 13px; width: 1280px; box-sizing: border-box; }
+                 #previous { height: 40px; }
+                 #quote { display: inline-block; position: relative; top: -19px;
+                          margin: 19px 336px 0 120px; width: 520px; }
+                 #quote blockquote { margin: 0; }
+                 #quote p { margin: 10px 1px 0 0; height: 25px; }
+                 #footer { float: left; clear: both; position: relative;
+                           width: 99.8%; height: 40px; margin-bottom: -8px; }
+               </style><div id="previous"></div><section id="quote"><blockquote><p>Per buck you get more computing action</p></blockquote></section><footer id="footer"></footer>"#,
+            1280.0,
+        );
+        let quote = crate::tests::test_grid::find_by_id(&doc.root, "quote").unwrap();
+        let footer = crate::tests::test_grid::find_by_id(&doc.root, "footer").unwrap();
+        assert!(
+            footer.layout.border_rect.y >= quote.layout.border_rect.bottom() + 8.0,
+            "footer must follow the quote after preceding block content: quote={:?} footer={:?}",
+            quote.layout.border_rect,
+            footer.layout.border_rect,
+        );
+    }
+
+    #[test]
+    fn positioned_control_does_not_create_empty_line_before_label_text() {
+        let doc = parse_and_layout(
+            r#"<style>
+                body { margin: 0; }
+                label { display: inline-block; position: relative; box-sizing: border-box;
+                        width: 86px; padding: 4px 28px; font: bold 13px/19px Arial; }
+                input { position: absolute; left: 6px; top: 3px; width: 13px; height: 13px; }
+               </style><label id="choice"><input type="radio">Almost all of it (80%+)</label>"#,
+            200.0,
+        );
+        let label = crate::tests::test_grid::find_by_id(&doc.root, "choice").unwrap();
+        assert!(
+            label.layout.border_rect.h < 100.0,
+            "positioned input must not create a separate line: {:?}",
+            label.layout.border_rect,
+        );
+    }
 
     #[test]
     fn test_float_right_on_same_line() {

@@ -198,17 +198,17 @@ fn build_ancestor_entry(
     type_child_index: usize,
     type_sibling_count: usize,
 ) -> crate::css::AncestorInfo {
-	    crate::css::AncestorInfo {
-	        tag: node.tag.clone(),
-	        attributes: node.attributes.clone(),
-	        child_index,
-	        sibling_count,
-	        type_child_index,
-	        type_sibling_count,
-	        node_id: node.node_id,
-	        prev_siblings: Vec::new(),
-	    }
-	}
+    crate::css::AncestorInfo {
+        tag: node.tag.clone(),
+        attributes: node.attributes.clone().into(),
+        child_index,
+        sibling_count,
+        type_child_index,
+        type_sibling_count,
+        node_id: node.node_id,
+        prev_siblings: Vec::new().into(),
+    }
+}
 
 /// Walk `node`'s subtree testing every ELEMENT against `selectors`.
 ///

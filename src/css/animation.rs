@@ -25,9 +25,17 @@ pub(crate) fn parse_easing_checked(s: &str) -> Option<EasingFn> {
         "step-end" => EasingFn::StepEnd,
         s if s.starts_with("cubic-bezier(") => {
             let inner = s.strip_prefix("cubic-bezier(")?.strip_suffix(')')?;
-            let parts: Vec<f32> = inner.split(',').map(|p| p.trim().parse().ok()).collect::<Option<_>>()?;
-            if parts.len() != 4 || parts.iter().any(|n| !n.is_finite())
-                || !(0.0..=1.0).contains(&parts[0]) || !(0.0..=1.0).contains(&parts[2]) { return None; }
+            let parts: Vec<f32> = inner
+                .split(',')
+                .map(|p| p.trim().parse().ok())
+                .collect::<Option<_>>()?;
+            if parts.len() != 4
+                || parts.iter().any(|n| !n.is_finite())
+                || !(0.0..=1.0).contains(&parts[0])
+                || !(0.0..=1.0).contains(&parts[2])
+            {
+                return None;
+            }
             EasingFn::CubicBezier(parts[0], parts[1], parts[2], parts[3])
         }
         s if s.starts_with("steps(") => {
@@ -41,12 +49,14 @@ pub(crate) fn parse_easing_checked(s: &str) -> Option<EasingFn> {
                 Some("jump-both") => StepPosition::JumpBoth,
                 _ => return None,
             };
-            if count == 0 || parts.next().is_some() { return None; }
+            if count == 0 || parts.next().is_some() {
+                return None;
+            }
             EasingFn::Steps(count, position)
         }
-        s if s.starts_with("linear(") => {
-            EasingFn::LinearPoints(parse_linear_points(s.strip_prefix("linear(")?.strip_suffix(')')?)?)
-        }
+        s if s.starts_with("linear(") => EasingFn::LinearPoints(parse_linear_points(
+            s.strip_prefix("linear(")?.strip_suffix(')')?,
+        )?),
         _ => return None,
     })
 }
@@ -271,7 +281,9 @@ fn tokenize_anim(s: &str) -> Vec<String> {
 }
 
 pub fn parse_time_ms(s: &str) -> Option<f32> {
-    if let Some(value) = super::calc::parse_math_time_ms(s) { return Some(value); }
+    if let Some(value) = super::calc::parse_math_time_ms(s) {
+        return Some(value);
+    }
     if let Some(ms) = s.strip_suffix("ms") {
         ms.trim().parse::<f32>().ok()
     } else if let Some(sec) = s.strip_suffix('s') {
@@ -301,12 +313,18 @@ fn parse_linear_points(inner: &str) -> Option<Vec<(f32, f32)>> {
     for entry in inner.split(',') {
         let mut toks = entry.split_whitespace();
         let out: f32 = toks.next()?.parse().ok()?;
-        if !out.is_finite() { return None; }
+        if !out.is_finite() {
+            return None;
+        }
         let mut had_pos = false;
         for (index, t) in toks.enumerate() {
-            if index >= 2 { return None; }
+            if index >= 2 {
+                return None;
+            }
             let p = t.strip_suffix('%')?.parse::<f32>().ok()? / 100.0;
-            if !p.is_finite() { return None; }
+            if !p.is_finite() {
+                return None;
+            }
             pts.push((out, Some(p)));
             had_pos = true;
         }

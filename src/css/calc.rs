@@ -10,10 +10,15 @@ const ANGLE: Dimension = [0, 1, 0, 0, 0, 0];
 const MAX_CALC_DEPTH: usize = 128;
 
 pub(crate) fn serialize_math_literal(value: f32, unit: &str) -> String {
-    let keyword = if value.is_nan() { Some("NaN") }
-        else if value == f32::INFINITY { Some("infinity") }
-        else if value == f32::NEG_INFINITY { Some("-infinity") }
-        else { None };
+    let keyword = if value.is_nan() {
+        Some("NaN")
+    } else if value == f32::INFINITY {
+        Some("infinity")
+    } else if value == f32::NEG_INFINITY {
+        Some("-infinity")
+    } else {
+        None
+    };
     match keyword {
         Some(keyword) if unit.is_empty() => keyword.into(),
         Some(keyword) => format!("calc({keyword} * 1{unit})"),
@@ -23,18 +28,24 @@ pub(crate) fn serialize_math_literal(value: f32, unit: &str) -> String {
 
 /// Serialize the calculation tree without losing operation precedence or units.
 /// The caller chooses specified-value or computed-value length serialization.
-pub(crate) fn serialize_calculation(node: &CalcNode, length: &impl Fn(&CssLength) -> String) -> String {
+pub(crate) fn serialize_calculation(
+    node: &CalcNode,
+    length: &impl Fn(&CssLength) -> String,
+) -> String {
     let child = |node: &CalcNode| serialize_calculation(node, length);
     match node {
         CalcNode::Value(value) => length(value),
-        CalcNode::Scalar(value, unit) => serialize_math_literal(*value, match unit {
-            CalcScalarUnit::Number => "",
-            CalcScalarUnit::Radians => "rad",
-            CalcScalarUnit::Seconds => "s",
-            CalcScalarUnit::Hertz => "Hz",
-            CalcScalarUnit::Dppx => "dppx",
-            CalcScalarUnit::Percent => "%",
-        }),
+        CalcNode::Scalar(value, unit) => serialize_math_literal(
+            *value,
+            match unit {
+                CalcScalarUnit::Number => "",
+                CalcScalarUnit::Radians => "rad",
+                CalcScalarUnit::Seconds => "s",
+                CalcScalarUnit::Hertz => "Hz",
+                CalcScalarUnit::Dppx => "dppx",
+                CalcScalarUnit::Percent => "%",
+            },
+        ),
         CalcNode::Add(a, b) => format!("({} + {})", child(a), child(b)),
         CalcNode::Sub(a, b) => format!("({} - {})", child(a), child(b)),
         CalcNode::Product(a, b) => format!("({} * {})", child(a), child(b)),
@@ -44,20 +55,38 @@ pub(crate) fn serialize_calculation(node: &CalcNode, length: &impl Fn(&CssLength
         CalcNode::Function(function, args) => {
             use CssMathFunction::*;
             let name = match function {
-                Min => "min", Max => "max", Clamp => "clamp", Round(_) => "round",
-                Mod => "mod", Rem => "rem", Abs => "abs", Sign => "sign",
-                Sin => "sin", Cos => "cos", Tan => "tan", Asin => "asin",
-                Acos => "acos", Atan => "atan", Atan2 => "atan2", Pow => "pow",
-                Sqrt => "sqrt", Hypot => "hypot", Log => "log", Exp => "exp",
+                Min => "min",
+                Max => "max",
+                Clamp => "clamp",
+                Round(_) => "round",
+                Mod => "mod",
+                Rem => "rem",
+                Abs => "abs",
+                Sign => "sign",
+                Sin => "sin",
+                Cos => "cos",
+                Tan => "tan",
+                Asin => "asin",
+                Acos => "acos",
+                Atan => "atan",
+                Atan2 => "atan2",
+                Pow => "pow",
+                Sqrt => "sqrt",
+                Hypot => "hypot",
+                Log => "log",
+                Exp => "exp",
             };
             let mut serialized = Vec::with_capacity(args.len() + 1);
             if let Round(strategy) = function {
-                serialized.push(match strategy {
-                    CssRoundingStrategy::Nearest => "nearest",
-                    CssRoundingStrategy::Up => "up",
-                    CssRoundingStrategy::Down => "down",
-                    CssRoundingStrategy::ToZero => "to-zero",
-                }.into());
+                serialized.push(
+                    match strategy {
+                        CssRoundingStrategy::Nearest => "nearest",
+                        CssRoundingStrategy::Up => "up",
+                        CssRoundingStrategy::Down => "down",
+                        CssRoundingStrategy::ToZero => "to-zero",
+                    }
+                    .into(),
+                );
             }
             serialized.extend(args.iter().enumerate().map(|(i, arg)| {
                 let unbounded = matches!(arg, CalcNode::Scalar(v, _) | CalcNode::Value(CssLength::Px(v))
@@ -127,30 +156,53 @@ pub(crate) fn parse_calc_number(value: &str) -> Option<f32> {
     parse_numeric_dimension(value, NUMBER)
 }
 
+pub(crate) fn parse_math_length_px(value: &str) -> Option<f32> {
+    parse_numeric_dimension(value, LENGTH)
+}
+
+pub(crate) fn parse_math_percentage(value: &str) -> Option<f32> {
+    parse_numeric_dimension(value, [0, 0, 0, 0, 0, 1])
+}
+
+pub(crate) fn parse_math_frequency_hz(value: &str) -> Option<f32> {
+    parse_numeric_dimension(value, [0, 0, 0, 1, 0, 0])
+}
+
 pub(crate) fn parse_css_number(value: &str) -> Option<f32> {
     let value = value.trim();
-    value.parse::<f32>().ok().or_else(|| parse_calc_number(value))
+    value
+        .parse::<f32>()
+        .ok()
+        .or_else(|| parse_calc_number(value))
         .filter(|n| n.is_finite())
 }
 
 pub(crate) fn parse_nonnegative_number(value: &str) -> Option<f32> {
     let number = parse_css_number(value)?;
     // Literal out-of-range values are invalid; calculations clamp at computed value time.
-    if is_math_function(value.trim()) { Some(number.max(0.0)) }
-    else { (number >= 0.0).then_some(number) }
+    if is_math_function(value.trim()) {
+        Some(number.max(0.0))
+    } else {
+        (number >= 0.0).then_some(number)
+    }
 }
 
 pub(crate) fn parse_css_integer(value: &str) -> Option<i32> {
     let value = value.trim();
-    if let Ok(integer) = value.parse::<i32>() { return Some(integer); }
+    if let Ok(integer) = value.parse::<i32>() {
+        return Some(integer);
+    }
     let number = parse_calc_number(value).filter(|n| n.is_finite())?;
     Some((f64::from(number) + 0.5).floor() as i32)
 }
 
 pub(crate) fn parse_positive_integer(value: &str) -> Option<i32> {
     let integer = parse_css_integer(value)?;
-    if is_math_function(value.trim()) { Some(integer.max(1)) }
-    else { (integer > 0).then_some(integer) }
+    if is_math_function(value.trim()) {
+        Some(integer.max(1))
+    } else {
+        (integer > 0).then_some(integer)
+    }
 }
 
 fn parse_numeric_dimension(value: &str, dimension: Dimension) -> Option<f32> {
@@ -170,6 +222,10 @@ pub(crate) fn parse_math_angle_deg(value: &str) -> Option<f32> {
 
 pub(crate) fn parse_math_time_ms(value: &str) -> Option<f32> {
     parse_numeric_dimension(value, [0, 0, 1, 0, 0, 0]).map(|v| v * 1000.0)
+}
+
+pub(crate) fn parse_math_resolution_dppx(value: &str) -> Option<f32> {
+    parse_numeric_dimension(value, [0, 0, 0, 0, 1, 0])
 }
 
 pub(crate) fn parse_math_alpha(value: &str) -> Option<f32> {
@@ -546,13 +602,12 @@ impl<'a> MathParser<'a> {
             CalcNode::Scalar(n, unit)
         } else {
             let value = parse_length(&self.input[start..self.pos]);
-            if matches!(value, CssLength::Auto) { return None; }
+            if matches!(value, CssLength::Auto) {
+                return None;
+            }
             CalcNode::Value(value)
         };
-        Some(Calculation {
-            node,
-            dimension,
-        })
+        Some(Calculation { node, dimension })
     }
 
     fn function(&mut self, name: &str) -> Option<Calculation> {
@@ -654,7 +709,11 @@ impl<'a> MathParser<'a> {
         for index in unbounded {
             args[index].dimension = args[1].dimension;
             if args[1].dimension == LENGTH {
-                let value = if index == 0 { f32::NEG_INFINITY } else { f32::INFINITY };
+                let value = if index == 0 {
+                    f32::NEG_INFINITY
+                } else {
+                    f32::INFINITY
+                };
                 args[index].node = CalcNode::Value(CssLength::Px(value));
             }
         }

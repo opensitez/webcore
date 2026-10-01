@@ -10,11 +10,20 @@ use crate::types::*;
 fn grid_justify_start_keeps_implicit_auto_track_at_intrinsic_width() {
     for (justify, expected) in [("normal", 600.0), ("start", 180.0)] {
         let doc = parse_and_layout(
-            &format!("<style>body{{margin:0}}#grid{{display:grid;width:600px;justify-content:{justify}}}#child{{width:180px}}</style><div id=grid><div id=item><div id=child>Headline</div></div></div>"),
+            &format!(
+                "<style>body{{margin:0}}#grid{{display:grid;width:600px;justify-content:{justify}}}#child{{width:180px}}</style><div id=grid><div id=item><div id=child>Headline</div></div></div>"
+            ),
             800.0,
         );
-        let item = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "item")).unwrap();
-        assert!((item.layout.border_rect.w - expected).abs() < 1.0, "justify={justify} item={:?}", item.layout.border_rect);
+        let item = find_box(&doc.root, &|n| {
+            n.attributes.get("id").is_some_and(|id| id == "item")
+        })
+        .unwrap();
+        assert!(
+            (item.layout.border_rect.w - expected).abs() < 1.0,
+            "justify={justify} item={:?}",
+            item.layout.border_rect
+        );
     }
 }
 
@@ -24,11 +33,21 @@ fn grown_nested_flex_item_uses_its_allocated_main_size() {
         "<style>body{margin:0}#outer{display:flex;width:600px;height:40px}#nav{width:100%;flex:1}#list{display:flex;height:40px}#list ul{display:flex;flex:1;max-width:fit-content;margin:0;padding:0}#list li{list-style:none;width:90px}#more{width:60px}#right{width:150px}</style><div id=outer><div id=nav><div id=list><ul><li>World</li><li>Politics</li><li>Sports</li></ul><div id=more>More</div></div></div><div id=right>Sign in</div></div>",
         800.0,
     );
-    let list = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "list")).unwrap();
+    let list = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|id| id == "list")
+    })
+    .unwrap();
     let ul = find_box(list, &|n| n.tag == "ul").unwrap();
-    let more = find_box(list, &|n| n.attributes.get("id").is_some_and(|id| id == "more")).unwrap();
-    assert!((more.layout.border_rect.x - ul.layout.border_rect.right()).abs() < 1.0,
-        "ul={:?} more={:?}", ul.layout.border_rect, more.layout.border_rect);
+    let more = find_box(list, &|n| {
+        n.attributes.get("id").is_some_and(|id| id == "more")
+    })
+    .unwrap();
+    assert!(
+        (more.layout.border_rect.x - ul.layout.border_rect.right()).abs() < 1.0,
+        "ul={:?} more={:?}",
+        ul.layout.border_rect,
+        more.layout.border_rect
+    );
 }
 
 #[test]
@@ -37,13 +56,28 @@ fn max_content_width_contributes_to_nested_flex_intrinsic_size() {
         "<style>body{margin:0}#outer{display:flex;width:300px}#end{display:flex}#sign{display:flex;width:max-content}#sign a{word-break:break-word}</style><div id=outer><div id=end><div id=sign><a>Sign in</a></div><span>Other</span></div></div>",
         800.0,
     );
-    let sign = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "sign")).unwrap();
-    let end = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "end")).unwrap();
+    let sign = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|id| id == "sign")
+    })
+    .unwrap();
+    let end = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|id| id == "end")
+    })
+    .unwrap();
     let engine = LayoutEngine::new();
     assert!(engine.max_content_width(sign, 16.0, 16.0) > 35.0);
     assert!(engine.intrinsic_sizes(sign, 16.0, 16.0).min_content > 35.0);
-    assert!(end.layout.border_rect.w > 70.0, "end={:?} sign={:?}", end.layout.border_rect, sign.layout.border_rect);
-    assert!(sign.layout.border_rect.w > 35.0, "sign={:?}", sign.layout.border_rect);
+    assert!(
+        end.layout.border_rect.w > 70.0,
+        "end={:?} sign={:?}",
+        end.layout.border_rect,
+        sign.layout.border_rect
+    );
+    assert!(
+        sign.layout.border_rect.w > 35.0,
+        "sign={:?}",
+        sign.layout.border_rect
+    );
 }
 
 #[test]
@@ -52,10 +86,29 @@ fn percent_height_image_sets_content_sized_flex_item_width() {
         "<style>body{margin:0}.bar{display:flex;height:40px}.logo{height:40px}.logo img{display:block;height:100%;width:auto}</style><div class=bar><div class=logo><a><picture><img id=mark width=176 height=208></picture></a></div><span>Navigation</span></div>",
         800.0,
     );
-    let mark = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "mark")).unwrap();
-    let logo = find_box(&doc.root, &|n| n.attributes.get("class").is_some_and(|s| s == "logo")).unwrap();
-    assert!((mark.layout.border_rect.h - 40.0).abs() < 0.5, "mark={:?} height={:?} logo={:?}", mark.layout.border_rect, mark.style.height, logo.layout.border_rect);
-    assert!((logo.layout.border_rect.w - 176.0 * 40.0 / 208.0).abs() < 0.5, "logo={:?} basis={:?} width={:?} height={:?}", logo.layout.border_rect, logo.style.flex_basis, logo.style.width, logo.style.height);
+    let mark = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|s| s == "mark")
+    })
+    .unwrap();
+    let logo = find_box(&doc.root, &|n| {
+        n.attributes.get("class").is_some_and(|s| s == "logo")
+    })
+    .unwrap();
+    assert!(
+        (mark.layout.border_rect.h - 40.0).abs() < 0.5,
+        "mark={:?} height={:?} logo={:?}",
+        mark.layout.border_rect,
+        mark.style.height,
+        logo.layout.border_rect
+    );
+    assert!(
+        (logo.layout.border_rect.w - 176.0 * 40.0 / 208.0).abs() < 0.5,
+        "logo={:?} basis={:?} width={:?} height={:?}",
+        logo.layout.border_rect,
+        logo.style.flex_basis,
+        logo.style.width,
+        logo.style.height
+    );
 }
 
 #[test]
@@ -64,19 +117,31 @@ fn emergency_word_break_keeps_max_content_word_on_one_line() {
         "<style>body{margin:0}#label{display:flex;width:max-content;font:700 20px Georgia;word-break:break-word}</style><div id=label>AVAVAVAV</div>",
         800.0,
     );
-    let label = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "label")).unwrap();
+    let label = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|id| id == "label")
+    })
+    .unwrap();
     let text = find_box(label, &|n| n.tag == "#text" && n.text.contains("AVAVAVAV")).unwrap();
-    assert_eq!(text.layout.line_cache.len(), 1, "max-content label must not wrap its word");
+    assert_eq!(
+        text.layout.line_cache.len(),
+        1,
+        "max-content label must not wrap its word"
+    );
 }
 
 #[test]
 fn media_table_columns_restore_after_stepping_across_breakpoint() {
-    let mut doc = parse_html("<style>.row{display:table;width:100%}.main{display:table-cell;width:70%}.aside{display:table-cell;width:30%}@media screen and (max-width:1023px){.main,.aside{display:block;width:100%}.aside{padding-bottom:55px}}</style><div class=row><div class=main>Main</div><aside class=aside>Aside</aside></div>");
+    let mut doc = parse_html(
+        "<style>.row{display:table;width:100%}.main{display:table-cell;width:70%}.aside{display:table-cell;width:30%}@media screen and (max-width:1023px){.main,.aside{display:block;width:100%}.aside{padding-bottom:55px}}</style><div class=row><div class=main>Main</div><aside class=aside>Aside</aside></div>",
+    );
     let mut engine = LayoutEngine::new();
     engine.viewport_h = 820.0;
     engine.layout(&mut doc, 900.0);
     engine.layout(&mut doc, 1280.0);
-    let aside = find_box(&doc.root, &|n| n.attributes.get("class").is_some_and(|s| s == "aside")).unwrap();
+    let aside = find_box(&doc.root, &|n| {
+        n.attributes.get("class").is_some_and(|s| s == "aside")
+    })
+    .unwrap();
     assert_eq!(aside.style.display, Display::TableCell);
     assert_eq!(aside.style.width, CssLength::Percent(30.0));
     assert_eq!(aside.style.padding_bottom, CssLength::Zero);
@@ -84,45 +149,137 @@ fn media_table_columns_restore_after_stepping_across_breakpoint() {
 
 #[test]
 fn adjacent_orphan_table_cells_share_a_row_across_whitespace() {
-    let doc = parse_and_layout("<style>body{margin:0}#host{width:1000px}#main{display:table-cell;width:70%;height:100px}#aside{display:table-cell;width:30%;height:50px}</style><div id=host><div class=clearfix></div>\n <div id=main>Main</div>\n <aside id=aside><div id=inner>Aside</div></aside>\n</div>", 1200.0);
-    let main = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "main")).unwrap();
-    let aside = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "aside")).unwrap();
-    let inner = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "inner")).unwrap();
-    assert!((main.layout.border_rect.y - aside.layout.border_rect.y).abs() < 0.1, "main={:?} aside={:?}", main.layout.border_rect, aside.layout.border_rect);
+    let doc = parse_and_layout(
+        "<style>body{margin:0}#host{width:1000px}#main{display:table-cell;width:70%;height:100px}#aside{display:table-cell;width:30%;height:50px}</style><div id=host><div class=clearfix></div>\n <div id=main>Main</div>\n <aside id=aside><div id=inner>Aside</div></aside>\n</div>",
+        1200.0,
+    );
+    let main = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|s| s == "main")
+    })
+    .unwrap();
+    let aside = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|s| s == "aside")
+    })
+    .unwrap();
+    let inner = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|s| s == "inner")
+    })
+    .unwrap();
+    assert!(
+        (main.layout.border_rect.y - aside.layout.border_rect.y).abs() < 0.1,
+        "main={:?} aside={:?}",
+        main.layout.border_rect,
+        aside.layout.border_rect
+    );
     assert!((main.layout.border_rect.right() - aside.layout.border_rect.x).abs() < 0.1);
-    assert!((inner.layout.border_rect.w - aside.layout.content_rect.w).abs() < 0.1, "inner={:?} aside={:?}", inner.layout.border_rect, aside.layout.content_rect);
+    assert!(
+        (inner.layout.border_rect.w - aside.layout.content_rect.w).abs() < 0.1,
+        "inner={:?} aside={:?}",
+        inner.layout.border_rect,
+        aside.layout.content_rect
+    );
 }
 
 #[test]
 fn inline_block_with_percentage_table_uses_available_width() {
-    let doc = parse_and_layout("<style>body{margin:0}#host{width:300px}#outer{display:inline-block;margin:0 10px}#table{width:100%}</style><div id=host><span id=outer><table id=table><tr><td>Agenda</td><td>27 Septembre</td></tr></table></span></div>", 500.0);
-    let outer = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "outer")).unwrap();
-    let table = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "table")).unwrap();
-    let host = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "host")).unwrap();
+    let doc = parse_and_layout(
+        "<style>body{margin:0}#host{width:300px}#outer{display:inline-block;margin:0 10px}#table{width:100%}</style><div id=host><span id=outer><table id=table><tr><td>Agenda</td><td>27 Septembre</td></tr></table></span></div>",
+        500.0,
+    );
+    let outer = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|s| s == "outer")
+    })
+    .unwrap();
+    let table = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|s| s == "table")
+    })
+    .unwrap();
+    let host = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|s| s == "host")
+    })
+    .unwrap();
     assert_eq!(table.style.display, Display::Table);
-    assert!(table.style.width.has_percentage(), "table width={:?}", table.style.width);
-    assert_eq!(outer.children[0].style.display, Display::Table, "outer first child={}", outer.children[0].tag);
-    assert!((outer.layout.border_rect.w - 280.0).abs() < 0.5, "host={:?} outer={:?} outer containing={} table={:?} table containing={}", host.layout.content_rect, outer.layout.border_rect, outer.layout.last_containing_width, table.layout.border_rect, table.layout.last_containing_width);
-    assert!((table.layout.border_rect.w - 280.0).abs() < 0.5, "table={:?}", table.layout.border_rect);
+    assert!(
+        table.style.width.has_percentage(),
+        "table width={:?}",
+        table.style.width
+    );
+    assert_eq!(
+        outer.children[0].style.display,
+        Display::Table,
+        "outer first child={}",
+        outer.children[0].tag
+    );
+    assert!(
+        (outer.layout.border_rect.w - 280.0).abs() < 0.5,
+        "host={:?} outer={:?} outer containing={} table={:?} table containing={}",
+        host.layout.content_rect,
+        outer.layout.border_rect,
+        outer.layout.last_containing_width,
+        table.layout.border_rect,
+        table.layout.last_containing_width
+    );
+    assert!(
+        (table.layout.border_rect.w - 280.0).abs() < 0.5,
+        "table={:?}",
+        table.layout.border_rect
+    );
 }
 
 #[test]
 fn block_inside_inline_link_wraps_beside_sibling_float() {
-    let doc = parse_and_layout("<style>body{margin:0}#list{width:300px}li{list-style:none}p{margin:0;font-size:16px;line-height:20px}img{float:left;width:90px;height:120px;margin-right:10px}</style><ul id=list><li><div><a>\n <img id=cover>\n </a>\n <a><p id=title>Report on monetary policy for the current year</p></a></div></li></ul>", 500.0);
-    let cover = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "cover")).unwrap();
-    let title = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "title")).unwrap();
-    assert!(title.layout.border_rect.x >= cover.layout.margin_rect.right() - 0.5, "cover={:?}, title={:?}", cover.layout.margin_rect, title.layout.border_rect);
-    assert!((title.layout.border_rect.w - 200.0).abs() < 0.5, "cover={:?}, title={:?}", cover.layout.margin_rect, title.layout.border_rect);
-    assert!(title.layout.border_rect.h > 20.0, "title={:?}", title.layout.border_rect);
+    let doc = parse_and_layout(
+        "<style>body{margin:0}#list{width:300px}li{list-style:none}p{margin:0;font-size:16px;line-height:20px}img{float:left;width:90px;height:120px;margin-right:10px}</style><ul id=list><li><div><a>\n <img id=cover>\n </a>\n <a><p id=title>Report on monetary policy for the current year</p></a></div></li></ul>",
+        500.0,
+    );
+    let cover = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|s| s == "cover")
+    })
+    .unwrap();
+    let title = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|s| s == "title")
+    })
+    .unwrap();
+    assert!(
+        title.layout.border_rect.x >= cover.layout.margin_rect.right() - 0.5,
+        "cover={:?}, title={:?}",
+        cover.layout.margin_rect,
+        title.layout.border_rect
+    );
+    assert!(
+        (title.layout.border_rect.w - 200.0).abs() < 0.5,
+        "cover={:?}, title={:?}",
+        cover.layout.margin_rect,
+        title.layout.border_rect
+    );
+    assert!(
+        title.layout.border_rect.h > 20.0,
+        "title={:?}",
+        title.layout.border_rect
+    );
 }
 
 #[test]
 fn floats_from_short_rows_constrain_following_rows() {
-    let doc = parse_and_layout("<style>body{margin:0}ul{width:300px;padding:0}li{list-style:none}p{margin:0;font-size:16px;line-height:20px}img{float:left;width:90px;height:120px;margin-right:10px}</style><ul><li><div><a>\n<img id=cover1>\n</a><a><p id=title1>First report heading wraps here</p></a></div></li><li><div><a>\n<img id=cover2>\n</a><a><p id=title2>Second report heading wraps</p></a></div></li><li><div><a>\n<img id=cover3>\n</a><a><p id=title3>Third report heading wraps across still more lines</p></a></div></li></ul>", 500.0);
-    let get = |id: &str| find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == id)).unwrap().layout.border_rect;
-    let (cover1, title1, cover2, title2) = (get("cover1"), get("title1"), get("cover2"), get("title2"));
+    let doc = parse_and_layout(
+        "<style>body{margin:0}ul{width:300px;padding:0}li{list-style:none}p{margin:0;font-size:16px;line-height:20px}img{float:left;width:90px;height:120px;margin-right:10px}</style><ul><li><div><a>\n<img id=cover1>\n</a><a><p id=title1>First report heading wraps here</p></a></div></li><li><div><a>\n<img id=cover2>\n</a><a><p id=title2>Second report heading wraps</p></a></div></li><li><div><a>\n<img id=cover3>\n</a><a><p id=title3>Third report heading wraps across still more lines</p></a></div></li></ul>",
+        500.0,
+    );
+    let get = |id: &str| {
+        find_box(&doc.root, &|n| {
+            n.attributes.get("id").is_some_and(|s| s == id)
+        })
+        .unwrap()
+        .layout
+        .border_rect
+    };
+    let (cover1, title1, cover2, title2) =
+        (get("cover1"), get("title1"), get("cover2"), get("title2"));
     assert!((title1.w - 200.0).abs() < 0.5, "title1={title1:?}");
-    assert!((cover2.x - cover1.x - 100.0).abs() < 0.5, "cover1={cover1:?}, cover2={cover2:?}");
+    assert!(
+        (cover2.x - cover1.x - 100.0).abs() < 0.5,
+        "cover1={cover1:?}, cover2={cover2:?}"
+    );
     assert!((title2.w - 100.0).abs() < 0.5, "title2={title2:?}");
     let title3 = get("title3");
     assert!((title3.w - 100.0).abs() < 0.5, "title3={title3:?}");
@@ -130,13 +287,21 @@ fn floats_from_short_rows_constrain_following_rows() {
 
 #[test]
 fn anonymous_table_wrappers_do_not_change_selectors_on_recascade() {
-    let mut doc = parse_html("<style>body{margin:0}nav>ul{display:table;width:600px;padding:0;margin:0}nav>ul>li{display:table-cell;width:50%;color:red}nav>ul>li+li{color:blue}</style><nav><ul><li id=a>First</li><li id=b>Second</li></ul></nav>");
+    let mut doc = parse_html(
+        "<style>body{margin:0}nav>ul{display:table;width:600px;padding:0;margin:0}nav>ul>li{display:table-cell;width:50%;color:red}nav>ul>li+li{color:blue}</style><nav><ul><li id=a>First</li><li id=b>Second</li></ul></nav>",
+    );
     let mut engine = LayoutEngine::new();
     for _ in 0..3 {
         doc.style_dirty = true;
         engine.layout(&mut doc, 800.0);
-        let a = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "a")).unwrap();
-        let b = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "b")).unwrap();
+        let a = find_box(&doc.root, &|n| {
+            n.attributes.get("id").is_some_and(|s| s == "a")
+        })
+        .unwrap();
+        let b = find_box(&doc.root, &|n| {
+            n.attributes.get("id").is_some_and(|s| s == "b")
+        })
+        .unwrap();
         assert_eq!(a.style.display, Display::TableCell);
         assert_eq!(b.style.display, Display::TableCell);
         assert_eq!(a.style.color, Color::rgb(255, 0, 0));
@@ -147,10 +312,20 @@ fn anonymous_table_wrappers_do_not_change_selectors_on_recascade() {
 
 #[test]
 fn trailing_br_does_not_add_a_caret_line_to_page_content() {
-    let doc = parse_and_layout("<style>body{margin:0}p{margin:0;font-size:14px;line-height:21px}span{display:block;font-size:16px;line-height:24px}</style><p id=plain>Text<br></p><p id=mixed><span>First<br>Second<br>Third</span><br></p><p id=double>Text<br><br></p>", 800.0);
+    let doc = parse_and_layout(
+        "<style>body{margin:0}p{margin:0;font-size:14px;line-height:21px}span{display:block;font-size:16px;line-height:24px}</style><p id=plain>Text<br></p><p id=mixed><span>First<br>Second<br>Third</span><br></p><p id=double>Text<br><br></p>",
+        800.0,
+    );
     for (id, height) in [("plain", 21.0), ("mixed", 93.0), ("double", 42.0)] {
-        let node = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == id)).unwrap();
-        assert!((node.layout.content_rect.h - height).abs() < 0.1, "{id}: {:?}", node.layout.content_rect);
+        let node = find_box(&doc.root, &|n| {
+            n.attributes.get("id").is_some_and(|s| s == id)
+        })
+        .unwrap();
+        assert!(
+            (node.layout.content_rect.h - height).abs() < 0.1,
+            "{id}: {:?}",
+            node.layout.content_rect
+        );
     }
 }
 
@@ -159,18 +334,45 @@ fn flex_resolves_percentage_height_against_definite_container_only() {
     // Chrome leaves the indefinite case at its 21px intrinsic minimum; the
     // percentage is not a computed `auto` size eligible for flex stretch.
     for (parent_height, expected_content) in [("", 21.0), ("height:800px", 380.0)] {
-        let doc = parse_and_layout(&format!("<style>#row{{display:flex;width:600px;{parent_height}}}#text{{width:300px;height:300px}}#column{{width:300px;height:50%;padding-bottom:20px;box-sizing:border-box}}#frame,#inner{{height:100%;min-height:21px}}#inner{{position:relative}}img{{position:absolute;width:100%;height:100%;object-fit:cover}}</style><div id=row><div id=text></div><div id=column><div id=frame><div id=inner><img id=image width=640 height=480></div></div></div></div>"), 800.0);
-        let column = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "column")).unwrap();
-        let image = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "image")).unwrap();
-        assert!((column.layout.content_rect.h - expected_content).abs() < 0.1, "{:?}", column.layout);
-        assert!((image.layout.content_rect.h - expected_content).abs() < 0.1, "{:?}", image.layout);
+        let doc = parse_and_layout(
+            &format!(
+                "<style>#row{{display:flex;width:600px;{parent_height}}}#text{{width:300px;height:300px}}#column{{width:300px;height:50%;padding-bottom:20px;box-sizing:border-box}}#frame,#inner{{height:100%;min-height:21px}}#inner{{position:relative}}img{{position:absolute;width:100%;height:100%;object-fit:cover}}</style><div id=row><div id=text></div><div id=column><div id=frame><div id=inner><img id=image width=640 height=480></div></div></div></div>"
+            ),
+            800.0,
+        );
+        let column = find_box(&doc.root, &|n| {
+            n.attributes.get("id").is_some_and(|s| s == "column")
+        })
+        .unwrap();
+        let image = find_box(&doc.root, &|n| {
+            n.attributes.get("id").is_some_and(|s| s == "image")
+        })
+        .unwrap();
+        assert!(
+            (column.layout.content_rect.h - expected_content).abs() < 0.1,
+            "{:?}",
+            column.layout
+        );
+        assert!(
+            (image.layout.content_rect.h - expected_content).abs() < 0.1,
+            "{:?}",
+            image.layout
+        );
     }
 }
 
 #[test]
 fn absolute_stretch_accounts_for_positive_and_negative_margins() {
-    let doc = parse_and_layout("<style>#outer{position:relative;width:1020px;height:390px}#box{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;margin:290px 175px -95px;padding:10px 65px;border:5px solid;box-sizing:border-box}#title{width:500px;height:120px}</style><div id=outer><div id=box><div id=title></div></div></div>", 1280.0);
-    let get = |id: &str| find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == id)).unwrap();
+    let doc = parse_and_layout(
+        "<style>#outer{position:relative;width:1020px;height:390px}#box{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;margin:290px 175px -95px;padding:10px 65px;border:5px solid;box-sizing:border-box}#title{width:500px;height:120px}</style><div id=outer><div id=box><div id=title></div></div></div>",
+        1280.0,
+    );
+    let get = |id: &str| {
+        find_box(&doc.root, &|n| {
+            n.attributes.get("id").is_some_and(|s| s == id)
+        })
+        .unwrap()
+    };
     let outer = get("outer").layout.content_rect;
     let rect = get("box").layout.border_rect;
     assert!((rect.w - 670.0).abs() < 0.1, "{rect:?}");
@@ -183,17 +385,38 @@ fn absolute_stretch_accounts_for_positive_and_negative_margins() {
 
 #[test]
 fn contents_text_wraps_beside_float() {
-    let doc = parse_and_layout("<style>#row{width:220px}time{float:left;width:35px;height:21px;margin-right:4px}a{display:contents}</style><div id=row><time>17:30</time><a>News text wraps beside the timestamp and continues below it.</a></div>", 500.0);
-    let row = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "row")).unwrap();
+    let doc = parse_and_layout(
+        "<style>#row{width:220px}time{float:left;width:35px;height:21px;margin-right:4px}a{display:contents}</style><div id=row><time>17:30</time><a>News text wraps beside the timestamp and continues below it.</a></div>",
+        500.0,
+    );
+    let row = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|s| s == "row")
+    })
+    .unwrap();
     let time = find_box(row, &|n| n.tag == "time").unwrap();
-    let first = row.layout.line_cache.first().expect("text should join the inline formatting context");
-    assert!(first.x >= time.layout.border_rect.right() + 3.9, "line {:?}, float {:?}", first.x, time.layout.border_rect);
+    let first = row
+        .layout
+        .line_cache
+        .first()
+        .expect("text should join the inline formatting context");
+    assert!(
+        first.x >= time.layout.border_rect.right() + 3.9,
+        "line {:?}, float {:?}",
+        first.x,
+        time.layout.border_rect
+    );
 }
 
 #[test]
 fn malformed_selector_list_does_not_generate_global_pseudo_boxes() {
-    let doc = parse_and_layout("<style>* zoom 1,:after{display:table;clear:both;content:''}</style><div id=target>Visible</div>", 500.0);
-    let node = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "target")).unwrap();
+    let doc = parse_and_layout(
+        "<style>* zoom 1,:after{display:table;clear:both;content:''}</style><div id=target>Visible</div>",
+        500.0,
+    );
+    let node = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|s| s == "target")
+    })
+    .unwrap();
     assert!(node.style.after_content.is_empty());
     assert!(node.children.iter().all(|n| n.tag != "::after"));
     for invalid in ["1", "-1", ".1", "#1", ".", "div?"] {
@@ -206,11 +429,16 @@ fn malformed_selector_list_does_not_generate_global_pseudo_boxes() {
 
 #[test]
 fn flex_clearfix_text_survives_repeated_layout() {
-    let mut doc = parse_html("<style>ul{display:flex}li::after{content:'';display:table;clear:both}</style><ul><li id=item><a>Accueil</a></li></ul>");
+    let mut doc = parse_html(
+        "<style>ul{display:flex}li::after{content:'';display:table;clear:both}</style><ul><li id=item><a>Accueil</a></li></ul>",
+    );
     let mut engine = LayoutEngine::new();
     for _ in 0..3 {
         engine.layout(&mut doc, 800.0);
-        let item = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "item")).unwrap();
+        let item = find_box(&doc.root, &|n| {
+            n.attributes.get("id").is_some_and(|s| s == "item")
+        })
+        .unwrap();
         fn has_lines(n: &WebCore) -> bool {
             !n.layout.line_cache.is_empty() || n.children.iter().any(has_lines)
         }
@@ -220,21 +448,41 @@ fn flex_clearfix_text_survives_repeated_layout() {
 
 #[test]
 fn indefinite_percentage_image_height_tracks_clamped_width() {
-    let doc = parse_and_layout("<style>.cover{width:65px}img{display:block;width:auto;height:100%;max-width:100%}</style><div class=cover><span><img id=cover width=650 height=870></span></div>", 800.0);
-    let image = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "cover")).unwrap();
+    let doc = parse_and_layout(
+        "<style>.cover{width:65px}img{display:block;width:auto;height:100%;max-width:100%}</style><div class=cover><span><img id=cover width=650 height=870></span></div>",
+        800.0,
+    );
+    let image = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|s| s == "cover")
+    })
+    .unwrap();
     assert!((image.layout.content_rect.w - 65.0).abs() < 0.1);
-    assert!((image.layout.content_rect.h - 87.0).abs() < 0.1, "{:?}", image.layout.content_rect);
+    assert!(
+        (image.layout.content_rect.h - 87.0).abs() < 0.1,
+        "{:?}",
+        image.layout.content_rect
+    );
 }
 
 #[test]
 fn inline_block_descendant_stays_with_positioned_container() {
-    let mut doc = parse_html("<style>*::after{content:'';display:table;clear:both}#outer{position:relative;margin-top:600px;width:320px;height:403px}a{position:absolute;right:0;top:6px;width:285px;height:382px}img{display:block;max-width:100%;height:auto}</style><div id=outer><a><span><img id=pic width=1181 height=1574></span></a></div>");
+    let mut doc = parse_html(
+        "<style>*::after{content:'';display:table;clear:both}#outer{position:relative;margin-top:600px;width:320px;height:403px}a{position:absolute;right:0;top:6px;width:285px;height:382px}img{display:block;max-width:100%;height:auto}</style><div id=outer><a><span><img id=pic width=1181 height=1574></span></a></div>",
+    );
     let mut engine = LayoutEngine::new();
     for _ in 0..3 {
         engine.layout(&mut doc, 800.0);
-        let image = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "pic")).unwrap();
+        let image = find_box(&doc.root, &|n| {
+            n.attributes.get("id").is_some_and(|s| s == "pic")
+        })
+        .unwrap();
         let anchor = find_box(&doc.root, &|n| n.tag == "a").unwrap();
-        assert!((image.layout.content_rect.y - anchor.layout.content_rect.y).abs() < 0.1, "image {:?}, anchor {:?}", image.layout.content_rect, anchor.layout.content_rect);
+        assert!(
+            (image.layout.content_rect.y - anchor.layout.content_rect.y).abs() < 0.1,
+            "image {:?}, anchor {:?}",
+            image.layout.content_rect,
+            anchor.layout.content_rect
+        );
     }
 }
 
@@ -242,18 +490,41 @@ fn inline_block_descendant_stays_with_positioned_container() {
 fn empty_inline_block_does_not_split_icon_row() {
     for nested in [false, true] {
         let items = "<i id=first></i> <i></i> <span id=empty></span> <i></i> <i id=last></i>";
-        let content = if nested { format!("<a>{items}</a>") } else { items.to_string() };
-        let doc = parse_and_layout(&format!("<style>body{{margin:0}}#row{{width:300px;text-align:right}}i{{display:inline-block;width:50px;height:50px}}#empty{{display:inline-block}}</style><div id=row>{content}</div>"), 500.0);
-        let get = |id: &str| find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == id)).unwrap();
+        let content = if nested {
+            format!("<a>{items}</a>")
+        } else {
+            items.to_string()
+        };
+        let doc = parse_and_layout(
+            &format!(
+                "<style>body{{margin:0}}#row{{width:300px;text-align:right}}i{{display:inline-block;width:50px;height:50px}}#empty{{display:inline-block}}</style><div id=row>{content}</div>"
+            ),
+            500.0,
+        );
+        let get = |id: &str| {
+            find_box(&doc.root, &|n| {
+                n.attributes.get("id").is_some_and(|s| s == id)
+            })
+            .unwrap()
+        };
         assert_eq!(get("empty").layout.content_rect.w, 0.0, "nested={nested}");
-        assert!((get("first").layout.border_rect.y - get("last").layout.border_rect.y).abs() < 0.1, "icons wrapped, nested={nested}");
+        assert!(
+            (get("first").layout.border_rect.y - get("last").layout.border_rect.y).abs() < 0.1,
+            "icons wrapped, nested={nested}"
+        );
     }
 }
 
 #[test]
 fn inline_size_containment_preserves_auto_block_size() {
-    let doc = parse_and_layout("<div id=box style='contain:inline-size'><div style='height:40px'></div></div>", 400.0);
-    let node = find_box(&doc.root, &|node| node.attributes.get("id").is_some_and(|id| id == "box")).unwrap();
+    let doc = parse_and_layout(
+        "<div id=box style='contain:inline-size'><div style='height:40px'></div></div>",
+        400.0,
+    );
+    let node = find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "box")
+    })
+    .unwrap();
     assert_eq!(node.layout.content_rect.h, 40.0);
 }
 
@@ -274,7 +545,11 @@ fn anonymous_blocks_only_inherit_inherited_properties() {
     inline.text = "text".into();
     parent.children.extend([block, inline]);
     crate::layout::block::wrap_mixed_children_in_anonymous_blocks(&mut parent);
-    let anon = parent.children.iter().find(|node| node.tag == "anonymous-block").unwrap();
+    let anon = parent
+        .children
+        .iter()
+        .find(|node| node.tag == "anonymous-block")
+        .unwrap();
     assert_eq!(anon.style.color, parent.style.color);
     assert_eq!(anon.style.font_size, parent.style.font_size);
     assert_eq!(anon.style.opacity, ComputedStyle::default().opacity);
@@ -312,21 +587,29 @@ fn anonymous_block_cleanup_handles_deep_trees_without_recursion() {
 #[test]
 fn rtl_table_columns_and_spanning_cells_follow_direction() {
     for collapse in ["separate", "collapse"] {
-        let page = |direction| format!(
-            "<style>body{{margin:0}}table{{direction:{direction};width:300px;table-layout:fixed;border-collapse:{collapse};border-spacing:4px}}td{{padding:0;height:20px}}</style><table id=t><tr><td id=a>A</td><td id=b>B</td><td id=c>C</td></tr><tr><td id=span colspan=2>Span</td><td id=d>D</td></tr></table>"
-        );
+        let page = |direction| {
+            format!(
+                "<style>body{{margin:0}}table{{direction:{direction};width:300px;table-layout:fixed;border-collapse:{collapse};border-spacing:4px}}td{{padding:0;height:20px}}</style><table id=t><tr><td id=a>A</td><td id=b>B</td><td id=c>C</td></tr><tr><td id=span colspan=2>Span</td><td id=d>D</td></tr></table>"
+            )
+        };
         let ltr = parse_and_layout(&page("ltr"), 600.0);
         let rtl = parse_and_layout(&page("rtl"), 600.0);
         let get = |root: &WebCore, id: &str| {
-            crate::dom::query_selector(root, &format!("#{id}")).unwrap().layout.border_rect
+            crate::dom::query_selector(root, &format!("#{id}"))
+                .unwrap()
+                .layout
+                .border_rect
         };
         let table = get(&rtl.root, "t");
         for id in ["a", "b", "c", "span", "d"] {
             let left = get(&ltr.root, id);
             let right = get(&rtl.root, id);
             assert!((left.w - right.w).abs() < 0.1);
-            assert!((right.x - (table.x + table.w - (left.x - get(&ltr.root, "t").x) - left.w)).abs() < 0.1,
-                "{collapse} {id}: {left:?} -> {right:?}");
+            assert!(
+                (right.x - (table.x + table.w - (left.x - get(&ltr.root, "t").x) - left.w)).abs()
+                    < 0.1,
+                "{collapse} {id}: {left:?} -> {right:?}"
+            );
         }
     }
 }
@@ -340,12 +623,20 @@ fn floated_auto_table_keeps_inline_images_on_one_max_content_line() {
     );
     let doc = renderer.load_html(&html, 800.0);
     let cell = crate::dom::query_selector(&doc.root, "#icons").unwrap();
-    assert_eq!(cell.layout.line_cache.len(), 1, "max-content table must not wrap its icons: {:?}", cell.layout);
+    assert_eq!(
+        cell.layout.line_cache.len(),
+        1,
+        "max-content table must not wrap its icons: {:?}",
+        cell.layout
+    );
 }
 
 #[test]
 fn subgrid_row_placement_cannot_create_implicit_tracks() {
-    let doc = parse_and_layout("<style>body{margin:0}#parent{display:grid;width:200px;grid-template-rows:40px}#sub{display:grid;grid-template-rows:subgrid}#child{grid-row:2 / 7}</style><div id=parent><div id=sub><div id=child>Item</div></div></div>", 800.0);
+    let doc = parse_and_layout(
+        "<style>body{margin:0}#parent{display:grid;width:200px;grid-template-rows:40px}#sub{display:grid;grid-template-rows:subgrid}#child{grid-row:2 / 7}</style><div id=parent><div id=sub><div id=child>Item</div></div></div>",
+        800.0,
+    );
     let sub = crate::dom::query_selector(&doc.root, "#sub").unwrap();
     let child = crate::dom::query_selector(&doc.root, "#child").unwrap();
     assert!((child.layout.border_rect.y - sub.layout.content_rect.y).abs() < 0.1);
@@ -359,21 +650,45 @@ fn single_row_select_uses_intrinsic_label_width_and_flex_stretch() {
     let select = crate::dom::query_selector(&doc.root, "#s").unwrap();
     assert!(select.style.height.is_auto());
     assert!(select.style.width.is_auto());
-    assert!((select.layout.border_rect.h - 40.0).abs() < 0.1, "{:?}", select.layout.border_rect);
-    assert!(select.layout.border_rect.w > 70.0 && select.layout.border_rect.w < 150.0, "{:?}", select.layout.border_rect);
+    assert!(
+        (select.layout.border_rect.h - 40.0).abs() < 0.1,
+        "{:?}",
+        select.layout.border_rect
+    );
+    assert!(
+        select.layout.border_rect.w > 70.0 && select.layout.border_rect.w < 150.0,
+        "{:?}",
+        select.layout.border_rect
+    );
 }
 
 #[test]
 fn block_align_content_centers_contents_as_a_unit() {
     for (alignment, offset) in [("center", 30.0), ("end", 60.0), ("space-around", 30.0)] {
-        let doc = parse_and_layout(&format!(
-            "<style>body{{margin:0}}#box{{height:100px;align-content:{alignment}}}#box div{{height:20px}}</style><section id=box><div id=a></div><div id=b></div></section>"
-        ), 800.0);
-        let get = |id: &str| find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|v| v == id)).unwrap().layout.border_rect;
-        assert!((get("a").y - get("box").y - offset).abs() < 0.1, "{alignment}");
+        let doc = parse_and_layout(
+            &format!(
+                "<style>body{{margin:0}}#box{{height:100px;align-content:{alignment}}}#box div{{height:20px}}</style><section id=box><div id=a></div><div id=b></div></section>"
+            ),
+            800.0,
+        );
+        let get = |id: &str| {
+            find_box(&doc.root, &|b| {
+                b.attributes.get("id").is_some_and(|v| v == id)
+            })
+            .unwrap()
+            .layout
+            .border_rect
+        };
+        assert!(
+            (get("a").y - get("box").y - offset).abs() < 0.1,
+            "{alignment}"
+        );
         assert!((get("b").y - get("a").y - 20.0).abs() < 0.1);
     }
-    let doc = parse_and_layout("<style>body{margin:0}button{display:block;width:160px;height:44px;padding:0;border:0}span{display:block;height:20px}</style><button id=box><span id=label>Search</span></button>", 800.0);
+    let doc = parse_and_layout(
+        "<style>body{margin:0}button{display:block;width:160px;height:44px;padding:0;border:0}span{display:block;height:20px}</style><button id=box><span id=label>Search</span></button>",
+        800.0,
+    );
     let button = crate::dom::query_selector(&doc.root, "#box").unwrap();
     let label = crate::dom::query_selector(&doc.root, "#label").unwrap();
     assert!((label.layout.border_rect.y - button.layout.content_rect.y - 12.0).abs() < 0.1);
@@ -386,20 +701,34 @@ fn button_label_wraps_by_default_in_narrow_container() {
     let button = crate::dom::query_selector(&doc.root, "#b").unwrap();
     let label = crate::dom::query_selector(&doc.root, "#label").unwrap();
     assert_eq!(label.style.white_space, WhiteSpace::Normal);
-    assert!(button.layout.border_rect.w >= 62.0 && button.layout.border_rect.w < 100.0, "{:?}", button.layout.border_rect);
+    assert!(
+        button.layout.border_rect.w >= 62.0 && button.layout.border_rect.w < 100.0,
+        "{:?}",
+        button.layout.border_rect
+    );
 }
 
 #[test]
 fn auto_width_flex_button_uses_fit_content_instead_of_parent_width() {
     for width in [2, 400] {
-        let doc = parse_and_layout(&format!(
-            "<style>body{{margin:0}}.parent{{width:{width}px;margin-left:100px}}\
+        let doc = parse_and_layout(
+            &format!(
+                "<style>body{{margin:0}}.parent{{width:{width}px;margin-left:100px}}\
              button{{display:flex;justify-content:flex-end;padding:0;border:0;min-width:0}}\
              span{{width:50px;flex-shrink:0}}i{{width:12px;flex-shrink:0}}</style>\
              <div class=parent><button id=button><span>Label</span><i></i></button></div>"
-        ), 800.0);
-        let button = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|v| v == "button")).unwrap();
-        assert!((button.layout.content_rect.w - 62.0).abs() < 0.1, "parent {width}: {:?}", button.layout.content_rect);
+            ),
+            800.0,
+        );
+        let button = find_box(&doc.root, &|b| {
+            b.attributes.get("id").is_some_and(|v| v == "button")
+        })
+        .unwrap();
+        assert!(
+            (button.layout.content_rect.w - 62.0).abs() < 0.1,
+            "parent {width}: {:?}",
+            button.layout.content_rect
+        );
         let label = find_box(button, &|b| b.tag == "span").unwrap();
         assert!((label.layout.border_rect.x - button.layout.content_rect.x).abs() < 0.1);
     }
@@ -413,12 +742,21 @@ fn blockified_button_intrinsics_do_not_depend_on_previous_geometry() {
              <button id='button'>{label}</button>"
         ));
         let mut engine = LayoutEngine::new();
-        let button = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|v| v == "button")).unwrap();
+        let button = find_box(&doc.root, &|b| {
+            b.attributes.get("id").is_some_and(|v| v == "button")
+        })
+        .unwrap();
         let cold_min = engine.min_content_width(button, 16.0, 16.0);
         let cold_max = engine.max_content_width(button, 16.0, 16.0);
-        assert!(cold_min > 0.0 && cold_max > cold_min, "{label}: {cold_min}, {cold_max}");
+        assert!(
+            cold_min > 0.0 && cold_max > cold_min,
+            "{label}: {cold_min}, {cold_max}"
+        );
         engine.layout(&mut doc, 600.0);
-        let button = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|v| v == "button")).unwrap();
+        let button = find_box(&doc.root, &|b| {
+            b.attributes.get("id").is_some_and(|v| v == "button")
+        })
+        .unwrap();
         assert!((engine.min_content_width(button, 16.0, 16.0) - cold_min).abs() < 0.1);
         assert!((engine.max_content_width(button, 16.0, 16.0) - cold_max).abs() < 0.1);
     }
@@ -437,15 +775,22 @@ fn nested_collapsed_bottom_margin_preserves_metadata_height() {
              <p id='intro'>Opening paragraph</p>"
         );
         let doc = parse_and_layout(&html, 600.0);
-        let get = |id: &str| find_box(&doc.root, &|b| {
-            b.attributes.get("id").is_some_and(|v| v == id)
-        }).unwrap().layout.border_rect;
+        let get = |id: &str| {
+            find_box(&doc.root, &|b| {
+                b.attributes.get("id").is_some_and(|v| v == id)
+            })
+            .unwrap()
+            .layout
+            .border_rect
+        };
         let metadata = get("metadata");
         let reading = get("reading");
         let intro = get("intro");
         assert!((metadata.h - 98.0).abs() < 0.1, "{direction}: {metadata:?}");
-        assert!((intro.y - reading.bottom() - 16.0).abs() < 0.1,
-            "{direction}: reading={reading:?}, intro={intro:?}");
+        assert!(
+            (intro.y - reading.bottom() - 16.0).abs() < 0.1,
+            "{direction}: reading={reading:?}, intro={intro:?}"
+        );
     }
 }
 
@@ -457,9 +802,19 @@ fn flex_items_reserve_min_width_of_percentage_width_children() {
          <ul><li id='one'><a>Home</a></li><li id='two'><a>Jobs</a></li></ul>",
         500.0,
     );
-    let one = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "one")).unwrap();
-    let two = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "two")).unwrap();
-    assert!(one.layout.border_rect.w >= 80.0, "{:?}", one.layout.border_rect);
+    let one = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "one")
+    })
+    .unwrap();
+    let two = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "two")
+    })
+    .unwrap();
+    assert!(
+        one.layout.border_rect.w >= 80.0,
+        "{:?}",
+        one.layout.border_rect
+    );
     assert!(two.layout.border_rect.x - one.layout.border_rect.x >= 80.0);
 }
 
@@ -474,8 +829,15 @@ fn stretch_width_fills_margin_box_and_supports_vendor_aliases() {
              </div>"
         );
         let doc = parse_and_layout(&html, 400.0);
-        let cover = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "cover")).unwrap();
-        assert!((cover.layout.border_rect.w - 200.0).abs() < 1.0, "{width}: {:?}", cover.layout.border_rect);
+        let cover = find_box(&doc.root, &|b| {
+            b.attributes.get("id").is_some_and(|id| id == "cover")
+        })
+        .unwrap();
+        assert!(
+            (cover.layout.border_rect.w - 200.0).abs() < 1.0,
+            "{width}: {:?}",
+            cover.layout.border_rect
+        );
     }
 }
 
@@ -488,8 +850,14 @@ fn logical_corner_radii_follow_direction_after_cascade() {
          #rtl{direction:rtl}</style><div id='ltr'></div><div id='rtl'></div>",
         200.0,
     );
-    let ltr = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "ltr")).unwrap();
-    let rtl = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "rtl")).unwrap();
+    let ltr = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "ltr")
+    })
+    .unwrap();
+    let rtl = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "rtl")
+    })
+    .unwrap();
     assert_eq!(ltr.style.border_top_left_radius, CssLength::Px(99.0));
     assert_eq!(ltr.style.border_top_right_radius, CssLength::Px(15.0));
     assert_eq!(rtl.style.border_top_right_radius, CssLength::Px(99.0));
@@ -512,8 +880,10 @@ fn negative_text_indent_does_not_expand_hidden_logo_intrinsic_width() {
         "#,
         1280.0,
     );
-    let logo = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "logo"))
-        .unwrap();
+    let logo = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "logo")
+    })
+    .unwrap();
     assert!((logo.layout.border_rect.w - 64.0).abs() < 1.0, "{logo:?}");
 }
 
@@ -617,7 +987,9 @@ fn absolute_auto_width_shrinks_to_explicit_child_width() {
         600.0,
     );
     let branding = find_box(&doc.root, &|b| {
-        b.attributes.get("class").is_some_and(|class| class == "branding")
+        b.attributes
+            .get("class")
+            .is_some_and(|class| class == "branding")
     })
     .unwrap();
     let intrinsic = LayoutEngine::new().max_content_width(branding, 16.0, 16.0);
@@ -938,8 +1310,18 @@ fn text_wrap_balance_rebalances_last_line_width() {
     assert!(
         balanced_last > normal_last + 20.0,
         "balanced text should avoid a short leftover line: normal={:?}, balanced={:?}",
-        normal.layout.line_cache.iter().map(|line| line.width).collect::<Vec<_>>(),
-        balanced.layout.line_cache.iter().map(|line| line.width).collect::<Vec<_>>()
+        normal
+            .layout
+            .line_cache
+            .iter()
+            .map(|line| line.width)
+            .collect::<Vec<_>>(),
+        balanced
+            .layout
+            .line_cache
+            .iter()
+            .map(|line| line.width)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1068,10 +1450,14 @@ fn unitless_calc_line_height_reserves_multiline_heading_space() {
         "#,
         360.0,
     );
-    let title = find_box(&doc.root, &|b| b.attributes.get("id") == Some(&"title".to_string()))
-        .unwrap();
-    let after = find_box(&doc.root, &|b| b.attributes.get("id") == Some(&"after".to_string()))
-        .unwrap();
+    let title = find_box(&doc.root, &|b| {
+        b.attributes.get("id") == Some(&"title".to_string())
+    })
+    .unwrap();
+    let after = find_box(&doc.root, &|b| {
+        b.attributes.get("id") == Some(&"after".to_string())
+    })
+    .unwrap();
     assert!(
         title.layout.content_rect.h >= 140.0,
         "unitless calc() must multiply the font size: {:?}",
@@ -2372,11 +2758,14 @@ fn break_inside_avoid_keeps_plain_wrapper_in_one_column() {
 /// items currently land at the same x (column 2); column 1 gets nothing.
 #[test]
 fn multicol_adjacent_forced_breaks_share_one_boundary() {
-    let doc = parse_and_layout(r#"
+    let doc = parse_and_layout(
+        r#"
         <style>body{margin:0} #cols{columns:3;column-gap:0;width:300px}
         #cols>div{height:40px;break-inside:avoid}</style>
         <div id=cols><div id=a style="break-after:column"></div>
-        <div id=b style="break-before:column"></div><div id=c></div></div>"#, 500.0);
+        <div id=b style="break-before:column"></div><div id=c></div></div>"#,
+        500.0,
+    );
     let a = find_by_id(&doc.root, "a").unwrap().layout.border_rect;
     let b = find_by_id(&doc.root, "b").unwrap().layout.border_rect;
     let c = find_by_id(&doc.root, "c").unwrap().layout.border_rect;
@@ -2388,12 +2777,15 @@ fn multicol_adjacent_forced_breaks_share_one_boundary() {
 
 #[test]
 fn multicol_balances_uneven_atomic_items_without_slack() {
-    let doc = parse_and_layout(r#"
+    let doc = parse_and_layout(
+        r#"
         <style>body{margin:0} .cols{columns:2;column-gap:0;width:200px}
         .cols>div{break-inside:avoid}</style>
         <div class=cols id=cols><div id=a style="height:80px"></div>
         <div id=b style="height:40px"></div><div id=c style="height:40px"></div>
-        <div id=d style="height:40px"></div></div>"#, 500.0);
+        <div id=d style="height:40px"></div></div>"#,
+        500.0,
+    );
     let a = find_by_id(&doc.root, "a").unwrap().layout.border_rect;
     let b = find_by_id(&doc.root, "b").unwrap().layout.border_rect;
     let c = find_by_id(&doc.root, "c").unwrap().layout.border_rect;
@@ -2406,12 +2798,17 @@ fn multicol_balances_uneven_atomic_items_without_slack() {
 #[test]
 fn multicol_balances_each_row_around_spanners() {
     for fill in ["balance", "auto"] {
-        let doc = parse_and_layout(&format!(r#"
+        let doc = parse_and_layout(
+            &format!(
+                r#"
             <style>body{{margin:0}} .cols{{columns:2;column-gap:0;width:200px;column-fill:{fill}}}
             .cols>div{{break-inside:avoid}}</style>
             <div class=cols><div id=a style="height:100px"></div>
             <div id=b style="height:100px"></div><div id=span style="column-span:all;height:20px"></div>
-            <div id=c style="height:10px"></div><div id=d style="height:10px"></div></div>"#), 500.0);
+            <div id=c style="height:10px"></div><div id=d style="height:10px"></div></div>"#
+            ),
+            500.0,
+        );
         let a = find_by_id(&doc.root, "a").unwrap().layout.border_rect;
         let b = find_by_id(&doc.root, "b").unwrap().layout.border_rect;
         let span = find_by_id(&doc.root, "span").unwrap().layout.border_rect;

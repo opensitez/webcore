@@ -95,7 +95,11 @@ impl Declarations {
     }
 
     pub fn get(&self, prop: &str) -> Option<&String> {
-        self.entries.iter().rev().find(|(k, _)| k == prop).map(|(_, v)| v)
+        self.entries
+            .iter()
+            .rev()
+            .find(|(k, _)| k == prop)
+            .map(|(_, v)| v)
     }
 
     pub fn contains_key(&self, prop: &str) -> bool {
@@ -189,15 +193,15 @@ pub struct CssRule {
     /// declaration beat every layered one. Kept on the rule so the cascade's
     /// sort is a field read rather than a name lookup per comparison.
     pub layer_rank: u32,
-    pub media_condition: String,     // non-empty if inside @media
+    pub media_condition: super::media_query::MediaConditions,
     pub container_condition: String, // non-empty if inside @container
     /// Headers nested inside `container_condition`, from outermost to innermost.
     pub nested_container_conditions: Vec<String>,
     pub container_name: String, // optional container name (empty = unnamed)
     pub scope_selector: Option<CssSelector>, // @scope root selector, when present
     pub scope_limit_selector: Option<CssSelector>, // @scope limit selector from `to (...)`
-    pub scopes: Vec<ScopeFrame>,             // Nested scope frames, from outermost to innermost
-    pub original_selector: String,           // verbatim selector text for roundtrip
+    pub scopes: Vec<ScopeFrame>, // Nested scope frames, from outermost to innermost
+    pub original_selector: String, // verbatim selector text for roundtrip
     pub is_hover: bool,
     /// True if any declaration value contains `var(` — needs slow-path resolution.
     pub has_var_refs: bool,
@@ -226,7 +230,7 @@ impl Default for CssRule {
             compiled_decls: Vec::new(),
             compiled_important: Vec::new(),
             specificity: 0,
-            media_condition: String::new(),
+            media_condition: super::media_query::MediaConditions::default(),
             container_condition: String::new(),
             nested_container_conditions: Vec::new(),
             container_name: String::new(),

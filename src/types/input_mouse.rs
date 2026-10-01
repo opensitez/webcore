@@ -57,12 +57,7 @@ impl Document {
         evt.button = button;
         let hit_result = crate::layout::hit_test::point_to_hit(&self.root, doc_pt, button);
         let mut hit_node_id: u32 = hit_result.as_ref().map(|h| h.node_id).unwrap_or(0);
-        if self
-            .get_node(hit_node_id)
-            .is_some_and(|node| !is_pointer_owner(node))
-        {
-            hit_node_id = normalize_pointer_target(&self.root, hit_node_id);
-        }
+        hit_node_id = normalize_pointer_target(&self.root, hit_node_id);
         // For inline links: check if the hit point is inside an inline run
         // with an href. If so, find the ancestor <a> element for hover styling.
         if let Some(ref hr) = hit_result {
@@ -675,7 +670,7 @@ impl Document {
             _ => {}
         }
 
-        let (handled, mut evt) = self.dispatch_input_event(evt);
+        let (handled, evt) = self.dispatch_input_event(evt);
         if handled {
             redraw = true;
         }
@@ -694,7 +689,7 @@ impl Document {
         // DOM state (class toggles, etc.), not merely for hover/active pointer updates.
         if handled {
             let width = self.root.layout.last_containing_width.max(0.0);
-            self.recascade();
+            self.style_dirty = true;
             LayoutEngine::new().layout(self, width);
         }
 
@@ -710,14 +705,7 @@ impl Document {
         let raw_new_id: u32 = crate::layout::hit_test::point_to_hit(&self.root, doc_pt, 0)
             .map(|h| h.node_id)
             .unwrap_or(0);
-        let new_id = if self
-            .get_node(raw_new_id)
-            .is_some_and(|node| !is_pointer_owner(node))
-        {
-            normalize_pointer_target(&self.root, raw_new_id)
-        } else {
-            raw_new_id
-        };
+        let new_id = normalize_pointer_target(&self.root, raw_new_id);
         let old_id = self.hovered_box;
         if new_id == old_id {
             return false;
@@ -773,11 +761,6 @@ impl Document {
             if self.svg_trigger_event(old_id, "pointerleave") {
                 redraw = true;
             }
-            let mut e = crate::dom::events::DomEvent::new("mouseout", old_id);
-            e.related_target = new_id;
-            e.client_x = client_pos.0;
-            e.client_y = client_pos.1;
-            self.dispatch_dom_event(&mut e);
         }
         if new_id != 0 {
             if self.svg_trigger_event(new_id, "mouseover") {
@@ -792,11 +775,6 @@ impl Document {
             if self.svg_trigger_event(new_id, "pointerenter") {
                 redraw = true;
             }
-            let mut e = crate::dom::events::DomEvent::new("mouseover", new_id);
-            e.related_target = old_id;
-            e.client_x = client_pos.0;
-            e.client_y = client_pos.1;
-            self.dispatch_dom_event(&mut e);
         }
         redraw
     }
@@ -811,54 +789,22 @@ fn normalize_pointer_target(root: &WebCore, target_id: u32) -> u32 {
         node: &WebCore,
         target_id: u32,
         nearest_element: u32,
-        nearest_owner: u32,
     ) -> Option<u32> {
         let current_element = if node.is_element() && node.node_id != 0 {
             node.node_id
         } else {
             nearest_element
         };
-        let current_owner = if node.node_id != 0 && is_pointer_owner(node) {
-            node.node_id
-        } else {
-            nearest_owner
-        };
         if node.node_id == target_id {
-            if current_owner != 0 {
-                return Some(current_owner);
-            }
-            return if node.is_element() {
-                Some(node.node_id)
-            } else if current_element != 0 {
-                Some(current_element)
-            } else {
-                Some(target_id)
-            };
+            return Some(if current_element != 0 { current_element } else { target_id });
         }
         for child in &node.children {
-            if let Some(found) = walk(child, target_id, current_element, current_owner) {
+            if let Some(found) = walk(child, target_id, current_element) {
                 return Some(found);
             }
         }
         None
     }
 
-    walk(root, target_id, 0, 0).unwrap_or(target_id)
-}
-
-fn is_pointer_owner(node: &WebCore) -> bool {
-    matches!(
-        node.tag.as_str(),
-        "a" | "button"
-            | "input"
-            | "select"
-            | "textarea"
-            | "label"
-            | "summary"
-            | "option"
-            | "video"
-            | "audio"
-    ) || node.attributes.contains_key("onclick")
-        || node.attributes.contains_key("role")
-        || node.attributes.contains_key("tabindex")
+    walk(root, target_id, 0).unwrap_or(target_id)
 }

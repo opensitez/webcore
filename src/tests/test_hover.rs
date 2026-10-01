@@ -101,9 +101,11 @@ fn hover_dirty_walk_keeps_type_index_after_skipping_siblings() {
         &doc.hover_sensitive_nodes,
     );
     assert!(find_by_id(&doc.root, "third").unwrap().cascade_dirty);
-    assert!(find_descendant_tag(find_by_id(&doc.root, "third").unwrap(), "span")
-        .unwrap()
-        .cascade_dirty);
+    assert!(
+        find_descendant_tag(find_by_id(&doc.root, "third").unwrap(), "span")
+            .unwrap()
+            .cascade_dirty
+    );
     assert!(!find_by_id(&doc.root, "first").unwrap().cascade_dirty);
     assert!(!find_by_id(&doc.root, "fourth").unwrap().cascade_dirty);
 }
@@ -112,19 +114,31 @@ fn hover_dirty_walk_keeps_type_index_after_skipping_siblings() {
 fn directory_links_keep_lines_after_hover_recascade() {
     let mut html = String::from("<h1>Directory</h1><ul>");
     for i in 0..172 {
-        html.push_str(&format!("<li id='item{i}'><a href='file{i}.html'>File {i}</a></li>\n"));
+        html.push_str(&format!(
+            "<li id='item{i}'><a href='file{i}.html'>File {i}</a></li>\n"
+        ));
     }
     html.push_str("</ul>");
     let mut doc = layout_html(&html, 1280.0);
     let mut engine = LayoutEngine::new();
     engine.viewport_h = 820.0;
     for hovered in [3, 15, 20, 3] {
-        let r = find_by_id(&doc.root, &format!("item{hovered}")).unwrap().layout.border_rect;
-        doc.process_mouse_event(crate::dom::HtmlEventType::MouseMove, (r.x + 10.0, r.y + 5.0), 0);
+        let r = find_by_id(&doc.root, &format!("item{hovered}"))
+            .unwrap()
+            .layout
+            .border_rect;
+        doc.process_mouse_event(
+            crate::dom::HtmlEventType::MouseMove,
+            (r.x + 10.0, r.y + 5.0),
+            0,
+        );
         engine.layout(&mut doc, 1280.0);
         for i in 0..172 {
             let item = find_by_id(&doc.root, &format!("item{i}")).unwrap();
-            assert!(!item.layout.line_cache.is_empty(), "item {i} lost its lines after hovering {hovered}");
+            assert!(
+                !item.layout.line_cache.is_empty(),
+                "item {i} lost its lines after hovering {hovered}"
+            );
         }
     }
 }
@@ -157,11 +171,16 @@ fn coalesced_pointer_moves_clear_the_last_painted_hover() {
     assert_eq!(doc.prev_hovered_box, applied);
     engine.layout(&mut doc, 800.0);
     for id in ["a", "b"] {
-        assert_eq!(find_by_id(&doc.root, id).unwrap().style.background_color,
-            Color::rgb(255, 255, 255), "{id} retained an obsolete hover");
+        assert_eq!(
+            find_by_id(&doc.root, id).unwrap().style.background_color,
+            Color::rgb(255, 255, 255),
+            "{id} retained an obsolete hover"
+        );
     }
-    assert_eq!(find_by_id(&doc.root, "c").unwrap().style.background_color,
-        Color::rgb(255, 0, 0));
+    assert_eq!(
+        find_by_id(&doc.root, "c").unwrap().style.background_color,
+        Color::rgb(255, 0, 0)
+    );
 }
 
 #[test]

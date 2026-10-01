@@ -1,7 +1,7 @@
 //! Native SVG rasterization.
 
 use super::geometry::{
-    AlignX, AlignY, PreserveAspectRatio, SvgLength, SvgViewBox, intrinsic_size_from_markup,
+    AlignX, AlignY, PreserveAspectRatio, SvgLength, SvgViewBox, intrinsic_size,
     parse_preserve_aspect_ratio, parse_svg_length, parse_view_box,
 };
 use super::path::{
@@ -18,7 +18,10 @@ use crate::css::{
 };
 use crate::svg::animation::{WEBCORE_ANIMATED_ATTR_NS, WEBCORE_ANIMATED_ATTR_PREFIX};
 use crate::svg::condition;
-use crate::types::{Color, Direction, Overflow, SPECIFIED_SVG_FILL, SPECIFIED_SVG_STROKE, SPECIFIED_SVG_STROKE_WIDTH, WebCore};
+use crate::types::{
+    Color, Direction, Overflow, SPECIFIED_SVG_FILL, SPECIFIED_SVG_STROKE,
+    SPECIFIED_SVG_STROKE_WIDTH, WebCore,
+};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use tiny_skia::{
@@ -120,7 +123,7 @@ pub fn rasterize_svg_to_rgba(svg: &str, width: u32, height: u32) -> Option<Vec<u
         &doc,
         width,
         height,
-        intrinsic_size_from_markup(svg),
+        intrinsic_size(&doc).unwrap_or((0.0, 0.0)),
         Color::BLACK,
         Some(Color::BLACK),
         None,
@@ -238,10 +241,25 @@ pub(crate) fn rasterize_svg_document_to_rgba_with_dom(
 }
 
 pub fn rasterize_svg_intrinsic(svg: &str) -> Option<(Vec<u8>, u32, u32)> {
-    let (w, h) = intrinsic_size_from_markup(svg);
+    let doc = parse_svg_document(svg).ok()?;
+    rasterize_svg_document_intrinsic(&doc)
+}
+
+pub fn rasterize_svg_document_intrinsic(doc: &SvgDocument) -> Option<(Vec<u8>, u32, u32)> {
+    let intrinsic = intrinsic_size(&doc).unwrap_or((0.0, 0.0));
+    let (w, h) = intrinsic;
     let w = w.ceil().max(1.0) as u32;
     let h = h.ceil().max(1.0) as u32;
-    rasterize_svg_to_rgba(svg, w, h).map(|rgba| (rgba, w, h))
+    rasterize_svg_document_to_rgba(
+        &doc,
+        w,
+        h,
+        intrinsic,
+        Color::BLACK,
+        Some(Color::BLACK),
+        None,
+    )
+    .map(|rgba| (rgba, w, h))
 }
 
 fn collect_id_nodes<'a>(node: &'a SvgNode, ids: &mut HashMap<String, &'a SvgNode>) {
@@ -2145,7 +2163,10 @@ fn apply_dom_computed_style(
     if specified_svg_paint & SPECIFIED_SVG_STROKE_WIDTH != 0 {
         // SVG percentages use the normalized diagonal of the current viewport.
         let basis = state.viewport_width.hypot(state.viewport_height) / std::f32::consts::SQRT_2;
-        state.stroke_width = style.rare().svg_stroke_width.as_ref()
+        state.stroke_width = style
+            .rare()
+            .svg_stroke_width
+            .as_ref()
             .map(|width| width.resolve(font_px, basis, font_px).max(0.0))
             .unwrap_or(1.0);
     }
@@ -4752,6 +4773,17 @@ fn points_path_from_pairs(points: &[(f32, f32)], close: bool) -> Option<Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn intrinsic_raster_matches_explicit_size_for_fractional_dimensions() {
+        let svg = r#"<svg width="2.5" height="1.5" xmlns="http://www.w3.org/2000/svg"><rect width="1.5" height="1" fill="red"/></svg>"#;
+        let (intrinsic, width, height) = rasterize_svg_intrinsic(svg).expect("intrinsic raster");
+        assert_eq!((width, height), (3, 2));
+        assert_eq!(
+            intrinsic,
+            rasterize_svg_to_rgba(svg, width, height).expect("explicit raster")
+        );
+    }
 
     fn has_painted_pixel(data: &[u8]) -> bool {
         data.chunks_exact(4).any(|p| p[3] != 0)

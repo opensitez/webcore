@@ -9,16 +9,102 @@
 //! This means scrolling is always instant — we just move pre-rasterized
 //! tiles around. Only content changes trigger rasterization.
 
-use crate::types::{Rect, WebCore};
 use super::display_list::{DisplayList, PaintCmd};
 use super::tiles::TileManager;
+use crate::types::{Rect, WebCore};
 
 pub struct PaintSegment {
     pub list: DisplayList,
     pub fixed: bool,
     pub backdrop_dependent: bool,
     pub tiles: TileManager,
-    pub fixed_surface: Option<(tiny_skia::Pixmap, f32)>,
+    pub fixed_surface: Option<FixedSurface>,
+}
+
+/// A viewport layer cropped to the pixels that can affect compositing.
+pub struct FixedSurface {
+    pub image: tiny_skia::Pixmap,
+    pub x: i32,
+    pub y: i32,
+    pub scale: f32,
+    viewport_width: u32,
+    viewport_height: u32,
+}
+
+impl FixedSurface {
+    pub fn from_viewport(surface: tiny_skia::Pixmap, scale: f32) -> Self {
+        let viewport_width = surface.width();
+        let viewport_height = surface.height();
+        let mut left = viewport_width;
+        let mut top = viewport_height;
+        let mut right = 0;
+        let mut bottom = 0;
+        for (index, pixel) in surface.data().chunks_exact(4).enumerate() {
+            if pixel[3] != 0 {
+                let x = index as u32 % viewport_width;
+                let y = index as u32 / viewport_width;
+                left = left.min(x);
+                top = top.min(y);
+                right = right.max(x + 1);
+                bottom = bottom.max(y + 1);
+            }
+        }
+        if right == viewport_width && bottom == viewport_height && left == 0 && top == 0 {
+            return Self {
+                image: surface,
+                x: 0,
+                y: 0,
+                scale,
+                viewport_width,
+                viewport_height,
+            };
+        }
+        if right <= left || bottom <= top {
+            return Self {
+                image: tiny_skia::Pixmap::new(1, 1).expect("one-pixel fixed surface"),
+                x: 0,
+                y: 0,
+                scale,
+                viewport_width,
+                viewport_height,
+            };
+        }
+        let width = right - left;
+        let height = bottom - top;
+        let mut image = tiny_skia::Pixmap::new(width, height).expect("bounded fixed surface");
+        let row_bytes = width as usize * 4;
+        for row in 0..height as usize {
+            let src = ((top as usize + row) * viewport_width as usize + left as usize) * 4;
+            let dst = row * row_bytes;
+            image.data_mut()[dst..dst + row_bytes]
+                .copy_from_slice(&surface.data()[src..src + row_bytes]);
+        }
+        Self {
+            image,
+            x: left as i32,
+            y: top as i32,
+            scale,
+            viewport_width,
+            viewport_height,
+        }
+    }
+
+    pub fn matches(&self, width: u32, height: u32, scale: f32) -> bool {
+        self.viewport_width == width
+            && self.viewport_height == height
+            && (self.scale - scale).abs() < 0.001
+    }
+
+    pub fn composite(&self, target: &mut tiny_skia::Pixmap) {
+        target.draw_pixmap(
+            self.x,
+            self.y,
+            self.image.as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            tiny_skia::Transform::identity(),
+            None,
+        );
+    }
 }
 
 /// Ordered document and viewport paint layers. Splitting at fixed-position
@@ -37,10 +123,15 @@ impl PaintSegments {
         for cmd in &list.commands {
             match cmd {
                 PaintCmd::BeginFixedPosition => {
-                    if inside_fixed || effect_depth != 0 || clips.iter().any(|rect: &Rect| {
-                        rect.x > 0.0 || rect.y > 0.0 || rect.right() < viewport_w
-                            || rect.bottom() + 0.5 < doc_h
-                    }) {
+                    if inside_fixed
+                        || effect_depth != 0
+                        || clips.iter().any(|rect: &Rect| {
+                            rect.x > 0.0
+                                || rect.y > 0.0
+                                || rect.right() < viewport_w
+                                || rect.bottom() + 0.5 < doc_h
+                        })
+                    {
                         return None;
                     }
                     inside_fixed = true;
@@ -54,8 +145,11 @@ impl PaintSegments {
                 }
                 _ if inside_fixed => {}
                 PaintCmd::PushClip { rect, .. } => clips.push(*rect),
-                PaintCmd::PopClip => { clips.pop(); }
+                PaintCmd::PopClip => {
+                    clips.pop();
+                }
                 PaintCmd::PushClipPath { .. }
+                | PaintCmd::PushClipSvgPath { .. }
                 | PaintCmd::PushTransform { .. }
                 | PaintCmd::PushOpacity { .. }
                 | PaintCmd::PushFilter { .. }
@@ -114,7 +208,11 @@ impl PaintSegments {
             }
         }
         segments.retain(|segment| {
-            segment.list.commands.iter().any(|cmd| !paint_segment_structure(cmd))
+            segment
+                .list
+                .commands
+                .iter()
+                .any(|cmd| !paint_segment_structure(cmd))
         });
         for segment in &mut segments {
             segment.backdrop_dependent = segment.list.commands.iter().any(|cmd| {
@@ -168,6 +266,16 @@ impl PaintSegments {
                 new.fixed_surface = old.fixed_surface;
                 retained += 1;
             } else {
+                if !new.fixed
+                    && !(new.backdrop_dependent && backdrop_changed)
+                    && let Some(damage) = simple_paint_damage(&old.list, &new.list, old.tiles.scale)
+                {
+                    new.tiles = old.tiles;
+                    for rect in damage {
+                        new.tiles.invalidate_rect(&rect);
+                    }
+                    retained += 1;
+                }
                 backdrop_changed = true;
             }
         }
@@ -175,18 +283,152 @@ impl PaintSegments {
     }
 }
 
+/// Only paint commands with bounded damage can retain tiles outside their
+/// changed bounds. Transforms and backdrop-dependent effects take the full path.
+fn simple_paint_damage(old: &DisplayList, new: &DisplayList, scale: f32) -> Option<Vec<Rect>> {
+    if old.commands.len() != new.commands.len() {
+        return inserted_or_removed_paint_damage(old, new, scale);
+    }
+    let mut damage = Vec::new();
+    for (before, after) in old.commands.iter().zip(&new.commands) {
+        if before == after {
+            if matches!(
+                before,
+                PaintCmd::PushTransform { .. }
+                    | PaintCmd::PushFilter { .. }
+                    | PaintCmd::PushMask { .. }
+                    | PaintCmd::PushBlendMode { .. }
+                    | PaintCmd::PushTextGradient { .. }
+                    | PaintCmd::BackdropFilter { .. }
+            ) {
+                return None;
+            }
+            continue;
+        }
+        damage.push(bounded_command_damage(before, scale)?);
+        damage.push(bounded_command_damage(after, scale)?);
+    }
+    Some(damage)
+}
+
+fn inserted_or_removed_paint_damage(
+    old: &DisplayList,
+    new: &DisplayList,
+    scale: f32,
+) -> Option<Vec<Rect>> {
+    let unsafe_effect = |cmd: &PaintCmd| {
+        matches!(
+            cmd,
+            PaintCmd::PushTransform { .. }
+                | PaintCmd::PushFilter { .. }
+                | PaintCmd::PushMask { .. }
+                | PaintCmd::PushBlendMode { .. }
+                | PaintCmd::PushTextGradient { .. }
+                | PaintCmd::BackdropFilter { .. }
+        )
+    };
+    if old.commands.iter().chain(&new.commands).any(unsafe_effect) {
+        return None;
+    }
+
+    let prefix = old
+        .commands
+        .iter()
+        .zip(&new.commands)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let suffix = old.commands[prefix..]
+        .iter()
+        .rev()
+        .zip(new.commands[prefix..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let old_changed = &old.commands[prefix..old.commands.len() - suffix];
+    let new_changed = &new.commands[prefix..new.commands.len() - suffix];
+    let mut damage = Vec::with_capacity(old_changed.len() + new_changed.len());
+    for cmd in old_changed.iter().chain(new_changed) {
+        damage.push(bounded_command_damage(cmd, scale)?);
+    }
+    Some(damage)
+}
+
+fn bounded_command_damage(cmd: &PaintCmd, scale: f32) -> Option<Rect> {
+    let (rect, inflate) = match cmd {
+        PaintCmd::FillRect { rect, .. } => (*rect, 1.0),
+        PaintCmd::Border { rect, .. }
+        | PaintCmd::BorderImage { rect, .. }
+        | PaintCmd::Image { rect, .. }
+        | PaintCmd::ResizeGrip { rect, .. } => (*rect, 2.0),
+        PaintCmd::Gradient { clip, .. } | PaintCmd::BackgroundImage { clip, .. } => (*clip, 2.0),
+        PaintCmd::Outline { rect, width, .. } => (*rect, width.max(0.0) * 0.5 + 2.0),
+        PaintCmd::BoxShadow {
+            rect,
+            offset_x,
+            offset_y,
+            blur,
+            spread,
+            inset,
+            ..
+        } => (
+            box_shadow_damage_rect(*rect, *offset_x, *offset_y, *blur, *spread, *inset, scale),
+            1.0,
+        ),
+        _ => return None,
+    };
+    Some(Rect::new(
+        rect.x - inflate,
+        rect.y - inflate,
+        rect.w + inflate * 2.0,
+        rect.h + inflate * 2.0,
+    ))
+}
+
+fn box_shadow_damage_rect(
+    rect: Rect,
+    offset_x: f32,
+    offset_y: f32,
+    blur: f32,
+    spread: f32,
+    inset: bool,
+    scale: f32,
+) -> Rect {
+    if inset {
+        return rect;
+    }
+    // Replay allocates a blurred shadow with 4 * blur + 4 device pixels of
+    // padding. Include the original box because replay clears its interior.
+    let blur_pad = (blur.max(0.0) * 4.0 + 4.0) / scale.max(0.001);
+    let reach = spread.abs() + blur_pad;
+    let left = rect.x.min(rect.x + offset_x) - reach;
+    let top = rect.y.min(rect.y + offset_y) - reach;
+    let right = rect.right().max(rect.right() + offset_x) + reach;
+    let bottom = rect.bottom().max(rect.bottom() + offset_y) + reach;
+    Rect::new(left, top, right - left, bottom - top)
+}
+
 fn paint_segment_structure(cmd: &PaintCmd) -> bool {
-    matches!(cmd,
-        PaintCmd::BeginFixedPosition | PaintCmd::EndFixedPosition
-        | PaintCmd::PushClip { .. } | PaintCmd::PopClip
-        | PaintCmd::PushClipPath { .. }
-        | PaintCmd::PushTransform { .. } | PaintCmd::PopTransform
-        | PaintCmd::PushOpacity { .. } | PaintCmd::PopOpacity
-        | PaintCmd::PushFilter { .. } | PaintCmd::PopFilter
-        | PaintCmd::PushMask { .. } | PaintCmd::PopMask
-        | PaintCmd::PushBlendMode { .. } | PaintCmd::PopBlendMode
-        | PaintCmd::PushTextGradient { .. } | PaintCmd::PopTextGradient
-        | PaintCmd::BeginStackingContext { .. } | PaintCmd::EndStackingContext
+    matches!(
+        cmd,
+        PaintCmd::BeginFixedPosition
+            | PaintCmd::EndFixedPosition
+            | PaintCmd::PushClip { .. }
+            | PaintCmd::PopClip
+            | PaintCmd::PushClipPath { .. }
+            | PaintCmd::PushClipSvgPath { .. }
+            | PaintCmd::PushTransform { .. }
+            | PaintCmd::PopTransform
+            | PaintCmd::PushOpacity { .. }
+            | PaintCmd::PopOpacity
+            | PaintCmd::PushFilter { .. }
+            | PaintCmd::PopFilter
+            | PaintCmd::PushMask { .. }
+            | PaintCmd::PopMask
+            | PaintCmd::PushBlendMode { .. }
+            | PaintCmd::PopBlendMode
+            | PaintCmd::PushTextGradient { .. }
+            | PaintCmd::PopTextGradient
+            | PaintCmd::BeginStackingContext { .. }
+            | PaintCmd::EndStackingContext
     )
 }
 
@@ -587,6 +829,41 @@ mod tests {
     use super::*;
     use crate::load_html;
 
+    #[test]
+    fn cropped_fixed_surface_composites_identically_to_full_viewport() {
+        let mut source = tiny_skia::Pixmap::new(100, 60).unwrap();
+        for y in 8..18usize {
+            for x in 30..50usize {
+                let offset = (y * 100 + x) * 4;
+                source.data_mut()[offset..offset + 4].copy_from_slice(&[80, 20, 10, 128]);
+            }
+        }
+        let mut expected = tiny_skia::Pixmap::new(100, 60).unwrap();
+        expected.fill(tiny_skia::Color::from_rgba8(10, 30, 90, 255));
+        let mut actual = expected.clone();
+        expected.draw_pixmap(
+            0,
+            0,
+            source.as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            tiny_skia::Transform::identity(),
+            None,
+        );
+        let retained = FixedSurface::from_viewport(source, 2.0);
+        assert_eq!((retained.x, retained.y), (30, 8));
+        assert_eq!((retained.image.width(), retained.image.height()), (20, 10));
+        assert!(retained.matches(100, 60, 2.0));
+        assert!(!retained.matches(100, 60, 1.0));
+        retained.composite(&mut actual);
+        assert_eq!(actual.data(), expected.data());
+
+        let empty = FixedSurface::from_viewport(tiny_skia::Pixmap::new(100, 60).unwrap(), 1.0);
+        assert_eq!((empty.image.width(), empty.image.height()), (1, 1));
+        let before = actual.clone();
+        empty.composite(&mut actual);
+        assert_eq!(actual.data(), before.data());
+    }
+
     fn two_layer_paint_list(
         document_color: crate::types::Color,
         fixed_color: crate::types::Color,
@@ -615,24 +892,506 @@ mod tests {
 
         let list = two_layer_paint_list(Color::WHITE, Color::rgb(0, 0, 255));
         let mut previous = PaintSegments::from_display_list(&list, 200.0, 100.0).unwrap();
-        let document = previous.segments.iter_mut().find(|segment| !segment.fixed).unwrap();
-        document.tiles.update_viewport(Rect::new(0.0, 0.0, 100.0, 100.0), 1.0);
+        let document = previous
+            .segments
+            .iter_mut()
+            .find(|segment| !segment.fixed)
+            .unwrap();
+        document
+            .tiles
+            .update_viewport(Rect::new(0.0, 0.0, 100.0, 100.0), 1.0);
         assert!(document.tiles.ensure_tile(0, 0));
         document.tiles.mark_clean(0, 0);
-        previous.segments.iter_mut().find(|segment| segment.fixed).unwrap().fixed_surface =
-            Some((tiny_skia::Pixmap::new(100, 100).unwrap(), 1.0));
+        previous
+            .segments
+            .iter_mut()
+            .find(|segment| segment.fixed)
+            .unwrap()
+            .fixed_surface = Some(FixedSurface::from_viewport(
+            tiny_skia::Pixmap::new(100, 100).unwrap(),
+            1.0,
+        ));
 
         let changed_fixed = two_layer_paint_list(Color::WHITE, Color::rgb(255, 0, 0));
         let mut rebuilt = PaintSegments::from_display_list(&changed_fixed, 200.0, 100.0).unwrap();
         rebuilt.retain_unchanged_rasters(previous);
-        let document = rebuilt.segments.iter().find(|segment| !segment.fixed).unwrap();
+        let document = rebuilt
+            .segments
+            .iter()
+            .find(|segment| !segment.fixed)
+            .unwrap();
         assert!(!document.tiles.tiles.get(&(0, 0)).unwrap().dirty);
-        assert!(rebuilt.segments.iter().find(|segment| segment.fixed).unwrap().fixed_surface.is_none());
+        assert!(
+            rebuilt
+                .segments
+                .iter()
+                .find(|segment| segment.fixed)
+                .unwrap()
+                .fixed_surface
+                .is_none()
+        );
 
         let changed_document = two_layer_paint_list(Color::rgb(0, 255, 0), Color::rgb(255, 0, 0));
-        let mut rebuilt_again = PaintSegments::from_display_list(&changed_document, 200.0, 100.0).unwrap();
+        let mut rebuilt_again =
+            PaintSegments::from_display_list(&changed_document, 200.0, 100.0).unwrap();
         rebuilt_again.retain_unchanged_rasters(rebuilt);
-        assert!(rebuilt_again.segments.iter().find(|segment| !segment.fixed).unwrap().tiles.tiles.is_empty());
+        assert!(
+            rebuilt_again
+                .segments
+                .iter()
+                .find(|segment| !segment.fixed)
+                .unwrap()
+                .tiles
+                .tiles
+                .get(&(0, 0))
+                .unwrap()
+                .dirty
+        );
+    }
+
+    #[test]
+    fn local_fill_change_keeps_distant_document_tiles_clean() {
+        use crate::types::Color;
+
+        let mut list = DisplayList::new();
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(0.0, 0.0, 1200.0, 100.0),
+            color: Color::WHITE,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(10.0, 10.0, 40.0, 40.0),
+            color: Color::rgb(0, 0, 255),
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        list.push(PaintCmd::BeginFixedPosition);
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+            color: Color::rgb(0, 0, 0),
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        list.push(PaintCmd::EndFixedPosition);
+        let mut previous = PaintSegments::from_display_list(&list, 1200.0, 100.0).unwrap();
+        let document = previous
+            .segments
+            .iter_mut()
+            .find(|segment| !segment.fixed)
+            .unwrap();
+        for tx in [0, 1] {
+            document.tiles.ensure_tile(tx, 0);
+            document.tiles.mark_clean(tx, 0);
+        }
+        if let PaintCmd::FillRect { color, .. } = &mut list.commands[1] {
+            *color = Color::rgb(255, 0, 0);
+        }
+        let mut rebuilt = PaintSegments::from_display_list(&list, 1200.0, 100.0).unwrap();
+        rebuilt.retain_unchanged_rasters(previous);
+        let document = rebuilt
+            .segments
+            .iter()
+            .find(|segment| !segment.fixed)
+            .unwrap();
+        assert!(document.tiles.tiles.get(&(0, 0)).unwrap().dirty);
+        assert!(!document.tiles.tiles.get(&(1, 0)).unwrap().dirty);
+    }
+
+    #[test]
+    fn bounded_change_inside_unchanged_opacity_group_keeps_distant_tiles() {
+        use crate::types::Color;
+
+        let mut list = DisplayList::new();
+        list.push(PaintCmd::PushOpacity { alpha: 0.5 });
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(0.0, 0.0, 1200.0, 100.0),
+            color: Color::WHITE,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(10.0, 10.0, 40.0, 40.0),
+            color: Color::rgb(0, 0, 255),
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        list.push(PaintCmd::PopOpacity);
+        list.push(PaintCmd::BeginFixedPosition);
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+            color: Color::BLACK,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        list.push(PaintCmd::EndFixedPosition);
+        let original = list.clone();
+        let mut previous = PaintSegments::from_display_list(&list, 1200.0, 100.0).unwrap();
+        let document = previous
+            .segments
+            .iter_mut()
+            .find(|segment| !segment.fixed)
+            .unwrap();
+        for tx in [0, 1] {
+            document.tiles.ensure_tile(tx, 0);
+            document.tiles.mark_clean(tx, 0);
+        }
+
+        if let PaintCmd::FillRect { color, .. } = &mut list.commands[2] {
+            *color = Color::rgb(255, 0, 0);
+        }
+        let mut rebuilt = PaintSegments::from_display_list(&list, 1200.0, 100.0).unwrap();
+        rebuilt.retain_unchanged_rasters(previous);
+        let document = rebuilt
+            .segments
+            .iter()
+            .find(|segment| !segment.fixed)
+            .unwrap();
+        assert!(document.tiles.tiles.get(&(0, 0)).unwrap().dirty);
+        assert!(!document.tiles.tiles.get(&(1, 0)).unwrap().dirty);
+
+        let mut fonts = cosmic_text::FontSystem::new();
+        let mut glyphs = cosmic_text::SwashCache::new();
+        for (tile_x, changed) in [(0.0, true), (512.0, false)] {
+            let mut before = tiny_skia::Pixmap::new(512, 512).unwrap();
+            let mut after = tiny_skia::Pixmap::new(512, 512).unwrap();
+            crate::renderer::display_list_replay::replay_tile_with_scroll_and_transform_overrides(
+                &original,
+                &mut before,
+                1.0,
+                &mut fonts,
+                &mut glyphs,
+                tile_x,
+                0.0,
+                0.0,
+                0.0,
+                None,
+            );
+            crate::renderer::display_list_replay::replay_tile_with_scroll_and_transform_overrides(
+                &list,
+                &mut after,
+                1.0,
+                &mut fonts,
+                &mut glyphs,
+                tile_x,
+                0.0,
+                0.0,
+                0.0,
+                None,
+            );
+            assert_eq!(before.data() != after.data(), changed, "tile x={tile_x}");
+        }
+
+        let mut changed_alpha = list.clone();
+        changed_alpha.commands[0] = PaintCmd::PushOpacity { alpha: 0.8 };
+        assert!(simple_paint_damage(&list, &changed_alpha, 1.0).is_none());
+
+        let mut inserted = list.clone();
+        inserted.commands.insert(
+            3,
+            PaintCmd::FillRect {
+                rect: Rect::new(70.0, 10.0, 20.0, 20.0),
+                color: Color::BLACK,
+                radius: [0.0; 4],
+                radius_y: [0.0; 4],
+            },
+        );
+        let damage = simple_paint_damage(&list, &inserted, 1.0).unwrap();
+        assert_eq!(damage.len(), 1);
+        assert!(damage[0].right() < 512.0);
+    }
+
+    #[test]
+    fn transformed_paint_change_does_not_retain_tiles_by_untransformed_bounds() {
+        use crate::types::Color;
+
+        let mut before = DisplayList::new();
+        before.push(PaintCmd::PushTransform {
+            node_id: 1,
+            transform: [1.0, 0.0, 0.0, 1.0, 700.0, 0.0],
+        });
+        before.push(PaintCmd::FillRect {
+            rect: Rect::new(10.0, 10.0, 40.0, 40.0),
+            color: Color::rgb(0, 0, 255),
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        before.push(PaintCmd::PopTransform);
+        let mut after = DisplayList::new();
+        after.commands = before.commands.clone();
+        if let PaintCmd::FillRect { color, .. } = &mut after.commands[1] {
+            *color = Color::rgb(255, 0, 0);
+        }
+        assert!(simple_paint_damage(&before, &after, 1.0).is_none());
+    }
+
+    #[test]
+    fn local_shadow_change_invalidates_blur_reach_but_retains_distant_tiles() {
+        use crate::types::Color;
+
+        let mut list = DisplayList::new();
+        list.push(PaintCmd::BoxShadow {
+            rect: Rect::new(505.0, 20.0, 20.0, 20.0),
+            color: Color::rgb(0, 0, 255),
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur: 3.0,
+            spread: 0.0,
+            inset: false,
+            radii: [0.0; 4],
+            radii_y: [0.0; 4],
+        });
+        list.push(PaintCmd::BeginFixedPosition);
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+            color: Color::WHITE,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        list.push(PaintCmd::EndFixedPosition);
+        let mut previous = PaintSegments::from_display_list(&list, 1600.0, 100.0).unwrap();
+        let document = previous
+            .segments
+            .iter_mut()
+            .find(|segment| !segment.fixed)
+            .unwrap();
+        document
+            .tiles
+            .update_viewport(Rect::new(0.0, 0.0, 1600.0, 100.0), 1.0);
+        for tx in 0..3 {
+            document.tiles.ensure_tile(tx, 0);
+            document.tiles.mark_clean(tx, 0);
+        }
+        if let PaintCmd::BoxShadow { color, .. } = &mut list.commands[0] {
+            *color = Color::rgb(255, 0, 0);
+        }
+        let mut rebuilt = PaintSegments::from_display_list(&list, 1600.0, 100.0).unwrap();
+        rebuilt.retain_unchanged_rasters(previous);
+        let document = rebuilt
+            .segments
+            .iter()
+            .find(|segment| !segment.fixed)
+            .unwrap();
+        assert!(document.tiles.tiles.get(&(0, 0)).unwrap().dirty);
+        assert!(document.tiles.tiles.get(&(1, 0)).unwrap().dirty);
+        assert!(!document.tiles.tiles.get(&(2, 0)).unwrap().dirty);
+    }
+
+    #[test]
+    fn inserted_bounded_paint_keeps_unaffected_document_tiles() {
+        use crate::types::Color;
+
+        let mut list = DisplayList::new();
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(0.0, 0.0, 1600.0, 100.0),
+            color: Color::WHITE,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        list.push(PaintCmd::BeginFixedPosition);
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+            color: Color::BLACK,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        list.push(PaintCmd::EndFixedPosition);
+        let mut previous = PaintSegments::from_display_list(&list, 1600.0, 100.0).unwrap();
+        let document = previous
+            .segments
+            .iter_mut()
+            .find(|segment| !segment.fixed)
+            .unwrap();
+        document
+            .tiles
+            .update_viewport(Rect::new(0.0, 0.0, 1600.0, 100.0), 1.0);
+        for tx in 0..3 {
+            document.tiles.ensure_tile(tx, 0);
+            document.tiles.mark_clean(tx, 0);
+        }
+
+        list.commands.insert(
+            1,
+            PaintCmd::FillRect {
+                rect: Rect::new(600.0, 10.0, 20.0, 20.0),
+                color: Color::rgb(255, 0, 0),
+                radius: [0.0; 4],
+                radius_y: [0.0; 4],
+            },
+        );
+        let mut rebuilt = PaintSegments::from_display_list(&list, 1600.0, 100.0).unwrap();
+        rebuilt.retain_unchanged_rasters(previous);
+        let document = rebuilt
+            .segments
+            .iter()
+            .find(|segment| !segment.fixed)
+            .unwrap();
+        assert!(!document.tiles.tiles.get(&(0, 0)).unwrap().dirty);
+        assert!(document.tiles.tiles.get(&(1, 0)).unwrap().dirty);
+        assert!(!document.tiles.tiles.get(&(2, 0)).unwrap().dirty);
+    }
+
+    #[test]
+    fn structural_damage_rejects_effect_layers_and_unbounded_commands() {
+        use crate::types::Color;
+
+        let fill = PaintCmd::FillRect {
+            rect: Rect::new(600.0, 10.0, 20.0, 20.0),
+            color: Color::rgb(255, 0, 0),
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        };
+        let mut before = DisplayList::new();
+        before.push(PaintCmd::PushTransform {
+            node_id: 1,
+            transform: [1.0, 0.0, 0.0, 1.0, 500.0, 0.0],
+        });
+        before.push(PaintCmd::PopTransform);
+        let mut after = DisplayList::new();
+        after.commands = before.commands.clone();
+        after.commands.insert(1, fill.clone());
+        assert!(simple_paint_damage(&before, &after, 1.0).is_none());
+
+        before.commands.clear();
+        before.push(PaintCmd::BackdropFilter {
+            rect: Rect::new(0.0, 0.0, 100.0, 100.0),
+            filters: Vec::new(),
+        });
+        after.commands = before.commands.clone();
+        after.push(fill);
+        assert!(simple_paint_damage(&before, &after, 1.0).is_none());
+    }
+
+    #[test]
+    fn removed_bounded_paint_inside_unchanged_clip_has_local_damage() {
+        use crate::types::Color;
+
+        let mut before = DisplayList::new();
+        before.push(PaintCmd::PushClip {
+            rect: Rect::new(0.0, 0.0, 800.0, 100.0),
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        before.push(PaintCmd::FillRect {
+            rect: Rect::new(550.0, 10.0, 20.0, 20.0),
+            color: Color::BLACK,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        before.push(PaintCmd::PopClip);
+        let mut after = DisplayList::new();
+        after.commands = vec![before.commands[0].clone(), before.commands[2].clone()];
+        let damage = simple_paint_damage(&before, &after, 1.0).expect("bounded removal");
+        assert_eq!(damage.len(), 1);
+        assert!(damage[0].x <= 550.0 && damage[0].right() >= 570.0);
+        assert!(damage[0].right() < 600.0);
+    }
+
+    #[test]
+    fn replacing_fill_with_clipped_gradient_retains_distant_tiles() {
+        use crate::types::{Color, GradientDirection};
+
+        let mut before = DisplayList::new();
+        before.push(PaintCmd::FillRect {
+            rect: Rect::new(600.0, 10.0, 30.0, 30.0),
+            color: Color::BLACK,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        let mut after = DisplayList::new();
+        after.push(PaintCmd::Gradient {
+            rect: Rect::new(0.0, 0.0, 1200.0, 100.0),
+            clip: Rect::new(600.0, 10.0, 30.0, 30.0),
+            repeat_x_mode: 0,
+            repeat_y_mode: 0,
+            gradient_type: 1,
+            angle: 0.0,
+            direction: GradientDirection::default(),
+            radial_center_x: 0.5,
+            radial_center_y: 0.5,
+            radial_radius_x: 0.5,
+            radial_radius_y: 0.5,
+            stops: vec![(Color::WHITE, 0.0), (Color::BLACK, 1.0)],
+            radii: [0.0; 4],
+            radii_y: [0.0; 4],
+            opacity: 1.0,
+            blend_mode: 0,
+        });
+        let damage = simple_paint_damage(&before, &after, 1.0).expect("bounded replacement");
+        assert_eq!(damage.len(), 2);
+        assert!(
+            damage
+                .iter()
+                .all(|rect| rect.x > 500.0 && rect.right() < 700.0)
+        );
+    }
+
+    #[test]
+    fn inserted_background_image_uses_paint_clip_not_positioning_area() {
+        use crate::renderer::display_list::ImageRef;
+
+        let before = DisplayList::new();
+        let mut after = DisplayList::new();
+        after.push(PaintCmd::BackgroundImage {
+            container: Rect::new(0.0, 0.0, 1200.0, 100.0),
+            clip: Rect::new(600.0, 10.0, 30.0, 30.0),
+            data: ImageRef::Owned(vec![255, 255, 255, 255], 1, 1),
+            size_mode: 0,
+            draw_w: 1.0,
+            draw_h: 1.0,
+            pos_x: 0.0,
+            pos_y: 0.0,
+            repeat_x_mode: 1,
+            repeat_y_mode: 1,
+            radii: [0.0; 4],
+            radii_y: [0.0; 4],
+            blend_mode: 0,
+        });
+        let damage = simple_paint_damage(&before, &after, 1.0).expect("bounded insertion");
+        assert_eq!(damage.len(), 1);
+        assert!(damage[0].x > 500.0 && damage[0].right() < 700.0);
+    }
+
+    #[test]
+    fn outline_damage_includes_stroke_outside_border_box() {
+        let damage = bounded_command_damage(
+            &PaintCmd::Outline {
+                rect: Rect::new(600.0, 10.0, 30.0, 30.0),
+                width: 12.0,
+                color: crate::types::Color::BLACK,
+                style: 1,
+                offset: 0.0,
+                radii: [0.0; 4],
+                radii_y: [0.0; 4],
+            },
+            1.0,
+        )
+        .unwrap();
+        assert!(damage.x <= 594.0 && damage.right() >= 636.0);
+    }
+
+    #[test]
+    fn changed_shadow_damage_includes_old_and_new_extents_at_device_scale() {
+        let old = box_shadow_damage_rect(
+            Rect::new(100.0, 10.0, 20.0, 20.0),
+            0.0,
+            0.0,
+            4.0,
+            0.0,
+            false,
+            2.0,
+        );
+        let new = box_shadow_damage_rect(
+            Rect::new(700.0, 10.0, 20.0, 20.0),
+            0.0,
+            0.0,
+            4.0,
+            0.0,
+            false,
+            2.0,
+        );
+        assert!(old.x <= 90.0 && old.right() >= 130.0);
+        assert!(new.x <= 690.0 && new.right() >= 730.0);
     }
 
     #[test]
@@ -647,7 +1406,9 @@ mod tests {
         let mut previous = PaintSegments::from_display_list(&list, 200.0, 100.0).unwrap();
         let dependent = previous.segments.last_mut().unwrap();
         assert!(dependent.backdrop_dependent);
-        dependent.tiles.update_viewport(Rect::new(0.0, 0.0, 100.0, 100.0), 1.0);
+        dependent
+            .tiles
+            .update_viewport(Rect::new(0.0, 0.0, 100.0, 100.0), 1.0);
         dependent.tiles.ensure_tile(0, 0);
         dependent.tiles.mark_clean(0, 0);
 
@@ -681,7 +1442,14 @@ mod tests {
 
         let segments = PaintSegments::from_display_list(&list, 200.0, 100.0).unwrap();
         assert_eq!(segments.segments.len(), 2);
-        assert_eq!(segments.segments.iter().filter(|segment| segment.fixed).count(), 1);
+        assert_eq!(
+            segments
+                .segments
+                .iter()
+                .filter(|segment| segment.fixed)
+                .count(),
+            1
+        );
     }
 
     #[test]

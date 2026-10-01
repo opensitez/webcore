@@ -5,12 +5,16 @@ use crate::types::*;
 #[test]
 fn auto_width_grid_respects_max_width_and_centers_tracks() {
     for direction in ["ltr", "rtl"] {
-        let doc = parse_and_layout(&format!(
-            "<style>*{{margin:0;padding:0;box-sizing:border-box}}\
+        let doc = parse_and_layout(
+            &format!(
+                "<style>*{{margin:0;padding:0;box-sizing:border-box}}\
              #grid{{display:grid;direction:{direction};max-width:600px;\
              margin:0 auto;padding:0 20px;column-gap:20px;grid-template-columns:1fr 1fr}}\
              #grid>div{{height:30px}}</style>\
-             <div id='grid'><div id='first'></div><div id='second'></div></div>"), 1000.0);
+             <div id='grid'><div id='first'></div><div id='second'></div></div>"
+            ),
+            1000.0,
+        );
         let grid = find_by_id(&doc.root, "grid").unwrap().layout.border_rect;
         let first = find_by_id(&doc.root, "first").unwrap().layout.border_rect;
         let second = find_by_id(&doc.root, "second").unwrap().layout.border_rect;
@@ -19,7 +23,10 @@ fn auto_width_grid_respects_max_width_and_centers_tracks() {
         assert!((first.w - 270.0).abs() < 0.1, "{direction}: {first:?}");
         assert!((second.w - 270.0).abs() < 0.1, "{direction}: {second:?}");
         let expected_first = if direction == "rtl" { 510.0 } else { 220.0 };
-        assert!((first.x - expected_first).abs() < 0.1, "{direction}: {first:?}");
+        assert!(
+            (first.x - expected_first).abs() < 0.1,
+            "{direction}: {first:?}"
+        );
     }
 }
 
@@ -73,7 +80,10 @@ fn later_fixed_column_item_does_not_precede_auto_item_in_row_flow() {
     let aside = find_by_id(&doc.root, "aside").unwrap().layout.border_rect;
     let later = find_by_id(&doc.root, "later").unwrap().layout.border_rect;
     assert_eq!(first.y, aside.y);
-    assert!(later.y >= first.bottom(), "later item must follow first row: {later:?}");
+    assert!(
+        later.y >= first.bottom(),
+        "later item must follow first row: {later:?}"
+    );
 }
 
 #[test]
@@ -87,7 +97,11 @@ fn auto_track_respects_grid_item_min_width_zero() {
     let grid = find_by_id(&doc.root, "grid").unwrap();
     let item = find_by_id(&doc.root, "item").unwrap();
     assert!((grid.layout.border_rect.w - 200.0).abs() < 1.0);
-    assert!((item.layout.border_rect.w - 200.0).abs() < 1.0, "{:?}", item.layout.border_rect);
+    assert!(
+        (item.layout.border_rect.w - 200.0).abs() < 1.0,
+        "{:?}",
+        item.layout.border_rect
+    );
 }
 
 #[test]
@@ -116,8 +130,16 @@ fn fit_content_grid_container_shrinks_to_its_track() {
         600.0,
     );
     let grid = find_by_id(&doc.root, "grid").unwrap();
-    assert!((grid.layout.border_rect.w - 128.0).abs() < 1.0, "{:?}", grid.layout.border_rect);
-    assert!((grid.layout.border_rect.x - 194.0).abs() < 1.0, "{:?}", grid.layout.border_rect);
+    assert!(
+        (grid.layout.border_rect.w - 128.0).abs() < 1.0,
+        "{:?}",
+        grid.layout.border_rect
+    );
+    assert!(
+        (grid.layout.border_rect.x - 194.0).abs() < 1.0,
+        "{:?}",
+        grid.layout.border_rect
+    );
 }
 
 #[test]
@@ -151,7 +173,11 @@ fn stretched_nested_grid_relayouts_its_children_at_final_width() {
     let inner = find_by_id(&doc.root, "inner").unwrap();
     let cover = find_by_id(&doc.root, "cover").unwrap();
     assert!((inner.layout.border_rect.w - 216.0).abs() < 1.0);
-    assert!((cover.layout.border_rect.w - 216.0).abs() < 1.0, "{:?}", cover.layout.border_rect);
+    assert!(
+        (cover.layout.border_rect.w - 216.0).abs() < 1.0,
+        "{:?}",
+        cover.layout.border_rect
+    );
 }
 
 #[test]
@@ -164,7 +190,11 @@ fn percentage_height_grid_item_uses_final_row_height() {
         400.0,
     );
     let cover = find_by_id(&doc.root, "cover").unwrap();
-    assert!((cover.layout.border_rect.h - 56.0).abs() < 1.0, "{:?}", cover.layout.border_rect);
+    assert!(
+        (cover.layout.border_rect.h - 56.0).abs() < 1.0,
+        "{:?}",
+        cover.layout.border_rect
+    );
 }
 
 #[test]
@@ -181,9 +211,7 @@ fn justify_self_end_auto_width_grid_item_uses_content_width() {
     let grid = find_by_id(&doc.root, "grid").unwrap();
     let right = find_by_id(&doc.root, "right").unwrap();
     assert!(right.layout.border_rect.w < 200.0);
-    assert!(
-        (right.layout.border_rect.right() - grid.layout.content_rect.right()).abs() < 1.0
-    );
+    assert!((right.layout.border_rect.right() - grid.layout.content_rect.right()).abs() < 1.0);
 }
 
 #[test]
@@ -298,7 +326,16 @@ fn column_flow_without_explicit_rows_places_items_across_one_row() {
     assert!((a.y - b.y).abs() < 1.0 && (b.y - c.y).abs() < 1.0);
     assert!((b.x - a.x - 200.0).abs() < 1.0);
     assert!((c.x - b.x - 200.0).abs() < 1.0);
-    assert!((find_by_id(&doc.root, "channels").unwrap().layout.border_rect.h - 56.0).abs() < 1.0);
+    assert!(
+        (find_by_id(&doc.root, "channels")
+            .unwrap()
+            .layout
+            .border_rect
+            .h
+            - 56.0)
+            .abs()
+            < 1.0
+    );
 }
 
 #[test]
@@ -560,10 +597,16 @@ fn grid_minmax_auto_tracks_measure_percent_sized_item_from_its_content() {
     );
     let media = find_by_id(&doc.root, "media").unwrap();
     let info = find_by_id(&doc.root, "info").unwrap();
-    assert!((media.layout.border_rect.w - 520.0).abs() < 1.0,
-        "media track should use 520px intrinsic image width, got {}", media.layout.border_rect.w);
-    assert!((info.layout.margin_rect.w - 465.0).abs() < 1.0,
-        "info track should take remaining 465px, got {}", info.layout.margin_rect.w);
+    assert!(
+        (media.layout.border_rect.w - 520.0).abs() < 1.0,
+        "media track should use 520px intrinsic image width, got {}",
+        media.layout.border_rect.w
+    );
+    assert!(
+        (info.layout.margin_rect.w - 465.0).abs() < 1.0,
+        "info track should take remaining 465px, got {}",
+        info.layout.margin_rect.w
+    );
 }
 
 #[test]

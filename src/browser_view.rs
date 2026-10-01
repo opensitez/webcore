@@ -53,6 +53,9 @@ pub struct BrowserView {
     renderer: Renderer,
     doc: Option<Document>,
     stream_frame: Option<EngineFrame>,
+    history_cache: std::collections::VecDeque<CachedHistoryPage>,
+    history_cache_bytes: usize,
+    current_history_id: Option<u64>,
     streamed_html_len: usize,
     stream_paint_ready: bool,
     stream_needs_layout: bool,
@@ -77,8 +80,22 @@ pub struct BrowserView {
     pending_navigate: Arc<Mutex<Option<String>>>,
 }
 
+const HISTORY_CACHE_MAX_PAGES: usize = 2;
+const HISTORY_CACHE_MAX_BYTES: usize = 128 * 1024 * 1024;
+
+struct CachedHistoryPage {
+    id: u64,
+    url: String,
+    title: String,
+    frame: EngineFrame,
+    streamed_html_len: usize,
+    bytes: usize,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BrowserMemoryStats {
+    pub history_cache_entries: usize,
+    pub history_cache_bytes: usize,
     pub viewport_surface_bytes: usize,
     pub renderer_cached_content_surface_bytes: usize,
     pub renderer_cached_surface_bytes: usize,
@@ -367,7 +384,7 @@ fn stylesheet_bytes(sheet: &crate::css::Stylesheet) -> usize {
     for rule in &sheet.rules {
         bytes = bytes
             .saturating_add(string_bytes(&rule.layer))
-            .saturating_add(string_bytes(&rule.media_condition))
+            .saturating_add(rule.media_condition.heap_bytes())
             .saturating_add(string_bytes(&rule.container_condition))
             .saturating_add(string_bytes(&rule.container_name))
             .saturating_add(string_bytes(&rule.original_selector))
@@ -432,12 +449,16 @@ fn add_arc_bytes_ref(
 
 impl BrowserView {
     pub fn new(width: f32, height: f32, mut options: PageLoadOptions) -> Self {
+        crate::css::initialize_ua_stylesheet();
         let (tx, rx) = mpsc::channel();
         ensure_cookie_jar(&mut options);
         Self {
             renderer: Renderer::new(),
             doc: None,
             stream_frame: None,
+            history_cache: std::collections::VecDeque::new(),
+            history_cache_bytes: 0,
+            current_history_id: None,
             streamed_html_len: 0,
             stream_paint_ready: false,
             stream_needs_layout: false,
@@ -720,6 +741,8 @@ impl BrowserView {
         let parsed_css = crate::parsed_css_cache_stats();
         let decoded = crate::decoded_image_cache_stats();
         let mut stats = BrowserMemoryStats {
+            history_cache_entries: self.history_cache.len(),
+            history_cache_bytes: self.history_cache_bytes,
             viewport_surface_bytes: self
                 .viewport_pixmap
                 .as_ref()
@@ -749,7 +772,8 @@ impl BrowserView {
             let mut seen_styles = std::collections::HashSet::<usize>::new();
             stats.stylesheet_estimated_bytes = stylesheet_bytes(&doc.stylesheet);
             for cached in doc.inline_stylesheet_cache.values() {
-                stats.stylesheet_estimated_bytes = stats.stylesheet_estimated_bytes
+                stats.stylesheet_estimated_bytes = stats
+                    .stylesheet_estimated_bytes
                     .saturating_add(stylesheet_bytes(&cached.sheet))
                     .saturating_add(cached.source.len())
                     .saturating_add(cached.base_url.capacity());
@@ -939,7 +963,94 @@ impl BrowserView {
         self.navigate_with_options(url, self.options.clone());
     }
 
+    /// Navigate to a history entry. Restoring a cached entry preserves its DOM,
+    /// computed styles, layout, form state, and scroll position.
+    pub fn navigate_history(&mut self, url: String, entry_id: u64, restore: bool) {
+        self.cache_current_history_page();
+        if restore {
+            if let Some(index) = self
+                .history_cache
+                .iter()
+                .position(|page| page.id == entry_id)
+            {
+                let page = self
+                    .history_cache
+                    .remove(index)
+                    .expect("cached history entry");
+                self.history_cache_bytes = self.history_cache_bytes.saturating_sub(page.bytes);
+                self.load_id = self.load_id.wrapping_add(1);
+                self.url = page.url;
+                self.title = page.title;
+                self.streamed_html_len = page.streamed_html_len;
+                self.stream_frame = Some(page.frame);
+                self.doc = None;
+                self.current_history_id = Some(entry_id);
+                self.loading = false;
+                self.stream_paint_ready = true;
+                self.stream_needs_layout = false;
+                self.stream_layout_committed = true;
+                self.html_parse_backlog = false;
+                self.interaction_layout_pending = false;
+                self.deferred_load_result = None;
+                self.renderer.invalidate_display_list();
+                self.invalidate_backing();
+                self.wake();
+                return;
+            }
+        }
+        self.history_cache.retain(|page| page.id != entry_id);
+        self.history_cache_bytes = self.history_cache.iter().map(|page| page.bytes).sum();
+        self.navigate_with_options(url, self.options.clone());
+        self.current_history_id = Some(entry_id);
+    }
+
+    /// Associate a navigation initiated by the document, such as a form submit,
+    /// with the history entry assigned by the embedding browser.
+    pub fn set_history_entry(&mut self, entry_id: u64) {
+        self.current_history_id = Some(entry_id);
+    }
+
+    fn cache_current_history_page(&mut self) {
+        let Some(id) = self.current_history_id.take() else {
+            return;
+        };
+        if self.loading || !self.stream_layout_committed || self.stream_frame.is_none() {
+            return;
+        }
+        let stats = self.memory_stats();
+        let bytes = stats
+            .dom_estimated_bytes
+            .saturating_add(stats.layout_estimated_bytes)
+            .saturating_add(stats.style_estimated_bytes)
+            .saturating_add(stats.line_cache_estimated_bytes)
+            .saturating_add(stats.stylesheet_estimated_bytes)
+            .saturating_add(stats.decoded_dom_image_bytes);
+        if bytes > HISTORY_CACHE_MAX_BYTES {
+            return;
+        }
+        self.history_cache.retain(|page| page.id != id);
+        self.history_cache_bytes = self.history_cache.iter().map(|page| page.bytes).sum();
+        let page = CachedHistoryPage {
+            id,
+            url: self.url.clone(),
+            title: self.title.clone(),
+            frame: self.stream_frame.take().expect("completed history frame"),
+            streamed_html_len: self.streamed_html_len,
+            bytes,
+        };
+        self.history_cache_bytes = self.history_cache_bytes.saturating_add(bytes);
+        self.history_cache.push_back(page);
+        while self.history_cache.len() > HISTORY_CACHE_MAX_PAGES
+            || self.history_cache_bytes > HISTORY_CACHE_MAX_BYTES
+        {
+            if let Some(oldest) = self.history_cache.pop_front() {
+                self.history_cache_bytes = self.history_cache_bytes.saturating_sub(oldest.bytes);
+            }
+        }
+    }
+
     fn navigate_with_options(&mut self, url: String, options: PageLoadOptions) {
+        self.cache_current_history_page();
         self.url = url.clone();
         self.title = "Loading...".to_string();
         self.loading = true;
@@ -1191,15 +1302,13 @@ impl BrowserView {
             || frame_needs_work
             || has_animations
             || self.stream_needs_layout;
-        let needs_redraw = !self.defer_queued_html_layout()
-            && (frame_needs_redraw || self.stream_needs_layout);
+        let needs_redraw =
+            !self.defer_queued_html_layout() && (frame_needs_redraw || self.stream_needs_layout);
         (needs_wake, needs_redraw)
     }
 
     fn defer_queued_html_layout(&self) -> bool {
-        self.html_parse_backlog
-            && self.stream_layout_committed
-            && !self.interaction_layout_pending
+        self.html_parse_backlog && self.stream_layout_committed && !self.interaction_layout_pending
     }
 
     pub fn paint_into(&mut self, target: &mut Pixmap, x: i32, y: i32, scale: f32) {
@@ -1273,11 +1382,13 @@ impl BrowserView {
                 return false;
             };
             let old_scroll_y = doc.scroll_y;
-            if doc.process_scrollbar_event(HtmlEventType::MouseMove, x, y, width, height)
-                && (doc.scroll_y - old_scroll_y).abs() >= 0.5
-            {
-                crate::profile::mark_scroll_input();
-                self.scroll_priority_frame = true;
+            if doc.process_scrollbar_event(HtmlEventType::MouseMove, x, y, width, height) {
+                if (doc.scroll_y - old_scroll_y).abs() >= 0.5 {
+                    crate::profile::mark_scroll_input();
+                    self.scroll_priority_frame = true;
+                }
+                self.flush_dirty_active_layout();
+                self.invalidate_backing();
                 self.wake();
                 return true;
             }
@@ -1322,11 +1433,13 @@ impl BrowserView {
             return false;
         };
         let old_scroll_y = doc.scroll_y;
-        if doc.process_scrollbar_event(kind, x, y, width, height)
-            && (doc.scroll_y - old_scroll_y).abs() >= 0.5
-        {
-            crate::profile::mark_scroll_input();
-            self.scroll_priority_frame = true;
+        if doc.process_scrollbar_event(kind, x, y, width, height) {
+            if (doc.scroll_y - old_scroll_y).abs() >= 0.5 {
+                crate::profile::mark_scroll_input();
+                self.scroll_priority_frame = true;
+            }
+            self.flush_dirty_active_layout();
+            self.invalidate_backing();
             self.wake();
             return true;
         }
@@ -1461,6 +1574,21 @@ impl BrowserView {
     }
 
     pub fn cursor_at(&self, x: f32, y: f32) -> CSSCursor {
+        if let Some(doc) = self.active_doc() {
+            let resize_axes = doc
+                .resize_drag
+                .as_ref()
+                .map(|drag| drag.axes)
+                .or_else(|| doc.resize_grip_at(x, y).map(|drag| drag.axes));
+            if let Some(axes) = resize_axes {
+                return match axes {
+                    (true, true) => CSSCursor::SEResize,
+                    (true, false) => CSSCursor::EResize,
+                    (false, true) => CSSCursor::SResize,
+                    (false, false) => CSSCursor::Auto,
+                };
+            }
+        }
         self.active_doc()
             .and_then(|doc| {
                 crate::layout::hit_test::point_to_hit(&doc.root, (x, y + doc.scroll_y), 0)
@@ -1700,12 +1828,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn history_restores_page_state_without_reloading() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let first_url = "about:history-first";
+        view.url = first_url.into();
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame
+            .as_mut()
+            .unwrap()
+            .start_streaming(first_url);
+        view.feed_streaming_chunk(first_url, "<body><p>First page</p></body>");
+        view.stream_frame.as_mut().unwrap().finish_loading();
+        view.update_streamed_frame_before_paint();
+        view.loading = false;
+        view.current_history_id = Some(1);
+        view.stream_frame.as_mut().unwrap().doc.scroll_y = 42.0;
+
+        view.navigate_history("about:history-second".into(), 2, false);
+        assert_eq!(view.history_cache.len(), 1);
+        view.navigate_history(first_url.into(), 1, true);
+
+        assert_eq!(view.url, first_url);
+        assert!(!view.loading);
+        assert_eq!(view.stream_frame.as_ref().unwrap().doc.scroll_y, 42.0);
+        assert!(
+            view.stream_frame
+                .as_ref()
+                .unwrap()
+                .doc
+                .root
+                .text_content()
+                .contains("First page")
+        );
+    }
+
+    #[test]
     fn animation_deadlines_do_not_add_paint_time_to_each_frame() {
         let start = Instant::now();
         let interval = Duration::from_nanos(16_666_667);
         let first = next_frame_deadline(None, start, interval);
         assert_eq!(first, start + interval);
-        assert_eq!(next_frame_deadline(Some(first), start + Duration::from_millis(8), interval), first);
+        assert_eq!(
+            next_frame_deadline(Some(first), start + Duration::from_millis(8), interval),
+            first
+        );
         assert_eq!(
             next_frame_deadline(Some(first), first + Duration::from_millis(8), interval),
             start + interval * 2,
@@ -1771,6 +1937,50 @@ mod tests {
         view.handle_mouse_button(HtmlEventType::MouseUp, x, y, 2);
 
         assert_eq!(*seen.lock().unwrap(), Some(2));
+    }
+
+    #[test]
+    fn resize_grip_drag_reflows_without_clicking_element() {
+        let clicks = Arc::new(Mutex::new(0usize));
+        let mut doc = crate::parse_html(
+            r#"<html><body style="margin:0"><div id="box" style="width:80px;height:60px;overflow:hidden;resize:both"></div></body></html>"#,
+        );
+        let id = doc.get_element_by_id("box").unwrap();
+        let observed = clicks.clone();
+        doc.add_event_listener(
+            id,
+            "click",
+            Box::new(move |_, _| *observed.lock().unwrap() += 1),
+            crate::dom::events::ListenerOptions::default(),
+        );
+        let mut view = BrowserView::new(240.0, 160.0, PageLoadOptions::default());
+        view.doc = Some(doc);
+        view.layout_active();
+        let rect = view
+            .doc
+            .as_ref()
+            .unwrap()
+            .get_node(id)
+            .unwrap()
+            .layout
+            .border_rect;
+        let press = (rect.x + rect.w - 5.0, rect.y + rect.h - 5.0);
+        assert_eq!(view.cursor_at(press.0, press.1), CSSCursor::SEResize);
+        view.handle_mouse_button(HtmlEventType::MouseDown, press.0, press.1, 0);
+        view.handle_mouse_move(press.0 + 20.0, press.1 + 10.0);
+        view.handle_mouse_button(HtmlEventType::MouseUp, press.0 + 20.0, press.1 + 10.0, 0);
+
+        let doc = view.doc.as_ref().unwrap();
+        let resized = doc.get_node(id).unwrap().layout.border_rect;
+        assert!(
+            (resized.w - rect.w - 20.0).abs() < 1.0,
+            "width: {resized:?}"
+        );
+        assert!(
+            (resized.h - rect.h - 10.0).abs() < 1.0,
+            "height: {resized:?}"
+        );
+        assert_eq!(*clicks.lock().unwrap(), 0);
     }
 
     #[test]
@@ -2149,8 +2359,11 @@ mod tests {
         view.paint_into(&mut target, 0, 0, 1.0);
         assert_eq!(target.pixel(50, 50).unwrap().blue(), 255);
         let outside = target.pixel(50, 150).unwrap();
-        assert_eq!((outside.red(), outside.green(), outside.blue()), (255, 255, 255),
-            "deferred positioned rows must remain clipped to the scrollport");
+        assert_eq!(
+            (outside.red(), outside.green(), outside.blue()),
+            (255, 255, 255),
+            "deferred positioned rows must remain clipped to the scrollport"
+        );
         assert_eq!(view.document().unwrap().layout_generation, generation);
     }
 
@@ -2166,7 +2379,9 @@ mod tests {
         view.handle_mouse_move(50.0, 50.0);
         assert!(view.handle_wheel(40.0, 60.0));
         let doc = view.document().unwrap();
-        let pane = doc.get_node(doc.get_element_by_id("pane").unwrap()).unwrap();
+        let pane = doc
+            .get_node(doc.get_element_by_id("pane").unwrap())
+            .unwrap();
         assert_eq!(pane.layout.scroll_left, 40.0);
         assert_eq!(pane.layout.scroll_top, 60.0);
         assert_eq!(doc.scroll_x, 0.0);
@@ -2413,10 +2628,13 @@ mod tests {
         let base = "https://example.test/";
         view.stream_frame = Some(EngineFrame::empty(240.0, 160.0));
         view.stream_frame.as_mut().unwrap().start_streaming(base);
-        view.feed_streaming_chunk(base, r#"<!doctype html><body style="margin:0">
+        view.feed_streaming_chunk(
+            base,
+            r#"<!doctype html><body style="margin:0">
             <svg width="40" height="40"><rect width="40" height="40" fill="red">
             <animate attributeName="fill" values="red;blue" dur="2s" repeatCount="indefinite"/>
-            </rect></svg><div style="height:80px;background:green">Static content</div></body>"#);
+            </rect></svg><div style="height:80px;background:green">Static content</div></body>"#,
+        );
         view.stream_frame.as_mut().unwrap().finish_loading();
         assert!(view.update_streamed_frame_before_paint());
         let mut target = Pixmap::new(240, 160).unwrap();
@@ -2424,9 +2642,12 @@ mod tests {
         let before = target.data().to_vec();
         fn advance(node: &mut crate::types::WebCore) {
             if node.svg_animation_start_time.is_some() {
-                node.svg_animation_start_time = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+                node.svg_animation_start_time =
+                    Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
             }
-            for child in &mut node.children { advance(child); }
+            for child in &mut node.children {
+                advance(child);
+            }
         }
         advance(&mut view.stream_frame.as_mut().unwrap().doc.root);
         assert!(view.update_streamed_frame_before_paint());
@@ -2434,9 +2655,15 @@ mod tests {
         assert_eq!(view.renderer.dirty_paint_rect_count_for_test(), 1);
         view.paint_into(&mut target, 0, 0, 1.0);
         let center = (20 * 240 + 20) * 4;
-        assert_ne!(&before[center..center + 4], &target.data()[center..center + 4]);
-        assert_eq!(&before[60 * 240 * 4..], &target.data()[60 * 240 * 4..],
-            "unchanged content below the animated SVG must retain its pixels");
+        assert_ne!(
+            &before[center..center + 4],
+            &target.data()[center..center + 4]
+        );
+        assert_eq!(
+            &before[60 * 240 * 4..],
+            &target.data()[60 * 240 * 4..],
+            "unchanged content below the animated SVG must retain its pixels"
+        );
     }
 
     #[test]

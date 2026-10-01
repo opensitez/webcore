@@ -9,14 +9,13 @@ use std::collections::{HashMap, HashSet};
 // ─── CSS Parser ──────────────────────────────────────────────────────────────
 
 /// Parse a full stylesheet text into rules.
-/// `parent_media` is non-empty when called recursively from inside an @media block.
 pub fn parse_stylesheet(css: &str) -> Option<Vec<CssRule>> {
     let cleaned = strip_css_comments(css);
     parse_stylesheet_cleaned(&cleaned)
 }
 
 pub(crate) fn parse_stylesheet_cleaned(css: &str) -> Option<Vec<CssRule>> {
-    parse_stylesheet_inner(css, "", "")
+    parse_stylesheet_inner(css, &MediaConditions::default(), "")
 }
 
 pub(crate) fn extract_page_rules_cleaned(css: &str) -> Vec<PageRule> {
@@ -577,19 +576,7 @@ fn supports_declaration_matches(prop: &str, value: &str) -> bool {
 }
 
 fn supports_font_format(format: &str) -> bool {
-    matches!(
-        format.to_ascii_lowercase().as_str(),
-        "woff2"
-            | "woff"
-            | "opentype"
-            | "truetype"
-            | "embedded-opentype"
-            | "collection"
-            | "font/woff2"
-            | "font/woff"
-            | "font/otf"
-            | "font/ttf"
-    )
+    super::font_face::supports_font_format(format)
 }
 
 fn supports_font_tech(tech: &str) -> bool {
@@ -668,7 +655,7 @@ fn starts_with_keyword_ci(s: &str, keyword: &str) -> bool {
 
 fn parse_stylesheet_inner(
     css: &str,
-    parent_media: &str,
+    parent_media: &MediaConditions,
     parent_layer: &str,
 ) -> Option<Vec<CssRule>> {
     let mut rules = Vec::new();
@@ -736,11 +723,7 @@ fn parse_stylesheet_inner(
             if at_lower.starts_with("@media") {
                 // Extract condition: everything after "@media"
                 let condition = at_header[6..].trim();
-                let media_cond = if parent_media.is_empty() {
-                    condition.to_string()
-                } else {
-                    format!("{} and {}", parent_media, condition)
-                };
+                let media_cond = parent_media.with_query(condition);
                 // Recursively parse inner block
                 if let Some(inner_rules) =
                     parse_stylesheet_inner(inner_block, &media_cond, parent_layer)
@@ -887,19 +870,24 @@ fn parse_stylesheet_inner(
 
                 let mut rule = CssRule::default();
                 rule.selectors = vec![sel];
-                if sel_str.to_ascii_lowercase().ends_with("::-webkit-scrollbar") {
+                if sel_str
+                    .to_ascii_lowercase()
+                    .ends_with("::-webkit-scrollbar")
+                {
                     if declarations.get("display").map(String::as_str) == Some("none") {
-                        rule.declarations.insert("scrollbar-width".into(), "none".into());
+                        rule.declarations
+                            .insert("scrollbar-width".into(), "none".into());
                     }
                     if important_declarations.get("display").map(String::as_str) == Some("none") {
-                        rule.important_declarations.insert("scrollbar-width".into(), "none".into());
+                        rule.important_declarations
+                            .insert("scrollbar-width".into(), "none".into());
                     }
                 } else {
                     rule.declarations = declarations.clone();
                     rule.important_declarations = important_declarations.clone();
                 }
                 rule.specificity = sp;
-                rule.media_condition = parent_media.to_string();
+                rule.media_condition = parent_media.clone();
                 rule.original_selector = original_selector;
                 rule.is_hover = is_hover;
                 rule.pseudo_element = pseudo_elem;
@@ -1019,18 +1007,43 @@ fn expand_nested_selectors(parent: &str, nested: &str) -> String {
 
 pub(crate) fn strip_css_comments(css: &str) -> String {
     let mut out = String::with_capacity(css.len());
-    let mut rest = css;
-    while let Some(start) = rest.find("/*") {
-        out.push_str(&rest[..start]);
-        let after = &rest[start + 2..];
-        if let Some(end) = after.find("*/") {
-            rest = &after[end + 2..];
-        } else {
-            rest = "";
-            break;
+    let bytes = css.as_bytes();
+    let mut start = 0;
+    let mut i = 0;
+    let mut quote = None;
+    while i < bytes.len() {
+        if let Some(delimiter) = quote {
+            if bytes[i] == b'\\' {
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+            if bytes[i] == delimiter {
+                quote = None;
+            }
+            i += 1;
+            continue;
         }
+        if bytes[i] == b'\'' || bytes[i] == b'"' {
+            quote = Some(bytes[i]);
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            out.push_str(&css[start..i]);
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            if i + 1 >= bytes.len() {
+                return out;
+            }
+            i += 2;
+            start = i;
+            continue;
+        }
+        i += 1;
     }
-    out.push_str(rest);
+    out.push_str(&css[start..]);
     out
 }
 
@@ -1088,7 +1101,12 @@ fn strip_pseudo_element(sel: &str) -> (String, PseudoElement, bool, Option<CssSe
             (8, PseudoElement::Backdrop)
         } else if pe_str == "-webkit-scrollbar" {
             let clean = sel[..pos].trim();
-            return (if clean.is_empty() { "*" } else { clean }.to_string(), PseudoElement::None, false, None);
+            return (
+                if clean.is_empty() { "*" } else { clean }.to_string(),
+                PseudoElement::None,
+                false,
+                None,
+            );
         } else if let Some(len) = pseudo_function_len(&pe_str, "part") {
             (len, PseudoElement::Ignored)
         } else if let Some(len) = pseudo_function_len(&pe_str, "slotted") {
@@ -1728,7 +1746,9 @@ fn read_ident(chars: &mut std::iter::Peekable<std::str::Chars>) -> String {
     s
 }
 
-pub(crate) fn read_css_ident_escape(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<char> {
+pub(crate) fn read_css_ident_escape(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+) -> Option<char> {
     let &first = chars.peek()?;
     if first == '\n' || first == '\r' || first == '\x0c' {
         return None;

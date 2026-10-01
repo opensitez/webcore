@@ -1,5 +1,6 @@
 //! HTML: the tokenizer, the tree-construction parser, and the pieces the
-//! parse needs — charset sniffing, entity decoding, image loading.
+//! parse needs — charset sniffing and entity decoding. Image loading lives in
+//! `crate::images` and is re-exported here for existing callers.
 //!
 //! ⛔ DECLARES and RE-EXPORTS. This file held 3,304 lines; the folder around
 //! it existed the whole time. Call sites say `crate::html::X`, so the glob
@@ -17,7 +18,7 @@ pub mod entity_decode;
 pub mod forms;
 pub mod head;
 pub mod html_children;
-pub mod images;
+pub use crate::images;
 pub mod parser;
 pub mod post_process;
 pub mod presentational;

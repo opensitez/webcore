@@ -659,7 +659,7 @@ fn collect_deferred_z_descendants_for_hit<'a>(
     pt: (f32, f32),
     out: &mut Vec<(&'a WebCore, (f32, f32))>,
 ) {
-    if !is_hit_renderable(node) {
+    if !is_hit_renderable(node) || !point_inside_clip_path(node, pt.0, pt.1) {
         return;
     }
     if is_explicit_z_positioned(node) {
@@ -689,6 +689,9 @@ fn collect_deferred_z_descendants_for_hit<'a>(
 }
 
 fn children_clipped_at(node: &WebCore, px: f32, py: f32) -> bool {
+    if node.style.content_visibility == crate::types::ContentVisibility::Hidden {
+        return true;
+    }
     let Some((left, right, top, bottom)) = children_clip_bounds(node) else {
         return false;
     };
@@ -768,63 +771,109 @@ fn overflow_clip_margin_px(node: &WebCore) -> f32 {
 }
 
 fn point_inside_clip_path(node: &WebCore, x: f32, y: f32) -> bool {
-    let b = &node.layout.border_rect;
+    let reference = node.style.clip_path.reference_rect(&node.layout);
+    let b = &reference;
     let font_px = node.style.font_size_px(16.0, 16.0);
     match node.style.clip_path.kind {
         ClipPathKind::None => true,
+        ClipPathKind::Box => {
+            let (rx, ry) =
+                node.style
+                    .clip_path
+                    .reference_box_radii(&node.style, &node.layout, 16.0);
+            point_inside_rounded_clip_box(*b, rx, ry, x, y)
+        }
         ClipPathKind::Inset => {
-            let top = node.style.clip_path.inset_top.resolve(font_px, b.h, 16.0);
-            let right = node.style.clip_path.inset_right.resolve(font_px, b.w, 16.0);
-            let bottom = node
+            let rect = node.style.clip_path.inset_rect(*b, font_px, 16.0);
+            let (rx, ry) = node
                 .style
                 .clip_path
-                .inset_bottom
-                .resolve(font_px, b.h, 16.0);
-            let left = node.style.clip_path.inset_left.resolve(font_px, b.w, 16.0);
-            x >= b.x + left && x < b.x + b.w - right && y >= b.y + top && y < b.y + b.h - bottom
+                .inset_round_radii(&node.style, rect, font_px, 16.0);
+            point_inside_rounded_clip_box(rect, rx, ry, x, y)
         }
         ClipPathKind::Circle => {
-            let reference = b.w.hypot(b.h) / std::f32::consts::SQRT_2;
-            let r = node
-                .style
-                .clip_path
-                .circle_radius
-                .resolve(font_px, reference, 16.0)
-                .max(0.0);
-            let cx = b.x + node.style.clip_path.center_x.resolve(font_px, b.w, 16.0);
-            let cy = b.y + node.style.clip_path.center_y.resolve(font_px, b.h, 16.0);
+            let rect = node.style.clip_path.circle_rect(*b, font_px, 16.0);
+            let r = rect.w * 0.5;
+            let cx = rect.x + r;
+            let cy = rect.y + r;
             let dx = x - cx;
             let dy = y - cy;
             dx * dx + dy * dy <= r * r
         }
         ClipPathKind::Ellipse => {
-            let rx = node
-                .style
-                .clip_path
-                .ellipse_rx
-                .resolve(font_px, b.w, 16.0)
-                .max(0.0);
-            let ry = node
-                .style
-                .clip_path
-                .ellipse_ry
-                .resolve(font_px, b.h, 16.0)
-                .max(0.0);
+            let rect = node.style.clip_path.ellipse_rect(*b, font_px, 16.0);
+            let rx = rect.w * 0.5;
+            let ry = rect.h * 0.5;
             if rx <= 0.0 || ry <= 0.0 {
                 return false;
             }
-            let cx = b.x + node.style.clip_path.center_x.resolve(font_px, b.w, 16.0);
-            let cy = b.y + node.style.clip_path.center_y.resolve(font_px, b.h, 16.0);
+            let cx = rect.x + rx;
+            let cy = rect.y + ry;
             let nx = (x - cx) / rx;
             let ny = (y - cy) / ry;
             nx * nx + ny * ny <= 1.0
         }
         ClipPathKind::Polygon => point_inside_clip_polygon(node, x, y, font_px),
+        ClipPathKind::Path => {
+            let Some((path, rule)) = node
+                .style
+                .rare
+                .as_ref()
+                .and_then(|rare| rare.clip_path_data.as_ref())
+            else {
+                return false;
+            };
+            let local_x = x - b.x;
+            let local_y = y - b.y;
+            let bounds = path.bounds();
+            if local_x < bounds.x()
+                || local_x > bounds.right()
+                || local_y < bounds.y()
+                || local_y > bounds.bottom()
+            {
+                return false;
+            }
+            let Some(mut mask) = tiny_skia::Mask::new(1, 1) else {
+                return false;
+            };
+            mask.fill_path(
+                path.as_ref(),
+                *rule,
+                false,
+                tiny_skia::Transform::from_translate(0.5 - local_x, 0.5 - local_y),
+            );
+            mask.data()[0] != 0
+        }
     }
 }
 
+fn point_inside_rounded_clip_box(b: Rect, rx: [f32; 4], ry: [f32; 4], x: f32, y: f32) -> bool {
+    if x < b.x || x >= b.x + b.w || y < b.y || y >= b.y + b.h {
+        return false;
+    }
+    for (cx, cy, corner) in [
+        (b.x + rx[0], b.y + ry[0], 0),
+        (b.x + b.w - rx[1], b.y + ry[1], 1),
+        (b.x + b.w - rx[2], b.y + b.h - ry[2], 2),
+        (b.x + rx[3], b.y + b.h - ry[3], 3),
+    ] {
+        let in_corner = match corner {
+            0 => x < cx && y < cy,
+            1 => x >= cx && y < cy,
+            2 => x >= cx && y >= cy,
+            _ => x < cx && y >= cy,
+        };
+        if in_corner && rx[corner] > 0.0 && ry[corner] > 0.0 {
+            let dx = (x - cx) / rx[corner];
+            let dy = (y - cy) / ry[corner];
+            return dx * dx + dy * dy <= 1.0;
+        }
+    }
+    true
+}
+
 fn point_inside_clip_polygon(node: &WebCore, x: f32, y: f32, font_px: f32) -> bool {
-    let b = node.layout.border_rect;
+    let b = node.style.clip_path.reference_rect(&node.layout);
     let points = &node.style.clip_path.points;
     if points.len() < 3 {
         return false;
@@ -1088,10 +1137,7 @@ fn deepest_box_at(node: &WebCore, pt: (f32, f32), _button: u8) -> Option<u32> {
             if let Some(r) = deepest_box_at(child, (cx, cy), _button) {
                 return Some(r);
             }
-            if in_margin
-                && accepts_pointer_events(child)
-                && point_inside_clip_path(child, cx, cy)
-            {
+            if in_margin && accepts_pointer_events(child) && point_inside_clip_path(child, cx, cy) {
                 return Some(child.node_id);
             }
         }

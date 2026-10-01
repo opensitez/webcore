@@ -3,6 +3,7 @@
 #![allow(unused_imports)]
 use crate::css::*;
 use crate::types::*;
+use webmedia::bitmap::premultiply_rgba;
 
 pub(crate) mod cache;
 pub mod stream;
@@ -418,16 +419,13 @@ fn decode_image_bytes_ex_with_source(
         }
     }
 
-    // Try raster formats first (PNG, JPEG, GIF, WebP, BMP)
-    if let Ok(img) = image::load_from_memory(bytes) {
-        let has_alpha = img.color().has_alpha();
-        let rgba = img.into_rgba8();
-        let (w, h) = rgba.dimensions();
-        let mut raw = rgba.into_raw();
-        if has_alpha {
-            premultiply_rgba(&mut raw);
-        }
-        return Some(DecodedImage::Raster(std::sync::Arc::new(raw), w, h));
+    // Try raster formats first (PNG, JPEG, GIF, WebP, BMP).
+    if let Ok(image) = webmedia::bitmap::decode_raster(bytes) {
+        return Some(DecodedImage::Raster(
+            std::sync::Arc::new(image.rgba),
+            image.width,
+            image.height,
+        ));
     }
     if let Some(animated) = decode_animated_image(bytes, source_bytes) {
         if animated.can_animate() {
@@ -823,21 +821,6 @@ fn animated_frame_decode_size(
         ((width as f64 * scale).round() as u32).max(1),
         ((height as f64 * scale).round() as u32).max(1),
     )
-}
-
-fn premultiply_rgba(raw: &mut [u8]) {
-    for pixel in raw.chunks_exact_mut(4) {
-        let a = pixel[3] as u16;
-        if a == 0 {
-            pixel[0] = 0;
-            pixel[1] = 0;
-            pixel[2] = 0;
-        } else if a < 255 {
-            pixel[0] = ((pixel[0] as u16 * a) / 255) as u8;
-            pixel[1] = ((pixel[1] as u16 * a) / 255) as u8;
-            pixel[2] = ((pixel[2] as u16 * a) / 255) as u8;
-        }
-    }
 }
 
 /// Minimal base64 decoder (no external dependency needed for this).

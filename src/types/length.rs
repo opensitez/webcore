@@ -103,21 +103,53 @@ pub enum CalcNode {
 /// Canonical units for non-length calculation literals; evaluation uses their
 /// canonical numeric values, while serialization retains their CSS types.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum CalcScalarUnit { Number, Radians, Seconds, Hertz, Dppx, Percent }
+pub enum CalcScalarUnit {
+    Number,
+    Radians,
+    Seconds,
+    Hertz,
+    Dppx,
+    Percent,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum CssRoundingStrategy { Nearest, Up, Down, ToZero }
+pub enum CssRoundingStrategy {
+    Nearest,
+    Up,
+    Down,
+    ToZero,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CssMathFunction {
-    Min, Max, Clamp, Round(CssRoundingStrategy), Mod, Rem, Abs, Sign,
-    Sin, Cos, Tan, Asin, Acos, Atan, Atan2, Pow, Sqrt, Hypot, Log, Exp,
+    Min,
+    Max,
+    Clamp,
+    Round(CssRoundingStrategy),
+    Mod,
+    Rem,
+    Abs,
+    Sign,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Atan2,
+    Pow,
+    Sqrt,
+    Hypot,
+    Log,
+    Exp,
 }
 
 impl CssMathFunction {
     fn evaluate(self, args: &[f32]) -> f32 {
         use CssMathFunction::*;
-        if args.iter().any(|v| v.is_nan()) { return f32::NAN; }
+        if args.iter().any(|v| v.is_nan()) {
+            return f32::NAN;
+        }
         let a = args[0];
         let b = args.get(1).copied().unwrap_or(1.0);
         match self {
@@ -125,17 +157,39 @@ impl CssMathFunction {
             Max => args.iter().copied().fold(f32::NEG_INFINITY, f32::max),
             Clamp => a.max(b.min(args[2])),
             Abs => a.abs(),
-            Sign => if a == 0.0 { a } else { a.signum() },
-            Sin => a.sin(), Cos => a.cos(), Tan => a.tan(),
-            Asin => a.asin(), Acos => a.acos(), Atan => a.atan(),
-            Atan2 => a.atan2(b), Pow => a.powf(b), Sqrt => a.sqrt(),
+            Sign => {
+                if a == 0.0 {
+                    a
+                } else {
+                    a.signum()
+                }
+            }
+            Sin => a.sin(),
+            Cos => a.cos(),
+            Tan => a.tan(),
+            Asin => a.asin(),
+            Acos => a.acos(),
+            Atan => a.atan(),
+            Atan2 => a.atan2(b),
+            Pow => a.powf(b),
+            Sqrt => a.sqrt(),
             Hypot => args.iter().copied().fold(0.0, f32::hypot),
-            Log => if args.len() == 1 { a.ln() } else { a.log(b) },
+            Log => {
+                if args.len() == 1 {
+                    a.ln()
+                } else {
+                    a.log(b)
+                }
+            }
             Exp => a.exp(),
             Round(strategy) => {
                 let step = b.abs();
-                if step == 0.0 || (a.is_infinite() && step.is_infinite()) { return f32::NAN; }
-                if a.is_infinite() { return a; }
+                if step == 0.0 || (a.is_infinite() && step.is_infinite()) {
+                    return f32::NAN;
+                }
+                if a.is_infinite() {
+                    return a;
+                }
                 if step.is_infinite() {
                     return match strategy {
                         CssRoundingStrategy::Up if a > 0.0 => f32::INFINITY,
@@ -143,7 +197,9 @@ impl CssMathFunction {
                         _ => 0.0f32.copysign(a),
                     };
                 }
-                if a % step == 0.0 { return a; }
+                if a % step == 0.0 {
+                    return a;
+                }
                 // Two finite f32 values can have a quotient outside f32's
                 // range even when their rounded result is representable.
                 let quotient = f64::from(a) / f64::from(step);
@@ -153,18 +209,33 @@ impl CssMathFunction {
                     CssRoundingStrategy::Down => quotient.floor(),
                     CssRoundingStrategy::ToZero => quotient.trunc(),
                 };
-                if rounded == 0.0 { 0.0f32.copysign(a) } else { (rounded * f64::from(step)) as f32 }
+                if rounded == 0.0 {
+                    0.0f32.copysign(a)
+                } else {
+                    (rounded * f64::from(step)) as f32
+                }
             }
             Mod | Rem => {
-                if b == 0.0 || a.is_infinite() { return f32::NAN; }
+                if b == 0.0 || a.is_infinite() {
+                    return f32::NAN;
+                }
                 if b.is_infinite() {
-                    return if self == Mod && a.is_sign_negative() != b.is_sign_negative() { f32::NAN } else { a };
+                    return if self == Mod && a.is_sign_negative() != b.is_sign_negative() {
+                        f32::NAN
+                    } else {
+                        a
+                    };
                 }
                 let remainder = a % b;
-                if self == Rem { remainder }
-                else if remainder == 0.0 { 0.0f32.copysign(b) }
-                else if remainder.is_sign_negative() != b.is_sign_negative() { remainder + b }
-                else { remainder }
+                if self == Rem {
+                    remainder
+                } else if remainder == 0.0 {
+                    0.0f32.copysign(b)
+                } else if remainder.is_sign_negative() != b.is_sign_negative() {
+                    remainder + b
+                } else {
+                    remainder
+                }
             }
         }
     }
@@ -180,16 +251,31 @@ mod math_edge_tests {
             assert!(CssMathFunction::Min.evaluate(&args).is_sign_negative());
             assert!(!CssMathFunction::Max.evaluate(&args).is_sign_negative());
         }
-        assert!(!CssMathFunction::Clamp.evaluate(&[0.0, -0.0, 1.0]).is_sign_negative());
-        assert!(CssMathFunction::Clamp.evaluate(&[-1.0, 0.0, -0.0]).is_sign_negative());
+        assert!(
+            !CssMathFunction::Clamp
+                .evaluate(&[0.0, -0.0, 1.0])
+                .is_sign_negative()
+        );
+        assert!(
+            CssMathFunction::Clamp
+                .evaluate(&[-1.0, 0.0, -0.0])
+                .is_sign_negative()
+        );
     }
 
     #[test]
     fn rounding_finite_values_does_not_overflow_intermediate_quotients() {
-        for strategy in [CssRoundingStrategy::Nearest, CssRoundingStrategy::Up,
-            CssRoundingStrategy::Down, CssRoundingStrategy::ToZero] {
+        for strategy in [
+            CssRoundingStrategy::Nearest,
+            CssRoundingStrategy::Up,
+            CssRoundingStrategy::Down,
+            CssRoundingStrategy::ToZero,
+        ] {
             for value in [1.0, -1.0] {
-                assert_eq!(CssMathFunction::Round(strategy).evaluate(&[value, 3.0e-40]), value);
+                assert_eq!(
+                    CssMathFunction::Round(strategy).evaluate(&[value, 3.0e-40]),
+                    value
+                );
             }
         }
     }
@@ -247,13 +333,29 @@ impl CalcNode {
                     0.0
                 }
             }
-            CalcNode::Product(a, b) => a.resolve_query_vp(parent_font_px, containing_px, root_font_px, vw, vh, query)
-                * b.resolve_query_vp(parent_font_px, containing_px, root_font_px, vw, vh, query),
-            CalcNode::Quotient(a, b) => a.resolve_query_vp(parent_font_px, containing_px, root_font_px, vw, vh, query)
-                / b.resolve_query_vp(parent_font_px, containing_px, root_font_px, vw, vh, query),
-            CalcNode::Function(function, args) => function.evaluate(&args.iter().map(|a|
+            CalcNode::Product(a, b) => {
                 a.resolve_query_vp(parent_font_px, containing_px, root_font_px, vw, vh, query)
-            ).collect::<Vec<_>>()),
+                    * b.resolve_query_vp(parent_font_px, containing_px, root_font_px, vw, vh, query)
+            }
+            CalcNode::Quotient(a, b) => {
+                a.resolve_query_vp(parent_font_px, containing_px, root_font_px, vw, vh, query)
+                    / b.resolve_query_vp(parent_font_px, containing_px, root_font_px, vw, vh, query)
+            }
+            CalcNode::Function(function, args) => function.evaluate(
+                &args
+                    .iter()
+                    .map(|a| {
+                        a.resolve_query_vp(
+                            parent_font_px,
+                            containing_px,
+                            root_font_px,
+                            vw,
+                            vh,
+                            query,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ),
         }
     }
 
@@ -263,7 +365,9 @@ impl CalcNode {
             CalcNode::Value(v) => v.has_percentage(),
             CalcNode::Add(a, b) | CalcNode::Sub(a, b) => a.has_percentage() || b.has_percentage(),
             CalcNode::Mul(a, _) | CalcNode::Div(a, _) => a.has_percentage(),
-            CalcNode::Product(a, b) | CalcNode::Quotient(a, b) => a.has_percentage() || b.has_percentage(),
+            CalcNode::Product(a, b) | CalcNode::Quotient(a, b) => {
+                a.has_percentage() || b.has_percentage()
+            }
             CalcNode::Function(_, args) => args.iter().any(CalcNode::has_percentage),
         }
     }
@@ -319,16 +423,46 @@ impl CssLength {
             CssLength::Vmax(v) => v / 100.0 * viewport_w.max(viewport_h),
             CssLength::Cqw(v) => v / 100.0 * query.width.unwrap_or(viewport_w),
             CssLength::Cqh(v) => v / 100.0 * query.height.unwrap_or(viewport_h),
-            CssLength::Cqi(v) => v / 100.0 * query.inline.unwrap_or(if query.fallback_vertical { viewport_h } else { viewport_w }),
-            CssLength::Cqb(v) => v / 100.0 * query.block.unwrap_or(if query.fallback_vertical { viewport_w } else { viewport_h }),
+            CssLength::Cqi(v) => {
+                v / 100.0
+                    * query.inline.unwrap_or(if query.fallback_vertical {
+                        viewport_h
+                    } else {
+                        viewport_w
+                    })
+            }
+            CssLength::Cqb(v) => {
+                v / 100.0
+                    * query.block.unwrap_or(if query.fallback_vertical {
+                        viewport_w
+                    } else {
+                        viewport_h
+                    })
+            }
             CssLength::Cqmin(v) => {
-                let inline = query.inline.unwrap_or(if query.fallback_vertical { viewport_h } else { viewport_w });
-                let block = query.block.unwrap_or(if query.fallback_vertical { viewport_w } else { viewport_h });
+                let inline = query.inline.unwrap_or(if query.fallback_vertical {
+                    viewport_h
+                } else {
+                    viewport_w
+                });
+                let block = query.block.unwrap_or(if query.fallback_vertical {
+                    viewport_w
+                } else {
+                    viewport_h
+                });
                 v / 100.0 * inline.min(block)
             }
             CssLength::Cqmax(v) => {
-                let inline = query.inline.unwrap_or(if query.fallback_vertical { viewport_h } else { viewport_w });
-                let block = query.block.unwrap_or(if query.fallback_vertical { viewport_w } else { viewport_h });
+                let inline = query.inline.unwrap_or(if query.fallback_vertical {
+                    viewport_h
+                } else {
+                    viewport_w
+                });
+                let block = query.block.unwrap_or(if query.fallback_vertical {
+                    viewport_w
+                } else {
+                    viewport_h
+                });
                 v / 100.0 * inline.max(block)
             }
             CssLength::Calc(c) => {

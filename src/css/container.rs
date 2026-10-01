@@ -29,6 +29,30 @@ struct ContainerConditionBranch<'a> {
     required_type: Option<crate::types::ContainerType>,
 }
 
+fn selector_needs_type_position(selector: &CssSelector) -> bool {
+    selector.parts.iter().any(|part| match part {
+        SelectorPart::PseudoClass(name) => matches!(
+            name.split('(').next().unwrap_or(name),
+            "first-of-type"
+                | "last-of-type"
+                | "only-of-type"
+                | "nth-of-type"
+                | "nth-last-of-type"
+                | "valid"
+                | "invalid"
+                | "in-range"
+                | "out-of-range"
+                | "user-valid"
+                | "user-invalid"
+        ),
+        SelectorPart::Not(inner) => selector_needs_type_position(inner),
+        SelectorPart::Is(list) | SelectorPart::Where(list) | SelectorPart::Has(list) => {
+            list.iter().any(selector_needs_type_position)
+        }
+        _ => false,
+    })
+}
+
 pub(crate) fn parse_container_branch_header(header: &str) -> (&str, &str) {
     let header = header.trim();
     if header.starts_with('(') {
@@ -98,6 +122,8 @@ fn query_container_type(condition: &str) -> Option<crate::types::ContainerType> 
 fn container_condition_matches(
     branches: &[ContainerConditionBranch<'_>],
     containers: &[ContainerEntry],
+    viewport_width: f32,
+    viewport_height: f32,
 ) -> bool {
     branches.iter().any(|branch| {
         let container = containers.iter().rev().find(|container| {
@@ -113,12 +139,14 @@ fn container_condition_matches(
                 }
         });
         container.is_some_and(|container| {
-            evaluate_container_for_type_and_style(
+            evaluate_container_with_viewport(
                 branch.condition,
                 container.width,
                 container.height,
                 container.container_type,
                 Some(&container.style),
+                viewport_width,
+                viewport_height,
             )
         })
     })
@@ -209,6 +237,11 @@ pub(crate) fn apply_container_cascade_tree_with_state(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    let needs_type_position = stylesheet.rules.iter().any(|rule| {
+        !rule.container_condition.is_empty()
+            && rule.selectors.iter().any(selector_needs_type_position)
+    });
     apply_container_cascade_inner(
         node,
         stylesheet,
@@ -225,6 +258,8 @@ pub(crate) fn apply_container_cascade_tree_with_state(
         keyboard_focus,
         applied_rules,
         &conditions,
+        &mut candidates,
+        needs_type_position,
     )
 }
 
@@ -244,6 +279,8 @@ fn apply_container_cascade_inner(
     keyboard_focus: bool,
     applied_rules: &mut HashMap<u32, AppliedContainerStyle>,
     conditions: &[Vec<Vec<ContainerConditionBranch<'_>>>],
+    candidates: &mut Vec<usize>,
+    needs_type_position: bool,
 ) -> bool {
     use crate::types::ContainerType;
 
@@ -270,17 +307,22 @@ fn apply_container_cascade_inner(
             next_siblings: &[],
             next_sibling_nodes: &[],
         };
-        let mut cont_matched: Vec<(usize, u32, Declarations)> = Vec::new();
-        for (rule_index, rule) in stylesheet.rules.iter().enumerate() {
+        let mut cont_matched: Vec<(usize, u32)> = Vec::new();
+        let id = node.attributes.get("id").map(|value| value.as_str());
+        let classes = node.attributes.get("class").map_or("", String::as_str);
+        stylesheet.candidate_rules(&node.tag, id, classes.split_whitespace(), candidates);
+        candidates.sort_unstable();
+        for &rule_index in candidates.iter() {
+            let rule = &stylesheet.rules[rule_index];
             if rule.container_condition.is_empty() {
                 continue;
             }
-            if !rule.media_condition.is_empty() && !evaluate_media(&rule.media_condition, vw, vh) {
+            if !rule.media_condition.matches(vw, vh) {
                 continue;
             }
             if !conditions[rule_index]
                 .iter()
-                .all(|branches| container_condition_matches(branches, container_stack))
+                .all(|branches| container_condition_matches(branches, container_stack, vw, vh))
             {
                 continue;
             }
@@ -307,32 +349,34 @@ fn apply_container_cascade_inner(
                     &match_ctx,
                 ) {
                     if rule.pseudo_element == PseudoElement::None {
-                        let mut merged = rule.declarations.clone();
-                        for (k, v) in &rule.important_declarations {
-                            merged.insert(k.clone(), v.clone());
-                        }
-                        cont_matched.push((rule_index, rule.specificity, merged));
+                        cont_matched.push((rule_index, rule.specificity));
                     }
                     break;
                 }
             }
         }
-        cont_matched.sort_by_key(|(_, specificity, _)| *specificity);
+        cont_matched.sort_by_key(|(_, specificity)| *specificity);
         let matched_rules = cont_matched
             .iter()
-            .map(|(index, _, _)| *index)
+            .map(|(index, _)| *index)
             .collect::<Vec<_>>();
         if !matched_rules.is_empty() || applied_rules.contains_key(&node.node_id) {
-            let entry = applied_rules
-                .entry(node.node_id)
-                .or_insert_with(|| AppliedContainerStyle {
-                    base: node.style.clone(),
-                    rules: Vec::new(),
-                });
+            let entry =
+                applied_rules
+                    .entry(node.node_id)
+                    .or_insert_with(|| AppliedContainerStyle {
+                        base: node.style.clone(),
+                        rules: Vec::new(),
+                    });
             if entry.rules != matched_rules {
                 let mut candidate = entry.base.clone();
-                for (_, _, decls) in &cont_matched {
-                    for (prop, val) in decls {
+                for (index, _) in &cont_matched {
+                    let rule = &stylesheet.rules[*index];
+                    let mut merged = rule.declarations.clone();
+                    for (prop, val) in &rule.important_declarations {
+                        merged.insert(prop.clone(), val.clone());
+                    }
+                    for (prop, val) in &merged {
                         let resolved = resolve_var_references(val, &stylesheet.variables);
                         apply_property(std::sync::Arc::make_mut(&mut candidate), prop, &resolved);
                     }
@@ -369,37 +413,40 @@ fn apply_container_cascade_inner(
     }
 
     // Push this element as an ancestor for children (mirrors apply_cascade_inner).
-	    ancestors.push(AncestorInfo {
-	        tag: node.tag.clone(),
-	        attributes: node.attributes.clone(),
-	        child_index,
-	        sibling_count,
-	        type_child_index,
-	        type_sibling_count,
-	        node_id: node.node_id,
-	        prev_siblings: Vec::new(),
-	    });
+    ancestors.push(AncestorInfo {
+        tag: node.tag.clone(),
+        attributes: std::sync::Arc::new(node.attributes.clone()),
+        child_index,
+        sibling_count,
+        type_child_index,
+        type_sibling_count,
+        node_id: node.node_id,
+        prev_siblings: std::sync::Arc::new(Vec::new()),
+    });
 
     // O(n) type counting (was O(n²) with per-child filter passes).
-    let child_tags: Vec<String> = node
-        .children
-        .iter()
-        .map(|c| c.tag.to_ascii_lowercase())
-        .collect();
-    let mut type_running: HashMap<&str, usize> = HashMap::new();
-    let type_counts: Vec<usize> = child_tags
-        .iter()
-        .map(|tag| {
-            let slot = type_running.entry(tag.as_str()).or_insert(0);
-            let idx = *slot;
-            *slot += 1;
-            idx
-        })
-        .collect();
-    let type_totals: Vec<usize> = child_tags
-        .iter()
-        .map(|tag| *type_running.get(tag.as_str()).unwrap_or(&0))
-        .collect();
+    let type_positions = needs_type_position.then(|| {
+        let child_tags: Vec<String> = node
+            .children
+            .iter()
+            .map(|c| c.tag.to_ascii_lowercase())
+            .collect();
+        let mut type_running: HashMap<&str, usize> = HashMap::new();
+        let type_counts: Vec<usize> = child_tags
+            .iter()
+            .map(|tag| {
+                let slot = type_running.entry(tag.as_str()).or_insert(0);
+                let idx = *slot;
+                *slot += 1;
+                idx
+            })
+            .collect();
+        let type_totals: Vec<usize> = child_tags
+            .iter()
+            .map(|tag| *type_running.get(tag.as_str()).unwrap_or(&0))
+            .collect();
+        (type_counts, type_totals)
+    });
 
     for (i, child) in node.children.iter_mut().enumerate() {
         let c = apply_container_cascade_inner(
@@ -409,8 +456,12 @@ fn apply_container_cascade_inner(
             ancestors,
             i,
             n_children,
-            type_counts[i],
-            type_totals[i],
+            type_positions
+                .as_ref()
+                .map_or(0, |positions| positions.0[i]),
+            type_positions
+                .as_ref()
+                .map_or(1, |positions| positions.1[i]),
             root_font_px,
             vw,
             vh,
@@ -418,6 +469,8 @@ fn apply_container_cascade_inner(
             keyboard_focus,
             applied_rules,
             conditions,
+            candidates,
+            needs_type_position,
         );
         if c {
             changed = true;

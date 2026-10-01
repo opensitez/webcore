@@ -109,6 +109,32 @@ fn user_select_all_selects_the_whole_element() {
     );
 }
 
+#[test]
+fn selecting_plain_text_does_not_make_it_editable() {
+    let mut doc = load_with_fonts(r#"<div id="plain">fixed text</div>"#);
+    let plain = doc.get_element_by_id("plain").unwrap();
+    let rect = doc.get_box_by_id(plain).unwrap().layout.border_rect;
+    assert!(doc.editor.handle_mouse_event(
+        &doc.root,
+        HtmlEventType::MouseDown,
+        (rect.x + 4.0, rect.y + rect.h * 0.5),
+        0,
+    ));
+    assert!(doc.editor.caret_info().is_none());
+    assert_eq!(doc.editor.caret_box, Some(plain));
+    assert!(!doc.editor.handle_key_event(
+        &mut doc.root,
+        HtmlEventType::KeyPress,
+        88,
+        Some('X'),
+        false,
+    ));
+    assert_eq!(
+        crate::layout::inline_layout::collect_flat_text(doc.get_box_by_id(plain).unwrap()),
+        "fixed text",
+    );
+}
+
 // ─── char_x population ───────────────────────────────────────────────────────
 
 #[test]
@@ -500,6 +526,23 @@ fn empty_paragraph_has_nonzero_height() {
         node.layout.border_rect.h > 0.0,
         "empty <p> must have non-zero height so it's visible and clickable"
     );
+}
+
+#[test]
+fn empty_editing_host_uses_line_height_without_expanding_plain_blocks() {
+    let doc = load_with_fonts(
+        r#"<style>#editor { line-height: 32px; }</style>
+           <div id="editor" contenteditable="true"></div><div id="plain"></div>"#,
+    );
+    let editor = doc.get_element_by_id("editor").unwrap();
+    let plain = doc.get_element_by_id("plain").unwrap();
+    let editor = doc.get_box_by_id(editor).unwrap();
+    let plain = doc.get_box_by_id(plain).unwrap();
+    assert_eq!(editor.layout.line_cache.len(), 1);
+    assert!((editor.layout.line_cache[0].height - 32.0).abs() <= 1.0);
+    assert!(editor.layout.border_rect.h >= editor.layout.line_cache[0].height);
+    assert!(plain.layout.line_cache.is_empty());
+    assert_eq!(plain.layout.border_rect.h, 0.0);
 }
 
 #[test]

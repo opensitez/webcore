@@ -5,13 +5,34 @@ use super::*;
 use crate::types::*;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 
 // ─── User-Agent Stylesheet ───────────────────────────────────────────────────
 
+static PARSED_UA: LazyLock<Stylesheet> = LazyLock::new(|| {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add(UA_CSS);
+    sheet
+});
+
+pub(crate) fn initialize_ua_stylesheet() {
+    LazyLock::force(&PARSED_UA);
+}
+
 pub fn ua_stylesheet() -> Stylesheet {
-    let mut ss = Stylesheet::default();
-    ss.parse_and_add(UA_CSS);
-    ss
+    PARSED_UA.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ua_sheet_template_is_reused_without_sharing_document_mutations() {
+        let mut first = super::ua_stylesheet();
+        let original_rules = first.rules.len();
+        first.add_rule(first.rules[0].clone());
+        let second = super::ua_stylesheet();
+        assert_eq!(second.rules.len(), original_rules);
+    }
 }
 
 const UA_CSS: &str = r##"

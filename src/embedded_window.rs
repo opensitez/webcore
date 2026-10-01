@@ -11,7 +11,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::platform::Platform;
@@ -34,6 +34,7 @@ struct Shell<P> {
     platform: Option<Platform>,
     pointer: PhysicalPosition<f64>,
     buttons: i32,
+    modifiers: ModifiersState,
 }
 
 fn active_slot() -> &'static Mutex<Option<Arc<Window>>> {
@@ -55,7 +56,8 @@ pub fn screen_size() -> Option<(f64, f64)> {
         let size = monitor.size();
         let scale = monitor.scale_factor();
         Some((size.width as f64 / scale, size.height as f64 / scale))
-    }).flatten()
+    })
+    .flatten()
 }
 
 pub fn resize_to(width: f64, height: f64) {
@@ -75,18 +77,24 @@ pub fn screen_position() -> Option<(f64, f64)> {
         let position = window.outer_position().ok()?;
         let scale = window.scale_factor();
         Some((position.x as f64 / scale, position.y as f64 / scale))
-    }).flatten()
+    })
+    .flatten()
 }
 
 impl<P: EmbeddedPage> ApplicationHandler for Shell<P> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        let window = Arc::new(event_loop.create_window(
-            Window::default_attributes()
-                .with_title(self.page.title())
-                .with_inner_size(LogicalSize::new(self.width, self.height))
-        ).expect("Failed to create Webcore window"));
+        let window = Arc::new(
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title(self.page.title())
+                        .with_inner_size(LogicalSize::new(self.width, self.height)),
+                )
+                .expect("Failed to create Webcore window"),
+        );
         let platform = Platform::new_windowed(window.clone());
-        self.page.resize(platform.logical_width(), platform.logical_height());
+        self.page
+            .resize(platform.logical_width(), platform.logical_height());
         window.request_redraw();
         *active_slot().lock().unwrap() = Some(window.clone());
         self.window = Some(window);
@@ -102,9 +110,12 @@ impl<P: EmbeddedPage> ApplicationHandler for Shell<P> {
             WindowEvent::Resized(size) => {
                 if let Some(platform) = self.platform.as_mut() {
                     platform.resize(size.width, size.height);
-                    self.page.resize(platform.logical_width(), platform.logical_height());
+                    self.page
+                        .resize(platform.logical_width(), platform.logical_height());
                 }
-                if let Some(window) = self.window.as_ref() { window.request_redraw(); }
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
             }
             WindowEvent::RedrawRequested => {
                 if let Some(platform) = self.platform.as_mut() {
@@ -113,13 +124,27 @@ impl<P: EmbeddedPage> ApplicationHandler for Shell<P> {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = position;
-                let scale = self.platform.as_ref().map(Platform::scale_factor).unwrap_or(1.0);
+                let scale = self
+                    .platform
+                    .as_ref()
+                    .map(Platform::scale_factor)
+                    .unwrap_or(1.0);
                 self.dispatch(UiEvent {
                     kind: "mousemove".into(),
                     client_x: (position.x / f64::from(scale)) as i32,
                     client_y: (position.y / f64::from(scale)) as i32,
                     buttons: self.buttons,
+                    ctrl_key: self.modifiers.control_key(),
+                    shift_key: self.modifiers.shift_key(),
+                    alt_key: self.modifiers.alt_key(),
+                    meta_key: self.modifiers.super_key(),
                     ..UiEvent::default()
+                });
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.dispatch(UiEvent {
+                    kind: "mousemove".into(), client_x: -1, client_y: -1,
+                    buttons: self.buttons, ..UiEvent::default()
                 });
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -129,36 +154,73 @@ impl<P: EmbeddedPage> ApplicationHandler for Shell<P> {
                     MouseButton::Right => (2, 2),
                     _ => (0, 0),
                 };
-                if state == ElementState::Pressed { self.buttons |= mask; }
-                else { self.buttons &= !mask; }
-                let scale = self.platform.as_ref().map(Platform::scale_factor).unwrap_or(1.0);
+                if state == ElementState::Pressed {
+                    self.buttons |= mask;
+                } else {
+                    self.buttons &= !mask;
+                }
+                let scale = self
+                    .platform
+                    .as_ref()
+                    .map(Platform::scale_factor)
+                    .unwrap_or(1.0);
                 self.dispatch(UiEvent {
-                    kind: if state == ElementState::Pressed { "mousedown" } else { "mouseup" }.into(),
+                    kind: if state == ElementState::Pressed {
+                        "mousedown"
+                    } else {
+                        "mouseup"
+                    }
+                    .into(),
                     client_x: (self.pointer.x / f64::from(scale)) as i32,
                     client_y: (self.pointer.y / f64::from(scale)) as i32,
-                    button, buttons: self.buttons,
+                    button,
+                    buttons: self.buttons,
+                    ctrl_key: self.modifiers.control_key(),
+                    shift_key: self.modifiers.shift_key(),
+                    alt_key: self.modifiers.alt_key(),
+                    meta_key: self.modifiers.super_key(),
                     ..UiEvent::default()
                 });
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                let scale = self.platform.as_ref().map(Platform::scale_factor).unwrap_or(1.0);
                 let delta_y = match delta {
                     MouseScrollDelta::LineDelta(_, y) => -(y as f64) * 100.0,
-                    MouseScrollDelta::PixelDelta(p) => -p.y,
+                    MouseScrollDelta::PixelDelta(p) => -p.y / f64::from(scale),
                 };
                 self.dispatch(UiEvent {
                     kind: "wheel".into(),
                     delta_y,
-                    client_x: self.pointer.x as i32,
-                    client_y: self.pointer.y as i32,
+                    client_x: (self.pointer.x / f64::from(scale)) as i32,
+                    client_y: (self.pointer.y / f64::from(scale)) as i32,
                     buttons: self.buttons,
+                    ctrl_key: self.modifiers.control_key(),
+                    shift_key: self.modifiers.shift_key(),
+                    alt_key: self.modifiers.alt_key(),
+                    meta_key: self.modifiers.super_key(),
                     ..UiEvent::default()
                 });
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers.state();
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let (key, code, key_code) = key_fields(&event.logical_key);
                 self.dispatch(UiEvent {
-                    kind: if event.state == ElementState::Pressed { "keydown" } else { "keyup" }.into(),
-                    key, code, key_code, repeat: event.repeat,
+                    kind: if event.state == ElementState::Pressed {
+                        "keydown"
+                    } else {
+                        "keyup"
+                    }
+                    .into(),
+                    key,
+                    code,
+                    key_code,
+                    repeat: event.repeat,
+                    ctrl_key: self.modifiers.control_key(),
+                    shift_key: self.modifiers.shift_key(),
+                    alt_key: self.modifiers.alt_key(),
+                    meta_key: self.modifiers.super_key(),
                     ..UiEvent::default()
                 });
             }
@@ -170,11 +232,15 @@ impl<P: EmbeddedPage> ApplicationHandler for Shell<P> {
         let changed = self.page.tick();
         if let Some(window) = self.window.as_ref() {
             let title = self.page.title();
-            if window.title() != title { window.set_title(&title); }
-            if changed { window.request_redraw(); }
+            if window.title() != title {
+                window.set_title(&title);
+            }
+            if changed {
+                window.request_redraw();
+            }
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(
-            std::time::Instant::now() + std::time::Duration::from_millis(16)
+            std::time::Instant::now() + std::time::Duration::from_millis(16),
         ));
     }
 }
@@ -183,23 +249,35 @@ impl<P: EmbeddedPage> Shell<P> {
     fn dispatch(&mut self, event: UiEvent) {
         ui_events::push(event.clone());
         self.page.input(&event);
-        if let Some(window) = self.window.as_ref() { window.request_redraw(); }
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
     }
 }
 
 pub fn run<P: EmbeddedPage>(width: u32, height: u32, page: P) {
     let event_loop = EventLoop::new().expect("Failed to create Webcore event loop");
     let mut shell = Shell {
-        page, width, height, window: None, platform: None,
-        pointer: PhysicalPosition::new(0.0, 0.0), buttons: 0,
+        page,
+        width,
+        height,
+        window: None,
+        platform: None,
+        pointer: PhysicalPosition::new(0.0, 0.0),
+        buttons: 0,
+        modifiers: ModifiersState::empty(),
     };
-    event_loop.run_app(&mut shell).expect("Webcore event loop failed");
+    event_loop
+        .run_app(&mut shell)
+        .expect("Webcore event loop failed");
 }
 
 fn key_fields(key: &Key) -> (String, String, i32) {
     match key {
         Key::Character(text) => {
-            let Some(c) = text.chars().next() else { return Default::default(); };
+            let Some(c) = text.chars().next() else {
+                return Default::default();
+            };
             let lower = c.to_ascii_lowercase();
             let code = match lower {
                 'a'..='z' => format!("Key{}", lower.to_ascii_uppercase()),
@@ -207,7 +285,11 @@ fn key_fields(key: &Key) -> (String, String, i32) {
                 ' ' => "Space".into(),
                 _ => String::new(),
             };
-            let key_code = if lower.is_ascii_alphabetic() { lower.to_ascii_uppercase() as i32 } else { lower as i32 };
+            let key_code = if lower.is_ascii_alphabetic() {
+                lower.to_ascii_uppercase() as i32
+            } else {
+                lower as i32
+            };
             (c.to_string(), code, key_code)
         }
         Key::Named(named) => {

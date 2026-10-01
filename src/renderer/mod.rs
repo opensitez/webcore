@@ -287,13 +287,17 @@ pub(crate) fn animation_override_rects_with_ids(
                     ..*ctx
                 };
                 let [a, b, c, d, e, f] = display_list_builder::compute_transform_matrix(
-                    &style, &node.layout.border_rect, &local_ctx,
+                    &style,
+                    &node.layout.border_rect,
+                    &local_ctx,
                 );
                 // A translation can travel arbitrarily far beyond the original
                 // box. Include all transformed corners, not a fixed travel pad.
                 let corners = [
-                    (rect.x, rect.y), (rect.x + rect.w, rect.y),
-                    (rect.x, rect.y + rect.h), (rect.x + rect.w, rect.y + rect.h),
+                    (rect.x, rect.y),
+                    (rect.x + rect.w, rect.y),
+                    (rect.x, rect.y + rect.h),
+                    (rect.x + rect.w, rect.y + rect.h),
                 ];
                 let mut left = rect.x;
                 let mut top = rect.y;
@@ -317,9 +321,12 @@ pub(crate) fn animation_override_rects_with_ids(
                 rect = inflate_rect(rect, pad);
                 let left = rect.x.min(transformed.x);
                 let top = rect.y.min(transformed.y);
-                rect = Rect::new(left, top,
+                rect = Rect::new(
+                    left,
+                    top,
                     (rect.x + rect.w).max(transformed.x + transformed.w) - left,
-                    (rect.y + rect.h).max(transformed.y + transformed.h) - top);
+                    (rect.y + rect.h).max(transformed.y + transformed.h) - top,
+                );
             }
             out.push((node.node_id, rect));
         }
@@ -330,9 +337,17 @@ pub(crate) fn animation_override_rects_with_ids(
     let mut out = Vec::new();
     let initial = ComputedStyle::INITIAL_FONT_SIZE_PX;
     let root_font_px = root.style.font_size_px(initial, initial);
-    walk(root, overrides, &mut out, &crate::types::TransformCtx {
-        font_px: root_font_px, root_font_px, viewport_w, viewport_h,
-    });
+    walk(
+        root,
+        overrides,
+        &mut out,
+        &crate::types::TransformCtx {
+            font_px: root_font_px,
+            root_font_px,
+            viewport_w,
+            viewport_h,
+        },
+    );
     out
 }
 
@@ -340,14 +355,12 @@ fn animation_overrides_are_transform_only(
     overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
 ) -> bool {
     !overrides.is_empty()
-        && overrides
-            .values()
-            .all(|props| {
-                !props.is_empty()
-                    && props.iter().all(|(prop, _)| {
-                        crate::types::animation_runtime::animation_property_is_transform(prop)
-                    })
-            })
+        && overrides.values().all(|props| {
+            !props.is_empty()
+                && props.iter().all(|(prop, _)| {
+                    crate::types::animation_runtime::animation_property_is_transform(prop)
+                })
+        })
 }
 
 fn animation_overrides_are_transform_only_for_ids(
@@ -569,10 +582,15 @@ impl Renderer {
             return false;
         }
         let viewport = Rect::new(doc.scroll_x, doc.scroll_y, viewport_w, viewport_h);
-        let rects = animation_override_rects_with_ids(&doc.root, &doc.animation_overrides, viewport_w, viewport_h)
-            .into_iter()
-            .filter_map(|(_, rect)| rect_intersects(rect, viewport).then_some(rect))
-            .collect::<Vec<_>>();
+        let rects = animation_override_rects_with_ids(
+            &doc.root,
+            &doc.animation_overrides,
+            viewport_w,
+            viewport_h,
+        )
+        .into_iter()
+        .filter_map(|(_, rect)| rect_intersects(rect, viewport).then_some(rect))
+        .collect::<Vec<_>>();
         if rects.is_empty() {
             return false;
         }
@@ -589,17 +607,22 @@ impl Renderer {
             return false;
         }
         let viewport = Rect::new(doc.scroll_x, doc.scroll_y, viewport_w, viewport_h);
-        let rects = animation_override_rects_with_ids(&doc.root, &doc.animation_overrides, viewport_w, viewport_h)
-            .into_iter()
-            .filter_map(|(node_id, rect)| {
-                let props = doc.animation_overrides.get(&node_id)?;
-                let transform_only = !props.is_empty()
-                    && props.iter().all(|(prop, _)| {
-                        crate::types::animation_runtime::animation_property_is_transform(prop)
-                    });
-                (!transform_only && rect_intersects(rect, viewport)).then_some(rect)
-            })
-            .collect::<Vec<_>>();
+        let rects = animation_override_rects_with_ids(
+            &doc.root,
+            &doc.animation_overrides,
+            viewport_w,
+            viewport_h,
+        )
+        .into_iter()
+        .filter_map(|(node_id, rect)| {
+            let props = doc.animation_overrides.get(&node_id)?;
+            let transform_only = !props.is_empty()
+                && props.iter().all(|(prop, _)| {
+                    crate::types::animation_runtime::animation_property_is_transform(prop)
+                });
+            (!transform_only && rect_intersects(rect, viewport)).then_some(rect)
+        })
+        .collect::<Vec<_>>();
         if rects.is_empty() {
             return false;
         }
@@ -714,10 +737,16 @@ impl Renderer {
             }
         }
         if doc.needs_animation_frame && !needs_relayout && !scroll_changed {
-            let previous_rects = animation_override_rects_with_ids(&doc.root, &doc.animation_overrides, viewport_w, viewport_h);
+            let previous_rects = animation_override_rects_with_ids(
+                &doc.root,
+                &doc.animation_overrides,
+                viewport_w,
+                viewport_h,
+            );
             doc.tick_animations(now);
-            let finished_rects = previous_rects.into_iter()
-                .filter_map(|(id, rect)| (!doc.animation_overrides.contains_key(&id)).then_some(rect));
+            let finished_rects = previous_rects.into_iter().filter_map(|(id, rect)| {
+                (!doc.animation_overrides.contains_key(&id)).then_some(rect)
+            });
             if self.invalidate_paint_rects(finished_rects) {
                 self.invalidate_paint_only_display_list();
                 needs_redraw = true;
@@ -753,11 +782,15 @@ impl Renderer {
                 // display list with the new sampled style, but keep the old
                 // surface and repaint only the animated boxes.
                 let viewport = Rect::new(doc.scroll_x, doc.scroll_y, viewport_w, viewport_h);
-                let visible_animation_rects =
-                    animation_override_rects_with_ids(&doc.root, &doc.animation_overrides, viewport_w, viewport_h)
-                        .into_iter()
-                        .filter(|(_, rect)| rect_intersects(*rect, viewport))
-                        .collect::<Vec<_>>();
+                let visible_animation_rects = animation_override_rects_with_ids(
+                    &doc.root,
+                    &doc.animation_overrides,
+                    viewport_w,
+                    viewport_h,
+                )
+                .into_iter()
+                .filter(|(_, rect)| rect_intersects(*rect, viewport))
+                .collect::<Vec<_>>();
                 let visible_animation_ids = visible_animation_rects
                     .iter()
                     .map(|(id, _)| *id)
@@ -962,7 +995,7 @@ impl Renderer {
                     .segments
                     .iter()
                     .filter_map(|segment| segment.fixed_surface.as_ref())
-                    .map(|(surface, _)| surface.data().len())
+                    .map(|surface| surface.image.data().len())
                     .sum()
             })
             .unwrap_or(0);
@@ -1521,9 +1554,9 @@ impl Renderer {
         let scroll_outside_cached_band = self.cached_display_list.is_none()
             || doc.scroll_y < self.cached_paint_top
             || doc.scroll_y + view_h > self.cached_paint_bottom;
-        let scroll_changed_since_surface =
-            (self.cached_surface_scroll_x - doc.scroll_x).abs() >= 0.5
-                || (self.cached_surface_scroll_y - doc.scroll_y).abs() >= 0.5;
+        let scroll_changed_since_surface = (self.cached_surface_scroll_x - doc.scroll_x).abs()
+            >= 0.5
+            || (self.cached_surface_scroll_y - doc.scroll_y).abs() >= 0.5;
         let sticky_scroll_changed = scroll_changed_since_surface
             && self
                 .cached_display_list
@@ -1552,9 +1585,9 @@ impl Renderer {
             if self.paint_segments.is_none()
                 && scroll_changed_since_surface
                 && self.cached_display_list.as_ref().is_some_and(|list| {
-                    list.commands.iter().any(|cmd| {
-                        matches!(cmd, display_list::PaintCmd::BeginFixedPosition)
-                    })
+                    list.commands
+                        .iter()
+                        .any(|cmd| matches!(cmd, display_list::PaintCmd::BeginFixedPosition))
                 })
             {
                 self.tile_manager.invalidate_all();
@@ -1644,32 +1677,42 @@ impl Renderer {
                 &doc.base_url,
                 font_system,
             );
-            crate::profile::record(crate::profile::Phase::DisplayListRecord, record_start.elapsed());
+            crate::profile::record(
+                crate::profile::Phase::DisplayListRecord,
+                record_start.elapsed(),
+            );
             if !animation_restore.is_empty() {
                 crate::css::restore_animation_overrides(&mut doc.root, animation_restore);
             }
             let segments_start = std::time::Instant::now();
-            let mut paint_segments = self.use_tiles.then(|| {
-                compositor::PaintSegments::from_display_list(&list, view_w, doc_h)
-            }).flatten();
-            crate::profile::record(crate::profile::Phase::DisplayListSegments, segments_start.elapsed());
+            let mut paint_segments = self
+                .use_tiles
+                .then(|| compositor::PaintSegments::from_display_list(&list, view_w, doc_h))
+                .flatten();
+            crate::profile::record(
+                crate::profile::Phase::DisplayListSegments,
+                segments_start.elapsed(),
+            );
             let previous_segment_count = self
                 .paint_segments
                 .as_ref()
                 .map_or(0, |segments| segments.segments.len());
             let mut retained_segment_count = 0;
             let retain_start = std::time::Instant::now();
-            if let (Some(new), Some(previous)) =
-                (&mut paint_segments, self.paint_segments.take())
-            {
+            if let (Some(new), Some(previous)) = (&mut paint_segments, self.paint_segments.take()) {
                 retained_segment_count = new.retain_unchanged_rasters(previous);
             }
-            crate::profile::record(crate::profile::Phase::DisplayListRetain, retain_start.elapsed());
+            crate::profile::record(
+                crate::profile::Phase::DisplayListRetain,
+                retain_start.elapsed(),
+            );
             if trace_render {
                 eprintln!(
                     "[webcore render] paint_segments previous={} current={} retained={}",
                     previous_segment_count,
-                    paint_segments.as_ref().map_or(0, |segments| segments.segments.len()),
+                    paint_segments
+                        .as_ref()
+                        .map_or(0, |segments| segments.segments.len()),
                     retained_segment_count,
                 );
             }
@@ -1755,11 +1798,13 @@ impl Renderer {
                             );
                         }
                     }
-                    let mut segments = self.use_tiles.then(|| {
-                        compositor::PaintSegments::from_display_list(&paint_list, view_w, doc_h)
-                    }).flatten();
-                    if let (Some(new), Some(previous)) =
-                        (&mut segments, self.paint_segments.take())
+                    let mut segments = self
+                        .use_tiles
+                        .then(|| {
+                            compositor::PaintSegments::from_display_list(&paint_list, view_w, doc_h)
+                        })
+                        .flatten();
+                    if let (Some(new), Some(previous)) = (&mut segments, self.paint_segments.take())
                     {
                         new.retain_unchanged_rasters(previous);
                     }
@@ -2015,13 +2060,10 @@ impl Renderer {
                                     );
                                 }
                             } else {
-                                let cache_matches = segment.fixed_surface.as_ref().is_some_and(
-                                    |(surface, cached_scale)| {
-                                        surface.width() == pixmap.width()
-                                            && surface.height() == pixmap.height()
-                                            && (cached_scale - tile_scale).abs() < 0.001
-                                    },
-                                );
+                                let cache_matches =
+                                    segment.fixed_surface.as_ref().is_some_and(|surface| {
+                                        surface.matches(pixmap.width(), pixmap.height(), tile_scale)
+                                    });
                                 if !cache_matches {
                                     segment.fixed_surface = None;
                                     if let Some(mut surface) =
@@ -2037,18 +2079,14 @@ impl Renderer {
                                             0.0,
                                             0.0,
                                         );
-                                        segment.fixed_surface = Some((surface, tile_scale));
+                                        segment.fixed_surface =
+                                            Some(compositor::FixedSurface::from_viewport(
+                                                surface, tile_scale,
+                                            ));
                                     }
                                 }
-                                if let Some((surface, _)) = &segment.fixed_surface {
-                                    pixmap.draw_pixmap(
-                                        0,
-                                        0,
-                                        surface.as_ref(),
-                                        &tiny_skia::PixmapPaint::default(),
-                                        Transform::identity(),
-                                        None,
-                                    );
+                                if let Some(surface) = &segment.fixed_surface {
+                                    surface.composite(pixmap);
                                 } else {
                                     display_list_replay::replay_commands_with_scroll(
                                         &segment.list.commands,
@@ -2113,23 +2151,23 @@ impl Renderer {
                         );
                     }
                 } else {
-                self.tile_manager.doc_width = doc_w.max(view_w);
-                self.tile_manager.doc_height = doc_h.max(view_h);
-                let tile_scale = scale * zoom;
-                let needed_tiles = self.tile_manager.update_viewport(
-                    Rect::new(doc.scroll_x, doc.scroll_y, view_w, view_h),
-                    tile_scale,
-                );
-                for (tx, ty) in needed_tiles {
-                    let needs_tile = self.tile_manager.ensure_tile(tx, ty);
-                    if needs_tile {
-                        let tile_profile_start =
-                            crate::profile::is_enabled().then(std::time::Instant::now);
-                        if let Some(tile) = self.tile_manager.tiles.get_mut(&(tx, ty)) {
-                            tile.pixmap.fill(canvas_color);
-                            let tile_scroll_x = tx as f32 * tiles::TILE_SIZE;
-                            let tile_scroll_y = ty as f32 * tiles::TILE_SIZE;
-                            display_list_replay::replay_tile_with_scroll_and_transform_overrides(
+                    self.tile_manager.doc_width = doc_w.max(view_w);
+                    self.tile_manager.doc_height = doc_h.max(view_h);
+                    let tile_scale = scale * zoom;
+                    let needed_tiles = self.tile_manager.update_viewport(
+                        Rect::new(doc.scroll_x, doc.scroll_y, view_w, view_h),
+                        tile_scale,
+                    );
+                    for (tx, ty) in needed_tiles {
+                        let needs_tile = self.tile_manager.ensure_tile(tx, ty);
+                        if needs_tile {
+                            let tile_profile_start =
+                                crate::profile::is_enabled().then(std::time::Instant::now);
+                            if let Some(tile) = self.tile_manager.tiles.get_mut(&(tx, ty)) {
+                                tile.pixmap.fill(canvas_color);
+                                let tile_scroll_x = tx as f32 * tiles::TILE_SIZE;
+                                let tile_scroll_y = ty as f32 * tiles::TILE_SIZE;
+                                display_list_replay::replay_tile_with_scroll_and_transform_overrides(
                                 list,
                                 &mut tile.pixmap,
                                 tile_scale,
@@ -2142,27 +2180,27 @@ impl Renderer {
                                 (!animation_transform_overrides.is_empty())
                                     .then_some(&animation_transform_overrides),
                             );
-                            tile.dirty = false;
-                        }
-                        if let Some(started) = tile_profile_start {
-                            crate::profile::record(
-                                crate::profile::Phase::TileRaster,
-                                started.elapsed(),
-                            );
+                                tile.dirty = false;
+                            }
+                            if let Some(started) = tile_profile_start {
+                                crate::profile::record(
+                                    crate::profile::Phase::TileRaster,
+                                    started.elapsed(),
+                                );
+                            }
                         }
                     }
-                }
-                self.tile_manager.evict_distant();
-                let composite_profile_start =
-                    crate::profile::is_enabled().then(std::time::Instant::now);
-                self.tile_manager
-                    .composite_to(pixmap, doc.scroll_x, doc.scroll_y, tile_scale);
-                if let Some(started) = composite_profile_start {
-                    crate::profile::record(
-                        crate::profile::Phase::TileComposite,
-                        started.elapsed(),
-                    );
-                }
+                    self.tile_manager.evict_distant();
+                    let composite_profile_start =
+                        crate::profile::is_enabled().then(std::time::Instant::now);
+                    self.tile_manager
+                        .composite_to(pixmap, doc.scroll_x, doc.scroll_y, tile_scale);
+                    if let Some(started) = composite_profile_start {
+                        crate::profile::record(
+                            crate::profile::Phase::TileComposite,
+                            started.elapsed(),
+                        );
+                    }
                 }
             } else {
                 let direct_profile_start =
@@ -2192,10 +2230,7 @@ impl Renderer {
                     );
                 }
                 if let Some(started) = direct_profile_start {
-                    crate::profile::record(
-                        crate::profile::Phase::DirectReplay,
-                        started.elapsed(),
-                    );
+                    crate::profile::record(crate::profile::Phase::DirectReplay, started.elapsed());
                 }
             }
             page_content_repainted = true;
@@ -2207,8 +2242,14 @@ impl Renderer {
             let cache_start = crate::profile::is_enabled().then(std::time::Instant::now);
             self.cache_content_surface(pixmap);
             self.cached_surface_animation_rects = animation_override_rects_with_ids(
-                &doc.root, &doc.animation_overrides, view_w, view_h,
-            ).into_iter().map(|(_, rect)| rect).collect();
+                &doc.root,
+                &doc.animation_overrides,
+                view_w,
+                view_h,
+            )
+            .into_iter()
+            .map(|(_, rect)| rect)
+            .collect();
             if let Some(started) = cache_start {
                 crate::profile::record(crate::profile::Phase::ContentCache, started.elapsed());
             }
@@ -2281,19 +2322,17 @@ impl Renderer {
             self.draw_color_picker(doc, pixmap, doc.scroll_x, doc.scroll_y);
         }
         if doc.editor.has_selection() {
-            if let Some((caret_id, _)) = doc.editor.caret_info() {
-                if crate::dom::is_in_contenteditable_by_id(&doc.root, caret_id) {
-                    self.scale = scale * zoom;
-                    self.draw_selection_highlight(
-                        &doc.root,
-                        pixmap,
-                        doc.scroll_x,
-                        doc.scroll_y,
-                        caret_id,
-                        doc.editor.sel_start,
-                        doc.editor.sel_end,
-                    );
-                }
+            if let Some(caret_id) = doc.editor.caret_box {
+                self.scale = scale * zoom;
+                self.draw_selection_highlight(
+                    &doc.root,
+                    pixmap,
+                    doc.scroll_x,
+                    doc.scroll_y,
+                    caret_id,
+                    doc.editor.sel_start,
+                    doc.editor.sel_end,
+                );
             }
         }
         if doc.editor.caret_visible {
@@ -2343,12 +2382,21 @@ impl Renderer {
                 let brightness = 299u32 * background.r as u32
                     + 587u32 * background.g as u32
                     + 114u32 * background.b as u32;
-                color = if brightness < 128_000 { Color::WHITE } else { Color::BLACK };
+                color = if brightness < 128_000 {
+                    Color::WHITE
+                } else {
+                    Color::BLACK
+                };
             }
             let mut paint = Paint::default();
             paint.set_color(color.to_tiny_skia());
             if let Some(caret) = SkRect::from_xywh(caret_x, caret_y, 1.5, caret_h) {
-                pixmap.fill_rect(caret, &paint, Transform::from_scale(scale * zoom, scale * zoom), None);
+                pixmap.fill_rect(
+                    caret,
+                    &paint,
+                    Transform::from_scale(scale * zoom, scale * zoom),
+                    None,
+                );
             }
         }
         self.scale = scale;
@@ -2366,7 +2414,10 @@ impl Renderer {
                 .unwrap_or(Color::rgba(128, 128, 128, 40));
             let track_h = h;
             let (thumb_h, thumb_y, _) = crate::types::scrollbar_hit::viewport_scrollbar_thumb(
-                track_h, view_h, doc_h, doc.scroll_y,
+                track_h,
+                view_h,
+                doc_h,
+                doc.scroll_y,
             );
             let track_x = w - scrollbar_w;
             let ts = Transform::from_scale(self.scale, self.scale);
@@ -3206,27 +3257,67 @@ fn configure_generic_font_families(font_system: &mut FontSystem) {
     }
 
     let db = font_system.db_mut();
-    if db.query(&fontdb::Query {
-        families: &[cosmic_text::Family::Serif],
-        ..fontdb::Query::default()
-    }).is_none() {
-        if let Some(name) = installed_name(db, &["Times New Roman", "Georgia", "Liberation Serif", "Noto Serif", "DejaVu Serif", "Times"]) {
+    if db
+        .query(&fontdb::Query {
+            families: &[cosmic_text::Family::Serif],
+            ..fontdb::Query::default()
+        })
+        .is_none()
+    {
+        if let Some(name) = installed_name(
+            db,
+            &[
+                "Times New Roman",
+                "Georgia",
+                "Liberation Serif",
+                "Noto Serif",
+                "DejaVu Serif",
+                "Times",
+            ],
+        ) {
             db.set_serif_family(name);
         }
     }
-    if db.query(&fontdb::Query {
-        families: &[cosmic_text::Family::SansSerif],
-        ..fontdb::Query::default()
-    }).is_none() {
-        if let Some(name) = installed_name(db, &["Arial", "Helvetica", "Segoe UI", "Liberation Sans", "Noto Sans", "DejaVu Sans", "Open Sans"]) {
+    if db
+        .query(&fontdb::Query {
+            families: &[cosmic_text::Family::SansSerif],
+            ..fontdb::Query::default()
+        })
+        .is_none()
+    {
+        if let Some(name) = installed_name(
+            db,
+            &[
+                "Arial",
+                "Helvetica",
+                "Segoe UI",
+                "Liberation Sans",
+                "Noto Sans",
+                "DejaVu Sans",
+                "Open Sans",
+            ],
+        ) {
             db.set_sans_serif_family(name);
         }
     }
-    if db.query(&fontdb::Query {
-        families: &[cosmic_text::Family::Monospace],
-        ..fontdb::Query::default()
-    }).is_none() {
-        if let Some(name) = installed_name(db, &["Menlo", "Consolas", "Liberation Mono", "Noto Sans Mono", "DejaVu Sans Mono", "Courier New"]) {
+    if db
+        .query(&fontdb::Query {
+            families: &[cosmic_text::Family::Monospace],
+            ..fontdb::Query::default()
+        })
+        .is_none()
+    {
+        if let Some(name) = installed_name(
+            db,
+            &[
+                "Menlo",
+                "Consolas",
+                "Liberation Mono",
+                "Noto Sans Mono",
+                "DejaVu Sans Mono",
+                "Courier New",
+            ],
+        ) {
             db.set_monospace_family(name);
         }
     }

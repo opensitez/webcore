@@ -5,23 +5,27 @@
 //! decoding can sit behind the same state later; pages and SVG eventbase timing
 //! already need the DOM contract even when the renderer has no demuxer.
 
-pub mod backend;
 mod controls;
 mod source;
-#[cfg(feature = "audio-symphonia")]
-pub mod symphonia_backend;
 mod tracks;
 
+pub use webmedia::video::{av1, backend, h264, h264_cabac, h264_intra, h264_transform, mp4, mp4_avc, y4m};
+#[cfg(feature = "audio-symphonia")]
+pub use webmedia::video::symphonia_backend;
+
 use crate::types::Document;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
-pub use backend::{
+pub use webmedia::video::{
     AudioSamples, DecodedMedia, MediaDecodeError, MediaDecoder, MediaMetadata, NullMediaDecoder,
-    VideoFrame,
+    StreamingVideoDecoder, VideoFrame,
 };
 pub(crate) use controls::build_media_element;
 pub use tracks::TextTrackInfo;
+
+#[cfg(test)]
+mod integration_tests;
 
 #[derive(Clone, Debug)]
 pub struct MediaElementState {
@@ -37,6 +41,7 @@ pub struct MediaElementState {
     pub muted: bool,
     pub metadata_loaded: bool,
     pub last_tick: Option<Instant>,
+    pub pending_video_frames: VecDeque<VideoFrame>,
 }
 
 impl Default for MediaElementState {
@@ -54,6 +59,7 @@ impl Default for MediaElementState {
             muted: false,
             metadata_loaded: false,
             last_tick: None,
+            pending_video_frames: VecDeque::new(),
         }
     }
 }
@@ -239,6 +245,7 @@ impl Document {
             state.ended = false;
             state.seeking = false;
             state.last_tick = None;
+            state.pending_video_frames.clear();
             events.push("loadstart");
             if has_source {
                 state.metadata_loaded = true;
@@ -259,6 +266,106 @@ impl Document {
         self.sync_media_render_state(id);
         for event in events {
             self.fire_media_event(id, event);
+        }
+        true
+    }
+
+    pub fn media_apply_video_metadata(&mut self, id: u32, metadata: MediaMetadata) -> bool {
+        if self.tag_name(id) != Some("video") {
+            return false;
+        }
+        let duration = metadata
+            .duration
+            .filter(|value| value.is_finite() && *value >= 0.0);
+        let dimensions = metadata
+            .width
+            .zip(metadata.height)
+            .filter(|(width, height)| *width > 0 && *height > 0);
+        if duration.is_none() && dimensions.is_none() {
+            return false;
+        }
+        let mut duration_changed = false;
+        if let Some(state) = self.ensure_media_state(id) {
+            if let Some(duration) = duration {
+                duration_changed = state.duration != Some(duration);
+                state.duration = Some(duration);
+            }
+        }
+        if let Some((width, height)) = dimensions {
+            if let Some(node) = self.find_webcore_mut(id) {
+                node.image_width = width;
+                node.image_height = height;
+                node.layout.intrinsic_dirty = true;
+            }
+        }
+        self.sync_media_render_state(id);
+        if duration_changed {
+            self.fire_media_event(id, "durationchange");
+        }
+        self.needs_animation_frame = true;
+        true
+    }
+
+    pub fn media_present_video_frame(&mut self, id: u32, frame: VideoFrame) -> bool {
+        if self.tag_name(id) != Some("video")
+            || frame.width == 0
+            || frame.height == 0
+            || !frame.timestamp.is_finite()
+            || frame.timestamp < 0.0
+            || u64::from(frame.width) * u64::from(frame.height) * 4 != frame.rgba.len() as u64
+        {
+            return false;
+        }
+        let Some(node) = self.find_webcore_mut(id) else {
+            return false;
+        };
+        node.image_data = Some(frame.rgba);
+        node.image_data_width = frame.width;
+        node.image_data_height = frame.height;
+        node.image_width = frame.width;
+        node.image_height = frame.height;
+        node.svg_document = None;
+        node.layout.intrinsic_dirty = true;
+        self.needs_animation_frame = true;
+        true
+    }
+
+    pub fn media_queue_video_frames(&mut self, id: u32, frames: Vec<VideoFrame>) -> bool {
+        if self.tag_name(id) != Some("video") {
+            return false;
+        }
+        let Some(state) = self.ensure_media_state(id) else {
+            return false;
+        };
+        let mut last_timestamp = state
+            .pending_video_frames
+            .back()
+            .map(|frame| frame.timestamp);
+        for frame in &frames {
+            if frame.width == 0
+                || frame.height == 0
+                || !frame.timestamp.is_finite()
+                || frame.timestamp < 0.0
+                || u64::from(frame.width) * u64::from(frame.height) * 4 != frame.rgba.len() as u64
+                || last_timestamp.is_some_and(|last| frame.timestamp < last)
+            {
+                return false;
+            }
+            last_timestamp = Some(frame.timestamp);
+        }
+        let first = frames.first().cloned();
+        for frame in frames {
+            if state.pending_video_frames.len() == 8 {
+                state.pending_video_frames.pop_front();
+            }
+            state.pending_video_frames.push_back(frame);
+        }
+        if let Some(frame) = first
+            && self
+                .find_webcore(id)
+                .is_some_and(|node| node.image_data.is_none())
+        {
+            self.media_present_video_frame(id, frame);
         }
         true
     }
@@ -374,6 +481,7 @@ impl Document {
         let ids: Vec<u32> = self.media_states.keys().copied().collect();
         let mut events = Vec::<(u32, &'static str)>::new();
         let mut sync_ids = Vec::<u32>::new();
+        let mut video_frames = Vec::<(u32, VideoFrame)>::new();
         let mut any_playing = false;
 
         for id in ids {
@@ -393,6 +501,17 @@ impl Document {
                 continue;
             }
             state.current_time = (state.current_time + dt).max(0.0);
+            let mut latest = None;
+            while state
+                .pending_video_frames
+                .front()
+                .is_some_and(|frame| frame.timestamp <= state.current_time)
+            {
+                latest = state.pending_video_frames.pop_front();
+            }
+            if let Some(frame) = latest {
+                video_frames.push((id, frame));
+            }
             events.push((id, "timeupdate"));
             if let Some(duration) = state.duration {
                 if state.current_time >= duration {
@@ -418,6 +537,9 @@ impl Document {
         sync_ids.dedup();
         for id in sync_ids {
             self.sync_media_render_state(id);
+        }
+        for (id, frame) in video_frames {
+            self.media_present_video_frame(id, frame);
         }
 
         for (id, event) in events {

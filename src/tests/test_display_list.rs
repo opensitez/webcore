@@ -8,10 +8,10 @@ use crate::renderer::display_list_builder::{
     build_display_list, build_display_list_full, build_display_list_full_with_font_system,
 };
 use crate::renderer::display_list_replay::{
-    reduce_corner_radii, replay, replay_tile_with_scroll_and_transform_overrides, replay_with_text,
-    replay_with_scroll, replay_with_scroll_and_transform_overrides,
+    reduce_corner_radii, replay, replay_tile_with_scroll_and_transform_overrides,
+    replay_with_scroll, replay_with_scroll_and_transform_overrides, replay_with_text,
 };
-use crate::types::{Color, Rect};
+use crate::types::{Color, Rect, TextTransform};
 
 fn build(html: &str) -> (EngineFrame, DisplayList) {
     let doc = parse_html(html);
@@ -27,25 +27,50 @@ fn empty_positioned_bullet_and_wrapped_link_border() {
         let (_, list) = build(&format!(
             "<style>body{{margin:40px;direction:{direction}}}li{{position:relative;width:140px;list-style:none;font:16px/26px Arial}}li::before{{content:'';position:absolute;top:8px;inset-inline-start:-16px;border:3px solid #3f3f42;border-radius:50%;background:#3f3f42}}a{{color:#222;border-bottom:1px solid #b80000;text-decoration:none}}</style><ul><li><a>Several words make this link wrap across lines</a></li></ul>"
         ));
-        let bullet = list.commands.iter().find_map(|cmd| match cmd {
-            PaintCmd::Border { rect, widths, colors, radii, radii_y, .. }
-                if widths[0] == 3.0 && colors[0].r == 63 => {
+        let bullet = list
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                PaintCmd::Border {
+                    rect,
+                    widths,
+                    colors,
+                    radii,
+                    radii_y,
+                    ..
+                } if widths[0] == 3.0 && colors[0].r == 63 => {
                     assert_eq!(*radii, [3.0; 4], "bullet horizontal radii");
                     assert_eq!(*radii_y, [3.0; 4], "bullet vertical radii");
                     Some(rect)
-                },
-            _ => None,
-        }).expect("bullet border");
-        assert!((bullet.w - 6.0).abs() < 0.1 && (bullet.h - 6.0).abs() < 0.1,
-            "{direction}: empty bullet must not stretch: {bullet:?}");
-        let borders: Vec<_> = list.commands.iter().filter_map(|cmd| match cmd {
-            PaintCmd::Border { rect, widths, colors, .. }
-                if widths[2] == 1.0 && colors[2].r == 184 => Some(rect),
-            _ => None,
-        }).collect();
-        assert!(borders.len() >= 2, "{direction}: each wrapped line needs its red border: {borders:?}");
-        assert!(borders.iter().all(|r| r.h <= 27.1 && r.w <= 141.0),
-            "{direction}: borders must follow individual fragments: {borders:?}");
+                }
+                _ => None,
+            })
+            .expect("bullet border");
+        assert!(
+            (bullet.w - 6.0).abs() < 0.1 && (bullet.h - 6.0).abs() < 0.1,
+            "{direction}: empty bullet must not stretch: {bullet:?}"
+        );
+        let borders: Vec<_> = list
+            .commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                PaintCmd::Border {
+                    rect,
+                    widths,
+                    colors,
+                    ..
+                } if widths[2] == 1.0 && colors[2].r == 184 => Some(rect),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            borders.len() >= 2,
+            "{direction}: each wrapped line needs its red border: {borders:?}"
+        );
+        assert!(
+            borders.iter().all(|r| r.h <= 27.1 && r.w <= 141.0),
+            "{direction}: borders must follow individual fragments: {borders:?}"
+        );
     }
 }
 
@@ -62,9 +87,14 @@ fn auto_z_positioned_content_paints_after_earlier_fixed_layer() {
     let subject = list
         .commands
         .iter()
-        .position(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text.contains("Message subject")))
+        .position(
+            |cmd| matches!(cmd, PaintCmd::Text { text, .. } if text.contains("Message subject")),
+        )
         .expect("positioned row text");
-    assert!(fixed_end < subject, "later positioned content must paint over the fixed layer");
+    assert!(
+        fixed_end < subject,
+        "later positioned content must paint over the fixed layer"
+    );
 }
 
 #[test]
@@ -80,9 +110,16 @@ fn indented_inline_text_paints_at_the_collapsed_space_position() {
             .expect("followers text command")
     }
 
-    let compact = word_x("<style>body{margin:0;font:14px Arial}</style><div><a><span>6</span> followers</a></div>");
-    let indented = word_x("<style>body{margin:0;font:14px Arial}</style><div><a><span>6</span>\n          followers</a></div>");
-    assert!((compact - indented).abs() < 1.0, "indentation shifted paint from {compact} to {indented}");
+    let compact = word_x(
+        "<style>body{margin:0;font:14px Arial}</style><div><a><span>6</span> followers</a></div>",
+    );
+    let indented = word_x(
+        "<style>body{margin:0;font:14px Arial}</style><div><a><span>6</span>\n          followers</a></div>",
+    );
+    assert!(
+        (compact - indented).abs() < 1.0,
+        "indentation shifted paint from {compact} to {indented}"
+    );
 }
 
 fn build_full(html: &str) -> (EngineFrame, DisplayList) {
@@ -237,7 +274,12 @@ fn absolutely_positioned_block_pseudo_text_is_painted() {
         ));
 
     let pseudo = find_node_by_tag(&frame.doc.root, "::before").unwrap();
-    let text_w = pseudo.layout.line_cache.first().expect("generated text line").width;
+    let text_w = pseudo
+        .layout
+        .line_cache
+        .first()
+        .expect("generated text line")
+        .width;
     let text_center_x = moon.0 + text_w * 0.5;
     let text_center_y = moon.1 + moon.3 * 0.5;
     assert!(
@@ -289,12 +331,16 @@ fn rtl_atomic_prefix_does_not_shift_multiple_words_outside_line() {
     );
     let node = crate::dom::query_selector(&frame.doc.root, "#line").unwrap();
     let line = &node.layout.line_cache[0];
-    assert!(line.text_x_offset.abs() < 0.1,
-        "all words, not just the first, determine the RTL origin: {line:?}");
+    assert!(
+        line.text_x_offset.abs() < 0.1,
+        "all words, not just the first, determine the RTL origin: {line:?}"
+    );
     for command in &list.commands {
         if let PaintCmd::Text { x, text, .. } = command {
-            assert!(*x >= line.x - 0.1 && *x < 320.0,
-                "text outside RTL line: {text} at {x}");
+            assert!(
+                *x >= line.x - 0.1 && *x < 320.0,
+                "text outside RTL line: {text} at {x}"
+            );
         }
     }
 }
@@ -308,12 +354,22 @@ fn rtl_list_bullets_paint_on_inline_start_side() {
             ));
             let item = crate::dom::query_selector(&frame.doc.root, "#item").unwrap();
             let line = &item.layout.line_cache[0];
-            let x = list.commands.iter().find_map(|cmd| match cmd {
-                PaintCmd::ListMarker { x, .. } => Some(*x),
-                _ => None,
-            }).expect("list marker");
-            assert!(if direction == "rtl" { x > line.x + line.width } else { x < line.x },
-                "{direction} {kind}: marker {x} must be on inline-start side of {line:?}");
+            let x = list
+                .commands
+                .iter()
+                .find_map(|cmd| match cmd {
+                    PaintCmd::ListMarker { x, .. } => Some(*x),
+                    _ => None,
+                })
+                .expect("list marker");
+            assert!(
+                if direction == "rtl" {
+                    x > line.x + line.width
+                } else {
+                    x < line.x
+                },
+                "{direction} {kind}: marker {x} must be on inline-start side of {line:?}"
+            );
         }
     }
 }
@@ -330,15 +386,25 @@ fn outside_text_markers_do_not_overlap_list_content_in_either_direction() {
             let mut fonts = cosmic_text::FontSystem::new();
             let mut cache = cosmic_text::SwashCache::new();
             replay_with_text(&list, &mut pixmap, 1.0, &mut fonts, &mut cache);
-            let xs: Vec<_> = pixmap.data().chunks_exact(4).enumerate()
+            let xs: Vec<_> = pixmap
+                .data()
+                .chunks_exact(4)
+                .enumerate()
                 .filter(|(_, p)| p[0] > 0 && p[1] == 0 && p[2] == 0 && p[3] > 0)
-                .map(|(i, _)| i % 400).collect();
+                .map(|(i, _)| i % 400)
+                .collect();
             assert!(!xs.is_empty(), "{direction} marker must paint");
-            assert!(if direction == "rtl" {
-                *xs.iter().min().unwrap() as f32 >= item.layout.content_rect.right()
-            } else {
-                (*xs.iter().max().unwrap() as f32) < item.layout.content_rect.x
-            }, "{direction} {custom}: marker {:?}..{:?} overlaps {:?}", xs.iter().min(), xs.iter().max(), item.layout.content_rect);
+            assert!(
+                if direction == "rtl" {
+                    *xs.iter().min().unwrap() as f32 >= item.layout.content_rect.right()
+                } else {
+                    (*xs.iter().max().unwrap() as f32) < item.layout.content_rect.x
+                },
+                "{direction} {custom}: marker {:?}..{:?} overlaps {:?}",
+                xs.iter().min(),
+                xs.iter().max(),
+                item.layout.content_rect
+            );
         }
     }
 }
@@ -352,19 +418,33 @@ fn list_image_markers_follow_direction_and_position() {
             let list = list_marker_with_example_base(&format!(
                 "<style>*{{margin:0;padding:0}}body{{margin:100px}}li{{width:200px;direction:{direction};list-style-position:{position};list-style-image:url(silicon.png)}}</style><ul><li>item</li></ul>"
             ));
-            let (x, width) = list.commands.iter().find_map(|cmd| match cmd {
-                PaintCmd::ListMarker { marker_type:4, x, image:Some(image), .. } => {
-                    let width = match image { ImageRef::Owned(_, w, _) | ImageRef::Shared(_, w, _) => *w as f32 };
-                    Some((*x, width))
-                }
-                _ => None,
-            }).expect("decoded marker");
+            let (x, width) = list
+                .commands
+                .iter()
+                .find_map(|cmd| match cmd {
+                    PaintCmd::ListMarker {
+                        marker_type: 4,
+                        x,
+                        image: Some(image),
+                        ..
+                    } => {
+                        let width = match image {
+                            ImageRef::Owned(_, w, _) | ImageRef::Shared(_, w, _) => *w as f32,
+                        };
+                        Some((*x, width))
+                    }
+                    _ => None,
+                })
+                .expect("decoded marker");
             let expected = if rtl {
                 300.0 - if inside { width } else { 0.0 }
             } else {
                 100.0 - if inside { 0.0 } else { width }
             };
-            assert!((x - expected).abs() < 0.1, "{direction} {position}: {x} != {expected}");
+            assert!(
+                (x - expected).abs() < 0.1,
+                "{direction} {position}: {x} != {expected}"
+            );
         }
     }
 }
@@ -389,12 +469,18 @@ fn text_controls_preserve_authored_color_even_when_background_matches() {
                 "<style>input,textarea{{appearance:none;color:{color};background:{color};width:200px;height:30px;border:0;padding:0}}</style>{markup}"
             ));
             let node = crate::dom::query_selector(&frame.doc.root, "input,textarea").unwrap();
-            let painted = list.commands.iter().find_map(|cmd| match cmd {
-                PaintCmd::FormElement { color, .. } => Some(*color),
-                _ => None,
-            }).expect("form paint command");
-            assert_eq!(painted, node.style.color,
-                "paint must use the cascaded color, not a contrast heuristic: {markup} {color}");
+            let painted = list
+                .commands
+                .iter()
+                .find_map(|cmd| match cmd {
+                    PaintCmd::FormElement { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .expect("form paint command");
+            assert_eq!(
+                painted, node.style.color,
+                "paint must use the cascaded color, not a contrast heuristic: {markup} {color}"
+            );
         }
     }
 }
@@ -410,12 +496,24 @@ fn text_input_values_and_placeholders_respect_rtl_start_alignment() {
             let mut fonts = cosmic_text::FontSystem::new();
             let mut cache = cosmic_text::SwashCache::new();
             replay_with_text(&list, &mut pixmap, 1.0, &mut fonts, &mut cache);
-            let xs: Vec<_> = pixmap.data().chunks_exact(4).enumerate()
+            let xs: Vec<_> = pixmap
+                .data()
+                .chunks_exact(4)
+                .enumerate()
                 .filter(|(_, p)| p[0] > 0 && p[1] == 0 && p[2] == 0 && p[3] > 0)
-                .map(|(i, _)| i % 220).collect();
+                .map(|(i, _)| i % 220)
+                .collect();
             assert!(!xs.is_empty(), "{attribute} must paint");
-            assert!(if direction == "rtl" { *xs.iter().min().unwrap() > 150 } else { *xs.iter().max().unwrap() < 50 },
-                "{attribute} {direction} wrong text bounds: {:?}..{:?}", xs.iter().min(), xs.iter().max());
+            assert!(
+                if direction == "rtl" {
+                    *xs.iter().min().unwrap() > 150
+                } else {
+                    *xs.iter().max().unwrap() < 50
+                },
+                "{attribute} {direction} wrong text bounds: {:?}..{:?}",
+                xs.iter().min(),
+                xs.iter().max()
+            );
         }
     }
 }
@@ -885,6 +983,36 @@ fn inline_svg_uses_black_current_color_when_rasterized() {
 }
 
 #[test]
+fn inline_svg_paints_later_group_with_inherited_fill() {
+    let standalone = crate::svg::rasterize_svg_to_rgba(
+        r##"<svg width="93" height="20" viewBox="0 0 93 20"><g><path d="M0 0H29V20H0Z" fill="#ff0033"/></g><g id="wordmark"><path d="M31.1484 2.09994H40.6084V18.8999H31.1484Z"/></g></svg>"##,
+        93,
+        20,
+    )
+    .expect("standalone SVG image");
+    let standalone_pixel = (10 * 93 + 35) * 4;
+    assert!(
+        standalone[standalone_pixel + 3] > 200,
+        "standalone second group should paint"
+    );
+    let (_, list) = build(
+        r##"<div style="color:black;fill:currentcolor">
+            <svg width="93" height="20" viewBox="0 0 93 20">
+                <g><path d="M0 0H29V20H0Z" fill="#ff0033"/></g>
+                <g id="wordmark"><path d="M31.1484 2.09994H40.6084V18.8999H31.1484Z"/></g>
+            </svg>
+        </div>"##,
+    );
+    let (data, width, _) = first_image_data(&list).expect("inline SVG image");
+    let pixel = ((10 * width + 35) * 4) as usize;
+    assert!(
+        data[pixel] < 30 && data[pixel + 1] < 30 && data[pixel + 2] < 30 && data[pixel + 3] > 200,
+        "second group should inherit black fill, got {:?}",
+        &data[pixel..pixel + 4]
+    );
+}
+
+#[test]
 fn inline_svg_preserves_current_color_path_over_default_fill() {
     let (_, list) = build(
         r#"<style>svg.play { color: rgb(255, 255, 255); }</style>
@@ -921,12 +1049,17 @@ fn inline_svg_preserves_current_color_path_over_default_fill() {
 
 #[test]
 fn inline_svg_use_resolves_symbols_in_other_inline_svg() {
-    let (_, list) = build(r##"<svg style="display:none"><defs>
+    let (_, list) = build(
+        r##"<svg style="display:none"><defs>
         <symbol id="shared" viewBox="0 0 12 12"><rect width="12" height="12"/></symbol>
-        </defs></svg><svg style="width:12px;height:12px;fill:red"><use href="#shared"/></svg>"##);
+        </defs></svg><svg style="width:12px;height:12px;fill:red"><use href="#shared"/></svg>"##,
+    );
     let (data, w, h) = first_image_data(&list).expect("visible SVG");
     assert_eq!((w, h), (12, 12));
-    assert!(data.chunks_exact(4).any(|pixel| pixel[0] > 200 && pixel[3] > 200));
+    assert!(
+        data.chunks_exact(4)
+            .any(|pixel| pixel[0] > 200 && pixel[3] > 200)
+    );
 }
 
 #[test]
@@ -1097,7 +1230,10 @@ fn inline_svg_uses_css_animated_fill_when_rasterized() {
            </svg>"#,
         20.0,
     );
-    assert!(!doc.animation_overrides.is_empty(), "CSS animation should be sampled");
+    assert!(
+        !doc.animation_overrides.is_empty(),
+        "CSS animation should be sampled"
+    );
     let mut pixmap = tiny_skia::Pixmap::new(20, 20).unwrap();
     renderer.render(&mut doc, &mut pixmap, 1.0);
     let data = pixmap.data();
@@ -1719,6 +1855,45 @@ fn data_svg_background_decodes_before_first_paint() {
 }
 
 #[test]
+fn image_set_background_uses_selected_candidate_resolution_for_auto_size() {
+    fn find_by_id_mut<'a>(node: &'a mut crate::WebCore, id: &str) -> Option<&'a mut crate::WebCore> {
+        if node.attributes.get("id").map(String::as_str) == Some(id) {
+            return Some(node);
+        }
+        node.children
+            .iter_mut()
+            .find_map(|child| find_by_id_mut(child, id))
+    }
+
+    let doc = parse_html(
+        r#"<style>body{margin:0}</style><div id="box" style="width:250px;height:100px;background-image:image-set(url(one.png) 1x,url(two.png) 2x);background-repeat:no-repeat"></div>"#,
+    );
+    let mut frame = EngineFrame::new(doc, 300.0, 150.0);
+    frame.update_frame();
+    let node = find_by_id_mut(&mut frame.doc.root, "box").expect("box node");
+    let bitmap = std::sync::Arc::new(vec![255; 200 * 100 * 4]);
+    assert!(crate::images::set_decoded_bg_image_for_url_on_node(
+        node,
+        crate::images::DecodedImage::Raster(bitmap, 200, 100),
+        "https://example.test/two.png",
+        "https://example.test/page",
+    ));
+    assert_eq!(node.bg_image_resolution, 2.0);
+
+    let list = build_display_list(&frame.doc.root, 300.0, 150.0);
+    let (width, height) = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::BackgroundImage { draw_w, draw_h, .. } => Some((*draw_w, *draw_h)),
+            _ => None,
+        })
+        .expect("background image paint command");
+    assert!((width - 100.0).abs() < 0.1, "draw_w={width}");
+    assert!((height - 50.0).abs() < 0.1, "draw_h={height}");
+}
+
+#[test]
 fn background_position_keyword_offsets_resolve_from_far_edge() {
     fn find_by_id_mut<'a>(
         node: &'a mut crate::WebCore,
@@ -1850,8 +2025,14 @@ fn nested_opacity_emits_nested_groups_around_child_fill() {
     let mut pops = 0;
     for cmd in &list.commands {
         match cmd {
-            PaintCmd::PushOpacity { .. } => { depth += 1; pushes += 1; }
-            PaintCmd::PopOpacity => { depth -= 1; pops += 1; }
+            PaintCmd::PushOpacity { .. } => {
+                depth += 1;
+                pushes += 1;
+            }
+            PaintCmd::PopOpacity => {
+                depth -= 1;
+                pops += 1;
+            }
             PaintCmd::FillRect { color, .. } if color.r > 200 && color.g < 50 => {
                 red_depth = Some(depth);
             }
@@ -1862,7 +2043,10 @@ fn nested_opacity_emits_nested_groups_around_child_fill() {
     let mut pixmap = tiny_skia::Pixmap::new(50, 50).unwrap();
     replay(&list, &mut pixmap, 1.0);
     let pixel = &pixmap.data()[(20 * 50 + 20) * 4..][..4];
-    assert!(pixel[0] > 0 && pixel[3] > 0, "nested opacity should replay its child fill, got {pixel:?}");
+    assert!(
+        pixel[0] > 0 && pixel[3] > 0,
+        "nested opacity should replay its child fill, got {pixel:?}"
+    );
     let mut tile = tiny_skia::Pixmap::new(512, 512).unwrap();
     replay_tile_with_scroll_and_transform_overrides(
         &list,
@@ -1877,8 +2061,10 @@ fn nested_opacity_emits_nested_groups_around_child_fill() {
         None,
     );
     let tile_pixel = &tile.data()[(20 * 512 + 20) * 4..][..4];
-    assert!(tile_pixel[0] > 0 && tile_pixel[3] > 0,
-        "tile replay should retain nested opacity content, got {tile_pixel:?}");
+    assert!(
+        tile_pixel[0] > 0 && tile_pixel[3] > 0,
+        "tile replay should retain nested opacity content, got {tile_pixel:?}"
+    );
 }
 
 #[test]
@@ -1887,14 +2073,27 @@ fn tile_culling_retains_transformed_and_shadow_spill_pixels() {
         "top:100px;transform:translateY(-30px);background:red",
         "top:100px;box-shadow:0 -30px 0 red",
     ] {
-        let (_, list) = build(&format!("<style>body{{margin:0}}div{{position:absolute;left:10px;width:20px;height:20px;{style}}}</style><div></div>"));
+        let (_, list) = build(&format!(
+            "<style>body{{margin:0}}div{{position:absolute;left:10px;width:20px;height:20px;{style}}}</style><div></div>"
+        ));
         let mut tile = tiny_skia::Pixmap::new(100, 90).unwrap();
         replay_tile_with_scroll_and_transform_overrides(
-            &list, &mut tile, 1.0, &mut cosmic_text::FontSystem::new(),
-            &mut cosmic_text::SwashCache::new(), 0.0, 0.0, 0.0, 0.0, None,
+            &list,
+            &mut tile,
+            1.0,
+            &mut cosmic_text::FontSystem::new(),
+            &mut cosmic_text::SwashCache::new(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            None,
         );
         let pixel = tile.pixel(20, 80).unwrap();
-        assert!(pixel.red() > 200 && pixel.alpha() > 200, "paint spilling into tile lost: {style}: {pixel:?}");
+        assert!(
+            pixel.red() > 200 && pixel.alpha() > 200,
+            "paint spilling into tile lost: {style}: {pixel:?}"
+        );
     }
 }
 
@@ -1968,9 +2167,18 @@ fn fixed_backdrop_respects_positioned_z_order_and_viewport_scroll() {
             _ => None,
         })
         .collect();
-    let blue = colors.iter().position(|c| *c == (0, 0, 255)).expect("fixed backdrop");
-    let red = colors.iter().position(|c| *c == (255, 0, 0)).expect("article");
-    assert!(blue < red, "fixed backdrop must paint behind higher z-index article");
+    let blue = colors
+        .iter()
+        .position(|c| *c == (0, 0, 255))
+        .expect("fixed backdrop");
+    let red = colors
+        .iter()
+        .position(|c| *c == (255, 0, 0))
+        .expect("article");
+    assert!(
+        blue < red,
+        "fixed backdrop must paint behind higher z-index article"
+    );
 
     let mut fonts = cosmic_text::FontSystem::new();
     let mut cache = cosmic_text::SwashCache::new();
@@ -2000,9 +2208,18 @@ fn fixed_backdrop_respects_positioned_z_order_and_viewport_scroll() {
             _ => None,
         })
         .collect();
-    let blue = colors.iter().position(|c| *c == (0, 0, 255)).expect("fixed overlay");
-    let red = colors.iter().position(|c| *c == (255, 0, 0)).expect("article");
-    assert!(red < blue, "higher z-index fixed overlay must paint above article");
+    let blue = colors
+        .iter()
+        .position(|c| *c == (0, 0, 255))
+        .expect("fixed overlay");
+    let red = colors
+        .iter()
+        .position(|c| *c == (255, 0, 0))
+        .expect("article");
+    assert!(
+        red < blue,
+        "higher z-index fixed overlay must paint above article"
+    );
 }
 
 #[test]
@@ -2014,9 +2231,15 @@ fn fixed_box_rasterizes_at_one_viewport_position_across_tiles() {
         radius: [0.0; 4],
         radius_y: [0.0; 4],
     };
-    list.push(fill(Rect::new(0.0, 0.0, 128.0, 256.0), Color::rgb(0, 0, 255)));
+    list.push(fill(
+        Rect::new(0.0, 0.0, 128.0, 256.0),
+        Color::rgb(0, 0, 255),
+    ));
     list.push(PaintCmd::BeginFixedPosition);
-    list.push(fill(Rect::new(0.0, 0.0, 128.0, 80.0), Color::rgb(255, 0, 0)));
+    list.push(fill(
+        Rect::new(0.0, 0.0, 128.0, 80.0),
+        Color::rgb(255, 0, 0),
+    ));
     list.push(PaintCmd::EndFixedPosition);
 
     let mut fonts = cosmic_text::FontSystem::new();
@@ -2062,7 +2285,11 @@ fn unavailable_icon_font_uses_missing_glyph_square() {
             "<body style='margin:0'><div style='font-family:{family};font-size:20px;line-height:24px;color:red'>{content}</div></body>"
         );
         let (_, list) = build_full(&html);
-        assert!(list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Text { .. })));
+        assert!(
+            list.commands
+                .iter()
+                .any(|cmd| matches!(cmd, PaintCmd::Text { .. }))
+        );
         let mut pixmap = tiny_skia::Pixmap::new(64, 32).unwrap();
         replay_with_text(
             &list,
@@ -2153,14 +2380,26 @@ fn clip_path_inset_and_circle_emit_display_list_clips() {
 
 #[test]
 fn degenerate_polygon_clip_hides_paint() {
-    for shape in ["polygon(0 0)", "polygon(0 0, 0 0)", "polygon(0 0, 100% 100%)"] {
+    for shape in [
+        "polygon(0 0)",
+        "polygon(0 0, 0 0)",
+        "polygon(0 0, 100% 100%)",
+    ] {
         let (_, list) = build(&format!(
             "<style>body{{margin:0}}</style><div style='width:100px;height:100px;background:red;clip-path:{shape}'></div>"
         ));
-        assert!(list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::PushClipPath { .. })), "{shape}");
+        assert!(
+            list.commands
+                .iter()
+                .any(|cmd| matches!(cmd, PaintCmd::PushClipPath { .. })),
+            "{shape}"
+        );
         let mut pixmap = tiny_skia::Pixmap::new(120, 120).unwrap();
         replay(&list, &mut pixmap, 1.0);
-        assert!(pixmap.data().chunks_exact(4).all(|pixel| pixel[3] == 0), "{shape} must have no visible fill area");
+        assert!(
+            pixmap.data().chunks_exact(4).all(|pixel| pixel[3] == 0),
+            "{shape} must have no visible fill area"
+        );
     }
 }
 
@@ -2180,13 +2419,378 @@ fn clip_shape_pixels_and_hits_agree_on_non_square_boxes() {
         replay(&list, &mut pixmap, 1.0);
         for (point, expected) in [(inside, true), (outside, false)] {
             let pixel = &pixmap.data()[(point.1 * 200 + point.0) * 4..][..4];
-            assert_eq!(pixel[0] > 200 && pixel[1] < 30 && pixel[3] > 200, expected,
-                "{shape} pixel at {point:?}: {pixel:?}");
-            assert_eq!(doc.element_from_point(point.0 as f32, point.1 as f32) == Some(id), expected,
-                "{shape} DOM hit at {point:?}");
-            assert_eq!(crate::layout::hit_test::hit_test_box_at(&doc.root, (point.0 as f32, point.1 as f32), 0) == id, expected,
-                "{shape} layout hit at {point:?}");
+            assert_eq!(
+                pixel[0] > 200 && pixel[1] < 30 && pixel[3] > 200,
+                expected,
+                "{shape} pixel at {point:?}: {pixel:?}"
+            );
+            assert_eq!(
+                doc.element_from_point(point.0 as f32, point.1 as f32) == Some(id),
+                expected,
+                "{shape} DOM hit at {point:?}"
+            );
+            assert_eq!(
+                crate::layout::hit_test::hit_test_box_at(
+                    &doc.root,
+                    (point.0 as f32, point.1 as f32),
+                    0
+                ) == id,
+                expected,
+                "{shape} layout hit at {point:?}"
+            );
         }
+    }
+}
+
+#[test]
+fn clip_path_geometry_box_clips_paint_and_hits_at_the_same_edges() {
+    for clip in [
+        "content-box",
+        "inset(0) content-box",
+        "content-box inset(0)",
+    ] {
+        let mut renderer = Renderer::new();
+        let doc = renderer.load_html(
+            &format!(
+                "<style>body{{margin:0}}#shape{{width:80px;height:80px;padding:10px;border:5px solid blue;background:red;clip-path:{clip}}}</style><div id=shape></div>"
+            ),
+            800.0,
+        );
+        let id = doc.get_element_by_id("shape").unwrap();
+        let mut pixmap = tiny_skia::Pixmap::new(110, 110).unwrap();
+        replay(
+            &build_display_list(&doc.root, 800.0, 600.0),
+            &mut pixmap,
+            1.0,
+        );
+        for (x, y, visible) in [
+            (5, 5, false),
+            (14, 50, false),
+            (15, 50, true),
+            (94, 50, true),
+            (95, 50, false),
+        ] {
+            let pixel = pixmap.pixel(x, y).unwrap();
+            assert_eq!(
+                pixel.red() > 200 && pixel.green() < 30,
+                visible,
+                "{clip} paint at ({x},{y})"
+            );
+            assert_eq!(
+                doc.element_from_point(x as f32, y as f32) == Some(id),
+                visible,
+                "{clip} hit at ({x},{y})"
+            );
+        }
+    }
+}
+
+#[test]
+fn bare_clip_path_boxes_follow_border_radii_but_explicit_inset_stays_square() {
+    for (clip, corner_visible) in [
+        ("border-box", false),
+        ("inset(0) border-box", true),
+        ("padding-box", false),
+        ("inset(0) padding-box", true),
+        ("content-box", false),
+        ("inset(0) content-box", true),
+    ] {
+        let mut renderer = Renderer::new();
+        let doc = renderer.load_html(
+            &format!("<style>body{{margin:0}}#shape{{position:relative;width:80px;height:80px;padding:10px;border:5px solid transparent;border-radius:30px;clip-path:{clip}}}#child{{position:absolute;inset:0;background:red}}</style><div id=shape><div id=child></div></div>"),
+            800.0,
+        );
+        let child = doc.get_element_by_id("child").unwrap();
+        let point = match clip.split_whitespace().last().unwrap() {
+            "border-box" => (5, 5),
+            "padding-box" => (6, 6),
+            _ => (16, 16),
+        };
+        let mut pixmap = tiny_skia::Pixmap::new(110, 110).unwrap();
+        replay(
+            &build_display_list(&doc.root, 800.0, 600.0),
+            &mut pixmap,
+            1.0,
+        );
+        let painted = pixmap.pixel(point.0, point.1).unwrap().alpha() > 200;
+        assert_eq!(painted, corner_visible, "{clip} paint at {point:?}");
+        assert_eq!(
+            doc.element_from_point(point.0 as f32, point.1 as f32) == Some(child),
+            corner_visible,
+            "{clip} hit at {point:?}"
+        );
+    }
+}
+
+#[test]
+fn rounded_inset_clip_agrees_between_paint_and_hit_testing() {
+    let mut renderer = Renderer::new();
+    let doc = renderer.load_html(
+        "<style>body{margin:0}#shape{width:100px;height:100px;background:red;clip-path:inset(10px round 30px / 15px)}</style><div id=shape></div>",
+        800.0,
+    );
+    let id = doc.get_element_by_id("shape").unwrap();
+    let mut pixmap = tiny_skia::Pixmap::new(100, 100).unwrap();
+    replay(
+        &build_display_list(&doc.root, 800.0, 600.0),
+        &mut pixmap,
+        1.0,
+    );
+    for (x, y, expected) in [
+        (12, 12, false),
+        (50, 12, true),
+        (12, 50, true),
+        (50, 50, true),
+    ] {
+        assert_eq!(
+            pixmap.pixel(x, y).unwrap().alpha() > 200,
+            expected,
+            "paint at ({x},{y})"
+        );
+        assert_eq!(
+            doc.element_from_point(x as f32, y as f32) == Some(id),
+            expected,
+            "hit at ({x},{y})"
+        );
+    }
+}
+
+#[test]
+fn xywh_and_rect_clips_agree_between_paint_and_hit_testing() {
+    for (clip, samples) in [
+        (
+            "XYWH(10px 20px 40px 30px round 8px)",
+            [
+                (11, 21, false),
+                (30, 22, true),
+                (30, 35, true),
+                (60, 35, false),
+            ],
+        ),
+        (
+            "RECT(20px 50px 50px 10px)",
+            [
+                (12, 22, true),
+                (30, 22, true),
+                (30, 35, true),
+                (60, 35, false),
+            ],
+        ),
+    ] {
+        let mut renderer = Renderer::new();
+        let doc = renderer.load_html(
+            &format!("<style>body{{margin:0}}#shape{{width:100px;height:100px;background:red;clip-path:{clip}}}</style><div id=shape></div>"),
+            800.0,
+        );
+        let id = doc.get_element_by_id("shape").unwrap();
+        let shape = crate::tests::harness::find_box(&doc.root, &|node| node.node_id == id).unwrap();
+        assert_eq!(
+            shape.style.clip_path.kind,
+            crate::types::ClipPathKind::Inset,
+            "{clip}"
+        );
+        let expected = Rect::new(10.0, 20.0, 40.0, 30.0);
+        assert_eq!(
+            shape
+                .style
+                .clip_path
+                .inset_rect(shape.layout.border_rect, 16.0, 16.0),
+            expected,
+            "{clip}"
+        );
+        if clip.starts_with("XYWH") {
+            assert_eq!(
+                shape.style.rare().clip_path_inset_round.as_ref().unwrap().0[0],
+                crate::types::CssLength::Px(8.0)
+            );
+        }
+        let mut pixmap = tiny_skia::Pixmap::new(100, 100).unwrap();
+        replay(
+            &build_display_list(&doc.root, 800.0, 600.0),
+            &mut pixmap,
+            1.0,
+        );
+        for (x, y, visible) in samples {
+            assert_eq!(
+                pixmap.pixel(x, y).unwrap().alpha() > 200,
+                visible,
+                "{clip} paint at ({x},{y})"
+            );
+            assert_eq!(
+                doc.element_from_point(x as f32, y as f32) == Some(id),
+                visible,
+                "{clip} hit at ({x},{y})"
+            );
+        }
+    }
+}
+
+#[test]
+fn default_radial_clips_agree_between_paint_and_hit_testing() {
+    for (clip, samples) in [
+        (
+            "circle()",
+            [
+                (10, 30, false),
+                (50, 5, true),
+                (50, 30, true),
+                (90, 30, false),
+            ],
+        ),
+        (
+            "ellipse()",
+            [
+                (5, 5, false),
+                (50, 5, true),
+                (50, 30, true),
+                (95, 55, false),
+            ],
+        ),
+    ] {
+        let mut renderer = Renderer::new();
+        let doc = renderer.load_html(
+            &format!("<style>body{{margin:0}}#shape{{width:100px;height:60px;background:red;clip-path:{clip}}}</style><div id=shape></div>"),
+            800.0,
+        );
+        let id = doc.get_element_by_id("shape").unwrap();
+        let mut pixmap = tiny_skia::Pixmap::new(100, 60).unwrap();
+        replay(
+            &build_display_list(&doc.root, 800.0, 600.0),
+            &mut pixmap,
+            1.0,
+        );
+        for (x, y, visible) in samples {
+            assert_eq!(
+                pixmap.pixel(x, y).unwrap().alpha() > 200,
+                visible,
+                "{clip} paint at ({x},{y})"
+            );
+            assert_eq!(
+                doc.element_from_point(x as f32, y as f32) == Some(id),
+                visible,
+                "{clip} hit at ({x},{y})"
+            );
+        }
+    }
+}
+
+#[test]
+fn inset_clip_reduces_overconstrained_percentages_proportionally() {
+    let mut renderer = Renderer::new();
+    let doc = renderer.load_html(
+        "<style>body{margin:0}#shape{width:100px;height:100px;background:red;clip-path:inset(75% 0 50% 0)}</style><div id=shape></div>",
+        800.0,
+    );
+    let list = build_display_list(&doc.root, 800.0, 600.0);
+    let inset = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::PushClip { rect, .. } if rect.w == 100.0 && rect.h == 0.0 => Some(*rect),
+            _ => None,
+        })
+        .expect("zero-height inset clip");
+    assert!((inset.y - 60.0).abs() < 0.01, "inset y = {}", inset.y);
+    let mut pixmap = tiny_skia::Pixmap::new(100, 100).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    assert_eq!(pixmap.pixel(50, 60).unwrap().alpha(), 0);
+    assert_ne!(
+        doc.element_from_point(50.0, 60.0),
+        doc.get_element_by_id("shape")
+    );
+}
+
+#[test]
+fn css_path_clip_uses_svg_curves_and_fill_rule_for_paint_and_hits() {
+    for (clip, visible_at_center) in [
+        (
+            "path(nonzero, 'M0 0 H100 V100 H0 Z M25 25 H75 V75 H25 Z')",
+            true,
+        ),
+        (
+            "path(evenodd, 'M0 0 H100 V100 H0 Z M25 25 H75 V75 H25 Z')",
+            false,
+        ),
+    ] {
+        let mut renderer = Renderer::new();
+        let doc = renderer.load_html(
+            &format!("<style>body{{margin:0}}#shape{{width:100px;height:100px;background:red;clip-path:{clip}}}</style><div id=shape></div>"),
+            800.0,
+        );
+        let id = doc.get_element_by_id("shape").unwrap();
+        let list = build_display_list(&doc.root, 800.0, 600.0);
+        assert!(
+            list.commands
+                .iter()
+                .any(|cmd| matches!(cmd, PaintCmd::PushClipSvgPath { .. }))
+        );
+        let mut pixmap = tiny_skia::Pixmap::new(100, 100).unwrap();
+        replay(&list, &mut pixmap, 1.0);
+        for (x, y, expected) in [(10, 10, true), (50, 50, visible_at_center)] {
+            assert_eq!(
+                pixmap.pixel(x, y).unwrap().alpha() > 200,
+                expected,
+                "{clip} paint at ({x},{y})"
+            );
+            assert_eq!(
+                doc.element_from_point(x as f32, y as f32) == Some(id),
+                expected,
+                "{clip} hit at ({x},{y})"
+            );
+        }
+    }
+    let mut renderer = Renderer::new();
+    let doc = renderer.load_html(
+        "<style>body{margin:0}#shape{width:100px;height:100px;background:red;clip-path:path('M0 100 Q50 -100 100 100 Z')}</style><div id=shape></div>",
+        800.0,
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(100, 100).unwrap();
+    replay(
+        &build_display_list(&doc.root, 800.0, 600.0),
+        &mut pixmap,
+        1.0,
+    );
+    assert!(
+        pixmap.pixel(50, 40).unwrap().alpha() > 200,
+        "quadratic curve fills below its arc"
+    );
+    assert_eq!(
+        pixmap.pixel(25, 5).unwrap().alpha(),
+        0,
+        "quadratic curve clips above its arc"
+    );
+}
+
+#[test]
+fn css_path_clip_uses_reference_box_origin_and_clips_positioned_descendants() {
+    let mut renderer = Renderer::new();
+    let doc = renderer.load_html(
+        "<style>body{margin:0}#shape{position:relative;margin:20px;width:100px;height:100px;clip-path:path('M0 0 H50 V100 H0 Z')}#child{position:absolute;inset:0;background:red}</style><div id=shape><div id=child></div></div>",
+        800.0,
+    );
+    let child = doc.get_element_by_id("child").unwrap();
+    let mut pixmap = tiny_skia::Pixmap::new(160, 160).unwrap();
+    replay(
+        &build_display_list(&doc.root, 800.0, 600.0),
+        &mut pixmap,
+        1.0,
+    );
+    for (x, y, visible) in [
+        (30, 30, true),
+        (60, 60, true),
+        (90, 30, false),
+        (10, 30, false),
+    ] {
+        assert_eq!(
+            pixmap.pixel(x, y).unwrap().alpha() > 200,
+            visible,
+            "paint at ({x},{y})"
+        );
+        assert_eq!(
+            doc.element_from_point(x as f32, y as f32) == Some(child),
+            visible,
+            "hit at ({x},{y})"
+        );
     }
 }
 
@@ -2884,19 +3488,33 @@ fn replay_scrolls_form_element_content() {
 
 #[test]
 fn placeholder_typography_changes_placeholder_paint_but_not_input_value() {
-    let (_, list) = build(r#"<input type="text" placeholder="MMMM" style="width:200px;height:50px;font-size:10px">"#);
-    let command = list.commands.iter().find(|command| matches!(command, PaintCmd::FormElement { .. }))
-        .expect("form paint command").clone();
+    let (_, list) = build(
+        r#"<input type="text" placeholder="MMMM" style="width:200px;height:50px;font-size:10px">"#,
+    );
+    let command = list
+        .commands
+        .iter()
+        .find(|command| matches!(command, PaintCmd::FormElement { .. }))
+        .expect("form paint command")
+        .clone();
     let mut styled = command.clone();
-    if let PaintCmd::FormElement { placeholder_typography, .. } = &mut styled {
+    if let PaintCmd::FormElement {
+        placeholder_typography,
+        ..
+    } = &mut styled
+    {
         *placeholder_typography = Some(PlaceholderTypography {
             font_size: 28.0,
             font_weight: 700,
             font_style: 1,
             font_family: "serif".to_string(),
+            font_stretch: 100.0,
             line_height: 34.0,
             letter_spacing: 2.0,
             word_spacing: 0.0,
+            text_transform: TextTransform::None,
+            decoration: Default::default(),
+            shadow: None,
         });
     }
     let paint = |command: PaintCmd| {
@@ -2910,7 +3528,11 @@ fn placeholder_typography_changes_placeholder_paint_but_not_input_value() {
     };
     let base_pixels = paint(command.clone());
     let styled_pixels = paint(styled.clone());
-    assert_ne!(base_pixels.data(), styled_pixels.data(), "placeholder font must affect paint");
+    assert_ne!(
+        base_pixels.data(),
+        styled_pixels.data(),
+        "placeholder font must affect paint"
+    );
 
     let mut value_base = command;
     let mut value_styled = styled;
@@ -2920,7 +3542,150 @@ fn placeholder_typography_changes_placeholder_paint_but_not_input_value() {
     if let PaintCmd::FormElement { value, .. } = &mut value_styled {
         *value = "MMMM".to_string();
     }
-    assert_eq!(paint(value_base).data(), paint(value_styled).data(), "value must keep the input font");
+    assert_eq!(
+        paint(value_base).data(),
+        paint(value_styled).data(),
+        "value must keep the input font"
+    );
+}
+
+#[test]
+fn placeholder_transform_and_stretch_reach_paint_without_changing_value() {
+    let (_, list) = build(
+        r#"<style>input::placeholder { text-transform: uppercase; font-stretch: 150%; }</style>
+           <input type="text" placeholder="Hello" style="width:200px;height:50px">"#,
+    );
+    let styled = list
+        .commands
+        .iter()
+        .find(|command| matches!(command, PaintCmd::FormElement { .. }))
+        .expect("form paint command")
+        .clone();
+    let mut plain = styled.clone();
+    if let PaintCmd::FormElement {
+        placeholder_typography: Some(typography),
+        ..
+    } = &mut plain
+    {
+        assert_eq!(typography.text_transform, TextTransform::Uppercase);
+        assert_eq!(typography.font_stretch, 150.0);
+        typography.text_transform = TextTransform::None;
+        typography.font_stretch = 100.0;
+    } else {
+        panic!("placeholder pseudo style must reach the form paint command");
+    }
+    let paint = |command: PaintCmd| {
+        let mut display_list = DisplayList::new();
+        display_list.push(command);
+        let mut pixmap = tiny_skia::Pixmap::new(240, 80).unwrap();
+        let mut fonts = cosmic_text::FontSystem::new();
+        let mut glyphs = cosmic_text::SwashCache::new();
+        replay_with_text(&display_list, &mut pixmap, 1.0, &mut fonts, &mut glyphs);
+        pixmap
+    };
+    assert_ne!(paint(styled.clone()).data(), paint(plain.clone()).data());
+    let mut value_styled = styled;
+    let mut value_plain = plain;
+    if let PaintCmd::FormElement { value, .. } = &mut value_styled {
+        *value = "Hello".into();
+    }
+    if let PaintCmd::FormElement { value, .. } = &mut value_plain {
+        *value = "Hello".into();
+    }
+    assert_eq!(paint(value_styled).data(), paint(value_plain).data());
+}
+
+#[test]
+fn placeholder_decoration_paints_without_decorating_input_value() {
+    let (_, list) = build(
+        r#"<style>input::placeholder { text-decoration: underline; text-decoration-color: red; }</style>
+           <input type="text" placeholder="Hello" style="width:200px;height:50px">"#,
+    );
+    let styled = list
+        .commands
+        .iter()
+        .find(|command| matches!(command, PaintCmd::FormElement { .. }))
+        .expect("form paint command")
+        .clone();
+    let mut plain = styled.clone();
+    if let PaintCmd::FormElement {
+        placeholder_typography: Some(typography),
+        ..
+    } = &mut plain
+    {
+        assert!(typography.decoration.underline);
+        typography.decoration = Default::default();
+    } else {
+        panic!("placeholder pseudo style must reach the form paint command");
+    }
+    let paint = |command: PaintCmd| {
+        let mut display_list = DisplayList::new();
+        display_list.push(command);
+        let mut pixmap = tiny_skia::Pixmap::new(240, 80).unwrap();
+        let mut fonts = cosmic_text::FontSystem::new();
+        let mut glyphs = cosmic_text::SwashCache::new();
+        replay_with_text(&display_list, &mut pixmap, 1.0, &mut fonts, &mut glyphs);
+        pixmap
+    };
+    assert_ne!(paint(styled.clone()).data(), paint(plain.clone()).data());
+    let mut value_styled = styled;
+    let mut value_plain = plain;
+    if let PaintCmd::FormElement { value, .. } = &mut value_styled {
+        *value = "Hello".into();
+    }
+    if let PaintCmd::FormElement { value, .. } = &mut value_plain {
+        *value = "Hello".into();
+    }
+    assert_eq!(paint(value_styled).data(), paint(value_plain).data());
+}
+
+#[test]
+fn placeholder_blurred_shadow_paints_without_shadowing_input_value() {
+    let (_, list) = build(
+        r#"<style>input::placeholder { text-shadow: 4px 3px 2px red; }</style>
+           <input type="text" placeholder="Hello" style="width:200px;height:50px">"#,
+    );
+    let styled = list
+        .commands
+        .iter()
+        .find(|command| matches!(command, PaintCmd::FormElement { .. }))
+        .expect("form paint command")
+        .clone();
+    let mut plain = styled.clone();
+    if let PaintCmd::FormElement {
+        placeholder_typography: Some(typography),
+        ..
+    } = &mut plain
+    {
+        assert!(
+            typography
+                .shadow
+                .as_ref()
+                .is_some_and(|shadow| shadow.blur > 0.0)
+        );
+        typography.shadow = None;
+    } else {
+        panic!("placeholder pseudo style must reach the form paint command");
+    }
+    let paint = |command: PaintCmd| {
+        let mut display_list = DisplayList::new();
+        display_list.push(command);
+        let mut pixmap = tiny_skia::Pixmap::new(240, 80).unwrap();
+        let mut fonts = cosmic_text::FontSystem::new();
+        let mut glyphs = cosmic_text::SwashCache::new();
+        replay_with_text(&display_list, &mut pixmap, 1.0, &mut fonts, &mut glyphs);
+        pixmap
+    };
+    assert_ne!(paint(styled.clone()).data(), paint(plain.clone()).data());
+    let mut value_styled = styled;
+    let mut value_plain = plain;
+    if let PaintCmd::FormElement { value, .. } = &mut value_styled {
+        *value = "Hello".into();
+    }
+    if let PaintCmd::FormElement { value, .. } = &mut value_plain {
+        *value = "Hello".into();
+    }
+    assert_eq!(paint(value_styled).data(), paint(value_plain).data());
 }
 
 #[test]
@@ -3192,16 +3957,32 @@ fn deferred_sticky_uses_its_parent_containing_block() {
         .border_rect
         .y;
     let list = build_display_list_full(
-        &frame.doc.root, 800.0, 600.0, 0.0, 0.0, 0, 0,
-        &std::collections::HashSet::new(), "",
+        &frame.doc.root,
+        800.0,
+        600.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
     );
-    let painted_y = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::FillRect { rect, color, .. } if color.r == 255 && color.g == 0 && color.b == 0 => {
-            Some(rect.y)
-        }
-        _ => None,
-    }).expect("sticky background");
-    assert!((painted_y - expected_y).abs() < 0.1, "painted at {painted_y}, laid out at {expected_y}");
+    let painted_y = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::FillRect { rect, color, .. }
+                if color.r == 255 && color.g == 0 && color.b == 0 =>
+            {
+                Some(rect.y)
+            }
+            _ => None,
+        })
+        .expect("sticky background");
+    assert!(
+        (painted_y - expected_y).abs() < 0.1,
+        "painted at {painted_y}, laid out at {expected_y}"
+    );
 }
 
 // ── Pseudo-elements ─────────────────────────────────────────────────────────
@@ -3366,12 +4147,222 @@ fn multiple_box_shadows_produce_separate_commands() {
     );
 }
 
+#[test]
+fn box_shadow_uses_border_edge_outside_and_padding_edge_inside() {
+    let (_, list) = build(
+        "<body style='margin:0'><div style='position:absolute;left:40px;top:40px;\
+         width:100px;height:80px;border:10px solid blue;border-radius:20px;\
+         box-shadow:0 0 0 3px red,inset 0 0 0 3px green'></div></body>",
+    );
+    let shadows: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::BoxShadow {
+                rect,
+                inset,
+                radii,
+                radii_y,
+                ..
+            } => Some((rect, inset, radii, radii_y)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shadows.len(), 2);
+    for (rect, inset, radii, radii_y) in shadows {
+        let (expected_rect, expected_radius) = if *inset {
+            (Rect::new(50.0, 50.0, 100.0, 80.0), 10.0)
+        } else {
+            (Rect::new(40.0, 40.0, 120.0, 100.0), 20.0)
+        };
+        assert_eq!(*rect, expected_rect, "wrong shadow edge for inset={inset}");
+        assert_eq!(*radii, [expected_radius; 4]);
+        assert_eq!(*radii_y, [expected_radius; 4]);
+    }
+}
+
+#[test]
+fn bordered_box_shadows_paint_on_their_respective_sides() {
+    let doc = parse_html(
+        "<body style='margin:0;background:white'><div style='position:absolute;left:40px;top:40px;\
+         width:100px;height:80px;border:10px solid blue;border-radius:20px;background:white;\
+         box-shadow:0 0 0 3px red,inset 0 0 0 3px green'></div></body>",
+    );
+    let mut frame = EngineFrame::new(doc, 200.0, 180.0);
+    frame.update_frame();
+    let mut pixels = tiny_skia::Pixmap::new(200, 180).unwrap();
+    Renderer::new().render(&mut frame.doc, &mut pixels, 1.0);
+    let outer = pixels.pixel(38, 90).unwrap();
+    let border = pixels.pixel(45, 90).unwrap();
+    let inner = pixels.pixel(51, 90).unwrap();
+    let center = pixels.pixel(100, 90).unwrap();
+    assert!(
+        outer.red() > 200 && outer.green() < 40 && outer.blue() < 40,
+        "outer shadow missed the border edge: {outer:?}"
+    );
+    assert!(
+        border.blue() > 200 && border.red() < 40,
+        "border was overwritten by a shadow: {border:?}"
+    );
+    assert!(
+        inner.green() > 80 && inner.red() < 80,
+        "inset shadow missed the padding edge: {inner:?}"
+    );
+    assert!(
+        center.red() > 240 && center.green() > 240 && center.blue() > 240,
+        "inset shadow filled the center: {center:?}"
+    );
+}
+
+#[test]
+fn inset_shadow_offset_moves_hole_without_flattening_its_corner() {
+    let mut list = DisplayList::new();
+    list.push(PaintCmd::BoxShadow {
+        rect: Rect::new(40.0, 40.0, 100.0, 100.0),
+        color: Color::BLACK,
+        offset_x: 20.0,
+        offset_y: 0.0,
+        blur: 0.0,
+        spread: 0.0,
+        inset: true,
+        radii: [30.0; 4],
+        radii_y: [30.0; 4],
+    });
+    let mut pixels = tiny_skia::Pixmap::new(180, 180).unwrap();
+    replay(&list, &mut pixels, 1.0);
+    assert!(
+        pixels.pixel(65, 48).unwrap().alpha() > 200,
+        "offset flattened the inset shadow's upper-left corner"
+    );
+    assert_eq!(
+        pixels.pixel(100, 80).unwrap().alpha(),
+        0,
+        "shadow filled its translated hole"
+    );
+}
+
+#[test]
+fn inset_shadow_spread_and_offset_translate_the_same_hole() {
+    let mut list = DisplayList::new();
+    list.push(PaintCmd::BoxShadow {
+        rect: Rect::new(40.0, 40.0, 100.0, 100.0),
+        color: Color::BLACK,
+        offset_x: 20.0,
+        offset_y: 0.0,
+        blur: 0.0,
+        spread: 10.0,
+        inset: true,
+        radii: [0.0; 4],
+        radii_y: [0.0; 4],
+    });
+    let mut pixels = tiny_skia::Pixmap::new(180, 180).unwrap();
+    replay(&list, &mut pixels, 1.0);
+    assert!(
+        pixels.pixel(65, 90).unwrap().alpha() > 200,
+        "positive offset and spread did not widen the left shadow"
+    );
+    assert_eq!(
+        pixels.pixel(135, 90).unwrap().alpha(),
+        0,
+        "positive offset incorrectly left a right-side shadow"
+    );
+    assert!(
+        pixels.pixel(90, 45).unwrap().alpha() > 200,
+        "spread did not paint the top shadow"
+    );
+}
+
+#[test]
+fn background_clip_uses_the_corresponding_corner_radius() {
+    for (clip, x, y) in [("padding-box", 58, 51), ("content-box", 61, 61)] {
+        let doc = parse_html(&format!(
+            "<body style='margin:0;background:white'><div style='position:absolute;left:40px;top:40px;\
+             width:100px;height:80px;border:10px solid transparent;padding:10px;\
+             border-radius:20px;background:red;background-clip:{clip}'></div></body>"
+        ));
+        let mut frame = EngineFrame::new(doc, 200.0, 180.0);
+        frame.update_frame();
+        let mut pixels = tiny_skia::Pixmap::new(200, 180).unwrap();
+        Renderer::new().render(&mut frame.doc, &mut pixels, 1.0);
+        let hit = pixels.pixel(x, y).unwrap();
+        assert!(
+            hit.red() > 200 && hit.green() < 40 && hit.blue() < 40,
+            "{clip} used the border-box corner radius at ({x}, {y}): {hit:?}"
+        );
+        let outside = pixels.pixel(x - 10, y - 10).unwrap();
+        assert!(
+            outside.red() > 240 && outside.green() > 240 && outside.blue() > 240,
+            "{clip} painted outside its clipping edge: {outside:?}"
+        );
+    }
+}
+
+#[test]
+fn gradient_background_uses_its_clip_box_radius() {
+    let (_, list) = build(
+        "<body style='margin:0'><div style='width:100px;height:80px;border:10px solid transparent;\
+         padding:10px;border-radius:20px;background-image:linear-gradient(red,blue);\
+         background-clip:padding-box'></div></body>",
+    );
+    let (clip, radii, radii_y) = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::Gradient {
+                clip,
+                radii,
+                radii_y,
+                ..
+            } => Some((clip, radii, radii_y)),
+            _ => None,
+        })
+        .expect("gradient paint command");
+    assert_eq!(*clip, Rect::new(10.0, 10.0, 120.0, 100.0));
+    assert_eq!(*radii, [10.0; 4]);
+    assert_eq!(*radii_y, [10.0; 4]);
+}
+
+#[test]
+fn image_background_uses_its_clip_box_radius() {
+    let doc = parse_html(
+        "<body style='margin:0'><div id='box' style='width:100px;height:80px;\
+         border:10px solid transparent;padding:10px;border-radius:20px;\
+         background-image:url(sprite.png);background-clip:content-box'></div></body>",
+    );
+    let mut frame = EngineFrame::new(doc, 200.0, 180.0);
+    frame.update_frame();
+    let box_node = crate::dom::query_selector_mut(&mut frame.doc.root, "#box").unwrap();
+    box_node.bg_image_data = Some(std::sync::Arc::new(vec![255; 4]));
+    box_node.bg_image_width = 1;
+    box_node.bg_image_height = 1;
+    box_node.bg_image_ratio_only = false;
+    let list = build_display_list(&frame.doc.root, 200.0, 180.0);
+    let (clip, radii, radii_y) = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::BackgroundImage {
+                clip,
+                radii,
+                radii_y,
+                ..
+            } => Some((clip, radii, radii_y)),
+            _ => None,
+        })
+        .expect("background image paint command");
+    assert_eq!(*clip, Rect::new(20.0, 20.0, 100.0, 80.0));
+    assert_eq!(*radii, [0.0; 4]);
+    assert_eq!(*radii_y, [0.0; 4]);
+}
+
 // ── Pixel-level rendering tests ─────────────────────────────────────────────
 
 #[test]
 fn blurred_outer_shadow_does_not_fill_transparent_border_box() {
     for extra in ["", "transform:translateX(1px)", "border-radius:20px"] {
-        let doc = parse_html(&format!("<body style='margin:0;background:white'><div style='position:absolute;left:40px;top:40px;width:100px;height:80px;box-shadow:0 0 8px black;{extra}'></div></body>"));
+        let doc = parse_html(&format!(
+            "<body style='margin:0;background:white'><div style='position:absolute;left:40px;top:40px;width:100px;height:80px;box-shadow:0 0 8px black;{extra}'></div></body>"
+        ));
         let mut frame = EngineFrame::new(doc, 200.0, 160.0);
         frame.update_frame();
         let mut pixmap = tiny_skia::Pixmap::new(200, 160).unwrap();
@@ -3382,6 +4373,284 @@ fn blurred_outer_shadow_does_not_fill_transparent_border_box() {
         assert_eq!(inside.red(), 255, "shadow filled interior: {extra}");
         assert!(outside.red() < 250, "outer shadow missing: {extra}");
     }
+}
+
+#[test]
+fn outer_shadow_tile_culling_preserves_edge_and_clears_interior() {
+    let mut list = DisplayList::new();
+    list.push(PaintCmd::BoxShadow {
+        rect: Rect::new(100.0, 100.0, 800.0, 800.0),
+        color: Color::rgba(0, 0, 0, 255),
+        offset_x: 0.0,
+        offset_y: 0.0,
+        blur: 20.0,
+        spread: 0.0,
+        inset: false,
+        radii: [20.0; 4],
+        radii_y: [20.0; 4],
+    });
+    let mut fonts = cosmic_text::FontSystem::new();
+    let mut glyphs = cosmic_text::SwashCache::new();
+    for scale in [1.0, 2.0] {
+        let side = (256.0 * scale) as u32;
+        let mut interior = tiny_skia::Pixmap::new(side, side).unwrap();
+        replay_tile_with_scroll_and_transform_overrides(
+            &list,
+            &mut interior,
+            scale,
+            &mut fonts,
+            &mut glyphs,
+            300.0,
+            300.0,
+            0.0,
+            0.0,
+            None,
+        );
+        assert!(
+            interior.data().chunks_exact(4).all(|pixel| pixel[3] == 0),
+            "interior tile contains shadow at scale {scale}"
+        );
+
+        let mut edge = tiny_skia::Pixmap::new(side, side).unwrap();
+        replay_tile_with_scroll_and_transform_overrides(
+            &list,
+            &mut edge,
+            scale,
+            &mut fonts,
+            &mut glyphs,
+            0.0,
+            300.0,
+            0.0,
+            0.0,
+            None,
+        );
+        assert!(
+            edge.pixel((95.0 * scale) as u32, (100.0 * scale) as u32)
+                .is_some_and(|pixel| pixel.alpha() > 0),
+            "edge tile lost shadow at scale {scale}"
+        );
+        assert_eq!(
+            edge.pixel((150.0 * scale) as u32, (100.0 * scale) as u32)
+                .unwrap()
+                .alpha(),
+            0,
+            "edge tile painted border-box interior at scale {scale}"
+        );
+    }
+}
+
+#[test]
+fn transformed_inset_shadow_blurs_and_stays_inside_border_box() {
+    for (transform, edge, center, outside) in [
+        (
+            [1.0, 0.0, 0.0, 1.0, 40.0, 0.0],
+            (72, 70),
+            (120, 70),
+            (65, 70),
+        ),
+        (
+            [1.5, 0.0, 0.0, 1.5, 20.0, 0.0],
+            (68, 105),
+            (130, 105),
+            (60, 105),
+        ),
+        (
+            [0.0, 1.0, -1.0, 0.0, 180.0, 0.0],
+            (72, 80),
+            (110, 80),
+            (65, 80),
+        ),
+    ] {
+        let mut list = DisplayList::new();
+        list.push(PaintCmd::PushTransform {
+            node_id: 1,
+            transform,
+        });
+        list.push(PaintCmd::BoxShadow {
+            rect: Rect::new(30.0, 30.0, 100.0, 80.0),
+            color: Color::BLACK,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur: 8.0,
+            spread: 0.0,
+            inset: true,
+            radii: [12.0; 4],
+            radii_y: [12.0; 4],
+        });
+        list.push(PaintCmd::PopTransform);
+        let mut pixels = tiny_skia::Pixmap::new(240, 190).unwrap();
+        replay(&list, &mut pixels, 1.0);
+        let edge_alpha = pixels.pixel(edge.0, edge.1).unwrap().alpha();
+        let center_alpha = pixels.pixel(center.0, center.1).unwrap().alpha();
+        let outside_alpha = pixels.pixel(outside.0, outside.1).unwrap().alpha();
+        assert!(
+            edge_alpha > center_alpha + 20,
+            "transformed inset shadow lost its blur: edge {edge_alpha}, center {center_alpha}"
+        );
+        assert_eq!(
+            outside_alpha, 0,
+            "transformed inset shadow escaped its border box"
+        );
+    }
+}
+
+#[test]
+fn outer_shadow_blur_has_consistent_css_size_at_hidpi() {
+    let mut list = DisplayList::new();
+    list.push(PaintCmd::BoxShadow {
+        rect: Rect::new(50.0, 50.0, 100.0, 100.0),
+        color: Color::BLACK,
+        offset_x: 0.0,
+        offset_y: 0.0,
+        blur: 8.0,
+        spread: 0.0,
+        inset: false,
+        radii: [0.0; 4],
+        radii_y: [0.0; 4],
+    });
+    let mut alphas = Vec::new();
+    for scale in [1.0, 2.0] {
+        let mut pixels =
+            tiny_skia::Pixmap::new((200.0 * scale) as u32, (200.0 * scale) as u32).unwrap();
+        replay(&list, &mut pixels, scale);
+        alphas.push(
+            pixels
+                .pixel((45.0 * scale) as u32, (100.0 * scale) as u32)
+                .unwrap()
+                .alpha(),
+        );
+    }
+    assert!(alphas[0] > 0, "outer shadow is missing");
+    assert!(
+        (alphas[0] as i16 - alphas[1] as i16).abs() <= 25,
+        "outer shadow changed CSS blur width with device scale: {alphas:?}"
+    );
+}
+
+#[test]
+fn outer_shadow_spread_keeps_small_corners_sharp() {
+    for blur in [0.0, 4.0] {
+        let mut list = DisplayList::new();
+        list.push(PaintCmd::BoxShadow {
+            rect: Rect::new(50.0, 50.0, 100.0, 100.0),
+            color: Color::BLACK,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur,
+            spread: 20.0,
+            inset: false,
+            radii: [2.0; 4],
+            radii_y: [2.0; 4],
+        });
+        let mut pixels = tiny_skia::Pixmap::new(200, 200).unwrap();
+        replay(&list, &mut pixels, 1.0);
+        let near_corner = pixels.pixel(42, 31).unwrap().alpha();
+        assert!(
+            near_corner > 70,
+            "small border radius was exaggerated by spread with blur {blur}: alpha {near_corner}"
+        );
+        assert_eq!(
+            pixels.pixel(60, 60).unwrap().alpha(),
+            0,
+            "outer shadow painted inside the border box with blur {blur}"
+        );
+    }
+}
+
+#[test]
+fn clipped_outer_shadow_blurs_before_clipping() {
+    let shadow = PaintCmd::BoxShadow {
+        rect: Rect::new(50.0, 50.0, 60.0, 60.0),
+        color: Color::BLACK,
+        offset_x: 0.0,
+        offset_y: 0.0,
+        blur: 14.0,
+        spread: 0.0,
+        inset: false,
+        radii: [0.0; 4],
+        radii_y: [0.0; 4],
+    };
+    let mut unclipped = DisplayList::new();
+    unclipped.push(shadow.clone());
+    let mut clipped = DisplayList::new();
+    clipped.push(PaintCmd::PushClip {
+        rect: Rect::new(75.0, 0.0, 75.0, 150.0),
+        radius: [0.0; 4],
+        radius_y: [0.0; 4],
+    });
+    clipped.push(shadow);
+    clipped.push(PaintCmd::PopClip);
+    let mut full_pixels = tiny_skia::Pixmap::new(160, 160).unwrap();
+    let mut clipped_pixels = tiny_skia::Pixmap::new(160, 160).unwrap();
+    replay(&unclipped, &mut full_pixels, 1.0);
+    replay(&clipped, &mut clipped_pixels, 1.0);
+    for y in 35..50 {
+        for x in 80..100 {
+            let actual = clipped_pixels.pixel(x, y).unwrap().alpha();
+            let expected = full_pixels.pixel(x, y).unwrap().alpha();
+            assert!(
+                (actual as i16 - expected as i16).abs() <= 2,
+                "clip changed the shadow blur at ({x}, {y}): {actual} vs {expected}"
+            );
+        }
+    }
+    assert_eq!(clipped_pixels.pixel(70, 40).unwrap().alpha(), 0);
+}
+
+#[test]
+fn transformed_clipped_outer_shadow_preserves_blur_and_bounds() {
+    let shadow = PaintCmd::BoxShadow {
+        rect: Rect::new(40.0, 40.0, 60.0, 60.0),
+        color: Color::BLACK,
+        offset_x: 0.0,
+        offset_y: 0.0,
+        blur: 12.0,
+        spread: 0.0,
+        inset: false,
+        radii: [10.0; 4],
+        radii_y: [10.0; 4],
+    };
+    let make_list = |with_clip: bool| {
+        let mut list = DisplayList::new();
+        list.push(PaintCmd::PushTransform {
+            node_id: 1,
+            transform: [1.25, 0.0, 0.0, 1.25, 25.0, 10.0],
+        });
+        if with_clip {
+            list.push(PaintCmd::PushClip {
+                rect: Rect::new(55.0, 0.0, 65.0, 120.0),
+                radius: [0.0; 4],
+                radius_y: [0.0; 4],
+            });
+        }
+        list.push(shadow.clone());
+        if with_clip {
+            list.push(PaintCmd::PopClip);
+        }
+        list.push(PaintCmd::PopTransform);
+        list
+    };
+    let full = make_list(false);
+    let clipped = make_list(true);
+    let mut full_pixels = tiny_skia::Pixmap::new(190, 170).unwrap();
+    let mut clipped_pixels = tiny_skia::Pixmap::new(190, 170).unwrap();
+    replay(&full, &mut full_pixels, 1.0);
+    replay(&clipped, &mut clipped_pixels, 1.0);
+    assert!(
+        full_pixels.pixel(110, 55).unwrap().alpha() > 0,
+        "transformed outer shadow did not paint outside its border box"
+    );
+    for y in 52..60 {
+        for x in 105..120 {
+            let actual = clipped_pixels.pixel(x, y).unwrap().alpha();
+            let expected = full_pixels.pixel(x, y).unwrap().alpha();
+            assert!(
+                (actual as i16 - expected as i16).abs() <= 2,
+                "transformed clip changed the shadow at ({x}, {y}): {actual} vs {expected}"
+            );
+        }
+    }
+    assert_eq!(clipped_pixels.pixel(75, 55).unwrap().alpha(), 0);
 }
 
 #[test]
@@ -4259,6 +5528,7 @@ fn additional_background_url_layer_after_gradient_is_painted() {
         width: 32,
         height: 800,
         ratio_only: false,
+        resolution: 1.0,
     })];
 
     let list = build_display_list_full(
@@ -4629,11 +5899,22 @@ fn form_labels_respect_text_indent_and_control_clipping() {
     let mut fonts = cosmic_text::FontSystem::new();
     let mut cache = cosmic_text::SwashCache::new();
     crate::renderer::display_list_replay::replay_with_text(
-        &list, &mut pixmap, 1.0, &mut fonts, &mut cache,
+        &list,
+        &mut pixmap,
+        1.0,
+        &mut fonts,
+        &mut cache,
     );
     assert!(pixmap.data().chunks_exact(4).all(|px| px[0] == 255));
 
-    if let PaintCmd::FormElement { tag, input_type, value, text_indent, .. } = &mut list.commands[0] {
+    if let PaintCmd::FormElement {
+        tag,
+        input_type,
+        value,
+        text_indent,
+        ..
+    } = &mut list.commands[0]
+    {
         *tag = "select".to_string();
         input_type.clear();
         *value = "All Departments".to_string();
@@ -4641,29 +5922,50 @@ fn form_labels_respect_text_indent_and_control_clipping() {
     }
     pixmap.fill(tiny_skia::Color::WHITE);
     crate::renderer::display_list_replay::replay_with_text(
-        &list, &mut pixmap, 1.0, &mut fonts, &mut cache,
+        &list,
+        &mut pixmap,
+        1.0,
+        &mut fonts,
+        &mut cache,
     );
     for y in 0..50usize {
         for x in 55..160usize {
-            assert_eq!(pixmap.data()[(y * 160 + x) * 4], 255, "select text escaped at {x},{y}");
+            assert_eq!(
+                pixmap.data()[(y * 160 + x) * 4],
+                255,
+                "select text escaped at {x},{y}"
+            );
         }
     }
 }
 
 #[test]
 fn select_default_label_paints_at_device_scale() {
-    let (_, list) = build(r#"<select style="position:absolute;left:200px;top:40px;width:150px;height:40px;appearance:none;border:0;background:transparent;color:black"><option>All Categories</option></select>"#);
-    let command = list.commands.iter().find(|cmd| matches!(cmd, PaintCmd::FormElement { tag, .. } if tag == "select")).unwrap().clone();
-    assert!(matches!(&command, PaintCmd::FormElement { value, selected: 0, .. } if value == "All Categories"));
+    let (_, list) = build(
+        r#"<select style="position:absolute;left:200px;top:40px;width:150px;height:40px;appearance:none;border:0;background:transparent;color:black"><option>All Categories</option></select>"#,
+    );
+    let command = list
+        .commands
+        .iter()
+        .find(|cmd| matches!(cmd, PaintCmd::FormElement { tag, .. } if tag == "select"))
+        .unwrap()
+        .clone();
+    assert!(
+        matches!(&command, PaintCmd::FormElement { value, selected: 0, .. } if value == "All Categories")
+    );
     let mut isolated = DisplayList::new();
     isolated.push(command);
     let mut fonts = cosmic_text::FontSystem::new();
     let mut cache = cosmic_text::SwashCache::new();
     for scale in [1.0, 2.0] {
-        let mut pixels = tiny_skia::Pixmap::new((500.0 * scale) as u32, (150.0 * scale) as u32).unwrap();
+        let mut pixels =
+            tiny_skia::Pixmap::new((500.0 * scale) as u32, (150.0 * scale) as u32).unwrap();
         pixels.fill(tiny_skia::Color::WHITE);
         replay_with_text(&isolated, &mut pixels, scale, &mut fonts, &mut cache);
-        assert!(pixels.data().chunks_exact(4).any(|p| p[0] < 128), "selected label missing at scale {scale}");
+        assert!(
+            pixels.data().chunks_exact(4).any(|p| p[0] < 128),
+            "selected label missing at scale {scale}"
+        );
         let mut clipped = DisplayList::new();
         clipped.push(PaintCmd::PushClip {
             rect: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -4674,7 +5976,10 @@ fn select_default_label_paints_at_device_scale() {
         clipped.push(PaintCmd::PopClip);
         pixels.fill(tiny_skia::Color::WHITE);
         replay_with_text(&clipped, &mut pixels, scale, &mut fonts, &mut cache);
-        assert!(pixels.data().chunks_exact(4).all(|p| p[0] == 255), "selected label escaped ancestor clip at scale {scale}");
+        assert!(
+            pixels.data().chunks_exact(4).all(|p| p[0] == 255),
+            "selected label escaped ancestor clip at scale {scale}"
+        );
     }
 }
 
@@ -4793,9 +6098,20 @@ fn inset_box_shadow_respects_rounded_corners() {
     let mut pixmap = tiny_skia::Pixmap::new(90, 40).unwrap();
     replay(&list, &mut pixmap, 1.0);
     let alpha = |x, y| pixmap.pixel(x, y).unwrap().alpha();
-    assert_eq!(alpha(0, 0), 0, "the outer pill corner must stay transparent");
-    assert!(alpha(42, 0) > 150, "the top edge must retain its inset outline");
-    assert_eq!(alpha(42, 16), 0, "the center must not be filled by the shadow");
+    assert_eq!(
+        alpha(0, 0),
+        0,
+        "the outer pill corner must stay transparent"
+    );
+    assert!(
+        alpha(42, 0) > 150,
+        "the top edge must retain its inset outline"
+    );
+    assert_eq!(
+        alpha(42, 16),
+        0,
+        "the center must not be filled by the shadow"
+    );
 }
 
 /// identity `[1, 0, 0, 1, 0, 0]` — the percentage translation is exactly zero.
@@ -5028,11 +6344,19 @@ fn text_overflow_mixed_styled_runs_emits_one_end_marker() {
     let (_, list) = build(
         "<style>*{margin:0;padding:0}div{width:75px;font:20px monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}b{color:red}</style><div>abcd<b>efghijklmnop</b></div>",
     );
-    let markers = list.commands.iter().filter(|cmd| match cmd {
-        PaintCmd::Text { text, .. } => text.contains('…'),
-        _ => false,
-    }).count();
-    assert_eq!(markers, 1, "one clipped line must paint one end marker: {:?}", list.commands);
+    let markers = list
+        .commands
+        .iter()
+        .filter(|cmd| match cmd {
+            PaintCmd::Text { text, .. } => text.contains('…'),
+            _ => false,
+        })
+        .count();
+    assert_eq!(
+        markers, 1,
+        "one clipped line must paint one end marker: {:?}",
+        list.commands
+    );
 }
 
 #[test]
@@ -5043,59 +6367,129 @@ fn text_overflow_keeps_complete_graphemes_inside_marker_budget() {
             let (_, list) = build(&format!(
                 "<style>*{{margin:0;padding:0}}div{{width:{width}px;font:20px monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}</style><div>{source}</div>"
             ));
-            let text = list.commands.iter().find_map(|cmd| match cmd {
-                PaintCmd::Text { text, .. } if text.ends_with('…') => Some(text.as_str()),
-                _ => None,
-            }).expect("ellipsis command");
+            let text = list
+                .commands
+                .iter()
+                .find_map(|cmd| match cmd {
+                    PaintCmd::Text { text, .. } if text.ends_with('…') => Some(text.as_str()),
+                    _ => None,
+                })
+                .expect("ellipsis command");
             let prefix = text.strip_suffix('…').unwrap();
-            assert!(prefix.is_empty() || source.grapheme_indices(true).any(|(offset, cluster)| offset + cluster.len() == prefix.len()),
-                "ellipsis split a grapheme: {text:?}");
-            let measured = crate::layout::inline_layout::measure_text_width_weighted(
-                text, 20.0, None, crate::types::FontWeight::Normal, crate::types::FontStyle::Normal, 1.0, "monospace", 1.0,
+            assert!(
+                prefix.is_empty()
+                    || source
+                        .grapheme_indices(true)
+                        .any(|(offset, cluster)| offset + cluster.len() == prefix.len()),
+                "ellipsis split a grapheme: {text:?}"
             );
-            assert!(measured <= width + 0.1, "ellipsis clipped at {width}px: {text:?} occupies {measured}px");
+            let measured = crate::layout::inline_layout::measure_text_width_weighted(
+                text,
+                20.0,
+                None,
+                crate::types::FontWeight::Normal,
+                crate::types::FontStyle::Normal,
+                1.0,
+                "monospace",
+                1.0,
+            );
+            assert!(
+                measured <= width + 0.1,
+                "ellipsis clipped at {width}px: {text:?} occupies {measured}px"
+            );
         }
     }
 }
 
 #[test]
 fn text_overflow_reserves_the_markers_letter_spacing() {
-    let (_, list) = build("<style>*{margin:0;padding:0}div{width:80px;font:20px monospace;letter-spacing:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}</style><div>abcdefghijk</div>");
-    let text = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::Text { text, .. } if text.ends_with('…') => Some(text.as_str()),
-        _ => None,
-    }).expect("ellipsis command");
+    let (_, list) = build(
+        "<style>*{margin:0;padding:0}div{width:80px;font:20px monospace;letter-spacing:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}</style><div>abcdefghijk</div>",
+    );
+    let text = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::Text { text, .. } if text.ends_with('…') => Some(text.as_str()),
+            _ => None,
+        })
+        .expect("ellipsis command");
     let measured = crate::layout::inline_layout::measure_text_width_weighted(
-        text, 20.0, None, crate::types::FontWeight::Normal, crate::types::FontStyle::Normal, 1.0, "monospace", 1.0,
+        text,
+        20.0,
+        None,
+        crate::types::FontWeight::Normal,
+        crate::types::FontStyle::Normal,
+        1.0,
+        "monospace",
+        1.0,
     ) + text.chars().count().saturating_sub(1) as f32 * 4.0;
-    assert!(measured <= 80.1, "tracking clips the ellipsis: {text:?} occupies {measured}px");
+    assert!(
+        measured <= 80.1,
+        "tracking clips the ellipsis: {text:?} occupies {measured}px"
+    );
 
     let mut renderer = Renderer::new();
     let width = crate::layout::inline_layout::measure_text_width_weighted(
-        "abcd…", 20.0, Some(&mut renderer.font_system), crate::types::FontWeight::Normal,
-        crate::types::FontStyle::Normal, 1.0, "monospace", 1.0,
-    ) + 4.0 * 4.0 + 0.5;
+        "abcd…",
+        20.0,
+        Some(&mut renderer.font_system),
+        crate::types::FontWeight::Normal,
+        crate::types::FontStyle::Normal,
+        1.0,
+        "monospace",
+        1.0,
+    ) + 4.0 * 4.0
+        + 0.5;
     let doc = renderer.load_html(&format!("<style>*{{margin:0;padding:0}}div{{width:{width}px;font:20px monospace;letter-spacing:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}</style><div>abcdefghijk</div>"), 800.0);
     let list = build_display_list_full_with_font_system(
-        &doc.root, 800.0, 600.0, 0.0, 0.0, 0, 0, &std::collections::HashSet::new(), "",
+        &doc.root,
+        800.0,
+        600.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
         Some(&mut renderer.font_system as *mut _),
     );
-    assert!(list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == "abcd…")),
-        "must not reserve unused tracking after the last marker glyph");
+    assert!(
+        list.commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == "abcd…")),
+        "must not reserve unused tracking after the last marker glyph"
+    );
 }
 
 #[test]
 fn empty_text_overflow_string_clips_at_grapheme_boundaries_without_ellipsis() {
     use unicode_segmentation::UnicodeSegmentation;
     let source = "a\u{301}a\u{301}a\u{301}a\u{301}a\u{301}";
-    let (_, list) = build(&format!("<style>*{{margin:0;padding:0}}div{{width:40px;font:20px monospace;white-space:nowrap;overflow:hidden;text-overflow:\"\"}}</style><div>{source}</div>"));
-    let text = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::Text { text, .. } => Some(text.as_str()),
-        _ => None,
-    }).expect("text command");
-    assert!(!text.contains('…'), "empty marker must not become ellipsis: {text:?}");
-    assert!(text.len() < source.len(), "must truncate rather than clip mid-glyph");
-    assert!(source.grapheme_indices(true).any(|(offset, cluster)| offset + cluster.len() == text.len()));
+    let (_, list) = build(&format!(
+        "<style>*{{margin:0;padding:0}}div{{width:40px;font:20px monospace;white-space:nowrap;overflow:hidden;text-overflow:\"\"}}</style><div>{source}</div>"
+    ));
+    let text = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .expect("text command");
+    assert!(
+        !text.contains('…'),
+        "empty marker must not become ellipsis: {text:?}"
+    );
+    assert!(
+        text.len() < source.len(),
+        "must truncate rather than clip mid-glyph"
+    );
+    assert!(
+        source
+            .grapheme_indices(true)
+            .any(|(offset, cluster)| offset + cluster.len() == text.len())
+    );
 }
 
 #[test]
@@ -5103,78 +6497,144 @@ fn rtl_single_value_text_overflow_marks_the_physical_left_edge() {
     let (_, list) = build(
         "<style>*{margin:0;padding:0}div{direction:rtl;width:45px;font:20px sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}</style><div>مرحبا بالعالم الجميل</div>",
     );
-    let marker = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::Text { text, x, .. } if text == "…" => Some(*x),
-        _ => None,
-    }).expect("RTL overflow marker");
-    assert!((marker - 0.0).abs() < 0.1, "marker should sit at the physical left edge: {marker}");
-    assert!(!list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text.ends_with('…') && text != "…")),
-        "single-value RTL text-overflow must not append a right-edge marker");
+    let marker = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::Text { text, x, .. } if text == "…" => Some(*x),
+            _ => None,
+        })
+        .expect("RTL overflow marker");
+    assert!(
+        (marker - 0.0).abs() < 0.1,
+        "marker should sit at the physical left edge: {marker}"
+    );
+    assert!(
+        !list.commands.iter().any(
+            |cmd| matches!(cmd, PaintCmd::Text { text, .. } if text.ends_with('…') && text != "…")
+        ),
+        "single-value RTL text-overflow must not append a right-edge marker"
+    );
 }
 
 #[test]
 fn scrolled_two_value_text_overflow_marks_the_fixed_left_edge() {
-    let mut frame = EngineFrame::new(parse_html(
-        "<style>*{margin:0;padding:0}div{width:50px;font:20px monospace;white-space:nowrap;overflow:auto;text-overflow:'<' clip}</style><div id=box>abcdefghijklmnop</div>",
-    ), 800.0, 600.0);
+    let mut frame = EngineFrame::new(
+        parse_html(
+            "<style>*{margin:0;padding:0}div{width:50px;font:20px monospace;white-space:nowrap;overflow:auto;text-overflow:'<' clip}</style><div id=box>abcdefghijklmnop</div>",
+        ),
+        800.0,
+        600.0,
+    );
     frame.update_frame();
     let box_node = crate::dom::query_selector_mut(&mut frame.doc.root, "#box").unwrap();
     assert!(box_node.layout.scroll_width > box_node.layout.content_rect.w);
     box_node.layout.scroll_left = 30.0;
     let list = build_display_list(&frame.doc.root, 800.0, 600.0);
-    let marker_x = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::Text { text, x, .. } if text == "<" => Some(*x),
-        _ => None,
-    }).expect("scrolled left-edge marker");
-    assert!((marker_x - 0.0).abs() < 0.1, "left marker must remain at the box edge: {marker_x}");
+    let marker_x = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::Text { text, x, .. } if text == "<" => Some(*x),
+            _ => None,
+        })
+        .expect("scrolled left-edge marker");
+    assert!(
+        (marker_x - 0.0).abs() < 0.1,
+        "left marker must remain at the box edge: {marker_x}"
+    );
 }
 
 #[test]
 fn scrolled_two_value_text_overflow_marks_both_physical_edges() {
-    let mut frame = EngineFrame::new(parse_html(
-        "<style>*{margin:0;padding:0}div{width:50px;font:20px monospace;white-space:nowrap;overflow:auto;text-overflow:'<' '>'}</style><div id=box>abcdefghijklmnop</div>",
-    ), 800.0, 600.0);
+    let mut frame = EngineFrame::new(
+        parse_html(
+            "<style>*{margin:0;padding:0}div{width:50px;font:20px monospace;white-space:nowrap;overflow:auto;text-overflow:'<' '>'}</style><div id=box>abcdefghijklmnop</div>",
+        ),
+        800.0,
+        600.0,
+    );
     frame.update_frame();
     let box_node = crate::dom::query_selector_mut(&mut frame.doc.root, "#box").unwrap();
     assert!(box_node.layout.scroll_width > box_node.layout.content_rect.w);
     box_node.layout.scroll_left = 30.0;
     let list = build_display_list(&frame.doc.root, 800.0, 600.0);
-    let markers: Vec<_> = list.commands.iter().filter_map(|cmd| match cmd {
-        PaintCmd::Text { text, x, .. } if text == "<" || text == ">" => Some((text.as_str(), *x)),
-        _ => None,
-    }).collect();
-    assert!(markers.iter().any(|&(marker, x)| marker == "<" && x.abs() < 0.1),
-        "left marker should stay at the left edge: {markers:?}");
-    assert!(markers.iter().any(|&(marker, x)| marker == ">" && x > 30.0 && x < 50.0),
-        "right marker should stay at the right edge: {markers:?}");
+    let markers: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Text { text, x, .. } if text == "<" || text == ">" => {
+                Some((text.as_str(), *x))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        markers
+            .iter()
+            .any(|&(marker, x)| marker == "<" && x.abs() < 0.1),
+        "left marker should stay at the left edge: {markers:?}"
+    );
+    assert!(
+        markers
+            .iter()
+            .any(|&(marker, x)| marker == ">" && x > 30.0 && x < 50.0),
+        "right marker should stay at the right edge: {markers:?}"
+    );
 
     let box_node = crate::dom::query_selector_mut(&mut frame.doc.root, "#box").unwrap();
     box_node.layout.scroll_left = box_node.layout.scroll_width - box_node.layout.content_rect.w;
     let list = build_display_list(&frame.doc.root, 800.0, 600.0);
-    assert!(list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == "<")));
-    assert!(!list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == ">")),
-        "right marker must disappear once the right edge is fully visible");
+    assert!(
+        list.commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == "<"))
+    );
+    assert!(
+        !list
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == ">")),
+        "right marker must disappear once the right edge is fully visible"
+    );
 }
 
 #[test]
 fn left_text_overflow_marker_reserves_its_letter_spacing() {
     fn clipped_text_start(spacing: u32) -> f32 {
-        let mut frame = EngineFrame::new(parse_html(&format!(
-            "<style>*{{margin:0;padding:0}}div{{width:50px;font:20px monospace;letter-spacing:{spacing}px;white-space:nowrap;overflow:auto;text-overflow:'<<' clip}}</style><div id=box>abcdefghijklmnop</div>"
-        )), 800.0, 600.0);
+        let mut frame = EngineFrame::new(
+            parse_html(&format!(
+                "<style>*{{margin:0;padding:0}}div{{width:50px;font:20px monospace;letter-spacing:{spacing}px;white-space:nowrap;overflow:auto;text-overflow:'<<' clip}}</style><div id=box>abcdefghijklmnop</div>"
+            )),
+            800.0,
+            600.0,
+        );
         frame.update_frame();
-        crate::dom::query_selector_mut(&mut frame.doc.root, "#box").unwrap().layout.scroll_left = 30.0;
+        crate::dom::query_selector_mut(&mut frame.doc.root, "#box")
+            .unwrap()
+            .layout
+            .scroll_left = 30.0;
         let list = build_display_list(&frame.doc.root, 800.0, 600.0);
-        assert!(list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == "<<")));
-        list.commands.iter().find_map(|cmd| match cmd {
-            PaintCmd::PushClip { rect, .. } if rect.x > 0.0 && rect.w < 50.0 => Some(rect.x),
-            _ => None,
-        }).expect("left marker text clip")
+        assert!(
+            list.commands
+                .iter()
+                .any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == "<<"))
+        );
+        list.commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                PaintCmd::PushClip { rect, .. } if rect.x > 0.0 && rect.w < 50.0 => Some(rect.x),
+                _ => None,
+            })
+            .expect("left marker text clip")
     }
 
     let plain = clipped_text_start(0);
     let spaced = clipped_text_start(4);
-    assert!((spaced - plain - 4.0).abs() < 0.1, "marker tracking must reserve one extra 4px gap: {plain} -> {spaced}");
+    assert!(
+        (spaced - plain - 4.0).abs() < 0.1,
+        "marker tracking must reserve one extra 4px gap: {plain} -> {spaced}"
+    );
 }
 
 #[test]
@@ -5744,12 +7204,17 @@ fn missing_list_style_image_uses_list_style_type_fallback() {
     let (_, list) = build(
         r#"<ul><li style="list-style-image:url(missing-marker.png);list-style-type:square">item</li></ul>"#,
     );
-    assert!(list.commands.iter().any(|cmd| matches!(cmd,
-        PaintCmd::ListMarker { marker_type: 2, .. }
-    )));
-    assert!(!list.commands.iter().any(|cmd| matches!(cmd,
-        PaintCmd::ListMarker { marker_type: 4, .. }
-    )));
+    assert!(
+        list.commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::ListMarker { marker_type: 2, .. }))
+    );
+    assert!(
+        !list
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::ListMarker { marker_type: 4, .. }))
+    );
 }
 
 #[test]
@@ -5837,7 +7302,11 @@ fn list_style_image_marker_preserves_intrinsic_aspect_ratio() {
     replay(&paint_list, &mut pixmap, 1.0);
     let pixel = |x: usize, y: usize| &pixmap.data()[(y * 24 + x) * 4..][..4];
     assert!(pixel(10, 6)[0] > 200, "intrinsic marker width should paint");
-    assert_eq!(pixel(10, 10)[3], 0, "intrinsic marker height should not stretch");
+    assert_eq!(
+        pixel(10, 10)[3],
+        0,
+        "intrinsic marker height should not stretch"
+    );
 }
 
 #[test]
@@ -6010,6 +7479,70 @@ fn border_image_repeat_tiles_edge_segments() {
 }
 
 #[test]
+fn border_image_fill_center_repeats_on_both_axes() {
+    let mut data = vec![0; 4 * 4 * 4];
+    for (x, y, color) in [
+        (1, 1, [255, 0, 0, 255]),
+        (2, 1, [0, 255, 0, 255]),
+        (1, 2, [0, 0, 255, 255]),
+        (2, 2, [255, 255, 0, 255]),
+    ] {
+        data[(y * 4 + x) * 4..(y * 4 + x) * 4 + 4].copy_from_slice(&color);
+    }
+    let list = DisplayList {
+        commands: vec![PaintCmd::BorderImage {
+            rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+            widths: [1.0; 4],
+            slices: [1.0; 4],
+            repeat_x_mode: 1,
+            repeat_y_mode: 1,
+            fill_center: true,
+            data: ImageRef::Owned(data, 4, 4),
+        }],
+        has_scroll_dependent_sticky: false,
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(10, 10).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let rgba = pixmap.data();
+    let pixel = |x: usize, y: usize| &rgba[(y * 10 + x) * 4..(y * 10 + x) * 4 + 4];
+    assert_eq!(
+        pixel(4, 4),
+        pixel(6, 6),
+        "the center image must tile on both axes"
+    );
+    assert!(pixel(4, 4)[3] > 200, "the filled center must be painted");
+}
+
+#[test]
+fn border_image_tiles_visible_region_behind_translation() {
+    let list = DisplayList {
+        commands: vec![
+            PaintCmd::PushTransform {
+                node_id: 1,
+                transform: [1.0, 0.0, 0.0, 1.0, -5000.0, 0.0],
+            },
+            PaintCmd::BorderImage {
+                rect: Rect::new(5000.0, 0.0, 10_000.0, 1000.0),
+                widths: [1.0; 4],
+                slices: [1.0; 4],
+                repeat_x_mode: 1,
+                repeat_y_mode: 1,
+                fill_center: true,
+                data: ImageRef::Owned([255, 0, 0, 255].repeat(9), 3, 3),
+            },
+            PaintCmd::PopTransform,
+        ],
+        has_scroll_dependent_sticky: false,
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(60, 40).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let painted = pixmap.pixel(30, 20).unwrap();
+    assert!(painted.red() > 240 && painted.alpha() > 240);
+}
+
+#[test]
 fn border_image_repeat_modes_reach_display_list() {
     let (_frame, list) = build_full(
         r#"<body style="margin:0">
@@ -6034,6 +7567,26 @@ fn border_image_repeat_modes_reach_display_list() {
         .expect("expected border-image display command");
 
     assert_eq!(border_image, (3, 2));
+}
+
+#[test]
+fn border_image_math_and_env_slices_reach_paint_geometry() {
+    let (_frame, list) = build_full(
+        r#"<body style="margin:0">
+             <div style="width:40px;height:20px;border:4px solid transparent;
+                         border-image-source:url('data:image/svg+xml,%3Csvg%20viewBox=%220%200%203%203%22%20xmlns=%22http://www.w3.org/2000/svg%22%3E%3Crect%20width=%223%22%20height=%223%22%20fill=%22red%22/%3E%3C/svg%3E');
+                         border-image-slice:calc(1 + 1) env(--slice, calc(50%)) fill"></div>
+           </body>"#,
+    );
+    let slices = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::BorderImage { slices, .. } => Some(*slices),
+            _ => None,
+        })
+        .expect("expected border-image display command");
+    assert_eq!(slices, [2.0, 1.5, 2.0, 1.5]);
 }
 
 #[test]
@@ -6062,6 +7615,27 @@ fn border_image_width_and_outset_reach_display_list_geometry() {
     assert_eq!(rect.y, -3.0);
     assert_eq!(rect.w, 54.0);
     assert_eq!(rect.h, 30.0);
+}
+
+#[test]
+fn border_image_auto_width_uses_corresponding_natural_slice() {
+    let (_frame, list) = build_full(
+        r#"<body style="margin:0">
+             <div style="width:40px;height:20px;border:4px solid transparent;
+                         border-image-source:url('data:image/svg+xml,%3Csvg%20viewBox=%220%200%203%203%22%20xmlns=%22http://www.w3.org/2000/svg%22%3E%3Crect%20width=%223%22%20height=%223%22%20fill=%22red%22/%3E%3C/svg%3E');
+                         border-image-slice:1;
+                         border-image-width:auto 7px auto 9px"></div>
+           </body>"#,
+    );
+    let widths = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::BorderImage { widths, .. } => Some(*widths),
+            _ => None,
+        })
+        .expect("expected border-image command");
+    assert_eq!(widths, [1.0, 7.0, 1.0, 9.0]);
 }
 
 #[test]
@@ -6149,6 +7723,104 @@ fn zero_width_border_sides_do_not_paint_rectangles() {
 }
 
 #[test]
+fn straight_border_segments_paint_dashed_dotted_and_double_styles() {
+    let render = |style: u8, horizontal: bool| {
+        let rect = if horizontal {
+            Rect::new(2.0, 2.0, 40.0, 6.0)
+        } else {
+            Rect::new(2.0, 2.0, 6.0, 40.0)
+        };
+        let side = if horizontal { 0 } else { 3 };
+        let mut widths = [0.0; 4];
+        let mut colors = [Color::TRANSPARENT; 4];
+        let mut styles = [0; 4];
+        widths[side] = 6.0;
+        colors[side] = Color::rgba(0, 180, 0, 255);
+        styles[side] = style;
+        let list = DisplayList {
+            commands: vec![PaintCmd::Border {
+                rect,
+                widths,
+                colors,
+                styles,
+                radii: [0.0; 4],
+                radii_y: [0.0; 4],
+                opacity: 1.0,
+            }],
+            has_scroll_dependent_sticky: false,
+            fixed_commands: Vec::new(),
+        };
+        let mut pixmap = tiny_skia::Pixmap::new(48, 48).unwrap();
+        replay(&list, &mut pixmap, 1.0);
+        pixmap
+    };
+    let alpha =
+        |pixmap: &tiny_skia::Pixmap, x: usize, y: usize| pixmap.data()[(y * 48 + x) * 4 + 3];
+
+    let dashed = render(2, true);
+    assert!(alpha(&dashed, 10, 5) > 200);
+    assert_eq!(alpha(&dashed, 23, 5), 0);
+    let vertical_dash = render(2, false);
+    assert!(alpha(&vertical_dash, 5, 10) > 200);
+    assert_eq!(alpha(&vertical_dash, 5, 23), 0);
+
+    let dotted = render(3, true);
+    assert!(alpha(&dotted, 5, 5) > 200);
+    assert_eq!(alpha(&dotted, 11, 5), 0);
+
+    let double = render(4, true);
+    assert!(alpha(&double, 10, 3) > 200);
+    assert_eq!(alpha(&double, 10, 5), 0);
+    assert!(alpha(&double, 10, 7) > 200);
+}
+
+#[test]
+fn collapsed_table_winning_double_border_reaches_replay() {
+    let (_, list) = build(
+        "<style>body{margin:0}table{border-collapse:collapse}</style>\
+         <table><tr><td style='width:40px;height:24px;border-right:6px double green'>A</td>\
+         <td style='width:40px;border-left:1px solid red'>B</td></tr></table>",
+    );
+    assert!(list.commands.iter().any(|command| matches!(command,
+        PaintCmd::Border { widths, colors, styles, .. }
+            if widths[3] == 6.0 && styles[3] == 4 && colors[3].g > 0
+    )));
+}
+
+#[test]
+fn straight_border_segments_shade_raised_and_sunken_styles() {
+    let render = |style: u8| {
+        let list = DisplayList {
+            commands: vec![PaintCmd::Border {
+                rect: Rect::new(2.0, 2.0, 20.0, 6.0),
+                widths: [6.0, 0.0, 0.0, 0.0],
+                colors: [
+                    Color::rgba(100, 100, 100, 255),
+                    Color::TRANSPARENT,
+                    Color::TRANSPARENT,
+                    Color::TRANSPARENT,
+                ],
+                styles: [style, 0, 0, 0],
+                radii: [0.0; 4],
+                radii_y: [0.0; 4],
+                opacity: 1.0,
+            }],
+            has_scroll_dependent_sticky: false,
+            fixed_commands: Vec::new(),
+        };
+        let mut pixmap = tiny_skia::Pixmap::new(24, 12).unwrap();
+        replay(&list, &mut pixmap, 1.0);
+        let green = |y: usize| pixmap.data()[(y * 24 + 10) * 4 + 1];
+        (green(3), green(6))
+    };
+    let groove = render(5);
+    let ridge = render(6);
+    assert!(groove.0 < groove.1);
+    assert!(ridge.0 > ridge.1);
+    assert!(render(7).0 < render(8).0);
+}
+
+#[test]
 fn transparent_border_sides_shape_css_triangle() {
     let (_, built) = build(
         r#"<style>
@@ -6191,11 +7863,20 @@ fn transparent_border_sides_shape_css_triangle() {
 
 #[test]
 fn rounded_border_only_triangle_remains_visible() {
-    let (_, list) = build("<style>body{margin:0}div::before{content:'';position:absolute;left:10px;top:10px;width:0;height:0;border-right:40px solid #ffcc00;border-bottom:40px solid transparent;border-top-right-radius:12px}</style><div></div>");
+    let (_, list) = build(
+        "<style>body{margin:0}div::before{content:'';position:absolute;left:10px;top:10px;width:0;height:0;border-right:40px solid #ffcc00;border-bottom:40px solid transparent;border-top-right-radius:12px}</style><div></div>",
+    );
     let mut pixmap = tiny_skia::Pixmap::new(80, 80).unwrap();
     replay(&list, &mut pixmap, 1.0);
-    assert!(pixmap.pixel(44, 30).unwrap().alpha() > 200, "yellow wedge must paint");
-    assert_eq!(pixmap.pixel(15, 45).unwrap().alpha(), 0, "transparent wedge");
+    assert!(
+        pixmap.pixel(44, 30).unwrap().alpha() > 200,
+        "yellow wedge must paint"
+    );
+    assert_eq!(
+        pixmap.pixel(15, 45).unwrap().alpha(),
+        0,
+        "transparent wedge"
+    );
     assert_eq!(pixmap.pixel(49, 10).unwrap().alpha(), 0, "rounded corner");
 }
 
@@ -6227,7 +7908,10 @@ fn transparent_borders_do_not_enter_the_display_list() {
     );
 
     assert!(
-        !list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Border { .. })),
+        !list
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::Border { .. })),
         "transparent author borders must affect layout but not paint artifacts"
     );
 }

@@ -88,12 +88,23 @@ pub fn serialize_length(len: &CssLength) -> String {
             let (min, val, max) = (&parts[0], &parts[1], &parts[2]);
             format!(
                 "clamp({}, {}, {})",
-                if matches!(min, CssLength::Px(v) if *v == f32::NEG_INFINITY) { "none".into() } else { serialize_calculation_length(min) },
+                if matches!(min, CssLength::Px(v) if *v == f32::NEG_INFINITY) {
+                    "none".into()
+                } else {
+                    serialize_calculation_length(min)
+                },
                 serialize_calculation_length(val),
-                if matches!(max, CssLength::Px(v) if *v == f32::INFINITY) { "none".into() } else { serialize_calculation_length(max) }
+                if matches!(max, CssLength::Px(v) if *v == f32::INFINITY) {
+                    "none".into()
+                } else {
+                    serialize_calculation_length(max)
+                }
             )
         }
-        CssLength::CalcExpr(node) => format!("calc({})", crate::css::serialize_calculation(node, &serialize_calculation_length)),
+        CssLength::CalcExpr(node) => format!(
+            "calc({})",
+            crate::css::serialize_calculation(node, &serialize_calculation_length)
+        ),
     }
 }
 

@@ -21,8 +21,15 @@ pub enum Phase {
     Cascade,
     CascadeFlatten,
     CascadeMatch,
+    CascadeMarkDirty,
     CascadeApply,
+    CascadeGeneratedContent,
+    AnimationSync,
+    TransitionSync,
     Geometry,
+    GeometryBoxes,
+    GeometryFinalize,
+    GeometryContainerQueries,
     FrameUpdate,
     DisplayList,
     DisplayListRecord,
@@ -40,11 +47,14 @@ pub enum Phase {
     RasterText,
     RasterShadow,
     RasterLayer,
+    RasterOpacityPush,
+    RasterOpacityPop,
     RasterClip,
+    RasterClipMaskBuild,
 }
 
 impl Phase {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 40] = [
         Self::HtmlFetch,
         Self::HtmlParse,
         Self::CssFetch,
@@ -55,8 +65,15 @@ impl Phase {
         Self::Cascade,
         Self::CascadeFlatten,
         Self::CascadeMatch,
+        Self::CascadeMarkDirty,
         Self::CascadeApply,
+        Self::CascadeGeneratedContent,
+        Self::AnimationSync,
+        Self::TransitionSync,
         Self::Geometry,
+        Self::GeometryBoxes,
+        Self::GeometryFinalize,
+        Self::GeometryContainerQueries,
         Self::FrameUpdate,
         Self::DisplayList,
         Self::DisplayListRecord,
@@ -74,7 +91,10 @@ impl Phase {
         Self::RasterText,
         Self::RasterShadow,
         Self::RasterLayer,
+        Self::RasterOpacityPush,
+        Self::RasterOpacityPop,
         Self::RasterClip,
+        Self::RasterClipMaskBuild,
     ];
 
     pub fn name(self) -> &'static str {
@@ -89,8 +109,15 @@ impl Phase {
             Self::Cascade => "cascade",
             Self::CascadeFlatten => "cascade_flatten",
             Self::CascadeMatch => "cascade_match",
+            Self::CascadeMarkDirty => "cascade_mark_dirty",
             Self::CascadeApply => "cascade_apply",
+            Self::CascadeGeneratedContent => "cascade_generated_content",
+            Self::AnimationSync => "animation_sync",
+            Self::TransitionSync => "transition_sync",
             Self::Geometry => "geometry",
+            Self::GeometryBoxes => "geometry_boxes",
+            Self::GeometryFinalize => "geometry_finalize",
+            Self::GeometryContainerQueries => "geometry_container_queries",
             Self::FrameUpdate => "frame_update",
             Self::DisplayList => "display_list",
             Self::DisplayListRecord => "display_list_record",
@@ -108,7 +135,10 @@ impl Phase {
             Self::RasterText => "raster_text",
             Self::RasterShadow => "raster_shadow",
             Self::RasterLayer => "raster_layer",
+            Self::RasterOpacityPush => "raster_opacity_push",
+            Self::RasterOpacityPop => "raster_opacity_pop",
             Self::RasterClip => "raster_clip",
+            Self::RasterClipMaskBuild => "raster_clip_mask_build",
         }
     }
 }
@@ -187,7 +217,9 @@ pub fn reset() {
         return;
     }
     let epoch = EPOCH.fetch_add(1, Ordering::Relaxed) + 1;
-    *state().lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = ProfileState::new(epoch);
+    *state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = ProfileState::new(epoch);
 }
 
 pub struct Span {
@@ -213,7 +245,9 @@ impl Drop for Span {
 }
 
 fn record_epoch(phase: Phase, duration: Duration, epoch: u64) {
-    let mut profile = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut profile = state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if profile.epoch == epoch {
         profile.timings[phase as usize].add(duration);
     }
@@ -229,7 +263,9 @@ pub fn mark_scroll_input() {
     if !is_enabled() {
         return;
     }
-    let mut profile = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut profile = state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     profile.pending_scroll.get_or_insert_with(Instant::now);
 }
 
@@ -237,7 +273,9 @@ pub fn finish_scroll_paint() {
     if !is_enabled() {
         return;
     }
-    let mut profile = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut profile = state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(started) = profile.pending_scroll.take() {
         profile.timings[Phase::ScrollPaint as usize].add(started.elapsed());
     }
@@ -254,7 +292,9 @@ pub fn record_resource_for(
     if !is_enabled() {
         return;
     }
-    let mut profile = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut profile = state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if profile.epoch != epoch {
         return;
     }
@@ -279,7 +319,9 @@ pub fn record_resource_for(
 }
 
 pub fn snapshot() -> Snapshot {
-    let profile = state().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let profile = state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut resources = profile.resources.clone();
     resources.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.duration_ns));
     Snapshot {
@@ -302,7 +344,9 @@ pub fn summary() -> String {
     let mut out = format!("[profile] {:.1}s elapsed", snapshot.elapsed.as_secs_f64());
     let mut shown: Vec<_> = phases.into_iter().take(6).collect();
     if snapshot.timings[Phase::ScrollPaint as usize].count > 0
-        && !shown.iter().any(|phase| matches!(phase, Phase::ScrollPaint))
+        && !shown
+            .iter()
+            .any(|phase| matches!(phase, Phase::ScrollPaint))
     {
         shown.push(Phase::ScrollPaint);
     }
@@ -345,7 +389,8 @@ mod tests {
 
     #[test]
     fn phase_names_are_unique() {
-        let names: std::collections::HashSet<_> = Phase::ALL.iter().map(|phase| phase.name()).collect();
+        let names: std::collections::HashSet<_> =
+            Phase::ALL.iter().map(|phase| phase.name()).collect();
         assert_eq!(names.len(), Phase::ALL.len());
     }
 }

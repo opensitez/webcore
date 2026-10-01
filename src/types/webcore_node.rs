@@ -15,6 +15,7 @@ pub struct DecodedBackgroundImage {
     pub width: u32,
     pub height: u32,
     pub ratio_only: bool,
+    pub resolution: f32,
 }
 
 /// A box/node in the box tree.  Mirrors the C++ `Box` struct.
@@ -87,6 +88,7 @@ pub struct WebCore {
     pub bg_image_width: u32,
     pub bg_image_height: u32,
     pub bg_image_ratio_only: bool,
+    pub bg_image_resolution: f32,
     pub additional_bg_images: Vec<Option<DecodedBackgroundImage>>,
 
     // CSS mask-image data (SVG rasterized to alpha mask)
@@ -202,6 +204,9 @@ pub struct WebCore {
     /// True means a descendant has `layout_dirty` — must traverse into children during layout.
     /// Allows skipping entire clean subtrees.
     pub has_dirty_layout_descendant: bool,
+    /// The HTML parser has consumed this element as non-rendered raw content
+    /// (a script, or a noscript handled by an active scripting host).
+    pub parser_suppressed: bool,
 }
 
 /// Shadow DOM root — holds a scoped tree and stylesheet.

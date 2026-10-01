@@ -199,7 +199,7 @@ fn prescan_color_scheme(
     important: bool,
     author_pass: Option<bool>,
 ) -> String {
-    let mut probe = base.clone();
+    let mut probe: Option<ComputedStyle> = None;
     for &(sp, ri, _) in matched {
         if let Some(author) = author_pass {
             if is_author_origin(sp) != author {
@@ -209,10 +209,15 @@ fn prescan_color_scheme(
         let rule = &rules[ri];
         if important {
             if let Some(val) = rule.important_declarations.get("color-scheme") {
+                let current = probe.as_ref().unwrap_or(base);
                 let resolved =
-                    resolve_var_references_for_color_scheme(val, local_vars, &probe.color_scheme);
+                    resolve_var_references_for_color_scheme(val, local_vars, &current.color_scheme);
                 if !resolved.trim().is_empty() && !resolved.contains("var(") {
-                    apply_property(&mut probe, "color-scheme", &resolved);
+                    apply_property(
+                        probe.get_or_insert_with(|| base.clone()),
+                        "color-scheme",
+                        &resolved,
+                    );
                 }
                 continue;
             }
@@ -221,14 +226,23 @@ fn prescan_color_scheme(
                 .iter()
                 .find(|(id, _)| *id == properties::PropertyId::ColorScheme)
             {
-                apply_css_value(&mut probe, properties::PropertyId::ColorScheme, val);
+                apply_css_value(
+                    probe.get_or_insert_with(|| base.clone()),
+                    properties::PropertyId::ColorScheme,
+                    val,
+                );
             }
         } else {
             if let Some(val) = rule.declarations.get("color-scheme") {
+                let current = probe.as_ref().unwrap_or(base);
                 let resolved =
-                    resolve_var_references_for_color_scheme(val, local_vars, &probe.color_scheme);
+                    resolve_var_references_for_color_scheme(val, local_vars, &current.color_scheme);
                 if !resolved.trim().is_empty() && !resolved.contains("var(") {
-                    apply_property(&mut probe, "color-scheme", &resolved);
+                    apply_property(
+                        probe.get_or_insert_with(|| base.clone()),
+                        "color-scheme",
+                        &resolved,
+                    );
                 }
                 continue;
             }
@@ -237,11 +251,15 @@ fn prescan_color_scheme(
                 .iter()
                 .find(|(id, _)| *id == properties::PropertyId::ColorScheme)
             {
-                apply_css_value(&mut probe, properties::PropertyId::ColorScheme, val);
+                apply_css_value(
+                    probe.get_or_insert_with(|| base.clone()),
+                    properties::PropertyId::ColorScheme,
+                    val,
+                );
             }
         }
     }
-    probe.color_scheme.clone()
+    probe.as_ref().unwrap_or(base).color_scheme.clone()
 }
 
 fn apply_state_matched_rules(
@@ -323,17 +341,17 @@ fn projected_rule_targets_assigned_node(sel: &CssSelector) -> bool {
 }
 
 pub(crate) fn projected_ancestor_info(node: &WebCore) -> AncestorInfo {
-	    AncestorInfo {
-	        tag: node.tag.clone(),
-	        attributes: node.attributes.clone(),
-	        child_index: 0,
-	        sibling_count: 1,
-	        type_child_index: 0,
-	        type_sibling_count: 1,
-	        node_id: node.node_id,
-	        prev_siblings: Vec::new(),
-	    }
-	}
+    AncestorInfo {
+        tag: node.tag.clone(),
+        attributes: std::sync::Arc::new(node.attributes.clone()),
+        child_index: 0,
+        sibling_count: 1,
+        type_child_index: 0,
+        type_sibling_count: 1,
+        node_id: node.node_id,
+        prev_siblings: std::sync::Arc::new(Vec::new()),
+    }
+}
 
 pub(crate) fn apply_host_projected_rules_to_projected(
     node: &mut crate::types::WebCore,
@@ -396,8 +414,7 @@ fn apply_host_projected_rules_with_ancestors(
         .get("class")
         .map(|s| s.as_str())
         .unwrap_or("");
-    let classes: Vec<&str> = class_attr.split_whitespace().collect();
-    stylesheet.candidate_rules(&node.tag, id, &classes, candidates_buf);
+    stylesheet.candidate_rules(&node.tag, id, class_attr.split_whitespace(), candidates_buf);
     for (rule_idx, rule) in stylesheet.rules.iter().enumerate() {
         if rule
             .selectors
@@ -432,7 +449,7 @@ fn apply_host_projected_rules_with_ancestors(
         if rule.is_slotted || rule.pseudo_element != PseudoElement::None {
             continue;
         }
-        if !rule.media_condition.is_empty() && !evaluate_media(&rule.media_condition, vw, vh) {
+        if !rule.media_condition.matches(vw, vh) {
             continue;
         }
         if !rule.container_condition.is_empty() {
@@ -591,8 +608,7 @@ pub(crate) fn apply_slotted_rules_to_projected(
         .get("class")
         .map(|s| s.as_str())
         .unwrap_or("");
-    let classes: Vec<&str> = class_attr.split_whitespace().collect();
-    stylesheet.candidate_rules(&node.tag, id, &classes, candidates_buf);
+    stylesheet.candidate_rules(&node.tag, id, class_attr.split_whitespace(), candidates_buf);
 
     let empty_hover = std::collections::HashSet::new();
     let empty_focus = std::collections::HashSet::new();
@@ -644,7 +660,7 @@ pub(crate) fn apply_slotted_rules_to_projected(
                 continue;
             }
         }
-        if !rule.media_condition.is_empty() && !evaluate_media(&rule.media_condition, vw, vh) {
+        if !rule.media_condition.matches(vw, vh) {
             continue;
         }
         if !rule.container_condition.is_empty() {
@@ -901,8 +917,9 @@ pub fn apply_cascade_vp_hover_target_url(
 ) {
     let focus_within_chain = crate::css::build_hover_chain(root, focused_box);
     // Use parallel cascade when the stylesheet is large enough to justify the overhead.
-    if stylesheet.rules.len() > 1000
+    if (stylesheet.rules.len() > 1000
         && std::env::var_os("WEBCORE_DISABLE_PARALLEL_CASCADE").is_none()
+        || stylesheet.has_ancestor_has_rules)
         && !tree_has_duplicate_node_ids(root)
     {
         apply_cascade_parallel(
@@ -1385,35 +1402,71 @@ fn blockify_flex_or_grid_item(style: &mut ComputedStyle) {
 
 /// Counters and quotes follow document order independently of style matching.
 /// Clean siblings can change when an earlier element's counter operations change.
-pub(crate) fn resolve_document_generated_content(root: &mut crate::types::WebCore, stylesheet: &Stylesheet) {
+pub(crate) fn resolve_document_generated_content(
+    root: &mut crate::types::WebCore,
+    stylesheet: &Stylesheet,
+) {
+    let _profile = crate::profile::is_enabled()
+        .then(|| crate::profile::span(crate::profile::Phase::CascadeGeneratedContent));
     let mut pending = vec![&*root];
     let mut automatic = false;
     while let Some(node) = pending.pop() {
-        if node.style.display == Display::None { continue; }
+        if node.style.display == Display::None {
+            continue;
+        }
         automatic = std::iter::once(&*node.style)
             .chain(node.style.before_style.as_deref())
             .chain(node.style.after_style.as_deref())
             .chain(node.style.marker_style.as_deref())
-            .any(|style| style.counter_reset.iter().any(|reset| reset.value.is_none() && !reset.html_list_start));
-        if automatic { break; }
+            .any(|style| {
+                style
+                    .counter_reset
+                    .iter()
+                    .any(|reset| reset.value.is_none() && !reset.html_list_start)
+            });
+        if automatic {
+            break;
+        }
         pending.extend(node.children.iter());
-        if let Some(shadow) = &node.shadow_root { pending.extend(shadow.children.iter()); }
+        if let Some(shadow) = &node.shadow_root {
+            pending.extend(shadow.children.iter());
+        }
     }
     let initial_values = if automatic {
         replay_document_generated_content(root, stylesheet, Vec::new(), true)
-    } else { Vec::new() };
+    } else {
+        Vec::new()
+    };
     replay_document_generated_content(root, stylesheet, initial_values, false);
 }
 
-fn replay_document_generated_content(root: &mut crate::types::WebCore, stylesheet: &Stylesheet, initial_values: Vec<i32>, collecting: bool) -> Vec<i32> {
+fn replay_document_generated_content(
+    root: &mut crate::types::WebCore,
+    stylesheet: &Stylesheet,
+    initial_values: Vec<i32>,
+    collecting: bool,
+) -> Vec<i32> {
     fn html_list_initial(node: &crate::types::WebCore) -> Option<i32> {
-        if !node.style.counter_reset.iter().any(|reset| reset.html_list_start) { return None; }
+        if !node
+            .style
+            .counter_reset
+            .iter()
+            .any(|reset| reset.html_list_start)
+        {
+            return None;
+        }
         let mut count = 0i32;
         let mut pending: Vec<_> = node.children.iter().collect();
         while let Some(child) = pending.pop() {
-            if child.style.display == Display::None { continue; }
-            if matches!(child.tag.as_str(), "ol" | "ul" | "menu") { continue; }
-            if child.tag == "li" { count = count.saturating_add(1); }
+            if child.style.display == Display::None {
+                continue;
+            }
+            if matches!(child.tag.as_str(), "ol" | "ul" | "menu") {
+                continue;
+            }
+            if child.tag == "li" {
+                count = count.saturating_add(1);
+            }
             pending.extend(child.children.iter());
         }
         // The shared counter machinery decrements before painting the first item.
@@ -1438,19 +1491,34 @@ fn replay_document_generated_content(root: &mut crate::types::WebCore, styleshee
             "::after" => owner.after_style.as_deref(),
             _ => owner.marker_style.as_deref(),
         };
-        let Some(style) = style else { return false; };
-        if style.display == Display::None { return false; }
+        let Some(style) = style else {
+            return false;
+        };
+        if style.display == Display::None {
+            return false;
+        }
         counters.apply_element(style);
-        if counters.collecting { return false; }
-        if style.rare().content_template.is_empty() { return false; }
-        let text = render_counter_content(&style.rare().content_template, style.rare().quotes.as_deref(), depth, &counters.values);
+        if counters.collecting {
+            return false;
+        }
+        if style.rare().content_template.is_empty() {
+            return false;
+        }
+        let text = render_counter_content(
+            &style.rare().content_template,
+            style.rare().quotes.as_deref(),
+            depth,
+            &counters.values,
+        );
         {
             let current = match pseudo {
                 "::before" => &owner.before_content,
                 "::after" => &owner.after_content,
                 _ => &owner.marker_content,
             };
-            if *current == text { return false; }
+            if *current == text {
+                return false;
+            }
             let style = std::sync::Arc::make_mut(owner);
             match pseudo {
                 "::before" => style.before_content = text,
@@ -1461,18 +1529,23 @@ fn replay_document_generated_content(root: &mut crate::types::WebCore, styleshee
         true
     }
     fn anonymous(node: &crate::types::WebCore) -> bool {
-        matches!(node.tag.as_str(), "anonymous-block" | "anonymous-table" | "anonymous-table-row" | "anonymous-table-cell")
+        matches!(
+            node.tag.as_str(),
+            "anonymous-block" | "anonymous-table" | "anonymous-table-row" | "anonymous-table-cell"
+        )
     }
     fn materialized_pseudos(node: &crate::types::WebCore) -> (bool, bool) {
         let mut found = (false, false);
-        if node.style.before_style.is_none() && node.style.after_style.is_none() { return found; }
+        if node.style.before_style.is_none() && node.style.after_style.is_none() {
+            return found;
+        }
         let mut pending: Vec<_> = node.children.iter().collect();
         while let Some(child) = pending.pop() {
             match child.tag.as_str() {
                 "::before" => found.0 = true,
                 "::after" => found.1 = true,
                 _ if anonymous(child) => pending.extend(child.children.iter()),
-                _ => {},
+                _ => {}
             }
         }
         found
@@ -1492,20 +1565,35 @@ fn replay_document_generated_content(root: &mut crate::types::WebCore, styleshee
     let mut work = vec![Visit::Enter(root)];
     let mut depth = 0;
     let mut revision = 0;
-    let mut counters = CounterState { collecting, initial_values, ..CounterState::default() };
+    let mut counters = CounterState {
+        collecting,
+        initial_values,
+        ..CounterState::default()
+    };
     while let Some(visit) = work.pop() {
         match visit {
             Visit::Enter(node) => {
-                if node.style.display == Display::None { continue; }
+                if node.style.display == Display::None {
+                    continue;
+                }
                 if matches!(node.tag.as_str(), "::before" | "::after") {
                     counters.apply_element(&node.style);
                     let template = &node.style.rare().content_template;
                     if !collecting && !template.is_empty() {
-                        let text = render_counter_content(template, node.style.rare().quotes.as_deref(), &mut depth, &counters.values);
+                        let text = render_counter_content(
+                            template,
+                            node.style.rare().quotes.as_deref(),
+                            &mut depth,
+                            &counters.values,
+                        );
                         // Flex/grid pseudo-elements own an anonymous text item.
-                        let target = if node.text.is_empty() && node.children.first().is_some_and(|c| c.tag == "#text") {
+                        let target = if node.text.is_empty()
+                            && node.children.first().is_some_and(|c| c.tag == "#text")
+                        {
                             &mut node.children[0]
-                        } else { &mut *node };
+                        } else {
+                            &mut *node
+                        };
                         if target.text != text {
                             target.text = text;
                             dirty(&mut target.layout, &mut target.has_dirty_layout_descendant);
@@ -1517,23 +1605,65 @@ fn replay_document_generated_content(root: &mut crate::types::WebCore, styleshee
                 }
                 let initial_revision = revision;
                 let anonymous = anonymous(node);
-                let (materialized_before, materialized_after) = if anonymous { (false, false) } else { materialized_pseudos(node) };
-                if !anonymous { counters.apply_element_with_list_start(&node.style, html_list_initial(node)); }
+                let (materialized_before, materialized_after) = if anonymous {
+                    (false, false)
+                } else {
+                    materialized_pseudos(node)
+                };
+                if !anonymous {
+                    counters.apply_element_with_list_start(&node.style, html_list_initial(node));
+                }
                 if !collecting && !anonymous && node.style.display == Display::ListItem {
-                    let value = counters.values.get("list-item").and_then(|v| v.last()).copied().unwrap_or(0);
-                    let marker = resolve_custom_counter_style_marker(stylesheet, &node.style.custom_list_style_type, value);
-                    if node.style.list_index != value || marker.as_ref().is_some_and(|m| *m != node.style.marker_content) {
+                    let value = counters
+                        .values
+                        .get("list-item")
+                        .and_then(|v| v.last())
+                        .copied()
+                        .unwrap_or(0);
+                    let marker = resolve_custom_counter_style_marker(
+                        stylesheet,
+                        &node.style.custom_list_style_type,
+                        value,
+                    );
+                    if node.style.list_index != value
+                        || marker
+                            .as_ref()
+                            .is_some_and(|m| *m != node.style.marker_content)
+                    {
                         let style = std::sync::Arc::make_mut(&mut node.style);
                         style.list_index = value;
-                        if let Some(marker) = marker { style.marker_content = marker; }
+                        if let Some(marker) = marker {
+                            style.marker_content = marker;
+                        }
                         revision += 1;
                     }
                 }
-                let contained_depth = (!anonymous && node.style.contain_style && node.style.display != Display::Contents).then_some(depth);
-                if !anonymous { counters.enter_children(); }
-                if contained_depth.is_some() { counters.enter_containment(); }
-                if !anonymous { revision += usize::from(expand(&mut node.style, "::marker", &mut depth, &mut counters)); }
-                if !anonymous && !materialized_before { revision += usize::from(expand(&mut node.style, "::before", &mut depth, &mut counters)); }
+                let contained_depth = (!anonymous
+                    && node.style.contain_style
+                    && node.style.display != Display::Contents)
+                    .then_some(depth);
+                if !anonymous {
+                    counters.enter_children();
+                }
+                if contained_depth.is_some() {
+                    counters.enter_containment();
+                }
+                if !anonymous {
+                    revision += usize::from(expand(
+                        &mut node.style,
+                        "::marker",
+                        &mut depth,
+                        &mut counters,
+                    ));
+                }
+                if !anonymous && !materialized_before {
+                    revision += usize::from(expand(
+                        &mut node.style,
+                        "::before",
+                        &mut depth,
+                        &mut counters,
+                    ));
+                }
                 let base = work.len();
                 let mut before_shadow = None;
                 for child in node.children.iter_mut().rev() {
@@ -1544,34 +1674,64 @@ fn replay_document_generated_content(root: &mut crate::types::WebCore, styleshee
                     }
                 }
                 if let Some(shadow) = &mut node.shadow_root {
-                    for child in shadow.children.iter_mut().rev() { work.push(Visit::Enter(child)); }
+                    for child in shadow.children.iter_mut().rev() {
+                        work.push(Visit::Enter(child));
+                    }
                 }
-                if let Some(before) = before_shadow { work.push(Visit::Enter(before)); }
+                if let Some(before) = before_shadow {
+                    work.push(Visit::Enter(before));
+                }
                 // Keep the owner's exit below its children without retaining a
                 // recursive stack frame or borrowing the whole owner twice.
-                work.insert(base, Visit::Exit {
-                    style: &mut node.style, layout: &mut node.layout,
-                    descendants: &mut node.has_dirty_layout_descendant,
-                    materialized_after, revision: initial_revision,
-                    contained_depth,
-                    anonymous,
-                });
+                work.insert(
+                    base,
+                    Visit::Exit {
+                        style: &mut node.style,
+                        layout: &mut node.layout,
+                        descendants: &mut node.has_dirty_layout_descendant,
+                        materialized_after,
+                        revision: initial_revision,
+                        contained_depth,
+                        anonymous,
+                    },
+                );
             }
-            Visit::Exit { style, layout, descendants, materialized_after, revision: initial_revision, contained_depth, anonymous } => {
+            Visit::Exit {
+                style,
+                layout,
+                descendants,
+                materialized_after,
+                revision: initial_revision,
+                contained_depth,
+                anonymous,
+            } => {
                 if !anonymous {
-                    if !materialized_after { revision += usize::from(expand(style, "::after", &mut depth, &mut counters)); }
+                    if !materialized_after {
+                        revision +=
+                            usize::from(expand(style, "::after", &mut depth, &mut counters));
+                    }
                     counters.exit_children();
                 }
                 if let Some(entry_depth) = contained_depth {
                     depth = entry_depth;
                     counters.exit_containment();
                 }
-                if revision != initial_revision { dirty(layout, descendants); }
+                if revision != initial_revision {
+                    dirty(layout, descendants);
+                }
             }
         }
     }
-    counters.automatic.iter().map(|initial| initial.total.saturating_add(initial.last_increment_negated)
-        .clamp(i32::MIN as i64, i32::MAX as i64) as i32).collect()
+    counters
+        .automatic
+        .iter()
+        .map(|initial| {
+            initial
+                .total
+                .saturating_add(initial.last_increment_negated)
+                .clamp(i32::MIN as i64, i32::MAX as i64) as i32
+        })
+        .collect()
 }
 
 fn resolve_generated_content(
@@ -1605,7 +1765,11 @@ fn render_counter_content(
             }
             crate::types::GeneratedContentPart::Text(text) => out.push_str(text),
             crate::types::GeneratedContentPart::Quote { .. } => {
-                out.push_str(&render_content_parts(std::slice::from_ref(part), quotes, depth));
+                out.push_str(&render_content_parts(
+                    std::slice::from_ref(part),
+                    quotes,
+                    depth,
+                ));
             }
         }
     }
@@ -1730,7 +1894,10 @@ pub(crate) fn build_pseudo_style_shared(
 pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
     fn wrap_layout_item_pseudo_text(pseudo_box: &mut crate::types::WebCore) {
         if (pseudo_box.text.is_empty() && pseudo_box.style.rare().content_template.is_empty())
-            || !matches!(pseudo_box.style.display, Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid)
+            || !matches!(
+                pseudo_box.style.display,
+                Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid
+            )
         {
             return;
         }
@@ -1771,6 +1938,8 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
             pseudo_box.bg_image_data = existing.bg_image_data.clone();
             pseudo_box.bg_image_width = existing.bg_image_width;
             pseudo_box.bg_image_height = existing.bg_image_height;
+            pseudo_box.bg_image_ratio_only = existing.bg_image_ratio_only;
+            pseudo_box.bg_image_resolution = existing.bg_image_resolution;
         }
         if background_layer_urls_match(
             &pseudo_box.style.rare().additional_background_layers,
@@ -1789,7 +1958,8 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         root.style.display,
         Display::Grid | Display::InlineGrid | Display::Flex | Display::InlineFlex
     );
-    let has_block_children = (root.style.before_style.is_some() || root.style.after_style.is_some())
+    let has_block_children = (root.style.before_style.is_some()
+        || root.style.after_style.is_some())
         && crate::layout::inline_layout::has_in_flow_block_children(root);
     let pseudo_needs_inline_box = |style: Option<&Box<ComputedStyle>>| {
         style.as_ref().is_some_and(|ps| {
@@ -1811,7 +1981,11 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
     let before_generated = root.style.before_style.is_some();
     let before_is_atomic_inline = pseudo_needs_inline_box(root.style.before_style.as_ref());
     if before_generated
-        && (is_grid_or_flex || has_block_children || before_is_positioned || before_is_block || before_is_atomic_inline)
+        && (is_grid_or_flex
+            || has_block_children
+            || before_is_positioned
+            || before_is_block
+            || before_is_atomic_inline)
     {
         let existing = root.children.iter().position(|c| c.tag == "::before");
         let existing_node = existing.and_then(|idx| root.children.get(idx));
@@ -1858,7 +2032,11 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
     let after_generated = root.style.after_style.is_some();
     let after_is_atomic_inline = pseudo_needs_inline_box(root.style.after_style.as_ref());
     if after_generated
-        && (is_grid_or_flex || has_block_children || after_is_positioned || after_is_block || after_is_atomic_inline)
+        && (is_grid_or_flex
+            || has_block_children
+            || after_is_positioned
+            || after_is_block
+            || after_is_atomic_inline)
     {
         let existing = root.children.iter().position(|c| c.tag == "::after");
         let existing_node = existing.and_then(|idx| root.children.get(idx));
@@ -2013,9 +2191,13 @@ pub fn debug_match_report_for_node(
                 .get("class")
                 .map(|s| s.as_str())
                 .unwrap_or("");
-            let classes: Vec<&str> = class_attr.split_whitespace().collect();
             let mut candidates = Vec::new();
-            stylesheet.candidate_rules(&node.tag, id, &classes, &mut candidates);
+            stylesheet.candidate_rules(
+                &node.tag,
+                id,
+                class_attr.split_whitespace(),
+                &mut candidates,
+            );
             let mut scratch = Vec::new();
             let sets = match_rules(
                 node,
@@ -2038,6 +2220,7 @@ pub fn debug_match_report_for_node(
                 next_siblings,
                 next_sibling_nodes,
                 &mut scratch,
+                None,
             );
             return Some(CssMatchDebugReport {
                 node_id: node.node_id,
@@ -2061,16 +2244,16 @@ pub fn debug_match_report_for_node(
             return None;
         }
 
-	        ancestors.push(AncestorInfo {
-	            tag: node.tag.clone(),
-	            attributes: node.attributes.clone(),
-	            child_index,
-	            sibling_count,
-	            type_child_index,
-	            type_sibling_count,
-	            node_id: node.node_id,
-	            prev_siblings: prev_siblings.to_vec(),
-	        });
+        ancestors.push(AncestorInfo {
+            tag: node.tag.clone(),
+            attributes: std::sync::Arc::new(node.attributes.clone()),
+            child_index,
+            sibling_count,
+            type_child_index,
+            type_sibling_count,
+            node_id: node.node_id,
+            prev_siblings: std::sync::Arc::new(prev_siblings.to_vec()),
+        });
 
         let children = node.effective_children();
         let n_children = children.len();
@@ -2212,6 +2395,7 @@ pub(crate) fn match_rules(
     next_siblings: &[SiblingInfo],
     next_sibling_nodes: &[&crate::types::WebCore],
     candidates_buf: &mut Vec<usize>,
+    media_matches: Option<&[bool]>,
 ) -> MatchSets {
     // ⛔ `html_box` is the element itself, always. `:has()`, `:empty`, `:focus`,
     // `:focus-within`, `:modal`, `:popover-open`, `:checked`, `:indeterminate`
@@ -2244,14 +2428,16 @@ pub(crate) fn match_rules(
         .get("class")
         .map(|s| s.as_str())
         .unwrap_or("");
-    let classes: Vec<&str> = class_attr.split_whitespace().collect();
-    stylesheet.candidate_rules(&node.tag, id, &classes, candidates_buf);
+    stylesheet.candidate_rules(&node.tag, id, class_attr.split_whitespace(), candidates_buf);
 
     for &rule_idx in candidates_buf.iter() {
         let rule = &stylesheet.rules[rule_idx];
         // Rules whose @media condition does not match the viewport are not in
         // the cascade at all.
-        if !rule.media_condition.is_empty() && !evaluate_media(&rule.media_condition, vw, vh) {
+        if !media_matches.map_or_else(
+            || rule.media_condition.matches(vw, vh),
+            |matches| matches[rule_idx],
+        ) {
             continue;
         }
         // Container rules need layout context — a post-layout pass applies them.
@@ -2650,7 +2836,7 @@ fn layout_affecting_style_changed(old: &ComputedStyle, new: &ComputedStyle) -> b
         || old.visibility != new.visibility
 }
 
-fn mark_layout_subtree_dirty(node: &mut crate::types::WebCore) {
+pub(crate) fn mark_layout_subtree_dirty(node: &mut crate::types::WebCore) {
     node.layout.layout_dirty = true;
     node.layout.intrinsic_dirty = true;
     node.layout.line_cache.clear();
@@ -2718,7 +2904,12 @@ pub(crate) struct CounterState {
 
 impl CounterState {
     fn enter_containment(&mut self) {
-        self.boundaries.push(self.values.iter().map(|(name, stack)| (name.clone(), stack.len())).collect());
+        self.boundaries.push(
+            self.values
+                .iter()
+                .map(|(name, stack)| (name.clone(), stack.len()))
+                .collect(),
+        );
     }
 
     fn exit_containment(&mut self) {
@@ -2726,7 +2917,9 @@ impl CounterState {
     }
 
     fn ensure_scope(&mut self) {
-        if self.sibling_scopes.is_empty() { self.sibling_scopes.push(HashMap::new()); }
+        if self.sibling_scopes.is_empty() {
+            self.sibling_scopes.push(HashMap::new());
+        }
     }
 
     fn enter_children(&mut self) {
@@ -2739,7 +2932,9 @@ impl CounterState {
         for (name, _) in names {
             if let Some(stack) = self.values.get_mut(&name) {
                 stack.pop();
-                if stack.is_empty() { self.values.remove(&name); }
+                if stack.is_empty() {
+                    self.values.remove(&name);
+                }
             }
         }
     }
@@ -2749,35 +2944,76 @@ impl CounterState {
         let automatic = value.is_none().then(|| {
             let id = self.next_automatic;
             self.next_automatic += 1;
-            if self.collecting { self.automatic.push(AutomaticCounterInitial::default()); }
+            if self.collecting {
+                self.automatic.push(AutomaticCounterInitial::default());
+            }
             id
         });
-        let value = value.unwrap_or_else(|| automatic.and_then(|id| self.initial_values.get(id).copied()).unwrap_or(0));
-        let fresh = self.sibling_scopes.last_mut().unwrap().insert(name.to_owned(), CounterScope { reversed, automatic }).is_none();
+        let value = value.unwrap_or_else(|| {
+            automatic
+                .and_then(|id| self.initial_values.get(id).copied())
+                .unwrap_or(0)
+        });
+        let fresh = self
+            .sibling_scopes
+            .last_mut()
+            .unwrap()
+            .insert(
+                name.to_owned(),
+                CounterScope {
+                    reversed,
+                    automatic,
+                },
+            )
+            .is_none();
         let stack = self.values.entry(name.to_owned()).or_default();
         // Same-level resets replace a sibling's instance, not an ancestor's.
-        if !fresh { stack.pop(); }
+        if !fresh {
+            stack.pop();
+        }
         stack.push(value);
     }
 
     fn writable_counter(&mut self, name: &str) -> (&mut i32, bool) {
         self.ensure_scope();
-        let boundary_depth = self.boundaries.last().and_then(|b| b.get(name)).copied().unwrap_or(0);
+        let boundary_depth = self
+            .boundaries
+            .last()
+            .and_then(|b| b.get(name))
+            .copied()
+            .unwrap_or(0);
         let stack = self.values.entry(name.to_owned()).or_default();
         let created = stack.len() <= boundary_depth;
         if created {
             stack.push(0);
-            self.sibling_scopes.last_mut().unwrap().insert(name.to_owned(), CounterScope::default());
+            self.sibling_scopes
+                .last_mut()
+                .unwrap()
+                .insert(name.to_owned(), CounterScope::default());
         }
         (stack.last_mut().expect("counter instantiated"), created)
     }
 
     fn record_initial_operation(&mut self, name: &str, increment: i64, set: Option<i32>) {
-        if !self.collecting { return; }
-        let Some(id) = self.sibling_scopes.iter().rev().find_map(|scope| scope.get(name)).and_then(|scope| scope.automatic) else { return; };
+        if !self.collecting {
+            return;
+        }
+        let Some(id) = self
+            .sibling_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
+            .and_then(|scope| scope.automatic)
+        else {
+            return;
+        };
         let initial = &mut self.automatic[id];
-        if initial.stopped { return; }
-        if increment != 0 { initial.last_increment_negated = -increment; }
+        if initial.stopped {
+            return;
+        }
+        if increment != 0 {
+            initial.last_increment_negated = -increment;
+        }
         if let Some(value) = set {
             initial.total = initial.total.saturating_add(i64::from(value));
             initial.stopped = true;
@@ -2790,23 +3026,38 @@ impl CounterState {
         self.apply_element_with_list_start(style, None);
     }
 
-    fn apply_element_with_list_start(&mut self, style: &ComputedStyle, html_list_start: Option<i32>) {
+    fn apply_element_with_list_start(
+        &mut self,
+        style: &ComputedStyle,
+        html_list_start: Option<i32>,
+    ) {
         // Published CSS Lists 3 inheritance: parent counters take priority over
         // same-name instances from a sibling. Containment-local instances are
         // the writable scope root, so they continue through that subtree.
         if let Some(scope) = self.sibling_scopes.last_mut() {
             scope.retain(|name, _| {
-                let Some(stack) = self.values.get_mut(name) else { return false; };
-                let contained_root = self.boundaries.last().and_then(|b| b.get(name))
+                let Some(stack) = self.values.get_mut(name) else {
+                    return false;
+                };
+                let contained_root = self
+                    .boundaries
+                    .last()
+                    .and_then(|b| b.get(name))
                     .is_some_and(|depth| *depth + 1 == stack.len());
                 if stack.len() > 1 && !contained_root {
                     stack.pop();
                     false
-                } else { true }
+                } else {
+                    true
+                }
             });
         }
         for reset in &style.counter_reset {
-            let value = if reset.html_list_start { html_list_start.or(reset.value) } else { reset.value };
+            let value = if reset.html_list_start {
+                html_list_start.or(reset.value)
+            } else {
+                reset.value
+            };
             self.reset(&reset.name, value, reset.reversed);
         }
         for (name, delta) in &style.counter_increment {
@@ -2815,21 +3066,49 @@ impl CounterState {
         }
         if self.collecting {
             for (index, (name, _)) in style.counter_increment.iter().enumerate() {
-                if style.counter_increment[..index].iter().any(|(previous, _)| previous == name) { continue; }
-                let increment = style.counter_increment.iter().filter(|(other, _)| other == name)
-                    .fold(0i64, |sum, (_, delta)| sum.saturating_add(i64::from(*delta)));
-                let set = style.counter_set.iter().rev().find(|(other, _)| other == name).map(|(_, value)| *value);
+                if style.counter_increment[..index]
+                    .iter()
+                    .any(|(previous, _)| previous == name)
+                {
+                    continue;
+                }
+                let increment = style
+                    .counter_increment
+                    .iter()
+                    .filter(|(other, _)| other == name)
+                    .fold(0i64, |sum, (_, delta)| {
+                        sum.saturating_add(i64::from(*delta))
+                    });
+                let set = style
+                    .counter_set
+                    .iter()
+                    .rev()
+                    .find(|(other, _)| other == name)
+                    .map(|(_, value)| *value);
                 self.record_initial_operation(name, increment, set);
             }
         }
         if style.display == Display::ListItem
-            && !style.counter_increment.iter().any(|(name, _)| name == "list-item")
+            && !style
+                .counter_increment
+                .iter()
+                .any(|(name, _)| name == "list-item")
         {
-            let reversed = self.sibling_scopes.iter().rev().find_map(|scope| scope.get("list-item")).is_some_and(|scope| scope.reversed);
+            let reversed = self
+                .sibling_scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get("list-item"))
+                .is_some_and(|scope| scope.reversed);
             let (value, created) = self.writable_counter("list-item");
             let increment = if reversed && !created { -1 } else { 1 };
             *value = value.saturating_add(increment);
-            let set = style.counter_set.iter().rev().find(|(name, _)| name == "list-item").map(|(_, value)| *value);
+            let set = style
+                .counter_set
+                .iter()
+                .rev()
+                .find(|(name, _)| name == "list-item")
+                .map(|(_, value)| *value);
             self.record_initial_operation("list-item", i64::from(increment), set);
         }
         for (name, new_value) in &style.counter_set {
@@ -2837,9 +3116,17 @@ impl CounterState {
         }
         if self.collecting {
             for (index, (name, value)) in style.counter_set.iter().enumerate() {
-                if style.counter_set[index + 1..].iter().any(|(other, _)| other == name)
-                    || style.counter_increment.iter().any(|(other, _)| other == name)
-                    || (name == "list-item" && style.display == Display::ListItem) { continue; }
+                if style.counter_set[index + 1..]
+                    .iter()
+                    .any(|(other, _)| other == name)
+                    || style
+                        .counter_increment
+                        .iter()
+                        .any(|(other, _)| other == name)
+                    || (name == "list-item" && style.display == Display::ListItem)
+                {
+                    continue;
+                }
                 self.record_initial_operation(name, 0, Some(*value));
             }
         }
@@ -2884,7 +3171,7 @@ fn apply_cascade_node(
     _share_cache: &mut ShareCache,
     // Selector matches computed off-thread by the parallel pass, keyed by
     // `node_id`. `None`, or a miss, means match inline — never "no rules".
-    precomputed: Option<&MatchMap>,
+    precomputed: Option<&mut MatchMap>,
 ) -> Option<CascadedNodeState> {
     // Guard against stack overflow on deeply nested DOMs.
     if ancestors.len() >= MAX_CASCADE_DEPTH {
@@ -2912,6 +3199,11 @@ fn apply_cascade_node(
         return None;
     }
 
+    if root.parser_suppressed {
+        std::sync::Arc::make_mut(&mut root.style).display = Display::None;
+        return None;
+    }
+
     // Synthetic ::before/::after children already have their computed pseudo
     // style set from the originating element. Recascading them as normal
     // children would overwrite pseudo-specific font/color/content rules.
@@ -2936,9 +3228,9 @@ fn apply_cascade_node(
     // precomputed result and an inline one can never disagree.
     let precomputed_here = precomputed
         .filter(|_| root.node_id != 0)
-        .and_then(|m| m.get(&root.node_id));
+        .and_then(|m| m.remove(&root.node_id));
     let sets = match precomputed_here {
-        Some(sets) => sets.clone(),
+        Some(sets) => sets,
         // ⛔ A miss MATCHES, it does not mean "no rules". An element the parallel
         // pass never saw — a box with no DOM node behind it, or a shadow subtree,
         // which is matched against its own scoped sheet — has to be cascaded, and
@@ -2964,6 +3256,7 @@ fn apply_cascade_node(
             next_siblings,
             next_sibling_nodes,
             candidates_buf,
+            None,
         ),
     };
     let MatchSets {
@@ -3214,93 +3507,102 @@ fn apply_cascade_node(
     // Applying `matched` in one sweep let a page write
     // `input[type=hidden] { display: block !important }` and reveal a hidden
     // field — Chrome answers `display: none` there, and now so does this.
-    let mut important_matched = matched.clone();
+    let mut important_matched: Vec<_> = matched
+        .iter()
+        .copied()
+        .filter(|(_, ri, _)| {
+            let rule = &stylesheet.rules[*ri];
+            !rule.compiled_important.is_empty() || !rule.important_declarations.is_empty()
+        })
+        .collect();
     important_matched.sort_by(|&a, &b| important_cascade_cmp(&stylesheet.rules, a, b));
-    for author_pass in [true, false] {
-        let important_color_scheme = prescan_color_scheme(
-            &style,
-            &stylesheet.rules,
-            &important_matched,
-            local_vars,
-            true,
-            Some(author_pass),
-        );
-        style.color_scheme = important_color_scheme;
-        let mut current_important_layer: Option<(bool, u32)> = None;
-        let mut important_layer_start_style = style.clone();
-        for &(sp, ri, _) in &important_matched {
-            if is_author_origin(sp) != author_pass {
-                continue;
-            }
-            let rule = &stylesheet.rules[ri];
-            let layer_key = (is_author_origin(sp), rule.layer_rank);
-            if current_important_layer != Some(layer_key) {
-                current_important_layer = Some(layer_key);
-                important_layer_start_style = style.clone();
-            }
-            let revert_base = if is_author_origin(sp) {
-                pre_author_normal_style.as_ref()
-            } else {
-                None
-            };
-            if has_vars && rule.has_var_refs {
-                if let Some(val) = rule.important_declarations.get("color-scheme") {
-                    let resolved = resolve_var_references_for_color_scheme(
-                        val,
-                        local_vars,
-                        &style.color_scheme,
-                    );
-                    if !resolved.trim().is_empty() && !resolved.contains("var(") {
+    if !important_matched.is_empty() {
+        for author_pass in [true, false] {
+            let important_color_scheme = prescan_color_scheme(
+                &style,
+                &stylesheet.rules,
+                &important_matched,
+                local_vars,
+                true,
+                Some(author_pass),
+            );
+            style.color_scheme = important_color_scheme;
+            let mut current_important_layer: Option<(bool, u32)> = None;
+            let mut important_layer_start_style = style.clone();
+            for &(sp, ri, _) in &important_matched {
+                if is_author_origin(sp) != author_pass {
+                    continue;
+                }
+                let rule = &stylesheet.rules[ri];
+                let layer_key = (is_author_origin(sp), rule.layer_rank);
+                if current_important_layer != Some(layer_key) {
+                    current_important_layer = Some(layer_key);
+                    important_layer_start_style = style.clone();
+                }
+                let revert_base = if is_author_origin(sp) {
+                    pre_author_normal_style.as_ref()
+                } else {
+                    None
+                };
+                if has_vars && rule.has_var_refs {
+                    if let Some(val) = rule.important_declarations.get("color-scheme") {
+                        let resolved = resolve_var_references_for_color_scheme(
+                            val,
+                            local_vars,
+                            &style.color_scheme,
+                        );
+                        if !resolved.trim().is_empty() && !resolved.contains("var(") {
+                            apply_resolved_property_with_cascade_context(
+                                &mut style,
+                                "color-scheme",
+                                properties::PropertyId::ColorScheme,
+                                &resolved,
+                                parent_style,
+                                revert_base,
+                                &important_layer_start_style,
+                            );
+                        }
+                    }
+                    for (prop, val) in &rule.important_declarations {
+                        if prop.starts_with("--") {
+                            continue;
+                        }
+                        let resolved = resolve_var_references_for_color_scheme(
+                            val,
+                            local_vars,
+                            &style.color_scheme,
+                        );
+                        if val.contains("var(")
+                            && (resolved.trim().is_empty() || resolved.contains("var("))
+                        {
+                            continue;
+                        }
+                        if prop == "color-scheme" {
+                            continue;
+                        }
+                        let id = properties::resolve(prop);
                         apply_resolved_property_with_cascade_context(
                             &mut style,
-                            "color-scheme",
-                            properties::PropertyId::ColorScheme,
+                            prop,
+                            id,
                             &resolved,
                             parent_style,
                             revert_base,
                             &important_layer_start_style,
                         );
                     }
-                }
-                for (prop, val) in &rule.important_declarations {
-                    if prop.starts_with("--") {
-                        continue;
+                } else {
+                    for &(id, ref val) in &rule.compiled_important {
+                        apply_css_value_with_cascade_context(
+                            &mut style,
+                            id,
+                            val,
+                            &local_vars,
+                            parent_style,
+                            revert_base,
+                            &important_layer_start_style,
+                        );
                     }
-                    let resolved = resolve_var_references_for_color_scheme(
-                        val,
-                        local_vars,
-                        &style.color_scheme,
-                    );
-                    if val.contains("var(")
-                        && (resolved.trim().is_empty() || resolved.contains("var("))
-                    {
-                        continue;
-                    }
-                    if prop == "color-scheme" {
-                        continue;
-                    }
-                    let id = properties::resolve(prop);
-                    apply_resolved_property_with_cascade_context(
-                        &mut style,
-                        prop,
-                        id,
-                        &resolved,
-                        parent_style,
-                        revert_base,
-                        &important_layer_start_style,
-                    );
-                }
-            } else {
-                for &(id, ref val) in &rule.compiled_important {
-                    apply_css_value_with_cascade_context(
-                        &mut style,
-                        id,
-                        val,
-                        &local_vars,
-                        parent_style,
-                        revert_base,
-                        &important_layer_start_style,
-                    );
                 }
             }
         }
@@ -3425,72 +3727,77 @@ fn apply_cascade_node(
     // The style attribute is author origin, so it outranks author RULES but
     // still loses to the UA sheet's `!important`; the UA pass therefore comes
     // last, not first.
-    let mut current_author_important_layer: Option<u32> = None;
-    let mut author_important_layer_start_style = style.clone();
-    for &(sp, ri, _) in &important_matched {
-        if !is_author_origin(sp) {
-            continue;
+    if !important_matched.is_empty() {
+        let mut current_author_important_layer: Option<u32> = None;
+        let mut author_important_layer_start_style = style.clone();
+        for &(sp, ri, _) in &important_matched {
+            if !is_author_origin(sp) {
+                continue;
+            }
+            let rule = &stylesheet.rules[ri];
+            if current_author_important_layer != Some(rule.layer_rank) {
+                current_author_important_layer = Some(rule.layer_rank);
+                author_important_layer_start_style = style.clone();
+            }
+            let revert_base = pre_author_normal_style.as_ref();
+            for &(id, ref val) in &stylesheet.rules[ri].compiled_important {
+                apply_css_value_with_cascade_context(
+                    &mut style,
+                    id,
+                    val,
+                    &local_vars,
+                    parent_style,
+                    revert_base,
+                    &author_important_layer_start_style,
+                );
+            }
         }
-        let rule = &stylesheet.rules[ri];
-        if current_author_important_layer != Some(rule.layer_rank) {
-            current_author_important_layer = Some(rule.layer_rank);
-            author_important_layer_start_style = style.clone();
-        }
-        let revert_base = pre_author_normal_style.as_ref();
-        for &(id, ref val) in &stylesheet.rules[ri].compiled_important {
-            apply_css_value_with_cascade_context(
+    }
+    if !inline_important.is_empty() {
+        let inline_important_start_style = style.clone();
+        for (prop, val) in &inline_important {
+            let resolved =
+                resolve_var_references_for_color_scheme(val, local_vars, &style.color_scheme);
+            if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var(")) {
+                continue;
+            }
+            let id = properties::resolve(prop);
+            apply_resolved_property_with_cascade_context(
                 &mut style,
+                prop,
                 id,
-                val,
-                &local_vars,
+                &resolved,
                 parent_style,
-                revert_base,
-                &author_important_layer_start_style,
+                pre_author_normal_style.as_ref(),
+                &inline_important_start_style,
             );
         }
     }
-    let inline_important_start_style = style.clone();
-    for (prop, val) in &inline_important {
-        let resolved =
-            resolve_var_references_for_color_scheme(val, local_vars, &style.color_scheme);
-        if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var(")) {
-            continue;
-        }
-        let id = properties::resolve(prop);
-        apply_resolved_property_with_cascade_context(
-            &mut style,
-            prop,
-            id,
-            &resolved,
-            parent_style,
-            pre_author_normal_style.as_ref(),
-            &inline_important_start_style,
-        );
-    }
-    let mut current_ua_important_layer: Option<u32> = None;
-    let mut ua_important_layer_start_style = style.clone();
-    for &(sp, ri, _) in &important_matched {
-        if is_author_origin(sp) {
-            continue;
-        }
-        let rule = &stylesheet.rules[ri];
-        if current_ua_important_layer != Some(rule.layer_rank) {
-            current_ua_important_layer = Some(rule.layer_rank);
-            ua_important_layer_start_style = style.clone();
-        }
-        for &(id, ref val) in &stylesheet.rules[ri].compiled_important {
-            apply_css_value_with_cascade_context(
-                &mut style,
-                id,
-                val,
-                &local_vars,
-                parent_style,
-                None,
-                &ua_important_layer_start_style,
-            );
+    if !important_matched.is_empty() {
+        let mut current_ua_important_layer: Option<u32> = None;
+        let mut ua_important_layer_start_style = style.clone();
+        for &(sp, ri, _) in &important_matched {
+            if is_author_origin(sp) {
+                continue;
+            }
+            let rule = &stylesheet.rules[ri];
+            if current_ua_important_layer != Some(rule.layer_rank) {
+                current_ua_important_layer = Some(rule.layer_rank);
+                ua_important_layer_start_style = style.clone();
+            }
+            for &(id, ref val) in &stylesheet.rules[ri].compiled_important {
+                apply_css_value_with_cascade_context(
+                    &mut style,
+                    id,
+                    val,
+                    &local_vars,
+                    parent_style,
+                    None,
+                    &ua_important_layer_start_style,
+                );
+            }
         }
     }
-
     // Capture href from attributes (non-standard CSS, but useful for our editor)
     if let Some(href) = root.attributes.get("href") {
         style.href = href.clone();
@@ -3558,9 +3865,12 @@ fn apply_cascade_node(
     // footnote says the serializer it counted with "emits a subset of
     // properties, so styles differing in an unserialized property collide".
     // Compared losslessly the styles on a real page are nearly all distinct.
+    let style_changed = root.style.as_ref() != &style;
     let old_display = root.style.display;
     let new_display = style.display;
-    root.style = std::sync::Arc::new(style);
+    if style_changed {
+        root.style = std::sync::Arc::new(style);
+    }
     // Store matched CSS rules for inspector (only when enabled).
     if stylesheet.inspect_mode {
         root.matched_rules.clear();
@@ -3577,7 +3887,7 @@ fn apply_cascade_node(
                 source: if ri < 50 {
                     "ua".to_string()
                 } else {
-                    rule.media_condition.clone()
+                    rule.media_condition.label()
                 },
                 layer: rule.layer.clone(),
                 layer_rank: rule.layer_rank,
@@ -3587,7 +3897,9 @@ fn apply_cascade_node(
     // Mark dirty so the layout subtree pruning (in layout_box_with_fc) knows to
     // re-layout this element.  Cleared by the individual layout algorithms after
     // they have computed the final geometry.
-    root.layout.layout_dirty = true;
+    if style_changed || root.layout.last_containing_width <= 0.0 {
+        root.layout.layout_dirty = true;
+    }
     if old_display != new_display
         && matches!(old_display, Display::None) != matches!(new_display, Display::None)
     {
@@ -3612,7 +3924,8 @@ fn apply_cascade_node(
     // instances are removed when this element's child scope finishes.
     counters.apply_element(&root.style);
     if root.style.display == Display::ListItem {
-        if let Some(value) = counters.values
+        if let Some(value) = counters
+            .values
             .get("list-item")
             .and_then(|stack| stack.last())
             .copied()
@@ -3631,7 +3944,9 @@ fn apply_cascade_node(
     let counter_containment = root.style.contain_style
         && !matches!(root.style.display, Display::None | Display::Contents);
     counters.enter_children();
-    if counter_containment { counters.enter_containment(); }
+    if counter_containment {
+        counters.enter_containment();
+    }
 
     if let Some((Some(txt), mut ps)) = build_pseudo_style_shared(
         &mut before_matched,
@@ -3641,7 +3956,8 @@ fn apply_cascade_node(
         &stylesheet.rules,
     ) {
         counters.apply_element(&ps);
-        let resolved_content = resolve_generated_content(&txt, &root.attributes, &mut ps, &counters.values);
+        let resolved_content =
+            resolve_generated_content(&txt, &root.attributes, &mut ps, &counters.values);
         std::sync::Arc::make_mut(&mut root.style).before_content = resolved_content;
         std::sync::Arc::make_mut(&mut root.style).before_style = Some(ps);
     }
@@ -3685,7 +4001,8 @@ fn apply_cascade_node(
             // `quotes` is not an applicable marker-box property; use the
             // originating element's inherited quote pairs (CSS Lists 3).
             ps.rare_mut().quotes = root.style.rare().quotes.clone();
-            let resolved_content = resolve_generated_content(&txt, &root.attributes, &mut ps, &counters.values);
+            let resolved_content =
+                resolve_generated_content(&txt, &root.attributes, &mut ps, &counters.values);
             std::sync::Arc::make_mut(&mut root.style).marker_content = resolved_content;
         }
         std::sync::Arc::make_mut(&mut root.style).marker_style = Some(ps);
@@ -3770,21 +4087,35 @@ fn apply_cascade_node(
     {
         let style = std::sync::Arc::make_mut(&mut root.style);
         for pseudo in [
-            &mut style.before_style, &mut style.after_style,
-            &mut style.selection_style, &mut style.placeholder_style,
-            &mut style.marker_style, &mut style.backdrop_style,
-            &mut style.file_selector_button_style, &mut style.details_content_style,
-            &mut style.spelling_error_style, &mut style.grammar_error_style,
-            &mut style.first_line_style, &mut style.first_letter_style,
-        ].into_iter().flatten() {
-            let pseudo_font = pseudo.font_size.resolve_vp(font_px, font_px, root_font_px, vw, vh);
+            &mut style.before_style,
+            &mut style.after_style,
+            &mut style.selection_style,
+            &mut style.placeholder_style,
+            &mut style.marker_style,
+            &mut style.backdrop_style,
+            &mut style.file_selector_button_style,
+            &mut style.details_content_style,
+            &mut style.spelling_error_style,
+            &mut style.grammar_error_style,
+            &mut style.first_line_style,
+            &mut style.first_letter_style,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let pseudo_font = pseudo
+                .font_size
+                .resolve_vp(font_px, font_px, root_font_px, vw, vh);
             crate::css::finalize_filter_values(pseudo, &|length| {
                 length.resolve_vp(pseudo_font, 0.0, root_font_px, vw, vh)
             });
         }
     }
     Some(CascadedNodeState {
-        root_font_px, local_vars: local_vars_owned, counter_containment, pending_after,
+        root_font_px,
+        local_vars: local_vars_owned,
+        counter_containment,
+        pending_after,
     })
 }
 
@@ -3813,26 +4144,58 @@ pub(crate) fn apply_cascade_inner(
     next_siblings: &[SiblingInfo],
     next_sibling_nodes: &[&crate::types::WebCore],
     share_cache: &mut ShareCache,
-    precomputed: Option<&MatchMap>,
+    mut precomputed: Option<&mut MatchMap>,
 ) {
-    let Some(state) = apply_cascade_node(root, stylesheet, parent_style, root_font_px,
-        ancestors, child_index, sibling_count, type_child_index, type_sibling_count,
-        vw, vh, focused_box, keyboard_focus, target_id, document_url, inherited_vars,
-        candidates_buf, counters, hover_chain, focus_within_chain, prev_siblings,
-        next_siblings, next_sibling_nodes, share_cache, precomputed) else { return; };
-    let CascadedNodeState { root_font_px, local_vars, counter_containment, pending_after } = state;
+    let Some(state) = apply_cascade_node(
+        root,
+        stylesheet,
+        parent_style,
+        root_font_px,
+        ancestors,
+        child_index,
+        sibling_count,
+        type_child_index,
+        type_sibling_count,
+        vw,
+        vh,
+        focused_box,
+        keyboard_focus,
+        target_id,
+        document_url,
+        inherited_vars,
+        candidates_buf,
+        counters,
+        hover_chain,
+        focus_within_chain,
+        prev_siblings,
+        next_siblings,
+        next_sibling_nodes,
+        share_cache,
+        precomputed.as_deref_mut(),
+    ) else {
+        return;
+    };
+    let CascadedNodeState {
+        root_font_px,
+        local_vars,
+        counter_containment,
+        pending_after,
+    } = state;
     let local_vars = local_vars.as_ref().unwrap_or(inherited_vars);
 
-	    ancestors.push(AncestorInfo {
-	        tag: root.tag.clone(),
-	        attributes: root.attributes.clone(),
-	        child_index,
-	        sibling_count,
-	        type_child_index,
-	        type_sibling_count,
-	        node_id: root.node_id,
-	        prev_siblings: prev_siblings.to_vec(),
-	    });
+    let has_descendants = !root.children.is_empty() || root.shadow_root.is_some();
+    if has_descendants {
+        ancestors.push(AncestorInfo {
+            tag: root.tag.clone(),
+            attributes: std::sync::Arc::new(root.attributes.clone()),
+            child_index,
+            sibling_count,
+            type_child_index,
+            type_sibling_count,
+            node_id: root.node_id,
+            prev_siblings: std::sync::Arc::new(prev_siblings.to_vec()),
+        });
+    }
 
     // Helper: cascade a list of children with a given stylesheet
     fn cascade_children(
@@ -3855,7 +4218,7 @@ pub(crate) fn apply_cascade_inner(
         hover_chain: &std::collections::HashSet<u32>,
         focus_within_chain: &std::collections::HashSet<u32>,
         share_cache: &mut ShareCache,
-        precomputed: Option<&MatchMap>,
+        mut precomputed: Option<&mut MatchMap>,
         projected_document_stylesheet: Option<&Stylesheet>,
     ) {
         let n_children = children.len();
@@ -3919,7 +4282,6 @@ pub(crate) fn apply_cascade_inner(
         for i in 0..n_children {
             let (_before, rest) = children.split_at_mut(i);
             let (child, after) = rest.split_first_mut().unwrap();
-            let after_nodes: Vec<&crate::types::WebCore> = after.iter().collect();
             let is_projected_child = crate::types::is_projected_slot_subtree(child);
             let cascade_stylesheet = if is_projected_child {
                 projected_document_stylesheet.unwrap_or(stylesheet)
@@ -3968,31 +4330,7 @@ pub(crate) fn apply_cascade_inner(
             // attributes are still not interchangeable. Two `<dialog open>`s,
             // one `show()`n and one `showModal()`ed, hashed the same and the
             // modal took the plain one's `position`.
-            let child_class = {
-                let mut parts: Vec<String> = child
-                    .attributes
-                    .iter()
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect();
-                parts.sort();
-                parts.push(child.selector_state_key(focused_box));
-                parts.join("\u{1}")
-            };
-            let id = child.attributes.get("id").map(|s| s.as_str());
-            let class_attr = child
-                .attributes
-                .get("class")
-                .map(|s| s.as_str())
-                .unwrap_or("");
-            let classes: Vec<&str> = class_attr.split_whitespace().collect();
-            cascade_stylesheet.candidate_rules(&child.tag, id, &classes, candidates_buf);
-            let child_has_sibling_sensitive_candidates = cascade_stylesheet
-                .has_sibling_sensitive_rules
-                && cascade_stylesheet.candidate_rules_are_sibling_sensitive(candidates_buf);
-            let child_has_context_sensitive_candidates =
-                cascade_stylesheet.candidate_rules_need_selector_context(candidates_buf);
-            let can_share = child.is_element()
-                && child.tag != "::before" && child.tag != "::after"
+            let share_eligible = child.is_element()
                 // This cache hit replaces the whole node visit, not just its
                 // declaration calculation. Descendants still require cascade.
                 && child.children.is_empty()
@@ -4001,24 +4339,43 @@ pub(crate) fn apply_cascade_inner(
                 && parent_node_id != 0
                 && !child.attributes.contains_key("id")
                 && !child.attributes.contains_key("style")
-                && !hover_chain.contains(&child.node_id)
-                // ⛔ The share key is `(tag, class)` and says nothing about
-                // sibling POSITION. With `i + i { … }` or `li:nth-child(2)`
-                // in the sheet, two same-key siblings are NOT interchangeable
-                // — the second was handed the first one's style and the rule
-                // vanished. Verified both ways: the test goes green with
-                // sharing off and red with it on.
-                && !child_has_sibling_sensitive_candidates
-                // Context selectors (`.section .item`, `.nav > a`, `:has`,
-                // pseudo-elements in candidate buckets, etc.) can distinguish
-                // two otherwise-identical elements by ancestry or structure.
-                // Such nodes must run the matcher instead of borrowing a style
-                // from a previous same-key element.
-                && !child_has_context_sensitive_candidates;
-            let share_key = (parent_id, child.tag.clone(), child_class.clone());
+                && !hover_chain.contains(&child.node_id);
+            let share_key = if share_eligible {
+                let class_attr = child
+                    .attributes
+                    .get("class")
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                cascade_stylesheet.candidate_rules(
+                    &child.tag,
+                    None,
+                    class_attr.split_whitespace(),
+                    candidates_buf,
+                );
+                let sibling_sensitive = cascade_stylesheet.has_sibling_sensitive_rules
+                    && cascade_stylesheet.candidate_rules_are_sibling_sensitive(candidates_buf);
+                let context_sensitive =
+                    cascade_stylesheet.candidate_rules_need_selector_context(candidates_buf);
+                // Sibling and ancestor-sensitive selectors make otherwise
+                // identical elements unsafe to share.
+                if sibling_sensitive || context_sensitive {
+                    None
+                } else {
+                    let mut parts: Vec<String> = child
+                        .attributes
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect();
+                    parts.sort();
+                    parts.push(child.selector_state_key(focused_box));
+                    Some((parent_id, child.tag.clone(), parts.join("\u{1}")))
+                }
+            } else {
+                None
+            };
 
-            if can_share {
-                if let Some(cached) = share_cache.get(&share_key) {
+            if let Some(share_key) = share_key.as_ref() {
+                if let Some(cached) = share_cache.get(share_key) {
                     // ⛔ THE point of item 1: a shared style is a refcount
                     // bump, not a 2.3 KB memcpy. `cached` is already an `Arc`.
                     let old_display = child.style.display;
@@ -4039,6 +4396,18 @@ pub(crate) fn apply_cascade_inner(
                 }
             }
 
+            // Parallel matching already captured the sibling context for this
+            // node. Only misses need a fresh list of following sibling nodes.
+            let has_precomputed_match = !is_projected_child
+                && child.node_id != 0
+                && precomputed
+                    .as_ref()
+                    .is_some_and(|matches| matches.contains_key(&child.node_id));
+            let after_nodes: Vec<&crate::types::WebCore> = if has_precomputed_match {
+                Vec::new()
+            } else {
+                after.iter().collect()
+            };
             apply_cascade_inner(
                 child,
                 cascade_stylesheet,
@@ -4067,7 +4436,7 @@ pub(crate) fn apply_cascade_inner(
                 if is_projected_child {
                     None
                 } else {
-                    precomputed
+                    precomputed.as_deref_mut()
                 },
             );
             if matches!(
@@ -4102,13 +4471,15 @@ pub(crate) fn apply_cascade_inner(
                 );
             }
             // Cache style for sharing with future siblings
-            if can_share && !share_cache.contains_key(&share_key)
+            if let Some(share_key) = share_key
+                && !share_cache.contains_key(&share_key)
                 && child.style.counter_reset.is_empty()
                 && child.style.counter_increment.is_empty()
                 && child.style.counter_set.is_empty()
                 && child.style.display != Display::ListItem
                 && child.style.before_style.is_none()
-                && child.style.after_style.is_none() {
+                && child.style.after_style.is_none()
+            {
                 share_cache.insert(share_key, child.style.clone());
             }
         }
@@ -4210,13 +4581,16 @@ pub(crate) fn apply_cascade_inner(
         );
     }
 
-    ancestors.pop();
+    if has_descendants {
+        ancestors.pop();
+    }
 
     if let Some(content) = pending_after {
         let style = std::sync::Arc::make_mut(&mut root.style);
         if let Some(ps) = style.after_style.as_mut() {
             counters.apply_element(ps);
-            style.after_content = resolve_generated_content(&content, &root.attributes, ps, &counters.values);
+            style.after_content =
+                resolve_generated_content(&content, &root.attributes, ps, &counters.values);
         }
     }
 
@@ -4225,7 +4599,9 @@ pub(crate) fn apply_cascade_inner(
     build_pseudo_element_boxes(root);
 
     counters.exit_children();
-    if counter_containment { counters.exit_containment(); }
+    if counter_containment {
+        counters.exit_containment();
+    }
 }
 
 fn apply_form_sizing_hints_after_ua(
@@ -4292,14 +4668,25 @@ fn apply_presentational_hints(
             "start" if root.tag == "ol" => {
                 if let Some(value) = crate::html::forms::parse_integer(val) {
                     let reversed = root.attributes.contains_key("reversed");
-                    let value = if reversed { value.saturating_add(1) } else { value.saturating_sub(1) }
-                        .clamp(i32::MIN as i64, i32::MAX as i64);
-                    let name = if reversed { "reversed(list-item)" } else { "list-item" };
+                    let value = if reversed {
+                        value.saturating_add(1)
+                    } else {
+                        value.saturating_sub(1)
+                    }
+                    .clamp(i32::MIN as i64, i32::MAX as i64);
+                    let name = if reversed {
+                        "reversed(list-item)"
+                    } else {
+                        "list-item"
+                    };
                     apply_property(style, "counter-reset", &format!("{name} {value}"));
                 }
             }
             "reversed" if root.tag == "ol" => {
-                let start = root.attributes.get("start").and_then(|value| crate::html::forms::parse_integer(value));
+                let start = root
+                    .attributes
+                    .get("start")
+                    .and_then(|value| crate::html::forms::parse_integer(value));
                 if start.is_none() {
                     apply_property(style, "counter-reset", "reversed(list-item)");
                     if let Some(reset) = style.counter_reset.first_mut() {

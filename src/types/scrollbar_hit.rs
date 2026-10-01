@@ -46,7 +46,10 @@ mod tests {
             let (height, y, per_pixel) = viewport_scrollbar_thumb(12.0, 12.0, 22.0, scroll_y);
             assert_eq!((height, y, per_pixel), (12.0, 0.0, 0.0));
         }
-        assert_eq!(viewport_scrollbar_thumb(0.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0));
+        assert_eq!(
+            viewport_scrollbar_thumb(0.0, 0.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0)
+        );
     }
 
     #[test]
@@ -115,7 +118,12 @@ pub(crate) fn scrollbar_hit_test(
         // Scrollbar is at the right edge of the padding box (matches draw_scrollbars).
         let track_x = prx + pr.w - sbw;
         let track_h = (pr.h - if horizontal_active { sbw } else { 0.0 }).max(0.0);
-        if track_h > 0.0 && screen_x >= track_x && screen_x < prx + pr.w && screen_y >= pry && screen_y < pry + track_h {
+        if track_h > 0.0
+            && screen_x >= track_x
+            && screen_x < prx + pr.w
+            && screen_y >= pry
+            && screen_y < pry + track_h
+        {
             let scrollable_h = node.layout.scroll_height + (pr.h - cr.h).max(0.0);
             let thumb_h = (track_h * pr.h / scrollable_h).max(20.0).min(track_h);
             let max_s = node.layout.scroll_height - cr.h;
@@ -158,9 +166,7 @@ pub(crate) fn scrollbar_hit_test(
             && screen_y < track_y + sbw
         {
             let scrollable_w = node.layout.scroll_width + (pr.w - cr.w).max(0.0);
-            let thumb_w = (track_w * pr.w / scrollable_w)
-                .max(20.0)
-                .min(track_w);
+            let thumb_w = (track_w * pr.w / scrollable_w).max(20.0).min(track_w);
             let max_s = node.layout.scroll_width - cr.w;
             let scroll_per_px = if track_w - thumb_w > 0.0 {
                 max_s / (track_w - thumb_w)

@@ -107,7 +107,8 @@ pub fn parse_single_track(v: &str) -> GridTrackSize {
 /// auto_repeat_cols receives any auto-fill/auto-fit tracks.
 pub fn parse_track_list(v: &str, auto_repeat_cols: &mut Vec<GridTrackSize>) -> Vec<GridTrackSize> {
     let mut line_names = std::collections::HashMap::new();
-    parse_track_list_with_names(v, auto_repeat_cols, &mut line_names)
+    let mut auto_fit = false;
+    parse_track_list_with_names(v, auto_repeat_cols, &mut line_names, &mut auto_fit)
 }
 
 /// Like parse_track_list but also populates a name→line-number map.
@@ -115,6 +116,7 @@ pub fn parse_track_list_with_names(
     v: &str,
     auto_repeat_cols: &mut Vec<GridTrackSize>,
     line_names: &mut std::collections::HashMap<String, Vec<usize>>,
+    auto_fit: &mut bool,
 ) -> Vec<GridTrackSize> {
     if v.is_empty() {
         return Vec::new();
@@ -168,8 +170,14 @@ pub fn parse_track_list_with_names(
             let track_str = inner[comma + 1..].trim();
             let mut pattern_names = std::collections::HashMap::new();
             let mut nested_auto = Vec::new();
-            let pattern = parse_track_list_with_names(track_str, &mut nested_auto, &mut pattern_names);
+            let pattern = parse_track_list_with_names(
+                track_str,
+                &mut nested_auto,
+                &mut pattern_names,
+                auto_fit,
+            );
             if count_str == "auto-fill" || count_str == "auto-fit" {
+                *auto_fit = count_str == "auto-fit";
                 auto_repeat_cols.extend(pattern);
             } else {
                 let count = if let Ok(n) = count_str.parse::<usize>() {

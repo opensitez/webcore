@@ -13,6 +13,8 @@ pub use crate::css::Stylesheet;
 use crate::dom::{Editor, HtmlEvent, HtmlEventType};
 use crate::layout::LayoutEngine;
 
+pub const CSS_RESIZE_GRIP_PX: f32 = 12.0;
+
 /// Active scrollbar drag state (set by `process_scrollbar_event`).
 #[derive(Debug, Clone)]
 pub struct ScrollbarDrag {
@@ -26,6 +28,15 @@ pub struct ScrollbarDrag {
     pub start_scroll: f32,
     /// Pixels of scroll per pixel of mouse movement.
     pub scroll_per_px: f32,
+}
+
+/// User-initiated CSS resize, anchored to the size and pointer position at press.
+#[derive(Debug, Clone)]
+pub struct ResizeDrag {
+    pub node_id: u32,
+    pub axes: (bool, bool),
+    pub start_mouse: (f32, f32),
+    pub start_size: (f32, f32),
 }
 
 /// Which scrollbar is being dragged.

@@ -62,7 +62,7 @@ impl ParsedCssCache {
     }
 
     fn insert(&mut self, key: String, sheet: std::sync::Arc<css::Stylesheet>) {
-        let bytes = stylesheet_cache_bytes(&sheet);
+        let bytes = stylesheet_cache_bytes(&sheet).saturating_add(key.len());
         if bytes > PARSED_CSS_CACHE_MAX_BYTES {
             return;
         }
@@ -160,7 +160,7 @@ fn stylesheet_cache_bytes(sheet: &css::Stylesheet) -> usize {
         bytes =
             bytes
                 .saturating_add(string_bytes(&rule.layer))
-                .saturating_add(string_bytes(&rule.media_condition))
+                .saturating_add(rule.media_condition.heap_bytes())
                 .saturating_add(string_bytes(&rule.container_condition))
                 .saturating_add(string_bytes(&rule.container_name))
                 .saturating_add(string_bytes(&rule.original_selector))
@@ -193,124 +193,11 @@ fn stylesheet_cache_bytes(sheet: &css::Stylesheet) -> usize {
     bytes
 }
 
-const DECODED_IMAGE_CACHE_MAX_BYTES: usize = 128 * 1024 * 1024;
-
-struct DecodedImageCache {
-    entries: std::collections::HashMap<String, (html::DecodedImage, usize, u64)>,
-    order: std::collections::VecDeque<(String, u64)>,
-    bytes: usize,
-    next_generation: u64,
-}
-
-impl DecodedImageCache {
-    fn new() -> Self {
-        Self {
-            entries: std::collections::HashMap::new(),
-            order: std::collections::VecDeque::new(),
-            bytes: 0,
-            next_generation: 1,
-        }
-    }
-
-    fn get(&mut self, url: &str) -> Option<html::DecodedImage> {
-        let generation = self.next_generation;
-        self.next_generation = self.next_generation.wrapping_add(1).max(1);
-        let decoded = self.entries.get_mut(url).map(|(decoded, _, entry_gen)| {
-            *entry_gen = generation;
-            decoded.clone()
-        })?;
-        self.order.push_back((url.to_string(), generation));
-        self.compact_order_if_needed();
-        Some(decoded)
-    }
-
-    fn insert(&mut self, url: String, decoded: html::DecodedImage) {
-        let bytes = decoded_image_footprint(&decoded);
-        if bytes > DECODED_IMAGE_CACHE_MAX_BYTES {
-            return;
-        }
-        let generation = self.next_generation;
-        self.next_generation = self.next_generation.wrapping_add(1).max(1);
-        if let Some((_, old_bytes, _)) = self.entries.remove(&url) {
-            self.bytes = self.bytes.saturating_sub(old_bytes);
-        }
-        while self.bytes.saturating_add(bytes) > DECODED_IMAGE_CACHE_MAX_BYTES {
-            let Some((oldest, oldest_generation)) = self.order.pop_front() else {
-                break;
-            };
-            let should_remove = self
-                .entries
-                .get(&oldest)
-                .is_some_and(|(_, _, entry_generation)| *entry_generation == oldest_generation);
-            if should_remove && let Some((_, old_bytes, _)) = self.entries.remove(&oldest) {
-                self.bytes = self.bytes.saturating_sub(old_bytes);
-            }
-        }
-        self.bytes = self.bytes.saturating_add(bytes);
-        self.order.push_back((url.clone(), generation));
-        self.entries.insert(url, (decoded, bytes, generation));
-        self.compact_order_if_needed();
-    }
-
-    fn compact_order_if_needed(&mut self) {
-        let live = self.entries.len().max(1);
-        if self.order.len() <= live.saturating_mul(4).saturating_add(32) {
-            return;
-        }
-        self.order.retain(|(key, generation)| {
-            self.entries
-                .get(key)
-                .is_some_and(|(_, _, entry_generation)| entry_generation == generation)
-        });
-    }
-}
-
-static DECODED_IMAGE_CACHE: std::sync::LazyLock<std::sync::Mutex<DecodedImageCache>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(DecodedImageCache::new()));
-
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct CacheMemoryStats {
     pub entries: usize,
     pub bytes: usize,
 }
-
-pub(crate) fn decoded_image_cache_stats() -> CacheMemoryStats {
-    DECODED_IMAGE_CACHE
-        .lock()
-        .map(|cache| CacheMemoryStats {
-            entries: cache.entries.len(),
-            bytes: cache.bytes,
-        })
-        .unwrap_or_default()
-}
-
-fn decoded_image_footprint(decoded: &html::DecodedImage) -> usize {
-    match decoded {
-        html::DecodedImage::Raster(data, _, _) => data.len(),
-        html::DecodedImage::Animated(animated) => {
-            animated
-                .frames
-                .iter()
-                .map(|frame| frame.pixels.len())
-                .sum::<usize>()
-                + animated
-                    .source_bytes
-                    .as_ref()
-                    .map(|bytes| bytes.len())
-                    .unwrap_or(0)
-        }
-        html::DecodedImage::Svg(markup, _, _) => markup.len(),
-    }
-}
-
-struct ImageDecodeState {
-    result: std::sync::Mutex<Option<Result<html::DecodedImage, String>>>,
-    done: std::sync::Condvar,
-}
-
-static DECODED_IMAGE_IN_FLIGHT: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<ImageDecodeState>>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 fn resource_pool_threads(min: usize, max: usize) -> usize {
     std::thread::available_parallelism()
@@ -338,6 +225,29 @@ pub(crate) fn cached_parsed_stylesheet(cache_key: &str) -> Option<css::Styleshee
         .and_then(|mut cache| cache.get(cache_key).map(|sheet| (*sheet).clone()))
 }
 
+pub(crate) fn parsed_inline_stylesheet(
+    css_text: &str,
+    base_url: &str,
+) -> std::sync::Arc<css::Stylesheet> {
+    let key = format!("\0inline\0{base_url}\0{css_text}");
+    if key.len() <= PARSED_CSS_CACHE_MAX_BYTES / 2 {
+        if let Ok(mut cache) = PARSED_CSS_CACHE.lock() {
+            if let Some(sheet) = cache.get(&key) {
+                return sheet;
+            }
+        }
+    }
+    let mut sheet = css::Stylesheet::default();
+    sheet.parse_and_add_with_base(css_text, base_url);
+    let sheet = std::sync::Arc::new(sheet);
+    if key.len() <= PARSED_CSS_CACHE_MAX_BYTES / 2 {
+        if let Ok(mut cache) = PARSED_CSS_CACHE.lock() {
+            cache.insert(key, sheet.clone());
+        }
+    }
+    sheet
+}
+
 pub(crate) fn parsed_css_cache_stats() -> CacheMemoryStats {
     PARSED_CSS_CACHE
         .lock()
@@ -348,114 +258,15 @@ pub(crate) fn parsed_css_cache_stats() -> CacheMemoryStats {
         .unwrap_or_default()
 }
 
-pub(crate) fn cached_decoded_image(
-    url: &str,
-    loader: Option<&(dyn Fn(&str) -> Option<html::DecodedImage> + Send + Sync + 'static)>,
-) -> Option<html::DecodedImage> {
-    cached_decoded_image_result_from_option_loader(url, loader).ok()
-}
-
-pub(crate) fn cached_decoded_image_result(
-    url: &str,
-    loader: Option<&(dyn Fn(&str) -> Result<html::DecodedImage, String> + Send + Sync + 'static)>,
-) -> Result<html::DecodedImage, String> {
-    cached_decoded_image_result_inner(url, loader)
-}
-
-fn cached_decoded_image_result_from_option_loader(
-    url: &str,
-    loader: Option<&(dyn Fn(&str) -> Option<html::DecodedImage> + Send + Sync + 'static)>,
-) -> Result<html::DecodedImage, String> {
-    let wrapped = loader.map(|loader| {
-        move |src: &str| loader(src).ok_or_else(|| format!("fetch or decode failed for {src}"))
-    });
-    cached_decoded_image_result_inner(
-        url,
-        wrapped.as_ref().map(|loader| {
-            loader as &(dyn Fn(&str) -> Result<html::DecodedImage, String> + Send + Sync)
-        }),
-    )
-}
-
-fn cached_decoded_image_result_inner(
-    url: &str,
-    loader: Option<&(dyn Fn(&str) -> Result<html::DecodedImage, String> + Send + Sync)>,
-) -> Result<html::DecodedImage, String> {
-    if let Some(decoded) = DECODED_IMAGE_CACHE
-        .lock()
-        .ok()
-        .and_then(|mut cache| cache.get(url))
-    {
-        return Ok(decoded);
-    }
-    let (decode_state, owns_decode) = {
-        let mut in_flight = DECODED_IMAGE_IN_FLIGHT
-            .lock()
-            .expect("decoded image in-flight cache poisoned");
-        if let Some(state) = in_flight.get(url) {
-            (state.clone(), false)
-        } else {
-            let state = std::sync::Arc::new(ImageDecodeState {
-                result: std::sync::Mutex::new(None),
-                done: std::sync::Condvar::new(),
-            });
-            in_flight.insert(url.to_string(), state.clone());
-            (state, true)
-        }
-    };
-    if !owns_decode {
-        let mut guard = decode_state
-            .result
-            .lock()
-            .expect("decoded image result poisoned");
-        while guard.is_none() {
-            guard = decode_state
-                .done
-                .wait(guard)
-                .expect("decoded image result poisoned");
-        }
-        return guard
-            .as_ref()
-            .expect("decoded image result set")
-            .as_ref()
-            .cloned()
-            .map_err(Clone::clone);
-    }
-    let decoded = match loader {
-        Some(loader) => loader(url),
-        None => html::load_decoded_image_from_src(url, "")
-            .ok_or_else(|| format!("fetch or decode failed for {url}")),
-    };
-    if let Ok(decoded) = decoded.as_ref()
-        && let Ok(mut cache) = DECODED_IMAGE_CACHE.lock()
-    {
-        cache.insert(url.to_string(), decoded.clone());
-    }
-    {
-        let mut guard = decode_state
-            .result
-            .lock()
-            .expect("decoded image result poisoned");
-        *guard = Some(decoded.clone());
-        decode_state.done.notify_all();
-    }
-    if let Ok(mut in_flight) = DECODED_IMAGE_IN_FLIGHT.lock() {
-        in_flight.remove(url);
-    }
-    decoded
-}
-
-fn cached_decoded_image_ready(url: &str) -> Option<html::DecodedImage> {
-    DECODED_IMAGE_CACHE
-        .lock()
-        .ok()
-        .and_then(|mut cache| cache.get(url))
-}
+pub(crate) use images::cache::{
+    cached_decoded_image, cached_decoded_image_ready, cached_decoded_image_result,
+    cached_decoded_image_result_from_option_loader, decoded_image_cache_stats,
+};
 
 fn stream_stylesheet_fragments(
     css_text: &str,
     css_url: &str,
-    media: &str,
+    media: &css::MediaConditions,
     mut emit: impl FnMut(css::Stylesheet),
 ) -> usize {
     let mut emitted = 0;
@@ -470,7 +281,7 @@ fn stream_stylesheet_fragments(
             return;
         }
         let mut sheet = css::Stylesheet::default();
-        sheet.parse_and_add_with_base_media(batch, css_url, media);
+        sheet.parse_and_add_with_base_media_conditions(batch, css_url, media);
         if stylesheet_has_content(&sheet) {
             *emitted += 1;
             emit(sheet);
@@ -499,41 +310,173 @@ fn stylesheet_has_content(sheet: &css::Stylesheet) -> bool {
         || !sheet.keyframes.is_empty()
         || !sheet.page_rules.is_empty()
         || !sheet.counter_styles.is_empty()
+        || !sheet.layer_order.is_empty()
 }
 
-fn css_import_target(rule: &str) -> Option<(&str, &str)> {
+fn record_stylesheet_fragment(
+    combined: &mut css::Stylesheet,
+    emitted: &mut usize,
+    emit: &mut impl FnMut(css::Stylesheet),
+    fragment: css::Stylesheet,
+) {
+    *emitted += 1;
+    combined.append_fragment(fragment.clone());
+    emit(fragment);
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CssImportTarget<'a> {
+    url: String,
+    media: &'a str,
+    layer: Option<Option<&'a str>>,
+    supports: Option<&'a str>,
+}
+
+fn css_import_function<'a>(input: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
+    let prefix = input.get(..name.len())?;
+    if !prefix.eq_ignore_ascii_case(name) || input.as_bytes().get(name.len()) != Some(&b'(') {
+        return None;
+    }
+    let body = input.get(name.len() + 1..)?;
+    let mut depth = 1usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in body.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if ch == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&body[..index], body[index + 1..].trim_start()));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn css_import_target(rule: &str) -> Option<CssImportTarget<'_>> {
     let rule = rule.trim();
     let rest = rule.get(7..)?;
-    if !rule.get(..7)?.eq_ignore_ascii_case("@import")
-        || !rest.chars().next().is_some_and(char::is_whitespace)
+    if !rule.get(..7)?.eq_ignore_ascii_case("@import") {
+        return None;
+    }
+    if !rest
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_whitespace() || ch == '\'' || ch == '"')
     {
         return None;
     }
     let rest = rest.trim_start();
-    let rest = if rest.get(..4).is_some_and(|prefix| prefix.eq_ignore_ascii_case("url(")) {
-        rest.get(4..)?.trim_start()
+    let (url, rest) = if rest
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("url("))
+    {
+        let (url, consumed) = css::apply::parse_url_function(rest)?;
+        (url, rest.get(consumed..)?.trim_start())
     } else {
-        rest
+        let (url, tail) = css::apply::consume_css_string(rest)?;
+        (url, tail.trim_start())
     };
-    let (url, rest) = if let Some(quote @ ('\'' | '"')) = rest.chars().next() {
-        let tail = rest.get(1..)?;
-        let end = tail.find(quote)?;
-        (&tail[..end], tail[end + 1..].trim_start())
-    } else {
-        let end = rest.find(|ch: char| ch == ')' || ch.is_whitespace())?;
-        (&rest[..end], rest[end..].trim_start())
+    let mut rest = rest.strip_suffix(';')?.trim();
+    let mut layer = None;
+    let mut supports = None;
+    for _ in 0..2 {
+        if layer.is_none() {
+            if let Some((name, tail)) = css_import_function(rest, "layer") {
+                let name = name.trim();
+                if name.is_empty() {
+                    return None;
+                }
+                layer = Some(Some(name));
+                rest = tail;
+                continue;
+            }
+            if rest
+                .get(..5)
+                .is_some_and(|head| head.eq_ignore_ascii_case("layer"))
+                && rest
+                    .get(5..)
+                    .is_some_and(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace))
+            {
+                layer = Some(None);
+                rest = rest.get(5..)?.trim_start();
+                continue;
+            }
+        }
+        if supports.is_none() {
+            if let Some((condition, tail)) = css_import_function(rest, "supports") {
+                supports = Some(condition.trim());
+                rest = tail;
+                continue;
+            }
+        }
+        break;
+    }
+    Some(CssImportTarget {
+        url,
+        media: rest.trim(),
+        layer,
+        supports,
+    })
+}
+
+fn imported_layer_name(parent: Option<&str>, layer: Option<Option<&str>>) -> Option<String> {
+    let local = match layer {
+        None => return parent.map(str::to_string),
+        Some(Some(name)) => name.to_string(),
+        Some(None) => {
+            static NEXT_LAYER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            format!(
+                "\0import-{}",
+                NEXT_LAYER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            )
+        }
     };
-    let rest = rest.strip_prefix(')').unwrap_or(rest).trim();
-    let media = rest.strip_suffix(';')?.trim();
-    Some((url, media))
+    Some(match parent {
+        Some(parent) => format!("{parent}.{local}"),
+        None => local,
+    })
+}
+
+fn scope_imported_layer(sheet: &mut css::Stylesheet, layer: &str) {
+    for name in &mut sheet.layer_order {
+        *name = format!("{layer}.{name}");
+    }
+    for rule in &mut sheet.rules {
+        rule.layer = if rule.layer.is_empty() {
+            layer.to_string()
+        } else {
+            format!("{layer}.{}", rule.layer)
+        };
+    }
 }
 
 fn emit_css_imports(
     css_text: &str,
     css_url: &str,
-    media: &str,
+    media: &css::MediaConditions,
     loader: &StylesheetLoader,
+    streaming_loader: Option<&StreamingStylesheetLoader>,
     stack: &mut std::collections::HashSet<String>,
+    parent_layer: Option<&str>,
     emit: &mut impl FnMut(css::Stylesheet),
 ) -> usize {
     if stack.len() >= 32 {
@@ -546,102 +489,240 @@ fn emit_css_imports(
         if unit.to_ascii_lowercase().starts_with("@charset") {
             continue;
         }
-        let Some((href, import_media)) = css_import_target(unit) else {
+        let Some(target) = css_import_target(unit) else {
             break;
         };
-        let url = resolve_css_url(css_url, href);
+        if target.supports.is_some_and(|condition| {
+            !css::parser::supports_condition_matches(&format!("({condition})"))
+        }) {
+            continue;
+        }
+        let layer = imported_layer_name(parent_layer, target.layer);
+        if target.layer.is_some() {
+            let mut declaration = css::Stylesheet::default();
+            declaration.layer_order.push(layer.clone().unwrap());
+            count += 1;
+            emit(declaration);
+        }
+        let url = resolve_css_url(css_url, &target.url);
         if !stack.insert(url.clone()) {
             continue;
         }
-        if let Ok(imported) = loader(&url) {
-            let effective_media = if import_media.is_empty() || import_media.eq_ignore_ascii_case("all") {
-                media.to_string()
-            } else if media.is_empty() || media.eq_ignore_ascii_case("all") {
-                import_media.to_string()
-            } else {
-                format!("{media} and {import_media}")
-            };
-            count += emit_css_imports(&imported, &url, &effective_media, loader, stack, emit);
-            count += stream_stylesheet_fragments(&imported, &url, &effective_media, &mut *emit);
+        let effective_media = media.with_query(target.media);
+        let mut consume = |text: &str| {
+            count += emit_css_imports(
+                text,
+                &url,
+                &effective_media,
+                loader,
+                streaming_loader,
+                stack,
+                layer.as_deref(),
+                emit,
+            );
+            count += stream_stylesheet_fragments(text, &url, &effective_media, |mut sheet| {
+                if let Some(layer) = layer.as_deref() {
+                    scope_imported_layer(&mut sheet, layer);
+                }
+                emit(sheet);
+            });
+        };
+        if let Some(streaming_loader) = streaming_loader {
+            let mut buffer = CssStreamBuffer::default();
+            let mut received = false;
+            let _result = streaming_loader(&url, &mut |chunk| {
+                received |= !chunk.is_empty();
+                if let Some(complete) = buffer.push(chunk) {
+                    consume(&complete);
+                }
+            });
+            if received {
+                if !buffer.text.trim().is_empty() {
+                    consume(&buffer.text);
+                }
+            } else if let Ok(imported) = loader(&url) {
+                consume(&imported);
+            }
+        } else if let Ok(imported) = loader(&url) {
+            consume(&imported);
         }
         stack.remove(&url);
     }
     count
 }
 
-pub(crate) fn drain_complete_css_text(buffer: &mut String) -> Option<String> {
-    let drain_to = complete_css_drain_boundary(buffer);
-    if drain_to == 0 {
-        return None;
+type ImportedFragment = (css::Stylesheet, std::sync::mpsc::Sender<()>);
+
+struct ImportWorker {
+    units: Option<std::sync::mpsc::Sender<String>>,
+    fragments: std::sync::mpsc::Receiver<ImportedFragment>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl ImportWorker {
+    fn spawn(
+        css_url: String,
+        media: css::MediaConditions,
+        loader: StylesheetLoader,
+        streaming_loader: StreamingStylesheetLoader,
+        mut stack: std::collections::HashSet<String>,
+    ) -> std::io::Result<Self> {
+        let (units, unit_rx) = std::sync::mpsc::channel::<String>();
+        let (fragment_tx, fragments) = std::sync::mpsc::channel::<ImportedFragment>();
+        let thread = std::thread::Builder::new()
+            .name("webcore-css-import".into())
+            .spawn(move || {
+                while let Ok(unit) = unit_rx.recv() {
+                    emit_css_imports(
+                        &unit,
+                        &css_url,
+                        &media,
+                        &loader,
+                        Some(&streaming_loader),
+                        &mut stack,
+                        None,
+                        &mut |fragment| {
+                            let (ack, received) = std::sync::mpsc::channel();
+                            if fragment_tx.send((fragment, ack)).is_ok() {
+                                let _ = received.recv();
+                            }
+                        },
+                    );
+                }
+            })?;
+        Ok(Self {
+            units: Some(units),
+            fragments,
+            thread,
+        })
     }
-    let complete = buffer[..drain_to].to_string();
-    let rest = buffer[drain_to..].to_string();
-    *buffer = rest;
-    if complete.trim().is_empty() {
-        None
-    } else {
-        Some(complete)
+
+    fn send(&self, unit: String) -> Result<(), String> {
+        self.units
+            .as_ref()
+            .ok_or_else(|| "import prefix already closed".to_string())?
+            .send(unit)
+            .map_err(|_| "import worker stopped".to_string())
+    }
+
+    fn close_units(&mut self) {
+        self.units.take();
+    }
+
+    fn drain(&mut self, emit: &mut impl FnMut(css::Stylesheet)) -> bool {
+        loop {
+            match self.fragments.try_recv() {
+                Ok((fragment, ack)) => {
+                    emit(fragment);
+                    let _ = ack.send(());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => return true,
+            }
+        }
+    }
+
+    fn finish(mut self, emit: &mut impl FnMut(css::Stylesheet)) {
+        self.close_units();
+        while let Ok((fragment, ack)) = self.fragments.recv() {
+            emit(fragment);
+            let _ = ack.send(());
+        }
+        let _ = self.thread.join();
     }
 }
 
-fn complete_css_drain_boundary(css_text: &str) -> usize {
-    let bytes = css_text.as_bytes();
-    let mut depth = 0usize;
-    let mut in_string = None;
-    let mut escape = false;
-    let mut in_comment = false;
-    let mut boundary = 0usize;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if in_comment {
-            if b == b'*' && bytes.get(i + 1) == Some(&b'/') {
-                in_comment = false;
+#[derive(Default)]
+struct CssStreamBuffer {
+    text: String,
+    scanned: usize,
+    depth: usize,
+    quote: Option<u8>,
+    escaped: bool,
+    comment: bool,
+    boundary: usize,
+}
+
+impl CssStreamBuffer {
+    fn push(&mut self, chunk: &str) -> Option<String> {
+        self.text.push_str(chunk);
+        let bytes = self.text.as_bytes();
+        let mut i = self.scanned;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if self.comment {
+                if b == b'*' {
+                    if i + 1 == bytes.len() {
+                        break;
+                    }
+                    if bytes[i + 1] == b'/' {
+                        self.comment = false;
+                        i += 2;
+                        continue;
+                    }
+                }
+                i += 1;
+                continue;
+            }
+            if let Some(quote) = self.quote {
+                if self.escaped {
+                    self.escaped = false;
+                } else if b == b'\\' {
+                    self.escaped = true;
+                } else if b == quote {
+                    self.quote = None;
+                }
+                i += 1;
+                continue;
+            }
+            if b == b'/' {
+                if i + 1 == bytes.len() {
+                    break;
+                }
+                if bytes[i + 1] == b'*' {
+                    self.comment = true;
+                    i += 2;
+                    continue;
+                }
+            }
+            if b == b'\'' || b == b'"' {
+                self.quote = Some(b);
+                i += 1;
+                continue;
+            }
+            if b == b'\\' {
+                if i + 1 == bytes.len() {
+                    break;
+                }
                 i += 2;
                 continue;
             }
-            i += 1;
-            continue;
-        }
-        if let Some(quote) = in_string {
-            if escape {
-                escape = false;
-            } else if b == b'\\' {
-                escape = true;
-            } else if b == quote {
-                in_string = None;
-            }
-            i += 1;
-            continue;
-        }
-        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            in_comment = true;
-            i += 2;
-            continue;
-        }
-        if b == b'\'' || b == b'"' {
-            in_string = Some(b);
-            i += 1;
-            continue;
-        }
-        if b == b'\\' {
-            i = (i + 2).min(bytes.len());
-            continue;
-        }
-        match b {
-            b'{' => depth += 1,
-            b'}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    boundary = i + 1;
+            match b {
+                b'{' => self.depth += 1,
+                b'}' => {
+                    self.depth = self.depth.saturating_sub(1);
+                    if self.depth == 0 {
+                        self.boundary = i + 1;
+                    }
                 }
+                b';' if self.depth == 0 => self.boundary = i + 1,
+                _ => {}
             }
-            b';' if depth == 0 => boundary = i + 1,
-            _ => {}
+            i += 1;
         }
-        i += 1;
+        self.scanned = i;
+        if self.boundary == 0 {
+            return None;
+        }
+        let complete: String = self.text.drain(..self.boundary).collect();
+        self.scanned -= self.boundary;
+        self.boundary = 0;
+        if complete.trim().is_empty() {
+            None
+        } else {
+            Some(complete)
+        }
     }
-    boundary
 }
 
 fn complete_css_units(css_text: &str) -> Vec<&str> {
@@ -804,6 +885,8 @@ where
         }
     }
 
+    let media = css::MediaConditions::default().with_query(&media);
+
     let parse_state = if cache_parsed && !progressive_stream {
         let existing = CSS_PARSE_IN_FLIGHT
             .lock()
@@ -846,38 +929,119 @@ where
     let mut emitted = 0usize;
     let mut import_stack = std::collections::HashSet::from([css_url.clone()]);
     if let Some(streaming_loader) = streaming_loader {
-        let mut buffer = String::new();
-        let mut streamed_text = String::new();
-        let streaming_result = streaming_loader(&css_url, &mut |chunk| {
-            text_len += chunk.len();
-            if emitted == 0 {
-                streamed_text.push_str(chunk);
-            }
-            buffer.push_str(chunk);
-            if let Some(complete_css) = drain_complete_css_text(&mut buffer) {
-                emitted += emit_css_imports(
-                    &complete_css,
-                    &css_url,
-                    &media,
-                    &loader,
-                    &mut import_stack,
-                    &mut |fragment| {
-                        combined.append_fragment(fragment.clone());
-                        emit_fragment(fragment);
-                    },
-                );
-                let mut fragment = crate::css::Stylesheet::default();
-                fragment.parse_and_add_with_base_media(&complete_css, &css_url, &media);
-                if stylesheet_has_content(&fragment) {
-                    emitted += 1;
-                    combined.append_fragment(fragment.clone());
-                    emit_fragment(fragment);
+        let mut buffer = CssStreamBuffer::default();
+        let mut import_worker: Option<ImportWorker> = None;
+        let mut pending_parent = Vec::new();
+        let mut import_prefix = true;
+        let import_streaming_loader = streaming_loader.clone();
+        let mut process_complete_css = |complete_css: &str| {
+            let cleaned = css::parser::strip_css_comments(complete_css);
+            for unit in complete_css_units(&cleaned) {
+                let unit = unit.trim();
+                if import_prefix && unit.to_ascii_lowercase().starts_with("@charset") {
+                    continue;
+                }
+                if import_prefix && css_import_target(unit).is_some() {
+                    if import_worker.is_none() {
+                        import_worker = ImportWorker::spawn(
+                            css_url.clone(),
+                            media.clone(),
+                            loader.clone(),
+                            import_streaming_loader.clone(),
+                            import_stack.clone(),
+                        )
+                        .ok();
+                    }
+                    if import_worker
+                        .as_ref()
+                        .is_some_and(|worker| worker.send(unit.to_string()).is_ok())
+                    {
+                        continue;
+                    }
+                    emit_css_imports(
+                        unit,
+                        &css_url,
+                        &media,
+                        &loader,
+                        Some(&import_streaming_loader),
+                        &mut import_stack,
+                        None,
+                        &mut |fragment| {
+                            record_stylesheet_fragment(
+                                &mut combined,
+                                &mut emitted,
+                                &mut emit_fragment,
+                                fragment,
+                            );
+                        },
+                    );
+                } else if !unit.is_empty() {
+                    import_prefix = false;
                 }
             }
-            if emitted > 0 && !streamed_text.is_empty() {
-                streamed_text = String::new();
+            if !import_prefix && let Some(worker) = import_worker.as_mut() {
+                worker.close_units();
+            }
+            let mut fragment = css::Stylesheet::default();
+            fragment.parse_and_add_with_base_media_conditions(complete_css, &css_url, &media);
+            if stylesheet_has_content(&fragment) {
+                if import_worker.is_some() {
+                    pending_parent.push(fragment);
+                } else {
+                    record_stylesheet_fragment(
+                        &mut combined,
+                        &mut emitted,
+                        &mut emit_fragment,
+                        fragment,
+                    );
+                }
+            }
+            let finished = import_worker.as_mut().is_some_and(|worker| {
+                worker.drain(&mut |fragment| {
+                    record_stylesheet_fragment(
+                        &mut combined,
+                        &mut emitted,
+                        &mut emit_fragment,
+                        fragment,
+                    );
+                })
+            });
+            if finished {
+                import_worker.take().unwrap().finish(&mut |_| {});
+                for fragment in pending_parent.drain(..) {
+                    record_stylesheet_fragment(
+                        &mut combined,
+                        &mut emitted,
+                        &mut emit_fragment,
+                        fragment,
+                    );
+                }
+            }
+        };
+        let streaming_result = streaming_loader(&css_url, &mut |chunk| {
+            text_len += chunk.len();
+            if let Some(complete_css) = buffer.push(chunk) {
+                process_complete_css(&complete_css);
             }
         });
+        let tail = std::mem::take(&mut buffer.text);
+        if !tail.trim().is_empty() {
+            process_complete_css(&tail);
+        }
+        drop(process_complete_css);
+        if let Some(worker) = import_worker.take() {
+            worker.finish(&mut |fragment| {
+                record_stylesheet_fragment(
+                    &mut combined,
+                    &mut emitted,
+                    &mut emit_fragment,
+                    fragment,
+                );
+            });
+        }
+        for fragment in pending_parent {
+            record_stylesheet_fragment(&mut combined, &mut emitted, &mut emit_fragment, fragment);
+        }
         if streaming_result.is_err() || text_len == 0 {
             match loader(&css_url) {
                 Ok(text) => {
@@ -887,7 +1051,9 @@ where
                         &css_url,
                         &media,
                         &loader,
+                        Some(&streaming_loader),
                         &mut import_stack,
+                        None,
                         &mut |fragment| {
                             combined.append_fragment(fragment.clone());
                             emit_fragment(fragment);
@@ -898,39 +1064,12 @@ where
                         emit_fragment(fragment);
                     });
                     if emitted == 0 && !text.trim().is_empty() {
-                        combined.parse_and_add_with_base_media(&text, &css_url, &media);
+                        combined.parse_and_add_with_base_media_conditions(&text, &css_url, &media);
                     }
                 }
                 Err(err) => {
                     eprintln!("  CSS failed: {css_url} ({err})");
                 }
-            }
-        } else if emitted == 0 && !streamed_text.trim().is_empty() {
-            combined.parse_and_add_with_base_media(&streamed_text, &css_url, &media);
-            if stylesheet_has_content(&combined) {
-                emitted = 1;
-                emit_fragment(combined.clone());
-            }
-        }
-        let tail = std::mem::take(&mut buffer);
-        if !tail.trim().is_empty() {
-            emitted += emit_css_imports(
-                &tail,
-                &css_url,
-                &media,
-                &loader,
-                &mut import_stack,
-                &mut |fragment| {
-                    combined.append_fragment(fragment.clone());
-                    emit_fragment(fragment);
-                },
-            );
-            let mut fragment = crate::css::Stylesheet::default();
-            fragment.parse_and_add_with_base_media(&tail, &css_url, &media);
-            if stylesheet_has_content(&fragment) {
-                emitted += 1;
-                combined.append_fragment(fragment.clone());
-                emit_fragment(fragment);
             }
         }
     } else {
@@ -941,7 +1080,9 @@ where
             &css_url,
             &media,
             &loader,
+            None,
             &mut import_stack,
+            None,
             &mut |fragment| {
                 combined.append_fragment(fragment.clone());
                 emit_fragment(fragment);
@@ -952,7 +1093,7 @@ where
             emit_fragment(fragment);
         });
         if emitted == 0 {
-            combined.parse_and_add_with_base_media(&text, &css_url, &media);
+            combined.parse_and_add_with_base_media_conditions(&text, &css_url, &media);
         }
     }
 
@@ -987,10 +1128,69 @@ mod stylesheet_loader_tests {
     use std::sync::{Arc, Mutex};
 
     #[test]
+    fn decoded_image_is_shared_across_page_requests() {
+        let url = "https://example.test/history-shared-image.png";
+        let first_loader = |_url: &str| {
+            Ok(html::DecodedImage::Raster(
+                Arc::new(vec![255, 0, 0, 255]),
+                1,
+                1,
+            ))
+        };
+        let first = cached_decoded_image_result(url, Some(&first_loader)).unwrap();
+        let second_loader = |_url: &str| -> Result<html::DecodedImage, String> {
+            panic!("decoded image was loaded again")
+        };
+        let second = cached_decoded_image_result(url, Some(&second_loader)).unwrap();
+        let (
+            html::DecodedImage::Raster(first_pixels, _, _),
+            html::DecodedImage::Raster(second_pixels, _, _),
+        ) = (first, second)
+        else {
+            panic!("expected cached raster images")
+        };
+        assert!(Arc::ptr_eq(&first_pixels, &second_pixels));
+    }
+
+    #[test]
+    fn parsed_external_stylesheet_is_reused_across_document_loads() {
+        let key = "test-parsed-css-revisit\nhttps://example.test/shared.css".to_string();
+        let url = "https://example.test/shared.css".to_string();
+        let loader: StylesheetLoader = Arc::new(|_| Ok(".shared { color: red }".into()));
+        let first = load_stylesheet_cached(
+            key.clone(),
+            url.clone(),
+            String::new(),
+            loader,
+            None,
+            true,
+            |_| {},
+        );
+        assert_eq!(first.sheet.rules.len(), 1);
+
+        let never_fetch: StylesheetLoader = Arc::new(|_| panic!("cached CSS was fetched again"));
+        let never_stream: StreamingStylesheetLoader =
+            Arc::new(|_, _| panic!("cached CSS was streamed again"));
+        let second = load_stylesheet_cached(
+            key,
+            url,
+            String::new(),
+            never_fetch,
+            Some(never_stream),
+            true,
+            |_| {},
+        );
+        assert_eq!(second.sheet.rules.len(), 1);
+        assert_eq!(second.text_len, 0);
+        assert_eq!(second.emitted_fragments, 0);
+    }
+
+    #[test]
     fn streamed_data_url_background_rule_is_preserved() {
         let css = r#".bg-\[url\(\'data\:image\/svg\+xml\;base64\2c AAA\'\)\]{color:red}.loader{background-image:url("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=");background-size:12rem}.disabled{opacity:.4}"#.to_string();
         let escaped_semicolon = css.find("\\;").expect("escaped selector semicolon");
-        assert_eq!(complete_css_drain_boundary(&css[..escaped_semicolon + 2]), 0);
+        let mut partial = CssStreamBuffer::default();
+        assert!(partial.push(&css[..escaped_semicolon + 2]).is_none());
         let mut expected = css::Stylesheet::default();
         expected.parse_and_add_with_base(&css, "https://example.test/main.css");
         let streaming_loader: StreamingStylesheetLoader = Arc::new(move |_, emit| {
@@ -1015,15 +1215,55 @@ mod stylesheet_loader_tests {
             false,
             |_| {},
         );
-        let expected_selectors: Vec<_> = expected.rules.iter().map(|rule| rule.original_selector.as_str()).collect();
-        let actual_selectors: Vec<_> = result.sheet.rules.iter().map(|rule| rule.original_selector.as_str()).collect();
+        let expected_selectors: Vec<_> = expected
+            .rules
+            .iter()
+            .map(|rule| rule.original_selector.as_str())
+            .collect();
+        let actual_selectors: Vec<_> = result
+            .sheet
+            .rules
+            .iter()
+            .map(|rule| rule.original_selector.as_str())
+            .collect();
         assert_eq!(actual_selectors, expected_selectors);
         assert!(actual_selectors.contains(&".loader"));
     }
 
     #[test]
+    fn css_stream_boundary_survives_chunked_comments_strings_and_escapes() {
+        let css = r#"/* a } */ .a\;b { content: "} ;"; background: url("data:image/svg+xml;utf8,<svg></svg>") } /* split */ .next { color: red }"#;
+        let mut stream = CssStreamBuffer::default();
+        let mut drained = String::new();
+        for chunk in css.as_bytes().chunks(1) {
+            if let Some(complete) = stream.push(std::str::from_utf8(chunk).unwrap()) {
+                drained.push_str(&complete);
+            }
+        }
+        drained.push_str(&stream.text);
+        assert_eq!(drained, css);
+        assert!(stream.text.is_empty());
+        assert_eq!(stream.scanned, 0);
+    }
+
+    #[test]
+    fn css_stream_scans_only_new_bytes_of_an_unfinished_rule() {
+        let mut stream = CssStreamBuffer::default();
+        assert!(stream.push(".large { content: '").is_none());
+        for _ in 0..4096 {
+            assert!(stream.push("x").is_none());
+            assert_eq!(stream.scanned, stream.text.len());
+        }
+        let complete = stream.push("'; color: red }").unwrap();
+        assert!(complete.starts_with(".large { content: '"));
+        assert!(complete.ends_with("'; color: red }"));
+        assert!(stream.text.is_empty());
+    }
+
+    #[test]
     fn imported_css_precedes_parent_and_resolves_its_own_font_urls() {
-        let loader: StylesheetLoader = Arc::new(|url| match url {
+        let loader: StylesheetLoader = Arc::new(|url| {
+            match url {
             "https://site.test/base.css" => Ok(
                 "@import url('fonts/fonts.css'); .title { color: blue }".into(),
             ),
@@ -1031,6 +1271,7 @@ mod stylesheet_loader_tests {
                 "@import '../base.css'; @font-face { font-family: Demo; src: url('demo.woff2') } .title { color: red }".into(),
             ),
             _ => Err(format!("unexpected URL: {url}")),
+        }
         });
         let result = load_stylesheet_cached(
             "test-import-order".into(),
@@ -1042,9 +1283,208 @@ mod stylesheet_loader_tests {
             |_| {},
         );
         assert_eq!(result.sheet.rules.len(), 2);
-        assert!(result.sheet.rules[0].declarations.iter().any(|decl| decl.1 == "red"));
-        assert!(result.sheet.rules[1].declarations.iter().any(|decl| decl.1 == "blue"));
-        assert!(result.sheet.font_faces[0].src.contains("https://site.test/fonts/demo.woff2"));
+        assert!(
+            result.sheet.rules[0]
+                .declarations
+                .iter()
+                .any(|decl| decl.1 == "red")
+        );
+        assert!(
+            result.sheet.rules[1]
+                .declarations
+                .iter()
+                .any(|decl| decl.1 == "blue")
+        );
+        assert!(
+            result.sheet.font_faces[0]
+                .src
+                .contains("https://site.test/fonts/demo.woff2")
+        );
+    }
+
+    #[test]
+    fn quoted_import_without_whitespace_precedes_parent_rule() {
+        assert_eq!(
+            css_import_target("@import\"theme.css\";"),
+            Some(CssImportTarget {
+                url: "theme.css".to_string(),
+                media: "",
+                layer: None,
+                supports: None,
+            })
+        );
+        assert!(css_import_target("@importurl(theme.css);").is_none());
+        let loader: StylesheetLoader = Arc::new(|url| match url {
+            "https://site.test/base.css" => {
+                Ok("@import\"theme.css\"; .title { color: blue }".into())
+            }
+            "https://site.test/theme.css" => Ok(".title { color: red }".into()),
+            _ => Err(format!("unexpected URL: {url}")),
+        });
+        let result = load_stylesheet_cached(
+            "test-adjacent-import".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            None,
+            false,
+            |_| {},
+        );
+        assert_eq!(result.sheet.rules.len(), 2);
+        assert_eq!(result.sheet.rules[0].declarations.get("color").map(String::as_str), Some("red"));
+        assert_eq!(result.sheet.rules[1].declarations.get("color").map(String::as_str), Some("blue"));
+    }
+
+    #[test]
+    fn css_import_urls_decode_escapes_and_reject_bad_url_tokens() {
+        assert_eq!(
+            css_import_target(r#"@import "th\65 me.css";"#).unwrap().url,
+            "theme.css"
+        );
+        assert_eq!(
+            css_import_target(r#"@import url(a\)b.css);"#).unwrap().url,
+            "a)b.css"
+        );
+        assert_eq!(
+            css_import_target(r#"@import url("a\"b.css");"#)
+                .unwrap()
+                .url,
+            "a\"b.css"
+        );
+        for invalid in [
+            "@import theme.css;",
+            "@import url(foo bar);",
+            "@import url(foo(bar));",
+            "@import url(\"unterminated);",
+            "@import \"unterminated;",
+        ] {
+            assert!(css_import_target(invalid).is_none(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn escaped_import_fetches_decoded_url_before_parent_rule() {
+        let loader: StylesheetLoader = Arc::new(|url| match url {
+            "https://site.test/base.css" => {
+                Ok(r#"@import "th\65 me.css"; .title { color: blue }"#.into())
+            }
+            "https://site.test/theme.css" => Ok(".title { color: red }".into()),
+            _ => Err(format!("unexpected URL: {url}")),
+        });
+        let result = load_stylesheet_cached(
+            "test-escaped-import".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            None,
+            false,
+            |_| {},
+        );
+        assert_eq!(result.sheet.rules.len(), 2);
+        let colors: Vec<_> = result
+            .sheet
+            .rules
+            .iter()
+            .map(|rule| rule.declarations.get("color").map(String::as_str))
+            .collect();
+        assert_eq!(colors, [Some("red"), Some("blue")]);
+    }
+
+    #[test]
+    fn conditional_import_skips_false_supports_without_fetching() {
+        let loader: StylesheetLoader = Arc::new(|url| match url {
+            "https://site.test/base.css" => Ok(concat!(
+                "@import 'skip.css' supports(display: invented-value);",
+                "@import 'use.css' supports(display: grid);",
+                ".title { color: blue }"
+            ).into()),
+            "https://site.test/use.css" => Ok(".title { color: red }".into()),
+            _ => panic!("unexpected import fetch: {url}"),
+        });
+        let result = load_stylesheet_cached(
+            "test-conditional-import".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            None,
+            false,
+            |_| {},
+        );
+        assert_eq!(result.sheet.rules.len(), 2);
+        assert_eq!(result.sheet.rules[0].declarations.get("color").map(String::as_str), Some("red"));
+        assert_eq!(result.sheet.rules[1].declarations.get("color").map(String::as_str), Some("blue"));
+    }
+
+    #[test]
+    fn imported_media_list_stays_bounded_by_the_link_media() {
+        let loader: StylesheetLoader = Arc::new(|url| match url {
+            "https://site.test/base.css" => {
+                Ok("@import 'theme.css' screen, print;".into())
+            }
+            "https://site.test/theme.css" => Ok(".title { color: red }".into()),
+            _ => Err(format!("unexpected URL: {url}")),
+        });
+        let result = load_stylesheet_cached(
+            "test-import-media-conjunction".into(),
+            "https://site.test/base.css".into(),
+            "print".into(),
+            loader,
+            None,
+            false,
+            |_| {},
+        );
+        assert_eq!(result.sheet.rules.len(), 1);
+        assert!(!result.sheet.rules[0].media_condition.matches(900.0, 600.0));
+    }
+
+    #[test]
+    fn imported_layer_scopes_rules_and_nested_layers_in_source_order() {
+        let loader: StylesheetLoader = Arc::new(|url| match url {
+            "https://site.test/base.css" => Ok(concat!(
+                "@import 'theme.css' supports(display: grid) layer(theme);",
+                "@layer override { .title { color: blue } }"
+            ).into()),
+            "https://site.test/theme.css" => Ok(concat!(
+                ".title { color: red }",
+                "@layer accent { .title { color: green } }"
+            ).into()),
+            _ => panic!("unexpected import fetch: {url}"),
+        });
+        let result = load_stylesheet_cached(
+            "test-layered-import".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            None,
+            false,
+            |_| {},
+        );
+        assert_eq!(result.sheet.layer_order, ["theme", "theme.accent", "override"]);
+        assert_eq!(result.sheet.rules.iter().map(|rule| rule.layer.as_str()).collect::<Vec<_>>(),
+            ["theme", "theme.accent", "override"]);
+        assert_eq!(css_import_target("@import 'x.css' layer(foo) supports(display: grid); ").unwrap().layer, Some(Some("foo")));
+    }
+
+    #[test]
+    fn streamed_layer_declaration_is_not_dropped_as_empty_css() {
+        let loader: StylesheetLoader = Arc::new(|_| panic!("streaming fetch should be used"));
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(|_, emit| {
+            emit("@layer first, second;");
+            Ok(())
+        });
+        let mut emitted = Vec::new();
+        let result = load_stylesheet_cached(
+            "test-layer-only-stream".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            Some(streaming_loader),
+            false,
+            |fragment| emitted.extend(fragment.layer_order),
+        );
+        assert_eq!(result.emitted_fragments, 1);
+        assert_eq!(result.sheet.layer_order, ["first", "second"]);
+        assert_eq!(emitted, ["first", "second"]);
     }
 
     #[test]
@@ -1054,9 +1494,15 @@ mod stylesheet_loader_tests {
             "https://site.test/theme.css" => Ok(".title { color: red }".into()),
             _ => Err(format!("unexpected URL: {url}")),
         });
-        let streaming_loader: StreamingStylesheetLoader = Arc::new(move |_, emit| {
-            for chunk in parent.as_bytes().chunks(9) {
-                emit(std::str::from_utf8(chunk).unwrap());
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(move |url, emit| {
+            match url {
+                "https://site.test/base.css" => {
+                    for chunk in parent.as_bytes().chunks(9) {
+                        emit(std::str::from_utf8(chunk).unwrap());
+                    }
+                }
+                "https://site.test/theme.css" => emit(".title { color: red }"),
+                _ => return Err(format!("unexpected URL: {url}")),
             }
             Ok(())
         });
@@ -1068,9 +1514,143 @@ mod stylesheet_loader_tests {
             loader,
             Some(streaming_loader),
             false,
-            |sheet| seen.extend(sheet.rules.into_iter().map(|rule| rule.declarations.get("color").unwrap().clone())),
+            |sheet| {
+                seen.extend(
+                    sheet
+                        .rules
+                        .into_iter()
+                        .map(|rule| rule.declarations.get("color").unwrap().clone()),
+                )
+            },
         );
         assert_eq!(seen, ["red", "blue"]);
+        assert_eq!(result.sheet.rules.len(), 2);
+    }
+
+    #[test]
+    fn nested_css_imports_use_the_streaming_loader_in_source_order() {
+        let loader: StylesheetLoader = Arc::new(|url| Err(format!("complete fetch forbidden: {url}")));
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(|url, emit| {
+            let css = match url {
+                "https://site.test/base.css" => {
+                    "@import 'theme.css'; .title { color: blue }"
+                }
+                "https://site.test/theme.css" => {
+                    "@import 'colors.css'; .title { color: red }"
+                }
+                "https://site.test/colors.css" => ".title { color: green }",
+                _ => return Err(format!("unexpected URL: {url}")),
+            };
+            for chunk in css.as_bytes().chunks(7) {
+                emit(std::str::from_utf8(chunk).unwrap());
+            }
+            Ok(())
+        });
+        let mut emitted_colors = Vec::new();
+        let result = load_stylesheet_cached(
+            "test-nested-streamed-imports".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            Some(streaming_loader),
+            false,
+            |sheet| {
+                emitted_colors.extend(
+                    sheet
+                        .rules
+                        .iter()
+                        .filter_map(|rule| rule.declarations.get("color").cloned()),
+                );
+            },
+        );
+        assert_eq!(emitted_colors, ["green", "red", "blue"]);
+        assert_eq!(result.sheet.rules.len(), 3);
+    }
+
+    #[test]
+    fn imported_rule_is_emitted_before_its_stream_finishes() {
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let checked = observed.clone();
+        let loader: StylesheetLoader = Arc::new(|url| Err(format!("complete fetch forbidden: {url}")));
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(move |url, emit| {
+            match url {
+                "https://site.test/base.css" => emit("@import 'theme.css';"),
+                "https://site.test/theme.css" => {
+                    emit(".title { color: red }");
+                    assert!(checked.load(std::sync::atomic::Ordering::SeqCst));
+                    emit(".subtitle { color: blue }");
+                }
+                _ => return Err(format!("unexpected URL: {url}")),
+            }
+            Ok(())
+        });
+        let result = load_stylesheet_cached(
+            "test-progressive-import".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            Some(streaming_loader),
+            false,
+            |sheet| {
+                if sheet.rules.iter().any(|rule| rule.original_selector == ".title") {
+                    observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            },
+        );
+        assert_eq!(result.sheet.rules.len(), 2);
+    }
+
+    #[test]
+    fn parent_css_stream_advances_while_import_fetch_waits() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let parent_advanced = Arc::new(AtomicBool::new(false));
+        let import_timed_out = Arc::new(AtomicBool::new(false));
+        let advanced = parent_advanced.clone();
+        let timed_out = import_timed_out.clone();
+        let loader: StylesheetLoader = Arc::new(|url| Err(format!("complete fetch forbidden: {url}")));
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(move |url, emit| {
+            match url {
+                "https://site.test/base.css" => {
+                    emit("@import 'theme.css';");
+                    advanced.store(true, Ordering::SeqCst);
+                    emit(".title { color: blue }");
+                }
+                "https://site.test/theme.css" => {
+                    for _ in 0..100 {
+                        if advanced.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    if !advanced.load(Ordering::SeqCst) {
+                        timed_out.store(true, Ordering::SeqCst);
+                    }
+                    emit(".title { color: red }");
+                }
+                _ => return Err(format!("unexpected URL: {url}")),
+            }
+            Ok(())
+        });
+        let mut colors = Vec::new();
+        let result = load_stylesheet_cached(
+            "test-parent-import-concurrency".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            Some(streaming_loader),
+            false,
+            |sheet| {
+                colors.extend(
+                    sheet
+                        .rules
+                        .iter()
+                        .filter_map(|rule| rule.declarations.get("color").cloned()),
+                );
+            },
+        );
+        assert!(!import_timed_out.load(Ordering::SeqCst));
+        assert_eq!(colors, ["red", "blue"]);
         assert_eq!(result.sheet.rules.len(), 2);
     }
 
@@ -1128,6 +1708,71 @@ mod stylesheet_loader_tests {
         );
         assert!(!emitted.lock().unwrap().is_empty());
     }
+
+    #[test]
+    fn css_wait_counts_completed_stylesheets_not_streamed_fragments() {
+        let loader: StylesheetLoader = Arc::new(|_| panic!("streaming fetch should be used"));
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(|_, emit| {
+            emit(".first { color: red }");
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            emit(".second { color: blue }");
+            Ok(())
+        });
+        let doc = load_html_reusing_with_resource_loaders_and_wait(
+            "<link rel=stylesheet href='https://css-wait-fragments.test/one.css'><div class=second>text</div>",
+            "https://css-wait-fragments.test/",
+            800.0,
+            600.0,
+            types::ComponentRegistry::default(),
+            None,
+            Some(loader),
+            Some(streaming_loader),
+            None,
+            false,
+            std::time::Duration::from_secs(1),
+        );
+        assert!(doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".first"));
+        assert!(doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".second"));
+        assert!(doc.pending_stylesheets.is_none());
+    }
+
+    #[test]
+    fn css_wait_timeout_keeps_later_streamed_fragments() {
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel::<()>();
+        let resume_rx = Arc::new(Mutex::new(resume_rx));
+        let loader: StylesheetLoader = Arc::new(|_| panic!("streaming fetch should be used"));
+        let streaming_loader: StreamingStylesheetLoader = Arc::new(move |_, emit| {
+            emit(".first { color: red }");
+            resume_rx.lock().unwrap().recv().unwrap();
+            emit(".second { color: blue }");
+            Ok(())
+        });
+        let mut doc = load_html_reusing_with_resource_loaders_and_wait(
+            "<link rel=stylesheet href='https://css-wait-timeout.test/one.css'><div class=second>text</div>",
+            "https://css-wait-timeout.test/",
+            800.0,
+            600.0,
+            types::ComponentRegistry::default(),
+            None,
+            Some(loader),
+            Some(streaming_loader),
+            None,
+            false,
+            std::time::Duration::from_millis(10),
+        );
+        assert!(!doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".second"));
+        assert!(doc.pending_stylesheets.is_some());
+        resume_tx.send(()).unwrap();
+        for _ in 0..100 {
+            doc.poll_pending_stylesheets_budgeted(usize::MAX, std::time::Duration::ZERO);
+            if doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".second") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".first"));
+        assert!(doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".second"));
+    }
 }
 
 pub mod types;
@@ -1143,23 +1788,25 @@ pub mod browser_view;
 pub mod canvas;
 pub mod css;
 pub mod dom;
+pub mod embedded_window;
+pub mod fonts;
 pub mod frame;
 pub mod html;
+pub mod images;
 pub mod layout;
 pub mod loading;
 pub mod markdown;
 pub mod platform;
-pub mod embedded_window;
-pub mod ui_events;
-pub mod scheduling;
 pub mod profile;
 pub mod renderer;
+pub mod scheduling;
 pub mod svg;
+pub mod ui_events;
 pub mod video;
 pub mod widgets;
 /// WHATWG HTML §7 — browsing contexts and the `Window` interface.
 pub mod window;
-pub mod woff;
+pub use fonts as woff;
 
 #[cfg(test)]
 pub mod tests;
@@ -1440,23 +2087,32 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
     let t1 = std::time::Instant::now();
     let expected_count = css_idx.load(std::sync::atomic::Ordering::SeqCst);
     let mut css_results: Vec<(usize, String, crate::css::Stylesheet, String)> = Vec::new();
-    if !css_wait.is_zero() {
+    let mut css_finished = expected_count == 0;
+    if !css_wait.is_zero() && !css_finished {
         let deadline = std::time::Instant::now() + css_wait;
-        while css_results.len() < expected_count {
+        loop {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
             match css_rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
             {
                 Ok(item) => css_results.push(item),
-                Err(_) => break, // timeout or disconnected
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    css_finished = true;
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
             }
         }
     }
     eprintln!(
-        "CSS wait: {:.0}ms ({}/{} sheets)",
+        "CSS wait: {:.0}ms ({} fragments, {} sheets{})",
         t1.elapsed().as_millis(),
         css_results.len(),
-        expected_count
+        expected_count,
+        if css_finished { " complete" } else { " pending" }
     );
-    let has_pending_css = css_results.len() < expected_count;
+    let has_pending_css = !css_finished;
     if !doc.document_stylesheets.is_empty() {
         let mut fetched_map: std::collections::HashMap<String, crate::css::Stylesheet> =
             std::collections::HashMap::new();
@@ -1502,7 +2158,16 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
                     if !crate::css::evaluate_media(media, doc.viewport_w, doc.viewport_h) {
                         continue;
                     }
-                    doc.stylesheet.parse_and_add_with_base(css, &doc.base_url);
+                    let sheet = parsed_inline_stylesheet(css, &doc.base_url);
+                    doc.stylesheet.append_fragment((*sheet).clone());
+                    doc.inline_stylesheet_cache.insert(
+                        idx,
+                        types::CachedInlineStylesheet {
+                            source: css.clone(),
+                            base_url: doc.base_url.clone(),
+                            sheet,
+                        },
+                    );
                 }
                 crate::types::DocumentStylesheet::Linked { href, media } => {
                     if !crate::css::evaluate_media(media, doc.viewport_w, doc.viewport_h) {
@@ -1618,6 +2283,7 @@ fn start_async_image_fetches_with_loader(
     }
 
     let mut async_pending = Vec::with_capacity(pending.len());
+    let base_url = doc.base_url.clone();
     for (node_id, path, target, url) in pending {
         let url_trimmed = url.trim();
         if url_trimmed.starts_with("data:")
@@ -1639,13 +2305,17 @@ fn start_async_image_fetches_with_loader(
                     };
                     match target {
                         types::PendingImageTarget::Background => {
-                            let _ = html::set_decoded_bg_image_on_node(node, decoded);
+                            let _ = html::set_decoded_bg_image_for_url_on_node(
+                                node, decoded, &url, &base_url,
+                            );
                         }
                         types::PendingImageTarget::BackgroundLayer(layer_index) => {
-                            let _ = html::set_decoded_bg_image_layer_on_node(
+                            let _ = html::set_decoded_bg_image_layer_for_url_on_node(
                                 node,
                                 layer_index,
                                 decoded,
+                                &url,
+                                &base_url,
                             );
                         }
                         types::PendingImageTarget::Mask => {
@@ -1712,6 +2382,7 @@ fn apply_ready_cached_images(doc: &mut types::Document) {
         &mut Vec::new(),
         &mut pending,
     );
+    let base_url = doc.base_url.clone();
     for (node_id, path, target, url) in pending {
         let Some(decoded) = cached_decoded_image_ready(&url) else {
             continue;
@@ -1731,10 +2402,17 @@ fn apply_ready_cached_images(doc: &mut types::Document) {
                     html::set_decoded_image_on_node(node, decoded);
                 }
                 types::PendingImageTarget::Background => {
-                    let _ = html::set_decoded_bg_image_on_node(node, decoded);
+                    let _ =
+                        html::set_decoded_bg_image_for_url_on_node(node, decoded, &url, &base_url);
                 }
                 types::PendingImageTarget::BackgroundLayer(layer_index) => {
-                    let _ = html::set_decoded_bg_image_layer_on_node(node, layer_index, decoded);
+                    let _ = html::set_decoded_bg_image_layer_for_url_on_node(
+                        node,
+                        layer_index,
+                        decoded,
+                        &url,
+                        &base_url,
+                    );
                 }
                 types::PendingImageTarget::Mask => {
                     if let Some((data, w, h)) = html::decoded_image_pixels_arc(decoded) {
@@ -1872,12 +2550,28 @@ fn collect_remote_images(
     }
     if let Some(shadow) = node.shadow_root.as_ref() {
         for child in &shadow.children {
-            collect_remote_images(child, base_url, viewport_w, viewport_h, device_pixel_ratio, path, pending);
+            collect_remote_images(
+                child,
+                base_url,
+                viewport_w,
+                viewport_h,
+                device_pixel_ratio,
+                path,
+                pending,
+            );
         }
     }
     for (i, child) in node.children.iter().enumerate() {
         path.push(i);
-        collect_remote_images(child, base_url, viewport_w, viewport_h, device_pixel_ratio, path, pending);
+        collect_remote_images(
+            child,
+            base_url,
+            viewport_w,
+            viewport_h,
+            device_pixel_ratio,
+            path,
+            pending,
+        );
         path.pop();
     }
 }

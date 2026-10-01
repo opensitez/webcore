@@ -309,29 +309,29 @@ fn decode_webp_preview<R: Read>(
     width: u32,
     height: u32,
     on_preview: &mut impl FnMut(DecodedImage),
-) {
+) -> Option<DecodedImage> {
     if u64::from(width) * u64::from(height) > MAX_PREVIEW_PIXELS {
-        return;
+        return None;
     }
     let animated = {
         let state = capture.0.lock().unwrap();
         if state.bytes.len() < 21 || &state.bytes[12..16] != b"VP8X" {
-            return;
+            return None;
         }
         state.bytes[20] & 0x02 != 0
     };
     let mut reader = capture.clone();
     if reader.seek(SeekFrom::Start(12)).is_err() {
-        return;
+        return None;
     }
     let riff_end = {
         let state = capture.0.lock().unwrap();
         let Some(size) = state.bytes.get(4..8) else {
-            return;
+            return None;
         };
         let Some(end) = (u32::from_le_bytes(size.try_into().unwrap()) as usize).checked_add(8)
         else {
-            return;
+            return None;
         };
         end
     };
@@ -339,7 +339,7 @@ fn decode_webp_preview<R: Read>(
     while position < riff_end.min(8 * 1024 * 1024) {
         let mut header = [0u8; 8];
         if reader.read_exact(&mut header).is_err() {
-            return;
+            return None;
         }
         let chunk_size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
         let Some(next) = position
@@ -347,26 +347,26 @@ fn decode_webp_preview<R: Read>(
             .and_then(|end| end.checked_add(chunk_size))
             .and_then(|end| end.checked_add(chunk_size & 1))
         else {
-            return;
+            return None;
         };
         if next > riff_end || next > 8 * 1024 * 1024 {
-            return;
+            return None;
         }
         if (animated && &header[..4] == b"ANMF")
             || (!animated && matches!(&header[..4], b"VP8 " | b"VP8L"))
         {
             if reader.seek(SeekFrom::Start(next as u64)).is_err() {
-                return;
+                return None;
             }
             let mut bytes = {
                 let state = capture.0.lock().unwrap();
                 if state.bytes.len() < next || state.bytes.len() >= riff_end {
-                    return;
+                    return None;
                 }
                 state.bytes[..next].to_vec()
             };
             let Ok(riff_size) = u32::try_from(next - 8) else {
-                return;
+                return None;
             };
             bytes[4..8].copy_from_slice(&riff_size.to_le_bytes());
             bytes[20] &= !(0x08 | 0x04);
@@ -380,15 +380,53 @@ fn decode_webp_preview<R: Read>(
                     on_preview(DecodedImage::Raster(Arc::new(pixels), width, height));
                 }
             } else if let Some(decoded @ DecodedImage::Raster(..)) = decode_image_bytes_ex(&bytes) {
-                on_preview(decoded);
+                on_preview(decoded.clone());
+                return Some(decoded);
             }
-            return;
+            return None;
         }
         if reader.seek(SeekFrom::Start(next as u64)).is_err() {
-            return;
+            return None;
         }
         position = next;
     }
+    None
+}
+
+fn complete_webp_riff(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return false;
+    }
+    let Some(expected) =
+        (u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize).checked_add(8)
+    else {
+        return false;
+    };
+    if expected != bytes.len() {
+        return false;
+    }
+    let mut position = 12usize;
+    while position < expected {
+        let Some(end) = position.checked_add(8) else {
+            return false;
+        };
+        let Some(header) = bytes.get(position..end) else {
+            return false;
+        };
+        let size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+        let Some(next) = position
+            .checked_add(8)
+            .and_then(|offset| offset.checked_add(size))
+            .and_then(|offset| offset.checked_add(size & 1))
+        else {
+            return false;
+        };
+        if next > expected {
+            return false;
+        }
+        position = next;
+    }
+    position == expected
 }
 
 fn convert_row(source: &[u8], target: &mut [u8], color: png::ColorType) -> Result<(), String> {
@@ -432,6 +470,7 @@ fn decode_reader_with_previews_and_bytes<R: Read>(
     mut on_dimensions: impl FnMut(u32, u32),
     mut on_preview: impl FnMut(DecodedImage),
 ) -> Result<(DecodedImage, Vec<u8>), String> {
+    let mut preview_decoded = None;
     let mut prefix = [0; 8];
     source
         .read_exact(&mut prefix)
@@ -496,7 +535,7 @@ fn decode_reader_with_previews_and_bytes<R: Read>(
     } else if prefix.starts_with(b"RIFF") {
         if let Some((width, height)) = webp_header_dimensions(capture.clone()) {
             on_dimensions(width, height);
-            decode_webp_preview(capture.clone(), width, height, &mut on_preview);
+            preview_decoded = decode_webp_preview(capture.clone(), width, height, &mut on_preview);
         }
     }
     let mut state = capture.0.lock().unwrap();
@@ -504,8 +543,14 @@ fn decode_reader_with_previews_and_bytes<R: Read>(
     source
         .read_to_end(bytes)
         .map_err(|error| error.to_string())?;
-    let decoded =
-        decode_image_bytes_ex(&state.bytes).ok_or_else(|| "unsupported image bytes".to_string())?;
+    let decoded = if let Some(preview) = preview_decoded {
+        if !complete_webp_riff(&state.bytes) {
+            return Err("incomplete WebP RIFF".to_string());
+        }
+        preview
+    } else {
+        decode_image_bytes_ex(&state.bytes).ok_or_else(|| "unsupported image bytes".to_string())?
+    };
     Ok((decoded, std::mem::take(&mut state.bytes)))
 }
 
@@ -1017,6 +1062,40 @@ mod tests {
             panic!("expected WebP rasters");
         };
         assert_eq!(decoded, regular);
+    }
+
+    #[test]
+    fn extended_webp_preview_does_not_accept_truncated_riff() {
+        let image = image::RgbaImage::from_pixel(64, 64, image::Rgba([30, 100, 180, 255]));
+        let mut output = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut output, image::ImageFormat::WebP)
+            .unwrap();
+        let simple = output.into_inner();
+        let mut bytes = b"RIFF\0\0\0\0WEBPVP8X".to_vec();
+        bytes.extend_from_slice(&10u32.to_le_bytes());
+        bytes.extend_from_slice(&[0x08, 0, 0, 0, 63, 0, 0, 63, 0, 0]);
+        bytes.extend_from_slice(&simple[12..]);
+        bytes.extend_from_slice(b"EXIF");
+        bytes.extend_from_slice(&4096u32.to_le_bytes());
+        bytes.extend_from_slice(&vec![0u8; 4096]);
+        let riff_size = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        bytes.truncate(bytes.len() - 2048);
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let source = ChunkedReader {
+            bytes,
+            position: 0,
+            consumed,
+        };
+        let mut previews = 0;
+        let result = decode_reader_with_previews_and_bytes(
+            source,
+            |width, height| assert_eq!((width, height), (64, 64)),
+            |_| previews += 1,
+        );
+        assert_eq!(previews, 1);
+        assert!(result.is_err());
     }
 
     #[test]

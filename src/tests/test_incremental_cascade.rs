@@ -8,14 +8,102 @@ use crate::html::parse_html;
 use std::collections::HashSet;
 
 #[test]
+fn hover_late_mixed_sibling_keeps_nth_of_type_position() {
+    let mut html = String::from(
+        "<html><head><style>span:nth-of-type(151):hover { color: red; }</style></head><body><div>",
+    );
+    for i in 0..300 {
+        html.push_str(&format!("<span id='item{i}'>item</span>"));
+        if i % 3 == 0 {
+            html.push_str("<em>other type</em>");
+        }
+    }
+    html.push_str("</div></body></html>");
+    let mut doc = parse_html(&html);
+    let empty = HashSet::new();
+    apply_cascade_vp_hover(
+        &mut doc.root,
+        &doc.stylesheet,
+        None,
+        16.0,
+        800.0,
+        600.0,
+        0,
+        false,
+        &empty,
+    );
+    clear_cascade_dirty(&mut doc.root);
+
+    let target = doc.get_element_by_id("item150").unwrap();
+    let hovered = build_hover_chain(&doc.root, target);
+    mark_hover_dirty(
+        &mut doc.root,
+        &doc.stylesheet,
+        &empty,
+        &hovered,
+        false,
+        &empty,
+    );
+    apply_cascade_incremental(
+        &mut doc.root,
+        &doc.stylesheet,
+        None,
+        16.0,
+        800.0,
+        600.0,
+        0,
+        false,
+        &hovered,
+    );
+    clear_cascade_dirty(&mut doc.root);
+    assert_eq!(
+        by_id(&doc.root, "item150").unwrap().style.color,
+        crate::types::Color::rgb(255, 0, 0)
+    );
+    assert_ne!(
+        by_id(&doc.root, "item149").unwrap().style.color,
+        crate::types::Color::rgb(255, 0, 0)
+    );
+
+    mark_hover_dirty(
+        &mut doc.root,
+        &doc.stylesheet,
+        &hovered,
+        &empty,
+        false,
+        &empty,
+    );
+    apply_cascade_incremental(
+        &mut doc.root,
+        &doc.stylesheet,
+        None,
+        16.0,
+        800.0,
+        600.0,
+        0,
+        false,
+        &empty,
+    );
+    assert_ne!(
+        by_id(&doc.root, "item150").unwrap().style.color,
+        crate::types::Color::rgb(255, 0, 0)
+    );
+}
+
+#[test]
 fn hover_recascade_unwraps_anonymous_table_ancestors() {
     use crate::types::Display;
 
-    fn by_id_mut<'a>(node: &'a mut crate::types::WebCore, id: &str) -> Option<&'a mut crate::types::WebCore> {
+    fn by_id_mut<'a>(
+        node: &'a mut crate::types::WebCore,
+        id: &str,
+    ) -> Option<&'a mut crate::types::WebCore> {
         if node.attributes.get("id").is_some_and(|value| value == id) {
             return Some(node);
         }
-        node.children.iter_mut().find_map(|child| by_id_mut(child, id))
+        node.children
+            .iter_mut()
+            .find_map(|child| by_id_mut(child, id))
     }
 
     let html = r#"<html><head><style>
@@ -25,7 +113,17 @@ fn hover_recascade_unwraps_anonymous_table_ancestors() {
     </style></head><body><nav><ul id="menu"><li id="one">One</li><li id="two">Two</li><li id="three">Three</li></ul></nav></body></html>"#;
     let mut doc = parse_html(html);
     let empty = HashSet::new();
-    apply_cascade_vp_hover(&mut doc.root, &doc.stylesheet, None, 16.0, 800.0, 600.0, 0, false, &empty);
+    apply_cascade_vp_hover(
+        &mut doc.root,
+        &doc.stylesheet,
+        None,
+        16.0,
+        800.0,
+        600.0,
+        0,
+        false,
+        &empty,
+    );
     clear_cascade_dirty(&mut doc.root);
 
     // Reproduce the table fixup left in the tree by a layout pass.
@@ -42,17 +140,59 @@ fn hover_recascade_unwraps_anonymous_table_ancestors() {
 
     let one_id = doc.get_element_by_id("one").unwrap();
     let hovered = build_hover_chain(&doc.root, one_id);
-    mark_hover_dirty(&mut doc.root, &doc.stylesheet, &empty, &hovered, false, &HashSet::new());
-    apply_cascade_incremental(&mut doc.root, &doc.stylesheet, None, 16.0, 800.0, 600.0, 0, false, &hovered);
+    mark_hover_dirty(
+        &mut doc.root,
+        &doc.stylesheet,
+        &empty,
+        &hovered,
+        false,
+        &HashSet::new(),
+    );
+    apply_cascade_incremental(
+        &mut doc.root,
+        &doc.stylesheet,
+        None,
+        16.0,
+        800.0,
+        600.0,
+        0,
+        false,
+        &hovered,
+    );
     clear_cascade_dirty(&mut doc.root);
     let menu = by_id(&doc.root, "menu").unwrap();
     assert!(menu.children.iter().all(|child| child.tag == "li"));
-    assert!(menu.children.iter().all(|child| child.style.display == Display::TableCell));
+    assert!(
+        menu.children
+            .iter()
+            .all(|child| child.style.display == Display::TableCell)
+    );
 
-    mark_hover_dirty(&mut doc.root, &doc.stylesheet, &hovered, &empty, false, &HashSet::new());
-    apply_cascade_incremental(&mut doc.root, &doc.stylesheet, None, 16.0, 800.0, 600.0, 0, false, &empty);
+    mark_hover_dirty(
+        &mut doc.root,
+        &doc.stylesheet,
+        &hovered,
+        &empty,
+        false,
+        &HashSet::new(),
+    );
+    apply_cascade_incremental(
+        &mut doc.root,
+        &doc.stylesheet,
+        None,
+        16.0,
+        800.0,
+        600.0,
+        0,
+        false,
+        &empty,
+    );
     let menu = by_id(&doc.root, "menu").unwrap();
-    assert!(menu.children.iter().all(|child| child.style.display == Display::TableCell));
+    assert!(
+        menu.children
+            .iter()
+            .all(|child| child.style.display == Display::TableCell)
+    );
 }
 
 /// Generate a large HTML document with N elements for benchmarking.

@@ -191,7 +191,7 @@ fn parse_env_color(inner: &str) -> Option<Color> {
     parse_color(args.get(1)?.trim())
 }
 
-fn is_zero_env_length(name: &str) -> bool {
+pub(crate) fn is_zero_env_length(name: &str) -> bool {
     matches!(
         name,
         "safe-area-inset-top"
@@ -1026,7 +1026,11 @@ fn parse_alpha(s: &str) -> u8 {
 /// A hue in degrees, accepting the angle units CSS Values 4 §7.1 defines.
 fn parse_hue_deg(s: &str) -> f32 {
     let s = s.trim().to_ascii_lowercase();
-    if let Some(value) = super::calc::parse_math_angle_deg(&s).or_else(|| super::calc::parse_calc_number(&s)) { return value; }
+    if let Some(value) =
+        super::calc::parse_math_angle_deg(&s).or_else(|| super::calc::parse_calc_number(&s))
+    {
+        return value;
+    }
     if let Some(v) = s.strip_suffix("turn") {
         return v.parse::<f32>().unwrap_or(0.0) * 360.0;
     }

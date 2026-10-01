@@ -2,8 +2,8 @@
 //!
 //! Each case is a fragment of markup and the DOM a browser builds from it. The
 //! expectations were generated from `Chrome --headless --dump-dom` by
-//! `/tmp/webcore-html/gen/gen.py`, so they are the real answer rather than what
-//! this parser happens to do; regenerate them the same way when adding cases.
+//! `/tmp/webcore-html/gen/gen.py`; the `<noscript>` case below also records
+//! the scripting-disabled tree used by webcore's default parser.
 //!
 //! The comparison is a CANONICAL TREE: one line per node, two spaces of indent
 //! per level, `tag[attr=value,…]` with attributes sorted, `"text"` for a text
@@ -1355,6 +1355,7 @@ first</textarea>",
       p
         \"real\"",
     ),
+    // `parse_html` does not execute scripts, so body noscript is parsed markup.
     (
         "<div><noscript><p>fallback</p></noscript></div>",
         "html
@@ -1362,7 +1363,8 @@ first</textarea>",
   body
     div
       noscript
-        \"<p>fallback</p>\"",
+        p
+          \"fallback\"",
     ),
     (
         "<iframe><p>x</p></iframe>",
@@ -2259,6 +2261,22 @@ fn tree_construction_matches_a_browser() {
         failed.len(),
         CASES.len(),
         failed.join("\n")
+    );
+}
+
+#[test]
+fn handled_noscript_keeps_the_scripting_enabled_raw_text_tree() {
+    let doc = parse_html_with_scripts(
+        "<div><noscript><p>fallback</p></noscript></div>",
+        "",
+        |_, _| {},
+        |tag, _, _| tag == "noscript",
+    );
+    let mut got = String::new();
+    canon_into(&doc.root, 0, &mut got);
+    assert_eq!(
+        got.trim_end(),
+        "html\n  head\n  body\n    div\n      noscript\n        \"<p>fallback</p>\""
     );
 }
 

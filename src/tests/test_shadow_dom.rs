@@ -266,7 +266,10 @@ fn inline_shadow_host_lays_out_its_inline_children() {
         first.layout.border_rect,
         first.style.display
     );
-    assert!(second.layout.border_rect.w > 0.0, "second shadow button has no box");
+    assert!(
+        second.layout.border_rect.w > 0.0,
+        "second shadow button has no box"
+    );
     assert!(
         first.layout.border_rect.y >= before.layout.border_rect.bottom(),
         "shadow controls overlap preceding paragraph"
@@ -493,16 +496,16 @@ fn host_context_slot_rules_style_projected_light_dom() {
         let mut node = WebCore::new("div");
         node.attributes
             .insert("slot".to_string(), "dropdown".to_string());
-	        let host = AncestorInfo {
-	            tag: "x-menu".to_string(),
-	            attributes: Default::default(),
-	            child_index: 0,
-	            sibling_count: 1,
-	            type_child_index: 0,
-	            type_sibling_count: 1,
-	            node_id: 77,
-	            prev_siblings: Vec::new(),
-	        };
+        let host = AncestorInfo {
+            tag: "x-menu".to_string(),
+            attributes: Default::default(),
+            child_index: 0,
+            sibling_count: 1,
+            type_child_index: 0,
+            type_sibling_count: 1,
+            node_id: 77,
+            prev_siblings: Vec::new().into(),
+        };
         let empty = HashSet::new();
         let ctx = MatchContext {
             focused_box: 0,
@@ -720,26 +723,26 @@ fn host_not_selector_matches_shadow_slot_descendant() {
         .insert("name".to_string(), "dropdown".to_string());
     let host = WebCore::new("x-menu");
     let ancestors = vec![
-	        AncestorInfo {
-	            tag: "x-theme".to_string(),
-	            attributes: Default::default(),
-	            child_index: 0,
-	            sibling_count: 1,
-	            type_child_index: 0,
-	            type_sibling_count: 1,
-	            node_id: 1,
-	            prev_siblings: Vec::new(),
-	        },
-	        AncestorInfo {
-	            tag: host.tag.clone(),
-	            attributes: host.attributes.clone(),
-	            child_index: 0,
-	            sibling_count: 1,
-	            type_child_index: 0,
-	            type_sibling_count: 1,
-	            node_id: host.node_id,
-	            prev_siblings: Vec::new(),
-	        },
+        AncestorInfo {
+            tag: "x-theme".to_string(),
+            attributes: Default::default(),
+            child_index: 0,
+            sibling_count: 1,
+            type_child_index: 0,
+            type_sibling_count: 1,
+            node_id: 1,
+            prev_siblings: Vec::new().into(),
+        },
+        AncestorInfo {
+            tag: host.tag.clone(),
+            attributes: host.attributes.clone().into(),
+            child_index: 0,
+            sibling_count: 1,
+            type_child_index: 0,
+            type_sibling_count: 1,
+            node_id: host.node_id,
+            prev_siblings: Vec::new().into(),
+        },
     ];
     let empty = HashSet::new();
     let ctx = MatchContext {

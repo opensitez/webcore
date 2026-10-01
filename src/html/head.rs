@@ -64,10 +64,38 @@ pub(crate) fn handle_head_tag(
             } else {
                 String::new()
             };
-            if let Some(ref mut f) = parser.on_script {
-                f(tag, &attrs, &content);
+            let handled = parser
+                .on_script
+                .as_mut()
+                .is_some_and(|f| f(tag, &attrs, &content));
+            if tag == "noscript" {
+                let mut node = parser.new_box(tag);
+                node.attributes = attrs;
+                if handled {
+                    node.text = content;
+                } else {
+                    let outer_tokens = std::mem::replace(&mut parser.tokens, tokenize(&content));
+                    let outer_pos = std::mem::replace(&mut parser.pos, 0);
+                    while let Some(token) = parser.tokens.get(parser.pos).cloned() {
+                        parser.pos += 1;
+                        if let Token::OpenTag {
+                            tag,
+                            attrs,
+                            self_closing,
+                        } = token
+                        {
+                            if matches!(tag.as_str(), "style" | "link" | "meta") {
+                                let start = parser.head_children.len();
+                                handle_head_tag(parser, &tag, attrs, self_closing);
+                                node.children.extend(parser.head_children.drain(start..));
+                            }
+                        }
+                    }
+                    parser.tokens = outer_tokens;
+                    parser.pos = outer_pos;
+                }
+                parser.head_children.push(node);
             }
-            // In <head>, noscript fallback content is not rendered.
         }
         "style" => {
             parser.fire_hook(tag, &attrs);
@@ -78,7 +106,10 @@ pub(crate) fn handle_head_tag(
             }
             parser
                 .document_stylesheets
-                .push(DocumentStylesheet::Inline { css: css.clone().into(), media });
+                .push(DocumentStylesheet::Inline {
+                    css: css.clone().into(),
+                    media,
+                });
             parser.push_head_node("style", attrs, css);
         }
         "title" => {

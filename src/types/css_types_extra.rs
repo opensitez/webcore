@@ -29,6 +29,21 @@ pub enum Resize {
     Both,
     Horizontal,
     Vertical,
+    Block,
+    Inline,
+}
+impl Resize {
+    pub fn axes(self, writing_mode: WritingMode) -> (bool, bool) {
+        let vertical_writing = writing_mode != WritingMode::HorizontalTB;
+        match self {
+            Self::None => (false, false),
+            Self::Both => (true, true),
+            Self::Horizontal => (true, false),
+            Self::Vertical => (false, true),
+            Self::Block => (vertical_writing, !vertical_writing),
+            Self::Inline => (!vertical_writing, vertical_writing),
+        }
+    }
 }
 impl Default for Resize {
     fn default() -> Self {
@@ -113,30 +128,62 @@ impl ScrollSnapType {
             mandatory: false,
         }
     }
-    pub fn snaps_y(self) -> bool {
-        matches!(
-            self.axis,
-            ScrollSnapAxis::Y | ScrollSnapAxis::Both | ScrollSnapAxis::Block
-        )
+    pub fn snaps_y(self, writing_mode: WritingMode) -> bool {
+        let vertical = !matches!(writing_mode, WritingMode::HorizontalTB);
+        matches!(self.axis, ScrollSnapAxis::Y | ScrollSnapAxis::Both)
+            || matches!(self.axis, ScrollSnapAxis::Block) && !vertical
+            || matches!(self.axis, ScrollSnapAxis::Inline) && vertical
     }
-    pub fn snaps_x(self) -> bool {
-        matches!(
-            self.axis,
-            ScrollSnapAxis::X | ScrollSnapAxis::Both | ScrollSnapAxis::Inline
-        )
+    pub fn snaps_x(self, writing_mode: WritingMode) -> bool {
+        let vertical = !matches!(writing_mode, WritingMode::HorizontalTB);
+        matches!(self.axis, ScrollSnapAxis::X | ScrollSnapAxis::Both)
+            || matches!(self.axis, ScrollSnapAxis::Block) && vertical
+            || matches!(self.axis, ScrollSnapAxis::Inline) && !vertical
     }
     pub fn is_enabled(self) -> bool {
         self.axis != ScrollSnapAxis::None
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
-pub enum ScrollSnapAlign {
-    #[default]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct ScrollSnapAlign(u8);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ScrollSnapAlignValue {
     None,
     Start,
     End,
     Center,
+}
+
+#[allow(non_upper_case_globals)]
+impl ScrollSnapAlign {
+    pub const None: Self = Self::two(ScrollSnapAlignValue::None, ScrollSnapAlignValue::None);
+    pub const Start: Self = Self::two(ScrollSnapAlignValue::Start, ScrollSnapAlignValue::Start);
+    pub const End: Self = Self::two(ScrollSnapAlignValue::End, ScrollSnapAlignValue::End);
+    pub const Center: Self = Self::two(ScrollSnapAlignValue::Center, ScrollSnapAlignValue::Center);
+
+    pub const fn two(block: ScrollSnapAlignValue, inline: ScrollSnapAlignValue) -> Self {
+        Self((block as u8) | ((inline as u8) << 2))
+    }
+
+    fn value(bits: u8) -> ScrollSnapAlignValue {
+        match bits & 3 {
+            1 => ScrollSnapAlignValue::Start,
+            2 => ScrollSnapAlignValue::End,
+            3 => ScrollSnapAlignValue::Center,
+            _ => ScrollSnapAlignValue::None,
+        }
+    }
+
+    pub fn block(self) -> ScrollSnapAlignValue {
+        Self::value(self.0)
+    }
+
+    pub fn inline(self) -> ScrollSnapAlignValue {
+        Self::value(self.0 >> 2)
+    }
 }
 
 /// Controls scroll chaining when a scroll container reaches its boundary.
@@ -347,29 +394,263 @@ impl Default for ContainerType {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ClipPath {
     pub kind: ClipPathKind,
+    pub reference_box: ClipPathBox,
     // inset(top right bottom left)
     pub inset_top: CssLength,
     pub inset_right: CssLength,
     pub inset_bottom: CssLength,
     pub inset_left: CssLength,
     // circle(r at cx cy) / ellipse(rx ry at cx cy)
-    pub circle_radius: CssLength,
-    pub ellipse_rx: CssLength,
-    pub ellipse_ry: CssLength,
+    pub circle_radius: ShapeRadius,
+    pub ellipse_rx: ShapeRadius,
+    pub ellipse_ry: ShapeRadius,
     pub center_x: CssLength,
     pub center_y: CssLength,
     // polygon points
     pub points: Vec<(CssLength, CssLength)>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum ShapeRadius {
+    #[default]
+    ClosestSide,
+    FarthestSide,
+    ClosestCorner,
+    FarthestCorner,
+    Length(CssLength),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum ClipPathBox {
+    Margin,
+    #[default]
+    Border,
+    Padding,
+    Content,
+}
+
+impl ClipPath {
+    pub fn circle_rect(&self, reference: Rect, font_px: f32, root_font_px: f32) -> Rect {
+        let cx = self.center_x.resolve(font_px, reference.w, root_font_px);
+        let cy = self.center_y.resolve(font_px, reference.h, root_font_px);
+        let near_x = cx.abs().min((reference.w - cx).abs());
+        let far_x = cx.abs().max((reference.w - cx).abs());
+        let near_y = cy.abs().min((reference.h - cy).abs());
+        let far_y = cy.abs().max((reference.h - cy).abs());
+        let r = match &self.circle_radius {
+            ShapeRadius::ClosestSide => near_x.min(near_y),
+            ShapeRadius::FarthestSide => far_x.max(far_y),
+            ShapeRadius::ClosestCorner => near_x.hypot(near_y),
+            ShapeRadius::FarthestCorner => far_x.hypot(far_y),
+            ShapeRadius::Length(length) => length.resolve(
+                font_px,
+                reference.w.hypot(reference.h) / std::f32::consts::SQRT_2,
+                root_font_px,
+            ),
+        }
+        .max(0.0);
+        Rect::new(reference.x + cx - r, reference.y + cy - r, 2.0 * r, 2.0 * r)
+    }
+
+    pub fn ellipse_rect(&self, reference: Rect, font_px: f32, root_font_px: f32) -> Rect {
+        let cx = self.center_x.resolve(font_px, reference.w, root_font_px);
+        let cy = self.center_y.resolve(font_px, reference.h, root_font_px);
+        let near_x = cx.abs().min((reference.w - cx).abs());
+        let far_x = cx.abs().max((reference.w - cx).abs());
+        let near_y = cy.abs().min((reference.h - cy).abs());
+        let far_y = cy.abs().max((reference.h - cy).abs());
+        let (rx, ry) = match (&self.ellipse_rx, &self.ellipse_ry) {
+            (ShapeRadius::ClosestSide, ShapeRadius::ClosestSide) => (near_x, near_y),
+            (ShapeRadius::FarthestSide, ShapeRadius::FarthestSide) => (far_x, far_y),
+            (ShapeRadius::ClosestCorner, ShapeRadius::ClosestCorner)
+            | (ShapeRadius::FarthestCorner, ShapeRadius::FarthestCorner) => {
+                let farthest = matches!(self.ellipse_rx, ShapeRadius::FarthestCorner);
+                let (side_x, side_y) = if farthest {
+                    (far_x, far_y)
+                } else {
+                    (near_x, near_y)
+                };
+                let scale = match (side_x > 0.0, side_y > 0.0) {
+                    (true, true) => std::f32::consts::SQRT_2,
+                    (false, false) => 0.0,
+                    _ => 1.0,
+                };
+                (side_x * scale, side_y * scale)
+            }
+            (ShapeRadius::Length(rx), ShapeRadius::Length(ry)) => (
+                rx.resolve(font_px, reference.w, root_font_px).max(0.0),
+                ry.resolve(font_px, reference.h, root_font_px).max(0.0),
+            ),
+            _ => (0.0, 0.0),
+        };
+        Rect::new(
+            reference.x + cx - rx,
+            reference.y + cy - ry,
+            2.0 * rx,
+            2.0 * ry,
+        )
+    }
+
+    pub fn inset_rect(&self, reference: Rect, font_px: f32, root_font_px: f32) -> Rect {
+        let mut top = self.inset_top.resolve(font_px, reference.h, root_font_px);
+        let mut right = self.inset_right.resolve(font_px, reference.w, root_font_px);
+        let mut bottom = self
+            .inset_bottom
+            .resolve(font_px, reference.h, root_font_px);
+        let mut left = self.inset_left.resolve(font_px, reference.w, root_font_px);
+        if top + bottom > reference.h && top + bottom > 0.0 {
+            let scale = reference.h.max(0.0) / (top + bottom);
+            top *= scale;
+            bottom *= scale;
+        }
+        if left + right > reference.w && left + right > 0.0 {
+            let scale = reference.w.max(0.0) / (left + right);
+            left *= scale;
+            right *= scale;
+        }
+        Rect::new(
+            reference.x + left,
+            reference.y + top,
+            (reference.w - left - right).max(0.0),
+            (reference.h - top - bottom).max(0.0),
+        )
+    }
+
+    pub fn inset_round_radii(
+        &self,
+        style: &ComputedStyle,
+        rect: Rect,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> ([f32; 4], [f32; 4]) {
+        let Some((horizontal, vertical)) = style
+            .rare
+            .as_ref()
+            .and_then(|rare| rare.clip_path_inset_round.as_ref())
+        else {
+            return ([0.0; 4], [0.0; 4]);
+        };
+        reduce_shape_box_radii(
+            rect.w,
+            rect.h,
+            horizontal
+                .clone()
+                .map(|length| length.resolve(font_px, rect.w, root_font_px)),
+            vertical
+                .clone()
+                .map(|length| length.resolve(font_px, rect.h, root_font_px)),
+        )
+    }
+
+    pub fn reference_rect(&self, layout: &LayoutBox) -> Rect {
+        match self.reference_box {
+            ClipPathBox::Margin => layout.margin_rect,
+            ClipPathBox::Border => layout.border_rect,
+            ClipPathBox::Padding => layout.padding_rect,
+            ClipPathBox::Content => layout.content_rect,
+        }
+    }
+
+    pub fn reference_box_radii(
+        &self,
+        style: &ComputedStyle,
+        layout: &LayoutBox,
+        root_font_px: f32,
+    ) -> ([f32; 4], [f32; 4]) {
+        let border = layout.border_rect;
+        let target = self.reference_rect(layout);
+        let font_px = style.font_size_px(root_font_px, root_font_px);
+        let mut rx = [
+            style
+                .border_top_left_radius
+                .resolve(font_px, border.w, root_font_px),
+            style
+                .border_top_right_radius
+                .resolve(font_px, border.w, root_font_px),
+            style
+                .border_bottom_right_radius
+                .resolve(font_px, border.w, root_font_px),
+            style
+                .border_bottom_left_radius
+                .resolve(font_px, border.w, root_font_px),
+        ];
+        let mut ry = [
+            style
+                .border_top_left_radius_y
+                .resolve(font_px, border.h, root_font_px),
+            style
+                .border_top_right_radius_y
+                .resolve(font_px, border.h, root_font_px),
+            style
+                .border_bottom_right_radius_y
+                .resolve(font_px, border.h, root_font_px),
+            style
+                .border_bottom_left_radius_y
+                .resolve(font_px, border.h, root_font_px),
+        ];
+        (rx, ry) = reduce_shape_box_radii(border.w, border.h, rx, ry);
+        let left = border.x - target.x;
+        let right = target.x + target.w - border.x - border.w;
+        let top = border.y - target.y;
+        let bottom = target.y + target.h - border.y - border.h;
+        for (corner, dx, dy) in [
+            (0, left, top),
+            (1, right, top),
+            (2, right, bottom),
+            (3, left, bottom),
+        ] {
+            let coverage =
+                2.0 * (rx[corner] / border.w.max(1.0)).min(ry[corner] / border.h.max(1.0));
+            rx[corner] = adjusted_shape_box_radius(rx[corner], dx, coverage);
+            ry[corner] = adjusted_shape_box_radius(ry[corner], dy, coverage);
+        }
+        reduce_shape_box_radii(target.w, target.h, rx, ry)
+    }
+}
+
+fn adjusted_shape_box_radius(radius: f32, outset: f32, coverage: f32) -> f32 {
+    if outset <= 0.0 || radius >= outset || coverage >= 1.0 {
+        return (radius + outset).max(0.0);
+    }
+    let ratio = radius / outset;
+    (radius + outset * (1.0 - (1.0 - ratio).powi(3) * (1.0 - coverage.powi(3)))).max(0.0)
+}
+
+pub(crate) fn reduce_shape_box_radii(
+    width: f32,
+    height: f32,
+    mut rx: [f32; 4],
+    mut ry: [f32; 4],
+) -> ([f32; 4], [f32; 4]) {
+    if width <= 0.0 || height <= 0.0 {
+        return ([0.0; 4], [0.0; 4]);
+    }
+    let mut scale = 1.0_f32;
+    for (sum, side) in [
+        (rx[0] + rx[1], width),
+        (rx[3] + rx[2], width),
+        (ry[0] + ry[3], height),
+        (ry[1] + ry[2], height),
+    ] {
+        if sum > side {
+            scale = scale.min(side / sum);
+        }
+    }
+    rx = rx.map(|radius| radius.max(0.0) * scale);
+    ry = ry.map(|radius| radius.max(0.0) * scale);
+    (rx, ry)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum ClipPathKind {
     #[default]
     None,
+    Box,
     Inset,
     Circle,
     Ellipse,
     Polygon,
+    Path,
 }
 
 impl ComputedStyle {

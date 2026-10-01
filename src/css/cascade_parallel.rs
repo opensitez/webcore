@@ -39,6 +39,12 @@ struct MatchNode<'a>(&'a crate::types::WebCore);
 unsafe impl Send for MatchNode<'_> {}
 unsafe impl Sync for MatchNode<'_> {}
 
+/// Shared sibling references for selector matching. The same read-only DOM
+/// borrow invariant as `MatchNode` applies to the references in this list.
+struct MatchSiblingNodes<'a>(Vec<&'a crate::types::WebCore>);
+unsafe impl Send for MatchSiblingNodes<'_> {}
+unsafe impl Sync for MatchSiblingNodes<'_> {}
+
 /// One element to match, with everything the matcher needs about its position.
 ///
 /// It borrows the node so the matcher can be handed a real `html_box`: `:has()`,
@@ -58,7 +64,7 @@ struct CascadeWorkItem<'a> {
     /// is what `+` and `~` look at.
     siblings: std::sync::Arc<Vec<SiblingInfo>>,
     sibling_pos: usize,
-    sibling_nodes: std::sync::Arc<Vec<MatchNode<'a>>>,
+    sibling_nodes: std::sync::Arc<MatchSiblingNodes<'a>>,
     raw_child_index: usize,
 }
 
@@ -74,7 +80,7 @@ fn flatten_tree_for_cascade<'a>(
     type_sibling_count: usize,
     siblings: &std::sync::Arc<Vec<SiblingInfo>>,
     sibling_pos: usize,
-    sibling_nodes: &std::sync::Arc<Vec<MatchNode<'a>>>,
+    sibling_nodes: &std::sync::Arc<MatchSiblingNodes<'a>>,
     raw_child_index: usize,
     out: &mut Vec<CascadeWorkItem<'a>>,
 ) {
@@ -103,16 +109,16 @@ fn flatten_tree_for_cascade<'a>(
         });
     }
 
-	    ancestors.push(AncestorInfo {
-	        tag: node.tag.clone(),
-	        attributes: node.attributes.clone(),
-	        child_index,
-	        sibling_count,
-	        type_child_index,
-	        type_sibling_count,
-	        node_id: node.node_id,
-	        prev_siblings: siblings[..sibling_pos].to_vec(),
-	    });
+    ancestors.push(AncestorInfo {
+        tag: node.tag.clone(),
+        attributes: std::sync::Arc::new(node.attributes.clone()),
+        child_index,
+        sibling_count,
+        type_child_index,
+        type_sibling_count,
+        node_id: node.node_id,
+        prev_siblings: std::sync::Arc::new(siblings[..sibling_pos].to_vec()),
+    });
     ancestor_nodes.push(MatchNode(node));
 
     let n_children = node.children.len();
@@ -160,8 +166,7 @@ fn flatten_tree_for_cascade<'a>(
                 .map(SiblingInfo::from_node)
                 .collect::<Vec<_>>(),
         );
-        let child_nodes =
-            std::sync::Arc::new(node.children.iter().map(MatchNode).collect::<Vec<_>>());
+        let child_nodes = std::sync::Arc::new(MatchSiblingNodes(node.children.iter().collect()));
         for (i, child) in node.children.iter().enumerate() {
             let (ci, ns) = if !child.is_element() {
                 (i, n_children)
@@ -211,71 +216,18 @@ pub fn apply_cascade_parallel(
 ) {
     // The work items borrow `root`, so passes 1 and 2 are scoped: the immutable
     // borrow has to end before pass 3 takes the tree mutably.
-    let match_map: MatchMap = {
-        let flatten_started = std::time::Instant::now();
-        let mut work_items: Vec<CascadeWorkItem> = Vec::new();
-        let mut ancestors: Vec<AncestorInfo> = Vec::new();
-        let mut ancestor_nodes = Vec::new();
-        let no_siblings = std::sync::Arc::new(Vec::new());
-        let no_sibling_nodes = std::sync::Arc::new(Vec::new());
-        flatten_tree_for_cascade(
-            root,
-            &mut ancestors,
-            &mut ancestor_nodes,
-            0,
-            1,
-            0,
-            1,
-            &no_siblings,
-            0,
-            &no_sibling_nodes,
-            0,
-            &mut work_items,
-        );
-        crate::profile::record(crate::profile::Phase::CascadeFlatten, flatten_started.elapsed());
-
-        let match_started = std::time::Instant::now();
-        let matches = work_items
-            .par_iter()
-            .map(|item| {
-                let mut candidates_buf: Vec<usize> = Vec::new();
-                let next_nodes: Vec<&crate::types::WebCore> =
-                    if item.raw_child_index + 1 < item.sibling_nodes.len() {
-                        item.sibling_nodes[item.raw_child_index + 1..]
-                            .iter()
-                            .map(|m| m.0)
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                let sets = match_rules(
-                    item.node.0,
-                    stylesheet,
-                    &item.ancestors,
-                    &item.ancestor_nodes.iter().map(|node| node.0).collect::<Vec<_>>(),
-                    item.child_index,
-                    item.sibling_count,
-                    item.type_child_index,
-                    item.type_sibling_count,
-                    vw,
-                    vh,
-                    focused_box,
-                    keyboard_focus,
-                    hover_chain,
-                    focus_within_chain,
-                    target_id,
-                    document_url,
-                    &item.siblings[..item.sibling_pos],
-                    &item.siblings[item.sibling_pos.saturating_add(1).min(item.siblings.len())..],
-                    &next_nodes,
-                    &mut candidates_buf,
-                );
-                (item.node.0.node_id, sets)
-            })
-            .collect();
-        crate::profile::record(crate::profile::Phase::CascadeMatch, match_started.elapsed());
-        matches
-    };
+    let mut match_map = match_tree_with_ancestor_nodes(
+        root,
+        stylesheet,
+        vw,
+        vh,
+        focused_box,
+        keyboard_focus,
+        hover_chain,
+        focus_within_chain,
+        target_id,
+        document_url,
+    );
 
     let apply_started = std::time::Instant::now();
     let mut ancestors: Vec<AncestorInfo> = Vec::new();
@@ -307,8 +259,221 @@ pub fn apply_cascade_parallel(
         &[],
         &[],
         &mut share_cache,
-        Some(&match_map),
+        Some(&mut match_map),
     );
-    crate::css::cascade::resolve_document_generated_content(root, stylesheet);
     crate::profile::record(crate::profile::Phase::CascadeApply, apply_started.elapsed());
+    crate::css::cascade::resolve_document_generated_content(root, stylesheet);
+}
+
+pub(crate) fn match_tree_with_ancestor_nodes(
+    root: &crate::types::WebCore,
+    stylesheet: &Stylesheet,
+    vw: f32,
+    vh: f32,
+    focused_box: u32,
+    keyboard_focus: bool,
+    hover_chain: &std::collections::HashSet<u32>,
+    focus_within_chain: &std::collections::HashSet<u32>,
+    target_id: u32,
+    document_url: &str,
+) -> MatchMap {
+    match_tree_with_ancestor_nodes_filtered(
+        root,
+        stylesheet,
+        vw,
+        vh,
+        focused_box,
+        keyboard_focus,
+        hover_chain,
+        focus_within_chain,
+        target_id,
+        document_url,
+        None,
+    )
+}
+
+pub(crate) fn match_tree_with_ancestor_nodes_filtered(
+    root: &crate::types::WebCore,
+    stylesheet: &Stylesheet,
+    vw: f32,
+    vh: f32,
+    focused_box: u32,
+    keyboard_focus: bool,
+    hover_chain: &std::collections::HashSet<u32>,
+    focus_within_chain: &std::collections::HashSet<u32>,
+    target_id: u32,
+    document_url: &str,
+    match_nodes: Option<&std::collections::HashSet<u32>>,
+) -> MatchMap {
+    let flatten_started = std::time::Instant::now();
+    let mut work_items: Vec<CascadeWorkItem> = Vec::new();
+    let mut ancestors: Vec<AncestorInfo> = Vec::new();
+    let mut ancestor_nodes = Vec::new();
+    let no_siblings = std::sync::Arc::new(Vec::new());
+    let no_sibling_nodes = std::sync::Arc::new(MatchSiblingNodes(Vec::new()));
+    flatten_tree_for_cascade(
+        root,
+        &mut ancestors,
+        &mut ancestor_nodes,
+        0,
+        1,
+        0,
+        1,
+        &no_siblings,
+        0,
+        &no_sibling_nodes,
+        0,
+        &mut work_items,
+    );
+    crate::profile::record(
+        crate::profile::Phase::CascadeFlatten,
+        flatten_started.elapsed(),
+    );
+
+    let mut media_cache = HashMap::new();
+    let media_matches: Vec<bool> = stylesheet
+        .rules
+        .iter()
+        .map(|rule| {
+            let condition = &rule.media_condition;
+            condition.is_empty()
+                || *media_cache
+                    .entry(condition)
+                    .or_insert_with(|| condition.matches(vw, vh))
+        })
+        .collect();
+    let match_started = std::time::Instant::now();
+    let matches = work_items
+        .par_iter()
+        .filter(|item| match_nodes.is_none_or(|ids| ids.contains(&item.node.0.node_id)))
+        .map(|item| {
+            let mut candidates_buf: Vec<usize> = Vec::new();
+            let next_nodes = item
+                .sibling_nodes
+                .0
+                .get(item.raw_child_index + 1..)
+                .unwrap_or(&[]);
+            let sets = match_rules(
+                item.node.0,
+                stylesheet,
+                &item.ancestors,
+                &item
+                    .ancestor_nodes
+                    .iter()
+                    .map(|node| node.0)
+                    .collect::<Vec<_>>(),
+                item.child_index,
+                item.sibling_count,
+                item.type_child_index,
+                item.type_sibling_count,
+                vw,
+                vh,
+                focused_box,
+                keyboard_focus,
+                hover_chain,
+                focus_within_chain,
+                target_id,
+                document_url,
+                &item.siblings[..item.sibling_pos],
+                &item.siblings[item.sibling_pos.saturating_add(1).min(item.siblings.len())..],
+                next_nodes,
+                &mut candidates_buf,
+                Some(&media_matches),
+            );
+            (item.node.0.node_id, sets)
+        })
+        .collect();
+    crate::profile::record(crate::profile::Phase::CascadeMatch, match_started.elapsed());
+    matches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flattened_siblings_share_one_read_only_node_list() {
+        let doc = crate::parse_html(
+            "<div><span id='first'></span><span id='second'></span><span id='third'></span></div>",
+        );
+        let mut work_items = Vec::new();
+        flatten_tree_for_cascade(
+            &doc.root,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            0,
+            1,
+            0,
+            1,
+            &std::sync::Arc::new(Vec::new()),
+            0,
+            &std::sync::Arc::new(MatchSiblingNodes(Vec::new())),
+            0,
+            &mut work_items,
+        );
+        let find = |id| {
+            work_items
+                .iter()
+                .find(|item| {
+                    item.node
+                        .0
+                        .attributes
+                        .get("id")
+                        .is_some_and(|value| value == id)
+                })
+                .unwrap()
+        };
+        let first = find("first");
+        let second = find("second");
+        let third = find("third");
+        assert!(std::sync::Arc::ptr_eq(
+            &first.sibling_nodes,
+            &second.sibling_nodes
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &second.sibling_nodes,
+            &third.sibling_nodes
+        ));
+        assert_eq!(
+            first.sibling_nodes.0[first.raw_child_index + 1]
+                .attributes
+                .get("id")
+                .map(String::as_str),
+            Some("second"),
+        );
+    }
+
+    #[test]
+    fn parallel_media_matching_follows_each_viewport() {
+        let mut doc = crate::parse_html("<p class='target'>Text</p>");
+        let mut sheet = Stylesheet::default();
+        sheet.parse_and_add_author(
+            "@media (min-width: 600px) { .target { color: red } } \
+             @media (max-width: 599px) { .target { color: blue } }",
+        );
+        sheet.rebuild_index();
+        let empty = HashSet::new();
+        let mut apply = |width| {
+            apply_cascade_parallel(
+                &mut doc.root,
+                &sheet,
+                None,
+                16.0,
+                width,
+                600.0,
+                0,
+                false,
+                &empty,
+                &empty,
+                0,
+                "",
+            );
+            crate::dom::query_selector(&doc.root, ".target")
+                .unwrap()
+                .style
+                .color
+        };
+        assert_eq!(apply(800.0), Color::rgb(255, 0, 0));
+        assert_eq!(apply(400.0), Color::rgb(0, 0, 255));
+    }
 }

@@ -4,6 +4,7 @@ pub mod flex;
 pub mod grid;
 pub mod inline_layout;
 pub mod perf;
+mod scroll_anchor;
 pub mod text;
 
 use std::collections::{HashMap, HashSet};
@@ -37,7 +38,9 @@ mod hover_geometry_tests {
             ("height:80px", true),
             ("color:red", true),
         ] {
-            let html = format!("<style>body{{margin:0}}#row{{position:relative;width:120px;height:40px}}#row:hover{{{declaration}}}@keyframes spin{{to{{transform:rotate(360deg)}}}}#spinner{{width:20px;height:20px;animation:spin 2s linear infinite}}</style><div id='row'>Message</div>Footer<div>End</div><div id='spinner'></div>");
+            let html = format!(
+                "<style>body{{margin:0}}#row{{position:relative;width:120px;height:40px}}#row:hover{{{declaration}}}@keyframes spin{{to{{transform:rotate(360deg)}}}}#spinner{{width:20px;height:20px;animation:spin 2s linear infinite}}</style><div id='row'>Message</div>Footer<div>End</div><div id='spinner'></div>"
+            );
             let mut doc = crate::html::parse_html(&html);
             let mut engine = LayoutEngine::new();
             engine.viewport_h = 300.0;
@@ -46,7 +49,11 @@ mod hover_geometry_tests {
             engine.layout_calls.set(0);
             doc.process_mouse_event(crate::dom::HtmlEventType::MouseMove, (10.0, 10.0), 0);
             engine.layout(&mut doc, 400.0);
-            assert_eq!(engine.layout_calls.get() > 0, requires_layout, "{declaration}");
+            assert_eq!(
+                engine.layout_calls.get() > 0,
+                requires_layout,
+                "{declaration}"
+            );
             assert!(!doc.has_dirty_layout());
         }
     }
@@ -76,10 +83,13 @@ impl HoverGeometrySnapshot {
         let mut entries = self.0.iter();
         let mut pending = vec![root];
         while let Some(node) = pending.pop() {
-            let Some(entry) = entries.next() else { return false };
+            let Some(entry) = entries.next() else {
+                return false;
+            };
             // Counter/generated-content replay can discard text layout even
             // when it ultimately restores identical computed style values.
-            if entry.node_id != node.node_id || entry.child_count != node.children.len()
+            if entry.node_id != node.node_id
+                || entry.child_count != node.children.len()
                 || entry.line_count != node.layout.line_cache.len()
                 || entry.run_count != node.layout.inline_runs.len()
                 || !node.style.reuses_geometry_from(&entry.style)
@@ -265,38 +275,42 @@ pub(crate) fn update_scroll_extents_from_children(
     content_w: f32,
     content_h: f32,
 ) {
-    if matches!(node.style.overflow_x, Overflow::Scroll | Overflow::Auto)
-        || matches!(node.style.overflow_y, Overflow::Scroll | Overflow::Auto)
+    let (natural_scroll_w, natural_scroll_h) = node
+        .children
+        .iter()
+        .filter(|child| {
+            !matches!(child.style.display, Display::None)
+                && !is_layout_inert_svg_node(child)
+                && (child.layout.margin_rect.w > 0.0 || child.layout.margin_rect.h > 0.0)
+        })
+        .fold((content_w, content_h), |(width, height), child| {
+            let own_right = child.layout.margin_rect.x + child.layout.margin_rect.w;
+            let overflow_right = if matches!(child.style.overflow_x, Overflow::Visible) {
+                child.layout.content_rect.x + child.layout.scroll_width
+            } else {
+                own_right
+            };
+            let own_bottom = child.layout.margin_rect.y + child.layout.margin_rect.h;
+            let overflow_bottom = if matches!(child.style.overflow_y, Overflow::Visible) {
+                child.layout.content_rect.y + child.layout.scroll_height
+            } else {
+                own_bottom
+            };
+            (
+                width.max(own_right.max(overflow_right) - content_x),
+                height.max(own_bottom.max(overflow_bottom) - content_y),
+            )
+        });
+    node.layout.scroll_width = natural_scroll_w;
+    node.layout.scroll_height = natural_scroll_h;
+    if matches!(node.style.overflow_x, Overflow::Scroll | Overflow::Auto | Overflow::Hidden)
+        || matches!(node.style.overflow_y, Overflow::Scroll | Overflow::Auto | Overflow::Hidden)
     {
-        let natural_scroll_w = node
-            .children
-            .iter()
-            .filter(|child| {
-                !matches!(child.style.display, Display::None)
-                    && !is_layout_inert_svg_node(child)
-                    && (child.layout.margin_rect.w > 0.0 || child.layout.margin_rect.h > 0.0)
-            })
-            .map(|child| child.layout.margin_rect.x + child.layout.margin_rect.w - content_x)
-            .fold(content_w, f32::max);
-        let natural_scroll_h = node
-            .children
-            .iter()
-            .filter(|child| {
-                !matches!(child.style.display, Display::None)
-                    && !is_layout_inert_svg_node(child)
-                    && (child.layout.margin_rect.w > 0.0 || child.layout.margin_rect.h > 0.0)
-            })
-            .map(|child| child.layout.margin_rect.y + child.layout.margin_rect.h - content_y)
-            .fold(content_h, f32::max);
-        node.layout.scroll_width = natural_scroll_w;
-        node.layout.scroll_height = natural_scroll_h;
         let max_scroll_x = (node.layout.scroll_width - content_w).max(0.0);
         let max_scroll_y = (node.layout.scroll_height - content_h).max(0.0);
         node.layout.scroll_left = node.layout.scroll_left.min(max_scroll_x).max(0.0);
         node.layout.scroll_top = node.layout.scroll_top.min(max_scroll_y).max(0.0);
     } else {
-        node.layout.scroll_width = content_w;
-        node.layout.scroll_height = content_h;
         node.layout.scroll_left = 0.0;
         node.layout.scroll_top = 0.0;
     }
@@ -318,13 +332,415 @@ static REMOTE_FONT_BYTES_IN_FLIGHT: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<RemoteFontFetchState>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-fn cached_remote_font_bytes(url: &str, cache_dir: Option<&str>) -> Option<std::sync::Arc<Vec<u8>>> {
+struct DecodedFontEntry {
+    source: std::sync::Arc<Vec<u8>>,
+    sfnt: std::sync::Arc<Vec<u8>>,
+}
+
+struct PendingFontResult {
+    faces: Vec<crate::css::FontFaceDecl>,
+    url: String,
+    bytes: Option<std::sync::Arc<Vec<u8>>>,
+}
+
+#[derive(Default)]
+struct DecodedFontCache {
+    entries: std::collections::HashMap<u64, Vec<DecodedFontEntry>>,
+    bytes: usize,
+}
+
+static DECODED_FONT_CACHE: std::sync::LazyLock<std::sync::Mutex<DecodedFontCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(DecodedFontCache::default()));
+const DECODED_FONT_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+fn is_font_data(bytes: &[u8]) -> bool {
+    matches!(
+        bytes.get(..4),
+        Some(b"wOF2" | b"wOFF" | b"OTTO" | b"ttcf" | b"true" | b"typ1" | b"\0\x01\0\0")
+    ) || is_eot_data(bytes)
+}
+
+fn is_eot_data(bytes: &[u8]) -> bool {
+    crate::fonts::eot::parse_prefix(bytes)
+        .ok()
+        .flatten()
+        .is_some_and(|header| header.total_size == bytes.len())
+}
+
+fn has_eot_magic(bytes: &[u8]) -> bool {
+    bytes.get(34..36) == Some(&b"LP"[..])
+}
+
+#[cfg(test)]
+mod font_data_tests {
+    use super::is_font_data;
+    use base64::Engine;
+
+    fn uncompressed_eot(font: &[u8]) -> Vec<u8> {
+        let mut eot = vec![0; 82];
+        eot[8..12].copy_from_slice(&0x0001_0000u32.to_le_bytes());
+        eot[34..36].copy_from_slice(&0x504cu16.to_le_bytes());
+        for index in 0..4 {
+            eot.extend_from_slice(&0u16.to_le_bytes());
+            if index < 3 {
+                eot.extend_from_slice(&0u16.to_le_bytes());
+            }
+        }
+        let total_size = (eot.len() + font.len()) as u32;
+        eot[..4].copy_from_slice(&total_size.to_le_bytes());
+        eot[4..8].copy_from_slice(&(font.len() as u32).to_le_bytes());
+        eot.extend_from_slice(font);
+        eot
+    }
+
+    #[test]
+    fn eot_source_is_advertised_as_supported() {
+        let sources = crate::css::font_face::parse_font_face_sources(
+            "url(legacy.eot) format('embedded-opentype'), url(modern.woff2) format('woff2')",
+        );
+        assert!(super::font_source_formats_supported(&sources[0]));
+        assert!(super::font_source_formats_supported(&sources[1]));
+    }
+
+    #[test]
+    fn remote_font_body_decodes_mtx_as_chunks_arrive() {
+        let mut payload = vec![3, 0, 0, 0, 0, 0, 14, 0, 0, 18];
+        payload.extend_from_slice(&[0; 12]);
+        let mut eot = uncompressed_eot(&payload);
+        eot[12..16].copy_from_slice(&4u32.to_le_bytes());
+        for chunk_size in [1, 3, 7, 16384] {
+            let mut body = super::RemoteFontBody::default();
+            for chunk in eot.chunks(chunk_size) {
+                body.push(chunk).unwrap();
+            }
+            let (raw, blocks) = body.finish().unwrap();
+            assert_eq!(raw, eot);
+            assert_eq!(blocks.unwrap(), [Vec::new(), Vec::new(), Vec::new()]);
+        }
+    }
+
+    #[test]
+    fn streamed_remote_eot_matches_full_decode() {
+        let eot = crate::fonts::compressed_eot_fixture();
+        let mut body = super::RemoteFontBody::default();
+        for chunk in eot.chunks(4093) {
+            body.push(chunk).unwrap();
+        }
+        let (raw, blocks) = body.finish().unwrap();
+        assert_eq!(raw, eot);
+        let blocks = blocks.expect("compressed EOT blocks decoded during fetch");
+        let header = crate::fonts::eot::parse_prefix(&raw).unwrap().unwrap();
+        for (index, block) in blocks.iter().enumerate() {
+            assert_eq!(
+                block,
+                &header.decode_mtx_stream(&raw, index).unwrap().unwrap()
+            );
+        }
+        let page_url = "https://example.com/";
+        let streamed =
+            crate::fonts::eot::decode_for_page_with_mtx_blocks(&raw, page_url, Some(blocks));
+        let full = crate::fonts::eot::decode_for_page(&raw, page_url);
+        assert_eq!(streamed, full);
+    }
+
+    #[test]
+    fn accepts_font_signatures_and_rejects_http_error_pages() {
+        for signature in [b"wOF2", b"wOFF", b"OTTO", b"ttcf", b"\0\x01\0\0"] {
+            assert!(is_font_data(signature));
+        }
+        assert!(!is_font_data(b"<html><body>404 Not Found</body></html>"));
+        assert!(!is_font_data(b""));
+    }
+
+    #[test]
+    fn eot_font_registration_checks_rights_before_adding_a_face() {
+        let woff = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let sfnt = crate::woff::decode(woff).unwrap();
+        let eot = uncompressed_eot(&sfnt);
+        assert!(is_font_data(&eot));
+        let mut malformed = eot.clone();
+        malformed[..4].copy_from_slice(&0u32.to_le_bytes());
+        assert!(
+            super::decode_font_bytes_for_page(
+                std::sync::Arc::new(malformed),
+                "https://example.com/page"
+            )
+            .is_none()
+        );
+        let mut fs = cosmic_text::FontSystem::new();
+        let face = crate::css::FontFaceDecl {
+            family: "EOT Test Face".into(),
+            ..Default::default()
+        };
+        assert!(super::load_font_face_bytes_for_page(
+            &mut fs,
+            &face,
+            std::sync::Arc::new(eot.clone()),
+            "https://example.com/page",
+        ));
+        assert!(
+            fs.db()
+                .query(&fontdb::Query {
+                    families: &[fontdb::Family::Name("EOT Test Face")],
+                    ..fontdb::Query::default()
+                })
+                .is_some()
+        );
+        let mut restricted = eot;
+        restricted[32..34].copy_from_slice(&0x0002u16.to_le_bytes());
+        assert!(!super::load_font_face_bytes_for_page(
+            &mut fs,
+            &face,
+            std::sync::Arc::new(restricted),
+            "https://example.com/page",
+        ));
+    }
+
+    #[test]
+    fn cached_eot_reuses_sfnt_without_bypassing_embedding_rights() {
+        let woff = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let sfnt = crate::woff::decode(woff).unwrap();
+        let eot = std::sync::Arc::new(uncompressed_eot(&sfnt));
+        let first = super::decode_font_bytes_for_page(eot.clone(), "https://example.test/a")
+            .expect("first EOT decode");
+        let second = super::decode_font_bytes_for_page(eot.clone(), "https://example.test/b")
+            .expect("cached EOT decode");
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+
+        let mut restricted = (*eot).clone();
+        restricted[32..34].copy_from_slice(&0x0004u16.to_le_bytes());
+        assert!(
+            super::decode_font_bytes_for_page(
+                std::sync::Arc::new(restricted),
+                "https://example.test/a",
+            )
+            .is_none()
+        );
+
+        let mut rooted = uncompressed_eot(&sfnt);
+        let v1_header = crate::fonts::eot::parse_prefix(&rooted).unwrap().unwrap();
+        rooted[8..12].copy_from_slice(&0x0002_0001u32.to_le_bytes());
+        rooted.splice(v1_header.font_data.start..v1_header.font_data.start, [0; 4]);
+        let total_size = rooted.len() as u32;
+        rooted[..4].copy_from_slice(&total_size.to_le_bytes());
+        let header = crate::fonts::eot::parse_prefix(&rooted).unwrap().unwrap();
+        let root: Vec<u8> = "https://example.test/allowed/"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let start = header.root_string.start;
+        rooted[start - 2..start].copy_from_slice(&(root.len() as u16).to_le_bytes());
+        rooted.splice(start..start, root);
+        let total_size = rooted.len() as u32;
+        rooted[..4].copy_from_slice(&total_size.to_le_bytes());
+        let rooted = std::sync::Arc::new(rooted);
+        let allowed =
+            super::decode_font_bytes_for_page(rooted.clone(), "https://example.test/allowed/page")
+                .expect("authorized page should decode the EOT");
+        assert_eq!(&*allowed, &sfnt);
+        assert!(
+            super::decode_font_bytes_for_page(rooted, "https://example.test/blocked/page")
+                .is_none(),
+            "a cached SFNT must not bypass the EOT RootString",
+        );
+    }
+
+    #[test]
+    fn rejected_font_sources_try_the_next_authored_candidate() {
+        let woff = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(woff);
+        let mut fs = cosmic_text::FontSystem::new();
+        let mut engine = super::LayoutEngine::new();
+        engine.font_system = Some(&mut fs);
+        let remote_url = "https://example.test/failed.eot".to_string();
+        engine.scheduled_font_faces.insert(remote_url.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(super::PendingFontResult {
+            faces: Vec::new(),
+            url: remote_url.clone(),
+            bytes: None,
+        })
+        .unwrap();
+        engine.pending_fonts.push(rx);
+        assert!(engine.poll_pending_fonts_budgeted(1, std::time::Duration::ZERO));
+        assert!(engine.failed_font_sources.contains(&remote_url));
+        assert!(!engine.scheduled_font_faces.contains(&remote_url));
+
+        let face = crate::css::FontFaceDecl {
+            family: "Fallback Face".into(),
+            sources: vec![
+                crate::css::FontFaceSource {
+                    kind: crate::css::FontFaceSourceKind::Url(remote_url),
+                    formats: Vec::new(),
+                    techs: Vec::new(),
+                },
+                crate::css::FontFaceSource {
+                    kind: crate::css::FontFaceSourceKind::Url(
+                        "data:font/woff2;base64,bm90Zm9udA==".into(),
+                    ),
+                    formats: Vec::new(),
+                    techs: Vec::new(),
+                },
+                crate::css::FontFaceSource {
+                    kind: crate::css::FontFaceSourceKind::Url(format!(
+                        "data:font/woff2;base64,{encoded}"
+                    )),
+                    formats: Vec::new(),
+                    techs: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        engine.load_font_faces(&[face], "https://example.test/page", "");
+        assert!(
+            fs.db()
+                .query(&fontdb::Query {
+                    families: &[fontdb::Family::Name("Fallback Face")],
+                    ..fontdb::Query::default()
+                })
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn eot_source_is_selected_or_falls_back_according_to_rights() {
+        let woff = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let sfnt = crate::woff::decode(woff).unwrap();
+        let fallback = format!(
+            "data:font/woff2;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(woff)
+        );
+        let eot_url = |rights: u16| {
+            let mut eot = uncompressed_eot(&sfnt);
+            eot[32..34].copy_from_slice(&rights.to_le_bytes());
+            format!(
+                "data:application/vnd.ms-fontobject;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(eot)
+            )
+        };
+        for (rights, eot_selected) in [(0, true), (0x0004, false)] {
+            let mut fs = cosmic_text::FontSystem::new();
+            let mut engine = super::LayoutEngine::new();
+            engine.font_system = Some(&mut fs);
+            let eot = eot_url(rights);
+            let face = crate::css::FontFaceDecl {
+                family: "EOT Source Face".into(),
+                sources: vec![
+                    crate::css::FontFaceSource {
+                        kind: crate::css::FontFaceSourceKind::Url(eot.clone()),
+                        formats: vec!["embedded-opentype".into()],
+                        techs: Vec::new(),
+                    },
+                    crate::css::FontFaceSource {
+                        kind: crate::css::FontFaceSourceKind::Url(fallback.clone()),
+                        formats: vec!["woff2".into()],
+                        techs: Vec::new(),
+                    },
+                ],
+                ..Default::default()
+            };
+            engine.load_font_faces(&[face], "https://example.test/page", "");
+            assert_eq!(engine.scheduled_font_faces.contains(&eot), eot_selected);
+            assert_eq!(
+                engine.scheduled_font_faces.contains(&fallback),
+                !eot_selected
+            );
+            assert!(
+                fs.db()
+                    .query(&fontdb::Query {
+                        families: &[fontdb::Family::Name("EOT Source Face")],
+                        ..fontdb::Query::default()
+                    })
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn shared_font_bytes_register_each_css_family_once() {
+        let bytes = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let mut fs = cosmic_text::FontSystem::new();
+        let before = fs.db().len();
+        let faces = [
+            crate::css::FontFaceDecl {
+                family: "Shared Face One".into(),
+                ..Default::default()
+            },
+            crate::css::FontFaceDecl {
+                family: "Shared Face Two".into(),
+                ..Default::default()
+            },
+        ];
+        assert!(super::load_font_faces_bytes(
+            &mut fs,
+            &faces,
+            std::sync::Arc::new(bytes.to_vec())
+        ));
+        assert_eq!(fs.db().len(), before + 3);
+        for face in &faces {
+            assert!(
+                fs.db()
+                    .query(&fontdb::Query {
+                        families: &[fontdb::Family::Name(&face.family)],
+                        ..fontdb::Query::default()
+                    })
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn identical_woff_bytes_reuse_decoded_font_across_allocations() {
+        let bytes = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let first = super::decode_font_bytes(std::sync::Arc::new(bytes.to_vec())).expect("decode");
+        let second =
+            super::decode_font_bytes(std::sync::Arc::new(bytes.to_vec())).expect("cache hit");
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    #[ignore]
+    fn benchmark_woff2_decode_and_fontdb_registration() {
+        let bytes = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        const ITERATIONS: u32 = 30;
+        let decoded = std::sync::Arc::new(crate::woff::decode(bytes).expect("decode"));
+
+        let started = std::time::Instant::now();
+        for _ in 0..ITERATIONS {
+            std::hint::black_box(crate::woff::decode(std::hint::black_box(bytes)).expect("decode"));
+        }
+        let decode_ms = started.elapsed().as_secs_f64() * 1000.0 / f64::from(ITERATIONS);
+
+        let started = std::time::Instant::now();
+        for _ in 0..ITERATIONS {
+            let mut db = fontdb::Database::new();
+            std::hint::black_box(db.load_font_source(fontdb::Source::Binary(decoded.clone())));
+        }
+        let register_ms = started.elapsed().as_secs_f64() * 1000.0 / f64::from(ITERATIONS);
+
+        super::decode_font_bytes(std::sync::Arc::new(bytes.to_vec())).expect("warm cache");
+        let started = std::time::Instant::now();
+        for _ in 0..ITERATIONS {
+            let source = std::sync::Arc::new(bytes.to_vec());
+            std::hint::black_box(super::decode_font_bytes(source).expect("cached decode"));
+        }
+        let cached_ms = started.elapsed().as_secs_f64() * 1000.0 / f64::from(ITERATIONS);
+        eprintln!(
+            "WOFF2 decode: {decode_ms:.2} ms; cached load: {cached_ms:.2} ms; fontdb registration: {register_ms:.2} ms"
+        );
+    }
+}
+
+fn cached_remote_font_bytes(
+    url: &str,
+    cache_dir: Option<&str>,
+) -> Option<(std::sync::Arc<Vec<u8>>, Option<[Vec<u8>; 3]>)> {
     if let Some(bytes) = REMOTE_FONT_BYTES_CACHE
         .lock()
         .ok()
         .and_then(|cache| cache.get(url).cloned())
     {
-        return Some(bytes);
+        return Some((bytes, None));
     }
 
     let (state, owns_fetch) = {
@@ -348,13 +764,29 @@ fn cached_remote_font_bytes(url: &str, cache_dir: Option<&str>) -> Option<std::s
         while guard.is_none() {
             guard = state.done.wait(guard).expect("remote font result poisoned");
         }
-        return guard.as_ref().and_then(|bytes| bytes.as_ref().cloned());
+        return guard
+            .as_ref()
+            .and_then(|bytes| bytes.as_ref().cloned())
+            .map(|bytes| (bytes, None));
     }
 
     let result = cache_dir
         .and_then(|dir| crate::loading::cached_fetch_bytes_arc(url, dir).ok())
-        .or_else(|| fetch_remote_font_bytes(url).map(std::sync::Arc::new));
-    if let Some(bytes) = result.as_ref()
+        .filter(|bytes| is_font_data(bytes))
+        .map(|bytes| (bytes, None))
+        .or_else(|| {
+            fetch_remote_font_bytes(url)
+                .filter(|(bytes, _)| is_font_data(bytes))
+                .map(|(bytes, blocks)| (std::sync::Arc::new(bytes), blocks))
+        })
+        .and_then(|(bytes, blocks)| {
+            if is_eot_data(&bytes) {
+                Some((bytes, blocks))
+            } else {
+                decode_font_bytes(bytes).map(|decoded| (decoded, None))
+            }
+        });
+    if let Some((bytes, _)) = result.as_ref()
         && let Ok(mut cache) = REMOTE_FONT_BYTES_CACHE.lock()
     {
         let existing_bytes: usize = cache
@@ -371,7 +803,7 @@ fn cached_remote_font_bytes(url: &str, cache_dir: Option<&str>) -> Option<std::s
     }
     {
         let mut guard = state.result.lock().expect("remote font result poisoned");
-        *guard = Some(result.clone());
+        *guard = Some(result.as_ref().map(|(bytes, _)| bytes.clone()));
         state.done.notify_all();
     }
     if let Ok(mut in_flight) = REMOTE_FONT_BYTES_IN_FLIGHT.lock() {
@@ -380,9 +812,63 @@ fn cached_remote_font_bytes(url: &str, cache_dir: Option<&str>) -> Option<std::s
     result
 }
 
-fn fetch_remote_font_bytes(url: &str) -> Option<Vec<u8>> {
+#[derive(Default)]
+struct RemoteFontBody {
+    bytes: Vec<u8>,
+    mtx: Option<(crate::fonts::eot::MtxStreamDecoder, usize, usize)>,
+    mtx_failed: bool,
+}
+
+impl RemoteFontBody {
+    fn push(&mut self, chunk: &[u8]) -> Option<()> {
+        if self.bytes.len().checked_add(chunk.len())? > REMOTE_FONT_BYTES_CACHE_MAX_BYTES {
+            return None;
+        }
+        self.bytes.extend_from_slice(chunk);
+        if !self.mtx_failed && self.mtx.is_none() && has_eot_magic(&self.bytes) {
+            match crate::fonts::eot::parse_prefix(&self.bytes) {
+                Ok(Some(header)) => match header.mtx_header(&self.bytes) {
+                    Ok(Some(mtx)) => {
+                        let start = header.font_data.start + mtx.streams[0].start;
+                        self.mtx = Some((
+                            crate::fonts::eot::MtxStreamDecoder::new(&header, &mtx),
+                            start,
+                            header.font_data.end,
+                        ));
+                    }
+                    Err(_) => self.mtx_failed = true,
+                    Ok(None) => {}
+                },
+                Err(_) => self.mtx_failed = true,
+                Ok(None) => {}
+            }
+        }
+        if let Some((decoder, next, end)) = self.mtx.as_mut() {
+            let available = self.bytes.len().min(*end);
+            if available > *next {
+                if decoder.push(*next, &self.bytes[*next..available]).is_ok() {
+                    *next = available;
+                } else {
+                    self.mtx = None;
+                    self.mtx_failed = true;
+                }
+            }
+        }
+        Some(())
+    }
+
+    fn finish(self) -> Option<(Vec<u8>, Option<[Vec<u8>; 3]>)> {
+        if self.bytes.is_empty() {
+            return None;
+        }
+        let blocks = self.mtx.and_then(|(decoder, _, _)| decoder.finish().ok());
+        Some((self.bytes, blocks))
+    }
+}
+
+fn fetch_remote_font_bytes(url: &str) -> Option<(Vec<u8>, Option<[Vec<u8>; 3]>)> {
     let fetch = |client: &reqwest::blocking::Client| {
-        client
+        let mut response = client
             .get(url)
             .header(
                 "Accept",
@@ -392,27 +878,108 @@ fn fetch_remote_font_bytes(url: &str) -> Option<Vec<u8>> {
             .header("Sec-Fetch-Mode", "cors")
             .send()
             .ok()
-            .and_then(|r| r.bytes().ok())
-            .map(|b| b.to_vec())
-            .filter(|b| !b.is_empty())
+            .filter(|r| r.status().is_success())?;
+        let mut body = RemoteFontBody::default();
+        let mut buffer = [0u8; 16 * 1024];
+        loop {
+            let count = std::io::Read::read(&mut response, &mut buffer).ok()?;
+            if count == 0 {
+                break;
+            }
+            body.push(&buffer[..count])?;
+        }
+        body.finish()
     };
     fetch(&crate::http_client()).or_else(|| fetch(&crate::http_client_lenient()))
 }
 
-/// Load raw font bytes into the font system, with format detection.
+fn decode_font_bytes(data: std::sync::Arc<Vec<u8>>) -> Option<std::sync::Arc<Vec<u8>>> {
+    if !data.as_slice().starts_with(&crate::woff::WOFF2_MAGIC)
+        && !data.as_slice().starts_with(&crate::woff::WOFF1_MAGIC)
+    {
+        return Some(data);
+    }
+
+    if let Some(hit) = cached_decoded_font(&data) {
+        return Some(hit);
+    }
+    let sfnt = std::sync::Arc::new(crate::woff::decode(data.as_slice())?);
+    cache_decoded_font(data, sfnt.clone());
+    Some(sfnt)
+}
+
+fn decoded_font_hash(data: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn cached_decoded_font(data: &std::sync::Arc<Vec<u8>>) -> Option<std::sync::Arc<Vec<u8>>> {
+    let hash = decoded_font_hash(data);
+    if let Ok(cache) = DECODED_FONT_CACHE.lock()
+        && let Some(hit) = cache.entries.get(&hash).and_then(|bucket| {
+            bucket
+                .iter()
+                .find(|entry| entry.source.as_slice() == data.as_slice())
+        })
+    {
+        return Some(hit.sfnt.clone());
+    }
+    None
+}
+
+fn cache_decoded_font(data: std::sync::Arc<Vec<u8>>, sfnt: std::sync::Arc<Vec<u8>>) {
+    let hash = decoded_font_hash(&data);
+    let entry_bytes = data.len().saturating_add(sfnt.len());
+    if entry_bytes <= DECODED_FONT_CACHE_MAX_BYTES
+        && let Ok(mut cache) = DECODED_FONT_CACHE.lock()
+    {
+        if cache.bytes.saturating_add(entry_bytes) > DECODED_FONT_CACHE_MAX_BYTES {
+            cache.entries.clear();
+            cache.bytes = 0;
+        }
+        cache
+            .entries
+            .entry(hash)
+            .or_default()
+            .push(DecodedFontEntry { source: data, sfnt });
+        cache.bytes += entry_bytes;
+    }
+}
+
+fn decode_font_bytes_for_page(
+    data: std::sync::Arc<Vec<u8>>,
+    page_url: &str,
+) -> Option<std::sync::Arc<Vec<u8>>> {
+    decode_font_bytes_for_page_with_mtx_blocks(data, page_url, None)
+}
+
+fn decode_font_bytes_for_page_with_mtx_blocks(
+    data: std::sync::Arc<Vec<u8>>,
+    page_url: &str,
+    blocks: Option<[Vec<u8>; 3]>,
+) -> Option<std::sync::Arc<Vec<u8>>> {
+    if has_eot_magic(&data) {
+        if let Some(hit) = cached_decoded_font(&data) {
+            return crate::fonts::eot::permits_page(&data, page_url).then_some(hit);
+        }
+        let sfnt = std::sync::Arc::new(crate::fonts::eot::decode_for_page_with_mtx_blocks(
+            &data, page_url, blocks,
+        )?);
+        cache_decoded_font(data, sfnt.clone());
+        return Some(sfnt);
+    }
+    decode_font_bytes(data)
+}
+
+/// Load raw or decoded font bytes into the font system.
 fn load_font_bytes(
     fs: &mut cosmic_text::FontSystem,
     data: std::sync::Arc<Vec<u8>>,
 ) -> Vec<fontdb::ID> {
-    let font_data = if data.as_slice().starts_with(&crate::woff::WOFF2_MAGIC)
-        || data.as_slice().starts_with(&crate::woff::WOFF1_MAGIC)
-    {
-        match crate::woff::decode(data.as_slice()) {
-            Some(sfnt) => std::sync::Arc::new(sfnt),
-            None => return Vec::new(),
-        }
-    } else {
-        data
+    let Some(font_data) = decode_font_bytes(data) else {
+        return Vec::new();
     };
     fs.db_mut()
         .load_font_source(fontdb::Source::Binary(font_data))
@@ -557,31 +1124,42 @@ fn load_font_face_bytes(
     face: &crate::css::FontFaceDecl,
     bytes: std::sync::Arc<Vec<u8>>,
 ) -> bool {
+    load_font_faces_bytes(fs, std::slice::from_ref(face), bytes)
+}
+
+fn load_font_face_bytes_for_page(
+    fs: &mut cosmic_text::FontSystem,
+    face: &crate::css::FontFaceDecl,
+    bytes: std::sync::Arc<Vec<u8>>,
+    page_url: &str,
+) -> bool {
+    let Some(decoded) = decode_font_bytes_for_page(bytes, page_url) else {
+        return false;
+    };
+    load_font_face_bytes(fs, face, decoded)
+}
+
+fn load_font_faces_bytes(
+    fs: &mut cosmic_text::FontSystem,
+    faces: &[crate::css::FontFaceDecl],
+    bytes: std::sync::Arc<Vec<u8>>,
+) -> bool {
     let ids = load_font_bytes(fs, bytes);
     if ids.is_empty() {
         return false;
     }
-    register_css_font_face_alias(fs, face, &ids);
+    for face in faces {
+        register_css_font_face_alias(fs, face, &ids);
+    }
     true
 }
 
 fn font_source_formats_supported(source: &crate::css::FontFaceSource) -> bool {
     source.formats.is_empty()
-        || source.formats.iter().any(|format| {
-            matches!(
-                format.as_str(),
-                "woff2"
-                    | "woff"
-                    | "opentype"
-                    | "truetype"
-                    | "embedded-opentype"
-                    | "collection"
-                    | "font/woff2"
-                    | "font/woff"
-                    | "font/otf"
-                    | "font/ttf"
-            )
-        })
+        || source
+            .formats
+            .iter()
+            .any(|format| crate::css::font_face::supports_font_format(format))
 }
 
 pub(crate) fn font_source_techs_supported(source: &crate::css::FontFaceSource) -> bool {
@@ -600,8 +1178,15 @@ fn load_local_font_face(
     name: &str,
 ) -> bool {
     if face.weight.is_none() && face.style.is_none() && face.stretch.is_none() {
-        let ids: Vec<_> = fs.db().faces()
-            .filter(|candidate| candidate.families.iter().any(|(family, _)| family.eq_ignore_ascii_case(name)))
+        let ids: Vec<_> = fs
+            .db()
+            .faces()
+            .filter(|candidate| {
+                candidate
+                    .families
+                    .iter()
+                    .any(|(family, _)| family.eq_ignore_ascii_case(name))
+            })
             .map(|candidate| candidate.id)
             .collect();
         if !ids.is_empty() {
@@ -1068,8 +1653,7 @@ fn inline_items_min_content_advance(items: &[inline_layout::InlineItem]) -> f32 
             continue;
         }
 
-        if (item.breakable
-            || item.emergency_break == inline_layout::EmergencyBreak::MinContent)
+        if (item.breakable || item.emergency_break == inline_layout::EmergencyBreak::MinContent)
             && segment_width > 0.0
         {
             max_width = max_width.max(segment_width);
@@ -1542,7 +2126,14 @@ fn resolve_box_vp_query(
             Some(ch) => {
                 let mut h = style
                     .height
-                    .resolve_query_vp(parent_font_px, ch, root_font_px, viewport_w, viewport_h, query)
+                    .resolve_query_vp(
+                        parent_font_px,
+                        ch,
+                        root_font_px,
+                        viewport_w,
+                        viewport_h,
+                        query,
+                    )
                     .max(0.0);
                 if style.box_sizing == BoxSizing::BorderBox {
                     h = (h - pad_top - pad_bottom - border_top - border_bottom).max(0.0);
@@ -1622,9 +2213,11 @@ pub struct LayoutEngine {
     /// Font-face sources already scheduled/loaded. Stylesheets can arrive
     /// progressively, so this cannot be a single document-wide latch.
     scheduled_font_faces: HashSet<String>,
+    /// Remote URLs that failed fetch, decode, or font registration. Their
+    /// authored successor is tried on the next layout pass.
+    failed_font_sources: HashSet<String>,
     /// Receivers for async font data arriving from background threads.
-    pending_fonts:
-        Vec<std::sync::mpsc::Receiver<(Vec<crate::css::FontFaceDecl>, std::sync::Arc<Vec<u8>>)>>,
+    pending_fonts: Vec<std::sync::mpsc::Receiver<PendingFontResult>>,
     /// Number of font fetches still in flight.
     fonts_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Shared browser resource cache for remote font bytes.
@@ -1662,6 +2255,27 @@ const MAX_LAYOUT_DEPTH: usize = 400;
 const MAX_TEXT_WIDTH_CACHE_ENTRIES: usize = 65_536;
 
 impl LayoutEngine {
+    fn contained_intrinsic_width(
+        &self,
+        style: &ComputedStyle,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> f32 {
+        if style.contain_intrinsic_width.is_none() || style.contain_intrinsic_width.is_auto() {
+            0.0
+        } else {
+            self.res_len(&style.contain_intrinsic_width, font_px, 0.0, root_font_px)
+                .max(0.0)
+        }
+    }
+
+    fn has_inline_size_containment(style: &ComputedStyle) -> bool {
+        style.contain_size
+            || style.container_type == ContainerType::Size
+            || (style.writing_mode == WritingMode::HorizontalTB
+                && (style.contain_inline_size || style.container_type == ContainerType::InlineSize))
+    }
+
     pub(crate) fn contained_intrinsic_height(
         &self,
         style: &ComputedStyle,
@@ -1671,7 +2285,8 @@ impl LayoutEngine {
         if style.contain_intrinsic_height.is_none() || style.contain_intrinsic_height.is_auto() {
             0.0
         } else {
-            self.res_len(&style.contain_intrinsic_height, font_px, 0.0, root_font_px).max(0.0)
+            self.res_len(&style.contain_intrinsic_height, font_px, 0.0, root_font_px)
+                .max(0.0)
         }
     }
 
@@ -1680,7 +2295,10 @@ impl LayoutEngine {
         let mut current = previous;
         current.fallback_vertical = style.writing_mode != WritingMode::HorizontalTB;
         self.query_container_sizes.set(current);
-        QueryContainerScope { cell: &self.query_container_sizes, previous }
+        QueryContainerScope {
+            cell: &self.query_container_sizes,
+            previous,
+        }
     }
 
     pub(crate) fn enter_query_container(
@@ -1694,7 +2312,8 @@ impl LayoutEngine {
         let previous = self.query_container_sizes.get();
         let mut current = previous;
         let vertical = style.writing_mode != WritingMode::HorizontalTB;
-        let height = height.unwrap_or_else(|| self.contained_intrinsic_height(style, font_px, root_font_px));
+        let height =
+            height.unwrap_or_else(|| self.contained_intrinsic_height(style, font_px, root_font_px));
         match style.container_type {
             ContainerType::Normal => {}
             ContainerType::InlineSize => {
@@ -1714,7 +2333,10 @@ impl LayoutEngine {
             }
         }
         self.query_container_sizes.set(current);
-        QueryContainerScope { cell: &self.query_container_sizes, previous }
+        QueryContainerScope {
+            cell: &self.query_container_sizes,
+            previous,
+        }
     }
 
     pub fn new() -> Self {
@@ -1733,6 +2355,7 @@ impl LayoutEngine {
             progressive_cutoff: 0.0,
             initial_layout_done: false,
             scheduled_font_faces: HashSet::new(),
+            failed_font_sources: HashSet::new(),
             text_width_cache: std::cell::RefCell::new(HashMap::new()),
             pending_fonts: Vec::new(),
             fonts_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -1895,14 +2518,24 @@ impl LayoutEngine {
         root_font_px: f32,
     ) -> Option<f32> {
         if node.tag == "select" {
-            let label_width = crate::html::forms::list_of_options(node).into_iter()
-                .map(|option| self.measure_text_cached_with_stretch(
-                    &crate::html::forms::option_label(option), font_px,
-                    node.style.font_weight, node.style.font_style,
-                    &node.style.font_family, node.style.font_stretch,
-                ))
+            let label_width = crate::html::forms::list_of_options(node)
+                .into_iter()
+                .map(|option| {
+                    self.measure_text_cached_with_stretch(
+                        &crate::html::forms::option_label(option),
+                        font_px,
+                        node.style.font_weight,
+                        node.style.font_style,
+                        &node.style.font_family,
+                        node.style.font_stretch,
+                    )
+                })
                 .fold(0.0, f32::max);
-            let indicator_width = if node.style.appearance == "none" { 0.0 } else { font_px };
+            let indicator_width = if node.style.appearance == "none" {
+                0.0
+            } else {
+                font_px
+            };
             return Some(label_width + indicator_width);
         }
         if node.tag != "input" || !crate::types::is_text_input(node) {
@@ -2358,8 +2991,43 @@ impl LayoutEngine {
             return w;
         }
 
+        if node.style.display == Display::Table {
+            let content_min = if Self::has_inline_size_containment(&node.style) {
+                self.contained_intrinsic_width(&node.style, font_px, root_font_px)
+            } else {
+                table::intrinsic_min_content_width(self, node, font_px, root_font_px)
+            };
+            if honor_width
+                && !node.style.width.is_auto()
+                && !node.style.width.has_percentage()
+                && node.style.width.intrinsic().is_none()
+            {
+                let mut specified = self.res_len(&node.style.width, font_px, 0.0, root_font_px);
+                if node.style.box_sizing == BoxSizing::BorderBox {
+                    let rb = self.res_box(&node.style, font_px, 0.0, root_font_px);
+                    specified = (specified
+                        - rb.padding_left
+                        - rb.padding_right
+                        - rb.border_left
+                        - rb.border_right)
+                        .max(0.0);
+                }
+                return content_min.max(specified);
+            }
+            return content_min;
+        }
+
         if honor_width && matches!(node.style.width, CssLength::MaxContent) {
             return self.max_content_width_of_content(node, parent_font_px, root_font_px);
+        }
+
+        // In a min-content query, a percentage max-width is cyclic: an image
+        // with width from its HTML attribute can still shrink with its parent.
+        if node.is_image_element() && node.style.max_width.has_percentage() && width_basis.is_none()
+        {
+            return self
+                .res_len(&node.style.max_width, font_px, 0.0, root_font_px)
+                .max(0.0);
         }
 
         // Explicit width → use that directly
@@ -2395,12 +3063,13 @@ impl LayoutEngine {
             }
         }
 
+        if Self::has_inline_size_containment(&node.style) {
+            return self.contained_intrinsic_width(&node.style, font_px, root_font_px);
+        }
+
         // A cyclic percentage width cannot make its containing block's
         // min-content size definite. Its fixed component still contributes.
-        if node.is_image_element()
-            && node.style.width.has_percentage()
-            && width_basis.is_none()
-        {
+        if node.is_image_element() && node.style.width.has_percentage() && width_basis.is_none() {
             return self
                 .res_len(&node.style.width, font_px, 0.0, root_font_px)
                 .max(0.0);
@@ -2449,7 +3118,9 @@ impl LayoutEngine {
             if node.style.overflow_wrap == OverflowWrap::Anywhere
                 || node.style.word_break == WordBreak::BreakWord
             {
-                if let Some(width) = self.inline_items_min_content_width(node, font_px, root_font_px) {
+                if let Some(width) =
+                    self.inline_items_min_content_width(node, font_px, root_font_px)
+                {
                     return width;
                 }
             }
@@ -2482,12 +3153,8 @@ impl LayoutEngine {
                     word,
                     node.style.text_transform,
                 );
-                let w = self.measure_text_with_css_spacing(
-                    &word,
-                    font_px,
-                    &node.style,
-                    root_font_px,
-                );
+                let w =
+                    self.measure_text_with_css_spacing(&word, font_px, &node.style, root_font_px);
                 if w > max_word {
                     max_word = w;
                 }
@@ -2651,6 +3318,10 @@ impl LayoutEngine {
         // zero wide and collapsed, instead of 200.
         if let Some(w) = self.aspect_ratio_transferred_width(node, font_px, root_font_px) {
             return w;
+        }
+
+        if Self::has_inline_size_containment(&node.style) {
+            return self.contained_intrinsic_width(&node.style, font_px, root_font_px);
         }
 
         // Replaced elements: the size they are shown at, ratio included.
@@ -3229,12 +3900,7 @@ impl LayoutEngine {
             } else if transformed.is_empty() {
                 0.0
             } else {
-                self.measure_text_with_css_spacing(
-                    &transformed,
-                    font_px,
-                    style,
-                    root_font_px,
-                )
+                self.measure_text_with_css_spacing(&transformed, font_px, style, root_font_px)
             };
         content_w.max(0.0)
             + rb.margin_left
@@ -3256,6 +3922,8 @@ impl LayoutEngine {
     ) {
         if let Some(fs_ptr) = self.font_system {
             let fs = unsafe { &mut *fs_ptr };
+            let coverage = (!document_text.is_empty())
+                .then(|| crate::css::font_face::UnicodeTextCoverage::new(document_text));
 
             // ── Phase 1: Resolve each @font-face to its best fetchable URL ──────
             let mut remote: std::collections::HashMap<String, Vec<crate::css::FontFaceDecl>> =
@@ -3264,10 +3932,10 @@ impl LayoutEngine {
             sorted_faces.sort_by_key(|f| if is_latin_font_face(f) { 0 } else { 1 });
 
             for face in &sorted_faces {
-                if !crate::css::font_face::unicode_range_intersects_text(
-                    face.unicode_range.as_deref(),
-                    document_text,
-                ) {
+                if coverage
+                    .as_ref()
+                    .is_some_and(|coverage| !coverage.intersects(face.unicode_range.as_deref()))
+                {
                     continue;
                 }
                 let mut found = false;
@@ -3312,10 +3980,12 @@ impl LayoutEngine {
                     // Strip query string for extension check
                     let url_for_ext = url_clean.split('?').next().unwrap_or(url_clean);
 
-                    // Skip the formats that are genuinely unreadable. `.eot`
-                    // is IE-only and `.svg` fonts were removed from browsers;
-                    // `.woff2` is decoded (see `load_font_bytes`).
-                    if url_for_ext.ends_with(".eot") || url_for_ext.ends_with(".svg") {
+                    // SVG fonts were removed from browsers. EOT, WOFF and
+                    // modern SFNT sources pass through the font decoder.
+                    if url_for_ext
+                        .get(url_for_ext.len().saturating_sub(4)..)
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case(".svg"))
+                    {
                         continue;
                     }
 
@@ -3330,14 +4000,23 @@ impl LayoutEngine {
                             continue;
                         }
                         if let Ok(bytes) = decode_base64(b64.trim()) {
-                            load_font_face_bytes(fs, face, std::sync::Arc::new(bytes));
-                            found = true;
-                            self.scheduled_font_faces.insert(key);
+                            found = load_font_face_bytes_for_page(
+                                fs,
+                                face,
+                                std::sync::Arc::new(bytes),
+                                base_url,
+                            );
+                            if found {
+                                self.scheduled_font_faces.insert(key);
+                            }
                         }
                         continue;
                     }
 
                     let resolved = crate::html::resolve_url(url_clean, base_url);
+                    if self.failed_font_sources.contains(&resolved) {
+                        continue;
+                    }
                     let key = resolved.clone();
                     if self.scheduled_font_faces.contains(&key) {
                         if let Some(faces) = remote.get_mut(&resolved) {
@@ -3364,9 +4043,15 @@ impl LayoutEngine {
                         // fallback font instead.
                         let path = resolved.strip_prefix("file://").unwrap_or(&resolved);
                         if let Ok(data) = std::fs::read(path) {
-                            load_font_face_bytes(fs, face, std::sync::Arc::new(data));
-                            found = true;
-                            self.scheduled_font_faces.insert(key);
+                            found = load_font_face_bytes_for_page(
+                                fs,
+                                face,
+                                std::sync::Arc::new(data),
+                                base_url,
+                            );
+                            if found {
+                                self.scheduled_font_faces.insert(key);
+                            }
                         }
                     }
                 }
@@ -3374,10 +4059,7 @@ impl LayoutEngine {
 
             // ── Phase 2: Fire-and-forget remote font fetches ────────────────────
             if !remote.is_empty() {
-                let (tx, rx) = std::sync::mpsc::channel::<(
-                    Vec<crate::css::FontFaceDecl>,
-                    std::sync::Arc<Vec<u8>>,
-                )>();
+                let (tx, rx) = std::sync::mpsc::channel::<PendingFontResult>();
                 let in_flight = self.fonts_in_flight.clone();
                 let cache_dir = self.resource_cache_dir.clone();
                 in_flight.fetch_add(remote.len(), std::sync::atomic::Ordering::SeqCst);
@@ -3386,8 +4068,13 @@ impl LayoutEngine {
                     let sender = tx.clone();
                     let counter = in_flight.clone();
                     let cache_dir = cache_dir.clone();
+                    let page_url = base_url.to_string();
                     crate::spawn_font_resource_task(move || {
-                        let result = cached_remote_font_bytes(&url, cache_dir.as_deref());
+                        let result = cached_remote_font_bytes(&url, cache_dir.as_deref()).and_then(
+                            |(bytes, blocks)| {
+                                decode_font_bytes_for_page_with_mtx_blocks(bytes, &page_url, blocks)
+                            },
+                        );
                         if let Some(bytes) = result {
                             eprintln!(
                                 "  Font loaded: {} face(s) ({} bytes) from {}",
@@ -3395,9 +4082,18 @@ impl LayoutEngine {
                                 bytes.len(),
                                 &url[..url.len().min(80)]
                             );
-                            let _ = sender.send((faces, bytes));
+                            let _ = sender.send(PendingFontResult {
+                                faces,
+                                url,
+                                bytes: Some(bytes),
+                            });
                         } else {
                             eprintln!("  Font fetch failed: {}", &url[..url.len().min(80)]);
+                            let _ = sender.send(PendingFontResult {
+                                faces,
+                                url,
+                                bytes: None,
+                            });
                         }
                         counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     });
@@ -3413,11 +4109,22 @@ impl LayoutEngine {
         face: &crate::css::FontFaceDecl,
         bytes: Vec<u8>,
     ) -> bool {
+        self.load_font_face_bytes_for_page(face, bytes, "")
+    }
+
+    /// Register a font supplied directly by the embedder. A document URL is
+    /// required when an EOT RootString restricts where the font may be used.
+    pub fn load_font_face_bytes_for_page(
+        &mut self,
+        face: &crate::css::FontFaceDecl,
+        bytes: Vec<u8>,
+        page_url: &str,
+    ) -> bool {
         let fs = match self.font_system {
             Some(ptr) => unsafe { &mut *ptr },
             None => return false,
         };
-        load_font_face_bytes(fs, face, std::sync::Arc::new(bytes))
+        load_font_face_bytes_for_page(fs, face, std::sync::Arc::new(bytes), page_url)
     }
 
     /// Poll for fonts that have arrived from background threads.
@@ -3442,14 +4149,21 @@ impl LayoutEngine {
             None => return false,
         };
 
-        let mut loaded_any = false;
+        let mut changed_any = false;
         let start = std::time::Instant::now();
         let time_limited = !max_time.is_zero();
         let mut processed = 0usize;
         for rx in &self.pending_fonts {
-            while let Ok((faces, bytes)) = rx.try_recv() {
-                for face in faces {
-                    loaded_any |= load_font_face_bytes(fs, &face, bytes.clone());
+            while let Ok(result) = rx.try_recv() {
+                let loaded = result
+                    .bytes
+                    .is_some_and(|bytes| load_font_faces_bytes(fs, &result.faces, bytes));
+                if loaded {
+                    changed_any = true;
+                } else {
+                    self.scheduled_font_faces.remove(&result.url);
+                    self.failed_font_sources.insert(result.url);
+                    changed_any = true;
                 }
                 processed += 1;
                 if processed >= max_fonts || (time_limited && start.elapsed() >= max_time) {
@@ -3470,7 +4184,7 @@ impl LayoutEngine {
             self.pending_fonts.clear();
         }
 
-        loaded_any
+        changed_any
     }
 
     /// Returns `true` if there are still font fetches in flight.
@@ -3481,6 +4195,9 @@ impl LayoutEngine {
     /// Main entry point: layout the full document.
     pub fn layout(&mut self, doc: &mut Document, viewport_width: f32) {
         let trace_start = std::time::Instant::now();
+        let scroll_anchor =
+            scroll_anchor::ViewportAnchor::capture(doc, viewport_width, self.viewport_h);
+        let element_anchors = scroll_anchor::ElementAnchors::capture(doc);
         self.viewport_w = viewport_width;
         // Use the document's viewport_h if it was set during load_html (it knows
         // the real window height); only fall back to the engine default if the
@@ -3518,7 +4235,8 @@ impl LayoutEngine {
         // rendering may create them before the final stylesheet has arrived;
         // if they remain in the tree during a later cascade, child combinators
         // such as `.toolbar > .button` stop matching.
-        let hover_only = doc.hover_changed && !doc.style_dirty
+        let hover_only = doc.hover_changed
+            && !doc.style_dirty
             && self.last_cascade_vw == viewport_width
             && self.last_geometry_viewport_h == self.viewport_h
             && !doc.has_dirty_layout();
@@ -3537,7 +4255,13 @@ impl LayoutEngine {
         // Load @font-face fonts (non-blocking — remote fonts arrive via poll_pending_fonts).
         if !doc.stylesheet.font_faces.is_empty() {
             let mut document_text = String::new();
-            collect_font_face_text(&doc.root, &mut document_text);
+            if doc.stylesheet.font_faces.iter().any(|face| {
+                face.unicode_range
+                    .as_ref()
+                    .is_some_and(|range| !range.trim().is_empty())
+            }) {
+                collect_font_face_text(&doc.root, &mut document_text);
+            }
             self.load_font_faces(&doc.stylesheet.font_faces, &doc.base_url, &document_text);
         }
 
@@ -3558,15 +4282,8 @@ impl LayoutEngine {
             || (self.cached_has_media_q
                 && doc.stylesheet.rules.iter().any(|r| {
                     !r.media_condition.is_empty()
-                        && crate::css::evaluate_media(
-                            &r.media_condition,
-                            self.last_cascade_vw,
-                            self.viewport_h,
-                        ) != crate::css::evaluate_media(
-                            &r.media_condition,
-                            viewport_width,
-                            self.viewport_h,
-                        )
+                        && r.media_condition.matches(self.last_cascade_vw, self.viewport_h)
+                            != r.media_condition.matches(viewport_width, self.viewport_h)
                 }));
 
         let hover_changed = doc.hover_changed;
@@ -3614,6 +4331,7 @@ impl LayoutEngine {
             // so the incremental hover cascade skipped them and the panel never
             // opened. Hovering the element itself worked, which is why simple
             // `a:hover` colour changes looked fine while no menu did.
+            let mark_dirty_started = crate::profile::is_enabled().then(std::time::Instant::now);
             crate::css::mark_hover_dirty(
                 &mut doc.root,
                 &doc.stylesheet,
@@ -3622,6 +4340,9 @@ impl LayoutEngine {
                 doc.stylesheet.has_hover_descendant_rules,
                 &doc.hover_sensitive_nodes,
             );
+            if let Some(started) = mark_dirty_started {
+                crate::profile::record(crate::profile::Phase::CascadeMarkDirty, started.elapsed());
+            }
 
             crate::css::apply_cascade_incremental(
                 &mut doc.root,
@@ -3650,14 +4371,21 @@ impl LayoutEngine {
         };
         self.root_font_px = root_font_px;
 
-        let hover_reuses_geometry = hover_geometry.as_ref()
+        let hover_reuses_geometry = hover_geometry
+            .as_ref()
             .is_some_and(|snapshot| snapshot.can_reuse(&doc.root));
 
         // ── CSS animation / transition runtime ─────────────────────────────
+        let animation_sync_started = crate::profile::is_enabled().then(std::time::Instant::now);
         let now = std::time::Instant::now();
         doc.sync_animations(now);
         if did_cascade || hover_changed {
-            doc.sync_transitions(now, did_cascade);
+            let transition_sync_started =
+                crate::profile::is_enabled().then(std::time::Instant::now);
+            doc.sync_transitions(now);
+            if let Some(started) = transition_sync_started {
+                crate::profile::record(crate::profile::Phase::TransitionSync, started.elapsed());
+            }
         }
         doc.tick_animations(now);
         let svg_animations_running = crate::svg::tick_svg_animations(&mut doc.root, now);
@@ -3672,6 +4400,9 @@ impl LayoutEngine {
             animation_restore =
                 crate::css::apply_animation_overrides_scoped(&mut doc.root, &overrides);
         }
+        if let Some(started) = animation_sync_started {
+            crate::profile::record(crate::profile::Phase::AnimationSync, started.elapsed());
+        }
         // ──────────────────────────────────────────────────────────────────
 
         // Progressive layout is disabled for now — it causes blank content
@@ -3684,7 +4415,8 @@ impl LayoutEngine {
         let cascade_end = std::time::Instant::now();
         self.initial_layout_done = true;
         if hover_reuses_geometry
-            && crate::types::animation_runtime::layout_animation_values(&doc.animation_overrides).is_empty()
+            && crate::types::animation_runtime::layout_animation_values(&doc.animation_overrides)
+                .is_empty()
         {
             crate::css::restore_animation_overrides(&mut doc.root, animation_restore);
             crate::css::clear_descendant_dirty(&mut doc.root);
@@ -3702,6 +4434,7 @@ impl LayoutEngine {
         // whose conditions match the computed dimensions of container ancestors, then
         // re-layout until dependent container sizes settle.
         if self.cached_has_container_q {
+            let container_started = crate::profile::is_enabled().then(std::time::Instant::now);
             let mut applied_rules = std::collections::HashMap::new();
             for _ in 0..4 {
                 let changed = crate::css::apply_container_cascade_tree_with_state(
@@ -3738,10 +4471,20 @@ impl LayoutEngine {
                 self.layout_geometry(doc, viewport_width, root_font_px);
                 self.last_geometry_viewport_h = self.viewport_h;
             }
+            if let Some(started) = container_started {
+                crate::profile::record(
+                    crate::profile::Phase::GeometryContainerQueries,
+                    started.elapsed(),
+                );
+            }
         }
         if !animation_restore.is_empty() {
             crate::css::restore_animation_overrides(&mut doc.root, animation_restore);
         }
+        if let Some(anchor) = scroll_anchor {
+            anchor.adjust(doc, self.viewport_h);
+        }
+        element_anchors.adjust(doc);
         if let Some(started) = geometry_profile_start {
             crate::profile::record(crate::profile::Phase::Geometry, started.elapsed());
         }
@@ -3793,9 +4536,16 @@ impl LayoutEngine {
     }
 
     pub fn layout_no_cascade(&mut self, doc: &mut Document, viewport_width: f32) {
+        let scroll_anchor =
+            scroll_anchor::ViewportAnchor::capture(doc, viewport_width, self.viewport_h);
+        let element_anchors = scroll_anchor::ElementAnchors::capture(doc);
         self.viewport_w = viewport_width;
         let root_font_px = self.root_font_px;
         self.layout_geometry(doc, viewport_width, root_font_px);
+        if let Some(anchor) = scroll_anchor {
+            anchor.adjust(doc, self.viewport_h);
+        }
+        element_anchors.adjust(doc);
         self.last_geometry_viewport_h = self.viewport_h;
     }
 
@@ -3866,7 +4616,12 @@ impl LayoutEngine {
         } else {
             Constraints::new(content_w, 0.0, 0.0, root_font_px, root_font_px)
         };
+        let boxes_started = crate::profile::is_enabled().then(std::time::Instant::now);
         self.layout_box(&mut doc.root, &root_c);
+        if let Some(started) = boxes_started {
+            crate::profile::record(crate::profile::Phase::GeometryBoxes, started.elapsed());
+        }
+        let finalize_started = crate::profile::is_enabled().then(std::time::Instant::now);
         clear_layout_inert_svg_subtrees(&mut doc.root, false);
         clear_display_contents_boxes(&mut doc.root);
 
@@ -3892,6 +4647,9 @@ impl LayoutEngine {
 
         // Rebuild O(1) node index (pointers stable until next mutation)
         doc.rebuild_node_index();
+        if let Some(started) = finalize_started {
+            crate::profile::record(crate::profile::Phase::GeometryFinalize, started.elapsed());
+        }
 
         // Bump generation so renderer knows to rebuild display list.
         //
@@ -3952,7 +4710,10 @@ impl LayoutEngine {
 
         if node.is_text_node()
             && node.text.chars().all(|ch| ch.is_ascii_whitespace())
-            && matches!(node.style.white_space, WhiteSpace::Normal | WhiteSpace::Nowrap)
+            && matches!(
+                node.style.white_space,
+                WhiteSpace::Normal | WhiteSpace::Nowrap
+            )
         {
             clear_layout_subtree(node);
             node.layout.layout_dirty = false;
@@ -4040,7 +4801,8 @@ impl LayoutEngine {
                 (Some(w), h_override)
             } else if node.style.height.is_auto() && !node.style.width.is_auto() {
                 let mut w = self.res_len(&node.style.width, font_px, containing_w, root_font_px);
-                let max_w = self.res_len(&node.style.max_width, font_px, containing_w, root_font_px);
+                let max_w =
+                    self.res_len(&node.style.max_width, font_px, containing_w, root_font_px);
                 if max_w > 0.0 && w > max_w {
                     w = max_w;
                 }
@@ -4058,7 +4820,8 @@ impl LayoutEngine {
                 } else {
                     (iw, ih)
                 };
-                let max_w = self.res_len(&node.style.max_width, font_px, containing_w, root_font_px);
+                let max_w =
+                    self.res_len(&node.style.max_width, font_px, containing_w, root_font_px);
                 if max_w > 0.0 && w > max_w {
                     h = (max_w * ih / iw).round();
                     w = max_w;
@@ -4090,7 +4853,9 @@ impl LayoutEngine {
             && has_block_children(node)
             && !node.style.width.is_auto()
         {
-            let mut w = self.res_len(&node.style.width, font_px, containing_w, root_font_px).max(0.0);
+            let mut w = self
+                .res_len(&node.style.width, font_px, containing_w, root_font_px)
+                .max(0.0);
             if node.style.box_sizing == BoxSizing::BorderBox {
                 w = (w
                     - rbox.padding_left
@@ -4103,7 +4868,9 @@ impl LayoutEngine {
         }
         if node.style.display == Display::Inline && is_inline_replaced_or_native_control(node) {
             if !node.style.width.is_auto() {
-                let mut w = self.res_len(&node.style.width, font_px, containing_w, root_font_px).max(0.0);
+                let mut w = self
+                    .res_len(&node.style.width, font_px, containing_w, root_font_px)
+                    .max(0.0);
                 if node.style.box_sizing == BoxSizing::BorderBox {
                     w = (w
                         - rbox.padding_left
@@ -4116,7 +4883,9 @@ impl LayoutEngine {
             }
             if !node.style.height.is_auto() {
                 let basis_h = c.forced_height.or(c.available_height).unwrap_or(0.0);
-                let mut h = self.res_len(&node.style.height, font_px, basis_h, root_font_px).max(0.0);
+                let mut h = self
+                    .res_len(&node.style.height, font_px, basis_h, root_font_px)
+                    .max(0.0);
                 if node.style.box_sizing == BoxSizing::BorderBox {
                     h = (h
                         - rbox.padding_top
@@ -4145,7 +4914,8 @@ impl LayoutEngine {
         }
 
         if node.tag == "select" && node.style.width.is_auto() {
-            rbox.content_width = self.text_control_intrinsic_content_width(node, font_px, root_font_px);
+            rbox.content_width =
+                self.text_control_intrinsic_content_width(node, font_px, root_font_px);
         }
 
         // HTML button layout uses fit-content for an automatic inline size,
@@ -4155,10 +4925,21 @@ impl LayoutEngine {
             && node.style.writing_mode == WritingMode::HorizontalTB
             && c.forced_width.is_none()
         {
-            let available = (containing_w - rbox.margin_left - rbox.margin_right
-                - rbox.padding_left - rbox.padding_right - rbox.border_left - rbox.border_right).max(0.0);
+            let available = (containing_w
+                - rbox.margin_left
+                - rbox.margin_right
+                - rbox.padding_left
+                - rbox.padding_right
+                - rbox.border_left
+                - rbox.border_right)
+                .max(0.0);
             rbox.content_width = Some(self.intrinsic_width(
-                &CssLength::FitContent, node, available, font_px, root_font_px, containing_w,
+                &CssLength::FitContent,
+                node,
+                available,
+                font_px,
+                root_font_px,
+                containing_w,
             ));
         }
 
@@ -4183,6 +4964,57 @@ impl LayoutEngine {
         }
         if let Some(fh) = c.forced_height {
             rbox.content_height = Some(fh);
+        }
+
+        if node.style.content_visibility == ContentVisibility::Hidden {
+            let content_w = rbox.content_width.unwrap_or_else(|| {
+                if matches!(
+                    node.style.display,
+                    Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+                ) {
+                    if node.style.contain_intrinsic_width.is_none()
+                        || node.style.contain_intrinsic_width.is_auto()
+                    {
+                        0.0
+                    } else {
+                        self.res_len(
+                            &node.style.contain_intrinsic_width,
+                            font_px,
+                            containing_w,
+                            root_font_px,
+                        )
+                        .max(0.0)
+                    }
+                } else {
+                    (containing_w - rbox.h_space()).max(0.0)
+                }
+            });
+            let content_h = rbox.content_height.unwrap_or_else(|| {
+                self.contained_intrinsic_height(&node.style, font_px, root_font_px)
+            });
+            node.layout.line_cache.clear();
+            node.layout.inline_runs.clear();
+            block::build_box_rects(
+                node,
+                &rbox,
+                x + rbox.margin_left + rbox.border_left + rbox.padding_left,
+                y + rbox.margin_top + rbox.border_top + rbox.padding_top,
+                content_w,
+                content_h,
+                rbox.margin_left,
+                rbox.margin_right,
+            );
+            node.layout.baseline = node.layout.content_rect.bottom();
+            node.layout.scroll_width = content_w;
+            node.layout.scroll_height = content_h;
+            node.layout.scroll_left = 0.0;
+            node.layout.scroll_top = 0.0;
+            node.layout.layout_dirty = false;
+            node.layout.intrinsic_dirty = false;
+            node.layout.last_containing_width = containing_w;
+            node.layout.last_containing_height = c.available_height;
+            self.layout_depth.set(depth);
+            return node.layout.margin_rect.h;
         }
 
         // CSS 2.1 §10.5: when this element has a definite content height,
@@ -4230,31 +5062,33 @@ impl LayoutEngine {
             node.layout.inline_runs.clear();
 
             let fallback_w = match node.tag.as_str() {
-                "input" => {
-                    match node.attributes.get("type").map(|s| s.as_str()) {
-                        Some("checkbox" | "radio") => font_px.max(13.0),
-                        Some(kind @ ("submit" | "reset" | "button")) => {
-                            let default_label = match kind {
-                                "submit" => "Submit",
-                                "reset" => "Reset",
-                                _ => "",
-                            };
-                            let label = node.attributes.get("value")
-                                .map(String::as_str)
-                                .unwrap_or(default_label);
-                            self.measure_text_cached_with_stretch(
-                                label,
-                                font_px,
-                                node.style.font_weight,
-                                node.style.font_style,
-                                &node.style.font_family,
-                                node.style.font_stretch,
-                            )
-                        }
-                        _ => 200.0,
+                "input" => match node.attributes.get("type").map(|s| s.as_str()) {
+                    Some("checkbox" | "radio") => font_px.max(13.0),
+                    Some(kind @ ("submit" | "reset" | "button")) => {
+                        let default_label = match kind {
+                            "submit" => "Submit",
+                            "reset" => "Reset",
+                            _ => "",
+                        };
+                        let label = node
+                            .attributes
+                            .get("value")
+                            .map(String::as_str)
+                            .unwrap_or(default_label);
+                        self.measure_text_cached_with_stretch(
+                            label,
+                            font_px,
+                            node.style.font_weight,
+                            node.style.font_style,
+                            &node.style.font_family,
+                            node.style.font_stretch,
+                        )
                     }
-                }
-                "select" => self.text_control_intrinsic_content_width(node, font_px, root_font_px).unwrap_or(0.0),
+                    _ => 200.0,
+                },
+                "select" => self
+                    .text_control_intrinsic_content_width(node, font_px, root_font_px)
+                    .unwrap_or(0.0),
                 "textarea" => 200.0,
                 "progress" | "meter" => 160.0,
                 _ => 0.0,
@@ -4486,7 +5320,7 @@ impl LayoutEngine {
                 table_rbox.padding_bottom = 0.0;
                 table_rbox.padding_left = 0.0;
                 // Handle margin:auto centering for tables
-                let table_c = if !node.style.width.is_auto()
+                let mut table_c = if !node.style.width.is_auto()
                     && (node.style.margin_left.is_auto() || node.style.margin_right.is_auto())
                 {
                     let tw = self.res_len(&node.style.width, font_px, containing_w, root_font_px);
@@ -4511,6 +5345,9 @@ impl LayoutEngine {
                 } else {
                     child_c
                 };
+                table_c.forced_width = c.forced_width;
+                table_c.forced_height = c.forced_height;
+                table_c.available_height = c.available_height;
                 table::layout_table(self, node, &table_rbox, &table_c)
             }
             _ => {
@@ -4853,14 +5690,19 @@ pub fn layout_positioned_static(
             engine.viewport_h,
             Some(containing_h),
         );
-        let w = (containing_w - l - r - rbox_inner.margin_left
-            - rbox_inner.margin_right - rbox_inner.inner_h_space()).max(0.0);
+        let w = (containing_w
+            - l
+            - r
+            - rbox_inner.margin_left
+            - rbox_inner.margin_right
+            - rbox_inner.inner_h_space())
+        .max(0.0);
         Some(w)
     } else {
         None
     };
 
-    let constrained_h = if !top_auto && !bot_auto {
+    let constrained_h = if !top_auto && !bot_auto && node.style.height.is_auto() {
         let t = node.style.top.resolve_vp(
             font_px,
             containing_h,
@@ -4884,8 +5726,13 @@ pub fn layout_positioned_static(
             engine.viewport_h,
             Some(containing_h),
         );
-        let h = (containing_h - t - b - rbox_inner.margin_top
-            - rbox_inner.margin_bottom - rbox_inner.inner_v_space()).max(0.0);
+        let h = (containing_h
+            - t
+            - b
+            - rbox_inner.margin_top
+            - rbox_inner.margin_bottom
+            - rbox_inner.inner_v_space())
+        .max(0.0);
         Some(h)
     } else {
         None

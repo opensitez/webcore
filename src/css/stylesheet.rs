@@ -4,11 +4,18 @@
 use super::*;
 use crate::types::*;
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 
 thread_local! {
     static CANDIDATE_SEEN: RefCell<(Vec<u32>, u32)> = const { RefCell::new((Vec::new(), 0)) };
+}
+
+fn is_root_variable_selector(selector: &str) -> bool {
+    let selector = selector.trim();
+    selector == "*"
+        || selector.eq_ignore_ascii_case(":root")
+        || selector.eq_ignore_ascii_case("html")
 }
 
 // ─── Stylesheet ───────────────────────────────────────────────────────────────
@@ -31,7 +38,7 @@ pub struct Stylesheet {
     idx_by_class: HashMap<String, Vec<usize>>,
     idx_by_tag: HashMap<String, Vec<usize>>,
     idx_universal: Vec<usize>, // rules with * or no specific key selector
-    idx_rule_flags: Vec<u8>,
+    idx_rule_flags: Vec<u8>,   // length is the indexed prefix; cleared when indices shift
     idx_dirty: bool,
     /// `@layer` names in declaration order. See `layer_rank`.
     pub layer_order: Vec<String>,
@@ -48,6 +55,9 @@ pub struct Stylesheet {
     /// handed the first one's style and the rule was silently dropped. Sharing
     /// is off for a sheet that can make the distinction.
     pub has_sibling_sensitive_rules: bool,
+    /// Ancestor `:has()` selectors need the ancestor's subtree, not only its
+    /// compact tag/attribute snapshot, during rule matching.
+    pub has_ancestor_has_rules: bool,
     /// True if any rule has :hover on a non-subject selector part (descendant hover rules).
     /// When true, descendants of hover-changed nodes must also be re-cascaded.
     pub has_hover_descendant_rules: bool,
@@ -97,6 +107,7 @@ impl Stylesheet {
         self.rules.insert(index, rule);
         self.source_count += 1;
         self.idx_dirty = true;
+        self.idx_rule_flags.clear();
         Ok(index)
     }
 
@@ -108,6 +119,7 @@ impl Stylesheet {
 
         self.rules.remove(index);
         self.idx_dirty = true;
+        self.idx_rule_flags.clear();
         Ok(())
     }
 
@@ -196,19 +208,26 @@ impl Stylesheet {
         css_base_url: &str,
         link_media: &str,
     ) {
-        if link_media.is_empty()
-            || link_media.eq_ignore_ascii_case("all")
-            || link_media.eq_ignore_ascii_case("screen")
-        {
+        self.parse_and_add_with_base_media_conditions(
+            css,
+            css_base_url,
+            &super::media_query::MediaConditions::default().with_query(link_media),
+        );
+    }
+
+    pub(crate) fn parse_and_add_with_base_media_conditions(
+        &mut self,
+        css: &str,
+        css_base_url: &str,
+        media: &super::media_query::MediaConditions,
+    ) {
+        if media.is_empty() {
             self.parse_and_add_with_base(css, css_base_url);
         } else {
             let before = self.rules.len();
             self.parse_and_add_with_base(css, css_base_url);
-            // Tag all newly added rules with the link's media condition
             for rule in &mut self.rules[before..] {
-                if rule.media_condition.is_empty() {
-                    rule.media_condition = link_media.to_string();
-                }
+                rule.media_condition = rule.media_condition.and(media);
             }
         }
     }
@@ -276,12 +295,8 @@ impl Stylesheet {
                 if !matches!(rule.pseudo_element, super::rule::PseudoElement::None)
                     || !rule.container_condition.is_empty()
                     || !rule.scopes.is_empty()
-                    || !matches!(
-                        rule.original_selector.trim().to_ascii_lowercase().as_str(),
-                        ":root" | "html" | "*"
-                    )
-                    || (vw > 0.0
-                        && !super::evaluate_media(&rule.media_condition, vw, vh))
+                    || !is_root_variable_selector(&rule.original_selector)
+                    || (vw > 0.0 && !rule.media_condition.matches(vw, vh))
                 {
                     continue;
                 }
@@ -302,17 +317,44 @@ impl Stylesheet {
         pre_resolve_variables(&mut self.variables);
     }
 
-    /// Rebuild the selector index if dirty.  Called once before each cascade pass.
+    pub(crate) fn may_change_root_variables(&self) -> bool {
+        !self.variables.is_empty()
+            || self.rules.iter().any(|rule| {
+                matches!(rule.pseudo_element, super::rule::PseudoElement::None)
+                    && rule.container_condition.is_empty()
+                    && rule.scopes.is_empty()
+                    && is_root_variable_selector(&rule.original_selector)
+                    && rule
+                        .declarations
+                        .iter()
+                        .chain(rule.important_declarations.iter())
+                        .any(|(name, _)| name.starts_with("--"))
+            })
+    }
+
+    /// Update the selector index before each cascade pass. Appended rule indices
+    /// are stable; insertions and deletions clear the indexed prefix above.
     pub fn rebuild_index(&mut self) {
-        if !self.idx_dirty {
+        if !self.idx_dirty && self.idx_rule_flags.len() == self.rules.len() {
             return;
         }
-        self.idx_by_id.clear();
-        self.idx_by_class.clear();
-        self.idx_by_tag.clear();
-        self.idx_universal.clear();
-        self.idx_rule_flags.clear();
-        for (i, rule) in self.rules.iter().enumerate() {
+        let first = if self.idx_rule_flags.len() > self.rules.len() {
+            0
+        } else {
+            self.idx_rule_flags.len()
+        };
+        if first == 0 {
+            self.idx_by_id.clear();
+            self.idx_by_class.clear();
+            self.idx_by_tag.clear();
+            self.idx_universal.clear();
+            self.idx_rule_flags.clear();
+            self.has_sibling_sensitive_rules = false;
+            self.has_ancestor_has_rules = false;
+            self.has_hover_descendant_rules = false;
+        }
+        for i in first..self.rules.len() {
+            let rule = &self.rules[i];
             self.idx_rule_flags.push(
                 u8::from(rule.selectors.iter().any(selector_is_sibling_sensitive))
                     | (u8::from(rule.selectors.iter().any(|selector| !selector.is_simple)) << 1),
@@ -330,36 +372,32 @@ impl Stylesheet {
                     }
                 }
             }
-        }
-        // Resolve every rule's layer to its sort rank once, here, rather than
-        // looking the name up per comparison in the cascade.
-        for i in 0..self.rules.len() {
             let rank = self.layer_rank(&self.rules[i].layer);
             self.rules[i].layer_rank = rank;
+            self.rules[i].compile_declarations();
         }
-        self.idx_dirty = false;
-
-        // Pre-compile declarations (string → PropertyId) for fast cascade dispatch
-        for rule in &mut self.rules {
-            rule.compile_declarations();
-        }
-
-        // Detect if any rule has :hover on a non-subject part (descendant hover selectors).
-        // e.g., ".parent:hover .child" — :hover is on .parent (ancestor), not .child (subject).
-        // Can any selector distinguish two siblings that share `(tag, class)`?
-        self.has_sibling_sensitive_rules = self
-            .rules
+        let appended = &self.rules[first..];
+        self.has_sibling_sensitive_rules |= appended
             .iter()
             .any(|rule| rule.selectors.iter().any(selector_is_sibling_sensitive));
 
-        self.has_hover_descendant_rules = false;
-        'rules: for rule in &self.rules {
+        self.has_ancestor_has_rules |= appended.iter().any(|rule| {
+            rule.selectors.iter().any(|selector| {
+                selector
+                    .parts
+                    .iter()
+                    .rposition(|part| matches!(part, SelectorPart::Combinator(_)))
+                    .is_some_and(|end| selector.parts[..end].iter().any(selector_part_contains_has))
+            })
+        });
+
+        for rule in appended {
             if !rule.is_hover {
                 continue;
             }
             if !matches!(rule.pseudo_element, PseudoElement::None) {
                 self.has_hover_descendant_rules = true;
-                break 'rules;
+                break;
             }
             for sel in &rule.selectors {
                 // Find the last combinator — everything before it is ancestor context
@@ -372,23 +410,30 @@ impl Stylesheet {
                     for part in &sel.parts[..pos] {
                         if selector_part_has_state(part, "hover") {
                             self.has_hover_descendant_rules = true;
-                            break 'rules;
+                            break;
                         }
                     }
                 }
             }
+            if self.has_hover_descendant_rules {
+                break;
+            }
         }
+        self.idx_dirty = false;
     }
 
     /// Get candidate rule indices for an element with given tag, id, and classes.
     /// Writes into a reusable buffer to avoid per-element allocation.
-    pub fn candidate_rules(
+    pub fn candidate_rules<I, C>(
         &self,
         tag: &str,
         id: Option<&str>,
-        classes: &[&str],
+        classes: I,
         out: &mut Vec<usize>,
-    ) {
+    ) where
+        I: IntoIterator<Item = C>,
+        C: AsRef<str>,
+    {
         out.clear();
         // Add universal rules (always candidates)
         out.extend_from_slice(&self.idx_universal);
@@ -414,7 +459,7 @@ impl Stylesheet {
         }
         // Add class-matched rules
         for cls in classes {
-            if let Some(indices) = self.idx_by_class.get(*cls) {
+            if let Some(indices) = self.idx_by_class.get(cls.as_ref()) {
                 out.extend_from_slice(indices);
             }
         }
@@ -449,15 +494,19 @@ impl Stylesheet {
     }
 
     pub(crate) fn candidate_rules_are_sibling_sensitive(&self, candidates: &[usize]) -> bool {
-        candidates
-            .iter()
-            .any(|&rule_idx| self.idx_rule_flags.get(rule_idx).is_some_and(|flags| flags & 1 != 0))
+        candidates.iter().any(|&rule_idx| {
+            self.idx_rule_flags
+                .get(rule_idx)
+                .is_some_and(|flags| flags & 1 != 0)
+        })
     }
 
     pub(crate) fn candidate_rules_need_selector_context(&self, candidates: &[usize]) -> bool {
-        candidates
-            .iter()
-            .any(|&rule_idx| self.idx_rule_flags.get(rule_idx).is_some_and(|flags| flags & 2 != 0))
+        candidates.iter().any(|&rule_idx| {
+            self.idx_rule_flags
+                .get(rule_idx)
+                .is_some_and(|flags| flags & 2 != 0)
+        })
     }
 }
 
@@ -484,6 +533,17 @@ fn selector_is_sibling_sensitive(sel: &CssSelector) -> bool {
         }
         _ => false,
     })
+}
+
+pub(crate) fn selector_part_contains_has(part: &SelectorPart) -> bool {
+    match part {
+        SelectorPart::Has(_) => true,
+        SelectorPart::Not(selector) => selector.parts.iter().any(selector_part_contains_has),
+        SelectorPart::Is(selectors) | SelectorPart::Where(selectors) => selectors
+            .iter()
+            .any(|selector| selector.parts.iter().any(selector_part_contains_has)),
+        _ => false,
+    }
 }
 
 /// Key extracted from the rightmost simple selector of a rule.
@@ -535,4 +595,89 @@ fn rule_key_selectors(rule: &CssRule) -> Vec<SelectorKey> {
         keys.push(key);
     }
     keys
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::Stylesheet;
+
+    #[test]
+    fn class_token_iterator_matches_slice_candidates() {
+        let mut sheet = Stylesheet::default();
+        sheet.parse_and_add_author(
+            "div { color: red; } .one { color: blue; } .two { color: green; } \
+             #target { color: black; } div.one { color: white; }",
+        );
+        sheet.rebuild_index();
+
+        let mut from_slice = Vec::new();
+        let mut from_iterator = Vec::new();
+        sheet.candidate_rules(
+            "div",
+            Some("target"),
+            &["one", "two", "one"],
+            &mut from_slice,
+        );
+        sheet.candidate_rules(
+            "div",
+            Some("target"),
+            "one two one".split_whitespace(),
+            &mut from_iterator,
+        );
+        assert_eq!(from_iterator, from_slice);
+    }
+
+    #[test]
+    fn streamed_append_indexes_only_new_rules_and_updates_selector_flags() {
+        let mut sheet = Stylesheet::default();
+        sheet.parse_and_add_author(".base { color: red; }");
+        sheet.rebuild_index();
+        sheet.idx_by_class.get_mut("base").unwrap().reserve(32);
+        let old_capacity = sheet.idx_by_class["base"].capacity();
+
+        let mut fragment = Stylesheet::default();
+        fragment.parse_and_add_author(
+            ".new { color: blue; } .item + .item { color: green; } \
+             .host:has(.child) .target { color: purple; } \
+             .menu:hover::before { content: 'x'; }",
+        );
+        sheet.append_fragment(fragment);
+        sheet.rebuild_index();
+
+        assert_eq!(sheet.idx_by_class["base"].capacity(), old_capacity);
+        assert_eq!(sheet.idx_rule_flags.len(), sheet.rules.len());
+        assert!(sheet.has_sibling_sensitive_rules);
+        assert!(sheet.has_ancestor_has_rules);
+        assert!(sheet.has_hover_descendant_rules);
+        let mut candidates = Vec::new();
+        sheet.candidate_rules("div", None, &["base"], &mut candidates);
+        assert_eq!(candidates.len(), 1);
+        sheet.candidate_rules("div", None, &["new"], &mut candidates);
+        assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
+    fn cssom_insertion_and_deletion_rebuild_shifted_rule_indices() {
+        let mut sheet = Stylesheet::default();
+        sheet.parse_and_add_author(
+            ".old { color: red; } .tail { color: blue; } .item + .item { color: green; }",
+        );
+        sheet.rebuild_index();
+        assert!(sheet.has_sibling_sensitive_rules);
+        sheet.delete_rule(2).unwrap();
+        sheet.delete_rule(0).unwrap();
+        sheet
+            .insert_author_rule(".head { color: green; }", 0)
+            .unwrap();
+        sheet.rebuild_index();
+        assert!(!sheet.has_sibling_sensitive_rules);
+
+        let mut candidates = Vec::new();
+        sheet.candidate_rules("div", None, &["old"], &mut candidates);
+        assert!(candidates.is_empty());
+        sheet.candidate_rules("div", None, &["head"], &mut candidates);
+        assert_eq!(candidates, [0]);
+        sheet.candidate_rules("div", None, &["tail"], &mut candidates);
+        assert_eq!(candidates, [1]);
+    }
 }

@@ -15,7 +15,10 @@
 
 use crate::css::apply_property;
 use crate::dom::arena::NodeId;
-use crate::types::{Document, Overflow, Rect, WebCore};
+use crate::types::{
+    Document, Overflow, Rect, ScrollSnapContext, WebCore, snapped_scroll_x, snapped_scroll_y,
+    snapped_viewport_scroll_x, snapped_viewport_scroll_y,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaQueryList {
@@ -856,7 +859,13 @@ impl Document {
     /// `font-size` on the root element — what `rem` resolves against.
     pub(crate) fn root_font_px(&self) -> f32 {
         let initial = crate::types::ComputedStyle::INITIAL_FONT_SIZE_PX;
-        self.root.style.font_size.resolve_vp(initial, initial, initial, self.viewport_w, self.viewport_h)
+        self.root.style.font_size.resolve_vp(
+            initial,
+            initial,
+            initial,
+            self.viewport_w,
+            self.viewport_h,
+        )
     }
 
     /// The origin a POSITIONED box's insets are measured from: the nearest
@@ -1566,6 +1575,9 @@ impl Document {
     /// whole flow depend on this width, so a viewport change that has not been
     /// laid out is a document that disagrees with itself.
     pub fn set_viewport(&mut self, width: f32, height: f32) {
+        if (width - self.viewport_w).abs() > 0.5 || (height - self.viewport_h).abs() > 0.5 {
+            crate::css::cascade::mark_layout_subtree_dirty(&mut self.root);
+        }
         self.viewport_w = width;
         self.viewport_h = height;
         let mut engine = crate::layout::LayoutEngine::new();
@@ -1850,6 +1862,9 @@ impl Document {
             crate::html::default_display(tag),
         );
         self.pending_nodes.insert(arena_id.0, b);
+        if tag == "style" {
+            self.dynamic_style_slots.insert(arena_id.0, None);
+        }
         self.next_node_id = self.next_node_id.max(arena_id.0 + 1);
         arena_id.0
     }
@@ -1933,7 +1948,10 @@ impl Document {
         if let Some(parent) = self.find_webcore_mut(parent_id) {
             // Generated content is not a DOM child. A streamed append belongs
             // before the existing ::after box, including clearfixs.
-            let index = parent.children.iter().position(|node| node.tag == "::after")
+            let index = parent
+                .children
+                .iter()
+                .position(|node| node.tag == "::after")
                 .unwrap_or(parent.children.len());
             appended_index = Some(index);
             parent.children.insert(index, child_box);
@@ -1946,6 +1964,7 @@ impl Document {
             self.node_index.insert(child_id, path);
         }
         self.ranges_after_insert(parent_id, insert_index);
+        self.sync_dynamic_style_sheets();
     }
 
     /// Insert a child before a reference node.
@@ -2000,6 +2019,7 @@ impl Document {
             parent.has_dirty_layout_descendant = true;
         }
         self.ranges_after_insert(parent_id, insert_index);
+        self.sync_dynamic_style_sheets();
     }
 
     /// Remove a child from its parent. The node is dropped from the WebCore tree
@@ -2051,6 +2071,7 @@ impl Document {
                 parent.has_dirty_layout_descendant = true;
             }
         }
+        self.sync_dynamic_style_sheets();
     }
 
     /// Set an attribute on an element. Sets STYLE dirty flag + layout dirty.
@@ -2113,6 +2134,9 @@ impl Document {
             }
         }
         self.style_dirty = true;
+        if key == "media" && self.dynamic_style_slots.contains_key(&id) {
+            self.sync_dynamic_style_sheets();
+        }
     }
 
     /// The `<select>` an option belongs to, if any.
@@ -2161,6 +2185,9 @@ impl Document {
             }
         }
         self.style_dirty = true;
+        if key == "media" && self.dynamic_style_slots.contains_key(&id) {
+            self.sync_dynamic_style_sheets();
+        }
     }
 
     /// Set the text content of a node, replacing all children.
@@ -2619,6 +2646,10 @@ impl Document {
 
     /// `element.scrollTo(x, y)`.
     pub fn element_scroll_to(&mut self, id: u32, x: f32, y: f32) {
+        self.element_scroll_to_impl(id, x, y, false);
+    }
+
+    fn element_scroll_to_impl(&mut self, id: u32, x: f32, y: f32, relative: bool) {
         let max_x = (self.element_scroll_width(id) - self.client_width(id)).max(0.0);
         let max_y = (self.element_scroll_height(id) - self.client_height(id)).max(0.0);
         let old_x = self.element_scroll_left(id);
@@ -2633,6 +2664,19 @@ impl Document {
         } else {
             0.0
         };
+        let context = ScrollSnapContext {
+            viewport_w: self.viewport_w,
+            viewport_h: self.viewport_h,
+            root_font_px: self.root_font_px(),
+        };
+        let (target_x, target_y) = self.find_webcore(id).map_or((target_x, target_y), |node| {
+            let before_x = if relative { old_x } else { target_x };
+            let before_y = if relative { old_y } else { target_y };
+            (
+                snapped_scroll_x(node, before_x, target_x, context),
+                snapped_scroll_y(node, before_y, target_y, context),
+            )
+        });
         let smooth = self
             .find_webcore(id)
             .is_some_and(|node| node.style.scroll_behavior == crate::types::ScrollBehavior::Smooth);
@@ -2669,13 +2713,13 @@ impl Document {
     pub fn element_scroll_by(&mut self, id: u32, dx: f32, dy: f32) {
         let x = self.element_scroll_left(id) + dx;
         let y = self.element_scroll_top(id) + dy;
-        self.element_scroll_to(id, x, y);
+        self.element_scroll_to_impl(id, x, y, true);
     }
 
     /// Programmatic viewport scroll. Honors root `scroll-behavior:smooth`.
     pub fn viewport_scroll_to(&mut self, x: f32, y: f32, viewport_w: f32, viewport_h: f32) -> bool {
         let doc_h = self.cached_scroll_height();
-        let doc_w = self.root.layout.margin_rect.w;
+        let doc_w = self.cached_scroll_width();
         let old_x = self.scroll_x;
         let old_y = self.scroll_y;
         let target_x = x.max(0.0).min((doc_w - viewport_w).max(0.0));
@@ -2683,6 +2727,18 @@ impl Document {
             self.scroll_y
         } else {
             y.max(0.0).min((doc_h - viewport_h).max(0.0))
+        };
+        let context = ScrollSnapContext {
+            viewport_w,
+            viewport_h,
+            root_font_px: self.root_font_px(),
+        };
+        let target_x =
+            snapped_viewport_scroll_x(&self.root, target_x, target_x, doc_w, target_y, context);
+        let target_y = if self.viewport_y_scroll_locked() {
+            target_y
+        } else {
+            snapped_viewport_scroll_y(&self.root, target_y, target_y, doc_h, target_x, context)
         };
         if (target_x - old_x).abs() <= 0.01 && (target_y - old_y).abs() <= 0.01 {
             return false;

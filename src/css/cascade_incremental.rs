@@ -78,16 +78,16 @@ pub fn mark_hover_dirty(
             node.has_dirty_descendant = true;
             any_dirty = true;
         }
-	        let anc = AncestorInfo {
-	            tag: node.tag.clone(),
-	            attributes: node.attributes.clone(),
-	            child_index,
-	            sibling_count,
-	            type_child_index,
-	            type_sibling_count,
-	            node_id: node.node_id,
-	            prev_siblings: Vec::new(),
-	        };
+        let anc = AncestorInfo {
+            tag: node.tag.clone(),
+            attributes: std::sync::Arc::new(node.attributes.clone()),
+            child_index,
+            sibling_count,
+            type_child_index,
+            type_sibling_count,
+            node_id: node.node_id,
+            prev_siblings: std::sync::Arc::new(Vec::new()),
+        };
         ancestors.push(anc);
 
         let child_count = node.children.len();
@@ -206,16 +206,16 @@ pub fn hover_change_requires_style(
             return true;
         }
 
-	        let anc = AncestorInfo {
-	            tag: node.tag.clone(),
-	            attributes: node.attributes.clone(),
-	            child_index,
-	            sibling_count,
-	            type_child_index,
-	            type_sibling_count,
-	            node_id: node.node_id,
-	            prev_siblings: Vec::new(),
-	        };
+        let anc = AncestorInfo {
+            tag: node.tag.clone(),
+            attributes: std::sync::Arc::new(node.attributes.clone()),
+            child_index,
+            sibling_count,
+            type_child_index,
+            type_sibling_count,
+            node_id: node.node_id,
+            prev_siblings: std::sync::Arc::new(Vec::new()),
+        };
         ancestors.push(anc);
 
         let child_count = node.children.len();
@@ -372,6 +372,23 @@ pub fn apply_cascade_incremental(
     let mut candidates_buf: Vec<usize> = Vec::new();
     let mut counters = crate::css::cascade::CounterState::default();
     let focus_within_chain = build_hover_chain(root, focused_box);
+    let mut precomputed = stylesheet.has_ancestor_has_rules.then(|| {
+        let match_nodes = incremental_match_node_ids(root);
+        crate::css::cascade_parallel::match_tree_with_ancestor_nodes_filtered(
+            root,
+            stylesheet,
+            vw,
+            vh,
+            focused_box,
+            keyboard_focus,
+            hover_chain,
+            &focus_within_chain,
+            0,
+            "",
+            Some(&match_nodes),
+        )
+    });
+    let apply_started = crate::profile::is_enabled().then(std::time::Instant::now);
     apply_cascade_incremental_walk(
         root,
         stylesheet,
@@ -391,8 +408,38 @@ pub fn apply_cascade_incremental(
         &mut counters,
         hover_chain,
         &focus_within_chain,
+        precomputed.as_mut(),
     );
+    if let Some(started) = apply_started {
+        crate::profile::record(crate::profile::Phase::CascadeApply, started.elapsed());
+    }
     crate::css::cascade::resolve_document_generated_content(root, stylesheet);
+}
+
+fn incremental_match_node_ids(root: &crate::types::WebCore) -> HashSet<u32> {
+    let mut ids = HashSet::new();
+    let mut pending = vec![(root, false)];
+    while let Some((node, recascading)) = pending.pop() {
+        let dirty_through_table_wrapper = node.has_dirty_descendant
+            && node.children.iter().any(|child| {
+                matches!(
+                    child.tag.as_str(),
+                    "anonymous-table" | "anonymous-table-row" | "anonymous-table-cell"
+                ) && (child.cascade_dirty || child.has_dirty_descendant)
+            });
+        let recascading = recascading || node.cascade_dirty || dirty_through_table_wrapper;
+        if recascading {
+            ids.insert(node.node_id);
+        }
+        if recascading || node.has_dirty_descendant {
+            for child in &node.children {
+                if recascading || child.cascade_dirty || child.has_dirty_descendant {
+                    pending.push((child, recascading));
+                }
+            }
+        }
+    }
+    ids
 }
 
 fn apply_cascade_incremental_walk(
@@ -414,6 +461,7 @@ fn apply_cascade_incremental_walk(
     counters: &mut crate::css::cascade::CounterState,
     hover_chain: &std::collections::HashSet<u32>,
     focus_within_chain: &std::collections::HashSet<u32>,
+    mut precomputed: Option<&mut crate::css::cascade::MatchMap>,
 ) {
     const CSS_INITIAL_ROOT_FONT_PX: f32 = 16.0;
     // SKIP: neither this node nor any descendant needs work
@@ -426,8 +474,10 @@ fn apply_cascade_incremental_walk(
     // otherwise direct-child selectors see the wrapper instead of the element.
     let dirty_through_table_wrapper = node.has_dirty_descendant
         && node.children.iter().any(|child| {
-            matches!(child.tag.as_str(), "anonymous-table" | "anonymous-table-row" | "anonymous-table-cell")
-                && (child.cascade_dirty || child.has_dirty_descendant)
+            matches!(
+                child.tag.as_str(),
+                "anonymous-table" | "anonymous-table-row" | "anonymous-table-cell"
+            ) && (child.cascade_dirty || child.has_dirty_descendant)
         });
     if node.cascade_dirty || dirty_through_table_wrapper {
         // Only this subtree will be recascaded. Unwrapping unrelated layout
@@ -469,40 +519,48 @@ fn apply_cascade_incremental_walk(
             // A cache local to this call: an incremental re-cascade
             // touches one subtree, so nothing outside it can be shared into.
             &mut crate::css::cascade::ShareCache::new(),
-            // Nothing precomputed: the incremental walk re-matches the dirty
-            // subtree with the current hover chain, which is what changed.
-            None,
+            precomputed.as_deref_mut(),
         );
         return;
     }
 
     // has_dirty_descendant only — don't re-cascade this node, just recurse into children
-	    let anc = AncestorInfo {
-	        tag: node.tag.clone(),
-	        attributes: node.attributes.clone(),
-	        child_index,
-	        sibling_count,
-	        type_child_index,
-	        type_sibling_count,
-	        node_id: node.node_id,
-	        prev_siblings: Vec::new(),
-	    };
+    let anc = AncestorInfo {
+        tag: node.tag.clone(),
+        attributes: std::sync::Arc::new(node.attributes.clone()),
+        child_index,
+        sibling_count,
+        type_child_index,
+        type_sibling_count,
+        node_id: node.node_id,
+        prev_siblings: std::sync::Arc::new(Vec::new()),
+    };
     ancestors.push(anc);
 
     let parent_s = node.style.clone();
     let child_count = node.children.len();
-    for i in 0..child_count {
-        let child_tag = node.children[i].tag.clone();
-        let mut t_idx = 0usize;
-        let mut t_count = 0usize;
-        for (j, sib) in node.children.iter().enumerate() {
-            if sib.tag == child_tag {
-                if j == i {
-                    t_idx = t_count;
-                }
-                t_count += 1;
-            }
+    let dirty_children = {
+        let mut totals = HashMap::new();
+        for child in &node.children {
+            *totals.entry(child.tag.as_str()).or_insert(0usize) += 1;
         }
+        let mut indices = HashMap::new();
+        node.children
+            .iter()
+            .enumerate()
+            .filter_map(|(i, child)| {
+                let index = indices.entry(child.tag.as_str()).or_insert(0usize);
+                let position = *index;
+                *index += 1;
+                (child.cascade_dirty || child.has_dirty_descendant).then_some((
+                    i,
+                    position,
+                    totals[child.tag.as_str()],
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+    for (i, t_idx, t_count) in dirty_children {
         let child = &mut node.children[i];
         apply_cascade_incremental_walk(
             child,
@@ -523,6 +581,7 @@ fn apply_cascade_incremental_walk(
             counters,
             hover_chain,
             focus_within_chain,
+            precomputed.as_deref_mut(),
         );
     }
 

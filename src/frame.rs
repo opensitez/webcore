@@ -45,6 +45,17 @@
 use crate::layout::LayoutEngine;
 use crate::types::{Document, Rect};
 
+enum PendingVideoUpdate {
+    Metadata {
+        node_id: u32,
+        metadata: crate::video::backend::MediaMetadata,
+    },
+    Frames {
+        node_id: u32,
+        frames: Vec<crate::video::backend::VideoFrame>,
+    },
+}
+
 /// Callbacks the engine fires to notify the host of state changes.
 /// The host implements this trait — the engine calls it, never the other way around.
 ///
@@ -122,6 +133,9 @@ pub struct EngineFrame {
     scheduled_stylesheets: std::collections::HashSet<String>,
     image_tx: Option<std::sync::mpsc::SyncSender<crate::types::PendingImageResult>>,
     scheduled_images: std::collections::HashSet<String>,
+    video_tx: Option<std::sync::mpsc::SyncSender<PendingVideoUpdate>>,
+    video_rx: Option<std::sync::mpsc::Receiver<PendingVideoUpdate>>,
+    scheduled_videos: std::collections::HashSet<(u32, String)>,
     pending_density_reselection: bool,
     cache_dir: Option<String>,
     resource_wake: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
@@ -164,6 +178,9 @@ impl EngineFrame {
             scheduled_stylesheets: std::collections::HashSet::new(),
             image_tx: None,
             scheduled_images: std::collections::HashSet::new(),
+            video_tx: None,
+            video_rx: None,
+            scheduled_videos: std::collections::HashSet::new(),
             pending_density_reselection: false,
             cache_dir: None,
             resource_wake: None,
@@ -229,6 +246,9 @@ impl EngineFrame {
             std::time::Duration::ZERO,
         );
         self.last_animation_layout_values.clear();
+        self.video_tx = None;
+        self.video_rx = None;
+        self.scheduled_videos.clear();
         self.first_paint_done = false;
         self.needs_style = true;
         self.needs_layout = true;
@@ -335,6 +355,24 @@ impl EngineFrame {
                     }
                 }
             }
+            if let Some(rx) = &self.video_rx {
+                let arrivals: Vec<_> = rx.try_iter().take(32).collect();
+                for arrival in arrivals {
+                    match arrival {
+                        PendingVideoUpdate::Metadata { node_id, metadata } => {
+                            if self.doc.media_apply_video_metadata(node_id, metadata) {
+                                resource_requested_relayout = true;
+                            }
+                        }
+                        PendingVideoUpdate::Frames { node_id, frames } => {
+                            if self.doc.media_queue_video_frames(node_id, frames) {
+                                self.needs_paint = true;
+                                update.rebuild_display_list = true;
+                            }
+                        }
+                    }
+                }
+            }
             if self
                 .engine
                 .poll_pending_fonts_budgeted(32, std::time::Duration::ZERO)
@@ -408,12 +446,19 @@ impl EngineFrame {
         let mut animation_needs_layout = false;
         if self.doc.needs_animation_frame {
             let previous_rects = crate::renderer::animation_override_rects_with_ids(
-                &self.doc.root, &self.doc.animation_overrides, self.viewport_w, self.viewport_h);
+                &self.doc.root,
+                &self.doc.animation_overrides,
+                self.viewport_w,
+                self.viewport_h,
+            );
             self.doc.tick_animations(now);
             // A removed override still needs one paint to restore the base
             // style. Current animation targets alone omit this final frame.
-            let finished_rects = previous_rects.into_iter()
-                .filter_map(|(id, rect)| (!self.doc.animation_overrides.contains_key(&id)).then_some(rect))
+            let finished_rects = previous_rects
+                .into_iter()
+                .filter_map(|(id, rect)| {
+                    (!self.doc.animation_overrides.contains_key(&id)).then_some(rect)
+                })
                 .collect::<Vec<_>>();
             if !finished_rects.is_empty() {
                 update.paint_rects.extend(finished_rects);
@@ -441,18 +486,13 @@ impl EngineFrame {
                 self.needs_layout = true;
                 self.needs_paint = true;
                 update.rebuild_display_list = true;
-            } else if !self.doc.animation_overrides.is_empty()
-                || svg_changed
-                || media_running
-            {
+            } else if !self.doc.animation_overrides.is_empty() || svg_changed || media_running {
                 self.needs_paint = true;
                 if svg_changed
                     || media_running
                     || !animation_overrides_are_transform_only(&self.doc.animation_overrides)
                 {
-                    if !animation_needs_layout
-                        && !media_running
-                    {
+                    if !animation_needs_layout && !media_running {
                         update.paint_only_display_list_rebuild = true;
                     } else {
                         update.rebuild_display_list = true;
@@ -475,6 +515,7 @@ impl EngineFrame {
                     .layout_no_cascade(&mut self.doc, self.viewport_w);
             }
             self.schedule_unscheduled_document_images();
+            self.schedule_unscheduled_document_videos();
             self.pending_density_reselection = false;
             self.needs_style = false;
             self.needs_layout = false;
@@ -554,6 +595,7 @@ impl EngineFrame {
     /// Set the viewport size. Triggers re-cascade + re-layout on next frame.
     pub fn set_viewport(&mut self, w: f32, h: f32) {
         if (w - self.viewport_w).abs() > 0.5 || (h - self.viewport_h).abs() > 0.5 {
+            crate::css::cascade::mark_layout_subtree_dirty(&mut self.doc.root);
             self.viewport_w = w;
             self.viewport_h = h;
             self.engine.viewport_w = w;
@@ -574,8 +616,7 @@ impl EngineFrame {
     }
 
     pub fn set_device_pixel_ratio(&mut self, ratio: f32) -> bool {
-        if !ratio.is_finite() || ratio <= 0.0
-            || (self.doc.device_pixel_ratio - ratio).abs() < 0.01
+        if !ratio.is_finite() || ratio <= 0.0 || (self.doc.device_pixel_ratio - ratio).abs() < 0.01
         {
             return false;
         }
@@ -591,28 +632,10 @@ impl EngineFrame {
 
     /// Scroll by delta. No layout needed — just repaint with new offset.
     pub fn scroll(&mut self, dx: f32, dy: f32) {
-        let doc_h = crate::types::Document::scroll_height(&self.doc.root);
-        let doc_w = self.doc.root.layout.margin_rect.w;
-        let view_h = self.viewport_h;
-        let view_w = self.viewport_w;
-
-        let new_y = if self.doc.viewport_y_scroll_locked() {
-            self.doc.scroll_y
-        } else {
-            (self.doc.scroll_y + dy)
-                .max(0.0)
-                .min((doc_h - view_h).max(0.0))
-        };
-        let new_x = (self.doc.scroll_x + dx)
-            .max(0.0)
-            .min((doc_w - view_w).max(0.0));
-
-        if (new_y - self.doc.scroll_y).abs() > 0.01 || (new_x - self.doc.scroll_x).abs() > 0.01 {
-            self.doc.scroll_y = new_y;
-            self.doc.scroll_x = new_x;
-            // `window.onscroll` — fired AFTER the offset moves, so a handler
-            // reading the scroll position sees the new one.
-            self.doc.fire_window_event("scroll");
+        if self
+            .doc
+            .scroll_viewport_by_user(dx, dy, self.viewport_w, self.viewport_h)
+        {
             self.needs_paint = true; // repaint only, no layout
         }
     }
@@ -1105,11 +1128,15 @@ impl EngineFrame {
         parser.set_root_child_count(self.doc.root.children.len());
         self.streaming_parser = Some(parser);
         self.stream_node_ids.clear();
-        self.stream_node_ids.insert(Vec::new(), self.doc.root.node_id);
+        self.stream_node_ids
+            .insert(Vec::new(), self.doc.root.node_id);
         self.stylesheet_tx = None;
         self.scheduled_stylesheets.clear();
         self.image_tx = None;
         self.scheduled_images.clear();
+        self.video_tx = None;
+        self.video_rx = None;
+        self.scheduled_videos.clear();
         self.doc.pending_images = None;
         self.doc.images_in_flight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         self.needs_style = true;
@@ -1232,6 +1259,7 @@ impl EngineFrame {
                     | crate::types::PendingImageTarget::Mask
             )
         {
+            let base_url = self.doc.base_url.clone();
             match crate::cached_decoded_image_result(url_trimmed, None) {
                 Ok(decoded) => {
                     if let Some(node) = if node_id != 0 {
@@ -1241,13 +1269,17 @@ impl EngineFrame {
                     } {
                         match target {
                             crate::types::PendingImageTarget::Background => {
-                                let _ = crate::html::set_decoded_bg_image_on_node(node, decoded);
+                                let _ = crate::html::set_decoded_bg_image_for_url_on_node(
+                                    node, decoded, &url, &base_url,
+                                );
                             }
                             crate::types::PendingImageTarget::BackgroundLayer(layer_index) => {
-                                let _ = crate::html::set_decoded_bg_image_layer_on_node(
+                                let _ = crate::html::set_decoded_bg_image_layer_for_url_on_node(
                                     node,
                                     layer_index,
                                     decoded,
+                                    &url,
+                                    &base_url,
                                 );
                             }
                             crate::types::PendingImageTarget::Mask => {
@@ -1273,21 +1305,54 @@ impl EngineFrame {
         let wake = self.resource_wake.clone();
         in_flight.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         crate::spawn_image_resource_task(move || {
-            let loader = cache_dir.map(|cache_dir| {
-                std::sync::Arc::new(move |src: &str| {
+            let preview_tx = tx.clone();
+            let preview_path = path.clone();
+            let preview_wake = wake.clone();
+            let loader = std::sync::Arc::new(move |src: &str| {
+                if src.starts_with("http://") || src.starts_with("https://") {
+                    let dimensions_tx = preview_tx.clone();
+                    let dimensions_path = preview_path.clone();
+                    let dimensions_wake = preview_wake.clone();
+                    return crate::images::stream::fetch_decode_with_previews_cached(
+                        src,
+                        cache_dir.as_deref(),
+                        move |width, height| {
+                            let _ =
+                                dimensions_tx.send(crate::types::PendingImageResult::Dimensions {
+                                    node_id,
+                                    path: dimensions_path.clone(),
+                                    target,
+                                    width,
+                                    height,
+                                });
+                            if let Some(wake) = dimensions_wake.as_ref() {
+                                wake();
+                            }
+                        },
+                        |decoded| {
+                            let _ = preview_tx.send(crate::types::PendingImageResult::Loaded {
+                                node_id,
+                                path: preview_path.clone(),
+                                target,
+                                url: src.to_string(),
+                                decoded,
+                            });
+                            if let Some(wake) = preview_wake.as_ref() {
+                                wake();
+                            }
+                        },
+                    );
+                }
+                if let Some(cache_dir) = cache_dir.as_deref() {
                     let bytes = crate::loading::cached_fetch_bytes_arc(src, &cache_dir)?;
-                    crate::html::decode_image_bytes_arc(bytes.clone()).ok_or_else(|| {
+                    return crate::html::decode_image_bytes_arc(bytes.clone()).ok_or_else(|| {
                         format!("unsupported image bytes: {} bytes from {src}", bytes.len())
-                    })
-                })
-                    as std::sync::Arc<
-                        dyn Fn(&str) -> Result<crate::html::DecodedImage, String>
-                            + Send
-                            + Sync
-                            + 'static,
-                    >
+                    });
+                }
+                crate::html::load_decoded_image_from_src(src, "")
+                    .ok_or_else(|| format!("fetch or decode failed for {src}"))
             });
-            let result = crate::cached_decoded_image_result(&url, loader.as_deref());
+            let result = crate::cached_decoded_image_result(&url, Some(loader.as_ref()));
             let event = match result {
                 Ok(decoded) => crate::types::PendingImageResult::Loaded {
                     node_id,
@@ -1349,6 +1414,105 @@ impl EngineFrame {
         }
         if let Some(node) = crate::types::find_node_by_path_mut(&mut self.doc.root, path) {
             crate::html::resolve_img_source(node, &base, self.viewport_w, self.viewport_h);
+        }
+    }
+
+    fn schedule_unscheduled_document_videos(&mut self) {
+        fn collect(node: &crate::types::WebCore, ids: &mut Vec<u32>) {
+            if node.tag == "video" {
+                ids.push(node.node_id);
+            }
+            for child in &node.children {
+                collect(child, ids);
+            }
+            if let Some(shadow) = &node.shadow_root {
+                for child in &shadow.children {
+                    collect(child, ids);
+                }
+            }
+        }
+
+        let mut ids = Vec::new();
+        collect(&self.doc.root, &mut ids);
+        for node_id in ids {
+            let Some(url) = self.doc.media_current_src(node_id) else {
+                continue;
+            };
+            let source_path = url.split(['?', '#']).next().unwrap_or("");
+            let is_y4m = source_path.ends_with(".y4m");
+            let is_mp4 = source_path.ends_with(".mp4");
+            if !(is_y4m || is_mp4) || !self.scheduled_videos.insert((node_id, url.clone())) {
+                continue;
+            }
+            let tx = self
+                .video_tx
+                .get_or_insert_with(|| {
+                    let (tx, rx) = std::sync::mpsc::sync_channel(8);
+                    self.video_rx = Some(rx);
+                    tx
+                })
+                .clone();
+            let wake = self.resource_wake.clone();
+            std::thread::spawn(move || {
+                use std::io::Read;
+
+                let mut reader: Box<dyn Read + Send> =
+                    if url.starts_with("http://") || url.starts_with("https://") {
+                        match crate::http_client().get(&url).send() {
+                            Ok(response) if response.status().is_success() => Box::new(response),
+                            _ => return,
+                        }
+                    } else {
+                        match std::fs::File::open(&url) {
+                            Ok(file) => Box::new(file),
+                            Err(_) => return,
+                        }
+                    };
+                let mut decoder: Box<dyn crate::video::backend::StreamingVideoDecoder> = if is_mp4 {
+                    Box::new(crate::video::mp4_avc::Mp4AvcStream::new())
+                } else {
+                    Box::new(crate::video::y4m::Y4mStream::new())
+                };
+                let mut metadata_sent = false;
+                let mut bytes = [0u8; 16 * 1024];
+                loop {
+                    let count = match reader.read(&mut bytes) {
+                        Ok(0) => break,
+                        Ok(count) => count,
+                        Err(_) => return,
+                    };
+                    let frames = match decoder.push(&bytes[..count]) {
+                        Ok(frames) => frames,
+                        Err(_) => return,
+                    };
+                    if !metadata_sent {
+                        if let Some(metadata) = decoder.metadata() {
+                            if tx
+                                .send(PendingVideoUpdate::Metadata { node_id, metadata })
+                                .is_err()
+                            {
+                                return;
+                            }
+                            metadata_sent = true;
+                            if let Some(wake) = &wake {
+                                wake();
+                            }
+                        }
+                    }
+                    if !frames.is_empty() {
+                        if tx
+                            .send(PendingVideoUpdate::Frames { node_id, frames })
+                            .is_err()
+                        {
+                            return;
+                        }
+                        if let Some(wake) = &wake {
+                            wake();
+                        }
+                    }
+                }
+                let _ = decoder.finish();
+            });
         }
     }
 
@@ -1484,12 +1648,28 @@ impl EngineFrame {
             }
             if let Some(shadow) = node.shadow_root.as_ref() {
                 for child in &shadow.children {
-                    collect(child, base_url, viewport_w, viewport_h, device_pixel_ratio, path, out);
+                    collect(
+                        child,
+                        base_url,
+                        viewport_w,
+                        viewport_h,
+                        device_pixel_ratio,
+                        path,
+                        out,
+                    );
                 }
             }
             for (idx, child) in node.children.iter().enumerate() {
                 path.push(idx);
-                collect(child, base_url, viewport_w, viewport_h, device_pixel_ratio, path, out);
+                collect(
+                    child,
+                    base_url,
+                    viewport_w,
+                    viewport_h,
+                    device_pixel_ratio,
+                    path,
+                    out,
+                );
                 path.pop();
             }
         }
@@ -1572,7 +1752,10 @@ impl EngineFrame {
                     }
                 }
                 DomMutation::AddStylesheet { css, media, .. } => {
-                    if self.doc.add_streamed_inline_stylesheet(css.clone(), media.clone()) {
+                    if self
+                        .doc
+                        .add_streamed_inline_stylesheet(css.clone(), media.clone())
+                    {
                         self.mark_style_dirty();
                         self.engine.invalidate_cascade();
                     }
@@ -1581,16 +1764,21 @@ impl EngineFrame {
                     self.callbacks.on_title_changed(title);
                 }
                 DomMutation::StylesheetHint { url, media } => {
-                    self.doc.linked_stylesheets.push((url.clone(), media.clone()));
+                    self.doc
+                        .linked_stylesheets
+                        .push((url.clone(), media.clone()));
                     let slot_idx = self.doc.document_stylesheets.len();
-                    self.doc.document_stylesheets.push(
-                        crate::types::DocumentStylesheet::Linked {
+                    self.doc
+                        .document_stylesheets
+                        .push(crate::types::DocumentStylesheet::Linked {
                             href: url.clone(),
                             media: media.clone(),
-                        },
-                    );
+                        });
                     self.schedule_streamed_stylesheet(slot_idx, url.clone(), media.clone());
-                    resource_hints.push((url.clone(), crate::html::streaming::ResourceKind::Stylesheet));
+                    resource_hints.push((
+                        url.clone(),
+                        crate::html::streaming::ResourceKind::Stylesheet,
+                    ));
                 }
                 DomMutation::ResourceHint { kind, url } => {
                     resource_hints.push((url.clone(), kind.clone()));
@@ -1666,7 +1854,9 @@ impl EngineFrame {
                         self.callbacks.on_title_changed(&title);
                     }
                     crate::html::streaming::DomMutation::StylesheetHint { url, media } => {
-                        self.doc.linked_stylesheets.push((url.clone(), media.clone()));
+                        self.doc
+                            .linked_stylesheets
+                            .push((url.clone(), media.clone()));
                         let slot_idx = self.doc.document_stylesheets.len();
                         self.doc.document_stylesheets.push(
                             crate::types::DocumentStylesheet::Linked {
@@ -1733,14 +1923,12 @@ fn animation_overrides_are_transform_only(
     overrides: &std::collections::HashMap<u32, Vec<(String, String)>>,
 ) -> bool {
     !overrides.is_empty()
-        && overrides
-            .values()
-            .all(|props| {
-                !props.is_empty()
-                    && props.iter().all(|(prop, _)| {
-                        crate::types::animation_runtime::animation_property_is_transform(prop)
-                    })
-            })
+        && overrides.values().all(|props| {
+            !props.is_empty()
+                && props.iter().all(|(prop, _)| {
+                    crate::types::animation_runtime::animation_property_is_transform(prop)
+                })
+        })
 }
 
 fn retained_paint_band(doc: &Document, viewport_h: f32) -> crate::types::Rect {
@@ -1820,6 +2008,120 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mp4_video_metadata_arrives_from_http_before_picture_data() {
+        use std::io::{Read, Write};
+
+        let Ok(path) = std::env::var("WEBCORE_MP4_FIXTURE") else {
+            return;
+        };
+        let bytes = std::fs::read(path).unwrap();
+        let prefix = bytes[..64 * 1024].to_vec();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/movie.mp4", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = socket.read(&mut request);
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: video/mp4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", prefix.len()).unwrap();
+            socket.write_all(&prefix).unwrap();
+        });
+
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.load_html(&format!("<video id=movie src='{url}'></video>"));
+        let id = frame.doc.get_element_by_id("movie").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            frame.update_frame();
+            let node = frame.doc.find_webcore(id).unwrap();
+            if (node.image_width, node.image_height) == (1280, 720) {
+                assert!(node.image_data.is_none());
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "MP4 metadata did not arrive"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert!(frame.doc.media_duration(id).unwrap() > 80.0);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn video_src_streams_and_plays_before_http_response_finishes() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/movie.y4m", listener.local_addr().unwrap());
+        let first = b"YUV4MPEG2 W2 H2 F25:1 C420\nFRAME\n\x10\x10\x10\x10\x80\x80";
+        let second = b"FRAME\n\xeb\xeb\xeb\xeb\x80\x80";
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = socket.read(&mut request);
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: video/x-yuv4mpeg2\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", first.len() + second.len()).unwrap();
+            socket.write_all(first).unwrap();
+            socket.flush().unwrap();
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+            socket.write_all(second).unwrap();
+        });
+
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.load_html(&format!(
+            "<video id=movie width=100 height=80 src='{url}' controls></video>"
+        ));
+        let id = frame.doc.get_element_by_id("movie").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            frame.update_frame();
+            if frame.doc.find_webcore(id).unwrap().image_data.is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "first video frame did not arrive"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(
+            &frame
+                .doc
+                .find_webcore(id)
+                .unwrap()
+                .image_data
+                .as_ref()
+                .unwrap()[..4],
+            &[0, 0, 0, 255]
+        );
+        assert!(frame.doc.media_play(id));
+        release_tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            frame.update_frame();
+            if frame
+                .doc
+                .find_webcore(id)
+                .unwrap()
+                .image_data
+                .as_ref()
+                .unwrap()[0]
+                == 255
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "second video frame did not play"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        server.join().unwrap();
+    }
+
+    #[test]
     fn prefixed_transform_keyframes_remain_compositor_only() {
         let overrides = std::collections::HashMap::from([(
             1,
@@ -1881,6 +2183,36 @@ mod tests {
     }
 
     #[test]
+    fn streamed_inline_styles_reuse_parsed_sheet_across_frames() {
+        let load = || {
+            let mut frame = EngineFrame::empty(320.0, 240.0);
+            frame.start_streaming("https://example.test/");
+            frame.feed_html_chunk(b"<style>.shared{color:red}</style><p class='shared'>Text</p>");
+            frame.finish_loading();
+            frame
+        };
+        let first = load();
+        let second = load();
+        assert!(std::sync::Arc::ptr_eq(
+            &first.doc.inline_stylesheet_cache[&0].sheet,
+            &second.doc.inline_stylesheet_cache[&0].sheet,
+        ));
+    }
+
+    #[test]
+    fn streamed_inline_styles_share_one_deferred_index_rebuild() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            b"<style>.target{color:red}</style><style>.target{color:blue}</style><p class='target'>Text</p>",
+        );
+        frame.finish_loading();
+        frame.update_frame();
+        let node = crate::dom::query_selector(&frame.doc.root, ".target").unwrap();
+        assert_eq!(node.style.color, crate::types::Color::rgb(0, 0, 255));
+    }
+
+    #[test]
     fn viewport_change_reevaluates_streamed_style_media() {
         let mut frame = EngineFrame::empty(800.0, 600.0);
         frame.start_streaming("https://example.test/");
@@ -1927,7 +2259,9 @@ mod tests {
         frame.update_frame();
         let main = crate::dom::query_selector(&frame.doc.root, "main").unwrap();
         assert!(
-            main.children.iter().any(|child| child.tag == "anonymous-block"),
+            main.children
+                .iter()
+                .any(|child| child.tag == "anonymous-block"),
             "layout must change the child-index structure exercised by this test"
         );
         frame.feed_html_chunk(
@@ -2161,7 +2495,11 @@ mod tests {
             frame.doc.pending_stylesheets.is_some(),
             "the live receiver remains attached while its sender is open"
         );
-        assert!(!frame.doc.poll_pending_stylesheets_budgeted(usize::MAX, std::time::Duration::ZERO));
+        assert!(
+            !frame
+                .doc
+                .poll_pending_stylesheets_budgeted(usize::MAX, std::time::Duration::ZERO)
+        );
     }
 
     #[test]
@@ -2455,17 +2793,82 @@ mod tests {
     }
 
     #[test]
+    fn streaming_frame_schedules_quoted_svg_data_mask_with_charset() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<html><head><style>.item::after{content:"";display:inline-block;width:12px;height:10px;mask-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12'%3E%3Cpath stroke='%23000' d='M1 4l5 4 5-4'/%3E%3C/svg%3E")}</style></head><body><span class="item">Menu</span></body></html>"#,
+        );
+        frame.finish_loading();
+        frame.update_frame();
+        let parsed_mask = frame
+            .doc
+            .stylesheet
+            .rules
+            .iter()
+            .find_map(|rule| rule.declarations.get("mask-image"));
+        assert!(
+            parsed_mask.is_some_and(|value| value.contains("data:image/svg+xml;charset=utf-8")),
+            "mask-image was lost during stylesheet parsing: {:?}",
+            parsed_mask
+        );
+        let mut direct_style = crate::types::ComputedStyle::default();
+        crate::css::apply_property(&mut direct_style, "mask-image", parsed_mask.unwrap());
+        assert!(
+            direct_style
+                .rare()
+                .mask_image_url
+                .contains("data:image/svg+xml;charset=utf-8"),
+            "mask-image property application failed: {:?}",
+            parsed_mask
+        );
+        fn find_after(node: &crate::types::WebCore) -> Option<&crate::types::WebCore> {
+            if node.tag == "::after" {
+                return Some(node);
+            }
+            node.children.iter().find_map(find_after)
+        }
+        let after = find_after(&frame.doc.root).expect("generated chevron");
+        assert!(
+            after
+                .style
+                .rare()
+                .mask_image_url
+                .contains("data:image/svg+xml;charset=utf-8"),
+            "mask-image did not reach the generated box: {:?}",
+            after.style.rare().mask_image_url
+        );
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("data:image/svg+xml;charset=utf-8")),
+            "quoted SVG data mask was not scheduled: {:?}",
+            frame.scheduled_images
+        );
+    }
+
+    #[test]
     fn streaming_append_keeps_clearfix_after_all_columns() {
         let mut frame = EngineFrame::empty(800.0, 600.0);
         frame.start_streaming("https://example.test/");
         frame.feed_html_chunk(br#"<html><head><style>#row{width:600px}#row::after{content:"";display:table;clear:both}.column{float:left;width:250px;height:100px}</style></head><body><div id="row"><div class="column">First</div>"#);
         frame.update_frame();
-        frame.feed_html_chunk(br#"<div class="column">Second</div></div><div id="next">Next</div></body></html>"#);
+        frame.feed_html_chunk(
+            br#"<div class="column">Second</div></div><div id="next">Next</div></body></html>"#,
+        );
         frame.finish_loading();
         frame.update_frame();
-        let row = crate::tests::harness::find_box(&frame.doc.root, &|n| n.attributes.get("id").is_some_and(|s| s == "row")).unwrap();
+        let row = crate::tests::harness::find_box(&frame.doc.root, &|n| {
+            n.attributes.get("id").is_some_and(|s| s == "row")
+        })
+        .unwrap();
         assert_eq!(row.children.last().unwrap().tag, "::after");
-        let columns: Vec<_> = row.children.iter().filter(|n| n.attributes.get("class").is_some_and(|s| s == "column")).collect();
+        let columns: Vec<_> = row
+            .children
+            .iter()
+            .filter(|n| n.attributes.get("class").is_some_and(|s| s == "column"))
+            .collect();
         assert_eq!(columns.len(), 2);
         assert!((columns[0].layout.border_rect.y - columns[1].layout.border_rect.y).abs() < 0.1);
         assert!((row.layout.content_rect.h - 100.0).abs() < 0.1);
@@ -2540,7 +2943,8 @@ mod tests {
         frame.doc.pending_images = Some(original_rx);
 
         frame.finish_loading();
-        std::sync::Arc::make_mut(&mut frame.doc.root.style).background_image_url = "memory:bg".into();
+        std::sync::Arc::make_mut(&mut frame.doc.root.style).background_image_url =
+            "memory:bg".into();
 
         assert!(
             frame.image_tx.is_some(),
@@ -2568,6 +2972,87 @@ mod tests {
     }
 
     #[test]
+    fn remote_png_preview_reaches_frame_before_download_completes() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut seed = 1u32;
+        let image = image::RgbaImage::from_fn(128, 128, |_, _| {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            image::Rgba([seed as u8, (seed >> 8) as u8, (seed >> 16) as u8, 255])
+        });
+        let mut output = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut output, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = output.into_inner();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/preview.png", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 2048];
+            let _ = socket.read(&mut request);
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                bytes.len()
+            );
+            socket.write_all(header.as_bytes()).unwrap();
+            for chunk in bytes.chunks(128) {
+                if socket.write_all(chunk).is_err() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+
+        let wakes = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.set_cache_dir(Some(std::env::temp_dir().to_string_lossy().into_owned()));
+        let wake_count = wakes.clone();
+        frame.set_resource_wake(Some(std::sync::Arc::new(move || {
+            wake_count.fetch_add(1, Ordering::SeqCst);
+        })));
+        frame.schedule_streamed_image(
+            0,
+            Vec::new(),
+            crate::types::PendingImageTarget::Element,
+            url,
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut saw_partial = false;
+        let mut saw_dimensions_before_pixels = false;
+        loop {
+            let poll = frame
+                .doc
+                .poll_pending_images_budgeted(1, std::time::Duration::ZERO);
+            if !saw_dimensions_before_pixels
+                && frame.doc.root.image_width == 128
+                && frame.doc.root.image_data.is_none()
+            {
+                saw_dimensions_before_pixels = true;
+                assert!(poll.needs_relayout);
+            }
+            if let Some(pixels) = frame.doc.root.image_data.as_ref() {
+                let last_alpha = pixels[pixels.len() - 1];
+                if last_alpha == 0 {
+                    saw_partial = true;
+                } else if last_alpha == 255 {
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "image worker did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        server.join().unwrap();
+        assert!(saw_partial);
+        assert!(saw_dimensions_before_pixels);
+        assert!(wakes.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[test]
     fn image_set_reselects_background_candidates_when_density_changes() {
         let mut frame = EngineFrame::new(
             crate::html::parse_html("<div id=hero style='width:40px;height:40px'></div>"),
@@ -2582,17 +3067,37 @@ mod tests {
             "image-set(url(file:///nonexistent-one.png) 1x, url(file:///nonexistent-two.png) 2x)",
         );
         frame.schedule_unscheduled_document_images();
-        assert!(frame.scheduled_images.iter().any(|key| key.contains("nonexistent-one.png")));
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("nonexistent-one.png"))
+        );
 
         assert!(frame.set_device_pixel_ratio(2.0));
         assert!(frame.needs_render());
         frame.update_frame();
-        assert!(frame.scheduled_images.iter().any(|key| key.contains("nonexistent-two.png")));
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("nonexistent-two.png"))
+        );
 
         assert!(frame.set_device_pixel_ratio(1.0));
         frame.update_frame();
-        assert!(frame.scheduled_images.iter().any(|key| key.contains("nonexistent-one.png")));
-        assert!(!frame.scheduled_images.iter().any(|key| key.contains("nonexistent-two.png")));
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("nonexistent-one.png"))
+        );
+        assert!(
+            !frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("nonexistent-two.png"))
+        );
     }
 
     #[test]
@@ -2610,15 +3115,45 @@ mod tests {
             "image-set(url(file:///first-one.png) 1x, url(file:///first-two.png) 2x), image-set(url(file:///second-one.png) 1x, url(file:///second-two.png) 2x)",
         );
         frame.schedule_unscheduled_document_images();
-        assert!(frame.scheduled_images.iter().any(|key| key.contains("first-one.png")));
-        assert!(frame.scheduled_images.iter().any(|key| key.contains("second-one.png")));
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("first-one.png"))
+        );
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("second-one.png"))
+        );
 
         assert!(frame.set_device_pixel_ratio(2.0));
         frame.update_frame();
-        assert!(frame.scheduled_images.iter().any(|key| key.contains("first-two.png")));
-        assert!(frame.scheduled_images.iter().any(|key| key.contains("second-two.png")));
-        assert!(!frame.scheduled_images.iter().any(|key| key.contains("first-one.png")));
-        assert!(!frame.scheduled_images.iter().any(|key| key.contains("second-one.png")));
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("first-two.png"))
+        );
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("second-two.png"))
+        );
+        assert!(
+            !frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("first-one.png"))
+        );
+        assert!(
+            !frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("second-one.png"))
+        );
     }
 
     #[test]
@@ -2636,12 +3171,27 @@ mod tests {
             "image-set(url(file:///mask-one.png) 1x, url(file:///mask-two.png) 2x)",
         );
         frame.schedule_unscheduled_document_images();
-        assert!(frame.scheduled_images.iter().any(|key| key.contains("mask-one.png")));
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("mask-one.png"))
+        );
 
         assert!(frame.set_device_pixel_ratio(2.0));
         frame.update_frame();
-        assert!(frame.scheduled_images.iter().any(|key| key.contains("mask-two.png")));
-        assert!(!frame.scheduled_images.iter().any(|key| key.contains("mask-one.png")));
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("mask-two.png"))
+        );
+        assert!(
+            !frame
+                .scheduled_images
+                .iter()
+                .any(|key| key.contains("mask-one.png"))
+        );
     }
 
     #[test]
@@ -3012,12 +3562,17 @@ mod tests {
 
         frame.schedule_unscheduled_document_images();
 
-        assert!(frame.scheduled_images.iter().any(|key| {
-            key.contains("Element:#") && key.contains("selected-photo.webp")
-        }));
-        assert!(frame.scheduled_images.iter().any(|key| {
-            key.contains("ElementFallback:#") && key.contains("saved-photo.jpg")
-        }));
+        assert!(
+            frame
+                .scheduled_images
+                .iter()
+                .any(|key| { key.contains("Element:#") && key.contains("selected-photo.webp") })
+        );
+        assert!(
+            frame.scheduled_images.iter().any(|key| {
+                key.contains("ElementFallback:#") && key.contains("saved-photo.jpg")
+            })
+        );
     }
 
     #[test]

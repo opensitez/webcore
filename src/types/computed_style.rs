@@ -6,6 +6,7 @@ use crate::css::*;
 use crate::dom::*;
 use crate::html::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GeneratedContentPart {
@@ -26,7 +27,12 @@ pub struct CounterReset {
 
 impl CounterReset {
     pub fn normal(name: impl Into<String>, value: i32) -> Self {
-        Self { name: name.into(), value: Some(value), reversed: false, html_list_start: false }
+        Self {
+            name: name.into(),
+            value: Some(value),
+            reversed: false,
+            html_list_start: false,
+        }
     }
 }
 
@@ -51,6 +57,8 @@ pub const SPECIFIED_SVG_STROKE_WIDTH: u16 = 1 << 2;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RareStyle {
+    pub clip_path_data: Option<(Arc<tiny_skia::Path>, tiny_skia::FillRule)>,
+    pub clip_path_inset_round: Option<([CssLength; 4], [CssLength; 4])>,
     /// Which colour properties were declared as `currentColor`, as a bitmask
     /// over `CURRENT_COLOR_*`.
     ///
@@ -70,6 +78,7 @@ pub struct RareStyle {
     pub grid_template_rows: Vec<GridTrackSize>,
     pub grid_template_areas: Vec<Vec<String>>,
     pub auto_repeat_columns: Vec<GridTrackSize>,
+    pub auto_fit_columns: bool,
     pub gradient_stops: Vec<GradientStop>,
     pub animations: Vec<ParsedAnimation>,
     pub transitions: Vec<ParsedTransition>,
@@ -149,14 +158,19 @@ pub struct BackgroundLayer {
 
 impl BackgroundLayer {
     pub(crate) fn image_url_for_dpr(&self, dpr: f32) -> String {
-        self.image_set_source.as_deref()
-            .and_then(|source| crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio(source, dpr))
+        self.image_set_source
+            .as_deref()
+            .and_then(|source| {
+                crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio(source, dpr)
+            })
             .unwrap_or_else(|| self.image_url.clone())
     }
 }
 
 impl RareStyle {
     pub const EMPTY: RareStyle = RareStyle {
+        clip_path_data: None,
+        clip_path_inset_round: None,
         current_color_props: 0,
         specified_svg_paint_props: 0,
         svg_stroke_width: None,
@@ -169,6 +183,7 @@ impl RareStyle {
         grid_template_rows: Vec::new(),
         grid_template_areas: Vec::new(),
         auto_repeat_columns: Vec::new(),
+        auto_fit_columns: false,
         gradient_stops: Vec::new(),
         animations: Vec::new(),
         transitions: Vec::new(),
@@ -195,14 +210,22 @@ impl RareStyle {
 
 impl ComputedStyle {
     pub(crate) fn mask_image_url_for_dpr(&self, dpr: f32) -> String {
-        self.rare().mask_image_set_source.as_deref()
-            .and_then(|source| crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio(source, dpr))
+        self.rare()
+            .mask_image_set_source
+            .as_deref()
+            .and_then(|source| {
+                crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio(source, dpr)
+            })
             .unwrap_or_else(|| self.rare().mask_image_url.clone())
     }
 
     pub(crate) fn background_image_url_for_dpr(&self, dpr: f32) -> String {
-        self.rare().background_image_set_source.as_deref()
-            .and_then(|source| crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio(source, dpr))
+        self.rare()
+            .background_image_set_source
+            .as_deref()
+            .and_then(|source| {
+                crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio(source, dpr)
+            })
             .unwrap_or_else(|| self.background_image_url.clone())
     }
 
@@ -230,8 +253,10 @@ impl ComputedStyle {
     }
 
     pub fn has_transform(&self) -> bool {
-        !self.css_transform.ops.is_empty() || !self.css_translate.ops.is_empty()
-            || !self.css_rotate.ops.is_empty() || !self.css_scale.ops.is_empty()
+        !self.css_transform.ops.is_empty()
+            || !self.css_translate.ops.is_empty()
+            || !self.css_rotate.ops.is_empty()
+            || !self.css_scale.ops.is_empty()
     }
 
     /// Read the rare properties. Never allocates.
@@ -742,6 +767,7 @@ impl Default for GradientRadialSize {
 pub struct GradientStop {
     pub color: Color,
     pub position: f32, // 0.0..1.0
+    pub current_color: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -772,7 +798,9 @@ impl TextOverflow {
     pub(crate) fn heap_bytes(&self) -> usize {
         match self {
             Self::String(text) => text.capacity(),
-            Self::Pair(edges) => std::mem::size_of_val(&**edges) + edges.iter().map(Self::heap_bytes).sum::<usize>(),
+            Self::Pair(edges) => {
+                std::mem::size_of_val(&**edges) + edges.iter().map(Self::heap_bytes).sum::<usize>()
+            }
             _ => 0,
         }
     }

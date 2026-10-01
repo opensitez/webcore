@@ -2582,12 +2582,21 @@ fn pointer_gesture_dispatches_one_dom_click() {
     let point = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
     let clicks = Arc::new(Mutex::new(0usize));
     let seen = clicks.clone();
-    frame.doc.add_event_listener(button, "click", Box::new(move |_, _| {
-        *seen.lock().unwrap() += 1;
-    }), ListenerOptions::default());
+    frame.doc.add_event_listener(
+        button,
+        "click",
+        Box::new(move |_, _| {
+            *seen.lock().unwrap() += 1;
+        }),
+        ListenerOptions::default(),
+    );
 
-    frame.doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, point, 0);
-    frame.doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, point, 0);
+    frame
+        .doc
+        .process_mouse_event(crate::dom::HtmlEventType::MouseDown, point, 0);
+    frame
+        .doc
+        .process_mouse_event(crate::dom::HtmlEventType::MouseUp, point, 0);
     assert_eq!(*clicks.lock().unwrap(), 1);
 }
 
@@ -2606,15 +2615,27 @@ fn direct_mouse_click_dispatches_once_to_target_and_ancestor() {
     let calls = Arc::new(Mutex::new((0usize, 0usize)));
 
     let target_calls = calls.clone();
-    frame.doc.add_event_listener(button, "click", Box::new(move |_, _| {
-        target_calls.lock().unwrap().0 += 1;
-    }), ListenerOptions::default());
+    frame.doc.add_event_listener(
+        button,
+        "click",
+        Box::new(move |_, _| {
+            target_calls.lock().unwrap().0 += 1;
+        }),
+        ListenerOptions::default(),
+    );
     let root_calls = calls.clone();
-    frame.doc.add_event_listener(root, "click", Box::new(move |_, _| {
-        root_calls.lock().unwrap().1 += 1;
-    }), ListenerOptions::default());
+    frame.doc.add_event_listener(
+        root,
+        "click",
+        Box::new(move |_, _| {
+            root_calls.lock().unwrap().1 += 1;
+        }),
+        ListenerOptions::default(),
+    );
 
-    frame.doc.process_mouse_event(crate::dom::HtmlEventType::Click, point, 0);
+    frame
+        .doc
+        .process_mouse_event(crate::dom::HtmlEventType::Click, point, 0);
     assert_eq!(*calls.lock().unwrap(), (1, 1));
 }
 
@@ -3205,15 +3226,24 @@ fn tiny_animated_gif_with_delay(delay_ms: u32) -> Vec<u8> {
 fn animated_image_expansion_keeps_preview_until_worker_completes() {
     let crate::html::DecodedImage::Animated(mut animated) =
         crate::html::decode_image_bytes_ex(&tiny_animated_gif()).unwrap()
-    else { panic!("expected animated GIF") };
+    else {
+        panic!("expected animated GIF")
+    };
     let preview = animated.frames[0].pixels.clone();
-    assert!(!crate::html::poll_animated_image_expansion(&mut animated, 1, 1));
+    assert!(!crate::html::poll_animated_image_expansion(
+        &mut animated,
+        1,
+        1
+    ));
     assert!(std::sync::Arc::ptr_eq(&preview, &animated.frames[0].pixels));
     assert_eq!(animated.frames.len(), 1);
     assert!(animated.pending_decode.is_some());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !crate::html::poll_animated_image_expansion(&mut animated, 1, 1) {
-        assert!(std::time::Instant::now() < deadline, "animation worker did not publish");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "animation worker did not publish"
+        );
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert!(animated.pending_decode.is_none());
@@ -3271,12 +3301,18 @@ fn animated_gif_keeps_decode_resolution_when_early_layout_is_small() {
         panic!("expected animated GIF");
     };
     assert_eq!((animated.width, animated.height), (100, 20));
-    assert!(crate::html::expand_animated_image_to_size(&mut animated, 12, 8));
+    assert!(crate::html::expand_animated_image_to_size(
+        &mut animated,
+        12,
+        8
+    ));
     assert_eq!((animated.width, animated.height), (100, 20));
-    assert!(animated
-        .frames
-        .iter()
-        .all(|frame| frame.pixels.len() == 100 * 20 * 4));
+    assert!(
+        animated
+            .frames
+            .iter()
+            .all(|frame| frame.pixels.len() == 100 * 20 * 4)
+    );
 }
 
 #[test]
@@ -3296,7 +3332,10 @@ fn single_frame_data_gif_decodes_as_raster_image() {
 fn wait_for_animation_frames(doc: &mut crate::types::Document, now: std::time::Instant) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !doc.tick_animated_images(now) {
-        assert!(std::time::Instant::now() < deadline, "animation worker did not publish");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "animation worker did not publish"
+        );
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }

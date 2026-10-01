@@ -19,11 +19,7 @@ pub fn confirm(message: &str) -> bool {
     )
 }
 
-fn file_dialog(
-    title: &str,
-    filters: &[(String, Vec<String>)],
-    directory: &str,
-) -> rfd::FileDialog {
+fn file_dialog(title: &str, filters: &[(String, Vec<String>)], directory: &str) -> rfd::FileDialog {
     let mut dialog = rfd::FileDialog::new().set_title(title);
     if !directory.is_empty() {
         dialog = dialog.set_directory(directory);

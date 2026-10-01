@@ -8,8 +8,8 @@ use crate::types::{
     BackgroundClip, BackgroundRepeat, BackgroundSize, BorderStyle, ClipPathKind, Color,
     ComputedStyle, ContentVisibility, CssLength, Direction, Display, FontStyle,
     GradientRadialShape, GradientRadialSize, GradientType, ListStylePosition, ListStyleType,
-    MixBlendMode, Overflow, Position, Resize, TextAlign, TextDecorationStyle,
-    TextOverflow, TextTransform, WhiteSpace,
+    MixBlendMode, Overflow, Position, Resize, TextAlign, TextDecorationStyle, TextOverflow,
+    TextTransform, WhiteSpace,
 };
 use crate::types::{Rect, WebCore};
 use unicode_segmentation::UnicodeSegmentation;
@@ -19,6 +19,7 @@ struct BackgroundImagePaint<'a> {
     image_width: u32,
     image_height: u32,
     ratio_only: bool,
+    resolution: f32,
     size: BackgroundSize,
     size_w: &'a CssLength,
     size_h: &'a CssLength,
@@ -41,8 +42,9 @@ fn push_background_image_paint(
     if layer.image_width == 0 || layer.image_height == 0 {
         return;
     }
-    let iw = layer.image_width as f32;
-    let ih = layer.image_height as f32;
+    let resolution = layer.resolution.max(f32::MIN_POSITIVE);
+    let iw = layer.image_width as f32 / resolution;
+    let ih = layer.image_height as f32 / resolution;
     let ow = bg_origin_rect.w;
     let oh = bg_origin_rect.h;
 
@@ -167,6 +169,7 @@ pub fn build_display_list(root: &WebCore, viewport_w: f32, viewport_h: f32) -> D
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         paint_clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         suppress_deferred_z_descendants: false,
+        viewport_overflow_body: crate::types::Document::viewport_overflow_body(root),
         font_system: None,
         transform_ctx: crate::types::TransformCtx {
             // The root box's font size IS the root font size — `rem`.
@@ -240,6 +243,7 @@ pub fn build_display_list_full_with_font_system(
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         paint_clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         suppress_deferred_z_descendants: false,
+        viewport_overflow_body: crate::types::Document::viewport_overflow_body(root),
         font_system,
         transform_ctx: crate::types::TransformCtx {
             // The root box's font size IS the root font size — `rem`.
@@ -265,8 +269,11 @@ fn collect_subtree_paint_bounds(
         return Some(Rect::default());
     }
 
-    let escapes_layout_bounds = matches!(node.style.position, Position::Absolute | Position::Fixed | Position::Sticky)
-        || (!node.style.transform.is_empty() && node.style.transform != "none")
+    let escapes_layout_bounds = matches!(
+        node.style.position,
+        Position::Absolute | Position::Fixed | Position::Sticky
+    ) || (!node.style.transform.is_empty()
+        && node.style.transform != "none")
         || !node.style.css_transform.ops.is_empty()
         || !node.style.css_translate.ops.is_empty()
         || !node.style.css_rotate.ops.is_empty()
@@ -369,6 +376,7 @@ pub fn build_display_list_viewport_with_font_system(
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         paint_clip,
         suppress_deferred_z_descendants: false,
+        viewport_overflow_body: crate::types::Document::viewport_overflow_body(root),
         font_system,
         transform_ctx: crate::types::TransformCtx {
             font_px: root_font_size_px(root),
@@ -424,6 +432,7 @@ struct BuildContext<'a> {
     clip: Rect,
     paint_clip: Rect,
     suppress_deferred_z_descendants: bool,
+    viewport_overflow_body: Option<u32>,
     font_system: Option<*mut cosmic_text::FontSystem>,
     /// What a `transform` needs to resolve `vw`/`vh` and `rem`. Carried on the
     /// context because the element's own box is not enough: a transform length
@@ -560,6 +569,32 @@ fn resolved_border_radii_for_node(node: &WebCore, root_font_px: f32) -> ([f32; 4
     (radii, radii_y)
 }
 
+fn padding_edge_radii(
+    border: Rect,
+    padding: Rect,
+    radii: [f32; 4],
+    radii_y: [f32; 4],
+) -> ([f32; 4], [f32; 4]) {
+    let left = (padding.x - border.x).max(0.0);
+    let top = (padding.y - border.y).max(0.0);
+    let right = (border.right() - padding.right()).max(0.0);
+    let bottom = (border.bottom() - padding.bottom()).max(0.0);
+    (
+        [
+            (radii[0] - left).max(0.0),
+            (radii[1] - right).max(0.0),
+            (radii[2] - right).max(0.0),
+            (radii[3] - left).max(0.0),
+        ],
+        [
+            (radii_y[0] - top).max(0.0),
+            (radii_y[1] - top).max(0.0),
+            (radii_y[2] - bottom).max(0.0),
+            (radii_y[3] - bottom).max(0.0),
+        ],
+    )
+}
+
 fn push_inline_descendant_box_backgrounds(
     node: &WebCore,
     list: &mut DisplayList,
@@ -668,7 +703,10 @@ fn build_for_box_inner(
         return;
     }
 
-    if let Some(Some(bounds)) = ctx.subtree_bounds.and_then(|all| all.get(&(node as *const WebCore as usize))) {
+    if let Some(Some(bounds)) = ctx
+        .subtree_bounds
+        .and_then(|all| all.get(&(node as *const WebCore as usize)))
+    {
         const PAINT_OVERHANG: f32 = 256.0;
         if bounds.right() - ctx.scroll_x + PAINT_OVERHANG < ctx.paint_clip.x
             || bounds.bottom() - ctx.scroll_y + PAINT_OVERHANG < ctx.paint_clip.y
@@ -708,6 +746,7 @@ fn build_for_box_inner(
         Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
     );
     if clips_children
+        && ctx.viewport_overflow_body != Some(node.node_id)
         && matches!(node.style.position, Position::Static | Position::Relative)
         && !node.style.is_inline_level()
         && !matches!(node.style.display, Display::Contents)
@@ -728,7 +767,10 @@ fn build_for_box_inner(
     let py = pr.y - sy;
     let pw = pr.w;
     let ph = pr.h;
-    let font_px = node.style.font_size_px(ctx.transform_ctx.root_font_px, ctx.transform_ctx.root_font_px);
+    let font_px = node.style.font_size_px(
+        ctx.transform_ctx.root_font_px,
+        ctx.transform_ctx.root_font_px,
+    );
 
     // ── Border radii, per corner ─────────────────────────────────────────────
     //
@@ -741,6 +783,7 @@ fn build_for_box_inner(
     // overflow clip.
     let (radii_arr, radii_y_arr) =
         resolved_border_radii_for_node(node, ctx.transform_ctx.root_font_px);
+    let (padding_radii, padding_radii_y) = padding_edge_radii(br, pr, radii_arr, radii_y_arr);
 
     // ── Hover / active / visited check ───────────────────────────────────────
     // Hover is applied by the cascade/layout pass. Applying `hover_style` again
@@ -803,22 +846,26 @@ fn build_for_box_inner(
                 )
             };
 
-        let top_val = node
-            .style
-            .top
-            .resolve(font_px, viewport_bottom - viewport_top, ctx.transform_ctx.root_font_px);
-        let left_val = node
-            .style
-            .left
-            .resolve(font_px, viewport_right - viewport_left, ctx.transform_ctx.root_font_px);
-        let bottom_val = node
-            .style
-            .bottom
-            .resolve(font_px, viewport_bottom - viewport_top, ctx.transform_ctx.root_font_px);
-        let right_val = node
-            .style
-            .right
-            .resolve(font_px, viewport_right - viewport_left, ctx.transform_ctx.root_font_px);
+        let top_val = node.style.top.resolve(
+            font_px,
+            viewport_bottom - viewport_top,
+            ctx.transform_ctx.root_font_px,
+        );
+        let left_val = node.style.left.resolve(
+            font_px,
+            viewport_right - viewport_left,
+            ctx.transform_ctx.root_font_px,
+        );
+        let bottom_val = node.style.bottom.resolve(
+            font_px,
+            viewport_bottom - viewport_top,
+            ctx.transform_ctx.root_font_px,
+        );
+        let right_val = node.style.right.resolve(
+            font_px,
+            viewport_right - viewport_left,
+            ctx.transform_ctx.root_font_px,
+        );
         let nat_x = pr.x - sx;
         let nat_y = pr.y - sy;
 
@@ -875,7 +922,7 @@ fn build_for_box_inner(
 
             if cb.w > 0.0 {
                 if cb_right - cb_left >= pw {
-                    cx = cx.clamp(cb_left, cb_right - pw);
+                    cx = clamp_sticky_axis(cx, cb_left, cb_right, pw);
                 } else if node.style.direction == Direction::RTL {
                     cx = cb_right - pw;
                 } else {
@@ -885,7 +932,7 @@ fn build_for_box_inner(
 
             if cb.h > 0.0 {
                 if cb_bottom - cb_top >= ph {
-                    cy = cy.clamp(cb_top, cb_bottom - ph);
+                    cy = clamp_sticky_axis(cy, cb_top, cb_bottom, ph);
                 } else {
                     cy = cb_top;
                 }
@@ -1024,9 +1071,34 @@ fn build_for_box_inner(
         list.push(PaintCmd::PushFilter { filters });
     }
 
-    let clip_path_rect = clip_path_rect(eff_style, node.layout.border_rect, sx, sy, font_px, ctx.transform_ctx.root_font_px);
-    let clip_path_polygon =
-        clip_path_polygon_points(eff_style, node.layout.border_rect, sx, sy, font_px, ctx.transform_ctx.root_font_px);
+    let clip_reference_rect = eff_style.clip_path.reference_rect(&node.layout);
+    let box_radii = if eff_style.clip_path.kind == ClipPathKind::Box {
+        eff_style.clip_path.reference_box_radii(
+            eff_style,
+            &node.layout,
+            ctx.transform_ctx.root_font_px,
+        )
+    } else {
+        ([0.0; 4], [0.0; 4])
+    };
+    let clip_path_rect = clip_path_rect(
+        eff_style,
+        clip_reference_rect,
+        box_radii,
+        sx,
+        sy,
+        font_px,
+        ctx.transform_ctx.root_font_px,
+    );
+    let clip_path_polygon = clip_path_polygon_points(
+        eff_style,
+        clip_reference_rect,
+        sx,
+        sy,
+        font_px,
+        ctx.transform_ctx.root_font_px,
+    );
+    let clip_path_svg = clip_path_svg(eff_style, clip_reference_rect, sx, sy);
     if let Some((rect, radius, radius_y)) = clip_path_rect {
         list.push(PaintCmd::PushClip {
             rect,
@@ -1037,13 +1109,19 @@ fn build_for_box_inner(
         list.push(PaintCmd::PushClipPath {
             points: points.clone(),
         });
+    } else if let Some((path, fill_rule, origin)) = clip_path_svg.as_ref() {
+        list.push(PaintCmd::PushClipSvgPath {
+            path: path.clone(),
+            fill_rule: *fill_rule,
+            origin: *origin,
+        });
     }
 
     // ── (a) Outer box-shadow ─────────────────────────────────────────────────
     for bs in &eff_style.box_shadow {
         if paint_self && !bs.inset {
             list.push(PaintCmd::BoxShadow {
-                rect: Rect::new(px, py, pw, ph),
+                rect: Rect::new(br.x - sx, br.y - sy, br.w, br.h),
                 color: bs.color,
                 offset_x: bs.offset_x,
                 offset_y: bs.offset_y,
@@ -1090,7 +1168,15 @@ fn build_for_box_inner(
             BackgroundClip::BorderBox => Rect::new(br.x - eff_sx, br.y - eff_sy, br.w, br.h),
         }
     };
+    let background_radii = |which: BackgroundClip| match which {
+        BackgroundClip::BorderBox => (radii_arr, radii_y_arr),
+        BackgroundClip::PaddingBox | BackgroundClip::Text => (padding_radii, padding_radii_y),
+        BackgroundClip::ContentBox => {
+            padding_edge_radii(pr, node.layout.content_rect, padding_radii, padding_radii_y)
+        }
+    };
     let bg_clip_rect = background_box(eff_style.background_clip);
+    let (bg_clip_radii, bg_clip_radii_y) = background_radii(eff_style.background_clip);
     let bg_origin_rect = background_box(eff_style.background_origin);
     let raw_bg = eff_style.background_color;
     let clipped_background_color = raw_bg;
@@ -1103,9 +1189,7 @@ fn build_for_box_inner(
         let is_inline_with_text = matches!(node.style.display, Display::Inline)
             && !node.is_image_element()
             && inline_has_non_empty_text(node);
-        if raw_bg.a > 0
-            && !is_inline_with_text
-            && eff_style.background_clip != BackgroundClip::Text
+        if raw_bg.a > 0 && !is_inline_with_text && eff_style.background_clip != BackgroundClip::Text
         {
             let bg = raw_bg;
             if paint_self {
@@ -1114,8 +1198,8 @@ fn build_for_box_inner(
                     // does not apply to it — only the painting area does.
                     rect: bg_clip_rect,
                     color: bg,
-                    radius: radii_arr,
-                    radius_y: radii_y_arr,
+                    radius: bg_clip_radii,
+                    radius_y: bg_clip_radii_y,
                 });
             }
         }
@@ -1200,8 +1284,8 @@ fn build_for_box_inner(
                 radial_radius_x,
                 radial_radius_y,
                 stops,
-                radii: radii_arr,
-                radii_y: radii_y_arr,
+                radii: bg_clip_radii,
+                radii_y: bg_clip_radii_y,
                 opacity,
                 blend_mode: background_blend_mode_to_u8(&eff_style.background_blend_mode),
             });
@@ -1223,7 +1307,10 @@ fn build_for_box_inner(
             radial_center_y: 0.0,
             radial_radius_x: 1.0,
             radial_radius_y: 1.0,
-            stops: vec![(clipped_background_color, 0.0), (clipped_background_color, 1.0)],
+            stops: vec![
+                (clipped_background_color, 0.0),
+                (clipped_background_color, 1.0),
+            ],
         });
     }
 
@@ -1246,6 +1333,7 @@ fn build_for_box_inner(
                     })
                     .collect();
                 let layer_clip_rect = background_box(layer.clip);
+                let (layer_clip_radii, layer_clip_radii_y) = background_radii(layer.clip);
                 let layer_origin_rect = background_box(layer.origin);
                 let gradient_rect = background_gradient_rect(
                     layer.size,
@@ -1295,8 +1383,8 @@ fn build_for_box_inner(
                     radial_radius_x,
                     radial_radius_y,
                     stops,
-                    radii: radii_arr,
-                    radii_y: radii_y_arr,
+                    radii: layer_clip_radii,
+                    radii_y: layer_clip_radii_y,
                     opacity,
                     blend_mode: background_blend_mode_to_u8(&layer.blend_mode),
                 });
@@ -1313,6 +1401,7 @@ fn build_for_box_inner(
                 image_width: node.bg_image_width,
                 image_height: node.bg_image_height,
                 ratio_only: node.bg_image_ratio_only,
+                resolution: node.bg_image_resolution,
                 size: node.style.background_size,
                 size_w: &node.style.background_size_w,
                 size_h: &node.style.background_size_h,
@@ -1324,8 +1413,8 @@ fn build_for_box_inner(
             ctx.transform_ctx.root_font_px,
             bg_origin_rect,
             bg_clip_rect,
-            radii_arr,
-            radii_y_arr,
+            bg_clip_radii,
+            bg_clip_radii_y,
             background_blend_mode_to_u8(&eff_style.background_blend_mode),
         );
     }
@@ -1341,6 +1430,7 @@ fn build_for_box_inner(
                 continue;
             };
             let layer_clip_rect = background_box(layer.clip);
+            let (layer_clip_radii, layer_clip_radii_y) = background_radii(layer.clip);
             let layer_origin_rect = background_box(layer.origin);
             push_background_image_paint(
                 list,
@@ -1349,6 +1439,7 @@ fn build_for_box_inner(
                     image_width: bg_image.width,
                     image_height: bg_image.height,
                     ratio_only: bg_image.ratio_only,
+                    resolution: bg_image.resolution,
                     size: layer.size,
                     size_w: &layer.size_w,
                     size_h: &layer.size_h,
@@ -1360,8 +1451,8 @@ fn build_for_box_inner(
                 ctx.transform_ctx.root_font_px,
                 layer_origin_rect,
                 layer_clip_rect,
-                radii_arr,
-                radii_y_arr,
+                layer_clip_radii,
+                layer_clip_radii_y,
                 background_blend_mode_to_u8(&layer.blend_mode),
             );
         }
@@ -1378,8 +1469,8 @@ fn build_for_box_inner(
                 blur: bs.blur,
                 spread: bs.spread,
                 inset: true,
-                radii: radii_arr,
-                radii_y: radii_y_arr,
+                radii: padding_radii,
+                radii_y: padding_radii_y,
             });
         }
     }
@@ -1395,7 +1486,10 @@ fn build_for_box_inner(
         ];
         if paint_self && !node.layout.collapsed_border_segments.is_empty() {
             for segment in &node.layout.collapsed_border_segments {
-                if segment.width <= 0.0 || segment.style == BorderStyle::None || segment.color.a == 0 {
+                if segment.width <= 0.0
+                    || segment.style == BorderStyle::None
+                    || segment.color.a == 0
+                {
                     continue;
                 }
                 let rect = Rect::new(
@@ -1436,6 +1530,7 @@ fn build_for_box_inner(
                 font_px,
                 false,
                 ctx.transform_ctx.root_font_px,
+                None,
             );
             let border_image_rect = Rect::new(
                 border_rect.x - border_image_outsets[3],
@@ -1450,6 +1545,7 @@ fn build_for_box_inner(
                 font_px,
                 true,
                 ctx.transform_ctx.root_font_px,
+                None,
             );
             let mut painted_border_image = false;
             if let Some(src) = crate::css::extract_url(&eff_style.border_image_source) {
@@ -1459,14 +1555,29 @@ fn build_for_box_inner(
                     if w > 0 && h > 0 {
                         let (repeat_x_mode, repeat_y_mode) =
                             border_image_repeat_modes(&eff_style.border_image_repeat);
+                        let slices =
+                            border_image_slices(&eff_style.border_image_slice, w as f32, h as f32);
+                        let image_widths = if eff_style
+                            .border_image_width
+                            .split_whitespace()
+                            .any(|token| token.eq_ignore_ascii_case("auto"))
+                        {
+                            border_image_side_values(
+                                &eff_style.border_image_width,
+                                bw,
+                                border_image_rect,
+                                font_px,
+                                true,
+                                ctx.transform_ctx.root_font_px,
+                                Some(slices),
+                            )
+                        } else {
+                            border_image_widths
+                        };
                         list.push(PaintCmd::BorderImage {
                             rect: border_image_rect,
-                            widths: border_image_widths,
-                            slices: border_image_slices(
-                                &eff_style.border_image_slice,
-                                w as f32,
-                                h as f32,
-                            ),
+                            widths: image_widths,
+                            slices,
                             repeat_x_mode,
                             repeat_y_mode,
                             fill_center: eff_style
@@ -1515,7 +1626,9 @@ fn build_for_box_inner(
                     .enumerate()
                     .any(|(side, width)| *width > 0.0 && border_colors[side].a > 0)
                 {
-                    if eff_style.display != Display::Inline || node.layout.inline_client_rects.is_empty() {
+                    if eff_style.display != Display::Inline
+                        || node.layout.inline_client_rects.is_empty()
+                    {
                         list.push(PaintCmd::Border {
                             rect: border_rect,
                             widths: border_widths,
@@ -1531,19 +1644,43 @@ fn build_for_box_inner(
                         let fragments = &node.layout.inline_client_rects;
                         for (index, fragment) in fragments.iter().enumerate() {
                             let rtl = eff_style.direction == Direction::RTL;
-                            let left_edge = if rtl { index + 1 == fragments.len() } else { index == 0 };
-                            let right_edge = if rtl { index == 0 } else { index + 1 == fragments.len() };
+                            let left_edge = if rtl {
+                                index + 1 == fragments.len()
+                            } else {
+                                index == 0
+                            };
+                            let right_edge = if rtl {
+                                index == 0
+                            } else {
+                                index + 1 == fragments.len()
+                            };
                             let mut widths = border_widths;
-                            if !left_edge { widths[3] = 0.0; }
-                            if !right_edge { widths[1] = 0.0; }
-                            let left = if left_edge { node.layout.resolved_pad_left + widths[3] } else { 0.0 };
-                            let right = if right_edge { node.layout.resolved_pad_right + widths[1] } else { 0.0 };
+                            if !left_edge {
+                                widths[3] = 0.0;
+                            }
+                            if !right_edge {
+                                widths[1] = 0.0;
+                            }
+                            let left = if left_edge {
+                                node.layout.resolved_pad_left + widths[3]
+                            } else {
+                                0.0
+                            };
+                            let right = if right_edge {
+                                node.layout.resolved_pad_right + widths[1]
+                            } else {
+                                0.0
+                            };
                             list.push(PaintCmd::Border {
                                 rect: Rect::new(
                                     fragment.x - eff_sx - left,
                                     fragment.y - eff_sy - node.layout.resolved_pad_top - bw[0],
                                     fragment.w + left + right,
-                                    fragment.h + node.layout.resolved_pad_top + node.layout.resolved_pad_bottom + bw[0] + bw[2],
+                                    fragment.h
+                                        + node.layout.resolved_pad_top
+                                        + node.layout.resolved_pad_bottom
+                                        + bw[0]
+                                        + bw[2],
                                 ),
                                 widths,
                                 colors: border_colors,
@@ -1585,17 +1722,22 @@ fn build_for_box_inner(
     }
 
     // ── (h) Overflow clip setup ──────────────────────────────────────────────
-    let overflow_clips = eff_style.contain_paint
-        || matches!(
-            node.style.overflow_x,
-            Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
-        )
-        || matches!(
-            node.style.overflow_y,
-            Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
-        );
-    let overflow_clip_margin =
-        resolve_overflow_clip_margin(eff_style, font_px, node.layout.padding_rect.w, ctx.transform_ctx.root_font_px);
+    let overflow_clips = ctx.viewport_overflow_body != Some(node.node_id)
+        && (eff_style.contain_paint
+            || matches!(
+                node.style.overflow_x,
+                Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
+            )
+            || matches!(
+                node.style.overflow_y,
+                Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
+            ));
+    let overflow_clip_margin = resolve_overflow_clip_margin(
+        eff_style,
+        font_px,
+        node.layout.padding_rect.w,
+        ctx.transform_ctx.root_font_px,
+    );
     let overflow_clip_rect = Rect::new(
         px - overflow_clip_margin,
         py - overflow_clip_margin,
@@ -1654,6 +1796,7 @@ fn build_for_box_inner(
         clip: child_clip,
         paint_clip: ctx.paint_clip,
         suppress_deferred_z_descendants: suppress_z,
+        viewport_overflow_body: ctx.viewport_overflow_body,
         font_system: ctx.font_system,
         transform_ctx: ctx.transform_ctx,
     };
@@ -1737,7 +1880,15 @@ fn build_for_box_inner(
             && !node.text.is_empty()
             && node.layout.line_cache.is_empty()
         {
-            emit_generated_pseudo_content(list, node, &node.text, &node.style, child_sx, child_sy, ctx.transform_ctx.root_font_px);
+            emit_generated_pseudo_content(
+                list,
+                node,
+                &node.text,
+                &node.style,
+                child_sx,
+                child_sy,
+                ctx.transform_ctx.root_font_px,
+            );
         }
 
         // ── (l) ::after pseudo-element (fallback when line_cache is empty) ─────
@@ -1748,7 +1899,12 @@ fn build_for_box_inner(
             let mut after_offset = 0.0f32;
             if !node.style.before_content.is_empty() {
                 let ps = node.style.before_style.as_deref().unwrap_or(&node.style);
-                let fpx = ps.font_size_px(ctx.transform_ctx.root_font_px, ctx.transform_ctx.root_font_px).max(1.0);
+                let fpx = ps
+                    .font_size_px(
+                        ctx.transform_ctx.root_font_px,
+                        ctx.transform_ctx.root_font_px,
+                    )
+                    .max(1.0);
                 after_offset = node.style.before_content.chars().count() as f32 * fpx * 0.55 + 6.0;
             }
             emit_generated_pseudo_content_offset(
@@ -1764,9 +1920,7 @@ fn build_for_box_inner(
         }
 
         // ── (m) List markers ─────────────────────────────────────────────────
-        if paint_self
-            && node.style.display == Display::ListItem
-        {
+        if paint_self && node.style.display == Display::ListItem {
             build_list_marker(node, list, ctx, eff_sx, eff_sy);
         }
 
@@ -1869,11 +2023,7 @@ fn build_for_box_inner(
                                 let (current_color, fill, stroke) = if node.tag == "svg" {
                                     let specified_svg_paint =
                                         node.style.rare().specified_svg_paint_props;
-                                    let fill = (specified_svg_paint
-                                        & crate::types::SPECIFIED_SVG_FILL
-                                        != 0)
-                                        .then_some(node.style.svg_fill)
-                                        .flatten();
+                                    let fill = node.style.svg_fill;
                                     let stroke = (specified_svg_paint
                                         & crate::types::SPECIFIED_SVG_STROKE
                                         != 0)
@@ -1962,7 +2112,10 @@ fn build_for_box_inner(
                     && (!matches!(c.tag.as_str(), "::before" | "::after")
                         || c.style.is_positioned()
                         || c.style.is_block_level()
-                        || matches!(c.style.display, Display::InlineBlock | Display::InlineFlex | Display::InlineGrid))
+                        || matches!(
+                            c.style.display,
+                            Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
+                        ))
                     && c.style.position != Position::Fixed
             };
 
@@ -1981,7 +2134,10 @@ fn build_for_box_inner(
             let mut normal_ctx = child_ctx;
             normal_ctx.suppress_deferred_z_descendants = suppress_z || !deferred_z.is_empty();
 
-            if !matches!(node.tag.as_str(), "input" | "select" | "textarea" | "progress" | "meter") {
+            if !matches!(
+                node.tag.as_str(),
+                "input" | "select" | "textarea" | "progress" | "meter"
+            ) {
                 let mut contents_work = Vec::new();
                 for child in eff_children {
                     if child.style.display == Display::Contents {
@@ -2031,11 +2187,11 @@ fn build_for_box_inner(
             (Overflow::Visible, Overflow::Visible)
         )
     {
-        let mode = match eff_style.resize {
-            Resize::Both => 1,
-            Resize::Horizontal => 2,
-            Resize::Vertical => 3,
-            Resize::None => 0,
+        let mode = match eff_style.resize.axes(eff_style.writing_mode) {
+            (true, true) => 1,
+            (true, false) => 2,
+            (false, true) => 3,
+            (false, false) => 0,
         };
         list.push(PaintCmd::ResizeGrip {
             rect: Rect::new(px, py, pw, ph),
@@ -2051,7 +2207,7 @@ fn build_for_box_inner(
     if overflow_clips {
         list.push(PaintCmd::PopClip);
     }
-    if clip_path_rect.is_some() || clip_path_polygon.is_some() {
+    if clip_path_rect.is_some() || clip_path_polygon.is_some() || clip_path_svg.is_some() {
         list.push(PaintCmd::PopClip);
     }
     if has_mask_layer {
@@ -2107,9 +2263,7 @@ fn build_element_scrollbar(
         let track_h = (pr.h - if horizontal_active { scrollbar_w } else { 0.0 }).max(0.0);
         if track_h > 0.0 {
             let scrollable_h = node.layout.scroll_height + (pr.h - cr.h).max(0.0);
-            let thumb_h = (track_h * pr.h / scrollable_h)
-                .max(20.0)
-                .min(track_h);
+            let thumb_h = (track_h * pr.h / scrollable_h).max(20.0).min(track_h);
             let max_scroll = (node.layout.scroll_height - cr.h).max(0.0);
             let thumb_y = if max_scroll > 0.0 && track_h > thumb_h {
                 node.layout.scroll_top * (track_h - thumb_h) / max_scroll
@@ -2143,9 +2297,7 @@ fn build_element_scrollbar(
         let track_w = (pr.w - if vertical_active { scrollbar_w } else { 0.0 }).max(0.0);
         if track_w > 0.0 {
             let scrollable_w = node.layout.scroll_width + (pr.w - cr.w).max(0.0);
-            let thumb_w = (track_w * pr.w / scrollable_w)
-                .max(20.0)
-                .min(track_w);
+            let thumb_w = (track_w * pr.w / scrollable_w).max(20.0).min(track_w);
             let max_scroll = (node.layout.scroll_width - cr.w).max(0.0);
             let thumb_x = if max_scroll > 0.0 && track_w > thumb_w {
                 node.layout.scroll_left * (track_w - thumb_w) / max_scroll
@@ -2287,10 +2439,10 @@ fn build_inline_text(
     let opacity = 1.0;
     let root_font_px = ctx.transform_ctx.root_font_px;
     let fallback_font_px = node.style.font_size_px(root_font_px, root_font_px).max(1.0);
-    let fallback_letter_spc = node
-        .style
-        .letter_spacing
-        .resolve(fallback_font_px, 0.0, root_font_px);
+    let fallback_letter_spc =
+        node.style
+            .letter_spacing
+            .resolve(fallback_font_px, 0.0, root_font_px);
     let fallback_word_spc = node
         .style
         .word_spacing
@@ -2307,10 +2459,11 @@ fn build_inline_text(
         Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
     );
     if overflow_clips {
-        let ti = node
-            .style
-            .text_indent
-            .resolve(fallback_font_px, node.layout.content_rect.w, root_font_px);
+        let ti = node.style.text_indent.resolve(
+            fallback_font_px,
+            node.layout.content_rect.w,
+            root_font_px,
+        );
         if ti < -(node.layout.content_rect.w + 100.0) {
             return;
         }
@@ -2346,8 +2499,8 @@ fn build_inline_text(
         let mut chunks: Vec<Chunk> = Vec::new();
 
         let has_rtl_visual_segments = line.visual_segments.iter().any(|vs| (vs.level & 1) != 0);
-        let use_bidi_visual_segments = has_rtl_visual_segments
-            && !node.layout.inline_runs.is_empty();
+        let use_bidi_visual_segments =
+            has_rtl_visual_segments && !node.layout.inline_runs.is_empty();
         if use_bidi_visual_segments {
             // BiDi: use visual segment order
             for vs in &line.visual_segments {
@@ -2416,14 +2569,17 @@ fn build_inline_text(
         let left_marker = if clamp_at_left {
             Some("…")
         } else {
-            node.style.text_overflow.marker_at_edge(false, node.style.direction)
+            node.style
+                .text_overflow
+                .marker_at_edge(false, node.style.direction)
         };
         let content_left = node.layout.content_rect.x - sx + node.layout.scroll_left;
         let line_left = lx + line.text_x_offset;
-        let left_overflow = clamp_at_left || (overflow_clips
-            && left_marker.is_some()
-            && line.width > node.layout.content_rect.w
-            && (line_left < content_left || node.style.direction == Direction::RTL));
+        let left_overflow = clamp_at_left
+            || (overflow_clips
+                && left_marker.is_some()
+                && line.width > node.layout.content_rect.w
+                && (line_left < content_left || node.style.direction == Direction::RTL));
         let left_marker_width = if left_overflow {
             let marker = left_marker.unwrap_or("");
             measure_paint_text_width(
@@ -2434,14 +2590,16 @@ fn build_inline_text(
                 node.style.font_style,
                 &node.style.font_family,
                 node.style.font_stretch,
-            )
-                + fallback_letter_spc * marker.chars().count().saturating_sub(1) as f32
+            ) + fallback_letter_spc * marker.chars().count().saturating_sub(1) as f32
                 + fallback_word_spc * marker.chars().filter(|ch| *ch == ' ').count() as f32
         } else {
             0.0
         };
         let content_right = content_left + node.layout.content_rect.w;
-        let right_marker = node.style.text_overflow.marker_at_edge(true, node.style.direction);
+        let right_marker = node
+            .style
+            .text_overflow
+            .marker_at_edge(true, node.style.direction);
         let fixed_right_marker = matches!(node.style.text_overflow, TextOverflow::Pair(_))
             && overflow_clips
             && right_marker.is_some()
@@ -2493,7 +2651,10 @@ fn build_inline_text(
             let (run_style, run_font_px, run_letter_spc, run_word_spc, _run_extra) =
                 if let Some(ri) = chunk.run_idx {
                     let run = &node.layout.inline_runs[ri];
-                    let fp = run.style.font_size_px(fallback_font_px, root_font_px).max(1.0);
+                    let fp = run
+                        .style
+                        .font_size_px(fallback_font_px, root_font_px)
+                        .max(1.0);
                     let ls = run.style.letter_spacing.resolve(fp, 0.0, root_font_px);
                     let ws = run.style.word_spacing.resolve(fp, 0.0, root_font_px);
                     (Some(&run.style), fp, ls, ws, line.extra_space_per_word)
@@ -2561,8 +2722,10 @@ fn build_inline_text(
                                 style_ref.font_style,
                                 &style_ref.font_family,
                                 style_ref.font_stretch,
-                            ) + run_letter_spc * leading.chars().count() as f32
-                                + run_word_spc * leading.chars().filter(|&c| c == ' ').count() as f32
+                            ) + run_letter_spc
+                                * leading.chars().count() as f32
+                                + run_word_spc
+                                    * leading.chars().filter(|&c| c == ' ').count() as f32
                                 + line.extra_space_per_word
                                     * leading.chars().filter(|&c| c == ' ').count() as f32;
                         }
@@ -2714,20 +2877,30 @@ fn build_inline_text(
             let x_pos = x_pos + leading_draw_advance + relative_dx;
             let y_pos = y_pos + relative_dy;
             let is_final_chunk = chunk_idx + 1 == chunks.len();
-            let line_clamp_marker = line.has_clamped_continuation && is_final_chunk && !clamp_at_left;
+            let line_clamp_marker =
+                line.has_clamped_continuation && is_final_chunk && !clamp_at_left;
             let overflow_marker = if line_clamp_marker {
                 "…"
             } else {
-                node.style.text_overflow.marker_at_edge(true, node.style.direction).unwrap_or("")
+                node.style
+                    .text_overflow
+                    .marker_at_edge(true, node.style.direction)
+                    .unwrap_or("")
             };
             if !fixed_right_marker
-                && (line_clamp_marker || node.style.text_overflow.marker_at_edge(true, node.style.direction).is_some())
+                && (line_clamp_marker
+                    || node
+                        .style
+                        .text_overflow
+                        .marker_at_edge(true, node.style.direction)
+                        .is_some())
                 && (overflow_clips || line_clamp_marker)
                 && !chunk.rtl
                 && (line.width > node.layout.content_rect.w || line_clamp_marker)
             {
                 let content_right = node.layout.content_rect.x - sx
-                    + node.layout.scroll_left + node.layout.content_rect.w;
+                    + node.layout.scroll_left
+                    + node.layout.content_rect.w;
                 if x_pos >= content_right {
                     continue;
                 }
@@ -2740,7 +2913,8 @@ fn build_inline_text(
                     style_ref.font_style,
                     &style_ref.font_family,
                     style_ref.font_stretch,
-                ) + run_letter_spc * overflow_marker.chars().count().saturating_sub(1) as f32
+                ) + run_letter_spc
+                    * overflow_marker.chars().count().saturating_sub(1) as f32
                     + run_word_spc * overflow_marker.chars().filter(|ch| *ch == ' ').count() as f32;
                 let budget = (available - marker_width).max(0.0);
                 let full_width = measure_paint_text_width(
@@ -2751,7 +2925,8 @@ fn build_inline_text(
                     style_ref.font_style,
                     &style_ref.font_family,
                     style_ref.font_stretch,
-                ) + run_letter_spc * draw_text.chars().count().saturating_sub(1) as f32
+                ) + run_letter_spc
+                    * draw_text.chars().count().saturating_sub(1) as f32
                     + run_word_spc * draw_text.chars().filter(|ch| *ch == ' ').count() as f32;
                 if line_clamp_marker && full_width <= budget {
                     draw_text.push_str(overflow_marker);
@@ -2795,7 +2970,8 @@ fn build_inline_text(
                                 &style_ref.font_family,
                                 style_ref.font_stretch,
                             ) + run_letter_spc * candidate.chars().count() as f32
-                                + run_word_spc * candidate.chars().filter(|ch| *ch == ' ').count() as f32;
+                                + run_word_spc
+                                    * candidate.chars().filter(|ch| *ch == ' ').count() as f32;
                             if width <= budget {
                                 cut = next;
                             } else {
@@ -2882,12 +3058,14 @@ fn build_inline_text(
             }
 
             // Main text
-            let deco_t = style_ref
-                .text_decoration_thickness
-                .resolve(run_font_px, 0.0, root_font_px);
-            let underline_offset = style_ref
-                .text_underline_offset
-                .resolve(run_font_px, 0.0, root_font_px);
+            let deco_t =
+                style_ref
+                    .text_decoration_thickness
+                    .resolve(run_font_px, 0.0, root_font_px);
+            let underline_offset =
+                style_ref
+                    .text_underline_offset
+                    .resolve(run_font_px, 0.0, root_font_px);
             let letter_sp = run_letter_spc;
 
             emit_text_emphasis_marks(
@@ -2998,12 +3176,14 @@ fn build_inline_text(
                 let first_alpha = ((first_color.a as f32) * opacity) as u8;
                 let first_text_color =
                     Color::rgba(first_color.r, first_color.g, first_color.b, first_alpha);
-                let first_letter_sp = first_style
-                    .letter_spacing
-                    .resolve(first_font_px, 0.0, root_font_px);
-                let first_word_sp = first_style
-                    .word_spacing
-                    .resolve(first_font_px, 0.0, root_font_px);
+                let first_letter_sp =
+                    first_style
+                        .letter_spacing
+                        .resolve(first_font_px, 0.0, root_font_px);
+                let first_word_sp =
+                    first_style
+                        .word_spacing
+                        .resolve(first_font_px, 0.0, root_font_px);
                 emit_text_run(
                     first.to_string(),
                     letter_x,
@@ -3143,8 +3323,18 @@ fn build_list_marker(
     }
     let ms = node.style.marker_style.as_deref();
     let font_px = ms
-        .map(|s| s.font_size_px(ctx.transform_ctx.root_font_px, ctx.transform_ctx.root_font_px))
-        .unwrap_or_else(|| node.style.font_size_px(ctx.transform_ctx.root_font_px, ctx.transform_ctx.root_font_px));
+        .map(|s| {
+            s.font_size_px(
+                ctx.transform_ctx.root_font_px,
+                ctx.transform_ctx.root_font_px,
+            )
+        })
+        .unwrap_or_else(|| {
+            node.style.font_size_px(
+                ctx.transform_ctx.root_font_px,
+                ctx.transform_ctx.root_font_px,
+            )
+        });
     let fallback_line_y = node.layout.content_rect.y;
     let fallback_line_h = node
         .style
@@ -3157,18 +3347,29 @@ fn build_list_marker(
     };
     let inside = node.style.list_style_position == ListStylePosition::Inside;
     let rtl = node.style.direction == Direction::RTL;
-    let line_right = node.layout.line_cache.first()
+    let line_right = node
+        .layout
+        .line_cache
+        .first()
         .map(|line| line.x + line.width)
         .unwrap_or_else(|| node.layout.content_rect.right());
     let shape_x = if rtl {
-        if inside { line_right - sx - 4.0 } else { line_right - sx + 10.0 }
+        if inside {
+            line_right - sx - 4.0
+        } else {
+            line_right - sx + 10.0
+        }
     } else if inside {
         line_x - sx + 4.0
     } else {
         line_x - sx - 10.0
     };
     let c = ms.map(|s| s.color).unwrap_or(node.style.color);
-    let text_align = if rtl == inside { TextAlign::Right } else { TextAlign::Left };
+    let text_align = if rtl == inside {
+        TextAlign::Right
+    } else {
+        TextAlign::Left
+    };
     let text_x = if rtl {
         line_right - sx + if inside { 0.0 } else { 4.0 }
     } else {
@@ -3459,13 +3660,10 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32, 
         color: node.style.color,
         text_align: node.style.text_align,
         direction: node.style.direction,
-        text_indent: node.style.text_indent.resolve_vp(
-            font_px,
-            cr.w,
-            font_px,
-            0.0,
-            0.0,
-        ),
+        text_indent: node
+            .style
+            .text_indent
+            .resolve_vp(font_px, cr.w, font_px, 0.0, 0.0),
         placeholder_color: node
             .style
             .placeholder_style
@@ -3487,11 +3685,42 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32, 
                     _ => 0,
                 },
                 font_family: style.font_family.clone(),
-                line_height: style.line_height
+                font_stretch: style.font_stretch,
+                line_height: style
+                    .line_height
                     .resolve(size, 0.0, root_font_px)
                     .max(size * 1.2),
                 letter_spacing: style.letter_spacing.resolve(size, 0.0, root_font_px),
                 word_spacing: style.word_spacing.resolve(size, 0.0, root_font_px),
+                text_transform: style.text_transform,
+                shadow: style.text_shadow.clone(),
+                decoration: TextDecoration {
+                    underline: style.text_decoration.underline,
+                    overline: style.text_decoration.overline,
+                    strikethrough: style.text_decoration.strikethrough,
+                    color: style.text_decoration_color.unwrap_or(style.color),
+                    style: match style.text_decoration_style {
+                        TextDecorationStyle::Double => 1,
+                        TextDecorationStyle::Dotted => 2,
+                        TextDecorationStyle::Dashed => 3,
+                        TextDecorationStyle::Wavy => 4,
+                        _ => 0,
+                    },
+                    thickness: {
+                        let thickness =
+                            style
+                                .text_decoration_thickness
+                                .resolve(size, 0.0, root_font_px);
+                        if thickness > 0.0 {
+                            thickness
+                        } else {
+                            (size / 12.0).max(1.0)
+                        }
+                    },
+                    underline_offset: style.text_underline_offset.resolve(size, 0.0, root_font_px),
+                    underline_position: style.text_underline_position,
+                    skip_ink: !style.text_decoration_skip_ink.eq_ignore_ascii_case("none"),
+                },
             }
         }),
         file_button_color: node
@@ -3578,7 +3807,13 @@ fn build_laid_out_text_node(
         return;
     }
 
-    let font_px = node.style.font_size_px(ctx.transform_ctx.root_font_px, ctx.transform_ctx.root_font_px).max(1.0);
+    let font_px = node
+        .style
+        .font_size_px(
+            ctx.transform_ctx.root_font_px,
+            ctx.transform_ctx.root_font_px,
+        )
+        .max(1.0);
     let line_h = node
         .style
         .line_height
@@ -3625,7 +3860,12 @@ fn emit_generated_pseudo_content_offset(
     if text.is_empty() {
         return;
     }
-    let font_px = style.font_size_px(node.style.font_size_px(root_font_px, root_font_px), root_font_px).max(1.0);
+    let font_px = style
+        .font_size_px(
+            node.style.font_size_px(root_font_px, root_font_px),
+            root_font_px,
+        )
+        .max(1.0);
     let line_h = style
         .line_height
         .resolve(font_px, 0.0, root_font_px)
@@ -3665,7 +3905,9 @@ fn emit_text(
     let lh = if line_h > 0.0 { line_h } else { fp * 1.2 };
     let letter_sp = style.letter_spacing.resolve(fp, 0.0, root_font_px);
     let word_sp = style.word_spacing.resolve(fp, 0.0, root_font_px);
-    let deco_t = style.text_decoration_thickness.resolve(fp, 0.0, root_font_px);
+    let deco_t = style
+        .text_decoration_thickness
+        .resolve(fp, 0.0, root_font_px);
     let underline_offset = style.text_underline_offset.resolve(fp, 0.0, root_font_px);
     list.push(PaintCmd::Text {
         x,
@@ -3705,7 +3947,12 @@ fn emit_text(
     });
 }
 
-fn resolve_overflow_clip_margin(style: &ComputedStyle, font_px: f32, reference: f32, root_font_px: f32) -> f32 {
+fn resolve_overflow_clip_margin(
+    style: &ComputedStyle,
+    font_px: f32,
+    reference: f32,
+    root_font_px: f32,
+) -> f32 {
     style
         .overflow_clip_margin
         .split_whitespace()
@@ -3717,94 +3964,83 @@ fn resolve_overflow_clip_margin(style: &ComputedStyle, font_px: f32, reference: 
 fn clip_path_rect(
     style: &ComputedStyle,
     border_rect: Rect,
+    box_radii: ([f32; 4], [f32; 4]),
     scroll_x: f32,
     scroll_y: f32,
     font_px: f32,
     root_font_px: f32,
 ) -> Option<(Rect, [f32; 4], [f32; 4])> {
     match style.clip_path.kind {
+        ClipPathKind::Box => Some((
+            Rect::new(
+                border_rect.x - scroll_x,
+                border_rect.y - scroll_y,
+                border_rect.w,
+                border_rect.h,
+            ),
+            box_radii.0,
+            box_radii.1,
+        )),
         ClipPathKind::Inset => {
-            let top = style
+            let rect = style
                 .clip_path
-                .inset_top
-                .resolve(font_px, border_rect.h, root_font_px);
-            let right = style
-                .clip_path
-                .inset_right
-                .resolve(font_px, border_rect.w, root_font_px);
-            let bottom = style
-                .clip_path
-                .inset_bottom
-                .resolve(font_px, border_rect.h, root_font_px);
-            let left = style
-                .clip_path
-                .inset_left
-                .resolve(font_px, border_rect.w, root_font_px);
-            let w = (border_rect.w - left - right).max(0.0);
-            let h = (border_rect.h - top - bottom).max(0.0);
+                .inset_rect(border_rect, font_px, root_font_px);
+            let (radius, radius_y) =
+                style
+                    .clip_path
+                    .inset_round_radii(style, rect, font_px, root_font_px);
             Some((
-                Rect::new(
-                    border_rect.x + left - scroll_x,
-                    border_rect.y + top - scroll_y,
-                    w,
-                    h,
-                ),
-                [0.0; 4],
-                [0.0; 4],
+                Rect::new(rect.x - scroll_x, rect.y - scroll_y, rect.w, rect.h),
+                radius,
+                radius_y,
             ))
         }
         ClipPathKind::Circle => {
-            let reference = border_rect.w.hypot(border_rect.h) / std::f32::consts::SQRT_2;
-            let r = style
+            let rect = style
                 .clip_path
-                .circle_radius
-                .resolve(font_px, reference, root_font_px)
-                .max(0.0);
-            let cx = border_rect.x
-                + style
-                    .clip_path
-                    .center_x
-                    .resolve(font_px, border_rect.w, root_font_px);
-            let cy = border_rect.y
-                + style
-                    .clip_path
-                    .center_y
-                    .resolve(font_px, border_rect.h, root_font_px);
+                .circle_rect(border_rect, font_px, root_font_px);
+            let r = rect.w * 0.5;
             Some((
-                Rect::new(cx - r - scroll_x, cy - r - scroll_y, r * 2.0, r * 2.0),
+                Rect::new(rect.x - scroll_x, rect.y - scroll_y, rect.w, rect.h),
                 [r; 4],
                 [r; 4],
             ))
         }
         ClipPathKind::Ellipse => {
-            let rx = style
+            let rect = style
                 .clip_path
-                .ellipse_rx
-                .resolve(font_px, border_rect.w, root_font_px)
-                .max(0.0);
-            let ry = style
-                .clip_path
-                .ellipse_ry
-                .resolve(font_px, border_rect.h, root_font_px)
-                .max(0.0);
-            let cx = border_rect.x
-                + style
-                    .clip_path
-                    .center_x
-                    .resolve(font_px, border_rect.w, root_font_px);
-            let cy = border_rect.y
-                + style
-                    .clip_path
-                    .center_y
-                    .resolve(font_px, border_rect.h, root_font_px);
+                .ellipse_rect(border_rect, font_px, root_font_px);
+            let rx = rect.w * 0.5;
+            let ry = rect.h * 0.5;
             Some((
-                Rect::new(cx - rx - scroll_x, cy - ry - scroll_y, rx * 2.0, ry * 2.0),
+                Rect::new(rect.x - scroll_x, rect.y - scroll_y, rect.w, rect.h),
                 [rx; 4],
                 [ry; 4],
             ))
         }
         _ => None,
     }
+}
+
+fn clip_path_svg(
+    style: &ComputedStyle,
+    reference: Rect,
+    scroll_x: f32,
+    scroll_y: f32,
+) -> Option<(
+    std::sync::Arc<tiny_skia::Path>,
+    tiny_skia::FillRule,
+    (f32, f32),
+)> {
+    if style.clip_path.kind != ClipPathKind::Path {
+        return None;
+    }
+    let (path, rule) = style.rare.as_ref()?.clip_path_data.as_ref()?;
+    Some((
+        path.clone(),
+        *rule,
+        (reference.x - scroll_x, reference.y - scroll_y),
+    ))
 }
 
 fn clip_path_polygon_points(
@@ -3955,21 +4191,26 @@ fn bstyle(s: crate::types::BorderStyle) -> u8 {
     }
 }
 
+fn clamp_sticky_axis(coordinate: f32, start: f32, end: f32, extent: f32) -> f32 {
+    // Subtracting rounded layout coordinates can put the upper bound just below
+    // the lower bound even when the containing block fits the sticky box.
+    coordinate.max(start).min((end - extent).max(start))
+}
+
 fn border_image_slices(value: &str, image_w: f32, image_h: f32) -> [f32; 4] {
     let mut vals = Vec::new();
-    for part in value.split_whitespace() {
+    for part in crate::css::property_defs::split_top_level_whitespace(value) {
         if part.eq_ignore_ascii_case("fill") {
             continue;
         }
-        let p = part.trim();
-        if let Some(raw) = p.strip_suffix('%') {
-            if let Ok(percent) = raw.parse::<f32>() {
+        match crate::css::property_defs::parse_border_image_slice_value(part) {
+            Some(crate::css::property_defs::BorderImageSliceValue::Percent(percent)) => {
                 vals.push((image_h * percent / 100.0, image_w * percent / 100.0));
             }
-        } else if let Ok(px) = p.parse::<f32>() {
-            vals.push((px, px));
-        } else if let Some(px) = p.strip_suffix("px").and_then(|n| n.parse::<f32>().ok()) {
-            vals.push((px, px));
+            Some(crate::css::property_defs::BorderImageSliceValue::Number(number)) => {
+                vals.push((number, number));
+            }
+            None => {}
         }
     }
     let pick = |idx: usize| vals.get(idx).copied();
@@ -4012,16 +4253,23 @@ fn border_image_side_values(
     font_px: f32,
     width_value: bool,
     root_font_px: f32,
+    natural_slices: Option<[f32; 4]>,
 ) -> [f32; 4] {
-    let tokens: Vec<&str> = value
-        .split_whitespace()
-        .filter(|token| !token.eq_ignore_ascii_case("auto"))
-        .collect();
+    let tokens: Vec<&str> = value.split_whitespace().collect();
     if tokens.is_empty() {
         return if width_value { border_widths } else { [0.0; 4] };
     }
     let refs = [rect.h, rect.w, rect.h, rect.w];
     let parse_side = |token: &str, side: usize| -> f32 {
+        if token.eq_ignore_ascii_case("auto") {
+            return if width_value {
+                natural_slices
+                    .map(|slices| slices[side])
+                    .unwrap_or(border_widths[side])
+            } else {
+                0.0
+            };
+        }
         if let Ok(multiplier) = token.parse::<f32>() {
             return (border_widths[side] * multiplier).max(0.0);
         }
@@ -4667,7 +4915,10 @@ fn is_explicit_z_positioned(node: &WebCore) -> bool {
 
 fn sticky_containing_block_for_children(node: &WebCore, inherited: Option<Rect>) -> Option<Rect> {
     if node.tag == "anonymous-block"
-        || matches!(node.style.display, Display::Inline | Display::Contents | Display::None)
+        || matches!(
+            node.style.display,
+            Display::Inline | Display::Contents | Display::None
+        )
     {
         return inherited;
     }
@@ -4700,40 +4951,129 @@ fn build_deferred_positioned_box(
     // positioned descendants. Absolute/fixed boxes retain their containing
     // block's context rather than acquiring intermediate static clips.
     if matches!(node.style.position, Position::Absolute | Position::Fixed) {
+        let mut clips = 0;
+        let mut scroll_x = ctx.scroll_x;
+        let mut scroll_y = ctx.scroll_y;
+        for ancestor in ancestors {
+            if ancestor.style.display == Display::Contents {
+                continue;
+            }
+            if ancestor.style.clip_path.kind != ClipPathKind::None {
+                let style = &ancestor.style;
+                let reference = style.clip_path.reference_rect(&ancestor.layout);
+                let box_radii = if style.clip_path.kind == ClipPathKind::Box {
+                    style.clip_path.reference_box_radii(
+                        style,
+                        &ancestor.layout,
+                        ctx.transform_ctx.root_font_px,
+                    )
+                } else {
+                    ([0.0; 4], [0.0; 4])
+                };
+                let font_px = style.font_size_px(
+                    ctx.transform_ctx.root_font_px,
+                    ctx.transform_ctx.root_font_px,
+                );
+                if let Some((rect, radius, radius_y)) = clip_path_rect(
+                    style,
+                    reference,
+                    box_radii,
+                    scroll_x,
+                    scroll_y,
+                    font_px,
+                    ctx.transform_ctx.root_font_px,
+                ) {
+                    list.push(PaintCmd::PushClip {
+                        rect,
+                        radius,
+                        radius_y,
+                    });
+                    clips += 1;
+                } else if let Some(points) = clip_path_polygon_points(
+                    style,
+                    reference,
+                    scroll_x,
+                    scroll_y,
+                    font_px,
+                    ctx.transform_ctx.root_font_px,
+                ) {
+                    list.push(PaintCmd::PushClipPath { points });
+                    clips += 1;
+                } else if let Some((path, fill_rule, origin)) =
+                    clip_path_svg(style, reference, scroll_x, scroll_y)
+                {
+                    list.push(PaintCmd::PushClipSvgPath {
+                        path,
+                        fill_rule,
+                        origin,
+                    });
+                    clips += 1;
+                }
+            }
+            scroll_x += ancestor.layout.scroll_left;
+            scroll_y += ancestor.layout.scroll_top;
+        }
         build_positioned_box(node, list, ctx);
+        for _ in 0..clips {
+            list.push(PaintCmd::PopClip);
+        }
         return;
     }
     let mut local = *ctx;
     let mut clips = 0;
     for ancestor in ancestors {
-        if ancestor.style.display == Display::Contents { continue; }
+        if ancestor.style.display == Display::Contents {
+            continue;
+        }
         let style = &ancestor.style;
         let pr = ancestor.layout.padding_rect;
         let scrollport = Rect::new(pr.x - local.scroll_x, pr.y - local.scroll_y, pr.w, pr.h);
-        if is_scroll_container(style) {
+        let viewport_overflow = local.viewport_overflow_body == Some(ancestor.node_id);
+        if !viewport_overflow && is_scroll_container(style) {
             local.sticky_scroll_container = Some(StickyScrollContainer { scrollport });
         }
-        if is_scroll_container(style) || style.contain_paint
-            || matches!(style.overflow_x, Overflow::Clip)
-            || matches!(style.overflow_y, Overflow::Clip)
+        if !viewport_overflow
+            && (is_scroll_container(style)
+                || style.contain_paint
+                || matches!(style.overflow_x, Overflow::Clip)
+                || matches!(style.overflow_y, Overflow::Clip))
         {
-            let font = style.font_size_px(local.transform_ctx.root_font_px, local.transform_ctx.root_font_px);
-            let margin = resolve_overflow_clip_margin(style, font, pr.w, local.transform_ctx.root_font_px);
-            let rect = Rect::new(scrollport.x - margin, scrollport.y - margin,
-                scrollport.w + margin * 2.0, scrollport.h + margin * 2.0);
-            let (radius, radius_y) = resolved_border_radii_for_node(ancestor, local.transform_ctx.root_font_px);
-            list.push(PaintCmd::PushClip { rect, radius, radius_y });
+            let font = style.font_size_px(
+                local.transform_ctx.root_font_px,
+                local.transform_ctx.root_font_px,
+            );
+            let margin =
+                resolve_overflow_clip_margin(style, font, pr.w, local.transform_ctx.root_font_px);
+            let rect = Rect::new(
+                scrollport.x - margin,
+                scrollport.y - margin,
+                scrollport.w + margin * 2.0,
+                scrollport.h + margin * 2.0,
+            );
+            let (radius, radius_y) =
+                resolved_border_radii_for_node(ancestor, local.transform_ctx.root_font_px);
+            list.push(PaintCmd::PushClip {
+                rect,
+                radius,
+                radius_y,
+            });
             clips += 1;
             let x = local.clip.x.max(rect.x);
             let y = local.clip.y.max(rect.y);
-            local.clip = Rect::new(x, y, (local.clip.right().min(rect.right()) - x).max(0.0),
-                (local.clip.bottom().min(rect.bottom()) - y).max(0.0));
+            local.clip = Rect::new(
+                x,
+                y,
+                (local.clip.right().min(rect.right()) - x).max(0.0),
+                (local.clip.bottom().min(rect.bottom()) - y).max(0.0),
+            );
         }
         local.scroll_x += ancestor.layout.scroll_left;
         local.scroll_y += ancestor.layout.scroll_top;
     }
     build_positioned_box(node, list, &local);
-    for _ in 0..clips { list.push(PaintCmd::PopClip); }
+    for _ in 0..clips {
+        list.push(PaintCmd::PopClip);
+    }
 }
 
 fn collect_explicit_z_descendants<'a>(
@@ -4746,7 +5086,13 @@ fn collect_explicit_z_descendants<'a>(
         return;
     }
     if is_explicit_z_positioned(node) {
-        out.push((node, PositionedAncestry { containing_block, nodes: ancestors.clone() }));
+        out.push((
+            node,
+            PositionedAncestry {
+                containing_block,
+                nodes: ancestors.clone(),
+            },
+        ));
         if !node.style.z_index_is_auto || creates_stacking_context(node) {
             return;
         }
@@ -4817,4 +5163,18 @@ pub(crate) fn object_fit_rect(
     let y = cr.y + place(&style.object_position_y, cr.h - oh, cr.h);
     let overflows = ow > cr.w + 0.01 || oh > cr.h + 0.01;
     (Rect::new(x, y, ow, oh), overflows)
+}
+
+#[cfg(test)]
+mod sticky_geometry_tests {
+    use super::clamp_sticky_axis;
+
+    #[test]
+    fn rounded_containing_block_bounds_do_not_panic() {
+        let start = 6.1035156e-5;
+        assert_eq!(clamp_sticky_axis(1.0, start, start, start), start);
+        assert_eq!(clamp_sticky_axis(-1.0, start, start, start), start);
+        assert_eq!(clamp_sticky_axis(50.0, 10.0, 100.0, 20.0), 50.0);
+        assert_eq!(clamp_sticky_axis(90.0, 10.0, 100.0, 20.0), 80.0);
+    }
 }

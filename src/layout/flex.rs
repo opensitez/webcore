@@ -82,7 +82,11 @@ fn single_replaced_width_at_height(
         if visible.next().is_some() {
             return None;
         }
-        if engine.res_box(&child.style, font_px, 0.0, root_font_px).h_space() != 0.0 {
+        if engine
+            .res_box(&child.style, font_px, 0.0, root_font_px)
+            .h_space()
+            != 0.0
+        {
             return None;
         }
         child
@@ -299,11 +303,16 @@ pub fn layout_flex(
         let left_auto = node.style.margin_left.is_auto();
         let right_auto = node.style.margin_right.is_auto();
         if left_auto || right_auto {
-            let border_w = content_w + rbox.padding_left + rbox.padding_right
-                + rbox.border_left + rbox.border_right;
-            let free = (containing_w - border_w
+            let border_w = content_w
+                + rbox.padding_left
+                + rbox.padding_right
+                + rbox.border_left
+                + rbox.border_right;
+            let free = (containing_w
+                - border_w
                 - if left_auto { 0.0 } else { rbox.margin_left }
-                - if right_auto { 0.0 } else { rbox.margin_right }).max(0.0);
+                - if right_auto { 0.0 } else { rbox.margin_right })
+            .max(0.0);
             if left_auto && right_auto {
                 resolved_box.margin_left = (free / 2.0).floor();
                 resolved_box.margin_right = free - resolved_box.margin_left;
@@ -595,12 +604,8 @@ pub fn layout_flex(
                 } else if child.style.width.is_auto() {
                     None
                 } else {
-                    let raw = engine.res_len(
-                        &child.style.width,
-                        child_font,
-                        content_w,
-                        root_font_px,
-                    );
+                    let raw =
+                        engine.res_len(&child.style.width, child_font, content_w, root_font_px);
                     let cb = if child.style.box_sizing == BoxSizing::BorderBox {
                         (raw - irb.border_left
                             - irb.border_right
@@ -650,16 +655,16 @@ pub fn layout_flex(
             && child.style.width.is_auto()
             && !child.style.height.is_auto()
             && !child.style.height.has_percentage())
-            .then(|| {
-                single_replaced_width_at_height(
-                    engine,
-                    child,
-                    engine.res_len(&child.style.height, child_font, 0.0, root_font_px),
-                    child_font,
-                    root_font_px,
-                )
-            })
-            .flatten();
+        .then(|| {
+            single_replaced_width_at_height(
+                engine,
+                child,
+                engine.res_len(&child.style.height, child_font, 0.0, root_font_px),
+                child_font,
+                root_font_px,
+            )
+        })
+        .flatten();
 
         let mut basis_main: f32 = if let Some(kind) = intrinsic_basis {
             if is_row {
@@ -736,12 +741,7 @@ pub fn layout_flex(
                 raw.max(0.0)
             }
         } else if is_row && !child.style.width.is_auto() {
-            let raw = engine.res_len(
-                &child.style.width,
-                child_font,
-                content_w,
-                root_font_px,
-            );
+            let raw = engine.res_len(&child.style.width, child_font, content_w, root_font_px);
             if child.style.box_sizing == BoxSizing::BorderBox {
                 (raw - irb.border_left - irb.border_right - irb.padding_left - irb.padding_right)
                     .max(0.0)
@@ -750,12 +750,7 @@ pub fn layout_flex(
             }
         } else if !is_row && !child.style.height.is_auto() {
             let main_ref = rbox.content_height.unwrap_or(0.0);
-            let raw = engine.res_len(
-                &child.style.height,
-                child_font,
-                main_ref,
-                root_font_px,
-            );
+            let raw = engine.res_len(&child.style.height, child_font, main_ref, root_font_px);
             if child.style.box_sizing == BoxSizing::BorderBox {
                 (raw - irb.border_top - irb.border_bottom - irb.padding_top - irb.padding_bottom)
                     .max(0.0)
@@ -802,31 +797,32 @@ pub fn layout_flex(
         };
         let max_main: f32 = if is_row {
             if child.style.max_width.intrinsic().is_some()
-                || (!child.style.max_width.is_none() && !child.style.max_width.is_auto()) {
-                engine.res_len_sizing(
-                    &child.style.max_width,
-                    child,
-                    content_w,
-                    child_font,
-                    content_w,
-                    root_font_px,
-                ).unwrap_or_else(|| {
-                    let v = engine.res_len(
-                        &child.style.max_width, child_font, content_w, root_font_px,
-                    );
-                    (v - bb_main).max(0.0)
-                })
+                || (!child.style.max_width.is_none() && !child.style.max_width.is_auto())
+            {
+                engine
+                    .res_len_sizing(
+                        &child.style.max_width,
+                        child,
+                        content_w,
+                        child_font,
+                        content_w,
+                        root_font_px,
+                    )
+                    .unwrap_or_else(|| {
+                        let v = engine.res_len(
+                            &child.style.max_width,
+                            child_font,
+                            content_w,
+                            root_font_px,
+                        );
+                        (v - bb_main).max(0.0)
+                    })
             } else {
                 f32::MAX
             }
         } else {
             if !child.style.max_height.is_none() && !child.style.max_height.is_auto() {
-                let v = engine.res_len(
-                    &child.style.max_height,
-                    child_font,
-                    0.0,
-                    root_font_px,
-                );
+                let v = engine.res_len(&child.style.max_height, child_font, 0.0, root_font_px);
                 (v - bb_main).max(0.0)
             } else {
                 f32::MAX
@@ -865,12 +861,7 @@ pub fn layout_flex(
                 } else {
                     rbox.content_height.unwrap_or(0.0)
                 };
-                let v = engine.res_len(
-                    len,
-                    child_font,
-                    basis,
-                    root_font_px,
-                );
+                let v = engine.res_len(len, child_font, basis, root_font_px);
                 Some((v - bb_main).max(0.0))
             } else {
                 None
@@ -890,19 +881,24 @@ pub fn layout_flex(
 
         let min_main: f32 = if is_row {
             if child.style.min_width.intrinsic().is_some() || !child.style.min_width.is_auto() {
-                engine.res_len_sizing(
-                    &child.style.min_width,
-                    child,
-                    content_w,
-                    child_font,
-                    content_w,
-                    root_font_px,
-                ).unwrap_or_else(|| {
-                    let v = engine.res_len(
-                        &child.style.min_width, child_font, content_w, root_font_px,
-                    );
-                    (v - bb_main).max(0.0)
-                })
+                engine
+                    .res_len_sizing(
+                        &child.style.min_width,
+                        child,
+                        content_w,
+                        child_font,
+                        content_w,
+                        root_font_px,
+                    )
+                    .unwrap_or_else(|| {
+                        let v = engine.res_len(
+                            &child.style.min_width,
+                            child_font,
+                            content_w,
+                            root_font_px,
+                        );
+                        (v - bb_main).max(0.0)
+                    })
             } else if child.style.overflow_x != Overflow::Visible {
                 // overflow: hidden/scroll/auto → automatic minimum is 0
                 0.0
@@ -910,18 +906,12 @@ pub fn layout_flex(
                 auto_min_main(
                     height_constrained_image_width.unwrap_or_else(|| {
                         engine.min_content_width_of_content(child, font_px, root_font_px)
-                    })
-                        + boundary_space_main,
+                    }) + boundary_space_main,
                 )
             }
         } else {
             if !child.style.min_height.is_auto() {
-                let v = engine.res_len(
-                    &child.style.min_height,
-                    child_font,
-                    0.0,
-                    root_font_px,
-                );
+                let v = engine.res_len(&child.style.min_height, child_font, 0.0, root_font_px);
                 (v - bb_main).max(0.0)
             } else if child.style.overflow_y != Overflow::Visible {
                 // overflow: hidden/scroll/auto → automatic minimum is 0
@@ -1599,8 +1589,8 @@ pub fn layout_flex(
                     // An indefinite percentage can have an automatic used
                     // height, but its computed value is not `auto`, so it
                     // does not qualify for stretch.
-                    let cross_is_auto = child.style.height.is_auto()
-                        && child.style.height.intrinsic().is_none();
+                    let cross_is_auto =
+                        child.style.height.is_auto() && child.style.height.intrinsic().is_none();
                     if cross_is_auto
                         && target_h > 0.0
                         && (target_h - child.layout.content_rect.h).abs() > 0.5

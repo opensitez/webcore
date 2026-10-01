@@ -119,6 +119,44 @@ fn group_rows_into_tbody(table: &mut WebCore) {
     table.children = out;
 }
 
+fn group_cols_into_colgroup(table: &mut WebCore) {
+    if !table.children.iter().any(|child| child.tag == "col") {
+        return;
+    }
+    let children = std::mem::take(&mut table.children);
+    let mut out = Vec::with_capacity(children.len());
+    let mut current: Option<WebCore> = None;
+    let mut pending_ws = Vec::new();
+    for child in children {
+        if child.tag == "col" {
+            let group = current.get_or_insert_with(|| {
+                let mut group = WebCore::new("colgroup");
+                apply_property(
+                    std::sync::Arc::make_mut(&mut group.style),
+                    "display",
+                    default_display("colgroup"),
+                );
+                group
+            });
+            group.children.append(&mut pending_ws);
+            group.children.push(child);
+        } else if child.is_text_node() && child.text.trim().is_empty() && current.is_some() {
+            pending_ws.push(child);
+        } else {
+            if let Some(group) = current.take() {
+                out.push(group);
+            }
+            out.append(&mut pending_ws);
+            out.push(child);
+        }
+    }
+    if let Some(group) = current {
+        out.push(group);
+    }
+    out.append(&mut pending_ws);
+    table.children = out;
+}
+
 /// Valid parents for an element that only belongs inside a table.
 /// `None` when the tag is not table-only and may appear anywhere.
 fn table_part_parents(tag: &str) -> Option<&'static [&'static str]> {
@@ -230,6 +268,7 @@ pub(crate) fn normalize_tables(node: &mut WebCore) {
             }
         }
         hoist_table_form_children(&mut node.children[i]);
+        group_cols_into_colgroup(&mut node.children[i]);
         group_rows_into_tbody(&mut node.children[i]);
         let moved = fostered.len();
         node.children.splice(i..i, fostered);

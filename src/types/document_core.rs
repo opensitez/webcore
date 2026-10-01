@@ -23,17 +23,75 @@ fn union_rect(a: Rect, b: Rect) -> Rect {
     Rect::new(x1, y1, x2 - x1, y2 - y1)
 }
 
-fn for_each_webcore_mut_by_id(node: &mut WebCore, id: u32, f: &mut impl FnMut(&mut WebCore)) {
+fn for_each_webcore_mut_by_id(
+    node: &mut WebCore,
+    id: u32,
+    f: &mut impl FnMut(&mut WebCore),
+) -> bool {
+    let mut found = false;
     if node.node_id == id {
         f(node);
+        found = true;
     }
     if let Some(shadow) = node.shadow_root.as_mut() {
         for child in &mut shadow.children {
-            for_each_webcore_mut_by_id(child, id, f);
+            found |= for_each_webcore_mut_by_id(child, id, f);
         }
     }
     for child in &mut node.children {
-        for_each_webcore_mut_by_id(child, id, f);
+        found |= for_each_webcore_mut_by_id(child, id, f);
+    }
+    found
+}
+
+fn update_image_target_in_root(
+    root: &mut WebCore,
+    node_id: u32,
+    path: &[usize],
+    update: &mut impl FnMut(&mut WebCore),
+) -> bool {
+    if node_id == 0 {
+        if let Some(node) = find_node_by_path_mut(root, path) {
+            update(node);
+            true
+        } else {
+            false
+        }
+    } else if let Some(node) = find_node_by_path_mut(root, path)
+        && node.node_id == node_id
+    {
+        update(node);
+        true
+    } else {
+        for_each_webcore_mut_by_id(root, node_id, update)
+    }
+}
+
+fn find_child_path_by_id(node: &WebCore, id: u32, path: &mut Vec<usize>) -> bool {
+    if node.node_id == id {
+        return true;
+    }
+    for (index, child) in node.children.iter().enumerate() {
+        path.push(index);
+        if find_child_path_by_id(child, id, path) {
+            return true;
+        }
+        path.pop();
+    }
+    false
+}
+
+fn mark_image_layout_path_dirty(root: &mut WebCore, node_id: u32, path: &[usize]) {
+    if node_id == 0 || find_node_by_path_mut(root, path).is_some_and(|node| node.node_id == node_id)
+    {
+        mark_layout_path_dirty(root, path);
+    } else {
+        let mut current_path = Vec::new();
+        if find_child_path_by_id(root, node_id, &mut current_path) {
+            mark_layout_path_dirty(root, &current_path);
+        } else {
+            mark_layout_node_dirty(root);
+        }
     }
 }
 
@@ -53,6 +111,7 @@ impl Document {
             linked_stylesheets: Vec::new(),
             document_stylesheets: Vec::new(),
             inline_stylesheet_cache: HashMap::new(),
+            dynamic_style_slots: HashMap::new(),
             loaded_linked_stylesheets: HashMap::new(),
             loaded_stylesheet_slots: HashMap::new(),
             preserve_stylesheet_document_order: true,
@@ -63,6 +122,7 @@ impl Document {
             scroll_x: 0.0,
             scroll_y: 0.0,
             scrollbar_drag: None,
+            resize_drag: None,
             hovered_box: 0,
             hover_suppress_count: 0,
             active_box: 0,
@@ -102,7 +162,7 @@ impl Document {
             active_animations: Vec::new(),
             transition_states: HashMap::new(),
             prev_styles: HashMap::new(),
-            cascade_styles: HashMap::new(),
+            transition_style_refs: HashMap::new(),
             animation_overrides: HashMap::new(),
             needs_animation_frame: false,
             smooth_scrolls: Vec::new(),
@@ -119,6 +179,7 @@ impl Document {
             live_regions_initialized: false,
             layout_generation: 0,
             scroll_height_cache: std::cell::Cell::new(None),
+            scroll_width_cache: std::cell::Cell::new(None),
             pending_images: None,
             image_load_errors: Vec::new(),
             images_in_flight: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -159,17 +220,69 @@ impl Document {
             media,
         });
         if active {
-            let mut sheet = crate::css::Stylesheet::default();
-            sheet.parse_and_add_with_base(&source, &self.base_url);
-            self.stylesheet.append_fragment(sheet.clone());
-            self.inline_stylesheet_cache.insert(slot, CachedInlineStylesheet {
-                source,
-                base_url: self.base_url.clone(),
-                sheet: std::sync::Arc::new(sheet),
-            });
-            self.stylesheet.rebuild_index();
+            let sheet = crate::parsed_inline_stylesheet(&source, &self.base_url);
+            self.stylesheet.append_fragment((*sheet).clone());
+            self.inline_stylesheet_cache.insert(
+                slot,
+                CachedInlineStylesheet {
+                    source,
+                    base_url: self.base_url.clone(),
+                    sheet,
+                },
+            );
         }
         active
+    }
+
+    /// Bring DOM-created `<style>` elements into the author cascade after a
+    /// tree or text mutation. Parser-created sheets already have their slots.
+    pub(crate) fn sync_dynamic_style_sheets(&mut self) {
+        let ids: Vec<u32> = self.dynamic_style_slots.keys().copied().collect();
+        let mut changed = false;
+        for id in ids {
+            let connected = self.is_connected(id);
+            let css = if connected {
+                self.text_content(id)
+            } else {
+                String::new()
+            };
+            let media = if connected {
+                self.get_attribute(id, "media").unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let slot = match self.dynamic_style_slots[&id] {
+                Some(slot) => slot,
+                None if connected => {
+                    let slot = self.document_stylesheets.len();
+                    self.dynamic_style_slots.insert(id, Some(slot));
+                    self.document_stylesheets.push(DocumentStylesheet::Inline {
+                        css: std::sync::Arc::from(""),
+                        media: String::new(),
+                    });
+                    slot
+                }
+                None => continue,
+            };
+            let current = &self.document_stylesheets[slot];
+            if matches!(current, DocumentStylesheet::Inline { css: old_css, media: old_media }
+                if old_css.as_ref() == css && old_media == &media)
+            {
+                continue;
+            }
+            self.document_stylesheets[slot] = DocumentStylesheet::Inline {
+                css: css.into(),
+                media,
+            };
+            changed = true;
+        }
+        if changed {
+            self.rebuild_author_stylesheet_from_document_order();
+            self.stylesheet
+                .resolve_variables_for_viewport(self.viewport_w, self.viewport_h);
+            self.stylesheet.rebuild_index();
+            self.style_dirty = true;
+        }
     }
 
     /// Poll pending stylesheet work. A zero `max_time` means "drain everything
@@ -194,6 +307,8 @@ impl Document {
         let time_limited = !max_time.is_zero();
         let mut disconnected = false;
         let mut changed = false;
+        let mut rebuild_needed = false;
+        let mut variables_changed = false;
         if rebuild_from_document_order {
             let mut results = Vec::new();
             loop {
@@ -211,6 +326,14 @@ impl Document {
             }
             results.sort_by_key(|(idx, _, _, _)| *idx);
             for (idx, css_url, sheet, _media) in results {
+                variables_changed |= sheet.may_change_root_variables();
+                let append_in_order =
+                    !rebuild_needed && self.can_append_linked_stylesheet_fragment(idx, &css_url);
+                if append_in_order {
+                    self.stylesheet.append_fragment(sheet.clone());
+                } else {
+                    rebuild_needed = true;
+                }
                 match self.loaded_stylesheet_slots.entry(idx) {
                     std::collections::hash_map::Entry::Occupied(mut entry) => {
                         entry.get_mut().append_fragment(sheet.clone());
@@ -234,6 +357,7 @@ impl Document {
             loop {
                 match rx.try_recv() {
                     Ok((_, _, sheet, _)) => {
+                        variables_changed |= sheet.may_change_root_variables();
                         self.stylesheet.append_fragment(sheet);
                         processed += 1;
                         changed = true;
@@ -255,14 +379,56 @@ impl Document {
         if !changed {
             return false;
         }
-        if rebuild_from_document_order {
+        if rebuild_from_document_order && rebuild_needed {
             self.rebuild_author_stylesheet_from_document_order();
         }
-        self.stylesheet
-            .resolve_variables_for_viewport(self.viewport_w, self.viewport_h);
+        if rebuild_needed || variables_changed {
+            self.stylesheet
+                .resolve_variables_for_viewport(self.viewport_w, self.viewport_h);
+        }
         self.stylesheet.rebuild_index();
         self.refresh_shadow_linked_stylesheets();
         self.style_dirty = true;
+        true
+    }
+
+    fn can_append_linked_stylesheet_fragment(&self, idx: usize, css_url: &str) -> bool {
+        let Some(DocumentStylesheet::Linked { href, media }) = self.document_stylesheets.get(idx)
+        else {
+            return false;
+        };
+        if !crate::css::evaluate_media(media, self.viewport_w, self.viewport_h)
+            || crate::html::resolve_url(href, &self.base_url) != css_url
+        {
+            return false;
+        }
+        for (later_idx, later) in self.document_stylesheets.iter().enumerate() {
+            if let DocumentStylesheet::Linked { href, .. } = later {
+                if later_idx != idx && crate::html::resolve_url(href, &self.base_url) == css_url {
+                    return false;
+                }
+            }
+            if later_idx <= idx {
+                continue;
+            }
+            match later {
+                DocumentStylesheet::Inline { media, .. }
+                    if crate::css::evaluate_media(media, self.viewport_w, self.viewport_h) =>
+                {
+                    return false;
+                }
+                DocumentStylesheet::Linked { href, media }
+                    if crate::css::evaluate_media(media, self.viewport_w, self.viewport_h)
+                        && (self.loaded_stylesheet_slots.contains_key(&later_idx)
+                            || self
+                                .loaded_linked_stylesheets
+                                .contains_key(&crate::html::resolve_url(href, &self.base_url))) =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+        }
         true
     }
 
@@ -274,23 +440,27 @@ impl Document {
                     if !crate::css::evaluate_media(media, self.viewport_w, self.viewport_h) {
                         continue;
                     }
-                    let cached = self.inline_stylesheet_cache.get(&idx).is_some_and(|cached| {
-                        cached.base_url == self.base_url
-                            && (std::sync::Arc::ptr_eq(&cached.source, css)
-                                || cached.source.as_ref() == css.as_ref())
-                    });
-                    if !cached {
-                        let mut sheet = crate::css::Stylesheet::default();
-                        sheet.parse_and_add_with_base(css, &self.base_url);
-                        self.inline_stylesheet_cache.insert(idx, CachedInlineStylesheet {
-                            source: css.clone(),
-                            base_url: self.base_url.clone(),
-                            sheet: std::sync::Arc::new(sheet),
+                    let cached = self
+                        .inline_stylesheet_cache
+                        .get(&idx)
+                        .is_some_and(|cached| {
+                            cached.base_url == self.base_url
+                                && (std::sync::Arc::ptr_eq(&cached.source, css)
+                                    || cached.source.as_ref() == css.as_ref())
                         });
+                    if !cached {
+                        let sheet = crate::parsed_inline_stylesheet(css, &self.base_url);
+                        self.inline_stylesheet_cache.insert(
+                            idx,
+                            CachedInlineStylesheet {
+                                source: css.clone(),
+                                base_url: self.base_url.clone(),
+                                sheet,
+                            },
+                        );
                     }
-                    self.stylesheet.append_fragment(
-                        (*self.inline_stylesheet_cache[&idx].sheet).clone(),
-                    );
+                    self.stylesheet
+                        .append_fragment((*self.inline_stylesheet_cache[&idx].sheet).clone());
                 }
                 DocumentStylesheet::Linked { href, media } => {
                     if !crate::css::evaluate_media(media, self.viewport_w, self.viewport_h) {
@@ -435,6 +605,48 @@ impl Document {
                 break;
             };
             let (node_id, path, target, url, decoded) = match result {
+                PendingImageResult::Dimensions {
+                    node_id,
+                    path,
+                    target,
+                    width,
+                    height,
+                } => {
+                    if target == PendingImageTarget::Element {
+                        let mut needs_relayout = false;
+                        let mut update = |node: &mut WebCore| {
+                            if node.image_width != width || node.image_height != height {
+                                node.image_width = width;
+                                node.image_height = height;
+                                needs_relayout |=
+                                    node.style.width.is_auto() || node.style.height.is_auto();
+                            }
+                        };
+                        let root_updated = update_image_target_in_root(
+                            &mut self.root,
+                            node_id,
+                            &path,
+                            &mut update,
+                        );
+                        if node_id != 0 {
+                            for pending in self.pending_nodes.values_mut() {
+                                for_each_webcore_mut_by_id(pending, node_id, &mut update);
+                            }
+                        }
+                        if needs_relayout {
+                            if root_updated {
+                                mark_image_layout_path_dirty(&mut self.root, node_id, &path);
+                            }
+                            poll.needs_relayout = true;
+                            poll.loaded_any = true;
+                        }
+                    }
+                    processed += 1;
+                    if processed >= max_images || (time_limited && start.elapsed() >= max_time) {
+                        break;
+                    }
+                    continue;
+                }
                 PendingImageResult::Loaded {
                     node_id,
                     path,
@@ -488,31 +700,49 @@ impl Document {
                     PendingImageTarget::Background => {
                         let selected = node.style.background_image_url_for_dpr(device_pixel_ratio);
                         let expected = crate::html::resolve_url(&selected, &base_url);
-                        if selected.is_empty() || (url != expected
-                            && (node.bg_image_data.is_some()
-                                || node.style.rare().background_image_set_source.is_none())) {
+                        if selected.is_empty()
+                            || (url != expected
+                                && (node.bg_image_data.is_some()
+                                    || node.style.rare().background_image_set_source.is_none()))
+                        {
                             return;
                         }
-                        if crate::html::set_decoded_bg_image_on_node(node, decoded.clone()) {
+                        if crate::html::set_decoded_bg_image_for_url_on_node(
+                            node,
+                            decoded.clone(),
+                            &url,
+                            &base_url,
+                        ) {
                             loaded_target = true;
                         }
                     }
                     PendingImageTarget::BackgroundLayer(layer_index) => {
-                        let Some(layer) = node.style.rare().additional_background_layers.get(layer_index) else {
+                        let Some(layer) = node
+                            .style
+                            .rare()
+                            .additional_background_layers
+                            .get(layer_index)
+                        else {
                             return;
                         };
                         let selected = layer.image_url_for_dpr(device_pixel_ratio);
                         let expected = crate::html::resolve_url(&selected, &base_url);
-                        let loaded = node.additional_bg_images.get(layer_index)
-                            .and_then(|image| image.as_ref()).is_some();
-                        if selected.is_empty() || (url != expected
-                            && (loaded || layer.image_set_source.is_none())) {
+                        let loaded = node
+                            .additional_bg_images
+                            .get(layer_index)
+                            .and_then(|image| image.as_ref())
+                            .is_some();
+                        if selected.is_empty()
+                            || (url != expected && (loaded || layer.image_set_source.is_none()))
+                        {
                             return;
                         }
-                        if crate::html::set_decoded_bg_image_layer_on_node(
+                        if crate::html::set_decoded_bg_image_layer_for_url_on_node(
                             node,
                             layer_index,
                             decoded.clone(),
+                            &url,
+                            &base_url,
                         ) {
                             loaded_target = true;
                         }
@@ -520,9 +750,11 @@ impl Document {
                     PendingImageTarget::Mask => {
                         let selected = node.style.mask_image_url_for_dpr(device_pixel_ratio);
                         let expected = crate::html::resolve_url(&selected, &base_url);
-                        if selected.is_empty() || (url != expected
-                            && (node.mask_image_data.is_some()
-                                || node.style.rare().mask_image_set_source.is_none())) {
+                        if selected.is_empty()
+                            || (url != expected
+                                && (node.mask_image_data.is_some()
+                                    || node.style.rare().mask_image_set_source.is_none()))
+                        {
                             return;
                         }
                         if let Some((data, w, h)) =
@@ -536,13 +768,12 @@ impl Document {
                     }
                 }
             };
+            let root_updated =
+                update_image_target_in_root(&mut self.root, node_id, &path, &mut apply_to_node);
             if node_id != 0 {
-                for_each_webcore_mut_by_id(&mut self.root, node_id, &mut apply_to_node);
                 for pending in self.pending_nodes.values_mut() {
                     for_each_webcore_mut_by_id(pending, node_id, &mut apply_to_node);
                 }
-            } else if let Some(node) = find_node_by_path_mut(&mut self.root, &path) {
-                apply_to_node(node);
             }
             if loaded_target {
                 self.image_load_errors
@@ -550,7 +781,9 @@ impl Document {
                         err_path != &loaded_path || *err_target != loaded_target_kind
                     });
                 if target_needs_relayout {
-                    mark_layout_path_dirty(&mut self.root, &path);
+                    if root_updated {
+                        mark_image_layout_path_dirty(&mut self.root, node_id, &path);
+                    }
                     poll.needs_relayout = true;
                 } else if let Some(rect) = paint_rect
                     && rect.w > 0.0
@@ -866,6 +1099,24 @@ impl Document {
         }
     }
 
+    pub(crate) fn viewport_overflow_body(root: &WebCore) -> Option<u32> {
+        let html = if root.tag == "html" {
+            root
+        } else {
+            root.effective_children()
+                .iter()
+                .find(|child| child.tag == "html")?
+        };
+        if html.style.overflow_x != Overflow::Visible || html.style.overflow_y != Overflow::Visible
+        {
+            return None;
+        }
+        html.effective_children()
+            .iter()
+            .find(|child| child.tag == "body")
+            .map(|body| body.node_id)
+    }
+
     /// Compute the full scrollable extent of the document.
     /// Walks all elements and returns the maximum bottom/right edge,
     /// ignoring containers with `height: 100vh` or similar constraints.
@@ -875,6 +1126,7 @@ impl Document {
             max_bottom: &mut f32,
             is_root: bool,
             inside_svg_foreign_content: bool,
+            viewport_overflow_body: Option<u32>,
         ) {
             if inside_svg_foreign_content {
                 return;
@@ -889,6 +1141,7 @@ impl Document {
             if matches!(node.style.position, Position::Fixed) {
                 return;
             }
+            let viewport_overflow = viewport_overflow_body == Some(node.node_id);
             // Absolute elements contribute only if they're within the document flow area
             // (some abs elements are positioned far off-screen as accessibility hacks)
             let contributes_own_scroll_extent = !matches!(node.style.display, Display::Contents)
@@ -903,15 +1156,17 @@ impl Document {
                             false,
                             node.tag == "svg"
                                 && crate::layout::is_svg_foreign_content_tag(&child.tag),
+                            viewport_overflow_body,
                         );
                     }
                     return;
                 }
-                // Only count if within a reasonable range (2x the current max)
+                // A tall positioned page starting near the origin contributes its full height.
+                // The top-edge limit only excludes far-offscreen accessibility content.
                 let bottom = node.layout.margin_rect.y + node.layout.margin_rect.h;
                 if node.layout.margin_rect.h > 0.0
                     && bottom > 0.0
-                    && bottom < *max_bottom * 3.0 + 2000.0
+                    && node.layout.margin_rect.y < *max_bottom * 3.0 + 2000.0
                 {
                     if bottom > *max_bottom {
                         *max_bottom = bottom;
@@ -925,7 +1180,7 @@ impl Document {
             // pages can grow but never shrink when display/content collapses.
             // Use descendants to compute the natural document extent instead.
             if !is_root && contributes_own_scroll_extent {
-                if node.layout.margin_rect.h <= 0.0 {
+                if node.layout.margin_rect.h <= 0.0 && !viewport_overflow {
                     return;
                 }
                 let bottom = node.layout.margin_rect.y + node.layout.margin_rect.h;
@@ -934,6 +1189,7 @@ impl Document {
                 }
             }
             if !is_root
+                && !viewport_overflow
                 && matches!(
                     node.style.overflow_y,
                     Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
@@ -947,11 +1203,18 @@ impl Document {
                     max_bottom,
                     false,
                     node.tag == "svg" && crate::layout::is_svg_foreign_content_tag(&child.tag),
+                    viewport_overflow_body,
                 );
             }
         }
         let mut max_bottom = 0.0;
-        walk_scroll(root, &mut max_bottom, true, false);
+        walk_scroll(
+            root,
+            &mut max_bottom,
+            true,
+            false,
+            Self::viewport_overflow_body(root),
+        );
         max_bottom
     }
 
@@ -973,6 +1236,71 @@ impl Document {
                 .set(Some((self.layout_generation, height)));
         }
         height
+    }
+
+    pub fn scroll_width(root: &WebCore) -> f32 {
+        let mut right = root.layout.margin_rect.w;
+        let mut pending = vec![(root, true, false)];
+        while let Some((node, is_root, inside_svg_foreign_content)) = pending.pop() {
+            if inside_svg_foreign_content
+                || matches!(node.style.display, Display::None)
+                || crate::layout::is_layout_inert_svg_node(node)
+                || matches!(node.style.position, Position::Fixed)
+            {
+                continue;
+            }
+            let contributes = !matches!(node.style.display, Display::Contents)
+                && !(node.is_text_node() && node.text.trim().is_empty());
+            if contributes && !is_root {
+                let rect = node.layout.margin_rect;
+                let edge = rect.x + rect.w;
+                if matches!(node.style.position, Position::Absolute) {
+                    if rect.w > 0.0 && edge > 0.0 && edge < right * 3.0 + 2000.0 {
+                        right = right.max(edge);
+                    } else {
+                        continue;
+                    }
+                } else if rect.w > 0.0 {
+                    right = right.max(edge);
+                }
+            }
+            if !is_root
+                && matches!(
+                    node.style.overflow_x,
+                    Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
+                )
+            {
+                continue;
+            }
+            pending.extend(node.children.iter().map(|child| {
+                (
+                    child,
+                    false,
+                    node.tag == "svg" && crate::layout::is_svg_foreign_content_tag(&child.tag),
+                )
+            }));
+        }
+        right
+    }
+
+    pub fn cached_scroll_width(&self) -> f32 {
+        if !self.style_dirty
+            && !self.root.layout.layout_dirty
+            && !self.root.has_dirty_layout_descendant
+            && let Some((generation, width)) = self.scroll_width_cache.get()
+            && generation == self.layout_generation
+        {
+            return width;
+        }
+        let width = Self::scroll_width(&self.root);
+        if !self.style_dirty
+            && !self.root.layout.layout_dirty
+            && !self.root.has_dirty_layout_descendant
+        {
+            self.scroll_width_cache
+                .set(Some((self.layout_generation, width)));
+        }
+        width
     }
 
     pub fn viewport_y_scroll_locked(&self) -> bool {
@@ -1262,6 +1590,48 @@ fn mark_layout_node_dirty(node: &mut WebCore) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn dom_created_style_element_updates_and_detaches_author_rules() {
+        let mut doc = crate::load_html(
+            "<html><body><button class='key'>7</button></body></html>",
+            800.0,
+        );
+        let base_rules = doc.stylesheet.rules.len();
+        let body = doc.body().unwrap();
+        let style = doc.create_element("style");
+        let text = doc.create_text_node(".key { width: 60px; }");
+        doc.append_child(style, text);
+        assert!(!doc.stylesheet.rules.iter().any(|rule| {
+            rule.declarations
+                .get("width")
+                .is_some_and(|value| value == "60px")
+        }));
+
+        doc.append_child(body, style);
+        assert_eq!(doc.stylesheet.rules.len(), base_rules + 1);
+        assert!(doc.stylesheet.rules.iter().any(|rule| {
+            rule.declarations
+                .get("width")
+                .is_some_and(|value| value == "60px")
+        }));
+
+        doc.set_text_content(style, ".key { width: 80px; }");
+        assert_eq!(doc.stylesheet.rules.len(), base_rules + 1);
+        assert!(doc.stylesheet.rules.iter().any(|rule| {
+            rule.declarations
+                .get("width")
+                .is_some_and(|value| value == "80px")
+        }));
+        assert!(!doc.stylesheet.rules.iter().any(|rule| {
+            rule.declarations
+                .get("width")
+                .is_some_and(|value| value == "60px")
+        }));
+
+        doc.remove_child(style);
+        assert_eq!(doc.stylesheet.rules.len(), base_rules);
+    }
+
     fn stylesheet_with_rule(selector: &str) -> crate::css::Stylesheet {
         let mut sheet = crate::css::Stylesheet::default();
         sheet.parse_and_add_author(&format!("{selector} {{ color: red }}"));
@@ -1294,8 +1664,18 @@ mod tests {
         doc.loaded_stylesheet_slots
             .insert(1, stylesheet_with_color(".print-only", "blue"));
         doc.rebuild_author_stylesheet_from_document_order();
-        assert!(doc.stylesheet.rules.iter().any(|r| r.declarations.get("color").is_some_and(|v| v == "red")));
-        assert!(!doc.stylesheet.rules.iter().any(|r| r.declarations.get("color").is_some_and(|v| v == "blue")));
+        assert!(
+            doc.stylesheet
+                .rules
+                .iter()
+                .any(|r| r.declarations.get("color").is_some_and(|v| v == "red"))
+        );
+        assert!(
+            !doc.stylesheet
+                .rules
+                .iter()
+                .any(|r| r.declarations.get("color").is_some_and(|v| v == "blue"))
+        );
         assert!(doc.loaded_stylesheet_slots.contains_key(&1));
     }
 
@@ -1360,7 +1740,10 @@ mod tests {
         doc.rebuild_author_stylesheet_from_document_order();
         let first = doc.inline_stylesheet_cache[&0].sheet.clone();
         doc.rebuild_author_stylesheet_from_document_order();
-        assert!(std::sync::Arc::ptr_eq(&first, &doc.inline_stylesheet_cache[&0].sheet));
+        assert!(std::sync::Arc::ptr_eq(
+            &first,
+            &doc.inline_stylesheet_cache[&0].sheet
+        ));
 
         doc.document_stylesheets[0] = DocumentStylesheet::Inline {
             css: ".updated { background-image: url(icon.svg) }".into(),
@@ -1369,15 +1752,69 @@ mod tests {
         doc.rebuild_author_stylesheet_from_document_order();
         let second = doc.inline_stylesheet_cache[&0].sheet.clone();
         assert!(!std::sync::Arc::ptr_eq(&first, &second));
-        assert!(doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".updated"));
-        assert!(!doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".target"));
+        assert!(
+            doc.stylesheet
+                .rules
+                .iter()
+                .any(|rule| rule.original_selector == ".updated")
+        );
+        assert!(
+            !doc.stylesheet
+                .rules
+                .iter()
+                .any(|rule| rule.original_selector == ".target")
+        );
 
         doc.base_url = "https://example.test/two/".into();
         doc.rebuild_author_stylesheet_from_document_order();
-        assert!(!std::sync::Arc::ptr_eq(&second, &doc.inline_stylesheet_cache[&0].sheet));
+        assert!(!std::sync::Arc::ptr_eq(
+            &second,
+            &doc.inline_stylesheet_cache[&0].sheet
+        ));
         assert!(doc.stylesheet.rules.iter().any(|rule| {
-            rule.declarations.iter().any(|(_, value)| value.contains("https://example.test/two/icon.svg"))
+            rule.declarations
+                .iter()
+                .any(|(_, value)| value.contains("https://example.test/two/icon.svg"))
         }));
+    }
+
+    #[test]
+    fn inline_stylesheet_parse_is_reused_across_documents() {
+        let css: std::sync::Arc<str> = ".revisited { background-image: url(icon.svg) }".into();
+        let make_doc = || {
+            let mut doc = Document::new();
+            doc.base_url = "https://example.test/revisited/".into();
+            doc.document_stylesheets.push(DocumentStylesheet::Inline {
+                css: css.clone(),
+                media: String::new(),
+            });
+            doc.rebuild_author_stylesheet_from_document_order();
+            doc
+        };
+        let first = make_doc();
+        let second = make_doc();
+        assert!(std::sync::Arc::ptr_eq(
+            &first.inline_stylesheet_cache[&0].sheet,
+            &second.inline_stylesheet_cache[&0].sheet,
+        ));
+    }
+
+    #[test]
+    fn initial_load_reuses_parsed_inline_stylesheet_across_documents() {
+        let html = "<style>.shared { color: red }</style><div class='shared'>hello</div>";
+        let first = crate::load_html_with_base(html, "https://example.test/page", 800.0, 600.0);
+        let second = crate::load_html_with_base(html, "https://example.test/page", 800.0, 600.0);
+        assert!(std::sync::Arc::ptr_eq(
+            &first.inline_stylesheet_cache[&0].sheet,
+            &second.inline_stylesheet_cache[&0].sheet,
+        ));
+        assert!(
+            second
+                .stylesheet
+                .rules
+                .iter()
+                .any(|rule| rule.original_selector == ".shared")
+        );
     }
 
     #[test]
@@ -1504,6 +1941,115 @@ mod tests {
     }
 
     #[test]
+    fn tail_stylesheet_fragments_keep_existing_rule_storage() {
+        let mut doc = Document::new();
+        doc.preserve_stylesheet_document_order = true;
+        doc.stylesheet = crate::css::ua_stylesheet();
+        doc.base_url = "https://example.test/".into();
+        doc.document_stylesheets.push(DocumentStylesheet::Linked {
+            href: "tail.css".into(),
+            media: String::new(),
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        doc.pending_stylesheets = Some(rx);
+        let url = "https://example.test/tail.css".to_string();
+        tx.send((
+            0,
+            url.clone(),
+            stylesheet_with_rule(".first"),
+            String::new(),
+        ))
+        .unwrap();
+        assert!(doc.poll_pending_stylesheets_budgeted(8, std::time::Duration::ZERO));
+        let first = doc
+            .stylesheet
+            .rules
+            .iter()
+            .find(|rule| rule.original_selector == ".first")
+            .unwrap();
+        let first_selector_storage = first.original_selector.as_ptr();
+
+        tx.send((0, url, stylesheet_with_rule(".second"), String::new()))
+            .unwrap();
+        assert!(doc.poll_pending_stylesheets_budgeted(8, std::time::Duration::ZERO));
+        let first = doc
+            .stylesheet
+            .rules
+            .iter()
+            .find(|rule| rule.original_selector == ".first")
+            .unwrap();
+        assert_eq!(first.original_selector.as_ptr(), first_selector_storage);
+        assert!(
+            doc.stylesheet
+                .rules
+                .iter()
+                .any(|rule| rule.original_selector == ".second")
+        );
+    }
+
+    #[test]
+    fn streamed_root_variables_keep_importance_across_unrelated_fragments() {
+        let mut doc = Document::new();
+        doc.stylesheet = crate::css::ua_stylesheet();
+        let (tx, rx) = std::sync::mpsc::channel();
+        doc.pending_stylesheets = Some(rx);
+        let send = |css: &str| {
+            let mut sheet = crate::css::Stylesheet::default();
+            sheet.parse_and_add_author(css);
+            tx.send((0, String::new(), sheet, String::new())).unwrap();
+        };
+
+        send(":root { --brand: red !important }");
+        assert!(doc.poll_pending_stylesheets_budgeted(8, std::time::Duration::ZERO));
+        assert_eq!(
+            doc.stylesheet.variables.get("--brand").map(String::as_str),
+            Some("red")
+        );
+
+        send(".unrelated { color: blue }");
+        assert!(doc.poll_pending_stylesheets_budgeted(8, std::time::Duration::ZERO));
+        assert_eq!(
+            doc.stylesheet.variables.get("--brand").map(String::as_str),
+            Some("red")
+        );
+
+        send("html { --brand: green; --accent: blue }");
+        assert!(doc.poll_pending_stylesheets_budgeted(8, std::time::Duration::ZERO));
+        assert_eq!(
+            doc.stylesheet.variables.get("--brand").map(String::as_str),
+            Some("red")
+        );
+        assert_eq!(
+            doc.stylesheet.variables.get("--accent").map(String::as_str),
+            Some("blue")
+        );
+    }
+
+    #[test]
+    fn stylesheet_tail_append_rejects_later_inline_css_and_repeated_href() {
+        let mut doc = Document::new();
+        doc.base_url = "https://example.test/".into();
+        doc.document_stylesheets = vec![
+            DocumentStylesheet::Linked {
+                href: "app.css".into(),
+                media: String::new(),
+            },
+            DocumentStylesheet::Inline {
+                css: "p { color: blue }".into(),
+                media: String::new(),
+            },
+        ];
+        assert!(!doc.can_append_linked_stylesheet_fragment(0, "https://example.test/app.css"));
+        doc.document_stylesheets.pop();
+        assert!(doc.can_append_linked_stylesheet_fragment(0, "https://example.test/app.css"));
+        doc.document_stylesheets.push(DocumentStylesheet::Linked {
+            href: "app.css".into(),
+            media: String::new(),
+        });
+        assert!(!doc.can_append_linked_stylesheet_fragment(0, "https://example.test/app.css"));
+    }
+
+    #[test]
     fn pending_stylesheet_poll_appends_live_fragments_without_rebuild_storage() {
         let mut doc = Document::new();
         doc.preserve_stylesheet_document_order = false;
@@ -1595,6 +2141,66 @@ mod tests {
     }
 
     #[test]
+    fn image_results_use_verified_path_and_relocate_stale_node_ids() {
+        let mut doc = Document::new();
+        let mut first = WebCore::new("div");
+        first.node_id = 11;
+        first.layout.layout_dirty = false;
+        let mut image = WebCore::new("img");
+        image.node_id = 12;
+        image.layout.layout_dirty = false;
+        doc.root.children.push(first);
+        doc.root.children.push(image);
+        let (tx, rx) = std::sync::mpsc::channel();
+        doc.pending_images = Some(rx);
+
+        tx.send(PendingImageResult::Dimensions {
+            node_id: 12,
+            path: vec![1],
+            target: PendingImageTarget::Element,
+            width: 20,
+            height: 10,
+        })
+        .unwrap();
+        assert!(
+            doc.poll_pending_images_budgeted(1, std::time::Duration::ZERO)
+                .needs_relayout
+        );
+        assert_eq!(doc.root.children[1].image_width, 20);
+        assert!(!doc.root.children[0].layout.layout_dirty);
+
+        doc.root.children[1].image_width = 0;
+        doc.root.children[1].image_height = 0;
+        doc.root.children[1].layout.layout_dirty = false;
+        tx.send(PendingImageResult::Loaded {
+            node_id: 12,
+            path: vec![0],
+            target: PendingImageTarget::Element,
+            url: "memory:image".into(),
+            decoded: crate::html::DecodedImage::Raster(
+                std::sync::Arc::new(vec![255, 0, 0, 255]),
+                1,
+                1,
+            ),
+        })
+        .unwrap();
+        assert!(
+            doc.poll_pending_images_budgeted(1, std::time::Duration::ZERO)
+                .needs_relayout
+        );
+        assert_eq!(doc.root.children[0].image_width, 0);
+        assert_eq!(doc.root.children[1].image_width, 1);
+        assert!(
+            !doc.root.children[0].layout.layout_dirty,
+            "stale path must not dirty the wrong sibling"
+        );
+        assert!(
+            doc.root.children[1].layout.layout_dirty,
+            "relocated image must dirty its current path"
+        );
+    }
+
+    #[test]
     fn image_set_keeps_low_density_pixels_until_high_density_arrives() {
         let mut doc = Document::new();
         doc.base_url = "https://example.test/".into();
@@ -1613,21 +2219,32 @@ mod tests {
             target: PendingImageTarget::Background,
             url: url.to_string(),
             decoded: crate::html::DecodedImage::Raster(
-                std::sync::Arc::new(vec![red, 0, 0, 255]), 1, 1,
+                std::sync::Arc::new(vec![red, 0, 0, 255]),
+                1,
+                1,
             ),
         };
 
         tx.send(loaded("https://example.test/one.png", 40)).unwrap();
-        assert!(doc.poll_pending_images_budgeted(1, std::time::Duration::ZERO).loaded_any);
+        assert!(
+            doc.poll_pending_images_budgeted(1, std::time::Duration::ZERO)
+                .loaded_any
+        );
         assert_eq!(doc.root.children[0].bg_image_data.as_ref().unwrap()[0], 40);
 
         doc.device_pixel_ratio = 2.0;
         assert_eq!(doc.root.children[0].bg_image_data.as_ref().unwrap()[0], 40);
         tx.send(loaded("https://example.test/two.png", 90)).unwrap();
         tx.send(loaded("https://example.test/one.png", 40)).unwrap();
-        assert!(doc.poll_pending_images_budgeted(1, std::time::Duration::ZERO).loaded_any);
+        assert!(
+            doc.poll_pending_images_budgeted(1, std::time::Duration::ZERO)
+                .loaded_any
+        );
         assert_eq!(doc.root.children[0].bg_image_data.as_ref().unwrap()[0], 90);
-        assert!(!doc.poll_pending_images_budgeted(1, std::time::Duration::ZERO).loaded_any);
+        assert!(
+            !doc.poll_pending_images_budgeted(1, std::time::Duration::ZERO)
+                .loaded_any
+        );
         assert_eq!(doc.root.children[0].bg_image_data.as_ref().unwrap()[0], 90);
     }
 }

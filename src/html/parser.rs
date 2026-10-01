@@ -151,6 +151,18 @@ impl HtmlParser {
         }
     }
 
+    fn parse_noscript_children(&mut self, content: &str, ol_counter: &mut i32) -> Vec<WebCore> {
+        let outer_tokens = std::mem::replace(&mut self.tokens, tokenize(content));
+        let outer_pos = std::mem::replace(&mut self.pos, 0);
+        let outer_format = std::mem::take(&mut self.pending_format);
+        let mut children = Vec::new();
+        self.parse_children_into("", &mut children, ol_counter);
+        self.tokens = outer_tokens;
+        self.pos = outer_pos;
+        self.pending_format = outer_format;
+        children
+    }
+
     /// Record a head element (`title`/`meta`/`link`/`style`/`base`) as a node.
     /// `text` is the element's text content, empty for the void ones.
     /// Wrap freshly-appended nodes in the formatting elements waiting to be
@@ -493,12 +505,10 @@ impl HtmlParser {
                         } else {
                             t
                         }
-                    } else if t.trim().is_empty() && t.contains('\n') {
-                        "\n".to_string()
                     } else {
-                        collapse_whitespace(&t)
+                        t
                     };
-                    let keep = !text_val.trim().is_empty() || text_val == " " || text_val == "\n";
+                    let keep = !text_val.is_empty();
                     if keep {
                         // Content arriving is what makes a pending formatting
                         // element real — see `reconstruct`.
@@ -542,55 +552,27 @@ impl HtmlParser {
                         } else {
                             String::new()
                         };
-                        // The ELEMENT stays in the DOM with its source as a text
-                        // child, whatever the host does with the content.
-                        // Dropping it meant `document.scripts` was empty and a
-                        // `<script>` could not be found, moved or re-read — and
-                        // `<script>` is `display: none`, so nothing is drawn.
-                        let mut script_node = self.new_box(&tag);
-                        script_node.attributes = attrs.clone();
-                        script_node.text = content.clone();
-                        apply_property(
-                            std::sync::Arc::make_mut(&mut script_node.style),
-                            "display",
-                            "none",
-                        );
-                        stack.last_mut().unwrap().node.children.push(script_node);
                         let host_handled = if let Some(ref mut f) = self.on_script {
                             f(&tag, &attrs, &content)
                         } else {
                             false
                         };
-                        // Scripting is ENABLED, so `<noscript>` is RAWTEXT: its
-                        // content is the text above and is NOT parsed. Parsing
-                        // it as fallback markup is the scripting-DISABLED
-                        // behaviour, and doing both put the same content in the
-                        // tree twice — once as text, once as elements.
-                        let parse_noscript_fallback = false;
-                        if parse_noscript_fallback
-                            && !host_handled
-                            && tag == "noscript"
-                            && !content.is_empty()
-                        {
-                            // Parse noscript content as HTML and insert into current frame
-                            let inner_tokens = tokenize(&content);
-                            let mut inner_parser = HtmlParser::new(inner_tokens);
-                            inner_parser.base_url = self.base_url.clone();
-                            let mut inner_children = Vec::new();
-                            let mut inner_ol = 0i32;
-                            inner_parser.parse_children_into(
-                                "",
-                                &mut inner_children,
-                                &mut inner_ol,
+                        let mut node = self.new_box(&tag);
+                        node.attributes = attrs;
+                        if tag == "noscript" && !host_handled {
+                            let mut ol_counter = stack.last().unwrap().ol_counter;
+                            node.children = self.parse_noscript_children(&content, &mut ol_counter);
+                            stack.last_mut().unwrap().ol_counter = ol_counter;
+                        } else {
+                            node.text = content;
+                            node.parser_suppressed = true;
+                            apply_property(
+                                std::sync::Arc::make_mut(&mut node.style),
+                                "display",
+                                "none",
                             );
-                            for child in inner_children {
-                                stack.last_mut().unwrap().node.children.push(child);
-                            }
-                            // Merge any stylesheets found inside noscript
-                            for rule in inner_parser.stylesheet.rules {
-                                self.stylesheet.rules.push(rule);
-                            }
                         }
+                        stack.last_mut().unwrap().node.children.push(node);
                         continue;
                     }
 
@@ -727,8 +709,10 @@ impl HtmlParser {
                             if crate::css::evaluate_media(&media, 0.0, 0.0) {
                                 self.stylesheet.parse_and_add(&normalize_css_text(&css));
                             }
-                            self.document_stylesheets
-                                .push(DocumentStylesheet::Inline { css: css.clone().into(), media });
+                            self.document_stylesheets.push(DocumentStylesheet::Inline {
+                                css: css.clone().into(),
+                                media,
+                            });
                         }
                         let mut style_node = self.new_box("style");
                         style_node.text = css.clone();
@@ -941,17 +925,17 @@ impl HtmlParser {
             } else {
                 false
             };
-            if !host_handled && tag == "noscript" && !content.is_empty() {
-                let inner_tokens = tokenize(&content);
-                let mut inner_parser = HtmlParser::new(inner_tokens);
-                inner_parser.base_url = self.base_url.clone();
-                let mut inner_children = Vec::new();
-                let mut inner_ol = *ol_counter;
-                inner_parser.parse_children_into("", &mut inner_children, &mut inner_ol);
-                children.extend(inner_children);
-                for rule in inner_parser.stylesheet.rules {
-                    self.stylesheet.rules.push(rule);
+            if tag == "noscript" {
+                let mut node = self.new_box("noscript");
+                node.attributes = attrs;
+                if host_handled {
+                    node.text = content;
+                    node.parser_suppressed = true;
+                    apply_property(std::sync::Arc::make_mut(&mut node.style), "display", "none");
+                } else {
+                    node.children = self.parse_noscript_children(&content, ol_counter);
                 }
+                children.push(node);
             }
             return;
         }
@@ -1004,8 +988,10 @@ impl HtmlParser {
             if crate::css::evaluate_media(&media, 0.0, 0.0) {
                 self.stylesheet.parse_and_add(&normalize_css_text(&css));
             }
-            self.document_stylesheets
-                .push(DocumentStylesheet::Inline { css: css.clone().into(), media });
+            self.document_stylesheets.push(DocumentStylesheet::Inline {
+                css: css.clone().into(),
+                media,
+            });
             // The element stays in the tree — see the sibling arm in
             // `parse_children_into`.
             let mut style_node = self.new_box("style");

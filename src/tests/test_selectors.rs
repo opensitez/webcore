@@ -306,7 +306,8 @@ fn selectors_child_universal_matches_direct_child() {
     // Direct child: parent is .grid-3
     let direct_ancestors = vec![AncestorInfo {
         tag: "div".into(),
-        attributes: [("class".to_string(), "grid-3".to_string())].into(),
+        attributes: crate::dom::attrs::AttrMap::from([("class".to_string(), "grid-3".to_string())])
+            .into(),
         child_index: 0,
         sibling_count: 3,
         ..Default::default()
@@ -320,7 +321,11 @@ fn selectors_child_universal_matches_direct_child() {
     let grandchild_ancestors = vec![
         AncestorInfo {
             tag: "div".into(),
-            attributes: [("class".to_string(), "grid-3".to_string())].into(),
+            attributes: crate::dom::attrs::AttrMap::from([(
+                "class".to_string(),
+                "grid-3".to_string(),
+            )])
+            .into(),
             child_index: 0,
             sibling_count: 1,
             ..Default::default()
@@ -337,6 +342,25 @@ fn selectors_child_universal_matches_direct_child() {
         !sel.matches_with_ancestors(&child, 0, 1, &grandchild_ancestors),
         "should NOT match a grandchild of .grid-3"
     );
+}
+
+#[test]
+fn ancestor_snapshots_share_immutable_attributes_and_siblings() {
+    let attributes = crate::dom::attrs::AttrMap::from([("class".into(), "parent".into())]);
+    let ancestor = crate::css::AncestorInfo {
+        attributes: std::sync::Arc::new(attributes),
+        prev_siblings: std::sync::Arc::new(vec![crate::css::SiblingInfo::default()]),
+        ..Default::default()
+    };
+    let copy = ancestor.clone();
+    assert!(std::sync::Arc::ptr_eq(
+        &ancestor.attributes,
+        &copy.attributes
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &ancestor.prev_siblings,
+        &copy.prev_siblings
+    ));
 }
 
 // ── nth-child keyword shorthands ──────────────────────────────────────────────
@@ -722,7 +746,12 @@ fn empty_forgiving_selector_lists_do_not_match_every_element() {
     );
     let mut engine = crate::layout::LayoutEngine::new();
     engine.layout(&mut doc, 400.0);
-    let body = doc.root.children.iter().find(|node| node.tag == "body").unwrap();
+    let body = doc
+        .root
+        .children
+        .iter()
+        .find(|node| node.tag == "body")
+        .unwrap();
     assert_eq!(body.style.position, crate::types::Position::Static);
 }
 

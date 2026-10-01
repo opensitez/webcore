@@ -1,7 +1,7 @@
 // Pixel-level render tests for blend modes, gradients, and layout.
 #[test]
 fn inline_link_becoming_flex_item_discards_old_border_fragments() {
-    use crate::renderer::display_list::{PaintCmd};
+    use crate::renderer::display_list::PaintCmd;
     use crate::renderer::display_list_builder::build_display_list_full;
     let mut renderer = Renderer::new();
     let mut doc = renderer.load_html(
@@ -11,15 +11,32 @@ fn inline_link_becoming_flex_item_discards_old_border_fragments() {
     let mut pixels = tiny_skia::Pixmap::new(500, 200).unwrap();
     renderer.render(&mut doc, &mut pixels, 1.0);
     let row = doc.get_element_by_id("row").unwrap();
-    doc.set_attribute(row, "style", "display:flex;justify-content:center;padding:30px");
+    doc.set_attribute(
+        row,
+        "style",
+        "display:flex;justify-content:center;padding:30px",
+    );
     renderer.layout_engine().layout(&mut doc, 500.0);
     renderer.render(&mut doc, &mut pixels, 1.0);
     let button = crate::dom::query_selector(&doc.root, "#button").unwrap();
     assert!(button.layout.inline_client_rects.is_empty());
     let expected = button.layout.border_rect;
-    let list = build_display_list_full(&doc.root, 500.0, 200.0, 0.0, 0.0, 0, 0,
-        &std::collections::HashSet::new(), "");
-    assert!(list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Border {rect, ..} if *rect == expected)));
+    let list = build_display_list_full(
+        &doc.root,
+        500.0,
+        200.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+    );
+    assert!(
+        list.commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::Border {rect, ..} if *rect == expected))
+    );
 }
 
 #[test]
@@ -131,12 +148,18 @@ fn whitespace_only_text_nodes_do_not_generate_flex_items_or_stale_boxes() {
         500.0,
     );
 
-    let row = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "row"))
-        .expect("row");
-    let a = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "a"))
-        .expect("a");
-    let b = find_box(&doc.root, &|n| n.attributes.get("id").is_some_and(|id| id == "b"))
-        .expect("b");
+    let row = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|id| id == "row")
+    })
+    .expect("row");
+    let a = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|id| id == "a")
+    })
+    .expect("a");
+    let b = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|id| id == "b")
+    })
+    .expect("b");
 
     assert!(
         (b.layout.margin_rect.x - a.layout.margin_rect.right() - 20.0).abs() < 0.5,
@@ -566,10 +589,16 @@ fn inline_icon_text_uses_document_root_rem_size() {
         300.0,
     );
     let list = crate::renderer::display_list_builder::build_display_list(&doc.root, 300.0, 80.0);
-    let icon_sizes = list.commands.iter().filter_map(|command| match command {
-        PaintCmd::Text { text, font_size, .. } if text == "a" => Some(*font_size),
-        _ => None,
-    }).collect::<Vec<_>>();
+    let icon_sizes = list
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            PaintCmd::Text {
+                text, font_size, ..
+            } if text == "a" => Some(*font_size),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     assert_eq!(icon_sizes, vec![8.0], "rem must use the root's 10px size");
 }
 
@@ -591,7 +620,11 @@ fn painted_rem_radius_uses_document_root_font_size() {
     );
     let list = crate::renderer::display_list_builder::build_display_list(&doc.root, 100.0, 100.0);
     let radius = list.commands.iter().find_map(|command| match command {
-        PaintCmd::FillRect { color, radius, .. } if color.r == 255 && color.g == 0 && color.b == 0 => Some(radius[0]),
+        PaintCmd::FillRect { color, radius, .. }
+            if color.r == 255 && color.g == 0 && color.b == 0 =>
+        {
+            Some(radius[0])
+        }
         _ => None,
     });
     assert_eq!(radius, Some(10.0));
@@ -619,10 +652,15 @@ fn flex_pseudo_text_is_centered_as_an_anonymous_flex_item() {
     );
     let list = crate::renderer::display_list_builder::build_display_list(&doc.root, 100.0, 50.0);
     let text_x = list.commands.iter().find_map(|command| match command {
-        PaintCmd::Text { text, x, font_size, .. } if text == "a" && *font_size == 8.0 => Some(*x),
+        PaintCmd::Text {
+            text, x, font_size, ..
+        } if text == "a" && *font_size == 8.0 => Some(*x),
         _ => None,
     });
-    assert!(matches!(text_x, Some(x) if x > 5.0 && x < 12.0), "pseudo glyph must be centered in its 20px flex box: {text_x:?}");
+    assert!(
+        matches!(text_x, Some(x) if x > 5.0 && x < 12.0),
+        "pseudo glyph must be centered in its 20px flex box: {text_x:?}"
+    );
 }
 
 #[test]
@@ -634,7 +672,7 @@ fn svg_stroke_current_color_does_not_get_filled() {
           svg { color: rgb(0, 128, 0); }
         </style>
         <svg width="80" height="40" viewBox="0 0 80 40">
-          <path d="M5 5 L75 5 L75 35 Z" stroke="currentColor" stroke-width="4"/>
+          <path d="M5 5 L75 5 L75 35 Z" fill="none" stroke="currentColor" stroke-width="4"/>
         </svg>
         "#,
         90,
@@ -676,6 +714,27 @@ fn box_shadow_blur_softens_outside_the_shadow_rect() {
 }
 
 #[test]
+fn inset_box_shadow_blur_softens_toward_the_center() {
+    let pm = render_html(
+        r#"<style>body{margin:0;background:white}#box{margin:20px;width:100px;height:100px;background:white;box-shadow:inset 0 0 12px black}</style><div id="box"></div>"#,
+        140,
+        140,
+    );
+    let edge = pixel(&pm, 24, 70).0;
+    let transition = pixel(&pm, 32, 70).0;
+    let center = pixel(&pm, 70, 70).0;
+    let outside = pixel(&pm, 16, 70).0;
+    assert!(
+        edge < transition && transition < center,
+        "inset blur should fade inward: {edge}, {transition}, {center}"
+    );
+    assert!(
+        outside > 245,
+        "inset shadow must not paint outside the box: {outside}"
+    );
+}
+
+#[test]
 fn zero_blur_box_shadow_paints_only_visible_shadow_difference() {
     let pm = render_html(
         r#"
@@ -712,9 +771,15 @@ fn zero_blur_rounded_shadow_does_not_paint_square_corners() {
         140,
     );
     let (cr, cg, cb, _) = pixel(&pm, 40, 40);
-    assert!(cr > 245 && cg > 245 && cb > 245, "rounded shadow painted a square corner");
+    assert!(
+        cr > 245 && cg > 245 && cb > 245,
+        "rounded shadow painted a square corner"
+    );
     let (tr, tg, tb, _) = pixel(&pm, 70, 39);
-    assert!(tr < 100 && tg < 100 && tb < 100, "rounded shadow is missing at the top edge");
+    assert!(
+        tr < 100 && tg < 100 && tb < 100,
+        "rounded shadow is missing at the top edge"
+    );
 }
 
 #[test]
@@ -851,6 +916,39 @@ fn render_contenteditable_selection_uses_selection_background() {
 }
 
 #[test]
+fn render_plain_text_selection_uses_selection_background() {
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"<style>
+           body { margin: 0; background: white; }
+           #text { font: 20px/24px sans-serif; color: black; }
+           #text::selection { background-color: rgb(255, 0, 0); color: white; }
+           </style>
+           <div id="text">hello world</div>"#,
+        240.0,
+    );
+    let text = doc.get_element_by_id("text").unwrap();
+    doc.editor.caret_box = Some(text);
+    doc.editor.sel_start = 0;
+    doc.editor.sel_end = 5;
+    doc.editor.caret_visible = false;
+
+    let line = doc
+        .get_box_by_id(text)
+        .unwrap()
+        .layout
+        .line_cache
+        .first()
+        .unwrap();
+    let x = (line.x + line.char_x.get(2).copied().unwrap_or(20.0)).round() as u32;
+    let y = (line.y + line.height / 2.0).round() as u32;
+    let mut pixmap = Pixmap::new(240, 80).unwrap();
+    renderer.render(&mut doc, &mut pixmap, 1.0);
+    let (r, g, b, a) = pixel(&pixmap, x, y);
+    assert!(a > 0 && r > 200 && g < 80 && b < 80);
+}
+
+#[test]
 fn render_contenteditable_selection_uses_selection_foreground() {
     let mut renderer = Renderer::new();
     let mut doc = renderer.load_html(
@@ -973,16 +1071,35 @@ fn two_axis_element_scrollbars_leave_a_separate_corner() {
         80.0,
     );
     let list = build_display_list(&doc.root, 80.0, 80.0);
-    let tracks: Vec<_> = list.commands.iter().filter_map(|command| {
-        if let PaintCmd::FillRect { rect, color, .. } = command {
-            (*color == Color::rgb(0, 255, 0)).then_some(*rect)
-        } else {
-            None
-        }
-    }).collect();
-    assert!(tracks.iter().any(|rect| rect.x == 30.0 && rect.y == 0.0 && rect.w == 10.0 && rect.h == 30.0), "vertical track: {tracks:?}");
-    assert!(tracks.iter().any(|rect| rect.x == 0.0 && rect.y == 30.0 && rect.w == 30.0 && rect.h == 10.0), "horizontal track: {tracks:?}");
-    assert!(tracks.iter().any(|rect| rect.x == 30.0 && rect.y == 30.0 && rect.w == 10.0 && rect.h == 10.0), "corner: {tracks:?}");
+    let tracks: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|command| {
+            if let PaintCmd::FillRect { rect, color, .. } = command {
+                (*color == Color::rgb(0, 255, 0)).then_some(*rect)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        tracks
+            .iter()
+            .any(|rect| rect.x == 30.0 && rect.y == 0.0 && rect.w == 10.0 && rect.h == 30.0),
+        "vertical track: {tracks:?}"
+    );
+    assert!(
+        tracks
+            .iter()
+            .any(|rect| rect.x == 0.0 && rect.y == 30.0 && rect.w == 30.0 && rect.h == 10.0),
+        "horizontal track: {tracks:?}"
+    );
+    assert!(
+        tracks
+            .iter()
+            .any(|rect| rect.x == 30.0 && rect.y == 30.0 && rect.w == 10.0 && rect.h == 10.0),
+        "corner: {tracks:?}"
+    );
 }
 
 #[test]
@@ -1001,33 +1118,70 @@ fn padded_scrollbar_tracks_reach_the_padding_box_corner() {
         100.0,
     );
     let list = build_display_list(&doc.root, 100.0, 100.0);
-    let tracks: Vec<_> = list.commands.iter().filter_map(|command| {
-        if let PaintCmd::FillRect { rect, color, .. } = command {
-            (*color == Color::rgb(0, 255, 0)).then_some(*rect)
-        } else {
-            None
-        }
-    }).collect();
-    assert!(tracks.iter().any(|r| r.x == 50.0 && r.y == 0.0 && r.w == 10.0 && r.h == 50.0), "vertical track: {tracks:?}");
-    assert!(tracks.iter().any(|r| r.x == 0.0 && r.y == 50.0 && r.w == 50.0 && r.h == 10.0), "horizontal track: {tracks:?}");
-    assert!(tracks.iter().any(|r| r.x == 50.0 && r.y == 50.0 && r.w == 10.0 && r.h == 10.0), "corner: {tracks:?}");
+    let tracks: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|command| {
+            if let PaintCmd::FillRect { rect, color, .. } = command {
+                (*color == Color::rgb(0, 255, 0)).then_some(*rect)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        tracks
+            .iter()
+            .any(|r| r.x == 50.0 && r.y == 0.0 && r.w == 10.0 && r.h == 50.0),
+        "vertical track: {tracks:?}"
+    );
+    assert!(
+        tracks
+            .iter()
+            .any(|r| r.x == 0.0 && r.y == 50.0 && r.w == 50.0 && r.h == 10.0),
+        "horizontal track: {tracks:?}"
+    );
+    assert!(
+        tracks
+            .iter()
+            .any(|r| r.x == 50.0 && r.y == 50.0 && r.w == 10.0 && r.h == 10.0),
+        "corner: {tracks:?}"
+    );
 
     let box_node = crate::dom::query_selector(&doc.root, "#box").unwrap();
     let content = box_node.layout.content_rect;
     let padding = box_node.layout.padding_rect;
     let expected_thumb_h = (50.0 * padding.h
-        / (box_node.layout.scroll_height + padding.h - content.h)).max(20.0).min(50.0);
+        / (box_node.layout.scroll_height + padding.h - content.h))
+        .max(20.0)
+        .min(50.0);
     let expected_thumb_w = (50.0 * padding.w
-        / (box_node.layout.scroll_width + padding.w - content.w)).max(20.0).min(50.0);
-    let thumbs: Vec<_> = list.commands.iter().filter_map(|command| {
-        if let PaintCmd::FillRect { rect, color, .. } = command {
-            (*color == Color::rgb(255, 0, 0)).then_some(*rect)
-        } else {
-            None
-        }
-    }).collect();
-    assert!(thumbs.iter().any(|r| r.x == 51.0 && (r.h - (expected_thumb_h - 2.0)).abs() < 0.01), "vertical thumb: {thumbs:?}");
-    assert!(thumbs.iter().any(|r| r.y == 51.0 && (r.w - (expected_thumb_w - 2.0)).abs() < 0.01), "horizontal thumb: {thumbs:?}");
+        / (box_node.layout.scroll_width + padding.w - content.w))
+        .max(20.0)
+        .min(50.0);
+    let thumbs: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|command| {
+            if let PaintCmd::FillRect { rect, color, .. } = command {
+                (*color == Color::rgb(255, 0, 0)).then_some(*rect)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(
+        thumbs
+            .iter()
+            .any(|r| r.x == 51.0 && (r.h - (expected_thumb_h - 2.0)).abs() < 0.01),
+        "vertical thumb: {thumbs:?}"
+    );
+    assert!(
+        thumbs
+            .iter()
+            .any(|r| r.y == 51.0 && (r.w - (expected_thumb_w - 2.0)).abs() < 0.01),
+        "horizontal thumb: {thumbs:?}"
+    );
 }
 
 // ── Flex nav: li items inside a flex ul must not overlap ──────────────────────
@@ -1506,22 +1660,46 @@ fn sticky_header_and_inline_button_paint_after_scrolling_past_their_flow_positio
     let mut pm = tiny_skia::Pixmap::new(300, 100).unwrap();
     renderer.render(&mut doc, &mut pm, 1.0);
     let list = build_display_list_viewport(
-        &doc.root, 300.0, 100.0, 0.0, 250.0, 250.0, 350.0,
-        0, 0, &std::collections::HashSet::new(), "",
+        &doc.root,
+        300.0,
+        100.0,
+        0.0,
+        250.0,
+        250.0,
+        350.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
     );
-    let fills: Vec<_> = list.commands.iter().filter_map(|cmd| match cmd {
-        PaintCmd::FillRect { rect, color, .. } => Some((rect, color)),
-        _ => None,
-    }).collect();
-    let fill_summary: Vec<_> = fills.iter().map(|(rect, color)|
-        (rect.x, rect.y, rect.w, rect.h, color.r, color.g, color.b)
-    ).collect();
-    assert!(fills.iter().any(|(rect, color)| rect.y + rect.h > 250.0 && rect.y < 350.0
-        && color.r == 255 && color.g == 255 && color.b == 255),
-        "sticky header background must be painted in the scrolled viewport: {fill_summary:?}");
-    assert!(fills.iter().any(|(rect, color)| rect.y + rect.h > 250.0 && rect.y < 350.0
-        && color.r == 2 && color.g == 2 && color.b == 3),
-        "sticky inline button must be painted in the scrolled viewport: {fill_summary:?}");
+    let fills: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::FillRect { rect, color, .. } => Some((rect, color)),
+            _ => None,
+        })
+        .collect();
+    let fill_summary: Vec<_> = fills
+        .iter()
+        .map(|(rect, color)| (rect.x, rect.y, rect.w, rect.h, color.r, color.g, color.b))
+        .collect();
+    assert!(
+        fills.iter().any(|(rect, color)| rect.y + rect.h > 250.0
+            && rect.y < 350.0
+            && color.r == 255
+            && color.g == 255
+            && color.b == 255),
+        "sticky header background must be painted in the scrolled viewport: {fill_summary:?}"
+    );
+    assert!(
+        fills.iter().any(|(rect, color)| rect.y + rect.h > 250.0
+            && rect.y < 350.0
+            && color.r == 2
+            && color.g == 2
+            && color.b == 3),
+        "sticky inline button must be painted in the scrolled viewport: {fill_summary:?}"
+    );
 }
 
 // ── inline-block in flex: background must cover padding ──────────────────────
@@ -1799,8 +1977,10 @@ fn nested_opacity_groups_composite_once_per_element() {
     direct_renderer.render(&mut direct_doc, &mut direct, 1.0);
     for (path, image) in [("tiled", &pm), ("direct", &direct)] {
         let (r, g, b, _) = pixel(image, 20, 20);
-        assert!(r > 245 && (175..=205).contains(&g) && (175..=205).contains(&b),
-            "{path} nested 50% groups should paint red at 25% over white, got {r},{g},{b}");
+        assert!(
+            r > 245 && (175..=205).contains(&g) && (175..=205).contains(&b),
+            "{path} nested 50% groups should paint red at 25% over white, got {r},{g},{b}"
+        );
     }
 }
 
@@ -2161,13 +2341,17 @@ fn render_css_scale_transform_affects_text() {
 
 #[test]
 fn individual_math_transforms_paint_without_transform_property() {
-    let pm = render_html(r#"<style>
+    let pm = render_html(
+        r#"<style>
         * { margin:0; padding:0; }
         body { background:white; }
         div { width:40px; height:20px; background:red; transform-origin:0 0;
               translate:calc(50% + 10px) 20px; scale:sqrt(4) calc(50%);
               rotate:calc(.25turn - 90deg); }
-        </style><div></div>"#, 160, 80);
+        </style><div></div>"#,
+        160,
+        80,
+    );
     assert_eq!(pixel(&pm, 35, 25), (255, 0, 0, 255));
     assert_eq!(pixel(&pm, 105, 25), (255, 0, 0, 255));
     assert_eq!(pixel(&pm, 10, 5), (255, 255, 255, 255));
@@ -2176,18 +2360,30 @@ fn individual_math_transforms_paint_without_transform_property() {
 
 #[test]
 fn uniformly_scaled_text_rasterizes_at_device_font_size() {
-    let scaled = render_html(r#"<style>
+    let scaled = render_html(
+        r#"<style>
         * { margin:0; padding:0; }
         body { background:white; }
         div { position:absolute; left:0; top:0; font:20px/24px sans-serif;
               color:black; transform-origin:0 0; transform:scale(2); }
-        </style><div>Scale</div>"#, 240, 100);
-    let native = render_html(r#"<style>
+        </style><div>Scale</div>"#,
+        240,
+        100,
+    );
+    let native = render_html(
+        r#"<style>
         * { margin:0; padding:0; }
         body { background:white; }
         div { position:absolute; left:0; top:0; font:40px/48px sans-serif; color:black; }
-        </style><div>Scale</div>"#, 240, 100);
-    assert_eq!(scaled.data(), native.data(), "scale(2) must rasterize glyphs at 40px, not stretch 20px pixels");
+        </style><div>Scale</div>"#,
+        240,
+        100,
+    );
+    assert_eq!(
+        scaled.data(),
+        native.data(),
+        "scale(2) must rasterize glyphs at 40px, not stretch 20px pixels"
+    );
 }
 
 #[test]
@@ -2734,31 +2930,71 @@ fn inline_run_boundaries_preserve_collapsed_spaces() {
         .collect::<Vec<_>>()
         .join("");
 
-    for (left, right) in [("against", "slowing"), ("posted", "on X"), ("37-page training manual", "\"for")] {
-        let measure = |text: &str, size, weight, style, family: &str, fonts: &mut cosmic_text::FontSystem| {
-            crate::layout::inline_layout::measure_text_width_weighted(
-                text, size, Some(fonts), crate::types::FontWeight::Value(weight),
-                match style {
-                    1 => crate::types::FontStyle::Italic,
-                    2 => crate::types::FontStyle::Oblique,
-                    _ => crate::types::FontStyle::Normal,
-                },
-                1.0, family, 100.0,
-            )
-        };
+    for (left, right) in [
+        ("against", "slowing"),
+        ("posted", "on X"),
+        ("37-page training manual", "\"for"),
+    ] {
+        let measure =
+            |text: &str, size, weight, style, family: &str, fonts: &mut cosmic_text::FontSystem| {
+                crate::layout::inline_layout::measure_text_width_weighted(
+                    text,
+                    size,
+                    Some(fonts),
+                    crate::types::FontWeight::Value(weight),
+                    match style {
+                        1 => crate::types::FontStyle::Italic,
+                        2 => crate::types::FontStyle::Oblique,
+                        _ => crate::types::FontStyle::Normal,
+                    },
+                    1.0,
+                    family,
+                    100.0,
+                )
+            };
         let mut left_edge = None;
         let mut right_edge = None;
         for command in &list.commands {
-            if let PaintCmd::Text { x, text, font_size, font_weight, font_style, font_family, .. } = command {
+            if let PaintCmd::Text {
+                x,
+                text,
+                font_size,
+                font_weight,
+                font_style,
+                font_family,
+                ..
+            } = command
+            {
                 if text.trim_end().ends_with(left) {
-                    left_edge = Some(*x + measure(text.trim_end(), *font_size, *font_weight, *font_style, font_family, &mut renderer.font_system));
+                    left_edge = Some(
+                        *x + measure(
+                            text.trim_end(),
+                            *font_size,
+                            *font_weight,
+                            *font_style,
+                            font_family,
+                            &mut renderer.font_system,
+                        ),
+                    );
                 }
                 if let Some(index) = text.find(right) {
-                    right_edge = Some(*x + measure(&text[..index], *font_size, *font_weight, *font_style, font_family, &mut renderer.font_system));
+                    right_edge = Some(
+                        *x + measure(
+                            &text[..index],
+                            *font_size,
+                            *font_weight,
+                            *font_style,
+                            font_family,
+                            &mut renderer.font_system,
+                        ),
+                    );
                 }
             }
         }
-        assert!(right_edge.unwrap() > left_edge.unwrap(), "missing visible gap between {left:?} and {right:?}: {painted:?}");
+        assert!(
+            right_edge.unwrap() > left_edge.unwrap(),
+            "missing visible gap between {left:?} and {right:?}: {painted:?}"
+        );
     }
 
     let mut against = None;
@@ -2881,7 +3117,10 @@ fn indented_inline_links_paint_at_collapsed_layout_positions() {
         .collect::<Vec<_>>();
     let positions = ["6", "followers", "·", "3", "following"]
         .map(|part| parts.iter().find(|(text, _)| text == part).unwrap().1);
-    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{positions:?}");
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "{positions:?}"
+    );
     assert!(positions[4] - positions[0] < 140.0, "{positions:?}");
 }
 
@@ -2986,21 +3225,34 @@ fn mixed_direction_subject_continuation_does_not_overlap_arabic() {
     let mut pixmap = tiny_skia::Pixmap::new(1200, 100).unwrap();
     renderer.render(&mut doc, &mut pixmap, 1.0);
     let list = build_display_list_full(
-        &doc.root, 1200.0, 100.0, 0.0, 0.0, 0, 0,
-        &std::collections::HashSet::new(), "",
+        &doc.root,
+        1200.0,
+        100.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
     );
     let mut arabic_x = None;
     let mut continuation_x = None;
     for command in &list.commands {
         if let PaintCmd::Text { x, text, .. } = command {
-            if text.contains("أيام") { arabic_x = Some(*x); }
-            if text.contains("Confirmation") { continuation_x = Some(*x); }
+            if text.contains("أيام") {
+                arabic_x = Some(*x);
+            }
+            if text.contains("Confirmation") {
+                continuation_x = Some(*x);
+            }
         }
     }
     let arabic_x = arabic_x.expect("Arabic subject segment");
     let continuation_x = continuation_x.expect("French continuation");
-    assert!(continuation_x > arabic_x + 50.0,
-        "continuation overlaps Arabic: Arabic={arabic_x}, continuation={continuation_x}");
+    assert!(
+        continuation_x > arabic_x + 50.0,
+        "continuation overlaps Arabic: Arabic={arabic_x}, continuation={continuation_x}"
+    );
 }
 
 #[test]
@@ -3082,16 +3334,27 @@ fn rtl_inline_style_runs_keep_visual_order_and_colors() {
         500.0,
     );
     let list = build_display_list_full_with_font_system(
-        &doc.root, 500.0, 100.0, 0.0, 0.0, 0, 0,
-        &Default::default(), "", Some(&mut renderer.font_system),
+        &doc.root,
+        500.0,
+        100.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &Default::default(),
+        "",
+        Some(&mut renderer.font_system),
     );
     let run = |word: &str| {
-        list.commands.iter().find_map(|command| match command {
-            PaintCmd::Text { x, y, text, color, .. } if text.contains(word) => {
-                Some((*x, *y, *color))
-            }
-            _ => None,
-        }).expect("styled RTL run must be painted")
+        list.commands
+            .iter()
+            .find_map(|command| match command {
+                PaintCmd::Text {
+                    x, y, text, color, ..
+                } if text.contains(word) => Some((*x, *y, *color)),
+                _ => None,
+            })
+            .expect("styled RTL run must be painted")
     };
     let first = run("فاز");
     let middle = run("النص العربي");
@@ -3508,11 +3771,12 @@ fn the_two_font_resolvers_agree_on_generic_families() {
 fn missing_named_font_uses_available_serif_fallback() {
     let renderer = Renderer::new();
     let fs = &renderer.font_system;
-    let resolved = crate::layout::inline_layout::resolve_css_family(
-        fs,
-        "missing-page-headline-font, serif",
-    );
-    assert!(matches!(resolved, crate::layout::inline_layout::ResolvedFamily::Generic("serif")));
+    let resolved =
+        crate::layout::inline_layout::resolve_css_family(fs, "missing-page-headline-font, serif");
+    assert!(matches!(
+        resolved,
+        crate::layout::inline_layout::ResolvedFamily::Generic("serif")
+    ));
     let id = fs.db().query(&fontdb::Query {
         families: &[cosmic_text::Family::Serif],
         weight: fontdb::Weight(600),
@@ -3520,7 +3784,11 @@ fn missing_named_font_uses_available_serif_fallback() {
         style: fontdb::Style::Normal,
     });
     let selected = id.and_then(|id| fs.db().face(id));
-    assert!(selected.is_some(), "no available serif face; configured serif is {:?}", fs.db().family_name(&cosmic_text::Family::Serif));
+    assert!(
+        selected.is_some(),
+        "no available serif face; configured serif is {:?}",
+        fs.db().family_name(&cosmic_text::Family::Serif)
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -3531,17 +3799,41 @@ fn css_font_stack_falls_through_missing_arabic_glyphs() {
     let fs = &mut renderer.font_system;
     let stack = "Unavailable-Webfont, Helvetica Neue, Helvetica, Arial, sans-serif";
     let text = "Latin \u{064a}\u{062a}\u{0635}\u{062f}\u{0631} \u{0627}\u{0644}\u{0622}\u{0646}";
-    let attrs = Attrs::new().family(Family::Name("Helvetica Neue")).weight(Weight(300));
+    let attrs = Attrs::new()
+        .family(Family::Name("Helvetica Neue"))
+        .weight(Weight(300));
     let spans = crate::layout::inline_layout::css_font_spans(fs, text, stack, &attrs);
-    assert!(spans.iter().any(|(s, a)| s.contains("Latin") && a.as_attrs().family == Family::Name("Helvetica Neue")));
-    assert!(spans.iter().any(|(s, a)| s.contains('\u{064a}') && a.as_attrs().family == Family::Name("Arial")));
+    assert!(
+        spans
+            .iter()
+            .any(|(s, a)| s.contains("Latin")
+                && a.as_attrs().family == Family::Name("Helvetica Neue"))
+    );
+    assert!(
+        spans
+            .iter()
+            .any(|(s, a)| s.contains('\u{064a}') && a.as_attrs().family == Family::Name("Arial"))
+    );
     let mut buffer = Buffer::new(fs, Metrics::new(26.0, 39.0));
-    buffer.set_rich_text(fs, spans.iter().map(|(s, a)| (*s, a.as_attrs())), &attrs, Shaping::Advanced, None);
+    buffer.set_rich_text(
+        fs,
+        spans.iter().map(|(s, a)| (*s, a.as_attrs())),
+        &attrs,
+        Shaping::Advanced,
+        None,
+    );
     buffer.shape_until_scroll(fs, false);
     for glyph in buffer.layout_runs().flat_map(|r| r.glyphs.iter()) {
-        if text[glyph.start..glyph.end].chars().any(|c| ('\u{0600}'..='\u{06ff}').contains(&c)) {
+        if text[glyph.start..glyph.end]
+            .chars()
+            .any(|c| ('\u{0600}'..='\u{06ff}').contains(&c))
+        {
             let face = fs.db().face(glyph.font_id).unwrap();
-            assert!(face.families.iter().any(|(name, _)| name == "Arial"), "unexpected Arabic fallback: {:?}", face.families);
+            assert!(
+                face.families.iter().any(|(name, _)| name == "Arial"),
+                "unexpected Arabic fallback: {:?}",
+                face.families
+            );
         }
     }
 }

@@ -538,7 +538,10 @@ fn submit_button_default_label() {
 
 #[test]
 fn submit_button_explicit_empty_value_has_no_default_label() {
-    let doc = layout_html(r#"<input id="default" type="submit"><input id="empty" type="submit" value="">"#, 400.0);
+    let doc = layout_html(
+        r#"<input id="default" type="submit"><input id="empty" type="submit" value="">"#,
+        400.0,
+    );
     let default = crate::dom::query_selector(&doc.root, "#default").unwrap();
     let empty = crate::dom::query_selector(&doc.root, "#empty").unwrap();
     assert_eq!(default.children[0].text, "Submit");
@@ -590,24 +593,44 @@ fn submit_input_sizes_to_its_label() {
     );
     let input = find_by_tag(&doc.root, "input").unwrap();
     let content_width = input.layout.content_rect.w;
-    assert!(content_width > 70.0 && content_width < 130.0, "{content_width}");
+    assert!(
+        content_width > 70.0 && content_width < 130.0,
+        "{content_width}"
+    );
 }
 
 #[test]
 fn block_controls_participate_in_adjoining_sibling_margins() {
     for tag in ["input", "textarea", "select", "progress", "meter"] {
         for (bottom, top, gap) in [(16, 0, 16), (16, 12, 16), (16, -6, 10), (-8, -4, -8)] {
-            let mut doc = layout_html(&format!(
-                "<style>body{{margin:0}}#before,#control,#after{{display:block;width:100px;height:30px;padding:0;border:0;margin:0}}#before{{margin-bottom:{bottom}px}}#control{{margin-top:{top}px;margin-bottom:{bottom}px}}#after{{margin-top:{top}px}}</style><div id=before></div><{tag} id=control></{tag}><div id=after></div>"
-            ), 400.0);
+            let mut doc = layout_html(
+                &format!(
+                    "<style>body{{margin:0}}#before,#control,#after{{display:block;width:100px;height:30px;padding:0;border:0;margin:0}}#before{{margin-bottom:{bottom}px}}#control{{margin-top:{top}px;margin-bottom:{bottom}px}}#after{{margin-top:{top}px}}</style><div id=before></div><{tag} id=control></{tag}><div id=after></div>"
+                ),
+                400.0,
+            );
             for width in [400.0, 380.0, 400.0] {
                 let before = crate::dom::query_selector(&doc.root, "#before").unwrap();
                 let control = crate::dom::query_selector(&doc.root, "#control").unwrap();
                 let after = crate::dom::query_selector(&doc.root, "#after").unwrap();
-                assert!((control.layout.border_rect.y - before.layout.border_rect.bottom() - gap as f32).abs() < 0.1,
-                    "{tag} leading adjoining margins {bottom}/{top}: {:?} {:?}", before.layout.border_rect, control.layout.border_rect);
-                assert!((after.layout.border_rect.y - control.layout.border_rect.bottom() - gap as f32).abs() < 0.1,
-                    "{tag} trailing adjoining margins {bottom}/{top}: {:?} {:?}", control.layout.border_rect, after.layout.border_rect);
+                assert!(
+                    (control.layout.border_rect.y
+                        - before.layout.border_rect.bottom()
+                        - gap as f32)
+                        .abs()
+                        < 0.1,
+                    "{tag} leading adjoining margins {bottom}/{top}: {:?} {:?}",
+                    before.layout.border_rect,
+                    control.layout.border_rect
+                );
+                assert!(
+                    (after.layout.border_rect.y - control.layout.border_rect.bottom() - gap as f32)
+                        .abs()
+                        < 0.1,
+                    "{tag} trailing adjoining margins {bottom}/{top}: {:?} {:?}",
+                    control.layout.border_rect,
+                    after.layout.border_rect
+                );
                 let mut engine = LayoutEngine::new();
                 engine.viewport_h = 900.0;
                 engine.layout(&mut doc, width);
@@ -626,10 +649,14 @@ fn native_text_control_preserves_matching_authored_foreground_and_background() {
         400.0,
     );
     let list = build_display_list(&doc.root, 400.0, 900.0);
-    let color = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::FormElement { color, value, .. } if value == "visible" => Some(*color),
-        _ => None,
-    }).expect("text input paint command");
+    let color = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::FormElement { color, value, .. } if value == "visible" => Some(*color),
+            _ => None,
+        })
+        .expect("text input paint command");
     assert_eq!(color, Color::rgb(141, 12, 12));
 }
 
@@ -1877,7 +1904,11 @@ fn typing_after_clicking_submit_label_does_not_edit_document_text() {
 
     let submit = find_by_id(&doc.root, "go").unwrap();
     assert_eq!(
-        submit.children.iter().find(|c| c.tag == "#text").map(|c| c.text.as_str()),
+        submit
+            .children
+            .iter()
+            .find(|c| c.tag == "#text")
+            .map(|c| c.text.as_str()),
         Some("Create a poem"),
         "native input button label text is internal control content, not editable document text"
     );
@@ -2906,11 +2937,7 @@ fn choosing_option_does_not_turn_select_whitespace_into_visible_text() {
         (center.0, option_y),
         0,
     );
-    doc.process_mouse_event(
-        crate::dom::HtmlEventType::MouseUp,
-        (center.0, option_y),
-        0,
-    );
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, (center.0, option_y), 0);
 
     let sel = find_by_id(&doc.root, "s").unwrap();
     assert_eq!(crate::html::forms::select_value(sel), "b");
@@ -3182,13 +3209,28 @@ fn placeholder_pseudo_typography_reaches_input_and_textarea_paint() {
         400.0,
     );
     let list = build_display_list(&doc.root, 400.0, 900.0);
-    let controls: Vec<_> = list.commands.iter().filter_map(|command| {
-        if let PaintCmd::FormElement { tag, font_size, placeholder_color, placeholder_typography, .. } = command {
-            (tag == "input" || tag == "textarea").then_some((font_size, placeholder_color, placeholder_typography))
-        } else {
-            None
-        }
-    }).collect();
+    let controls: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|command| {
+            if let PaintCmd::FormElement {
+                tag,
+                font_size,
+                placeholder_color,
+                placeholder_typography,
+                ..
+            } = command
+            {
+                (tag == "input" || tag == "textarea").then_some((
+                    font_size,
+                    placeholder_color,
+                    placeholder_typography,
+                ))
+            } else {
+                None
+            }
+        })
+        .collect();
     assert_eq!(controls.len(), 2);
     for (font_size, color, typography) in controls {
         assert!((*font_size - 12.0).abs() < 0.01);

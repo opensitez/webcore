@@ -909,12 +909,120 @@ fn html_noscript_content_suppressed() {
 }
 
 #[test]
+fn head_noscript_fallback_styles_are_parsed_in_document_order() {
+    let doc = parse(
+        r#"<head><noscript><style>p { color: red; }</style><link rel="stylesheet" href="fallback.css"><style>p { color: green; }</style></noscript></head><body><p>Fallback</p></body>"#,
+    );
+    let paragraph = find_box(&doc.root, &|node: &WebCore| node.tag == "p").unwrap();
+    assert_eq!(paragraph.style.color, crate::types::Color::rgb(0, 128, 0));
+    assert_eq!(
+        doc.linked_stylesheets,
+        vec![("fallback.css".to_string(), String::new())]
+    );
+    assert_eq!(doc.document_stylesheets.len(), 3);
+    assert!(matches!(
+        doc.document_stylesheets[0],
+        crate::types::DocumentStylesheet::Inline { .. }
+    ));
+    assert!(matches!(
+        doc.document_stylesheets[1],
+        crate::types::DocumentStylesheet::Linked { .. }
+    ));
+    assert!(matches!(
+        doc.document_stylesheets[2],
+        crate::types::DocumentStylesheet::Inline { .. }
+    ));
+    let noscript = find_box(&doc.root, &|node: &WebCore| node.tag == "noscript").unwrap();
+    assert_eq!(noscript.children.len(), 3);
+    let mut ids = std::collections::HashSet::new();
+    walk_boxes(&doc.root, &mut |node| assert!(ids.insert(node.node_id)));
+}
+
+#[test]
+fn handled_head_noscript_does_not_apply_fallback_styles() {
+    let doc = crate::html::parse_html_with_scripts(
+        r#"<head><noscript><style>p { color: red; }</style></noscript></head><body><p>Normal</p></body>"#,
+        "",
+        |_, _| {},
+        |tag, _, _| tag == "noscript",
+    );
+    let noscript = find_box(&doc.root, &|node: &WebCore| node.tag == "noscript").unwrap();
+    assert!(noscript.text.contains("<style>"));
+    assert!(noscript.children.is_empty());
+    assert!(doc.document_stylesheets.is_empty());
+}
+
+#[test]
 fn body_noscript_content_renders_when_scripting_is_disabled() {
     let doc = parse(r#"<html><body><noscript><p>Fallback</p></noscript></body></html>"#);
     assert!(doc_text(&doc).contains("Fallback"));
     let noscript = find_box(&doc.root, &|b: &WebCore| b.tag == "noscript")
         .expect("<noscript> should remain in the body tree");
-    assert!(!matches!(noscript.style.display, crate::types::Display::None));
+    assert!(!matches!(
+        noscript.style.display,
+        crate::types::Display::None
+    ));
+}
+
+#[test]
+fn body_noscript_only_stylesheet_reaches_the_selector_index() {
+    let doc = parse(
+        r#"<html><body><noscript><style>#fallback { color: rgb(0, 128, 0); }</style><p id="fallback">Fallback</p></noscript></body></html>"#,
+    );
+    let fallback = find_box(&doc.root, &|node: &WebCore| {
+        node.attributes.get("id").is_some_and(|id| id == "fallback")
+    })
+    .expect("fallback paragraph");
+    assert_eq!(fallback.style.color, crate::types::Color::rgb(0, 128, 0));
+    let mut ids = std::collections::HashSet::new();
+    walk_boxes(&doc.root, &mut |node| assert!(ids.insert(node.node_id)));
+}
+
+#[test]
+fn handled_noscript_keeps_raw_content_unparsed() {
+    let mut doc = crate::html::parse_html_with_scripts(
+        r#"<html><head><style>noscript { display: block !important; }</style></head><body><noscript><p id="fallback">Fallback</p></noscript></body></html>"#,
+        "",
+        |_, _| {},
+        |tag, _, _| tag == "noscript",
+    );
+    assert!(
+        find_box(&doc.root, &|node: &WebCore| {
+            node.attributes.get("id").is_some_and(|id| id == "fallback")
+        })
+        .is_none()
+    );
+    let noscript = find_box(&doc.root, &|node: &WebCore| node.tag == "noscript").unwrap();
+    assert!(noscript.text.contains("<p id=\"fallback\">"));
+    assert!(matches!(
+        noscript.style.display,
+        crate::types::Display::None
+    ));
+
+    doc.recascade();
+    let noscript = find_box(&doc.root, &|node: &WebCore| node.tag == "noscript").unwrap();
+    assert!(matches!(
+        noscript.style.display,
+        crate::types::Display::None
+    ));
+
+    doc.root.cascade_dirty = true;
+    crate::css::apply_cascade_incremental(
+        &mut doc.root,
+        &doc.stylesheet,
+        None,
+        16.0,
+        800.0,
+        600.0,
+        0,
+        false,
+        &std::collections::HashSet::new(),
+    );
+    let noscript = find_box(&doc.root, &|node: &WebCore| node.tag == "noscript").unwrap();
+    assert!(matches!(
+        noscript.style.display,
+        crate::types::Display::None
+    ));
 }
 
 #[test]

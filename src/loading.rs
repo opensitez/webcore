@@ -4,7 +4,7 @@
 //! they should not need to know how to fetch, cache, decode, or progressively
 //! surface document bytes.
 
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::sync::{Arc, Mutex};
 
 const RAW_RESOURCE_CACHE_MAX_BYTES: usize = 128 * 1024 * 1024;
@@ -614,7 +614,7 @@ where
         if n == 0 {
             break;
         }
-        let text = decode_streaming_utf8(&mut decoder, &buf[..n], false);
+        let text = decode_streaming_text(&mut decoder, &buf[..n], false);
         if !text.is_empty() {
             html.push_str(&text);
             if options.emit_preview {
@@ -629,7 +629,7 @@ where
             }
         }
     }
-    let tail = decode_streaming_utf8(&mut decoder, &[], true);
+    let tail = decode_streaming_text(&mut decoder, &[], true);
     if !tail.is_empty() {
         html.push_str(&tail);
         if options.emit_preview {
@@ -966,31 +966,9 @@ where
 }
 
 pub fn fetch_text_resource(url: &str, cache_dir: Option<&str>) -> Result<String, String> {
-    let _profile_fetch = crate::profile::span(crate::profile::Phase::CssFetch);
-    if let Some(cache_dir) = cache_dir
-        && !should_bypass_snapshot_cache(url)
-    {
-        let key = raw_cache_key(cache_dir, url);
-        if let Some(data) = raw_cache_get(&key) {
-            return Ok(decode_body(&data));
-        }
-        let path = url_cache_path(url, cache_dir);
-        if let Ok(data) = std::fs::read(&path) {
-            if data.is_empty() {
-                let _ = std::fs::remove_file(&path);
-            } else {
-                let data = Arc::new(data);
-                raw_cache_put(key, data.clone());
-                return Ok(decode_body(&data));
-            }
-        }
-        let text = fetch_text_resource_uncached(url)?;
-        let data = Arc::new(text.as_bytes().to_vec());
-        raw_cache_put(key, data.clone());
-        enqueue_cache_bytes(path, data);
-        return Ok(text);
-    }
-    fetch_text_resource_uncached(url)
+    let mut text = String::new();
+    fetch_text_resource_streaming(url, cache_dir, |chunk| text.push_str(chunk))?;
+    Ok(text)
 }
 
 pub fn fetch_text_resource_streaming<F>(
@@ -1002,59 +980,71 @@ where
     F: FnMut(&str),
 {
     let _profile_fetch = crate::profile::span(crate::profile::Phase::CssFetch);
-    let mut decoder = encoding_rs::UTF_8.new_decoder();
+    let mut decoder = CssByteDecoder::default();
+    let cache_url = css_raw_cache_url(url);
     if let Some(cache_dir) = cache_dir
         && !should_bypass_snapshot_cache(url)
     {
-        let key = raw_cache_key(cache_dir, url);
+        let key = raw_cache_key(cache_dir, &cache_url);
         if let Some(data) = raw_cache_get(&key) {
-            for chunk in data.chunks(16 * 1024) {
-                let text = decode_streaming_utf8(&mut decoder, chunk, false);
-                if !text.is_empty() {
-                    on_chunk(&text);
+            if let Ok((http_encoding, bytes)) = css_cache_body(&data) {
+                decoder.http_encoding = http_encoding;
+                for chunk in bytes.chunks(16 * 1024) {
+                    let text = decoder.push(chunk, false);
+                    if !text.is_empty() {
+                        on_chunk(&text);
+                    }
                 }
-            }
-            let tail = decode_streaming_utf8(&mut decoder, &[], true);
-            if !tail.is_empty() {
-                on_chunk(&tail);
-            }
-            return Ok(());
-        }
-        let path = url_cache_path(url, cache_dir);
-        if let Ok(mut file) = std::fs::File::open(&path) {
-            let mut body = Vec::new();
-            let mut buf = [0u8; 16 * 1024];
-            loop {
-                let n = file.read(&mut buf).map_err(|e| e.to_string())?;
-                if n == 0 {
-                    break;
+                let tail = decoder.push(&[], true);
+                if !tail.is_empty() {
+                    on_chunk(&tail);
                 }
-                body.extend_from_slice(&buf[..n]);
-                let text = decode_streaming_utf8(&mut decoder, &buf[..n], false);
-                if !text.is_empty() {
-                    on_chunk(&text);
-                }
-            }
-            let tail = decode_streaming_utf8(&mut decoder, &[], true);
-            if !tail.is_empty() {
-                on_chunk(&tail);
-            }
-            if body.is_empty() {
-                let _ = std::fs::remove_file(&path);
-            } else {
-                raw_cache_put(key, Arc::new(body));
                 return Ok(());
             }
         }
+        let path = url_cache_path(&cache_url, cache_dir);
+        if let Ok(mut file) = std::fs::File::open(&path) {
+            if let Ok(http_encoding) = read_css_cache_header(&mut file) {
+                decoder.http_encoding = http_encoding;
+                let mut body = css_cache_header(http_encoding);
+                let mut saw_bytes = false;
+                let mut buf = [0u8; 16 * 1024];
+                loop {
+                    let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+                    if n == 0 {
+                        break;
+                    }
+                    saw_bytes = true;
+                    body.extend_from_slice(&buf[..n]);
+                    let text = decoder.push(&buf[..n], false);
+                    if !text.is_empty() {
+                        on_chunk(&text);
+                    }
+                }
+                if saw_bytes {
+                    let tail = decoder.push(&[], true);
+                    if !tail.is_empty() {
+                        on_chunk(&tail);
+                    }
+                    raw_cache_put(key, Arc::new(body));
+                    return Ok(());
+                }
+            }
+            let _ = std::fs::remove_file(&path);
+        }
         let mut body = Vec::new();
-        fetch_text_resource_uncached_streaming(url, |bytes| {
+        fetch_text_resource_uncached_streaming(url, |bytes, http_encoding| {
+            if body.is_empty() {
+                body.extend_from_slice(&css_cache_header(http_encoding));
+                decoder.http_encoding = http_encoding;
+            }
             body.extend_from_slice(bytes);
-            let text = decode_streaming_utf8(&mut decoder, bytes, false);
+            let text = decoder.push(bytes, false);
             if !text.is_empty() {
                 on_chunk(&text);
             }
         })?;
-        let tail = decode_streaming_utf8(&mut decoder, &[], true);
+        let tail = decoder.push(&[], true);
         if !tail.is_empty() {
             on_chunk(&tail);
         }
@@ -1064,13 +1054,14 @@ where
         return Ok(());
     }
 
-    fetch_text_resource_uncached_streaming(url, |bytes| {
-        let text = decode_streaming_utf8(&mut decoder, bytes, false);
+    fetch_text_resource_uncached_streaming(url, |bytes, http_encoding| {
+        decoder.http_encoding = http_encoding;
+        let text = decoder.push(bytes, false);
         if !text.is_empty() {
             on_chunk(&text);
         }
     })?;
-    let tail = decode_streaming_utf8(&mut decoder, &[], true);
+    let tail = decoder.push(&[], true);
     if !tail.is_empty() {
         on_chunk(&tail);
     }
@@ -1142,9 +1133,21 @@ pub fn cached_fetch_bytes_arc(url: &str, cache_dir: &str) -> Result<Arc<Vec<u8>>
 }
 
 fn cached_fetch_bytes_uncached(url: &str, cache_dir: &str) -> Result<Vec<u8>, String> {
+    if let Some(data) = cached_bytes_if_present(url, cache_dir) {
+        return Ok((*data).clone());
+    }
+    let data = fetch_bytes(url)?;
+    cache_fetched_bytes(url, cache_dir, data.clone());
+    Ok(data)
+}
+
+pub(crate) fn cached_bytes_if_present(url: &str, cache_dir: &str) -> Option<Arc<Vec<u8>>> {
+    if should_bypass_snapshot_cache(url) {
+        return None;
+    }
     let key = raw_cache_key(cache_dir, url);
     if let Some(data) = raw_cache_get(&key) {
-        return Ok((*data).clone());
+        return Some(data);
     }
     let path = url_cache_path(url, cache_dir);
     if let Ok(data) = std::fs::read(&path) {
@@ -1153,7 +1156,7 @@ fn cached_fetch_bytes_uncached(url: &str, cache_dir: &str) -> Result<Vec<u8>, St
         } else {
             let data = Arc::new(data);
             raw_cache_put(key, data.clone());
-            return Ok((*data).clone());
+            return Some(data);
         }
     }
     if let Some(scheme_end) = url.find("://") {
@@ -1168,21 +1171,43 @@ fn cached_fetch_bytes_uncached(url: &str, cache_dir: &str) -> Result<Vec<u8>, St
                     let data = Arc::new(data);
                     raw_cache_put(key, data.clone());
                     enqueue_cache_bytes(path, data.clone());
-                    return Ok((*data).clone());
+                    return Some(data);
                 }
             }
         }
     }
-    let data = fetch_bytes(url)?;
+    None
+}
+
+pub(crate) fn cache_fetched_bytes(url: &str, cache_dir: &str, data: Vec<u8>) {
+    if should_bypass_snapshot_cache(url) {
+        return;
+    }
+    let key = raw_cache_key(cache_dir, url);
+    let path = url_cache_path(url, cache_dir);
     let data = Arc::new(data);
     raw_cache_put(key, data.clone());
     enqueue_cache_bytes(path, data.clone());
-    Ok((*data).clone())
 }
 
 pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     let started = crate::profile::is_enabled().then(std::time::Instant::now);
     let profile_epoch = crate::profile::epoch();
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        let path = url.strip_prefix("file://").unwrap_or(url);
+        let result = std::fs::read(path).map_err(|e| e.to_string());
+        if let Some(started) = started {
+            crate::profile::record_resource_for(
+                profile_epoch,
+                "image",
+                url,
+                "file",
+                result.as_ref().map_or(0, Vec::len),
+                started.elapsed(),
+            );
+        }
+        return result;
+    }
     let do_fetch = |client: &reqwest::blocking::Client| -> Result<Vec<u8>, (String, bool)> {
         let resp = client
             .get(url)
@@ -1203,8 +1228,10 @@ pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     };
     let result = match do_fetch(&crate::http_client()) {
         Ok(bytes) if !bytes.is_empty() => Ok(bytes),
-        Err((_, true)) => do_fetch(&crate::http_client_lenient()).map_err(|(e, _)| e),
-        Err((error, false)) => Err(error),
+        Err((_, true)) if url.starts_with("https://") => {
+            do_fetch(&crate::http_client_lenient()).map_err(|(e, _)| e)
+        }
+        Err((error, _)) => Err(error),
         Ok(_) => Err("empty image response".to_string()),
     };
     if let Some(started) = started {
@@ -1220,72 +1247,27 @@ pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     result
 }
 
-fn fetch_text_resource_uncached(url: &str) -> Result<String, String> {
-    if let Some(path) = url.strip_prefix("file://") {
-        return std::fs::read_to_string(path).map_err(|e| e.to_string());
-    }
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        return std::fs::read_to_string(url).map_err(|e| e.to_string());
-    }
-    let started = crate::profile::is_enabled().then(std::time::Instant::now);
-    let profile_epoch = crate::profile::epoch();
-    let do_fetch = |client: &reqwest::blocking::Client| -> Result<String, String> {
-        let resp = client
-            .get(url)
-            .header("Accept", "text/css,*/*;q=0.1")
-            .header("Sec-Fetch-Dest", "style")
-            .header("Sec-Fetch-Mode", "no-cors")
-            .send()
-            .map_err(|e| e.to_string())?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(format!("HTTP {status} loading stylesheet {url}"));
-        }
-        let bytes = resp.bytes().map_err(|e| e.to_string())?;
-        if bytes.is_empty() {
-            return Err(format!("empty stylesheet response from {url}"));
-        }
-        Ok(decode_body(&bytes))
-    };
-    let result = match do_fetch(&crate::http_client()) {
-        Ok(text) if !text.is_empty() => Ok(text),
-        _ => do_fetch(&crate::http_client_lenient()),
-    };
-    if let Some(started) = started {
-        crate::profile::record_resource_for(
-            profile_epoch,
-            "stylesheet",
-            url,
-            "network",
-            result.as_ref().map_or(0, String::len),
-            started.elapsed(),
-        );
-    }
-    result
-}
-
 fn fetch_text_resource_uncached_streaming<F>(url: &str, mut on_chunk: F) -> Result<(), String>
 where
-    F: FnMut(&[u8]),
+    F: FnMut(&[u8], Option<&'static encoding_rs::Encoding>),
 {
-    if let Some(path) = url.strip_prefix("file://") {
-        let data = std::fs::read(path).map_err(|e| e.to_string())?;
-        for chunk in data.chunks(16 * 1024) {
-            on_chunk(chunk);
-        }
-        return Ok(());
-    }
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        let data = std::fs::read(url).map_err(|e| e.to_string())?;
-        for chunk in data.chunks(16 * 1024) {
-            on_chunk(chunk);
+        let path = url.strip_prefix("file://").unwrap_or(url);
+        let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let mut buf = [0u8; 16 * 1024];
+        loop {
+            let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            on_chunk(&buf[..n], None);
         }
         return Ok(());
     }
     let started = crate::profile::is_enabled().then(std::time::Instant::now);
     let profile_epoch = crate::profile::epoch();
     let do_fetch = |client: &reqwest::blocking::Client,
-                    on_chunk: &mut dyn FnMut(&[u8])|
+                    on_chunk: &mut dyn FnMut(&[u8], Option<&'static encoding_rs::Encoding>)|
      -> Result<(), String> {
         let mut resp = client
             .get(url)
@@ -1298,6 +1280,7 @@ where
         if !status.is_success() {
             return Err(format!("HTTP {status} loading stylesheet {url}"));
         }
+        let http_encoding = css_http_encoding(resp.headers());
         let mut buf = [0u8; 16 * 1024];
         let mut saw = false;
         loop {
@@ -1306,7 +1289,7 @@ where
                 break;
             }
             saw = true;
-            on_chunk(&buf[..n]);
+            on_chunk(&buf[..n], http_encoding);
         }
         if !saw {
             return Err(format!("empty stylesheet response from {url}"));
@@ -1314,9 +1297,9 @@ where
         Ok(())
     };
     let mut saw = false;
-    let mut first = |bytes: &[u8]| {
+    let mut first = |bytes: &[u8], encoding| {
         saw = true;
-        on_chunk(bytes);
+        on_chunk(bytes, encoding);
     };
     let result = match do_fetch(&crate::http_client(), &mut first) {
         Ok(()) => Ok(()),
@@ -1336,7 +1319,96 @@ where
     result
 }
 
-fn decode_streaming_utf8(decoder: &mut encoding_rs::Decoder, bytes: &[u8], last: bool) -> String {
+fn css_http_encoding(
+    headers: &reqwest::header::HeaderMap,
+) -> Option<&'static encoding_rs::Encoding> {
+    let content_type = headers.get(reqwest::header::CONTENT_TYPE)?.to_str().ok()?;
+    let mime: mime::Mime = content_type.parse().ok()?;
+    let label = mime.get_param(mime::CHARSET)?.as_str();
+    encoding_rs::Encoding::for_label(label.as_bytes())
+}
+
+#[derive(Default)]
+struct CssByteDecoder {
+    prefix: Vec<u8>,
+    decoder: Option<encoding_rs::Decoder>,
+    http_encoding: Option<&'static encoding_rs::Encoding>,
+}
+
+impl CssByteDecoder {
+    fn push(&mut self, bytes: &[u8], last: bool) -> String {
+        if let Some(decoder) = self.decoder.as_mut() {
+            return decode_streaming_text(decoder, bytes, last);
+        }
+        self.prefix.extend_from_slice(bytes);
+        let Some((encoding, bom_len)) =
+            css_encoding_from_prefix(&self.prefix, last, self.http_encoding)
+        else {
+            return String::new();
+        };
+        let mut decoder = encoding.new_decoder_without_bom_handling();
+        let prefix = std::mem::take(&mut self.prefix);
+        let text = decode_streaming_text(&mut decoder, &prefix[bom_len..], last);
+        self.decoder = Some(decoder);
+        text
+    }
+}
+
+fn css_encoding_from_prefix(
+    bytes: &[u8],
+    last: bool,
+    http_encoding: Option<&'static encoding_rs::Encoding>,
+) -> Option<(&'static encoding_rs::Encoding, usize)> {
+    use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
+
+    if !last
+        && ((bytes.len() < 3 && b"\xef\xbb\xbf".starts_with(bytes))
+            || (bytes.len() < 2 && b"\xfe\xff".starts_with(bytes))
+            || (bytes.len() < 2 && b"\xff\xfe".starts_with(bytes)))
+    {
+        return None;
+    }
+    if let Some((encoding, bom_len)) = Encoding::for_bom(bytes) {
+        return Some((encoding, bom_len));
+    }
+    if let Some(encoding) = http_encoding {
+        return Some((encoding, 0));
+    }
+
+    const CHARSET_PREFIX: &[u8] = b"@charset \"";
+    if bytes.len() < CHARSET_PREFIX.len() && CHARSET_PREFIX.starts_with(bytes) && !last {
+        return None;
+    }
+    if bytes.starts_with(CHARSET_PREFIX) {
+        let label_start = CHARSET_PREFIX.len();
+        for i in label_start..bytes.len().min(1024) {
+            if bytes[i] == b'"' && i + 1 < 1024 && bytes.get(i + 1) == Some(&b';') {
+                let label = &bytes[label_start..i];
+                let encoding = Encoding::for_label(label).unwrap_or(UTF_8);
+                return Some((
+                    if encoding == UTF_16LE || encoding == UTF_16BE {
+                        UTF_8
+                    } else {
+                        encoding
+                    },
+                    0,
+                ));
+            }
+            if bytes[i] == b'"' && i + 1 == bytes.len() && !last {
+                return None;
+            }
+            if bytes[i] > 0x7f || bytes[i] == b'"' {
+                return Some((UTF_8, 0));
+            }
+        }
+        if bytes.len() < 1024 && !last {
+            return None;
+        }
+    }
+    Some((UTF_8, 0))
+}
+
+fn decode_streaming_text(decoder: &mut encoding_rs::Decoder, bytes: &[u8], last: bool) -> String {
     let mut out = String::with_capacity(bytes.len().saturating_add(16));
     let mut input = bytes;
     loop {
@@ -1372,16 +1444,266 @@ fn url_cache_path(url: &str, cache_dir: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(cache_dir).join(format!("{hash:016x}_{suffix}"))
 }
 
-fn decode_body(bytes: &[u8]) -> String {
-    String::from_utf8(bytes.to_vec()).unwrap_or_else(|_| {
-        let (cow, _, _) = encoding_rs::WINDOWS_1252.decode(bytes);
-        cow.into_owned()
-    })
+fn css_raw_cache_url(url: &str) -> String {
+    format!("css-raw-v2:{url}")
+}
+
+const CSS_CACHE_MAGIC: &[u8; 6] = b"\0WCSS\x01";
+
+fn css_cache_header(http_encoding: Option<&'static encoding_rs::Encoding>) -> Vec<u8> {
+    let label = http_encoding.map_or(b"".as_slice(), |encoding| encoding.name().as_bytes());
+    let mut header = Vec::with_capacity(CSS_CACHE_MAGIC.len() + 1 + label.len());
+    header.extend_from_slice(CSS_CACHE_MAGIC);
+    header.push(label.len() as u8);
+    header.extend_from_slice(label);
+    header
+}
+
+fn css_cache_body(bytes: &[u8]) -> Result<(Option<&'static encoding_rs::Encoding>, &[u8]), String> {
+    if !bytes.starts_with(CSS_CACHE_MAGIC) {
+        return Ok((None, bytes));
+    }
+    let label_len = *bytes
+        .get(CSS_CACHE_MAGIC.len())
+        .ok_or("truncated cached CSS header")? as usize;
+    let body_start = CSS_CACHE_MAGIC.len() + 1 + label_len;
+    let label = bytes
+        .get(CSS_CACHE_MAGIC.len() + 1..body_start)
+        .ok_or("truncated cached CSS charset")?;
+    let encoding = if label.is_empty() {
+        None
+    } else {
+        Some(encoding_rs::Encoding::for_label(label).ok_or("invalid cached CSS charset")?)
+    };
+    let body = bytes.get(body_start..).ok_or("truncated cached CSS body")?;
+    if body.is_empty() {
+        return Err("empty cached CSS body".to_string());
+    }
+    Ok((encoding, body))
+}
+
+fn read_css_cache_header(
+    file: &mut std::fs::File,
+) -> Result<Option<&'static encoding_rs::Encoding>, String> {
+    let mut header = [0u8; 7];
+    if let Err(err) = file.read_exact(&mut header) {
+        if err.kind() != std::io::ErrorKind::UnexpectedEof {
+            return Err(err.to_string());
+        }
+        file.rewind().map_err(|err| err.to_string())?;
+        return Ok(None);
+    }
+    if &header[..CSS_CACHE_MAGIC.len()] != CSS_CACHE_MAGIC {
+        file.rewind().map_err(|err| err.to_string())?;
+        return Ok(None);
+    }
+    let mut label = vec![0u8; header[CSS_CACHE_MAGIC.len()] as usize];
+    file.read_exact(&mut label).map_err(|err| err.to_string())?;
+    if label.is_empty() {
+        Ok(None)
+    } else {
+        encoding_rs::Encoding::for_label(&label)
+            .ok_or("invalid cached CSS charset".to_string())
+            .map(Some)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn css_decoder_recognizes_split_charset_without_delaying_plain_css() {
+        let mut plain = CssByteDecoder::default();
+        assert_eq!(plain.push(b"b", false), "b");
+        assert_eq!(plain.push(b"ody{}", true), "ody{}");
+
+        let bytes = b"@charset \"windows-1252\"; .caf\xe9 { color: red }";
+        let mut decoder = CssByteDecoder::default();
+        let mut decoded = String::new();
+        for byte in bytes {
+            decoded.push_str(&decoder.push(std::slice::from_ref(byte), false));
+        }
+        decoded.push_str(&decoder.push(&[], true));
+        assert_eq!(decoded, "@charset \"windows-1252\"; .café { color: red }");
+
+        let mut invalid = CssByteDecoder::default();
+        assert!(
+            invalid
+                .push(b"@charset 'windows-1252'; .caf\xe9 {}", true)
+                .contains(".caf�")
+        );
+    }
+
+    #[test]
+    fn css_decoder_bom_overrides_charset_and_survives_byte_chunks() {
+        let css = "body::before { content: 'é' }";
+        let mut bytes = vec![0xff, 0xfe];
+        for code_unit in css.encode_utf16() {
+            bytes.extend_from_slice(&code_unit.to_le_bytes());
+        }
+        let mut decoder = CssByteDecoder::default();
+        let mut decoded = String::new();
+        for byte in &bytes {
+            decoded.push_str(&decoder.push(std::slice::from_ref(byte), false));
+        }
+        decoded.push_str(&decoder.push(&[], true));
+        assert_eq!(decoded, css);
+
+        let bytes = b"\xef\xbb\xbf@charset \"windows-1252\"; .caf\xc3\xa9 {}";
+        let mut decoder = CssByteDecoder::default();
+        let mut decoded = String::new();
+        for byte in bytes {
+            decoded.push_str(&decoder.push(std::slice::from_ref(byte), false));
+        }
+        decoded.push_str(&decoder.push(&[], true));
+        assert_eq!(decoded, "@charset \"windows-1252\"; .café {}");
+
+        let mut late = CssByteDecoder::default();
+        let mut bytes = b"@charset \"".to_vec();
+        bytes.extend(std::iter::repeat_n(b' ', 1013));
+        bytes.extend_from_slice(b"\"; .caf\xe9 {}");
+        assert!(late.push(&bytes, true).contains(".caf�"));
+    }
+
+    #[test]
+    fn css_http_charset_precedes_declaration_but_not_bom() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            "text/css; charset=windows-1252".parse().unwrap(),
+        );
+        let http_encoding = css_http_encoding(&headers);
+        assert_eq!(http_encoding, Some(encoding_rs::WINDOWS_1252));
+
+        let mut decoder = CssByteDecoder {
+            http_encoding,
+            ..Default::default()
+        };
+        assert_eq!(
+            decoder.push(b"@charset \"UTF-8\"; .caf\xe9 {}", true),
+            "@charset \"UTF-8\"; .café {}"
+        );
+        let mut decoder = CssByteDecoder {
+            http_encoding,
+            ..Default::default()
+        };
+        assert_eq!(
+            decoder.push(b"\xef\xbb\xbf.caf\xc3\xa9 {}", true),
+            ".café {}"
+        );
+
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            "text/css; charset=not-an-encoding".parse().unwrap(),
+        );
+        assert_eq!(css_http_encoding(&headers), None);
+    }
+
+    #[test]
+    fn stylesheet_http_charset_decodes_streamed_response() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/style.css", listener.local_addr().unwrap());
+        let body = b"@charset \"UTF-8\"; .caf\xe9 { color: red }";
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            stream.read(&mut request).unwrap();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/css; charset=windows-1252\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(headers.as_bytes()).unwrap();
+            stream.write_all(body).unwrap();
+        });
+
+        let css = fetch_text_resource(&url, None).unwrap();
+        server.join().unwrap();
+        assert!(css.contains(".café"));
+    }
+
+    #[test]
+    fn cached_css_keeps_raw_bytes_for_streamed_and_complete_loads() {
+        let cache_dir =
+            std::env::temp_dir().join(format!("webcore-css-encoding-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let source = cache_dir.join("source.css");
+        let bytes = b"@charset \"windows-1252\"; .caf\xe9 { color: red }";
+        std::fs::write(&source, bytes).unwrap();
+        let url = source.to_string_lossy().to_string();
+        let cache_dir_str = cache_dir.to_string_lossy().to_string();
+
+        let complete = fetch_text_resource(&url, Some(&cache_dir_str)).unwrap();
+        let mut streamed = String::new();
+        fetch_text_resource_streaming(&url, Some(&cache_dir_str), |chunk| streamed.push_str(chunk))
+            .unwrap();
+        let raw_key = raw_cache_key(&cache_dir_str, &css_raw_cache_url(&url));
+        let cached = raw_cache_get(&raw_key).unwrap();
+        let (encoding, cached_bytes) = css_cache_body(&cached).unwrap();
+        assert_eq!(encoding, None);
+        assert_eq!(cached_bytes, bytes);
+        assert_eq!(complete, streamed);
+        assert!(complete.contains(".café"));
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
+    #[test]
+    fn cached_css_disk_replays_http_charset() {
+        let cache_dir =
+            std::env::temp_dir().join(format!("webcore-css-http-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let url = cache_dir.join("source.css").to_string_lossy().to_string();
+        let cache_dir_str = cache_dir.to_string_lossy().to_string();
+        let path = url_cache_path(&css_raw_cache_url(&url), &cache_dir_str);
+        let mut cached = css_cache_header(Some(encoding_rs::WINDOWS_1252));
+        cached.extend_from_slice(b".caf\xe9 { color: red }");
+        std::fs::write(path, cached).unwrap();
+
+        let css = fetch_text_resource(&url, Some(&cache_dir_str)).unwrap();
+        assert_eq!(css, ".café { color: red }");
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
+
+    #[test]
+    fn local_stylesheet_streams_file_chunks_without_splitting_utf8_text() {
+        let path = std::env::temp_dir().join(format!(
+            "webcore-css-file-stream-{}.css",
+            std::process::id()
+        ));
+        let source = format!("{}é.tail {{ color: red }}", "a".repeat(16 * 1024 - 1));
+        std::fs::write(&path, source.as_bytes()).unwrap();
+        let url = format!("file://{}", path.display());
+
+        let mut chunks = Vec::new();
+        fetch_text_resource_uncached_streaming(&url, |bytes, encoding| {
+            assert!(encoding.is_none());
+            chunks.push(bytes.to_vec());
+        })
+        .unwrap();
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| chunk.len() <= 16 * 1024));
+
+        let mut decoded = String::new();
+        fetch_text_resource_streaming(&url, None, |chunk| decoded.push_str(chunk)).unwrap();
+        assert_eq!(decoded, source);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn image_bytes_load_from_file_urls_and_resolved_local_paths() {
+        let path = std::env::temp_dir().join(format!(
+            "webcore-local-image-bytes-{}.png",
+            std::process::id()
+        ));
+        let bytes = b"local image bytes";
+        std::fs::write(&path, bytes).unwrap();
+        let file_url = format!("file://{}", path.display());
+        assert_eq!(fetch_bytes(&file_url).unwrap(), bytes);
+        assert_eq!(fetch_bytes(path.to_str().unwrap()).unwrap(), bytes);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn image_http_error_is_not_retried_with_certificate_fallback() {
@@ -1396,8 +1718,19 @@ mod tests {
             while server_running.load(std::sync::atomic::Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
                         let mut request = [0; 2048];
-                        let _ = stream.read(&mut request);
+                        let mut received = Vec::new();
+                        loop {
+                            let count = stream.read(&mut request).unwrap();
+                            if count == 0 {
+                                break;
+                            }
+                            received.extend_from_slice(&request[..count]);
+                            if received.windows(4).any(|window| window == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
                         stream
                             .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                             .unwrap();
@@ -1709,15 +2042,17 @@ mod tests {
             &state,
         );
 
-        let mut decoded = None;
-        for _ in 0..50 {
-            decoded = crate::cached_decoded_image_ready(image_url);
-            if decoded.is_some() {
-                break;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let decoded = loop {
+            if let Some(decoded) = crate::cached_decoded_image_ready(image_url) {
+                break decoded;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "image preload should decode into the shared image cache"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let decoded = decoded.expect("image preload should decode into the shared image cache");
+        };
         let (_, w, h) = crate::html::decoded_image_pixels(decoded).expect("decoded pixels");
         assert_eq!((w, h), (3, 2));
     }
@@ -1818,7 +2153,7 @@ mod tests {
         std::fs::write(&source, "body { color: green; }").unwrap();
         let url = source.to_string_lossy().to_string();
         let cache_dir_str = cache_dir.to_string_lossy().to_string();
-        let cache_path = url_cache_path(&url, &cache_dir_str);
+        let cache_path = url_cache_path(&css_raw_cache_url(&url), &cache_dir_str);
         std::fs::write(&cache_path, "").unwrap();
 
         let text = fetch_text_resource(&url, Some(&cache_dir_str)).unwrap();

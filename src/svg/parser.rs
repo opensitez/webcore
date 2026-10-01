@@ -32,7 +32,7 @@ impl<'a> Parser<'a> {
             return Err(self.error("unexpected closing tag"));
         }
         let name = self.parse_name()?;
-        let mut node = SvgNode::new(&name);
+        let mut node = SvgNode::new(name);
 
         loop {
             self.skip_ws();
@@ -74,7 +74,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.starts_with("<![CDATA[") {
-                node.text.push_str(&self.parse_cdata()?);
+                node.text.push_str(self.parse_cdata()?);
                 continue;
             }
             if self.starts_with("<") {
@@ -83,7 +83,11 @@ impl<'a> Parser<'a> {
             }
             let text = self.parse_text();
             if !text.is_empty() {
-                node.text.push_str(&decode_xml_entities(&text));
+                if text.contains('&') {
+                    node.text.push_str(&decode_xml_entities(text));
+                } else {
+                    node.text.push_str(text);
+                }
             } else if self.pos < self.input.len() {
                 let ch = self.peek_char().expect("pos checked");
                 self.pos += ch.len_utf8();
@@ -99,16 +103,16 @@ impl<'a> Parser<'a> {
         let value = self.parse_quoted_or_unquoted_value()?;
         let (namespace, name) = match raw_name.split_once(':') {
             Some((ns, local)) => (Some(ns.to_string()), local.to_string()),
-            None => (None, raw_name),
+            None => (None, raw_name.to_string()),
         };
         Ok(SvgAttribute {
             namespace,
             name,
-            value: decode_xml_entities(&value),
+            value: decode_xml_entities(value),
         })
     }
 
-    fn parse_quoted_or_unquoted_value(&mut self) -> Result<String, SvgParseError> {
+    fn parse_quoted_or_unquoted_value(&mut self) -> Result<&'a str, SvgParseError> {
         let Some(ch) = self.peek_char() else {
             return Err(self.error("expected attribute value"));
         };
@@ -117,7 +121,7 @@ impl<'a> Parser<'a> {
             let start = self.pos;
             while let Some(next) = self.peek_char() {
                 if next == ch {
-                    let out = self.input[start..self.pos].to_string();
+                    let out = &self.input[start..self.pos];
                     self.pos += ch.len_utf8();
                     return Ok(out);
                 }
@@ -136,11 +140,11 @@ impl<'a> Parser<'a> {
         if self.pos == start {
             Err(self.error("expected attribute value"))
         } else {
-            Ok(self.input[start..self.pos].to_string())
+            Ok(&self.input[start..self.pos])
         }
     }
 
-    fn parse_name(&mut self) -> Result<String, SvgParseError> {
+    fn parse_name(&mut self) -> Result<&'a str, SvgParseError> {
         let start = self.pos;
         while let Some(ch) = self.peek_char() {
             if ch.is_ascii_alphanumeric() || matches!(ch, ':' | '_' | '-' | '.') {
@@ -152,20 +156,20 @@ impl<'a> Parser<'a> {
         if self.pos == start {
             Err(self.error("expected name"))
         } else {
-            Ok(self.input[start..self.pos].to_string())
+            Ok(&self.input[start..self.pos])
         }
     }
 
-    fn parse_text(&mut self) -> String {
+    fn parse_text(&mut self) -> &'a str {
         let start = self.pos;
         while self.pos < self.input.len() && !self.starts_with("<") {
             let ch = self.peek_char().expect("pos checked");
             self.pos += ch.len_utf8();
         }
-        self.input[start..self.pos].to_string()
+        &self.input[start..self.pos]
     }
 
-    fn parse_cdata(&mut self) -> Result<String, SvgParseError> {
+    fn parse_cdata(&mut self) -> Result<&'a str, SvgParseError> {
         self.expect("<![CDATA[")?;
         let start = self.pos;
         let Some(end_rel) = self.input[self.pos..].find("]]>") else {
@@ -173,7 +177,7 @@ impl<'a> Parser<'a> {
         };
         let end = self.pos + end_rel;
         self.pos = end + 3;
-        Ok(self.input[start..end].to_string())
+        Ok(&self.input[start..end])
     }
 
     fn skip_misc(&mut self) -> Result<(), SvgParseError> {

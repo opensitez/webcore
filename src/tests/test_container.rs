@@ -167,6 +167,37 @@ fn container_orientation_and_aspect_ratio_require_matching_size() {
 }
 
 #[test]
+fn zero_height_container_aspect_ratio_uses_ratio_comparison() {
+    use crate::css::evaluate_container;
+
+    assert!(evaluate_container("(min-aspect-ratio: 2/1)", 100.0, 0.0));
+    assert!(!evaluate_container("(max-aspect-ratio: 2/1)", 100.0, 0.0));
+    assert!(evaluate_container("(aspect-ratio: 1/0)", 100.0, 0.0));
+    assert!(evaluate_container("(aspect-ratio >= 1/0)", 100.0, 0.0));
+    assert!(!evaluate_container("(aspect-ratio > 1/0)", 100.0, 0.0));
+
+    assert!(!evaluate_container("(aspect-ratio: 1/1)", 0.0, 0.0));
+    assert!(!evaluate_container("(aspect-ratio: 0/0)", 0.0, 0.0));
+    assert!(!evaluate_container("(min-aspect-ratio: 0/0)", 100.0, 0.0));
+}
+
+#[test]
+fn zero_height_size_container_applies_aspect_ratio_rule() {
+    let doc = parse_and_layout(
+        r#"<html><head><style>
+          .outer { container-type: size; width: 100px; height: 0; }
+          .target { color: red; }
+          @container (min-aspect-ratio: 2/1) { .target { color: green; } }
+        </style></head><body><div class="outer"><span id="target" class="target">x</span></div></body></html>"#,
+        800.0,
+    );
+    assert_eq!(
+        find_by_id(&doc.root, "target").unwrap().style.color,
+        Color::rgb(0, 128, 0)
+    );
+}
+
+#[test]
 fn name_only_container_query_selects_named_ancestor() {
     let doc = parse_and_layout(
         r#"<html><head><style>
@@ -203,6 +234,63 @@ fn orientation_query_skips_inline_size_container_but_style_query_uses_it() {
 }
 
 // ── Layout effect of @container rules ─────────────────────────────────────────
+
+#[test]
+fn container_query_candidates_keep_stylesheet_source_order() {
+    let doc = parse_and_layout(
+        r#"<html><head><style>
+          .outer { container-type: inline-size; width: 400px; }
+          @container (min-width: 300px) {
+            .earlier { color: red; }
+            .later { color: blue; }
+          }
+        </style></head><body>
+          <div class="outer"><div id="target" class="later earlier">text</div></div>
+        </body></html>"#,
+        800.0,
+    );
+    let target = find_by_id(&doc.root, "target").expect("target");
+    assert_eq!(
+        (
+            target.style.color.r,
+            target.style.color.g,
+            target.style.color.b
+        ),
+        (0, 0, 255)
+    );
+}
+
+#[test]
+fn container_query_preserves_nested_and_ancestor_type_positions() {
+    let doc = parse_and_layout(
+        r#"<html><head><style>
+          .outer { container-type: inline-size; width: 400px; }
+          @container (min-width: 300px) {
+            .group:nth-of-type(2) span:is(:nth-of-type(2)) { color: red; }
+          }
+        </style></head><body><div class="outer">
+          <div class="group"><span id="first-group">first</span></div>
+          <div class="group">
+            <span id="first-child">first</span>
+            <em>other type</em>
+            <span id="target">second</span>
+          </div>
+        </div></body></html>"#,
+        800.0,
+    );
+    assert_eq!(
+        find_by_id(&doc.root, "target").unwrap().style.color,
+        Color::rgb(255, 0, 0)
+    );
+    assert_ne!(
+        find_by_id(&doc.root, "first-child").unwrap().style.color,
+        Color::rgb(255, 0, 0)
+    );
+    assert_ne!(
+        find_by_id(&doc.root, "first-group").unwrap().style.color,
+        Color::rgb(255, 0, 0)
+    );
+}
 
 #[test]
 fn container_query_applies_style_when_wide() {
@@ -322,9 +410,9 @@ fn unchanged_container_query_matches_do_not_request_another_layout() {
     let mut applied_rules = std::collections::HashMap::new();
     let apply = |doc: &mut crate::types::Document,
                  applied_rules: &mut std::collections::HashMap<
-                    u32,
-                    crate::css::container::AppliedContainerStyle,
-                >| {
+        u32,
+        crate::css::container::AppliedContainerStyle,
+    >| {
         crate::css::apply_container_cascade_tree_with_state(
             &mut doc.root,
             &doc.stylesheet,
@@ -381,7 +469,11 @@ fn container_query_rule_removal_restores_the_pre_query_style() {
     };
     assert!(apply(&mut doc));
     assert_eq!(doc.get_node(target_id).unwrap().style.color.r, 255);
-    doc.get_box_by_id_mut(outer_id).unwrap().layout.content_rect.w = 100.0;
+    doc.get_box_by_id_mut(outer_id)
+        .unwrap()
+        .layout
+        .content_rect
+        .w = 100.0;
     assert!(apply(&mut doc));
     assert_eq!(doc.get_node(target_id).unwrap().style.color.b, 255);
     assert!(!apply(&mut doc));
@@ -420,7 +512,11 @@ fn changed_container_rule_set_with_same_style_is_a_no_op() {
         )
     };
     assert!(!apply(&mut doc));
-    doc.get_box_by_id_mut(outer_id).unwrap().layout.content_rect.w = 175.0;
+    doc.get_box_by_id_mut(outer_id)
+        .unwrap()
+        .layout
+        .content_rect
+        .w = 175.0;
     assert!(!apply(&mut doc));
     assert_eq!(doc.get_node(target_id).unwrap().style.color.r, 255);
 }
@@ -547,7 +643,10 @@ fn style_query_uses_nearest_normal_container_and_preserves_custom_property_case(
         </style></head><body><div class="outer"><div id="target" class="target">x</div></div></body></html>"#,
         800.0,
     );
-    assert_eq!(find_by_id(&doc.root, "target").unwrap().style.color, Color::rgb(0, 128, 0));
+    assert_eq!(
+        find_by_id(&doc.root, "target").unwrap().style.color,
+        Color::rgb(0, 128, 0)
+    );
 }
 
 #[test]
@@ -561,7 +660,10 @@ fn size_query_skips_normal_and_incompatible_inline_size_containers() {
         </style></head><body><div class="outer"><div class="middle"><div class="plain"><div id="target" class="target">x</div></div></div></div></body></html>"#,
         800.0,
     );
-    assert_eq!(find_by_id(&doc.root, "target").unwrap().style.color, Color::rgb(0, 128, 0));
+    assert_eq!(
+        find_by_id(&doc.root, "target").unwrap().style.color,
+        Color::rgb(0, 128, 0)
+    );
 }
 
 #[test]
@@ -576,7 +678,10 @@ fn comma_container_alternative_retains_style_query_context() {
         </style></head><body><div class="outer"><div id="target" class="target">x</div></div></body></html>"#,
         800.0,
     );
-    assert_eq!(find_by_id(&doc.root, "target").unwrap().style.color, Color::rgb(0, 128, 0));
+    assert_eq!(
+        find_by_id(&doc.root, "target").unwrap().style.color,
+        Color::rgb(0, 128, 0)
+    );
 }
 
 #[test]
@@ -592,7 +697,10 @@ fn comma_container_alternatives_select_their_own_named_ancestors() {
         </style></head><body><div class="outer"><div class="inner"><div id="target" class="target">x</div></div></div></body></html>"#,
         800.0,
     );
-    assert_eq!(find_by_id(&doc.root, "target").unwrap().style.color, Color::rgb(0, 128, 0));
+    assert_eq!(
+        find_by_id(&doc.root, "target").unwrap().style.color,
+        Color::rgb(0, 128, 0)
+    );
 }
 
 #[test]
@@ -651,7 +759,10 @@ fn boolean_custom_property_style_query_uses_computed_presence() {
         </style></head><body><div class="outer"><div id="target" class="target">x</div></div></body></html>"#,
         800.0,
     );
-    assert_eq!(find_by_id(&doc.root, "target").unwrap().style.color, Color::rgb(0, 128, 0));
+    assert_eq!(
+        find_by_id(&doc.root, "target").unwrap().style.color,
+        Color::rgb(0, 128, 0)
+    );
 }
 
 #[test]
@@ -711,7 +822,10 @@ fn container_style_query_supports_or_not_and_literal_and_values() {
         700
     );
     assert_eq!(
-        find_by_id(&doc.root, "target").unwrap().style.background_color,
+        find_by_id(&doc.root, "target")
+            .unwrap()
+            .style
+            .background_color,
         Color::rgb(0, 0, 255)
     );
 }
@@ -731,6 +845,148 @@ fn container_style_query_compares_computed_weight_and_resolved_color() {
     assert_eq!(
         find_by_id(&doc.root, "target").unwrap().style.color,
         Color::rgb(0, 128, 0)
+    );
+}
+
+#[test]
+fn invalid_container_size_thresholds_do_not_match_as_zero() {
+    for condition in [
+        "(min-width: nonsense)",
+        "(max-width: nonsense)",
+        "(min-height: auto)",
+        "(max-height: 10%)",
+        "(width > nonsense)",
+        "(width < nonsense)",
+        "(height <= auto)",
+        "(width >= 5)",
+        "(width >= -1px)",
+    ] {
+        assert!(
+            !crate::css::evaluate_container(condition, 100.0, 100.0),
+            "invalid query matched: {condition}"
+        );
+    }
+    assert!(crate::css::evaluate_container("(width >= 0)", 100.0, 100.0));
+    assert!(crate::css::evaluate_container(
+        "(width >= 0.0)",
+        100.0,
+        100.0
+    ));
+    assert!(crate::css::evaluate_container(
+        "(width >= 1rem)",
+        100.0,
+        100.0
+    ));
+}
+
+#[test]
+fn container_viewport_units_use_viewport_not_container_size() {
+    use crate::css::evaluate_container_with_viewport;
+
+    assert!(evaluate_container_with_viewport(
+        "(min-width: 20vw) and (max-width: 30vw)",
+        200.0,
+        120.0,
+        ContainerType::Size,
+        None,
+        800.0,
+        600.0,
+    ));
+    assert!(!evaluate_container_with_viewport(
+        "(min-width: 50vw)",
+        200.0,
+        120.0,
+        ContainerType::Size,
+        None,
+        800.0,
+        600.0,
+    ));
+    assert!(!evaluate_container_with_viewport(
+        "(min-height: 50vh)",
+        200.0,
+        120.0,
+        ContainerType::Size,
+        None,
+        800.0,
+        600.0,
+    ));
+
+    let doc = parse_and_layout(
+        r#"<style>
+            .container { container-type: inline-size; width: 200px; }
+            .target { color: red; }
+            @container (min-width: 20vw) and (max-width: 30vw) {
+                .target { color: green; }
+            }
+            @container (min-width: 50vw) { .target { color: blue; } }
+        </style>
+        <div class="container"><div id="target" class="target">x</div></div>"#,
+        800.0,
+    );
+    assert_eq!(
+        find_by_id(&doc.root, "target").unwrap().style.color,
+        Color::rgb(0, 128, 0)
+    );
+}
+
+#[test]
+fn container_size_ranges_support_value_first_and_two_sided_syntax() {
+    for condition in [
+        "(100px < width)",
+        "(100px<width)",
+        "(100px < width <= 200px)",
+        "(100px<width<=200px)",
+        "(100px <width<= 200px)",
+        "(100px < inline-size <= 200px)",
+        "(100px<inline-size<=200px)",
+        "(200px >= width > 100px)",
+        "(200px>=width>100px)",
+        "(height >= 120px)",
+        "(100px <= block-size <= 120px)",
+        "(100px<=block-size<=120px)",
+        "(width = 200px)",
+    ] {
+        assert!(
+            crate::css::evaluate_container(condition, 200.0, 120.0),
+            "{condition}"
+        );
+    }
+    for condition in [
+        "(200px < width)",
+        "(100px < width < 200px)",
+        "(100px<width<200px)",
+        "(100px < width > 300px)",
+        "(100px<width>300px)",
+        "(bogus < width < 300px)",
+        "(100px<<width)",
+        "(100px<width<=)",
+        "(100px<width<300px<400px)",
+        "(height = 120.25px)",
+    ] {
+        assert!(
+            !crate::css::evaluate_container(condition, 200.0, 120.0),
+            "{condition}"
+        );
+    }
+    assert!(!crate::css::evaluate_container_for_type(
+        "(100px < block-size)",
+        200.0,
+        120.0,
+        ContainerType::InlineSize,
+    ));
+
+    let doc = parse_and_layout(
+        r#"<style>
+            .container { container-type: inline-size; width: 200px; }
+            .target { color: red; }
+            @container (100px<width<=200px) { .target { color: green; } }
+        </style>
+        <div class="container"><div id="range-target" class="target">x</div></div>"#,
+        800.0,
+    );
+    assert_eq!(
+        find_by_id(&doc.root, "range-target").unwrap().style.color,
+        Color::rgb(0, 128, 0),
     );
 }
 
@@ -779,6 +1035,69 @@ fn container_style_ranges_convert_compatible_units_and_unitless_zero() {
     assert_eq!(target.style.background_color, Color::rgb(0, 0, 255));
     assert_eq!(target.style.font_weight.value(), 700);
     assert_eq!(target.style.font_style, crate::types::FontStyle::Italic);
+}
+
+#[test]
+fn container_style_ranges_evaluate_typed_math_without_mixing_dimensions() {
+    let mut style = crate::types::ComputedStyle::default();
+    for (name, value) in [
+        ("--size", "12px"),
+        ("--share", "50%"),
+        ("--angle", "180deg"),
+        ("--time", "250ms"),
+        ("--frequency", "2kHz"),
+        ("--density", "2dppx"),
+    ] {
+        style.custom_props.insert(name.into(), value.into());
+    }
+    let matches = |condition| {
+        crate::css::evaluate_container_for_type_and_style(
+            condition,
+            0.0,
+            0.0,
+            crate::types::ContainerType::Normal,
+            Some(&style),
+        )
+    };
+    for condition in [
+        "style(calc(6px + 6px) = --size)",
+        "style(calc(25% * 2) = --share)",
+        "style(calc(0.5turn) = --angle)",
+        "style(calc(0.2s + 50ms) = --time)",
+        "style(calc(1kHz * 2) = --frequency)",
+        "style(calc(96dpi * 2) = --density)",
+        "style(calc(3 * 4) > 10)",
+    ] {
+        assert!(matches(condition), "{condition}");
+    }
+    for condition in [
+        "style(calc(1em + 2px) = --size)",
+        "style(calc(50%) = --size)",
+        "style(calc(1s) = --frequency)",
+    ] {
+        assert!(!matches(condition), "{condition}");
+    }
+}
+
+#[test]
+fn container_style_math_range_applies_in_document_cascade() {
+    let doc = parse_and_layout(
+        r#"<html><head><style>
+          .outer { --size: calc(4px * 3); }
+          .target { color: red; }
+          @container style(calc(6px + 6px) = --size) {
+            .target { color: green; }
+          }
+          @container style(calc(1s) = --size) {
+            .target { color: blue; }
+          }
+        </style></head><body><div class="outer"><div id="target" class="target">x</div></div></body></html>"#,
+        800.0,
+    );
+    assert_eq!(
+        find_by_id(&doc.root, "target").unwrap().style.color,
+        Color::rgb(0, 128, 0)
+    );
 }
 
 #[test]
@@ -892,8 +1211,16 @@ fn flex_and_grid_containers_resolve_descendant_query_units() {
     );
     for id in ["flex-child", "grid-child"] {
         let child = find_by_id(&doc.root, id).unwrap();
-        assert!((child.layout.content_rect.w - 100.0).abs() < 0.01, "{id} width: {}", child.layout.content_rect.w);
-        assert!((child.layout.content_rect.h - 30.0).abs() < 0.01, "{id} height: {}", child.layout.content_rect.h);
+        assert!(
+            (child.layout.content_rect.w - 100.0).abs() < 0.01,
+            "{id} width: {}",
+            child.layout.content_rect.w
+        );
+        assert!(
+            (child.layout.content_rect.h - 30.0).abs() < 0.01,
+            "{id} height: {}",
+            child.layout.content_rect.h
+        );
     }
 }
 
@@ -912,8 +1239,14 @@ fn inline_and_table_containers_resolve_descendant_query_units() {
     );
     for id in ["inline-child", "table-child"] {
         let child = find_by_id(&doc.root, id).unwrap();
-        assert!((child.layout.content_rect.w - 100.0).abs() < 0.01, "{id} width");
-        assert!((child.layout.content_rect.h - 30.0).abs() < 0.01, "{id} height");
+        assert!(
+            (child.layout.content_rect.w - 100.0).abs() < 0.01,
+            "{id} width"
+        );
+        assert!(
+            (child.layout.content_rect.h - 30.0).abs() < 0.01,
+            "{id} height"
+        );
     }
 }
 
@@ -949,7 +1282,11 @@ fn subgrid_container_resolves_descendant_query_width() {
         800.0,
     );
     let child = find_by_id(&doc.root, "subgrid-child").unwrap();
-    assert!((child.layout.content_rect.w - 100.0).abs() < 0.01, "subgrid width: {}", child.layout.content_rect.w);
+    assert!(
+        (child.layout.content_rect.w - 100.0).abs() < 0.01,
+        "subgrid width: {}",
+        child.layout.content_rect.w
+    );
 }
 
 #[test]
@@ -966,7 +1303,11 @@ fn grid_tracks_use_ancestor_container_query_width() {
         800.0,
     );
     let child = find_by_id(&doc.root, "track-child").unwrap();
-    assert!((child.layout.border_rect.w - 100.0).abs() < 0.01, "track width: {}", child.layout.border_rect.w);
+    assert!(
+        (child.layout.border_rect.w - 100.0).abs() < 0.01,
+        "track width: {}",
+        child.layout.border_rect.w
+    );
 }
 
 #[test]
@@ -1004,7 +1345,11 @@ fn grid_rows_use_ancestor_container_query_height() {
         800.0,
     );
     let child = find_by_id(&doc.root, "row-child").unwrap();
-    assert!((child.layout.border_rect.h - 30.0).abs() < 0.01, "row height: {}", child.layout.border_rect.h);
+    assert!(
+        (child.layout.border_rect.h - 30.0).abs() < 0.01,
+        "row height: {}",
+        child.layout.border_rect.h
+    );
 }
 
 #[test]
@@ -1037,6 +1382,104 @@ fn size_containment_ignores_child_height_for_auto_size() {
 }
 
 #[test]
+fn inline_size_containment_ignores_child_intrinsic_width() {
+    let doc = parse_and_layout(
+        r#"<html><body style="margin:0">
+          <div id="plain" style="display:inline-block"><div style="width:200px">wide</div></div>
+          <div id="size" style="display:inline-block;contain:size"><div style="width:200px">wide</div></div>
+          <div id="inline" style="display:inline-block;contain:inline-size;contain-intrinsic-size:40px 20px"><div style="width:200px">wide</div></div>
+          <div id="query" style="display:inline-block;container-type:inline-size;contain-intrinsic-size:60px 20px"><div style="width:200px">wide</div></div>
+          <div id="size-query" style="display:inline-block;container-type:size;contain-intrinsic-size:50px 20px"><div style="width:200px">wide</div></div>
+          <div id="table" style="display:table;contain:size;contain-intrinsic-size:70px 20px"><div style="width:200px">wide</div></div>
+          <div id="explicit" style="display:inline-block;contain:size;width:90px"><div style="width:200px">wide</div></div>
+        </body></html>"#,
+        800.0,
+    );
+    let width = |id| find_by_id(&doc.root, id).unwrap().layout.content_rect.w;
+    assert!((width("plain") - 200.0).abs() < 0.01);
+    assert!(
+        (width("size") - 0.0).abs() < 0.01,
+        "size: {}",
+        width("size")
+    );
+    assert!(
+        (width("inline") - 40.0).abs() < 0.01,
+        "inline: {}",
+        width("inline")
+    );
+    assert!(
+        (width("query") - 60.0).abs() < 0.01,
+        "query: {}",
+        width("query")
+    );
+    assert!(
+        (width("size-query") - 50.0).abs() < 0.01,
+        "size-query: {}",
+        width("size-query")
+    );
+    assert!(
+        (width("table") - 70.0).abs() < 0.01,
+        "table: {}",
+        width("table")
+    );
+    assert!(
+        (width("explicit") - 90.0).abs() < 0.01,
+        "explicit: {}",
+        width("explicit")
+    );
+}
+
+#[test]
+fn hidden_content_visibility_skips_descendant_layout_but_keeps_own_size() {
+    let doc = parse_and_layout(
+        r#"<html><body style="margin:0">
+          <div id="explicit" style="content-visibility:hidden;width:100px;height:40px;padding:5px;background:red">
+            <div id="unlaid" style="height:300px"></div>
+          </div>
+          <div id="intrinsic" style="content-visibility:hidden;contain-intrinsic-size:70px 25px">
+            <div id="also-unlaid" style="height:300px"></div>
+          </div>
+        </body></html>"#,
+        800.0,
+    );
+    let explicit = find_by_id(&doc.root, "explicit").unwrap();
+    let intrinsic = find_by_id(&doc.root, "intrinsic").unwrap();
+    assert_eq!(explicit.layout.content_rect.h, 40.0);
+    assert_eq!(explicit.layout.border_rect.h, 50.0);
+    assert_eq!(intrinsic.layout.content_rect.h, 25.0);
+    assert_eq!(
+        find_by_id(&doc.root, "unlaid")
+            .unwrap()
+            .layout
+            .border_rect
+            .h,
+        0.0
+    );
+    assert_eq!(
+        find_by_id(&doc.root, "also-unlaid")
+            .unwrap()
+            .layout
+            .border_rect
+            .h,
+        0.0
+    );
+}
+
+#[test]
+fn hidden_content_visibility_blocks_hits_on_previously_laid_out_children() {
+    let mut doc = parse_and_layout(
+        r#"<html><body style="margin:0"><div id="outer" style="width:100px;height:50px"><div id="inner" style="width:80px;height:40px"></div></div></body></html>"#,
+        800.0,
+    );
+    let outer_id = find_by_id(&doc.root, "outer").unwrap().node_id;
+    let inner_id = find_by_id(&doc.root, "inner").unwrap().node_id;
+    assert_eq!(crate::hit_test_box_at(&doc.root, (10.0, 10.0), 0), inner_id);
+    std::sync::Arc::make_mut(&mut doc.find_webcore_mut(outer_id).unwrap().style)
+        .content_visibility = ContentVisibility::Hidden;
+    assert_eq!(crate::hit_test_box_at(&doc.root, (10.0, 10.0), 0), outer_id);
+}
+
+#[test]
 fn contained_intrinsic_height_is_the_query_container_height() {
     let doc = parse_and_layout(
         r#"<html><body style="margin:0">
@@ -1047,7 +1490,11 @@ fn contained_intrinsic_height_is_the_query_container_height() {
         800.0,
     );
     let child = find_by_id(&doc.root, "query-child").unwrap();
-    assert!((child.layout.content_rect.h - 2.5).abs() < 0.01, "query height: {}", child.layout.content_rect.h);
+    assert!(
+        (child.layout.content_rect.h - 2.5).abs() < 0.01,
+        "query height: {}",
+        child.layout.content_rect.h
+    );
 }
 
 #[test]

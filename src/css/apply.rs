@@ -309,14 +309,12 @@ pub fn finalize_logical(style: &mut ComputedStyle) {
             LogicalCornerSlot::EndEnd => (b_end, i_end),
         };
         match (block, inline) {
-            (PhysicalSide::Top, PhysicalSide::Left)
-            | (PhysicalSide::Left, PhysicalSide::Top) => {
+            (PhysicalSide::Top, PhysicalSide::Left) | (PhysicalSide::Left, PhysicalSide::Top) => {
                 style.border_top_left_radius = x;
                 style.border_top_left_radius_y = y;
                 style.border_radius = style.border_top_left_radius.clone();
             }
-            (PhysicalSide::Top, PhysicalSide::Right)
-            | (PhysicalSide::Right, PhysicalSide::Top) => {
+            (PhysicalSide::Top, PhysicalSide::Right) | (PhysicalSide::Right, PhysicalSide::Top) => {
                 style.border_top_right_radius = x;
                 style.border_top_right_radius_y = y;
             }
@@ -503,10 +501,35 @@ fn set_border_color(s: &mut ComputedStyle, side: crate::types::PhysicalSide, c: 
 pub fn finalize_current_color(style: &mut ComputedStyle) {
     use crate::types::*;
     let mask = style.rare().current_color_props;
-    if mask == 0 {
+    let has_gradient_current_color = style
+        .rare()
+        .gradient_stops
+        .iter()
+        .any(|stop| stop.current_color)
+        || style
+            .rare()
+            .additional_background_layers
+            .iter()
+            .any(|layer| layer.gradient_stops.iter().any(|stop| stop.current_color));
+    if mask == 0 && !has_gradient_current_color {
         return;
     }
     let c = style.color;
+    let rare = style.rare_mut();
+    for stop in &mut rare.gradient_stops {
+        if stop.current_color {
+            stop.color = c;
+            stop.current_color = false;
+        }
+    }
+    for layer in &mut rare.additional_background_layers {
+        for stop in &mut layer.gradient_stops {
+            if stop.current_color {
+                stop.color = c;
+                stop.current_color = false;
+            }
+        }
+    }
     if mask & CURRENT_COLOR_BORDER_TOP != 0 {
         style.border_top_color = c;
     }
@@ -582,14 +605,38 @@ pub(crate) fn record_physical_box_declaration(
         return;
     }
     let (slot, value) = match id {
-        MarginTop => (LogicalSlot::MarginPhysical(PhysicalSide::Top), style.margin_top.clone()),
-        MarginRight => (LogicalSlot::MarginPhysical(PhysicalSide::Right), style.margin_right.clone()),
-        MarginBottom => (LogicalSlot::MarginPhysical(PhysicalSide::Bottom), style.margin_bottom.clone()),
-        MarginLeft => (LogicalSlot::MarginPhysical(PhysicalSide::Left), style.margin_left.clone()),
-        PaddingTop => (LogicalSlot::PaddingPhysical(PhysicalSide::Top), style.padding_top.clone()),
-        PaddingRight => (LogicalSlot::PaddingPhysical(PhysicalSide::Right), style.padding_right.clone()),
-        PaddingBottom => (LogicalSlot::PaddingPhysical(PhysicalSide::Bottom), style.padding_bottom.clone()),
-        PaddingLeft => (LogicalSlot::PaddingPhysical(PhysicalSide::Left), style.padding_left.clone()),
+        MarginTop => (
+            LogicalSlot::MarginPhysical(PhysicalSide::Top),
+            style.margin_top.clone(),
+        ),
+        MarginRight => (
+            LogicalSlot::MarginPhysical(PhysicalSide::Right),
+            style.margin_right.clone(),
+        ),
+        MarginBottom => (
+            LogicalSlot::MarginPhysical(PhysicalSide::Bottom),
+            style.margin_bottom.clone(),
+        ),
+        MarginLeft => (
+            LogicalSlot::MarginPhysical(PhysicalSide::Left),
+            style.margin_left.clone(),
+        ),
+        PaddingTop => (
+            LogicalSlot::PaddingPhysical(PhysicalSide::Top),
+            style.padding_top.clone(),
+        ),
+        PaddingRight => (
+            LogicalSlot::PaddingPhysical(PhysicalSide::Right),
+            style.padding_right.clone(),
+        ),
+        PaddingBottom => (
+            LogicalSlot::PaddingPhysical(PhysicalSide::Bottom),
+            style.padding_bottom.clone(),
+        ),
+        PaddingLeft => (
+            LogicalSlot::PaddingPhysical(PhysicalSide::Left),
+            style.padding_left.clone(),
+        ),
         _ => return,
     };
     style.rare_mut().logical_box.push((slot, value));
@@ -790,13 +837,17 @@ pub(crate) fn finalize_filter_values(
     resolve_length: &impl Fn(&crate::types::CssLength) -> f32,
 ) {
     if !style.rare().filter.is_empty() {
-        if let Some(filters) = parse_css_filter_resolved(&style.rare().filter, style.color, resolve_length) {
+        if let Some(filters) =
+            parse_css_filter_resolved(&style.rare().filter, style.color, resolve_length)
+        {
             style.rare_mut().filter = filters.to_css();
             style.css_filter = filters;
         }
     }
     if !style.rare().backdrop_filter.is_empty() {
-        if let Some(filters) = parse_css_filter_resolved(&style.rare().backdrop_filter, style.color, resolve_length) {
+        if let Some(filters) =
+            parse_css_filter_resolved(&style.rare().backdrop_filter, style.color, resolve_length)
+        {
             style.rare_mut().backdrop_filter = filters.to_css();
         }
     }
@@ -832,9 +883,18 @@ pub(crate) fn parse_css_filter_resolved(
             return Some(default);
         }
         let length = crate::css::value_parse::parse_length_checked(arg)?;
-        if length.is_auto() || length.has_percentage()
-            || matches!(length, crate::types::CssLength::None | crate::types::CssLength::Content | crate::types::CssLength::Stretch)
-            || arg.parse::<f32>().is_ok_and(|v| v != 0.0) { return None; }
+        if length.is_auto()
+            || length.has_percentage()
+            || matches!(
+                length,
+                crate::types::CssLength::None
+                    | crate::types::CssLength::Content
+                    | crate::types::CssLength::Stretch
+            )
+            || arg.parse::<f32>().is_ok_and(|v| v != 0.0)
+        {
+            return None;
+        }
         Some(resolve_length(&length))
     };
     fn filter_angle_deg(arg: &str, default: f32) -> Option<f32> {
@@ -842,14 +902,11 @@ pub(crate) fn parse_css_filter_resolved(
         if arg.is_empty() {
             return Some(default);
         }
-        if super::is_math_function(arg) { return super::parse_math_angle_deg(arg); }
+        if super::is_math_function(arg) {
+            return super::parse_math_angle_deg(arg);
+        }
         let lower = arg.to_ascii_lowercase();
-        let num = |suffix: &str| {
-            lower
-                .trim_end_matches(suffix)
-                .parse::<f32>()
-                .ok()
-        };
+        let num = |suffix: &str| lower.trim_end_matches(suffix).parse::<f32>().ok();
         if lower.ends_with("turn") {
             num("turn").map(|n| n * 360.0)
         } else if lower.ends_with("grad") {
@@ -866,7 +923,9 @@ pub(crate) fn parse_css_filter_resolved(
     if v.trim().eq_ignore_ascii_case("none") {
         return Some(CssFilters::default());
     }
-    if v.trim().is_empty() { return None; }
+    if v.trim().is_empty() {
+        return None;
+    }
     let mut rest = v.trim();
     while !rest.is_empty() {
         rest = rest.trim_start();
@@ -878,12 +937,15 @@ pub(crate) fn parse_css_filter_resolved(
             None => return None,
         };
         let func = rest[..paren_pos].trim().to_ascii_lowercase();
-        let (arg_str, after_func) = super::transform_parse::consume_parenthesized(&rest[paren_pos..])?;
+        let (arg_str, after_func) =
+            super::transform_parse::consume_parenthesized(&rest[paren_pos..])?;
         rest = after_func;
         match func.as_str() {
             "blur" => {
                 let radius = filter_length_px(arg_str, 0.0)?;
-                if radius < 0.0 && !super::is_math_function(arg_str.trim()) { return None; }
+                if radius < 0.0 && !super::is_math_function(arg_str.trim()) {
+                    return None;
+                }
                 ops.push(FilterOp::Blur(radius.max(0.0)));
             }
             "brightness" => ops.push(FilterOp::Brightness(filter_number(arg_str, 1.0)?)),
@@ -900,14 +962,20 @@ pub(crate) fn parse_css_filter_resolved(
                 let mut color = None;
                 for part in parts {
                     if color.is_none() {
-                        if let Some(c) = if part.eq_ignore_ascii_case("currentcolor") { Some(current_color) } else { parse_color(&part) } {
+                        if let Some(c) = if part.eq_ignore_ascii_case("currentcolor") {
+                            Some(current_color)
+                        } else {
+                            parse_color(&part)
+                        } {
                             color = Some(c);
                             continue;
                         }
                     }
                     let mut length = filter_length_px(&part, 0.0)?;
                     if lengths.len() == 2 && length < 0.0 {
-                        if !super::is_math_function(&part) { return None; }
+                        if !super::is_math_function(&part) {
+                            return None;
+                        }
                         length = 0.0;
                     }
                     lengths.push(length);
@@ -1023,11 +1091,19 @@ mod light_dark_tests {
     #[test]
     fn light_dark_uses_preference_when_both_schemes_are_supported() {
         assert_eq!(
-            resolve_light_dark_functions_with_preference("light-dark(white, black)", "light dark", Dark),
+            resolve_light_dark_functions_with_preference(
+                "light-dark(white, black)",
+                "light dark",
+                Dark
+            ),
             "black"
         );
         assert_eq!(
-            resolve_light_dark_functions_with_preference("light-dark(white, black)", "dark light", Light),
+            resolve_light_dark_functions_with_preference(
+                "light-dark(white, black)",
+                "dark light",
+                Light
+            ),
             "white"
         );
     }
@@ -1043,7 +1119,11 @@ mod light_dark_tests {
             "black"
         );
         assert_eq!(
-            resolve_light_dark_functions_with_preference("light-dark(white, black)", "normal", Dark),
+            resolve_light_dark_functions_with_preference(
+                "light-dark(white, black)",
+                "normal",
+                Dark
+            ),
             "white"
         );
     }
@@ -1206,7 +1286,7 @@ fn needs_var_substitution_separator(inserted: &str, rest: &str) -> bool {
 /// Resolve a CSS `content` property value string to a displayable string.
 /// Handles string literals, open-quote/close-quote, and discards complex expressions.
 /// Process CSS Unicode escapes in a string: `\e001` → U+E001, `\A` → newline, etc.
-fn unescape_css_string(s: &str) -> String {
+pub(crate) fn unescape_css_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
@@ -1224,9 +1304,14 @@ fn unescape_css_string(s: &str) -> String {
             }
             if !hex.is_empty() {
                 // Optional trailing whitespace is consumed after hex escape
-                if chars.peek().is_some_and(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c')) {
+                if chars
+                    .peek()
+                    .is_some_and(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c'))
+                {
                     let whitespace = chars.next();
-                    if whitespace == Some('\r') && chars.peek() == Some(&'\n') { chars.next(); }
+                    if whitespace == Some('\r') && chars.peek() == Some(&'\n') {
+                        chars.next();
+                    }
                 }
                 if let Ok(cp) = u32::from_str_radix(&hex, 16) {
                     if let Some(uc) = char::from_u32(cp).filter(|ch| *ch != '\0') {
@@ -1237,8 +1322,12 @@ fn unescape_css_string(s: &str) -> String {
                 // Invalid code point — output replacement character
                 out.push('\u{FFFD}');
             } else if let Some(next) = chars.next() {
-                if next == '\r' && chars.peek() == Some(&'\n') { chars.next(); }
-                if matches!(next, '\n' | '\r' | '\x0c') { continue; }
+                if next == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                if matches!(next, '\n' | '\r' | '\x0c') {
+                    continue;
+                }
                 // Escaped literal character (e.g. \\ → \, \" → ")
                 out.push(next);
             }
@@ -1251,7 +1340,9 @@ fn unescape_css_string(s: &str) -> String {
 
 pub(crate) fn consume_css_string(source: &str) -> Option<(String, &str)> {
     let quote = source.chars().next()?;
-    if !matches!(quote, '\'' | '"') { return None; }
+    if !matches!(quote, '\'' | '"') {
+        return None;
+    }
     let mut escaped = false;
     let mut chars = source[1..].char_indices().peekable();
     while let Some((index, ch)) = chars.next() {
@@ -1259,18 +1350,31 @@ pub(crate) fn consume_css_string(source: &str) -> Option<(String, &str)> {
             escaped = false;
             if ch.is_ascii_hexdigit() {
                 for _ in 1..6 {
-                    if chars.peek().is_some_and(|(_, ch)| ch.is_ascii_hexdigit()) { chars.next(); }
-                    else { break; }
+                    if chars.peek().is_some_and(|(_, ch)| ch.is_ascii_hexdigit()) {
+                        chars.next();
+                    } else {
+                        break;
+                    }
                 }
-                if chars.peek().is_some_and(|(_, ch)| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c')) {
+                if chars
+                    .peek()
+                    .is_some_and(|(_, ch)| matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c'))
+                {
                     let whitespace = chars.next().map(|(_, ch)| ch);
-                    if whitespace == Some('\r') && chars.peek().is_some_and(|(_, ch)| *ch == '\n') { chars.next(); }
+                    if whitespace == Some('\r') && chars.peek().is_some_and(|(_, ch)| *ch == '\n') {
+                        chars.next();
+                    }
                 }
-            } else if ch == '\r' && chars.peek().is_some_and(|(_, ch)| *ch == '\n') { chars.next(); }
+            } else if ch == '\r' && chars.peek().is_some_and(|(_, ch)| *ch == '\n') {
+                chars.next();
+            }
         } else if ch == '\\' {
             escaped = true;
         } else if ch == quote {
-            return Some((unescape_css_string(&source[1..index + 1]), &source[index + 2..]));
+            return Some((
+                unescape_css_string(&source[1..index + 1]),
+                &source[index + 2..],
+            ));
         } else if matches!(ch, '\n' | '\r' | '\x0c') {
             return None;
         }
@@ -1294,26 +1398,44 @@ pub(crate) fn parse_content_parts(
     v: &str,
     attrs: Option<&crate::dom::attrs::AttrMap>,
 ) -> Vec<crate::types::GeneratedContentPart> {
-    use crate::types::GeneratedContentPart::{Text, Quote};
+    use crate::types::GeneratedContentPart::{Quote, Text};
     let mut rest = visible_content_value(v.trim()).trim();
     let mut parts = Vec::new();
     while !rest.is_empty() {
         rest = rest.trim_start();
-        if rest.is_empty() { break; }
+        if rest.is_empty() {
+            break;
+        }
         if rest.starts_with('"') || rest.starts_with('\'') {
-            let Some((text, tail)) = consume_css_string(rest) else { break; };
+            let Some((text, tail)) = consume_css_string(rest) else {
+                break;
+            };
             parts.push(Text(text));
             rest = tail;
         } else {
             let end = content_token_end(rest);
             let tok = &rest[..end];
             match tok {
-                "open-quote" => parts.push(Quote { open: true, emit: true }),
-                "close-quote" => parts.push(Quote { open: false, emit: true }),
-                "no-open-quote" => parts.push(Quote { open: true, emit: false }),
-                "no-close-quote" => parts.push(Quote { open: false, emit: false }),
+                "open-quote" => parts.push(Quote {
+                    open: true,
+                    emit: true,
+                }),
+                "close-quote" => parts.push(Quote {
+                    open: false,
+                    emit: true,
+                }),
+                "no-open-quote" => parts.push(Quote {
+                    open: true,
+                    emit: false,
+                }),
+                "no-close-quote" => parts.push(Quote {
+                    open: false,
+                    emit: false,
+                }),
                 _ => {
-                    if (tok.starts_with("counter(") || tok.starts_with("counters(")) && tok.ends_with(')') {
+                    if (tok.starts_with("counter(") || tok.starts_with("counters("))
+                        && tok.ends_with(')')
+                    {
                         parts.push(Text(format!("\x01{tok}\x01")));
                     } else if tok.starts_with("attr(") && tok.ends_with(')') {
                         if let Some(attrs) = attrs {
@@ -1333,18 +1455,24 @@ pub(crate) fn render_content_parts(
     quotes: Option<&[String]>,
     depth: &mut usize,
 ) -> String {
-    use crate::types::GeneratedContentPart::{Text, Quote};
+    use crate::types::GeneratedContentPart::{Quote, Text};
     let mut out = String::new();
     for part in parts {
         match part {
             Text(text) => out.push_str(text),
             Quote { open, emit } => {
                 if !open {
-                    if *depth == 0 { continue; }
+                    if *depth == 0 {
+                        continue;
+                    }
                     *depth -= 1;
                 }
-                if *emit { out.push_str(&quote_string(quotes, *open, *depth)); }
-                if *open { *depth = depth.saturating_add(1); }
+                if *emit {
+                    out.push_str(&quote_string(quotes, *open, *depth));
+                }
+                if *open {
+                    *depth = depth.saturating_add(1);
+                }
             }
         }
     }
@@ -1378,9 +1506,13 @@ fn visible_content_value(value: &str) -> &str {
 }
 
 fn quote_string(quotes: Option<&[String]>, open: bool, depth: usize) -> String {
-    if quotes.is_some_and(|items| items.is_empty()) { return String::new(); }
+    if quotes.is_some_and(|items| items.is_empty()) {
+        return String::new();
+    }
     quotes
-        .and_then(|items| items.get(depth.min((items.len() / 2).saturating_sub(1)) * 2 + usize::from(!open)))
+        .and_then(|items| {
+            items.get(depth.min((items.len() / 2).saturating_sub(1)) * 2 + usize::from(!open))
+        })
         .cloned()
         .unwrap_or_else(|| if open { "\u{201C}" } else { "\u{201D}" }.to_string())
 }
@@ -1816,22 +1948,44 @@ pub fn parse_counter_list_with_default(v: &str, default_value: i32) -> Vec<(Stri
     parse_counter_list_checked(v, default_value).unwrap_or_default()
 }
 
-pub(crate) fn parse_counter_list_checked(v: &str, default_value: i32) -> Option<Vec<(String, i32)>> {
-    Some(parse_counter_declarations(v, default_value, false)?.into_iter().map(|reset| (reset.name, reset.value.unwrap_or(default_value))).collect())
+pub(crate) fn parse_counter_list_checked(
+    v: &str,
+    default_value: i32,
+) -> Option<Vec<(String, i32)>> {
+    Some(
+        parse_counter_declarations(v, default_value, false)?
+            .into_iter()
+            .map(|reset| (reset.name, reset.value.unwrap_or(default_value)))
+            .collect(),
+    )
 }
 
 pub(crate) fn parse_counter_reset_checked(v: &str) -> Option<Vec<crate::types::CounterReset>> {
     parse_counter_declarations(v, 0, true)
 }
 
-fn parse_counter_declarations(v: &str, default_value: i32, allow_reversed: bool) -> Option<Vec<crate::types::CounterReset>> {
-    fn space(c: char) -> bool { matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c') }
-    fn start(c: char) -> bool { c.is_ascii_alphabetic() || c == '_' || !c.is_ascii() }
+fn parse_counter_declarations(
+    v: &str,
+    default_value: i32,
+    allow_reversed: bool,
+) -> Option<Vec<crate::types::CounterReset>> {
+    fn space(c: char) -> bool {
+        matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c')
+    }
+    fn start(c: char) -> bool {
+        c.is_ascii_alphabetic() || c == '_' || !c.is_ascii()
+    }
     fn identifier(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
         let first = *chars.peek()?;
         let mut look = chars.clone();
         look.next();
-        if !(start(first) || first == '\\' || (first == '-' && look.peek().is_some_and(|c| start(*c) || matches!(c, '-' | '\\')))) {
+        if !(start(first)
+            || first == '\\'
+            || (first == '-'
+                && look
+                    .peek()
+                    .is_some_and(|c| start(*c) || matches!(c, '-' | '\\'))))
+        {
             return None;
         }
         let mut name = String::new();
@@ -1842,37 +1996,62 @@ fn parse_counter_declarations(v: &str, default_value: i32, allow_reversed: bool)
             } else if start(c) || c.is_ascii_digit() || c == '-' {
                 name.push(c);
                 chars.next();
-            } else { break; }
+            } else {
+                break;
+            }
         }
         Some(name)
     }
     let mut chars = v.chars().peekable();
     let mut result = Vec::new();
     loop {
-        while chars.peek().is_some_and(|c| space(*c)) { chars.next(); }
-        if chars.peek().is_none() { break; }
+        while chars.peek().is_some_and(|c| space(*c)) {
+            chars.next();
+        }
+        if chars.peek().is_none() {
+            break;
+        }
         let mut name = identifier(&mut chars)?;
-        let reversed = allow_reversed && name.eq_ignore_ascii_case("reversed") && chars.peek() == Some(&'(');
+        let reversed =
+            allow_reversed && name.eq_ignore_ascii_case("reversed") && chars.peek() == Some(&'(');
         if reversed {
             chars.next();
-            while chars.peek().is_some_and(|c| space(*c)) { chars.next(); }
+            while chars.peek().is_some_and(|c| space(*c)) {
+                chars.next();
+            }
             name = identifier(&mut chars)?;
-            while chars.peek().is_some_and(|c| space(*c)) { chars.next(); }
-            if chars.next() != Some(')') { return None; }
+            while chars.peek().is_some_and(|c| space(*c)) {
+                chars.next();
+            }
+            if chars.next() != Some(')') {
+                return None;
+            }
         }
         if name.eq_ignore_ascii_case("none") {
-            if reversed { return None; }
-            while chars.peek().is_some_and(|c| space(*c)) { chars.next(); }
+            if reversed {
+                return None;
+            }
+            while chars.peek().is_some_and(|c| space(*c)) {
+                chars.next();
+            }
             return (result.is_empty() && chars.peek().is_none()).then(Vec::new);
         }
-        if matches!(name.to_ascii_lowercase().as_str(), "initial" | "inherit" | "unset" | "revert" | "revert-layer" | "default") {
+        if matches!(
+            name.to_ascii_lowercase().as_str(),
+            "initial" | "inherit" | "unset" | "revert" | "revert-layer" | "default"
+        ) {
             return None;
         }
-        while chars.peek().is_some_and(|c| space(*c)) { chars.next(); }
+        while chars.peek().is_some_and(|c| space(*c)) {
+            chars.next();
+        }
         let mut val = if reversed { None } else { Some(default_value) };
         let mut function = chars.clone();
         let mut expression = String::new();
-        while function.peek().is_some_and(|c| c.is_ascii_alphabetic() || *c == '-') {
+        while function
+            .peek()
+            .is_some_and(|c| c.is_ascii_alphabetic() || *c == '-')
+        {
             expression.push(function.next().unwrap());
         }
         if function.peek() == Some(&'(') {
@@ -1883,36 +2062,65 @@ fn parse_counter_declarations(v: &str, default_value: i32, allow_reversed: bool)
                     '(' => depth += 1,
                     ')' => {
                         depth -= 1;
-                        if depth == 0 { break; }
+                        if depth == 0 {
+                            break;
+                        }
                     }
-                    _ => {},
+                    _ => {}
                 }
             }
-            if depth != 0 { return None; }
+            if depth != 0 {
+                return None;
+            }
             val = Some(super::calc::parse_css_integer(&expression)?);
             chars = function;
-            result.push(crate::types::CounterReset { name, value: val, reversed, html_list_start: false });
+            result.push(crate::types::CounterReset {
+                name,
+                value: val,
+                reversed,
+                html_list_start: false,
+            });
             continue;
         }
         let mut number = chars.clone();
         let negative = number.peek() == Some(&'-');
-        if matches!(number.peek(), Some('+' | '-')) { number.next(); }
+        if matches!(number.peek(), Some('+' | '-')) {
+            number.next();
+        }
         if number.peek().is_some_and(|c| c.is_ascii_digit()) {
             // Saturate while scanning, rather than interpreting an overflowing
             // integer as another counter name.
-            let limit = if negative { i32::MAX as u64 + 1 } else { i32::MAX as u64 };
+            let limit = if negative {
+                i32::MAX as u64 + 1
+            } else {
+                i32::MAX as u64
+            };
             let mut magnitude = 0u64;
             while let Some(digit) = number.peek().and_then(|c| c.to_digit(10)) {
                 magnitude = (magnitude * 10 + u64::from(digit)).min(limit);
                 number.next();
             }
-            if number.peek().is_some_and(|c| !space(*c)) { return None; }
-            val = Some(if negative { -(magnitude as i64) as i32 } else { magnitude as i32 });
+            if number.peek().is_some_and(|c| !space(*c)) {
+                return None;
+            }
+            val = Some(if negative {
+                -(magnitude as i64) as i32
+            } else {
+                magnitude as i32
+            });
             chars = number;
-        } else if chars.peek().is_some_and(|c| !space(*c) && !start(*c) && !matches!(c, '-' | '\\')) {
+        } else if chars
+            .peek()
+            .is_some_and(|c| !space(*c) && !start(*c) && !matches!(c, '-' | '\\'))
+        {
             return None;
         }
-        result.push(crate::types::CounterReset { name, value: val, reversed, html_list_start: false });
+        result.push(crate::types::CounterReset {
+            name,
+            value: val,
+            reversed,
+            html_list_start: false,
+        });
     }
     (!result.is_empty()).then_some(result)
 }
@@ -2078,55 +2286,64 @@ pub(crate) fn parse_url_function(v: &str) -> Option<(String, usize)> {
     }
     let mut pos = 4;
     pos += leading_ws_len(&v[pos..]);
-    let bytes = v.as_bytes();
-    let mut value = String::new();
-    if matches!(bytes.get(pos), Some(b'"' | b'\'')) {
-        let quote = bytes[pos];
-        pos += 1;
-        while pos < v.len() {
-            let ch = v[pos..].chars().next()?;
-            pos += ch.len_utf8();
-            if ch == '\\' {
-                if pos < v.len() {
-                    let next = v[pos..].chars().next()?;
-                    value.push('\\');
-                    value.push(next);
-                    pos += next.len_utf8();
-                }
-                continue;
-            }
-            if ch as u8 == quote {
-                break;
-            }
-            value.push(ch);
-        }
+    if matches!(v.as_bytes().get(pos), Some(b'"' | b'\'')) {
+        let (value, tail) = consume_css_string(&v[pos..])?;
+        pos = v.len() - tail.len();
         pos += leading_ws_len(&v[pos..]);
-        if !matches!(v.as_bytes().get(pos), Some(b')')) {
-            return None;
-        }
-        pos += 1;
-        return Some((unescape_css_string(&value), pos));
+        return (v.as_bytes().get(pos) == Some(&b')')).then_some((value, pos + 1));
     }
 
+    let start = pos;
     while pos < v.len() {
         let ch = v[pos..].chars().next()?;
-        if ch == ')' {
-            break;
+        match ch {
+            ')' => return Some((unescape_css_string(&v[start..pos]), pos + 1)),
+            ch if matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c') => {
+                let end = pos;
+                pos += leading_ws_len(&v[pos..]);
+                return (v.as_bytes().get(pos) == Some(&b')'))
+                    .then_some((unescape_css_string(&v[start..end]), pos + 1));
+            }
+            '"' | '\'' | '(' => return None,
+            '\\' => {
+                pos += 1;
+                let next = v[pos..].chars().next()?;
+                if matches!(next, '\n' | '\r' | '\x0c') {
+                    return None;
+                }
+                if next.is_ascii_hexdigit() {
+                    for _ in 0..6 {
+                        let Some(digit) = v[pos..].chars().next() else {
+                            break;
+                        };
+                        if !digit.is_ascii_hexdigit() {
+                            break;
+                        }
+                        pos += digit.len_utf8();
+                    }
+                    if let Some(space) = v[pos..].chars().next()
+                        && space.is_whitespace()
+                    {
+                        pos += space.len_utf8();
+                        if space == '\r' && v[pos..].starts_with('\n') {
+                            pos += 1;
+                        }
+                    }
+                } else {
+                    pos += next.len_utf8();
+                }
+            }
+            ch if ch.is_control() => return None,
+            _ => pos += ch.len_utf8(),
         }
-        value.push(ch);
-        pos += ch.len_utf8();
     }
-    if !matches!(v.as_bytes().get(pos), Some(b')')) {
-        return None;
-    }
-    pos += 1;
-    Some((unescape_css_string(value.trim()), pos))
+    None
 }
 
 fn leading_ws_len(s: &str) -> usize {
     let mut len = 0;
     for ch in s.chars() {
-        if !ch.is_ascii_whitespace() {
+        if !matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c') {
             break;
         }
         len += ch.len_utf8();
@@ -2163,7 +2380,13 @@ pub fn resolve_css_urls(css: &str, css_base_url: &str) -> String {
             crate::html::resolve_url(&url_content, css_base_url)
         };
 
-        result.push_str(&format!("url('{}')", resolved));
+        if resolved.contains('\'') {
+            result.push_str("url(\"");
+            result.push_str(&resolved.replace('\\', "\\\\").replace('"', "\\\""));
+            result.push_str("\")");
+        } else {
+            result.push_str(&format!("url('{}')", resolved));
+        }
         remaining = &url_src[consumed..];
     }
     result.push_str(remaining);
@@ -2399,7 +2622,16 @@ fn function_body(s: &str, open: usize) -> &str {
 /// the fixup rules (css-images-3 §4.3.1) assign it.
 struct RawStop {
     color: Color,
+    current_color: bool,
     pos: Option<f32>,
+}
+
+fn parse_gradient_stop_color(value: &str) -> Option<(Color, bool)> {
+    if value.eq_ignore_ascii_case("currentcolor") {
+        Some((Color::TRANSPARENT, true))
+    } else {
+        parse_color(value).map(|color| (color, false))
+    }
 }
 
 /// A stop position as a fraction of the gradient line.
@@ -2429,18 +2661,23 @@ fn push_color_stop(component: &str, out: &mut Vec<RawStop>) {
     // The colour may itself be a function, so its end is the first space
     // OUTSIDE any parentheses.
     let split = find_top_level_space(c).unwrap_or(c.len());
-    let color = match parse_color(&c[..split]) {
+    let (color, current_color) = match parse_gradient_stop_color(&c[..split]) {
         Some(c) => c,
         None => return,
     };
     let rest = c.get(split..).map(str::trim).unwrap_or("");
     if rest.is_empty() {
-        out.push(RawStop { color, pos: None });
+        out.push(RawStop {
+            color,
+            current_color,
+            pos: None,
+        });
         return;
     }
     for tok in rest.split_whitespace().take(2) {
         out.push(RawStop {
             color,
+            current_color,
             pos: parse_stop_position(tok),
         });
     }
@@ -2498,6 +2735,77 @@ fn fixup_color_stops(stops: &mut [RawStop]) {
     }
 }
 
+fn parse_legacy_webkit_gradient(style: &mut ComputedStyle, layer: &str, name_at: usize) {
+    let Some(open_offset) = layer[name_at..].find('(') else {
+        return;
+    };
+    let args = split_top_level_commas(function_body(layer, name_at + open_offset));
+    if args.len() < 4 || !args[0].trim().eq_ignore_ascii_case("linear") {
+        return;
+    }
+    let point = |value: &str| -> Option<(f32, f32)> {
+        let mut parts = value.split_whitespace();
+        let coordinate = |part: &str| -> Option<f32> {
+            match part.to_ascii_lowercase().as_str() {
+                "left" | "top" => Some(0.0),
+                "center" => Some(0.5),
+                "right" | "bottom" => Some(1.0),
+                _ => parse_stop_position(part),
+            }
+        };
+        Some((coordinate(parts.next()?)?, coordinate(parts.next()?)?))
+    };
+    let (Some(from), Some(to)) = (point(&args[1]), point(&args[2])) else {
+        return;
+    };
+    let angle = (to.0 - from.0).atan2(from.1 - to.1).to_degrees();
+    let mut stops = Vec::new();
+    for arg in args.iter().skip(3) {
+        let arg = arg.trim();
+        let lower = arg.to_ascii_lowercase();
+        let (position, open) = if lower.starts_with("from(") {
+            (0.0, 4)
+        } else if lower.starts_with("to(") {
+            (1.0, 2)
+        } else if lower.starts_with("color-stop(") {
+            let components = split_top_level_commas(function_body(arg, 10));
+            if components.len() != 2 {
+                continue;
+            }
+            let position = parse_stop_position(components[0].trim())
+                .or_else(|| components[0].trim().parse::<f32>().ok());
+            if let (Some(position), Some((color, current_color))) =
+                (position, parse_gradient_stop_color(components[1].trim()))
+            {
+                stops.push(GradientStop {
+                    color,
+                    position,
+                    current_color,
+                });
+            }
+            continue;
+        } else {
+            continue;
+        };
+        if let Some((color, current_color)) =
+            parse_gradient_stop_color(function_body(arg, open).trim())
+        {
+            stops.push(GradientStop {
+                color,
+                position,
+                current_color,
+            });
+        }
+    }
+    if stops.len() < 2 {
+        return;
+    }
+    style.gradient_type = GradientType::Linear;
+    style.gradient_direction = GradientDirection::Angle(angle);
+    style.gradient_angle = angle;
+    style.rare_mut().gradient_stops = stops;
+}
+
 pub fn apply_gradient(style: &mut ComputedStyle, v: &str) {
     // `background` and `background-image` take a comma-separated list of
     // LAYERS, and only one gradient fits in `ComputedStyle`, so the first layer
@@ -2514,6 +2822,10 @@ pub fn apply_gradient(style: &mut ComputedStyle, v: &str) {
     // `to_ascii_lowercase` keeps byte offsets, so an index found in it indexes
     // the original.
     let lower = layer.to_ascii_lowercase();
+    if let Some(name_at) = lower.find("-webkit-gradient(") {
+        parse_legacy_webkit_gradient(style, &layer, name_at);
+        return;
+    }
     let (kind, name_at) = if let Some(i) = lower.find("linear-gradient") {
         (GradientType::Linear, i)
     } else if let Some(i) = lower.find("radial-gradient") {
@@ -2560,7 +2872,7 @@ pub fn apply_gradient(style: &mut ComputedStyle, v: &str) {
             // its own and would otherwise be eaten as a descriptor.
             let first = args[0].trim();
             let split = find_top_level_space(first).unwrap_or(first.len());
-            if parse_color(&first[..split]).is_none() {
+            if parse_gradient_stop_color(&first[..split]).is_none() {
                 apply_radial_gradient_descriptor(style, first);
                 args.remove(0);
             } else {
@@ -2580,6 +2892,7 @@ pub fn apply_gradient(style: &mut ComputedStyle, v: &str) {
     stops.extend(raw.iter().map(|s| GradientStop {
         color: s.color,
         position: s.pos.unwrap_or(0.0),
+        current_color: s.current_color,
     }));
 }
 

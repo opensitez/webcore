@@ -42,12 +42,19 @@ pub fn clear_timer(id: u64) -> bool {
 
 pub fn take_due_timer() -> Option<u64> {
     let mut state = state().lock().unwrap();
-    let index = state.timers.iter().position(|(_, deadline)| *deadline <= now_ms())?;
+    let index = state
+        .timers
+        .iter()
+        .position(|(_, deadline)| *deadline <= now_ms())?;
     Some(state.timers.remove(index).0)
 }
 
 pub fn timer_delay_ms() -> Option<f64> {
-    state().lock().unwrap().timers.iter()
+    state()
+        .lock()
+        .unwrap()
+        .timers
+        .iter()
         .map(|(_, deadline)| (deadline - now_ms()).max(0.0))
         .reduce(f64::min)
 }

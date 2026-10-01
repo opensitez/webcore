@@ -12,7 +12,7 @@
 //! - Debug/inspector visualization
 //! - Future: GPU acceleration, layer compositing
 
-use crate::types::{Color, GradientDirection, Rect, TextUnderlinePosition};
+use crate::types::{Color, GradientDirection, Rect, TextTransform, TextUnderlinePosition};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlaceholderTypography {
@@ -20,9 +20,13 @@ pub struct PlaceholderTypography {
     pub font_weight: u16,
     pub font_style: u8,
     pub font_family: String,
+    pub font_stretch: f32,
     pub line_height: f32,
     pub letter_spacing: f32,
     pub word_spacing: f32,
+    pub text_transform: TextTransform,
+    pub decoration: TextDecoration,
+    pub shadow: Option<crate::types::TextShadow>,
 }
 
 /// A single paint command in the display list.
@@ -92,7 +96,10 @@ pub enum PaintCmd {
     PopTextGradient,
 
     /// Draw an image (RGBA data) at a position.
-    Image { rect: Rect, data: ImageRef },
+    Image {
+        rect: Rect,
+        data: ImageRef,
+    },
 
     /// Push a clip rectangle — all subsequent commands are clipped to this rect.
     PushClip {
@@ -102,19 +109,33 @@ pub enum PaintCmd {
     },
 
     /// Push an arbitrary polygon clip in document coordinates.
-    PushClipPath { points: Vec<(f32, f32)> },
+    PushClipPath {
+        points: Vec<(f32, f32)>,
+    },
+
+    /// Push a parsed CSS path clip at the reference-box origin.
+    PushClipSvgPath {
+        path: std::sync::Arc<tiny_skia::Path>,
+        fill_rule: tiny_skia::FillRule,
+        origin: (f32, f32),
+    },
 
     /// Pop the current clip.
     PopClip,
 
     /// Push a CSS transform.
-    PushTransform { node_id: u32, transform: [f32; 6] }, // 2D affine: [a, b, c, d, e, f]
+    PushTransform {
+        node_id: u32,
+        transform: [f32; 6],
+    }, // 2D affine: [a, b, c, d, e, f]
 
     /// Pop the current transform.
     PopTransform,
 
     /// Push opacity — all subsequent commands are rendered with this alpha.
-    PushOpacity { alpha: f32 },
+    PushOpacity {
+        alpha: f32,
+    },
 
     /// Pop opacity.
     PopOpacity,
@@ -136,13 +157,18 @@ pub enum PaintCmd {
 
     /// Push a CSS mask layer. Subsequent element content is rendered offscreen,
     /// then composited through the mask image on pop.
-    PushMask { rect: Rect, data: ImageRef },
+    PushMask {
+        rect: Rect,
+        data: ImageRef,
+    },
 
     /// Pop the current CSS mask layer.
     PopMask,
 
     /// Push a blend mode layer — subsequent content is composited with this mode.
-    PushBlendMode { mode: u8 }, // 0=normal, 1=multiply, 2=screen, 3=overlay, etc.
+    PushBlendMode {
+        mode: u8,
+    }, // 0=normal, 1=multiply, 2=screen, 3=overlay, etc.
 
     /// Pop blend mode.
     PopBlendMode,
@@ -207,7 +233,11 @@ pub enum PaintCmd {
     },
 
     /// Draw a horizontal line (for <hr>).
-    HorizontalRule { x1: f32, y1: f32, x2: f32 },
+    HorizontalRule {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+    },
 
     /// List marker: 0=disc, 1=circle, 2=square, 3=text, 4=image URL in `text`.
     ListMarker {
@@ -321,7 +351,10 @@ pub enum PaintCmd {
     },
 
     /// Marker: start of a stacking context.
-    BeginStackingContext { node_id: u32, z_index: i32 },
+    BeginStackingContext {
+        node_id: u32,
+        z_index: i32,
+    },
 
     /// Marker: end of a stacking context.
     EndStackingContext,
@@ -490,6 +523,12 @@ impl DisplayListMemoryEstimate {
                     points
                         .capacity()
                         .saturating_mul(std::mem::size_of::<(f32, f32)>()),
+                );
+            }
+            PaintCmd::PushClipSvgPath { path, .. } => {
+                self.add_vec_bytes(
+                    path.verbs().len()
+                        + path.points().len() * std::mem::size_of::<tiny_skia::Point>(),
                 );
             }
             PaintCmd::PushFilter { filters } | PaintCmd::BackdropFilter { filters, .. } => {

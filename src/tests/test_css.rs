@@ -2,14 +2,43 @@
 
 use super::harness::*;
 use crate::css::{
-    PseudoElement, Stylesheet, apply_property, parse_declarations, parse_selector,
-    parse_stylesheet, parse_length_checked, resolve_content_value, resolve_counters_in_content,
+    PseudoElement, Stylesheet, apply_property, parse_declarations, parse_length_checked,
+    parse_selector, parse_stylesheet, resolve_content_value, resolve_counters_in_content,
 };
 use crate::frame::EngineFrame;
 use crate::html::parse_html;
 use crate::renderer::display_list::PaintCmd;
 use crate::renderer::display_list_builder::build_display_list;
 use crate::types::*;
+
+#[test]
+fn identical_recascade_preserves_clean_layout() {
+    let mut root = WebCore::new("main");
+    root.node_id = 1;
+    let mut child = WebCore::new("p");
+    child.node_id = 2;
+    root.children.push(child);
+
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add("main { color: red } p { width: 100px }");
+    sheet.rebuild_index();
+    crate::css::apply_cascade(&mut root, &sheet, None, 16.0);
+    root.layout.last_containing_width = 800.0;
+    root.children[0].layout.last_containing_width = 800.0;
+    root.layout.layout_dirty = false;
+    root.children[0].layout.layout_dirty = false;
+
+    crate::css::apply_cascade(&mut root, &sheet, None, 16.0);
+    assert!(!root.layout.layout_dirty);
+    assert!(!root.children[0].layout.layout_dirty);
+
+    sheet.parse_and_add("p { width: 120px }");
+    sheet.rebuild_index();
+    crate::css::apply_cascade(&mut root, &sheet, None, 16.0);
+    assert!(!root.layout.layout_dirty);
+    assert!(root.children[0].layout.layout_dirty);
+    assert_eq!(root.children[0].style.width, CssLength::Px(120.0));
+}
 
 #[test]
 fn shared_parent_styles_do_not_skip_descendant_cascade() {
@@ -29,15 +58,30 @@ fn shared_parent_styles_do_not_skip_descendant_cascade() {
         sheet.parse_and_add(&format!(
             "section {{color:{color};quotes:none}} span {{font-size:24px;background:yellow}}"
         ));
-        for i in 0..extra_rules { sheet.parse_and_add(&format!(".unused{i} {{color:green}}")); }
+        for i in 0..extra_rules {
+            sheet.parse_and_add(&format!(".unused{i} {{color:green}}"));
+        }
         sheet.rebuild_index();
         crate::css::apply_cascade(&mut root, &sheet, None, 16.0);
         for parent in &root.children {
             let child = &parent.children[0];
-            assert_eq!(child.style.font_size, CssLength::Px(24.0), "descendant {}", child.node_id);
+            assert_eq!(
+                child.style.font_size,
+                CssLength::Px(24.0),
+                "descendant {}",
+                child.node_id
+            );
             assert_eq!(child.style.color, parent.style.color);
             assert_eq!(child.style.rare().quotes, Some(Vec::new()));
-            assert_eq!(child.style.background_color, Color {r:255,g:255,b:0,a:255});
+            assert_eq!(
+                child.style.background_color,
+                Color {
+                    r: 255,
+                    g: 255,
+                    b: 0,
+                    a: 255
+                }
+            );
         }
     }
 }
@@ -73,15 +117,28 @@ fn negative_margin_can_reduce_atomic_inline_advance_to_zero() {
         </style><div class="nav"><header class="links" id="links"></header><button class="menu" id="menu"></button></div>"#,
         1200.0,
     );
-    let links = crate::tests::test_grid::find_by_id(&doc.root, "links").unwrap().layout.border_rect;
-    let menu = crate::tests::test_grid::find_by_id(&doc.root, "menu").unwrap().layout.border_rect;
-    assert!((menu.y - links.y).abs() < 1.0, "button wrapped below the header: {menu:?} {links:?}");
+    let links = crate::tests::test_grid::find_by_id(&doc.root, "links")
+        .unwrap()
+        .layout
+        .border_rect;
+    let menu = crate::tests::test_grid::find_by_id(&doc.root, "menu")
+        .unwrap()
+        .layout
+        .border_rect;
+    assert!(
+        (menu.y - links.y).abs() < 1.0,
+        "button wrapped below the header: {menu:?} {links:?}"
+    );
     assert!((menu.x - (links.x + links.w - menu.w)).abs() < 1.0);
 }
 
 #[test]
 fn media_and_container_queries_accept_adjacent_logical_keyword() {
-    assert!(!crate::css::evaluate_media("screen and (max-width:1023px)", 1280.0, 820.0));
+    assert!(!crate::css::evaluate_media(
+        "screen and (max-width:1023px)",
+        1280.0,
+        820.0
+    ));
     let query = "(min-width:768px)and (max-width:1023px)";
     assert!(crate::css::evaluate_media(query, 900.0, 700.0));
     assert!(!crate::css::evaluate_media(query, 1280.0, 700.0));
@@ -198,11 +255,18 @@ fn indented_inline_link_after_atomic_box_paints_at_its_layout_position() {
     let link = doc.get_element_by_id("link").unwrap();
     let link_x = doc.get_bounding_client_rect(link).unwrap().x;
     let list = build_display_list(&doc.root, 800.0, 600.0);
-    let text_x = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::Text { x, text, .. } if text.contains("French Anthology") => Some(*x),
-        _ => None,
-    }).expect("link text paint command");
-    assert!((text_x - link_x).abs() < 2.0, "paint x {text_x}, layout x {link_x}");
+    let text_x = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::Text { x, text, .. } if text.contains("French Anthology") => Some(*x),
+            _ => None,
+        })
+        .expect("link text paint command");
+    assert!(
+        (text_x - link_x).abs() < 2.0,
+        "paint x {text_x}, layout x {link_x}"
+    );
 }
 
 #[test]
@@ -217,24 +281,49 @@ fn leading_space_after_inline_link_is_preserved_in_painted_geometry() {
         800.0,
     );
     let list = crate::renderer::display_list_builder::build_display_list_full_with_font_system(
-        &doc.root, 800.0, 200.0, 0.0, 0.0, 0, 0,
-        &std::collections::HashSet::new(), "", Some(&mut renderer.font_system),
+        &doc.root,
+        800.0,
+        200.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+        Some(&mut renderer.font_system),
     );
     for (link, following) in [("Misti", "is a volcano"), ("and", "hydropower plants")] {
-        let (link_x, link_y) = list.commands.iter().find_map(|cmd| match cmd {
-            PaintCmd::Text {text, x, y, ..} if text == link => Some((*x, *y)),
-            _ => None,
-        }).unwrap();
-        let (next_x, next_y) = list.commands.iter().find_map(|cmd| match cmd {
-            PaintCmd::Text {text, x, y, ..} if text.starts_with(following) => Some((*x, *y)),
-            _ => None,
-        }).unwrap();
+        let (link_x, link_y) = list
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                PaintCmd::Text { text, x, y, .. } if text == link => Some((*x, *y)),
+                _ => None,
+            })
+            .unwrap();
+        let (next_x, next_y) = list
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                PaintCmd::Text { text, x, y, .. } if text.starts_with(following) => Some((*x, *y)),
+                _ => None,
+            })
+            .unwrap();
         let advance = crate::layout::inline_layout::measure_text_width_weighted(
-            &format!("{link} "), 16.0, Some(&mut renderer.font_system),
-            FontWeight::Normal, FontStyle::Normal, 1.0, "Menlo", 100.0,
+            &format!("{link} "),
+            16.0,
+            Some(&mut renderer.font_system),
+            FontWeight::Normal,
+            FontStyle::Normal,
+            1.0,
+            "Menlo",
+            100.0,
         );
-        assert!((next_x - link_x - advance).abs() < 0.1,
-            "{link}: separator must reserve exactly one space, advance={}, expected={advance}", next_x - link_x);
+        assert!(
+            (next_x - link_x - advance).abs() < 0.1,
+            "{link}: separator must reserve exactly one space, advance={}, expected={advance}",
+            next_x - link_x
+        );
         assert_eq!(link_y, next_y);
     }
 }
@@ -251,13 +340,27 @@ fn generated_content_slash_alt_text_is_not_visible() {
 fn bidi_level_runs_use_utf8_byte_offsets() {
     for prefix in ["العربية", "עברית", "😀 العربية", "é עברית"] {
         let text = format!("xx{prefix} Deutsch");
-        let mut line = LayoutLine {text_start:2, text_length:text.len()-2, ..LayoutLine::default()};
-        crate::layout::text::resolve_bidi_line(&text, &mut line, Direction::LTR, UnicodeBidi::Normal);
+        let mut line = LayoutLine {
+            text_start: 2,
+            text_length: text.len() - 2,
+            ..LayoutLine::default()
+        };
+        crate::layout::text::resolve_bidi_line(
+            &text,
+            &mut line,
+            Direction::LTR,
+            UnicodeBidi::Normal,
+        );
         let start = text.find("Deutsch").unwrap();
-        assert!(line.visual_segments.iter().any(|segment|
-            segment.logical_start <= start && segment.logical_start + segment.length >= start + "Deutsch".len()
-                && segment.level % 2 == 0
-        ), "Latin text split or assigned an RTL level after {prefix}: {:?}", line.visual_segments);
+        assert!(
+            line.visual_segments
+                .iter()
+                .any(|segment| segment.logical_start <= start
+                    && segment.logical_start + segment.length >= start + "Deutsch".len()
+                    && segment.level % 2 == 0),
+            "Latin text split or assigned an RTL level after {prefix}: {:?}",
+            line.visual_segments
+        );
         for segment in &line.visual_segments {
             assert!(text.is_char_boundary(segment.logical_start));
             assert!(text.is_char_boundary(segment.logical_start + segment.length));
@@ -697,6 +800,24 @@ fn external_stylesheet_urls_use_stylesheet_origin() {
 }
 
 #[test]
+fn stylesheet_url_rewrite_preserves_svg_data_url_quotes() {
+    let css = crate::css::resolve_css_urls(
+        r#".icon::after { mask-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3C/svg%3E") }"#,
+        "https://example.test/styles/site.css",
+    );
+    assert!(
+        css.contains("url(\"data:image/svg+xml;charset=utf-8,"),
+        "{css}"
+    );
+    assert_eq!(
+        crate::css::extract_url(&css).as_deref(),
+        Some(
+            "data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3C/svg%3E"
+        )
+    );
+}
+
+#[test]
 fn font_face_preserves_standard_descriptors() {
     let mut sheet = Stylesheet::default();
     sheet.parse_and_add_with_base(
@@ -764,6 +885,33 @@ fn font_face_unicode_range_matches_ranges_and_wildcards() {
         Some("U+0600-06FF, U+1F600"),
         "😀"
     ));
+}
+
+#[test]
+fn font_face_unicode_coverage_matches_text_scan() {
+    use crate::css::font_face::{UnicodeTextCoverage, unicode_range_intersects_text};
+
+    for text in ["", "ABC", "ΩӒ", "😀", "A😀Ω"] {
+        let coverage = UnicodeTextCoverage::new(text);
+        for range in [
+            None,
+            Some(""),
+            Some("invalid"),
+            Some("U+0041"),
+            Some("U+0042-0044"),
+            Some("U+0370-03FF"),
+            Some("U+4??"),
+            Some("U+1F600"),
+            Some("U+0600-06FF, U+1F600"),
+            Some("U+10FFFF"),
+        ] {
+            assert_eq!(
+                coverage.intersects(range),
+                unicode_range_intersects_text(range, text),
+                "{range:?} {text:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -843,26 +991,48 @@ fn local_font_face_alias_is_available_to_fallback_stack() {
         "different aliases for the same local family must both be registered"
     );
     let alias_normal = crate::layout::inline_layout::measure_text_width_weighted(
-        "Darüber spricht Deutschland", 20.0, Some(&mut renderer.font_system),
-        FontWeight::Normal, FontStyle::Normal, 1.0,
-        "Missing Site Face, Site Fallback", 100.0,
+        "Darüber spricht Deutschland",
+        20.0,
+        Some(&mut renderer.font_system),
+        FontWeight::Normal,
+        FontStyle::Normal,
+        1.0,
+        "Missing Site Face, Site Fallback",
+        100.0,
     );
     let arial_normal = crate::layout::inline_layout::measure_text_width_weighted(
-        "Darüber spricht Deutschland", 20.0, Some(&mut renderer.font_system),
-        FontWeight::Normal, FontStyle::Normal, 1.0, "Arial", 100.0,
+        "Darüber spricht Deutschland",
+        20.0,
+        Some(&mut renderer.font_system),
+        FontWeight::Normal,
+        FontStyle::Normal,
+        1.0,
+        "Arial",
+        100.0,
     );
     assert!(
         (alias_normal - arial_normal).abs() < 1.0,
         "local alias should shape normally like Arial: alias={alias_normal}, Arial={arial_normal}"
     );
     let alias_width = crate::layout::inline_layout::measure_text_width_weighted(
-        "Darüber spricht Deutschland", 20.0, Some(&mut renderer.font_system),
-        FontWeight::Bold, FontStyle::Normal, 1.0,
-        "Missing Site Face, Site Fallback", 100.0,
+        "Darüber spricht Deutschland",
+        20.0,
+        Some(&mut renderer.font_system),
+        FontWeight::Bold,
+        FontStyle::Normal,
+        1.0,
+        "Missing Site Face, Site Fallback",
+        100.0,
     );
     let arial_width = crate::layout::inline_layout::measure_text_width_weighted(
-        "Darüber spricht Deutschland", 20.0, Some(&mut renderer.font_system),
-        FontWeight::Bold, FontStyle::Normal, 1.0, "Arial", 100.0,
+        "Darüber spricht Deutschland",
+        20.0,
+        Some(&mut renderer.font_system),
+        FontWeight::Bold,
+        FontStyle::Normal,
+        1.0,
+        "Arial",
+        100.0,
     );
     assert!(
         (alias_width - arial_width).abs() < 1.0,
@@ -925,7 +1095,7 @@ fn css_nesting_preserves_grouping_at_rules() {
 
     assert!(
         ss.iter().any(|r| r.original_selector == ".card"
-            && r.media_condition == "(min-width: 1px)"
+            && r.media_condition.label() == "(min-width: 1px)"
             && r.declarations
                 .get("color")
                 .map(|v| v == "red")
@@ -934,7 +1104,7 @@ fn css_nesting_preserves_grouping_at_rules() {
     );
     assert!(
         ss.iter().any(|r| r.original_selector == ".card:hover"
-            && r.media_condition == "(min-width: 1px)"
+            && r.media_condition.label() == "(min-width: 1px)"
             && r.declarations
                 .get("color")
                 .map(|v| v == "blue")
@@ -1295,13 +1465,15 @@ fn supports_nested_condition_parens_and_case_insensitive_selector_function() {
 
 #[test]
 fn has_child_chain_is_anchored_and_searches_descendants() {
-    let doc = parse(r#"<style>
+    let doc = parse(
+        r#"<style>
         section { color:blue }
         section:has(> .a > .b > .c) { color:red }
         section:has(.a .c) { background-color:yellow }
     </style>
     <section id=match><div class=a><div class=b><span class=c></span></div></div></section>
-    <section id=wrong><div><div class=a><div class=b><span class=c></span></div></div></div></section>"#);
+    <section id=wrong><div><div class=a><div class=b><span class=c></span></div></div></div></section>"#,
+    );
     let a = crate::dom::query_selector(&doc.root, "#match").unwrap();
     let b = crate::dom::query_selector(&doc.root, "#wrong").unwrap();
     assert_eq!(a.style.color, Color::rgb(255, 0, 0));
@@ -1312,7 +1484,8 @@ fn has_child_chain_is_anchored_and_searches_descendants() {
 
 #[test]
 fn supports_subgrid_keeps_nested_card_rules() {
-    let doc = parse(r#"<style>
+    let doc = parse(
+        r#"<style>
         .card { display:flex }
         @supports (grid-template-rows: subgrid) {
             @supports selector(:has(*)) {
@@ -1321,8 +1494,12 @@ fn supports_subgrid_keeps_nested_card_rules() {
         }
         @supports (grid-template-columns: subgrid) { .card { color:red } }
         @supports (grid-template-rows: not-a-track) { .card { display:none } }
-    </style><div class=card></div>"#);
-    let card = find_box(&doc.root, &|b| b.attributes.get("class").is_some_and(|v| v == "card")).unwrap();
+    </style><div class=card></div>"#,
+    );
+    let card = find_box(&doc.root, &|b| {
+        b.attributes.get("class").is_some_and(|v| v == "card")
+    })
+    .unwrap();
     assert_eq!(card.style.display, Display::Grid);
     assert!(card.style.subgrid_rows);
     assert_eq!(card.style.color, Color::rgb(255, 0, 0));
@@ -1331,75 +1508,145 @@ fn supports_subgrid_keeps_nested_card_rules() {
 #[test]
 fn supports_deferred_property_families() {
     for (property, value) in [
-        ("display", "flow-root"), ("display", "contents"),
+        ("display", "flow-root"),
+        ("display", "contents"),
         ("grid-template-columns", "repeat(3, minmax(0, 1fr))"),
         ("grid-template-rows", "[first] 20px [last] min-content"),
-        ("grid-auto-columns", "100px 1fr"), ("grid-auto-flow", "column dense"),
+        ("grid-auto-columns", "100px 1fr"),
+        ("grid-auto-flow", "column dense"),
         ("grid-auto-columns", "calc((100cqw - 4 * 12px) / 5)"),
         ("width", "calc(100% - 2rem)"),
         ("font-size", "clamp(1rem, 2vw, 2rem)"),
-        ("grid-template-areas", "\"a a\" \"b c\""), ("grid-column", "span 2 / end"),
-        ("container-type", "inline-size"), ("container", "cards / inline-size"),
-        ("contain", "layout paint"), ("content-visibility", "auto"),
+        ("grid-template-areas", "\"a a\" \"b c\""),
+        ("grid-column", "span 2 / end"),
+        ("container-type", "inline-size"),
+        ("container", "cards / inline-size"),
+        ("contain", "layout paint"),
+        ("content-visibility", "auto"),
         ("contain-intrinsic-size", "auto 200px"),
-        ("transform", "translateX(10px) rotate(20deg)"), ("translate", "20% 1em"),
-        ("rotate", "45deg"), ("scale", "1.2"), ("transform-origin", "right bottom"),
-        ("filter", "blur(2px)"), ("backdrop-filter", "brightness(0.5)"),
-        ("animation-duration", "1s, 200ms"), ("animation-delay", "-1s"),
-        ("animation-timing-function", "steps(4, end)"), ("animation-iteration-count", "infinite"),
-        ("animation-composition", "add"), ("transition-behavior", "allow-discrete"),
-        ("animation", "spin 1s linear infinite"), ("transition", "opacity 0.2s ease"),
-        ("color", "light-dark(white, black)"), ("color-scheme", "light dark"),
-        ("font-size", "large"), ("font-weight", "bolder"), ("font-family", "\"Market Sans\", sans-serif"),
-        ("font-stretch", "120%"), ("font-feature-settings", "\"liga\" 1"),
-        ("font-variation-settings", "\"wght\" 600"), ("font-variant-numeric", "tabular-nums"),
-        ("font-synthesis", "none"), ("text-wrap", "balance"),
-        ("text-decoration", "underline wavy red"), ("text-shadow", "1px 2px 3px black"),
-        ("text-emphasis", "filled sesame red"), ("overflow-wrap", "anywhere"),
-        ("hyphens", "auto"), ("direction", "rtl"), ("writing-mode", "vertical-rl"),
-        ("align-content", "space-evenly"), ("align-items", "safe center"),
-        ("gap", "1em 2em"), ("flex", "1 1 auto"), ("flex-flow", "row wrap"),
-        ("table-layout", "fixed"), ("border-spacing", "2px 4px"),
-        ("aspect-ratio", "16 / 9"), ("object-fit", "cover"), ("object-position", "50% 50%"),
-        ("user-select", "none"), ("appearance", "none"), ("touch-action", "pan-y"),
-        ("scroll-snap-type", "x mandatory"), ("scroll-snap-align", "start"),
-        ("overscroll-behavior", "contain"), ("scrollbar-color", "red blue"),
-        ("mix-blend-mode", "multiply"), ("isolation", "isolate"),
-        ("column-count", "3"), ("columns", "12em 3"), ("break-inside", "avoid"),
-        ("counter-reset", "items 0"), ("counter-increment", "items"),
-        ("stroke-width", "0"), ("stroke", "none"), ("padding-inline", "1em 2em"),
-        ("margin-block", "auto"), ("border-radius", "50% / 20%"),
-        ("border", "1px solid transparent"), ("outline", "2px dotted red"),
-        ("background-image", "linear-gradient(red, blue)"), ("mask-image", "url(icon.svg)"),
-        ("background-image", "image-set(\"one.png\" 1x, \"two.png\" 2x)"),
-        ("background-size", "cover"), ("background", "red"),
-        ("clip-path", "polygon(0 0, 100% 0, 50% 100%)"), ("shape-outside", "circle(50%)"),
+        ("transform", "translateX(10px) rotate(20deg)"),
+        ("translate", "20% 1em"),
+        ("rotate", "45deg"),
+        ("scale", "1.2"),
+        ("transform-origin", "right bottom"),
+        ("filter", "blur(2px)"),
+        ("backdrop-filter", "brightness(0.5)"),
+        ("animation-duration", "1s, 200ms"),
+        ("animation-delay", "-1s"),
+        ("animation-timing-function", "steps(4, end)"),
+        ("animation-iteration-count", "infinite"),
+        ("animation-composition", "add"),
+        ("transition-behavior", "allow-discrete"),
+        ("animation", "spin 1s linear infinite"),
+        ("transition", "opacity 0.2s ease"),
+        ("color", "light-dark(white, black)"),
+        ("color-scheme", "light dark"),
+        ("font-size", "large"),
+        ("font-weight", "bolder"),
+        ("font-family", "\"Market Sans\", sans-serif"),
+        ("font-stretch", "120%"),
+        ("font-feature-settings", "\"liga\" 1"),
+        ("font-variation-settings", "\"wght\" 600"),
+        ("font-variant-numeric", "tabular-nums"),
+        ("font-synthesis", "none"),
+        ("text-wrap", "balance"),
+        ("text-decoration", "underline wavy red"),
+        ("text-shadow", "1px 2px 3px black"),
+        ("text-emphasis", "filled sesame red"),
+        ("overflow-wrap", "anywhere"),
+        ("hyphens", "auto"),
+        ("direction", "rtl"),
+        ("writing-mode", "vertical-rl"),
+        ("align-content", "space-evenly"),
+        ("align-items", "safe center"),
+        ("gap", "1em 2em"),
+        ("flex", "1 1 auto"),
+        ("flex-flow", "row wrap"),
+        ("table-layout", "fixed"),
+        ("border-spacing", "2px 4px"),
+        ("aspect-ratio", "16 / 9"),
+        ("object-fit", "cover"),
+        ("object-position", "50% 50%"),
+        ("user-select", "none"),
+        ("appearance", "none"),
+        ("touch-action", "pan-y"),
+        ("scroll-snap-type", "x mandatory"),
+        ("scroll-snap-align", "start"),
+        ("overscroll-behavior", "contain"),
+        ("scrollbar-color", "red blue"),
+        ("mix-blend-mode", "multiply"),
+        ("isolation", "isolate"),
+        ("column-count", "3"),
+        ("columns", "12em 3"),
+        ("break-inside", "avoid"),
+        ("counter-reset", "items 0"),
+        ("counter-increment", "items"),
+        ("stroke-width", "0"),
+        ("stroke", "none"),
+        ("padding-inline", "1em 2em"),
+        ("margin-block", "auto"),
+        ("border-radius", "50% / 20%"),
+        ("border", "1px solid transparent"),
+        ("outline", "2px dotted red"),
+        ("background-image", "linear-gradient(red, blue)"),
+        ("mask-image", "url(icon.svg)"),
+        (
+            "background-image",
+            "image-set(\"one.png\" 1x, \"two.png\" 2x)",
+        ),
+        ("background-size", "cover"),
+        ("background", "red"),
+        ("clip-path", "polygon(0 0, 100% 0, 50% 100%)"),
+        ("shape-outside", "circle(50%)"),
     ] {
         let condition = format!("({property}: {value})");
-        assert!(crate::css::parser::supports_condition_matches(&condition), "{condition}");
+        assert!(
+            crate::css::parser::supports_condition_matches(&condition),
+            "{condition}"
+        );
     }
 }
 
 #[test]
 fn supports_rejects_invalid_deferred_values() {
     for condition in [
-        "(grid-template-rows: not-a-track)", "(grid-template-columns: repeat(0, 1fr))",
-        "(grid-auto-columns: -1fr)", "(container-type: mystery)",
-        "(transform: unknown(3))", "(filter: unknown(3))", "(animation-duration: fast)",
-        "(animation-duration: -2s)", "(animation-timing-function: nonsense)",
-        "(color-scheme: bluish)", "(font-size: potato)", "(font-weight: 1001)",
-        "(gap: bogus)", "(padding: unknown)", "(border: banana)",
-        "(background-image: not-an-image)", "(clip-path: polygon(nonsense))",
+        "(grid-template-rows: not-a-track)",
+        "(grid-template-columns: repeat(0, 1fr))",
+        "(grid-auto-columns: -1fr)",
+        "(container-type: mystery)",
+        "(transform: unknown(3))",
+        "(filter: unknown(3))",
+        "(animation-duration: fast)",
+        "(animation-duration: -2s)",
+        "(animation-timing-function: nonsense)",
+        "(color-scheme: bluish)",
+        "(font-size: potato)",
+        "(font-weight: 1001)",
+        "(gap: bogus)",
+        "(padding: unknown)",
+        "(border: banana)",
+        "(background-image: not-an-image)",
+        "(clip-path: polygon(nonsense))",
         "(not-a-property: initial)",
-        "(anchor-name: --card)", "(animation-timeline: scroll())",
+        "(anchor-name: --card)",
+        "(animation-timeline: scroll())",
         "(offset-path: path('M 0 0 L 10 10'))",
     ] {
-        assert!(!crate::css::parser::supports_condition_matches(condition), "{condition}");
+        assert!(
+            !crate::css::parser::supports_condition_matches(condition),
+            "{condition}"
+        );
     }
 }
 
 #[test]
 fn supports_font_format_and_font_tech_conditions() {
+    assert!(crate::css::parser::supports_condition_matches(
+        "font-format(\"woff2\")"
+    ));
+    assert!(crate::css::parser::supports_condition_matches(
+        "font-format(\"embedded-opentype\")"
+    ));
     let doc = parse(
         r#"<html><head><style>
               p { color: rgb(1, 2, 3); background-color: rgb(9, 9, 9); border-top-color: rgb(2, 2, 2); }
@@ -1672,6 +1919,79 @@ fn env_fallback_tokens_survive_shadow_and_border_image_shorthands() {
     assert_eq!(style.border_image_width, "env(--width, calc(4px + 2px))");
     assert_eq!(style.border_image_outset, "env(--outset, calc(1px + 3px))");
     assert_eq!(style.border_image_repeat, "round");
+}
+
+#[test]
+fn border_image_shorthand_rejects_invalid_values_without_resetting_longhands() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "border-image",
+        "url(border.png) 30 fill / 10px / 2px round stretch",
+    );
+    assert_eq!(style.border_image_source, "url(border.png)");
+    assert_eq!(style.border_image_slice, "30 fill");
+    assert_eq!(style.border_image_width, "10px");
+    assert_eq!(style.border_image_outset, "2px");
+    assert_eq!(style.border_image_repeat, "round stretch");
+    let previous = style.clone();
+    for invalid in [
+        "",
+        "url(a.png) url(b.png) 30",
+        "url(a.png 30",
+        "30 fill fill",
+        "30 20 10 5 2",
+        "30 -2",
+        "30 /",
+        "30 / /",
+        "30 / -2px",
+        "30 / 2 / 10%",
+        "30 / 2 / -1px",
+        "30 / 2 / env(--outset, 10%)",
+        "30 / 2 / 3 / 4",
+        "30 repeat round space",
+        "30 / auto auto auto auto auto",
+    ] {
+        apply_property(&mut style, "border-image", invalid);
+        assert_eq!(style, previous, "{invalid}");
+    }
+    apply_property(&mut style, "border-image", "30 / / 2 repeat");
+    assert_eq!(style.border_image_source, "none");
+    assert_eq!(style.border_image_slice, "30");
+    assert_eq!(style.border_image_width, "1");
+    assert_eq!(style.border_image_outset, "2");
+    assert_eq!(style.border_image_repeat, "repeat");
+}
+
+#[test]
+fn border_image_longhands_reject_invalid_values_without_resetting() {
+    let mut style = ComputedStyle::default();
+    for (property, valid, invalid) in [
+        ("border-image-source", "url(border.png)", "url(border.png"),
+        ("border-image-slice", "30 fill", "30 fill fill"),
+        ("border-image-width", "2px auto", "2px -1px"),
+        ("border-image-outset", "2px 1", "2px 10%"),
+        ("border-image-repeat", "round stretch", "round stretch repeat"),
+    ] {
+        apply_property(&mut style, property, valid);
+        let previous = style.clone();
+        apply_property(&mut style, property, invalid);
+        assert_eq!(style, previous, "{property}: {invalid}");
+    }
+    assert_eq!(style.border_image_source, "url(border.png)");
+    assert_eq!(style.border_image_slice, "30 fill");
+    assert_eq!(style.border_image_width, "2px auto");
+    assert_eq!(style.border_image_outset, "2px 1");
+    assert_eq!(style.border_image_repeat, "round stretch");
+    let previous = style.clone();
+    apply_property(&mut style, "border-image-slice", "calc(2px)");
+    assert_eq!(style, previous);
+    apply_property(
+        &mut style,
+        "border-image-slice",
+        "env(safe-area-inset-top, 10)",
+    );
+    assert_eq!(style, previous);
 }
 
 #[test]
@@ -1966,9 +2286,11 @@ fn font_shorthand_accepts_numeric_weight_range() {
 fn font_shorthand_tracks_family_offset_through_whitespace() {
     for gap in [" ", "   ", "\t", "\n\t "] {
         let mut style = ComputedStyle::default();
-        apply_property(&mut style, "font", &format!(
-            "italic{gap}700{gap}20px/24px{gap}\"Example Family\", sans-serif"
-        ));
+        apply_property(
+            &mut style,
+            "font",
+            &format!("italic{gap}700{gap}20px/24px{gap}\"Example Family\", sans-serif"),
+        );
         assert_eq!(style.font_style, FontStyle::Italic);
         assert_eq!(style.font_weight, FontWeight::Value(700));
         assert_eq!(style.font_size, CssLength::Px(20.0));
@@ -2028,6 +2350,7 @@ fn font_shorthand_resolves_nested_custom_property_token() {
         &[],
         &[],
         &mut candidates,
+        None,
     );
     assert!(
         matched
@@ -2044,10 +2367,7 @@ fn font_shorthand_resolves_nested_custom_property_token() {
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        crate::css::resolve_var_references(
-            "var(--headline)",
-            &doc.stylesheet.variables
-        ),
+        crate::css::resolve_var_references("var(--headline)", &doc.stylesheet.variables),
         "700  20px/24px  \"GT America\", sans-serif"
     );
 
@@ -2568,11 +2888,17 @@ fn nested_shrink_wrap_preserves_fractional_intrinsic_widths() {
         .wrap {display:inline-block}
         #leaf {padding:0 2.25px;border:0.5px solid black}
         </style><span class=wrap id=outer><span class=wrap id=middle><span class=wrap id=leaf>All</span></span></span>"#, 800.0);
-    let leaf = crate::dom::query_selector(&doc.root, "#leaf").unwrap().layout.border_rect;
+    let leaf = crate::dom::query_selector(&doc.root, "#leaf")
+        .unwrap()
+        .layout
+        .border_rect;
     for id in ["#middle", "#outer"] {
         let node = crate::dom::query_selector(&doc.root, id).unwrap();
-        assert!((node.layout.border_rect.w - leaf.w).abs() < 0.01,
-            "{id} inflated its child's fractional width: {:?} vs {leaf:?}", node.layout.border_rect);
+        assert!(
+            (node.layout.border_rect.w - leaf.w).abs() < 0.01,
+            "{id} inflated its child's fractional width: {:?} vs {leaf:?}",
+            node.layout.border_rect
+        );
         assert_eq!(node.layout.line_cache.len(), 1);
     }
 }
@@ -2932,22 +3258,40 @@ fn nested_inline_before_content_contributes_to_icon_width() {
 fn atomic_generated_content_paints_once_with_nonzero_boxes() {
     let mut renderer = crate::Renderer::new();
     for display in ["inline-block", "inline-flex", "inline-grid"] {
-        let doc = renderer.load_html(&format!(r#"<style>
+        let doc = renderer.load_html(
+            &format!(
+                r#"<style>
             body {{font:20px/30px sans-serif}}
             #subject::before {{content:'A';display:{display};width:2em;background:yellow}}
             #subject::after {{content:'B';display:{display};width:2em;background:blue}}
-            </style><div id=subject>Label</div>"#), 800.0);
+            </style><div id=subject>Label</div>"#
+            ),
+            800.0,
+        );
         let owner = crate::dom::query_selector(&doc.root, "#subject").unwrap();
         for tag in ["::before", "::after"] {
-            let pseudo = owner.children.iter().find(|child| child.tag == tag).unwrap();
+            let pseudo = owner
+                .children
+                .iter()
+                .find(|child| child.tag == tag)
+                .unwrap();
             assert_eq!(pseudo.layout.content_rect.w, 40.0, "{display} {tag}");
-            assert!(pseudo.layout.content_rect.h >= 30.0, "{display} {tag}: {:?}", pseudo.layout.content_rect);
+            assert!(
+                pseudo.layout.content_rect.h >= 30.0,
+                "{display} {tag}: {:?}",
+                pseudo.layout.content_rect
+            );
         }
         let list = build_display_list(&doc.root, 800.0, 200.0);
         for glyph in ["A", "B"] {
-            assert_eq!(list.commands.iter().filter(|cmd|
-                matches!(cmd, PaintCmd::Text { text, .. } if text == glyph)
-            ).count(), 1, "{display}: {glyph} must paint exactly once");
+            assert_eq!(
+                list.commands
+                    .iter()
+                    .filter(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == glyph))
+                    .count(),
+                1,
+                "{display}: {glyph} must paint exactly once"
+            );
         }
     }
 }
@@ -2978,15 +3322,23 @@ fn slashdot_icon_font_before_rules_generate_inline_pseudo_content() {
             .unwrap_or(false)
     })
     .unwrap();
-    let generated = icon.children.iter().find(|child| child.tag == "::before")
+    let generated = icon
+        .children
+        .iter()
+        .find(|child| child.tag == "::before")
         .expect("atomic inline pseudo must have a generated box");
     assert_eq!(generated.text, "\u{e87a}");
     assert_eq!(generated.style.font_family, "sdicon");
     assert_eq!(generated.layout.content_rect.w, 16.0);
     let list = build_display_list(&doc.root, 800.0, 200.0);
-    assert_eq!(list.commands.iter().filter(|cmd|
-        matches!(cmd, PaintCmd::Text { text, .. } if text == "\u{e87a}")
-    ).count(), 1, "the icon must reach paint exactly once");
+    assert_eq!(
+        list.commands
+            .iter()
+            .filter(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == "\u{e87a}"))
+            .count(),
+        1,
+        "the icon must reach paint exactly once"
+    );
     let before = icon
         .style
         .before_style
@@ -3028,15 +3380,23 @@ fn slashdot_icon_font_before_rules_survive_parallel_cascade() {
             .unwrap_or(false)
     })
     .unwrap();
-    let generated = icon.children.iter().find(|child| child.tag == "::before")
+    let generated = icon
+        .children
+        .iter()
+        .find(|child| child.tag == "::before")
         .expect("parallel cascade must retain the generated pseudo box");
     assert_eq!(generated.text, "\u{e87a}");
     assert_eq!(generated.style.font_family, "sdicon");
     assert_eq!(generated.layout.content_rect.w, 16.0);
     let list = build_display_list(&doc.root, 800.0, 200.0);
-    assert_eq!(list.commands.iter().filter(|cmd|
-        matches!(cmd, PaintCmd::Text { text, .. } if text == "\u{e87a}")
-    ).count(), 1, "parallel cascade must paint the icon exactly once");
+    assert_eq!(
+        list.commands
+            .iter()
+            .filter(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text == "\u{e87a}"))
+            .count(),
+        1,
+        "parallel cascade must paint the icon exactly once"
+    );
     assert_eq!(
         icon.style
             .before_style
@@ -3211,17 +3571,37 @@ fn positioned_pseudo_on_plain_inline_uses_owner_geometry() {
         800.0,
     );
     let list = build_display_list(&doc.root, 800.0, 200.0);
-    let owner = crate::dom::query_selector(&doc.root, "#icon").unwrap().layout.padding_rect;
+    let owner = crate::dom::query_selector(&doc.root, "#icon")
+        .unwrap()
+        .layout
+        .padding_rect;
     assert_eq!(owner.x, 40.0);
-    assert!(owner.y >= 30.0 && owner.w > 0.0 && owner.h > 0.0, "{owner:?}");
-    let decorations: Vec<_> = list.commands.iter().filter_map(|cmd| match cmd {
-        PaintCmd::FillRect { rect, color, .. }
-            if color.r == 0 && color.g == 0 && color.b == 0 && color.a == 255 => Some(rect),
-        _ => None,
-    }).collect();
-    assert_eq!(decorations.len(), 1, "the positioned decoration must not be suppressed or duplicated");
+    assert!(
+        owner.y >= 30.0 && owner.w > 0.0 && owner.h > 0.0,
+        "{owner:?}"
+    );
+    let decorations: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::FillRect { rect, color, .. }
+                if color.r == 0 && color.g == 0 && color.b == 0 && color.a == 255 =>
+            {
+                Some(rect)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        decorations.len(),
+        1,
+        "the positioned decoration must not be suppressed or duplicated"
+    );
     let rect = decorations[0];
-    assert_eq!((rect.x, rect.y, rect.w, rect.h), (owner.x + 100.0, owner.y + 100.0, 20.0, 20.0));
+    assert_eq!(
+        (rect.x, rect.y, rect.w, rect.h),
+        (owner.x + 100.0, owner.y + 100.0, 20.0, 20.0)
+    );
 }
 
 #[test]
@@ -3713,61 +4093,134 @@ fn counter_declarations_validate_names_integers_and_preserve_previous_values() {
     for property in ["counter-reset", "counter-increment", "counter-set"] {
         let mut style = ComputedStyle::default();
         apply_property(&mut style, property, "chapter 7");
-        for invalid in ["", "12", "chapter 1.5", "chapter 2px", "chapter 1e2", "chapter +", "chapter, other", "chapter none", "chapter inherit", "- 2", "chapter \\\n"] {
+        for invalid in [
+            "",
+            "12",
+            "chapter 1.5",
+            "chapter 2px",
+            "chapter 1e2",
+            "chapter +",
+            "chapter, other",
+            "chapter none",
+            "chapter inherit",
+            "- 2",
+            "chapter \\\n",
+        ] {
             apply_property(&mut style, property, invalid);
             let actual = match property {
-                "counter-reset" => style.counter_reset.iter().map(|r| (r.name.clone(), r.value.unwrap())).collect(),
+                "counter-reset" => style
+                    .counter_reset
+                    .iter()
+                    .map(|r| (r.name.clone(), r.value.unwrap()))
+                    .collect(),
                 "counter-increment" => style.counter_increment.clone(),
                 _ => style.counter_set.clone(),
             };
-            assert_eq!(actual, vec![("chapter".into(), 7)], "{property}: {invalid:?}");
+            assert_eq!(
+                actual,
+                vec![("chapter".into(), 7)],
+                "{property}: {invalid:?}"
+            );
         }
         apply_property(&mut style, property, "NoNe");
-        assert!(style.counter_reset.is_empty() && style.counter_increment.is_empty() && style.counter_set.is_empty());
+        assert!(
+            style.counter_reset.is_empty()
+                && style.counter_increment.is_empty()
+                && style.counter_set.is_empty()
+        );
     }
-    assert_eq!(crate::css::apply::parse_counter_list_checked(r"\63 hapter +2 --part -3", 0),
-        Some(vec![("chapter".into(), 2), ("--part".into(), -3)]));
-    assert_eq!(crate::css::apply::parse_counter_list_checked("a 999999999999999999999 b -999999999999999999999", 0),
-        Some(vec![("a".into(), i32::MAX), ("b".into(), i32::MIN)]));
+    assert_eq!(
+        crate::css::apply::parse_counter_list_checked(r"\63 hapter +2 --part -3", 0),
+        Some(vec![("chapter".into(), 2), ("--part".into(), -3)])
+    );
+    assert_eq!(
+        crate::css::apply::parse_counter_list_checked(
+            "a 999999999999999999999 b -999999999999999999999",
+            0
+        ),
+        Some(vec![("a".into(), i32::MAX), ("b".into(), i32::MIN)])
+    );
 }
 
 #[test]
 fn counter_math_uses_typed_integer_evaluation_and_rounding() {
     let mut style = ComputedStyle::default();
-    for (property, expected) in [("counter-reset", 3), ("counter-increment", 3), ("counter-set", 3)] {
+    for (property, expected) in [
+        ("counter-reset", 3),
+        ("counter-increment", 3),
+        ("counter-set", 3),
+    ] {
         apply_property(&mut style, property, "n calc(2.5) other calc(-2.5)");
         let actual = match property {
-            "counter-reset" => style.counter_reset.iter().map(|r| (r.name.clone(), r.value.unwrap())).collect(),
+            "counter-reset" => style
+                .counter_reset
+                .iter()
+                .map(|r| (r.name.clone(), r.value.unwrap()))
+                .collect(),
             "counter-increment" => style.counter_increment.clone(),
             _ => style.counter_set.clone(),
         };
-        assert_eq!(actual, vec![("n".into(), expected), ("other".into(), -2)], "{property}");
+        assert_eq!(
+            actual,
+            vec![("n".into(), expected), ("other".into(), -2)],
+            "{property}"
+        );
     }
     apply_property(&mut style, "counter-reset", "n calc(2 * max(2, 3)) plain");
-    assert_eq!(style.counter_reset, vec![CounterReset::normal("n", 6), CounterReset::normal("plain", 0)]);
-    for invalid in ["n calc(1px)", "n calc(50%)", "n calc(1 + )", "n calc(2", "n unknown(2)"] {
+    assert_eq!(
+        style.counter_reset,
+        vec![
+            CounterReset::normal("n", 6),
+            CounterReset::normal("plain", 0)
+        ]
+    );
+    for invalid in [
+        "n calc(1px)",
+        "n calc(50%)",
+        "n calc(1 + )",
+        "n calc(2",
+        "n unknown(2)",
+    ] {
         apply_property(&mut style, "counter-reset", invalid);
-        assert_eq!(style.counter_reset, vec![CounterReset::normal("n", 6), CounterReset::normal("plain", 0)], "{invalid}");
+        assert_eq!(
+            style.counter_reset,
+            vec![
+                CounterReset::normal("n", 6),
+                CounterReset::normal("plain", 0)
+            ],
+            "{invalid}"
+        );
     }
-    assert_eq!(build_display_texts(r#"<style>
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         body {counter-reset:n calc(2 * max(2, 3));}
         p {counter-increment:n calc(2.5);}
         p::before {content:counter(n) "|";}
         p:last-child {counter-set:n calc(-2.5);}
-        </style><p></p><p></p>"#).concat(), "9|-2|");
+        </style><p></p><p></p>"#
+        )
+        .concat(),
+        "9|-2|"
+    );
 }
 
 #[test]
 fn counter_computed_values_serialize_names_defaults_and_math() {
-    let mut doc = parse_html(r#"<style>
+    let mut doc = parse_html(
+        r#"<style>
         #counter {counter-reset:chapter calc(2.5) section;
           counter-increment:chapter section -2;counter-set:section calc(-2.5);}
         #escaped {counter-reset:\31 st 2 a\ b 3 \- 4 \2d 2 5;}
-        </style><div id=counter></div><div id=escaped></div><div id=empty></div>"#);
+        </style><div id=counter></div><div id=escaped></div><div id=empty></div>"#,
+    );
     doc.set_viewport(800.0, 600.0);
     let id = doc.get_element_by_id("counter").unwrap();
-    for (property, expected) in [("counter-reset", "chapter 3 section 0"),
-        ("counter-increment", "chapter 1 section -2"), ("counter-set", "section -2")] {
+    for (property, expected) in [
+        ("counter-reset", "chapter 3 section 0"),
+        ("counter-increment", "chapter 1 section -2"),
+        ("counter-set", "section -2"),
+    ] {
         assert_eq!(doc.computed_style_property(id, property), expected);
     }
     let empty = doc.get_element_by_id("empty").unwrap();
@@ -3777,8 +4230,15 @@ fn counter_computed_values_serialize_names_defaults_and_math() {
     let escaped = doc.get_element_by_id("escaped").unwrap();
     let serialized = doc.computed_style_property(escaped, "counter-reset");
     assert_eq!(serialized, r"\31 st 2 a\ b 3 \- 4 -\32  5");
-    assert_eq!(crate::css::apply::parse_counter_list_checked(&serialized, 0),
-        Some(vec![("1st".into(), 2), ("a b".into(), 3), ("-".into(), 4), ("-2".into(), 5)]));
+    assert_eq!(
+        crate::css::apply::parse_counter_list_checked(&serialized, 0),
+        Some(vec![
+            ("1st".into(), 2),
+            ("a b".into(), 3),
+            ("-".into(), 4),
+            ("-2".into(), 5)
+        ])
+    );
 }
 
 #[test]
@@ -3793,46 +4253,93 @@ fn explicitly_initialized_reversed_counters_keep_direction_in_scope() {
         ol {counter-reset:reversed(list-item) 5;} li {list-style:none;counter-increment:list-item 2;}
         li::before {content:counter(list-item) "|";}
         </style><ol><li></li><li></li></ol>"#).concat(), "7|9|");
-    assert_eq!(build_display_texts(r#"<style>
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         body {counter-reset:reversed(n) 4;} p {counter-increment:n;}
         p::before {content:counter(n) "|";}
-        </style><p></p><p></p>"#).concat(), "5|6|");
-    let mut doc = parse_html(r#"<style>#x {counter-reset:reversed(n) calc(2.5) other;}</style><div id=x></div>"#);
+        </style><p></p><p></p>"#
+        )
+        .concat(),
+        "5|6|"
+    );
+    let mut doc = parse_html(
+        r#"<style>#x {counter-reset:reversed(n) calc(2.5) other;}</style><div id=x></div>"#,
+    );
     doc.set_viewport(800.0, 600.0);
     let id = doc.get_element_by_id("x").unwrap();
-    assert_eq!(doc.computed_style_property(id, "counter-reset"), "reversed(n) 3 other 0");
+    assert_eq!(
+        doc.computed_style_property(id, "counter-reset"),
+        "reversed(n) 3 other 0"
+    );
     for invalid in ["reversed(n) 2", "reversed(n)", "reversed(n 2) 3"] {
-        assert!(crate::css::apply::parse_counter_list_checked(invalid, 1).is_none(), "increment/set reject reset-only syntax");
+        assert!(
+            crate::css::apply::parse_counter_list_checked(invalid, 1).is_none(),
+            "increment/set reject reset-only syntax"
+        );
     }
 }
 
 #[test]
 fn automatic_reversed_counters_resolve_scope_operations_before_paint() {
-    assert_eq!(build_display_texts(r#"<style>
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         ol.reverse {counter-reset:reversed(list-item);} li {list-style:none;}
         li::before {content:counter(list-item) "|";}
-        </style><ol class=reverse><li></li><li><ol><li></li></ol></li><li></li></ol>"#).concat(), "3|2|1|1|");
-    assert_eq!(build_display_texts(r#"<style>
+        </style><ol class=reverse><li></li><li><ol><li></li></ol></li><li></li></ol>"#
+        )
+        .concat(),
+        "3|2|1|1|"
+    );
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         body {counter-reset:reversed(n);} p {counter-increment:n -2;}
         p::before {content:counter(n) "|";}
-        </style><p></p><p></p><p></p>"#).concat(), "6|4|2|");
-    assert_eq!(build_display_texts(r#"<style>
+        </style><p></p><p></p><p></p>"#
+        )
+        .concat(),
+        "6|4|2|"
+    );
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         body {counter-reset:reversed(n);} p {counter-increment:n -1;}
         p.set {counter-set:n 9;} p::before {content:counter(n) "|";}
-        </style><p></p><p class=set></p><p></p>"#).concat(), "10|9|8|");
-    assert_eq!(build_display_texts(r#"<style>
+        </style><p></p><p class=set></p><p></p>"#
+        )
+        .concat(),
+        "10|9|8|"
+    );
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         body {counter-reset:reversed(n);}
         p::before,p::after {counter-increment:n -1;content:counter(n) "|";}
-        </style><p></p><p></p>"#).concat(), "4|3|2|1|");
-    assert_eq!(build_display_texts(r#"<style>
+        </style><p></p><p></p>"#
+        )
+        .concat(),
+        "4|3|2|1|"
+    );
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         h2 {counter-reset:reversed(n);} p {counter-increment:n -1;}
         h2::before,p::before {content:counter(n) "|";}
         .hidden {display:none;}
-        </style><h2></h2><p></p><p class=hidden></p><p></p><h2></h2><p></p>"#).concat(), "3|2|1|2|1|");
+        </style><h2></h2><p></p><p class=hidden></p><p></p><h2></h2><p></p>"#
+        )
+        .concat(),
+        "3|2|1|2|1|"
+    );
     let mut doc = parse_html("<div id=x style='counter-reset:reversed(n)'></div>");
     doc.set_viewport(800.0, 600.0);
     let id = doc.get_element_by_id("x").unwrap();
-    assert_eq!(doc.computed_style_property(id, "counter-reset"), "reversed(n)");
+    assert_eq!(
+        doc.computed_style_property(id, "counter-reset"),
+        "reversed(n)"
+    );
 }
 
 #[test]
@@ -3853,8 +4360,14 @@ fn automatic_reversed_initial_values_recompute_after_incremental_cascade() {
         crate::css::clear_cascade_dirty(&mut root);
         root.children[1].cascade_dirty = true;
         root.has_dirty_descendant = true;
-        let hover = if hovered { std::collections::HashSet::from([3]) } else { std::collections::HashSet::new() };
-        crate::css::apply_cascade_incremental(&mut root, &sheet, None, 16.0, 800.0, 600.0, 0, false, &hover);
+        let hover = if hovered {
+            std::collections::HashSet::from([3])
+        } else {
+            std::collections::HashSet::new()
+        };
+        crate::css::apply_cascade_incremental(
+            &mut root, &sheet, None, 16.0, 800.0, 600.0, 0, false, &hover,
+        );
         assert_eq!(root.children[0].style.before_content, expected);
     }
 }
@@ -3865,7 +4378,10 @@ fn counter_reset_defaults_to_zero_but_increment_defaults_to_one() {
     apply_property(&mut style, "counter-reset", "section");
     apply_property(&mut style, "counter-increment", "item");
 
-    assert_eq!(style.counter_reset, vec![CounterReset::normal("section", 0)]);
+    assert_eq!(
+        style.counter_reset,
+        vec![CounterReset::normal("section", 0)]
+    );
     assert_eq!(style.counter_increment, vec![("item".to_string(), 1)]);
 }
 
@@ -3915,21 +4431,36 @@ fn aspect_ratio_math_uses_top_level_separator_and_rejects_invalid_values() {
         ("auto calc(3 + 1) / 2", Some(2.0)),
         ("sqrt(9) / calc(1 + 1) auto", Some(1.5)),
         ("calc(16 / 9)", Some(16.0 / 9.0)),
-        ("0 / 2", None), ("2 / 0", None),
+        ("0 / 2", None),
+        ("2 / 0", None),
     ] {
         apply_property(&mut style, "aspect-ratio", source);
         assert_eq!(style.aspect_ratio, expected, "{source}");
     }
-    for source in ["garbage / 2", "4 / garbage", "2 / 3 / 4", "-2 / 1",
-        "auto auto", "2 auto / 1", "calc(2px) / 1", ""] {
+    for source in [
+        "garbage / 2",
+        "4 / garbage",
+        "2 / 3 / 4",
+        "-2 / 1",
+        "auto auto",
+        "2 auto / 1",
+        "calc(2px) / 1",
+        "",
+    ] {
         style.aspect_ratio = Some(3.0);
         apply_property(&mut style, "aspect-ratio", source);
         assert_eq!(style.aspect_ratio, Some(3.0), "invalid: {source}");
     }
-    let doc = parse_and_layout("<div id=a style='width:240px;aspect-ratio:calc(8 / 2) / sqrt(4)'></div>", 800.0);
+    let doc = parse_and_layout(
+        "<div id=a style='width:240px;aspect-ratio:calc(8 / 2) / sqrt(4)'></div>",
+        800.0,
+    );
     let a = crate::dom::query_selector(&doc.root, "#a").unwrap();
     assert_eq!(a.layout.content_rect.h, 120.0);
-    let doc = parse_and_layout("<style>#a{width:240px;aspect-ratio:3;aspect-ratio:garbage / 2}#b{width:240px;aspect-ratio:3!important;aspect-ratio:garbage / 2!important}</style><div id=a></div><div id=b></div><div id=c style='width:240px;aspect-ratio:3;aspect-ratio:garbage / 2'></div>", 800.0);
+    let doc = parse_and_layout(
+        "<style>#a{width:240px;aspect-ratio:3;aspect-ratio:garbage / 2}#b{width:240px;aspect-ratio:3!important;aspect-ratio:garbage / 2!important}</style><div id=a></div><div id=b></div><div id=c style='width:240px;aspect-ratio:3;aspect-ratio:garbage / 2'></div>",
+        800.0,
+    );
     for id in ["#a", "#b", "#c"] {
         let node = crate::dom::query_selector(&doc.root, id).unwrap();
         assert_eq!(node.layout.content_rect.h, 80.0, "{id}");
@@ -3939,19 +4470,32 @@ fn aspect_ratio_math_uses_top_level_separator_and_rejects_invalid_values() {
 #[test]
 fn css_math_serialization_round_trips_dimensions_and_fractional_lengths() {
     for source in [
-        "0.125px", "-0.75px", "calc(50% - 0.25px)",
-        "calc(2 * min(20%, 3em))", "calc((100% - 2em) / 3)",
-        "round(up, 10% + 1em, 2px)", "mod(70% - 3px, 2em)",
-        "rem(70% - 3px, 2em)", "abs(10% - 2em)",
-        "calc(sign(10% - 2em) * 1px)", "hypot(10%, 2em)",
-        "calc(sin(30deg) * 10%)", "calc(cos(.5turn) * 2em)",
-        "calc(tan(45deg) * 3px)", "calc(asin(1) / 1deg * 1px)",
-        "calc(acos(0) / 1deg * 1px)", "calc(atan(1) / 1rad * 1px)",
+        "0.125px",
+        "-0.75px",
+        "calc(50% - 0.25px)",
+        "calc(2 * min(20%, 3em))",
+        "calc((100% - 2em) / 3)",
+        "round(up, 10% + 1em, 2px)",
+        "mod(70% - 3px, 2em)",
+        "rem(70% - 3px, 2em)",
+        "abs(10% - 2em)",
+        "calc(sign(10% - 2em) * 1px)",
+        "hypot(10%, 2em)",
+        "calc(sin(30deg) * 10%)",
+        "calc(cos(.5turn) * 2em)",
+        "calc(tan(45deg) * 3px)",
+        "calc(asin(1) / 1deg * 1px)",
+        "calc(acos(0) / 1deg * 1px)",
+        "calc(atan(1) / 1rad * 1px)",
         "calc(atan2(10%, 2em) / 1deg * 1px)",
-        "calc(pow(2, 3) * 1px)", "calc(sqrt(9) * 1px)",
-        "calc(log(exp(2)) * 1px)", "calc(1s / 250ms * 2px)",
-        "calc(2khz / 500hz * 2px)", "calc(192dpi / 1dppx * 2px)",
-        "clamp(none, 50% + 2px, none)", "min(0px, 1em)",
+        "calc(pow(2, 3) * 1px)",
+        "calc(sqrt(9) * 1px)",
+        "calc(log(exp(2)) * 1px)",
+        "calc(1s / 250ms * 2px)",
+        "calc(2khz / 500hz * 2px)",
+        "calc(192dpi / 1dppx * 2px)",
+        "clamp(none, 50% + 2px, none)",
+        "min(0px, 1em)",
     ] {
         let original = parse_length_checked(source).unwrap_or_else(|| panic!("input: {source}"));
         let serialized = crate::html::serializer::serialize_length(&original);
@@ -3960,19 +4504,27 @@ fn css_math_serialization_round_trips_dimensions_and_fractional_lengths() {
         for (font, basis) in [(16.0, 100.0), (30.0, 600.0)] {
             let expected = original.resolve_vp(font, basis, 20.0, 800.0, 600.0);
             let actual = reparsed.resolve_vp(font, basis, 20.0, 800.0, 600.0);
-            assert!((actual - expected).abs() < 0.001, "{source} -> {serialized}: {actual} != {expected}");
+            assert!(
+                (actual - expected).abs() < 0.001,
+                "{source} -> {serialized}: {actual} != {expected}"
+            );
         }
     }
 }
 
 #[test]
 fn cssom_nonlinear_math_keeps_percentage_dependency() {
-    let mut doc = parse_html("<div id=a style='font-size:20px;background-size:round(up, 50% + 1em, 3px) auto'></div>");
+    let mut doc = parse_html(
+        "<div id=a style='font-size:20px;background-size:round(up, 50% + 1em, 3px) auto'></div>",
+    );
     doc.set_viewport(800.0, 600.0);
     let a = doc.get_element_by_id("a").unwrap();
     let computed = doc.computed_style_property(a, "background-size");
     let value = parse_length_checked(&computed).unwrap_or_else(|| panic!("{computed}"));
-    assert!(value.has_percentage(), "computed value lost its percentage: {computed}");
+    assert!(
+        value.has_percentage(),
+        "computed value lost its percentage: {computed}"
+    );
     assert_eq!(value.resolve(20.0, 100.0, 16.0), 72.0);
     assert_eq!(value.resolve(20.0, 200.0, 16.0), 120.0);
 }
@@ -4012,9 +4564,20 @@ fn css_math_numeric_properties_use_typed_values_and_integer_rounding() {
     apply_property(&mut style, "orphans", "calc(1.5)");
     assert_eq!((style.widows, style.orphans), (3, 2));
 
-    let doc = parse_and_layout("<style>#a{flex-grow:sqrt(9);flex-shrink:calc(1 / 2);order:calc(-1.5);z-index:calc(2.5)}</style><div id=a>a</div>", 400.0);
+    let doc = parse_and_layout(
+        "<style>#a{flex-grow:sqrt(9);flex-shrink:calc(1 / 2);order:calc(-1.5);z-index:calc(2.5)}</style><div id=a>a</div>",
+        400.0,
+    );
     let a = crate::dom::query_selector(&doc.root, "#a").unwrap();
-    assert_eq!((a.style.flex_grow, a.style.flex_shrink, a.style.order, a.style.z_index), (3.0, 0.5, -1, 3));
+    assert_eq!(
+        (
+            a.style.flex_grow,
+            a.style.flex_shrink,
+            a.style.order,
+            a.style.z_index
+        ),
+        (3.0, 0.5, -1, 3)
+    );
 }
 
 #[test]
@@ -4028,10 +4591,17 @@ fn css_math_clamp_conflicting_bounds_favor_minimum() {
         ("clamp(-10px, -30px, -20px)", -10.0),
     ] {
         let length = parse_length_checked(source).unwrap();
-        assert_eq!(length.resolve_vp(20.0, 400.0, 16.0, 800.0, 600.0), expected, "{source}");
+        assert_eq!(
+            length.resolve_vp(20.0, 400.0, 16.0, 800.0, 600.0),
+            expected,
+            "{source}"
+        );
     }
     for width in [200.0, 400.0] {
-        let doc = parse_and_layout("<style>body{margin:0}#subject{width:clamp(50%,75px,50px);height:20px}</style><div id=subject></div>", width);
+        let doc = parse_and_layout(
+            "<style>body{margin:0}#subject{width:clamp(50%,75px,50px);height:20px}</style><div id=subject></div>",
+            width,
+        );
         let node = crate::dom::query_selector(&doc.root, "#subject").unwrap();
         assert_eq!(node.layout.content_rect.w, width * 0.5);
     }
@@ -4072,25 +4642,34 @@ fn css_math_functions_resolve_mixed_units_and_precedence() {
     ] {
         let parsed = parse_length_checked(value).unwrap_or_else(|| panic!("rejected {value}"));
         let actual = parsed.resolve_vp(20.0, 400.0, 16.0, 1000.0, 600.0);
-        assert!((actual - expected).abs() < 0.01, "{value}: {actual}, expected {expected}");
+        assert!(
+            (actual - expected).abs() < 0.01,
+            "{value}: {actual}, expected {expected}"
+        );
     }
 }
 
 #[test]
 fn css_math_resolves_in_property_consumers() {
-    let doc = parse_and_layout(r#"<style>
+    let doc = parse_and_layout(
+        r#"<style>
        #math { width:min(100% - 20px, 15em); font-size:20px;
          opacity:calc(25% + 25%); line-height:sqrt(4);
          transform:rotate(calc(.25turn + 90deg)) scale(sqrt(4));
          animation-duration:calc(1s + 250ms); }
-    </style><div style='width:400px'><div id=math>math</div></div>"#, 800.0);
+    </style><div style='width:400px'><div id=math>math</div></div>"#,
+        800.0,
+    );
     let node = crate::dom::query_selector(&doc.root, "#math").unwrap();
     assert!((node.layout.content_rect.w - 300.0).abs() < 0.1);
     assert_eq!(node.style.opacity, 0.5);
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "opacity", "0.4");
     apply_property(&mut style, "opacity", "calc(25% + 0.25)");
-    assert_eq!(style.opacity, 0.4, "incompatible opacity types must not replace the previous value");
+    assert_eq!(
+        style.opacity, 0.4,
+        "incompatible opacity types must not replace the previous value"
+    );
     assert_eq!(node.style.line_height, CssLength::Em(2.0));
     assert_eq!(crate::css::parse_time_ms("calc(1s + 250ms)"), Some(1250.0));
     let transform = crate::css::parse_css_transform("rotate(calc(.25turn + 90deg)) scale(sqrt(4))");
@@ -4100,14 +4679,25 @@ fn css_math_resolves_in_property_consumers() {
 
 #[test]
 fn css_math_rejects_incompatible_dimensions_and_incomplete_input() {
-    for value in ["calc(1px + 2)", "calc(1px * 2px)", "calc(1px +)", "calc(1px garbage)", "calc(1px+ 2px)", "min(1px, 2s)", "sqrt(4px)", "round(10px)", "clamp(1px, 2px)"] {
+    for value in [
+        "calc(1px + 2)",
+        "calc(1px * 2px)",
+        "calc(1px +)",
+        "calc(1px garbage)",
+        "calc(1px+ 2px)",
+        "min(1px, 2s)",
+        "sqrt(4px)",
+        "round(10px)",
+        "clamp(1px, 2px)",
+    ] {
         assert!(parse_length_checked(value).is_none(), "accepted {value}");
     }
 }
 
 #[test]
 fn implicit_counters_continue_across_siblings_without_escaping_parent() {
-    let doc = parse_and_layout(r#"<style>
+    let doc = parse_and_layout(
+        r#"<style>
         .item { counter-increment: popular; display:flex }
         .item::before { content: counter(popular) }
         .set { counter-set: assigned 7 }
@@ -4120,10 +4710,23 @@ fn implicit_counters_continue_across_siblings_without_escaping_parent() {
       <li class=item id=d>five</li>
     </ol></section>
     <section><div class=item id=separate>one</div></section>
-    <section><div class=set></div><div class=next id=setnext>eight</div></section>"#, 800.0);
-    for (id, expected) in [("#a", "1"), ("#b", "2"), ("#c", "3"), ("#nested", "4"), ("#d", "5"), ("#separate", "1"), ("#setnext", "8")] {
+    <section><div class=set></div><div class=next id=setnext>eight</div></section>"#,
+        800.0,
+    );
+    for (id, expected) in [
+        ("#a", "1"),
+        ("#b", "2"),
+        ("#c", "3"),
+        ("#nested", "4"),
+        ("#d", "5"),
+        ("#separate", "1"),
+        ("#setnext", "8"),
+    ] {
         let node = crate::dom::query_selector(&doc.root, id).unwrap();
-        let text = node.children.iter().find(|child| child.tag == "::before")
+        let text = node
+            .children
+            .iter()
+            .find(|child| child.tag == "::before")
             .map(|pseudo| pseudo.text.as_str())
             .unwrap_or(&node.style.before_content);
         assert_eq!(text, expected, "{id}");
@@ -4152,24 +4755,48 @@ fn counter_reset_then_increment_starts_generated_content_at_one() {
 
 #[test]
 fn explicit_counter_resets_survive_siblings_and_replace_same_level_instances() {
-    assert_eq!(build_display_texts(r#"<style>
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         h2 {counter-reset:n 5;}
         h2.second {counter-reset:n 9;} p {counter-increment:n;}
         h2::before,p::before {content:counters(n,".") "|";}
-        </style><h2></h2><p></p><h2 class=second></h2><p></p>"#).concat(), "5|6|9|10|");
-    assert_eq!(build_display_texts(r#"<style>
+        </style><h2></h2><p></p><h2 class=second></h2><p></p>"#
+        )
+        .concat(),
+        "5|6|9|10|"
+    );
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         body {counter-reset:n 1;} section {counter-reset:n 5;}
         div {counter-reset:n 8;} p {counter-increment:n;}
         div::before,p::before {content:counters(n,".") "|";}
-        </style><section><div></div><p></p></section><p></p>"#).concat(), "1.5.8|1.6|2|");
-    assert_eq!(build_display_texts(r#"<style>
+        </style><section><div></div><p></p></section><p></p>"#
+        )
+        .concat(),
+        "1.5.8|1.6|2|"
+    );
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         section::before {counter-reset:n 4;content:counters(n,".") "|";}
         section::after {counter-increment:n;content:counters(n,".") "|";}
         p {counter-increment:n;} p::before {content:counters(n,".") "|";}
-        </style><section><p></p></section><p></p>"#).concat(), "4|5|6|1|");
-    assert_eq!(build_display_texts(r#"<style>
+        </style><section><p></p></section><p></p>"#
+        )
+        .concat(),
+        "4|5|6|1|"
+    );
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         body {counter-reset:n 1;} p {counter-reset:n 4 n 7;}
-        p::before {content:counters(n,".");}</style><p></p>"#).concat(), "1.7");
+        p::before {content:counters(n,".");}</style><p></p>"#
+        )
+        .concat(),
+        "1.7"
+    );
 }
 
 #[test]
@@ -4227,13 +4854,15 @@ fn content_on_normal_element_does_not_replace_rendered_inline_text() {
 #[test]
 fn style_containment_scopes_quote_depth_without_resetting_it() {
     for contain in ["style", "layout style", "content", "strict"] {
-        let html = format!(r#"<style>
+        let html = format!(
+            r#"<style>
             body {{quotes:"[" "]" "{{" "}}";}}
             .open::before {{content:open-quote;}}
             .close::before {{content:close-quote;}}
             .scope {{contain:{contain}; width:200px; height:40px;}}
             .scope::before {{content:open-quote;}}
-            </style><span class=open></span><div class=scope><span class=open></span></div><span class=close></span>"#);
+            </style><span class=open></span><div class=scope><span class=open></span></div><span class=close></span>"#
+        );
         assert_eq!(build_display_texts(&html).concat(), "[{{]", "{contain}");
     }
     assert_eq!(build_display_texts(r#"<style>
@@ -4243,33 +4872,68 @@ fn style_containment_scopes_quote_depth_without_resetting_it() {
         .scope .scope::after {content:close-quote;}
         .close::before {content:close-quote "X";}
         </style><div class=scope><div class=scope></div><span class=close></span></div><span class=close></span>"#).concat(), "[{}]XX");
-    assert_eq!(build_display_texts(r#"<style>
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         body {quotes:"[" "]" "{" "}";}
         p::before {content:open-quote; contain:style;}
         p::after {content:close-quote "X";}
-        </style><p>A</p>"#).concat(), "[A]X");
-    assert_eq!(build_display_texts(r#"<style>
+        </style><p>A</p>"#
+        )
+        .concat(),
+        "[A]X"
+    );
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         body {quotes:"[" "]";}
         .scope {contain:style; display:contents;}
         .scope::before {content:open-quote;}
         .close::before {content:close-quote;}
-        </style><div class=scope>A</div><span class=close></span>"#).concat(), "[A]");
+        </style><div class=scope>A</div><span class=close></span>"#
+        )
+        .concat(),
+        "[A]"
+    );
 }
 
 #[test]
 fn inline_generated_content_surrounds_block_children_in_flow() {
     let mut renderer = crate::Renderer::new();
-    let doc = renderer.load_html(r#"<style>
+    let doc = renderer.load_html(
+        r#"<style>
         body {margin:0; font:20px/30px monospace;}
         section::before {content:"[";} section::after {content:"]";}
-        </style><section><div>X</div></section>"#, 800.0);
+        </style><section><div>X</div></section>"#,
+        800.0,
+    );
     let list = crate::renderer::display_list_builder::build_display_list_full_with_font_system(
-        &doc.root, 800.0, 600.0, 0.0, 0.0, 0, 0,
-        &std::collections::HashSet::new(), "", Some(&mut renderer.font_system));
-    let text: Vec<_> = list.commands.iter().filter_map(|command| {
-        if let PaintCmd::Text { y, text, .. } = command { Some((*y, text.as_str())) } else { None }
-    }).collect();
-    assert_eq!(text.iter().map(|(_, text)| *text).collect::<String>(), "[X]");
+        &doc.root,
+        800.0,
+        600.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+        Some(&mut renderer.font_system),
+    );
+    let text: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|command| {
+            if let PaintCmd::Text { y, text, .. } = command {
+                Some((*y, text.as_str()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        text.iter().map(|(_, text)| *text).collect::<String>(),
+        "[X]"
+    );
     assert_eq!(text.len(), 3);
     assert!((text[1].0 - text[0].0 - 30.0).abs() < 0.01, "{text:?}");
     assert!((text[2].0 - text[1].0 - 30.0).abs() < 0.01, "{text:?}");
@@ -4278,18 +4942,41 @@ fn inline_generated_content_surrounds_block_children_in_flow() {
 #[test]
 fn generated_content_only_blocks_reserve_line_height() {
     let mut renderer = crate::Renderer::new();
-    let doc = renderer.load_html(r#"<style>
+    let doc = renderer.load_html(
+        r#"<style>
         body {margin:0; font:20px/30px monospace; quotes:"[" "]";}
         .generated::before {content:open-quote;}
         .generated::after {content:close-quote;}
-        </style><div class=generated></div><div>X</div>"#, 800.0);
+        </style><div class=generated></div><div>X</div>"#,
+        800.0,
+    );
     let list = crate::renderer::display_list_builder::build_display_list_full_with_font_system(
-        &doc.root, 800.0, 600.0, 0.0, 0.0, 0, 0,
-        &std::collections::HashSet::new(), "", Some(&mut renderer.font_system));
-    let text: Vec<_> = list.commands.iter().filter_map(|command| {
-        if let PaintCmd::Text { y, text, .. } = command { Some((*y, text.as_str())) } else { None }
-    }).collect();
-    assert_eq!(text.iter().map(|(_, text)| *text).collect::<String>(), "[]X");
+        &doc.root,
+        800.0,
+        600.0,
+        0.0,
+        0.0,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        "",
+        Some(&mut renderer.font_system),
+    );
+    let text: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|command| {
+            if let PaintCmd::Text { y, text, .. } = command {
+                Some((*y, text.as_str()))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        text.iter().map(|(_, text)| *text).collect::<String>(),
+        "[]X"
+    );
     let first_y = text.first().unwrap().0;
     let last_y = text.last().unwrap().0;
     assert!((last_y - first_y - 30.0).abs() < 0.01, "{text:?}");
@@ -4298,24 +4985,42 @@ fn generated_content_only_blocks_reserve_line_height() {
 #[test]
 fn style_containment_counters_read_outer_values_but_write_nested_instances() {
     for containment in ["style", "layout style", "content", "strict"] {
-        let html = format!(r#"<style>
+        let html = format!(
+            r#"<style>
             body {{counter-reset:n;}}
             .item {{counter-increment:n;}}
             .item::before {{content:counters(n,".") "|";}}
             .scope {{contain:{containment}; width:200px; height:100px;}}
             .scope::after {{content:counters(n,".") "|";}}
-            </style><div class=item></div><div class="item scope"><div class=item></div><div class=item></div></div><div class=item></div>"#);
-        assert_eq!(build_display_texts(&html).concat(), "1|2|2.1|2.2|2.2|3|", "{containment}");
+            </style><div class=item></div><div class="item scope"><div class=item></div><div class=item></div></div><div class=item></div>"#
+        );
+        assert_eq!(
+            build_display_texts(&html).concat(),
+            "1|2|2.1|2.2|2.2|3|",
+            "{containment}"
+        );
     }
-    assert_eq!(build_display_texts(r#"<style>
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         body {counter-reset:n 7;} .scope {contain:style;counter-reset:n 20;}
         .scope span {counter-set:n 4;} span::before {content:counters(n,".") "|";}
-        </style><div class=scope><span></span></div><span></span>"#).concat(), "7.20.4|7|");
-    assert_eq!(build_display_texts(r#"<style>
+        </style><div class=scope><span></span></div><span></span>"#
+        )
+        .concat(),
+        "7.20.4|7|"
+    );
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         body {counter-reset:n 7;} .scope {contain:style;}
         .scope::before {counter-increment:n;content:counters(n,".") "|";}
         span::before {content:counters(n,".") "|";}
-        </style><div class=scope><span></span></div><span></span>"#).concat(), "7.1|7.1|7|");
+        </style><div class=scope><span></span></div><span></span>"#
+        )
+        .concat(),
+        "7.1|7.1|7|"
+    );
     assert_eq!(build_display_texts(r#"<style>
         body {counter-reset:n 5;} .scope {contain:style;}
         .item {counter-increment:n;} .item::before {content:counters(n,".") "|";}
@@ -4325,13 +5030,19 @@ fn style_containment_counters_read_outer_values_but_write_nested_instances() {
 
 #[test]
 fn after_counters_follow_descendant_counter_operations() {
-    assert_eq!(build_display_texts(r#"<style>
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         body {counter-reset:n;}
         div::before {content:counter(n) "|";}
         div::after {counter-increment:n;content:counter(n) "|";}
         span {counter-increment:n;}
         span::before {content:counter(n) "|";}
-        </style><div><span></span><span></span></div><span></span>"#).concat(), "0|1|2|3|4|");
+        </style><div><span></span><span></span></div><span></span>"#
+        )
+        .concat(),
+        "0|1|2|3|4|"
+    );
 }
 
 #[test]
@@ -4352,31 +5063,58 @@ fn display_contents_text_paints_once_in_parent_inline_context() {
 fn contain_grammar_rejects_partial_keywords_and_duplicates() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "contain", "layout paint");
-    for invalid in ["not-layout", "size bogus", "style style", "strict paint", "none style", "size inline-size", ""] {
+    for invalid in [
+        "not-layout",
+        "size bogus",
+        "style style",
+        "strict paint",
+        "none style",
+        "size inline-size",
+        "",
+    ] {
         apply_property(&mut style, "contain", invalid);
-        assert!(style.contain_layout && style.contain_paint && !style.contain_size, "{invalid}");
+        assert!(
+            style.contain_layout && style.contain_paint && !style.contain_size,
+            "{invalid}"
+        );
     }
     apply_property(&mut style, "contain", "inline-size");
-    assert!(!style.contain_size, "inline-size must not suppress block-size contributions");
+    assert!(
+        !style.contain_size,
+        "inline-size must not suppress block-size contributions"
+    );
     assert!(style.contain_inline_size);
 }
 
 #[test]
 fn contain_computed_values_preserve_keywords_and_cascade() {
-    let mut doc = parse_html(r#"<style>
+    let mut doc = parse_html(
+        r#"<style>
         #parent {contain:style paint;}
         #inherit {contain:inherit;} #unset {contain:unset;}
         #strict {contain:strict;} #content {contain:content;}
         #ordered {contain:paint STYLE inline-size layout;}
         #invalid {contain:style; contain:style style;}
         </style><div id=parent><div id=inherit></div><div id=unset></div><div id=initial></div></div>
-        <div id=strict></div><div id=content></div><div id=ordered></div><div id=invalid></div>"#);
+        <div id=strict></div><div id=content></div><div id=ordered></div><div id=invalid></div>"#,
+    );
     doc.set_viewport(800.0, 600.0);
-    for (id, expected) in [("parent", "style paint"), ("inherit", "style paint"), ("unset", "none"),
-        ("initial", "none"), ("strict", "strict"), ("content", "content"),
-        ("ordered", "inline-size layout style paint"), ("invalid", "style")] {
+    for (id, expected) in [
+        ("parent", "style paint"),
+        ("inherit", "style paint"),
+        ("unset", "none"),
+        ("initial", "none"),
+        ("strict", "strict"),
+        ("content", "content"),
+        ("ordered", "inline-size layout style paint"),
+        ("invalid", "style"),
+    ] {
         let node = doc.get_element_by_id(id).unwrap();
-        assert_eq!(doc.computed_style_property(node, "contain"), expected, "{id}");
+        assert_eq!(
+            doc.computed_style_property(node, "contain"),
+            expected,
+            "{id}"
+        );
     }
 }
 
@@ -4391,12 +5129,22 @@ fn generated_quotes_follow_document_depth() {
         </style>"#;
     for (body, expected) in [
         ("<q>A<q>B<q>C</q></q>D</q>", "[A{B{C}}D]"),
-        ("<span class=open></span><q>A</q><span class=close></span><q>B</q>", "{A}[B]"),
+        (
+            "<span class=open></span><q>A</q><span class=close></span><q>B</q>",
+            "{A}[B]",
+        ),
         ("<span class=end></span><q>A</q>", "X[A]"),
         ("<span class=hidden><q>Hidden</q></span><q>A</q>", "[A]"),
-        ("<q style='quotes:none'>A<q style='quotes:inherit'>B</q><q style='quotes:\"[\" \"]\" \"{\" \"}\"'>C</q></q>", "AB{C}"),
+        (
+            "<q style='quotes:none'>A<q style='quotes:inherit'>B</q><q style='quotes:\"[\" \"]\" \"{\" \"}\"'>C</q></q>",
+            "AB{C}",
+        ),
     ] {
-        assert_eq!(build_display_texts(&format!("{css}{body}")).concat(), expected, "{body}");
+        assert_eq!(
+            build_display_texts(&format!("{css}{body}")).concat(),
+            expected,
+            "{body}"
+        );
     }
 }
 
@@ -4411,11 +5159,15 @@ fn quote_depth_survives_incremental_and_parallel_cascade() {
             root.children.push(child);
         }
         let mut sheet = Stylesheet::default();
-        sheet.parse_and_add(r#"main { quotes:"[" "]" "{" "}"; }
+        sheet.parse_and_add(
+            r#"main { quotes:"[" "]" "{" "}"; }
             i::before { content:no-open-quote; }
             i:hover::before { content:none; }
-            q::before { content:open-quote; } q::after { content:close-quote; }"#);
-        for i in 0..extra_rules { sheet.parse_and_add(&format!(".unused{i} {{color:green}}")); }
+            q::before { content:open-quote; } q::after { content:close-quote; }"#,
+        );
+        for i in 0..extra_rules {
+            sheet.parse_and_add(&format!(".unused{i} {{color:green}}"));
+        }
         sheet.rebuild_index();
         crate::css::apply_cascade(&mut root, &sheet, None, 16.0);
         assert_eq!(root.children[1].style.before_content, "{");
@@ -4424,12 +5176,16 @@ fn quote_depth_survives_incremental_and_parallel_cascade() {
         root.children[0].cascade_dirty = true;
         root.has_dirty_descendant = true;
         let hover = std::collections::HashSet::from([2]);
-        crate::css::apply_cascade_incremental(&mut root, &sheet, None, 16.0,
-            800.0, 600.0, 0, false, &hover);
+        crate::css::apply_cascade_incremental(
+            &mut root, &sheet, None, 16.0, 800.0, 600.0, 0, false, &hover,
+        );
         assert_eq!(root.children[1].style.before_content, "[");
         assert_eq!(root.children[1].style.after_content, "]");
         crate::css::resolve_document_generated_content(&mut root, &sheet);
-        assert_eq!(root.children[1].style.before_content, "[", "repeat must reset depth");
+        assert_eq!(
+            root.children[1].style.before_content, "[",
+            "repeat must reset depth"
+        );
     }
 }
 
@@ -4443,10 +5199,12 @@ fn incremental_counters_replay_clean_ancestors_and_following_siblings() {
         root.children.push(child);
     }
     let mut sheet = Stylesheet::default();
-    sheet.parse_and_add(r#"main {counter-reset:n 7;}
+    sheet.parse_and_add(
+        r#"main {counter-reset:n 7;}
         i {counter-increment:n 2;} i:hover {counter-increment:n 4;}
         b {counter-increment:n;}
-        i::before, b::before {content:counter(n);}"#);
+        i::before, b::before {content:counter(n);}"#,
+    );
     sheet.rebuild_index();
     crate::css::apply_cascade(&mut root, &sheet, None, 16.0);
     assert_eq!(root.children[0].style.before_content, "9");
@@ -4454,8 +5212,17 @@ fn incremental_counters_replay_clean_ancestors_and_following_siblings() {
     crate::css::clear_cascade_dirty(&mut root);
     root.children[0].cascade_dirty = true;
     root.has_dirty_descendant = true;
-    crate::css::apply_cascade_incremental(&mut root, &sheet, None, 16.0,
-        800.0, 600.0, 0, false, &std::collections::HashSet::from([2]));
+    crate::css::apply_cascade_incremental(
+        &mut root,
+        &sheet,
+        None,
+        16.0,
+        800.0,
+        600.0,
+        0,
+        false,
+        &std::collections::HashSet::from([2]),
+    );
     assert_eq!(root.children[0].style.before_content, "11");
     assert_eq!(root.children[1].style.before_content, "12");
     assert!(root.children[1].layout.layout_dirty);
@@ -4467,7 +5234,11 @@ fn incremental_counter_templates_update_atomic_pseudos_and_preserve_clean_styles
         let Some(pseudo) = node.children.iter().find(|n| n.tag == "::before") else {
             return node.style.before_content.clone();
         };
-        if pseudo.children.is_empty() { pseudo.text.clone() } else { pseudo.children[0].text.clone() }
+        if pseudo.children.is_empty() {
+            pseudo.text.clone()
+        } else {
+            pseudo.children[0].text.clone()
+        }
     }
     for display in ["inline", "inline-block", "inline-flex", "inline-grid"] {
         let mut root = WebCore::new("main");
@@ -4478,23 +5249,37 @@ fn incremental_counter_templates_update_atomic_pseudos_and_preserve_clean_styles
             root.children.push(child);
         }
         let mut sheet = Stylesheet::default();
-        sheet.parse_and_add(&format!(r#"main {{counter-reset:n 7;}}
+        sheet.parse_and_add(&format!(
+            r#"main {{counter-reset:n 7;}}
             i {{counter-increment:n 2;}} i:hover {{counter-increment:n 4;}}
             b {{counter-increment:n;}}
-            i::before, b::before {{content:counter(n);display:{display};}}"#));
+            i::before, b::before {{content:counter(n);display:{display};}}"#
+        ));
         sheet.rebuild_index();
         crate::css::apply_cascade(&mut root, &sheet, None, 16.0);
         let clean_style = root.children[2].style.clone();
-        for (hover, expected) in [(true, ["11", "12"]), (false, ["9", "10"]), (true, ["11", "12"])] {
+        for (hover, expected) in [
+            (true, ["11", "12"]),
+            (false, ["9", "10"]),
+            (true, ["11", "12"]),
+        ] {
             crate::css::clear_cascade_dirty(&mut root);
             root.children[0].cascade_dirty = true;
             root.has_dirty_descendant = true;
-            let chain = if hover { std::collections::HashSet::from([2]) } else { std::collections::HashSet::new() };
-            crate::css::apply_cascade_incremental(&mut root, &sheet, None, 16.0,
-                800.0, 600.0, 0, false, &chain);
+            let chain = if hover {
+                std::collections::HashSet::from([2])
+            } else {
+                std::collections::HashSet::new()
+            };
+            crate::css::apply_cascade_incremental(
+                &mut root, &sheet, None, 16.0, 800.0, 600.0, 0, false, &chain,
+            );
             assert_eq!(text(&root.children[0]), expected[0], "{display}");
             assert_eq!(text(&root.children[1]), expected[1], "{display}");
-            assert!(std::sync::Arc::ptr_eq(&clean_style, &root.children[2].style));
+            assert!(std::sync::Arc::ptr_eq(
+                &clean_style,
+                &root.children[2].style
+            ));
         }
     }
 }
@@ -4502,46 +5287,77 @@ fn incremental_counter_templates_update_atomic_pseudos_and_preserve_clean_styles
 #[test]
 fn generated_counters_update_materialized_pseudos_inside_layout_wrappers() {
     let mut renderer = crate::Renderer::new();
-    let mut doc = renderer.load_html(r#"<style>
+    let mut doc = renderer.load_html(
+        r#"<style>
         section {counter-reset:n 1;}
         section::before,section::after {content:counter(n);}
-        </style><section><div>X</div></section>"#, 800.0);
+        </style><section><div>X</div></section>"#,
+        800.0,
+    );
     fn section(node: &mut WebCore) -> Option<&mut WebCore> {
-        if node.tag == "section" { return Some(node); }
+        if node.tag == "section" {
+            return Some(node);
+        }
         node.children.iter_mut().find_map(section)
     }
     let owner = section(&mut doc.root).unwrap();
-    assert!(owner.children.iter().any(|child| child.tag == "anonymous-block"));
+    assert!(
+        owner
+            .children
+            .iter()
+            .any(|child| child.tag == "anonymous-block")
+    );
     std::sync::Arc::make_mut(&mut owner.style).counter_reset = vec![CounterReset::normal("n", 9)];
     crate::css::resolve_document_generated_content(&mut doc.root, &doc.stylesheet);
     let owner = section(&mut doc.root).unwrap();
     for tag in ["::before", "::after"] {
         let pseudo = find_box(owner, &|node| node.tag == tag).unwrap();
-        assert_eq!(pseudo.text, "9", "{tag} must update inside its layout wrapper");
+        assert_eq!(
+            pseudo.text, "9",
+            "{tag} must update inside its layout wrapper"
+        );
     }
-    assert!(owner.style.before_content.is_empty(), "materialized text must not also paint through legacy content");
+    assert!(
+        owner.style.before_content.is_empty(),
+        "materialized text must not also paint through legacy content"
+    );
     assert!(owner.style.after_content.is_empty());
 }
 
 #[test]
 fn generated_quote_tokens_are_not_literal_text_and_keep_counters() {
-    assert_eq!(build_display_texts(r#"<style>
+    assert_eq!(
+        build_display_texts(
+            r#"<style>
         body {quotes:"[" "]" "{" "}"; counter-reset:n 7;}
         p::before {content:"open-quote" open-quote no-open-quote counter(n) attr(data-x);}
         p::after {content:close-quote close-quote close-quote "end";}
-        </style><p data-x=Y>X</p>"#).concat(), "open-quote[7YX}]end");
+        </style><p data-x=Y>X</p>"#
+        )
+        .concat(),
+        "open-quote[7YX}]end"
+    );
     for display in ["inline-block", "inline-flex", "inline-grid"] {
-        let html = format!(r#"<style>
+        let html = format!(
+            r#"<style>
             body {{quotes:"[" "]" "{{" "}}";}}
             q::before {{content:open-quote; display:{display};}}
             q::after {{content:close-quote; display:{display};}}
-            </style><q id=outer>A<q id=inner>B</q></q>"#);
+            </style><q id=outer>A<q id=inner>B</q></q>"#
+        );
         let doc = parse_and_layout(&html, 800.0);
         for (id, before, after) in [("outer", "[", "]"), ("inner", "{", "}")] {
-            let node = find_box(&doc.root, &|node| node.attributes.get("id").is_some_and(|value| value == id)).unwrap();
+            let node = find_box(&doc.root, &|node| {
+                node.attributes.get("id").is_some_and(|value| value == id)
+            })
+            .unwrap();
             for (tag, expected) in [("::before", before), ("::after", after)] {
                 let pseudo = node.children.iter().find(|child| child.tag == tag).unwrap();
-                let text = if pseudo.children.is_empty() { &pseudo.text } else { &pseudo.children[0].text };
+                let text = if pseudo.children.is_empty() {
+                    &pseudo.text
+                } else {
+                    &pseudo.children[0].text
+                };
                 assert_eq!(text, expected, "{display} {id} {tag}");
             }
         }
@@ -4553,14 +5369,38 @@ fn generated_quote_tokens_are_not_literal_text_and_keep_counters() {
         let mut renderer = crate::Renderer::new();
         let doc = renderer.load_html(&html, 800.0);
         let list = crate::renderer::display_list_builder::build_display_list_full_with_font_system(
-            &doc.root, 800.0, 600.0, 0.0, 0.0, 0, 0,
-            &std::collections::HashSet::new(), "", Some(&mut renderer.font_system));
-        let mut glyphs: Vec<_> = list.commands.iter().filter_map(|command| {
-            if let PaintCmd::Text { x, text, .. } = command { Some((*x, text.as_str())) } else { None }
-        }).collect();
+            &doc.root,
+            800.0,
+            600.0,
+            0.0,
+            0.0,
+            0,
+            0,
+            &std::collections::HashSet::new(),
+            "",
+            Some(&mut renderer.font_system),
+        );
+        let mut glyphs: Vec<_> = list
+            .commands
+            .iter()
+            .filter_map(|command| {
+                if let PaintCmd::Text { x, text, .. } = command {
+                    Some((*x, text.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect();
         glyphs.sort_by(|a, b| a.0.total_cmp(&b.0));
-        assert_eq!(glyphs.iter().map(|(_, text)| *text).collect::<String>(), "[A{B}]", "{display}");
-        assert!(glyphs.windows(2).all(|pair| pair[0].0 < pair[1].0), "overlapping origins: {glyphs:?}");
+        assert_eq!(
+            glyphs.iter().map(|(_, text)| *text).collect::<String>(),
+            "[A{B}]",
+            "{display}"
+        );
+        assert!(
+            glyphs.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "overlapping origins: {glyphs:?}"
+        );
     }
 }
 
@@ -4609,41 +5449,72 @@ fn generated_quotes_follow_pseudo_cascade_and_inheritance() {
 
 #[test]
 fn quotes_none_auto_and_escaped_pairs_remain_distinct() {
-    let mut doc = parse_html(r#"<style>
+    let mut doc = parse_html(
+        r#"<style>
         #none { quotes:none; } #auto { quotes:auto; }
         #pairs { quotes:"\22" "\5c"; } #controls { quotes:"\a" "\7f"; }
         </style><div id=none><span id=child>Inherited</span></div>
-        <div id=auto></div><div id=pairs></div><div id=controls></div>"#);
+        <div id=auto></div><div id=pairs></div><div id=controls></div>"#,
+    );
     doc.set_viewport(800.0, 600.0);
-    for (id, expected) in [("none", "none"), ("child", "none"), ("auto", "auto"),
-        ("pairs", r#""\"" "\\""#), ("controls", r#""\a " "\7f ""#)] {
+    for (id, expected) in [
+        ("none", "none"),
+        ("child", "none"),
+        ("auto", "auto"),
+        ("pairs", r#""\"" "\\""#),
+        ("controls", r#""\a " "\7f ""#),
+    ] {
         let node = doc.get_element_by_id(id).unwrap();
-        assert_eq!(doc.computed_style_property(node, "quotes"), expected, "{id}");
+        assert_eq!(
+            doc.computed_style_property(node, "quotes"),
+            expected,
+            "{id}"
+        );
     }
-    let texts = build_display_texts(r#"<style>
+    let texts = build_display_texts(
+        r#"<style>
         p { quotes:none; } p::before { content:open-quote; }
         p::after { content:close-quote; }
-        </style><p>Silent</p>"#);
+        </style><p>Silent</p>"#,
+    );
     assert_eq!(texts.concat(), "Silent");
-    let texts = build_display_texts(r#"<style>
+    let texts = build_display_texts(
+        r#"<style>
         p { quotes:none; } p::before { quotes:auto; content:open-quote; }
         p::after { content:close-quote; }
-        </style><p>Auto</p>"#);
+        </style><p>Auto</p>"#,
+    );
     assert_eq!(texts.concat(), "\u{201c}Auto");
-    let texts = build_display_texts(r#"<style>
+    let texts = build_display_texts(
+        r#"<style>
         p { quotes:"\22" "\5c"; }
         p::before { content:open-quote "a\"b" "c"; }
         p::after { content:"d" close-quote; }
-        </style><p>X</p>"#);
+        </style><p>X</p>"#,
+    );
     assert_eq!(texts.concat(), "\"a\"bcXd\\");
     let mut style = ComputedStyle::default();
     crate::css::apply_property(&mut style, "quotes", r#""[" "]" "<" ">""#);
     let pairs = style.rare().quotes.clone();
-    for invalid in ["", "bogus", r#""odd""#, r#""a" "b" garbage"#, "\"unterminated", "\"a\nb\" \"c\""] {
+    for invalid in [
+        "",
+        "bogus",
+        r#""odd""#,
+        r#""a" "b" garbage"#,
+        "\"unterminated",
+        "\"a\nb\" \"c\"",
+    ] {
         crate::css::apply_property(&mut style, "quotes", invalid);
-        assert_eq!(style.rare().quotes, pairs, "invalid quotes must preserve previous value: {invalid}");
+        assert_eq!(
+            style.rare().quotes,
+            pairs,
+            "invalid quotes must preserve previous value: {invalid}"
+        );
     }
-    assert_eq!(crate::css::resolve_content_value("\"\\41\tB\" \"\\0 \" \"a\\\nb\""), "AB\u{fffd}ab");
+    assert_eq!(
+        crate::css::resolve_content_value("\"\\41\tB\" \"\\0 \" \"a\\\nb\""),
+        "AB\u{fffd}ab"
+    );
 }
 
 #[test]
@@ -4772,70 +5643,121 @@ fn presentational_hints_sit_between_ua_and_author_rules() {
 #[test]
 fn html_list_numbering_hints_share_css_counters() {
     for direction in ["ltr", "rtl"] {
-        let html = format!("<ol dir={direction} start=' +4 items'><li>four</li><li value='123 items'>explicit</li><li>next</li><li value='-2'>negative</li><li value=invalid>next negative</li></ol>");
-        assert_eq!(build_display_markers(&html), ["4.", "123.", "124.", "-2.", "-1."]);
+        let html = format!(
+            "<ol dir={direction} start=' +4 items'><li>four</li><li value='123 items'>explicit</li><li>next</li><li value='-2'>negative</li><li value=invalid>next negative</li></ol>"
+        );
+        assert_eq!(
+            build_display_markers(&html),
+            ["4.", "123.", "124.", "-2.", "-1."]
+        );
     }
-    assert_eq!(build_display_markers(
-        "<style>ol{counter-reset:list-item 20}li{counter-set:list-item 8}</style><ol start=4><li value=123>eight</li></ol>"
-    ), ["8."]);
-    assert_eq!(build_display_markers(
-        "<style>li{counter-increment:other}</style><ol start=3><li>three</li><li>four</li></ol>"
-    ), ["3.", "4."]);
-    assert_eq!(build_display_markers(
-        "<div style='counter-reset:list-item 7'><p style='display:list-item;list-style-type:decimal'>eight</p><p style='display:list-item;list-style-type:decimal'>nine</p></div>"
-    ), ["8.", "9."]);
-    assert_eq!(build_display_markers(
-        "<style>ul{list-style-type:decimal}</style><ol start=4><li>outer<ul><li>inner</li><li>inner two</li></ul></li><li>outer next</li></ol>"
-    ), ["4.", "1.", "2.", "5."]);
-    assert_eq!(build_display_markers(
-        "<style>li{counter-increment:list-item 2}</style><ol><li>two</li><li value=10>ten</li><li>twelve</li></ol>"
-    ), ["2.", "10.", "12."]);
+    assert_eq!(
+        build_display_markers(
+            "<style>ol{counter-reset:list-item 20}li{counter-set:list-item 8}</style><ol start=4><li value=123>eight</li></ol>"
+        ),
+        ["8."]
+    );
+    assert_eq!(
+        build_display_markers(
+            "<style>li{counter-increment:other}</style><ol start=3><li>three</li><li>four</li></ol>"
+        ),
+        ["3.", "4."]
+    );
+    assert_eq!(
+        build_display_markers(
+            "<div style='counter-reset:list-item 7'><p style='display:list-item;list-style-type:decimal'>eight</p><p style='display:list-item;list-style-type:decimal'>nine</p></div>"
+        ),
+        ["8.", "9."]
+    );
+    assert_eq!(
+        build_display_markers(
+            "<style>ul{list-style-type:decimal}</style><ol start=4><li>outer<ul><li>inner</li><li>inner two</li></ul></li><li>outer next</li></ol>"
+        ),
+        ["4.", "1.", "2.", "5."]
+    );
+    assert_eq!(
+        build_display_markers(
+            "<style>li{counter-increment:list-item 2}</style><ol><li>two</li><li value=10>ten</li><li>twelve</li></ol>"
+        ),
+        ["2.", "10.", "12."]
+    );
 }
 
 #[test]
 fn html_reversed_lists_with_start_use_shared_counter_direction() {
     for direction in ["ltr", "rtl"] {
-        assert_eq!(build_display_markers(&format!(
-            "<ol reversed start=' +4 items' dir={direction}><li>four</li><li value=9>nine</li><li>eight</li><li value=-2>negative</li><li>next</li></ol>"
-        )), ["4.", "9.", "8.", "-2.", "-3."]);
+        assert_eq!(
+            build_display_markers(&format!(
+                "<ol reversed start=' +4 items' dir={direction}><li>four</li><li value=9>nine</li><li>eight</li><li value=-2>negative</li><li>next</li></ol>"
+            )),
+            ["4.", "9.", "8.", "-2.", "-3."]
+        );
     }
-    assert_eq!(build_display_markers(
-        "<ol reversed start=4><li>outer<ol><li>inner</li><li>inner</li></ol></li><li>outer</li></ol>"
-    ), ["4.", "1.", "2.", "3."]);
-    assert_eq!(build_display_markers(
-        "<style>ol{counter-reset:list-item 20}</style><ol reversed start=4><li>author</li><li>author</li></ol>"
-    ), ["21.", "22."]);
-    assert_eq!(build_display_markers(
-        "<ol reversed start=0><li>zero</li><li>negative</li></ol>"
-    ), ["0.", "-1."]);
+    assert_eq!(
+        build_display_markers(
+            "<ol reversed start=4><li>outer<ol><li>inner</li><li>inner</li></ol></li><li>outer</li></ol>"
+        ),
+        ["4.", "1.", "2.", "3."]
+    );
+    assert_eq!(
+        build_display_markers(
+            "<style>ol{counter-reset:list-item 20}</style><ol reversed start=4><li>author</li><li>author</li></ol>"
+        ),
+        ["21.", "22."]
+    );
+    assert_eq!(
+        build_display_markers("<ol reversed start=0><li>zero</li><li>negative</li></ol>"),
+        ["0.", "-1."]
+    );
 }
 
 #[test]
 fn html_reversed_lists_without_valid_start_use_automatic_css_counters() {
     for attributes in ["reversed", "reversed='' start=invalid", "reversed=false"] {
-        assert_eq!(build_display_markers(&format!(
-            "<ol {attributes}><li>three</li><li>two</li><li>one</li></ol>"
-        )), ["3.", "2.", "1."]);
+        assert_eq!(
+            build_display_markers(&format!(
+                "<ol {attributes}><li>three</li><li>two</li><li>one</li></ol>"
+            )),
+            ["3.", "2.", "1."]
+        );
     }
-    assert_eq!(build_display_markers(
-        "<ol reversed><li>outer<ol><li>inner</li><li>inner</li></ol></li><li>outer</li></ol>"
-    ), ["2.", "1.", "2.", "1."]);
-    assert_eq!(build_display_markers(
-        "<ol reversed><li>two</li><li style='display:none'>hidden</li><li>one</li></ol>"
-    ), ["2.", "1."]);
-    assert_eq!(build_display_markers(
-        "<style>ol{counter-reset:list-item 20}</style><ol reversed><li>author</li><li>author</li></ol>"
-    ), ["21.", "22."]);
+    assert_eq!(
+        build_display_markers(
+            "<ol reversed><li>outer<ol><li>inner</li><li>inner</li></ol></li><li>outer</li></ol>"
+        ),
+        ["2.", "1.", "2.", "1."]
+    );
+    assert_eq!(
+        build_display_markers(
+            "<ol reversed><li>two</li><li style='display:none'>hidden</li><li>one</li></ol>"
+        ),
+        ["2.", "1."]
+    );
+    assert_eq!(
+        build_display_markers(
+            "<style>ol{counter-reset:list-item 20}</style><ol reversed><li>author</li><li>author</li></ol>"
+        ),
+        ["21.", "22."]
+    );
     // A later li[value] changes that item's ordinal, not the HTML list's default start.
-    assert_eq!(build_display_markers(
-        "<ol reversed><li>before set</li><li value=9>set</li><li>after set</li></ol>"
-    ), ["3.", "9.", "8."]);
-    assert_eq!(build_display_markers(
-        "<ol reversed start=invalid><li>before</li><li value=-2>set</li><li>after</li></ol>"
-    ), ["3.", "-2.", "-3."]);
-    assert_eq!(build_display_markers(
-        "<style>ol{counter-reset:reversed(list-item)}</style><ol reversed><li>before</li><li value=9>set</li><li>after</li></ol>"
-    ), ["10.", "9.", "8."]);
+    assert_eq!(
+        build_display_markers(
+            "<ol reversed><li>before set</li><li value=9>set</li><li>after set</li></ol>"
+        ),
+        ["3.", "9.", "8."]
+    );
+    assert_eq!(
+        build_display_markers(
+            "<ol reversed start=invalid><li>before</li><li value=-2>set</li><li>after</li></ol>"
+        ),
+        ["3.", "-2.", "-3."]
+    );
+    assert_eq!(
+        build_display_markers(
+            "<style>ol{counter-reset:reversed(list-item)}</style><ol reversed><li>before</li><li value=9>set</li><li>after</li></ol>"
+        ),
+        ["10.", "9.", "8."]
+    );
 }
 
 #[test]
@@ -4846,7 +5768,9 @@ fn html_reversed_start_recounts_after_incremental_visibility_changes() {
     for index in 0..3 {
         let mut child = WebCore::new("li");
         child.node_id = index + 2;
-        if index == 1 { child.attributes.insert("value", "9"); }
+        if index == 1 {
+            child.attributes.insert("value", "9");
+        }
         root.children.push(child);
     }
     let mut sheet = Stylesheet::default();
@@ -4858,8 +5782,14 @@ fn html_reversed_start_recounts_after_incremental_visibility_changes() {
         crate::css::clear_cascade_dirty(&mut root);
         root.children[2].cascade_dirty = true;
         root.has_dirty_descendant = true;
-        let hover = if hovered { std::collections::HashSet::from([4]) } else { std::collections::HashSet::new() };
-        crate::css::apply_cascade_incremental(&mut root, &sheet, None, 16.0, 800.0, 600.0, 0, false, &hover);
+        let hover = if hovered {
+            std::collections::HashSet::from([4])
+        } else {
+            std::collections::HashSet::new()
+        };
+        crate::css::apply_cascade_incremental(
+            &mut root, &sheet, None, 16.0, 800.0, 600.0, 0, false, &hover,
+        );
         assert_eq!(root.children[0].style.list_index, expected);
         assert_eq!(root.children[1].style.list_index, 9);
     }
@@ -4868,9 +5798,12 @@ fn html_reversed_start_recounts_after_incremental_visibility_changes() {
 #[test]
 fn ua_list_indentation_follows_inline_direction() {
     for (direction, rtl) in [("ltr", false), ("rtl", true)] {
-        let doc = parse_and_layout(&format!(
-            "<div dir={direction}><ol id=ol><li>one</li></ol><ul id=ul><li>one</li></ul><menu id=menu><li>one</li></menu><dir id=dir><li>one</li></dir><dl><dt>term</dt><dd id=dd>description</dd></dl></div>"
-        ), 800.0);
+        let doc = parse_and_layout(
+            &format!(
+                "<div dir={direction}><ol id=ol><li>one</li></ol><ul id=ul><li>one</li></ul><menu id=menu><li>one</li></menu><dir id=dir><li>one</li></dir><dl><dt>term</dt><dd id=dd>description</dd></dl></div>"
+            ),
+            800.0,
+        );
         for id in ["#ol", "#ul", "#menu", "#dir"] {
             let node = crate::dom::query_selector(&doc.root, id).unwrap();
             let (start, end) = if rtl {
@@ -4879,10 +5812,17 @@ fn ua_list_indentation_follows_inline_direction() {
                 (&node.style.padding_left, &node.style.padding_right)
             };
             assert_eq!(*start, CssLength::Px(40.0), "{direction} {id}");
-            assert!(matches!(end, CssLength::Zero | CssLength::Px(0.0)), "{direction} {id}: {end:?}");
+            assert!(
+                matches!(end, CssLength::Zero | CssLength::Px(0.0)),
+                "{direction} {id}: {end:?}"
+            );
         }
         let dd = crate::dom::query_selector(&doc.root, "#dd").unwrap();
-        let start = if rtl { &dd.style.margin_right } else { &dd.style.margin_left };
+        let start = if rtl {
+            &dd.style.margin_right
+        } else {
+            &dd.style.margin_left
+        };
         assert_eq!(*start, CssLength::Px(40.0), "{direction} dd");
     }
 }
@@ -4894,10 +5834,24 @@ fn physical_and_logical_spacing_share_cascade_order() {
         800.0,
     );
     let node = |id| crate::dom::query_selector(&doc.root, id).unwrap();
-    for (id, left, right) in [("#a", 5.0, 30.0), ("#b", 0.0, 5.0), ("#c", 0.0, 30.0), ("#d", 0.0, 0.0), ("#e", 0.0, 9.0), ("#f", 0.0, 30.0), ("#reset", 0.0, 0.0)] {
+    for (id, left, right) in [
+        ("#a", 5.0, 30.0),
+        ("#b", 0.0, 5.0),
+        ("#c", 0.0, 30.0),
+        ("#d", 0.0, 0.0),
+        ("#e", 0.0, 9.0),
+        ("#f", 0.0, 30.0),
+        ("#reset", 0.0, 0.0),
+    ] {
         let rect = &node(id).layout;
-        assert!((rect.content_rect.x - rect.padding_rect.x - left).abs() < 0.1, "{id} left");
-        assert!((rect.padding_rect.right() - rect.content_rect.right() - right).abs() < 0.1, "{id} right");
+        assert!(
+            (rect.content_rect.x - rect.padding_rect.x - left).abs() < 0.1,
+            "{id} left"
+        );
+        assert!(
+            (rect.padding_rect.right() - rect.content_rect.right() - right).abs() < 0.1,
+            "{id} right"
+        );
     }
     assert_eq!(node("#g").style.margin_right, CssLength::Px(5.0));
 }
@@ -5429,13 +6383,14 @@ fn percentage_width_image_does_not_expand_flex_column_to_natural_width() {
         900.0,
     );
     let find = |id| {
-        find_box(&doc.root, &|b| b.attributes.get("id").map(String::as_str) == Some(id))
-            .unwrap()
+        find_box(&doc.root, &|b| {
+            b.attributes.get("id").map(String::as_str) == Some(id)
+        })
+        .unwrap()
     };
     assert!((find("main").layout.border_rect.w - 600.0).abs() < 1.0);
     assert!(
-        (find("side").layout.border_rect.x - find("row").layout.border_rect.x - 600.0).abs()
-            < 1.0
+        (find("side").layout.border_rect.x - find("row").layout.border_rect.x - 600.0).abs() < 1.0
     );
     assert!((find("pic").layout.border_rect.w - 600.0).abs() < 1.0);
 }
@@ -5663,12 +6618,14 @@ fn css_vertical_align_property() {
 
 #[test]
 fn cssom_math_preserves_percentages_until_used_value_resolution() {
-    let mut doc = parse_html(r#"<html><head><style>
+    let mut doc = parse_html(
+        r#"<html><head><style>
       html{font-size:20px}body{font-size:30px}
       #a{background-size:calc(50% - 2em) min(50%, 3rem);
         max-width:clamp(1em, 50%, 10rem);min-width:min-content;
         flex-basis:calc(25% + 1rem);column-gap:calc(10% + 2px);left:calc(10% + 2em)}
-    </style></head><body><div id=a>math</div></body></html>"#);
+    </style></head><body><div id=a>math</div></body></html>"#,
+    );
     doc.set_viewport(800.0, 600.0);
     let a = doc.get_element_by_id("a").unwrap();
     for (property, expected) in [
@@ -5679,23 +6636,41 @@ fn cssom_math_preserves_percentages_until_used_value_resolution() {
         ("column-gap", "calc(10% + 2px)"),
         ("left", "calc(10% + 60px)"),
     ] {
-        assert_eq!(doc.computed_style_property(a, property), expected, "{property}");
+        assert_eq!(
+            doc.computed_style_property(a, property),
+            expected,
+            "{property}"
+        );
     }
 }
 
 #[test]
 fn cssom_lengths_use_element_root_and_viewport_context() {
-    let mut doc = parse_html(r#"<html><head><style>
+    let mut doc = parse_html(
+        r#"<html><head><style>
       html{font-size:20px}body{font-size:30px}
       #a{background-size:2em 3rem;vertical-align:2em;row-gap:10vh;column-gap:calc(1rem + 2vw)}
       #a::before{content:'x';font-size:2em}
-    </style></head><body><span id=a>text</span></body></html>"#);
+    </style></head><body><span id=a>text</span></body></html>"#,
+    );
     doc.set_viewport(800.0, 600.0);
     let a = doc.get_element_by_id("a").unwrap();
-    for (property, expected) in [("background-size", "60px 60px"), ("vertical-align", "60px"), ("row-gap", "60px"), ("column-gap", "36px")] {
-        assert_eq!(doc.computed_style_property(a, property), expected, "{property}");
+    for (property, expected) in [
+        ("background-size", "60px 60px"),
+        ("vertical-align", "60px"),
+        ("row-gap", "60px"),
+        ("column-gap", "36px"),
+    ] {
+        assert_eq!(
+            doc.computed_style_property(a, property),
+            expected,
+            "{property}"
+        );
     }
-    assert_eq!(doc.computed_style_pseudo_property(a, "::before", "font-size"), "60px");
+    assert_eq!(
+        doc.computed_style_pseudo_property(a, "::before", "font-size"),
+        "60px"
+    );
     assert_eq!(doc.viewport(), (800.0, 600.0));
     doc.set_viewport(1000.0, 400.0);
     assert_eq!(doc.computed_style_property(a, "row-gap"), "40px");
@@ -5705,30 +6680,38 @@ fn cssom_lengths_use_element_root_and_viewport_context() {
 
 #[test]
 fn css_math_layout_recomputes_mixed_units_on_resize() {
-    let mut doc = parse_html(r#"<html><head><style>
+    let mut doc = parse_html(
+        r#"<html><head><style>
       html {font-size:20px}
       #container {width:400px;height:200px}
       #child {font-size:30px;width:calc(50% + 2em + 1rem + 5vw);
         height:calc(50% - 1em + 10vh)}
-    </style></head><body><div id=container><div id=child>math</div></div></body></html>"#);
+    </style></head><body><div id=container><div id=child>math</div></div></body></html>"#,
+    );
     let child = doc.get_element_by_id("child").unwrap();
-    for (width, height, expected_width, expected_height) in [
-        (800.0, 600.0, 320.0, 130.0),
-        (1000.0, 400.0, 330.0, 110.0),
-    ] {
+    for (width, height, expected_width, expected_height) in
+        [(800.0, 600.0, 320.0, 130.0), (1000.0, 400.0, 330.0, 110.0)]
+    {
         doc.set_viewport(width, height);
         let rect = doc.get_bounding_client_rect(child).unwrap();
         assert!((rect.w - expected_width).abs() < 0.01, "width: {}", rect.w);
-        assert!((rect.h - expected_height).abs() < 0.01, "height: {}", rect.h);
+        assert!(
+            (rect.h - expected_height).abs() < 0.01,
+            "height: {}",
+            rect.h
+        );
     }
 }
 
 #[test]
 fn css_math_percentage_height_uses_definite_height_or_auto() {
-    let doc = parse_and_layout(r#"<style>
+    let doc = parse_and_layout(
+        r#"<style>
       .child {height:min(50% + 10px, 150px)}
     </style><div style='width:400px;height:200px'><div id=definite class=child></div></div>
-    <div style='width:400px'><div id=indefinite class=child><div style='height:25px'></div></div></div>"#, 800.0);
+    <div style='width:400px'><div id=indefinite class=child><div style='height:25px'></div></div></div>"#,
+        800.0,
+    );
     let definite = crate::dom::query_selector(&doc.root, "#definite").unwrap();
     let indefinite = crate::dom::query_selector(&doc.root, "#indefinite").unwrap();
     assert_eq!(definite.layout.content_rect.h, 110.0);
@@ -5737,7 +6720,9 @@ fn css_math_percentage_height_uses_definite_height_or_auto() {
 
 #[test]
 fn cssom_relative_insets_use_containing_axes_and_preserve_declared_edges() {
-    let mut doc = parse_html("<div style='width:300px;height:100px'><div id=a style='position:relative;left:50%;top:50%'>a</div><div id=b style='position:relative;direction:rtl;left:10px;right:20px'>b</div></div>");
+    let mut doc = parse_html(
+        "<div style='width:300px;height:100px'><div id=a style='position:relative;left:50%;top:50%'>a</div><div id=b style='position:relative;direction:rtl;left:10px;right:20px'>b</div></div>",
+    );
     doc.set_viewport(800.0, 600.0);
     let a = doc.get_element_by_id("a").unwrap();
     let b = doc.get_element_by_id("b").unwrap();
@@ -5912,24 +6897,23 @@ fn standards_known_pseudo_elements_do_not_drop_rules() {
             .any(|r| r.pseudo_element == PseudoElement::FirstLetter)
     );
     assert!(ss.rules.iter().any(|r| {
-        r.is_slotted
-            && r.pseudo_element == PseudoElement::None
-            && r.slotted_slot_selector.is_some()
+        r.is_slotted && r.pseudo_element == PseudoElement::None && r.slotted_slot_selector.is_some()
     }));
     assert!(
         ss.rules
             .iter()
             .filter(|r| {
-                !r.is_slotted && !matches!(
-                    r.pseudo_element,
-                    PseudoElement::Backdrop
-                        | PseudoElement::FileSelectorButton
-                        | PseudoElement::DetailsContent
-                        | PseudoElement::SpellingError
-                        | PseudoElement::GrammarError
-                        | PseudoElement::FirstLine
-                        | PseudoElement::FirstLetter
-                )
+                !r.is_slotted
+                    && !matches!(
+                        r.pseudo_element,
+                        PseudoElement::Backdrop
+                            | PseudoElement::FileSelectorButton
+                            | PseudoElement::DetailsContent
+                            | PseudoElement::SpellingError
+                            | PseudoElement::GrammarError
+                            | PseudoElement::FirstLine
+                            | PseudoElement::FirstLetter
+                    )
             })
             .all(|r| r.pseudo_element == PseudoElement::Ignored)
     );
@@ -6142,7 +7126,13 @@ fn css_text_overflow_property() {
     apply_property(&mut style, "text-overflow", "ellipsis");
     assert_eq!(style.text_overflow, TextOverflow::Ellipsis);
     apply_property(&mut style, "text-overflow", r#"clip "--""#);
-    assert_eq!(style.text_overflow, TextOverflow::Pair(Box::new([TextOverflow::Clip, TextOverflow::String("--".into())])));
+    assert_eq!(
+        style.text_overflow,
+        TextOverflow::Pair(Box::new([
+            TextOverflow::Clip,
+            TextOverflow::String("--".into())
+        ]))
+    );
     apply_property(&mut style, "text-overflow", "clip");
     assert_eq!(style.text_overflow, TextOverflow::Clip);
 
@@ -6165,15 +7155,26 @@ fn svg_stroke_width_cascades_inherits_and_rejects_invalid_values() {
     apply_property(&mut style, "stroke-width", "2px");
     for value in ["-1px", "auto", "none", "min-content", "bogus"] {
         apply_property(&mut style, "stroke-width", value);
-        assert_eq!(style.rare().svg_stroke_width, Some(CssLength::Px(2.0)), "{value}");
+        assert_eq!(
+            style.rare().svg_stroke_width,
+            Some(CssLength::Px(2.0)),
+            "{value}"
+        );
     }
-    let mut frame = crate::EngineFrame::new(crate::parse_html(
-        "<style>svg{stroke-width:0}circle{stroke-width:inherit}</style><svg><g id=g><circle id=c /></g></svg>"
-    ), 200.0, 80.0);
+    let mut frame = crate::EngineFrame::new(
+        crate::parse_html(
+            "<style>svg{stroke-width:0}circle{stroke-width:inherit}</style><svg><g id=g><circle id=c /></g></svg>",
+        ),
+        200.0,
+        80.0,
+    );
     frame.update_frame();
     for id in ["g", "c"] {
         let nid = frame.doc.get_element_by_id(id).unwrap();
-        assert_eq!(frame.doc.computed_style_property(nid, "stroke-width"), "0px");
+        assert_eq!(
+            frame.doc.computed_style_property(nid, "stroke-width"),
+            "0px"
+        );
     }
 }
 
@@ -6181,17 +7182,34 @@ fn svg_stroke_width_cascades_inherits_and_rejects_invalid_values() {
 fn text_overflow_preserves_both_edges_strings_and_invalid_declarations() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "text-overflow", "ellipsis");
-    for invalid in ["", "bogus", "garbage ellipsis", "clip ellipsis clip", "\"unclosed", "\"bad\nstring\""] {
+    for invalid in [
+        "",
+        "bogus",
+        "garbage ellipsis",
+        "clip ellipsis clip",
+        "\"unclosed",
+        "\"bad\nstring\"",
+    ] {
         apply_property(&mut style, "text-overflow", invalid);
         assert_eq!(style.text_overflow, TextOverflow::Ellipsis, "{invalid:?}");
     }
-    for (value, expected) in [("ELLIPSIS", "ellipsis"), ("clip ellipsis", "clip ellipsis"), ("\"\"", "\"\""), ("'start' '\\2026 '", "\"start\" \"…\"")] {
-        let html = format!("<style>#parent{{text-overflow:{value}}}#child{{text-overflow:inherit}}</style><div id=parent><div id=child></div></div>");
+    for (value, expected) in [
+        ("ELLIPSIS", "ellipsis"),
+        ("clip ellipsis", "clip ellipsis"),
+        ("\"\"", "\"\""),
+        ("'start' '\\2026 '", "\"start\" \"…\""),
+    ] {
+        let html = format!(
+            "<style>#parent{{text-overflow:{value}}}#child{{text-overflow:inherit}}</style><div id=parent><div id=child></div></div>"
+        );
         let mut frame = crate::EngineFrame::new(crate::parse_html(&html), 200.0, 80.0);
         frame.update_frame();
         for selector in ["#parent", "#child"] {
             let id = frame.doc.query_selector(selector).unwrap();
-            assert_eq!(frame.doc.computed_style_property(id, "text-overflow"), expected);
+            assert_eq!(
+                frame.doc.computed_style_property(id, "text-overflow"),
+                expected
+            );
         }
     }
 }
@@ -6276,14 +7294,32 @@ fn rtl_line_clamp_paints_ellipsis_at_inline_end() {
     frame.update_frame();
     let list = build_display_list(&frame.doc.root, 240.0, 80.0);
     let div = crate::dom::query_selector(&frame.doc.root, "div").unwrap();
-    assert!(div.layout.line_cache.iter().any(|line| line.has_clamped_continuation),
-        "layout must mark the visible RTL line as clamped: {:?}", div.layout.line_cache);
-    let marker = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::Text { text, x, .. } if text == "…" => Some(*x),
-        _ => None,
-    }).expect("RTL clamped line should paint an ellipsis");
-    assert!(marker < 10.0, "RTL inline-end marker belongs at the physical left edge: {marker}");
-    assert!(!list.commands.iter().any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text.contains("الثاني"))));
+    assert!(
+        div.layout
+            .line_cache
+            .iter()
+            .any(|line| line.has_clamped_continuation),
+        "layout must mark the visible RTL line as clamped: {:?}",
+        div.layout.line_cache
+    );
+    let marker = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::Text { text, x, .. } if text == "…" => Some(*x),
+            _ => None,
+        })
+        .expect("RTL clamped line should paint an ellipsis");
+    assert!(
+        marker < 10.0,
+        "RTL inline-end marker belongs at the physical left edge: {marker}"
+    );
+    assert!(
+        !list
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::Text { text, .. } if text.contains("الثاني")))
+    );
 }
 
 #[test]
@@ -6441,6 +7477,146 @@ fn scrollbar_gutter_stable_both_edges_reserves_layout_space() {
 }
 
 #[test]
+fn scrollbar_gutter_stable_follows_overflow_kind() {
+    for (overflow, expected_width) in [
+        ("visible", 100.0),
+        ("clip", 100.0),
+        ("hidden", 80.0),
+        ("auto", 80.0),
+        ("scroll", 80.0),
+    ] {
+        let html = format!(
+            "<div style='width:100px;height:20px;overflow-y:{overflow};scrollbar-gutter:stable both-edges'>\
+             <div id='child' style='height:10px'></div></div>"
+        );
+        let doc = parse_and_layout(&html, 800.0);
+        let child = find_box(&doc.root, &|node| {
+            node.attributes.get("id").map(String::as_str) == Some("child")
+        })
+        .expect("child");
+        assert_eq!(
+            child.layout.content_rect.w, expected_width,
+            "overflow-y:{overflow}"
+        );
+    }
+}
+
+#[test]
+fn auto_scrollbar_reserves_width_only_when_content_overflows() {
+    for (sizing, child_height, expected_width) in [
+        ("height:20px", 10, 100.0),
+        ("height:20px", 40, 90.0),
+        ("max-height:20px", 10, 100.0),
+        ("max-height:20px", 40, 90.0),
+    ] {
+        let html = format!(
+            "<div style='width:100px;{sizing};overflow-y:auto'>\
+             <div id='child' style='height:{child_height}px'></div></div>"
+        );
+        let doc = parse_and_layout(&html, 800.0);
+        let child = find_box(&doc.root, &|node| {
+            node.attributes.get("id").map(String::as_str) == Some("child")
+        })
+        .expect("child");
+        assert_eq!(
+            child.layout.content_rect.w, expected_width,
+            "{sizing}, child={child_height}"
+        );
+    }
+}
+
+#[test]
+fn mixed_block_scroller_includes_inline_line_width() {
+    let doc = parse_and_layout(
+        "<div id='scroll' style='width:60px;overflow-x:auto;white-space:nowrap'>\
+         A long unbroken line that exceeds sixty pixels\
+         <div style='width:10px;height:10px'></div></div>",
+        800.0,
+    );
+    let node = crate::tests::test_grid::find_by_id(&doc.root, "scroll").unwrap();
+    assert!(
+        node.layout.scroll_width > node.layout.content_rect.w + 1.0,
+        "inline text must contribute to scroll width: scroll={} content={}",
+        node.layout.scroll_width,
+        node.layout.content_rect.w,
+    );
+
+    let nested = parse_and_layout(
+        "<div id='scroll' style='width:60px;overflow-x:auto'>\
+         <div><div style='white-space:nowrap'>A long unbroken line that exceeds sixty pixels</div></div>\
+         </div>",
+        800.0,
+    );
+    let nested_scroller = crate::tests::test_grid::find_by_id(&nested.root, "scroll").unwrap();
+    assert!(nested_scroller.layout.scroll_width > nested_scroller.layout.content_rect.w + 1.0);
+
+    let clipped = parse_and_layout(
+        "<div id='scroll' style='width:60px;overflow-x:auto'>\
+         <div style='width:40px;overflow:hidden;white-space:nowrap'>\
+         A long unbroken line that exceeds sixty pixels</div></div>",
+        800.0,
+    );
+    let clipped_scroller = crate::tests::test_grid::find_by_id(&clipped.root, "scroll").unwrap();
+    assert_eq!(
+        clipped_scroller.layout.scroll_width,
+        clipped_scroller.layout.content_rect.w
+    );
+}
+
+#[test]
+fn flex_and_grid_scrollers_include_visible_child_text_overflow() {
+    for layout in ["display:flex", "display:grid;grid-template-columns:40px"] {
+        let html = format!(
+            "<div id='scroll' style='width:60px;overflow-x:auto;{layout}'>\
+             <div style='width:40px;min-width:0;flex:none;white-space:nowrap'>\
+             A long unbroken line that exceeds sixty pixels</div></div>"
+        );
+        let doc = parse_and_layout(&html, 800.0);
+        let node = crate::tests::test_grid::find_by_id(&doc.root, "scroll").unwrap();
+        assert!(
+            node.layout.scroll_width > node.layout.content_rect.w + 1.0,
+            "{layout}: scroll={} content={}",
+            node.layout.scroll_width,
+            node.layout.content_rect.w,
+        );
+    }
+}
+
+#[test]
+fn ancestor_scrollers_include_visible_nested_vertical_overflow() {
+    for layout in [
+        "display:block",
+        "display:flex;flex-direction:column",
+        "display:grid;grid-template-rows:20px",
+    ] {
+        let html = format!(
+            "<div id='scroll' style='height:50px;overflow-y:auto;{layout}'>\
+             <div style='height:20px;flex:none'><div style='height:100px'></div></div></div>"
+        );
+        let doc = parse_and_layout(&html, 800.0);
+        let node = crate::tests::test_grid::find_by_id(&doc.root, "scroll").unwrap();
+        assert!(
+            node.layout.scroll_height > node.layout.content_rect.h + 1.0,
+            "{layout}: scroll={} content={}",
+            node.layout.scroll_height,
+            node.layout.content_rect.h,
+        );
+
+        let clipped_html = format!(
+            "<div id='scroll' style='height:50px;overflow-y:auto;{layout}'>\
+             <div style='height:20px;flex:none;overflow:hidden'>\
+             <div style='height:100px'></div></div></div>"
+        );
+        let clipped = parse_and_layout(&clipped_html, 800.0);
+        let node = crate::tests::test_grid::find_by_id(&clipped.root, "scroll").unwrap();
+        assert_eq!(
+            node.layout.scroll_height, node.layout.content_rect.h,
+            "{layout}"
+        );
+    }
+}
+
+#[test]
 fn css_outline_properties() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "outline-width", "2px");
@@ -6529,6 +7705,25 @@ fn css_mix_blend_mode_via_descendant_combinator() {
 }
 
 #[test]
+fn legacy_webkit_linear_gradient_background() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "background",
+        "white -webkit-gradient(linear, 0% 100%, 0% 0%, color-stop(0.37, #cecece), color-stop(0.65, #ffffff))",
+    );
+    assert_eq!(style.gradient_type, GradientType::Linear);
+    assert!(style.gradient_angle.abs() < 0.01);
+    assert_eq!(style.rare().gradient_stops.len(), 2);
+    assert_eq!(
+        style.rare().gradient_stops[0].color,
+        Color::rgb(0xce, 0xce, 0xce)
+    );
+    assert!((style.rare().gradient_stops[0].position - 0.37).abs() < 0.01);
+    assert!((style.rare().gradient_stops[1].position - 0.65).abs() < 0.01);
+}
+
+#[test]
 fn css_radial_gradient_with_position_stops() {
     // radial-gradient(circle at 50% 50%, #fbbf24 0%, #f97316 60%, transparent 100%)
     // must parse 3 stops with correct colors and positions.
@@ -6586,6 +7781,51 @@ fn css_radial_gradient_bare_colors() {
     assert!((style.rare().gradient_stops[0].position - 0.0).abs() < 0.01);
     assert_eq!(style.rare().gradient_stops[1].color, Color::rgb(0, 0, 255));
     assert!((style.rare().gradient_stops[1].position - 1.0).abs() < 0.01);
+}
+
+#[test]
+fn gradient_current_color_resolves_after_the_element_color_cascades() {
+    let doc = parse_and_layout(
+        r#"<style>
+            #linear { background-image: linear-gradient(currentColor 20% 40%, transparent); color: #123456; }
+            #radial { background-image: radial-gradient(currentColor, red); color: #654321; }
+            #layers { background-image: linear-gradient(red, blue), linear-gradient(currentColor, white); color: #abcdef; }
+        </style><div id="linear">linear</div><div id="radial">radial</div><div id="layers">layers</div>"#,
+        800.0,
+    );
+    for (id, expected, stop_count) in [
+        ("linear", Color::rgb(0x12, 0x34, 0x56), 3),
+        ("radial", Color::rgb(0x65, 0x43, 0x21), 2),
+    ] {
+        let node = find_box(&doc.root, &|b| {
+            b.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .unwrap();
+        assert_eq!(node.style.rare().gradient_stops.len(), stop_count);
+        assert_eq!(node.style.rare().gradient_stops[0].color, expected);
+        assert!(!node.style.rare().gradient_stops[0].current_color);
+    }
+
+    let layered = find_box(&doc.root, &|b| {
+        b.attributes
+            .get("id")
+            .is_some_and(|value| value == "layers")
+    })
+    .unwrap();
+    assert_eq!(layered.style.rare().additional_background_layers.len(), 1);
+    let second = &layered.style.rare().additional_background_layers[0].gradient_stops[0];
+    assert_eq!(second.color, Color::rgb(0xab, 0xcd, 0xef));
+    assert!(!second.current_color);
+
+    let mut legacy = ComputedStyle::default();
+    apply_property(
+        &mut legacy,
+        "background",
+        "-webkit-gradient(linear, 0% 100%, 0% 0%, from(currentColor), to(blue))",
+    );
+    legacy.color = Color::rgb(4, 5, 6);
+    crate::css::finalize_current_color(&mut legacy);
+    assert_eq!(legacy.rare().gradient_stops[0].color, legacy.color);
 }
 
 // ── CSS Variable Inheritance ─────────────────────────────────────────────────
@@ -6664,9 +7904,17 @@ fn desktop_headline_calc_font_size_resolves_at_viewport_width() {
         1366.0,
     );
     let heading = find_box(&doc.root, &|b| b.tag == "h2").unwrap();
-    let actual = heading.style.font_size.resolve_vp(16.0, 0.0, 16.0, 1366.0, 768.0);
+    let actual = heading
+        .style
+        .font_size
+        .resolve_vp(16.0, 0.0, 16.0, 1366.0, 768.0);
     let parsed = crate::css::parse_length("calc(36px + 16 * (100vw - 1280px) / 160)");
-    assert!((actual - 44.6).abs() < 0.1, "got {actual}px from {:?}, parsed {:?}", heading.style.font_size, parsed);
+    assert!(
+        (actual - 44.6).abs() < 0.1,
+        "got {actual}px from {:?}, parsed {:?}",
+        heading.style.font_size,
+        parsed
+    );
 }
 
 #[test]
@@ -6842,9 +8090,15 @@ fn stylesheet_clones_preserve_viewport_variables_without_raw_sources() {
     merged.append_fragment(fragment);
     assert_eq!(merged.source_count, original.source_count);
     merged.resolve_variables_for_viewport(800.0, 600.0);
-    assert_eq!(merged.variables.get("--theme").map(String::as_str), Some("large"));
+    assert_eq!(
+        merged.variables.get("--theme").map(String::as_str),
+        Some("large")
+    );
     merged.resolve_variables_for_viewport(600.0, 600.0);
-    assert_eq!(merged.variables.get("--theme").map(String::as_str), Some("small"));
+    assert_eq!(
+        merged.variables.get("--theme").map(String::as_str),
+        Some("small")
+    );
 }
 
 #[test]
@@ -6857,10 +8111,19 @@ fn stylesheet_root_variables_follow_parsed_supports_media_and_priority() {
          :root { --accent: second; }",
     );
     sheet.resolve_variables_for_viewport(800.0, 600.0);
-    assert_eq!(sheet.variables.get("--mode").map(String::as_str), Some("wide"));
-    assert_eq!(sheet.variables.get("--accent").map(String::as_str), Some("first"));
+    assert_eq!(
+        sheet.variables.get("--mode").map(String::as_str),
+        Some("wide")
+    );
+    assert_eq!(
+        sheet.variables.get("--accent").map(String::as_str),
+        Some("first")
+    );
     sheet.resolve_variables_for_viewport(600.0, 600.0);
-    assert_eq!(sheet.variables.get("--mode").map(String::as_str), Some("base"));
+    assert_eq!(
+        sheet.variables.get("--mode").map(String::as_str),
+        Some("base")
+    );
 }
 
 #[test]
@@ -6868,7 +8131,10 @@ fn deleted_root_rule_no_longer_supplies_custom_properties() {
     let mut sheet = Stylesheet::default();
     sheet.insert_rule(":root { --deleted: red; }", 0).unwrap();
     sheet.resolve_variables_for_viewport(800.0, 600.0);
-    assert_eq!(sheet.variables.get("--deleted").map(String::as_str), Some("red"));
+    assert_eq!(
+        sheet.variables.get("--deleted").map(String::as_str),
+        Some("red")
+    );
     sheet.delete_rule(0).unwrap();
     sheet.resolve_variables_for_viewport(800.0, 600.0);
     assert!(!sheet.variables.contains_key("--deleted"));
@@ -6882,11 +8148,17 @@ fn stylesheet_variables_follow_statement_form_at_rules() {
     );
     sheet.resolve_variables_for_viewport(800.0, 600.0);
     assert_eq!(
-        sheet.variables.get("--borderRadius-medium").map(String::as_str),
+        sheet
+            .variables
+            .get("--borderRadius-medium")
+            .map(String::as_str),
         Some(".375rem")
     );
     assert_eq!(
-        sheet.variables.get("--borderWidth-thin").map(String::as_str),
+        sheet
+            .variables
+            .get("--borderWidth-thin")
+            .map(String::as_str),
         Some(".0625rem")
     );
 }
@@ -6895,11 +8167,10 @@ fn stylesheet_variables_follow_statement_form_at_rules() {
 fn streamed_custom_property_only_root_fragment_is_preserved() {
     let css = ":root{--brand:#434fcf}.button{color:var(--brand)}";
     let loader: crate::StylesheetLoader = std::sync::Arc::new(|_| Ok(String::new()));
-    let streaming_loader: crate::StreamingStylesheetLoader =
-        std::sync::Arc::new(move |_, emit| {
-            emit(css);
-            Ok(())
-        });
+    let streaming_loader: crate::StreamingStylesheetLoader = std::sync::Arc::new(move |_, emit| {
+        emit(css);
+        Ok(())
+    });
     let loaded = crate::load_stylesheet_cached(
         "test-streamed-root-vars".to_string(),
         "https://example.test/app.css".to_string(),
@@ -7351,16 +8622,24 @@ fn computed_style_can_read_stored_pseudo_element_styles() {
 #[test]
 fn pseudo_filter_lengths_use_pseudo_font_root_and_viewport() {
     use crate::types::{Color, FilterOp};
-    let mut doc = parse_html(r#"<html><head><style>
+    let mut doc = parse_html(
+        r#"<html><head><style>
       html{font-size:20px}#a{font-size:30px}
       #a::before{content:'before';font-size:2em;filter:blur(calc(1em + 1rem + 1vw)) drop-shadow(1em 1rem);color:rgb(10,20,30)}
       #a::after{content:'after';backdrop-filter:blur(calc(1em + 1rem + 1vh))}
-    </style></head><body><div id=a>text</div></body></html>"#);
-    doc.set_viewport(800.0,600.0);
+    </style></head><body><div id=a>text</div></body></html>"#,
+    );
+    doc.set_viewport(800.0, 600.0);
     let a = doc.get_node(doc.get_element_by_id("a").unwrap()).unwrap();
     let before = a.style.before_style.as_ref().unwrap();
-    assert!(matches!(before.css_filter.ops[0], FilterOp::Blur(v) if v == 88.0), "{:?}", before.css_filter);
-    assert!(matches!(before.css_filter.ops[1], FilterOp::DropShadow {dx,dy,color,..} if dx == 60.0 && dy == 20.0 && color == Color::rgb(10,20,30)));
+    assert!(
+        matches!(before.css_filter.ops[0], FilterOp::Blur(v) if v == 88.0),
+        "{:?}",
+        before.css_filter
+    );
+    assert!(
+        matches!(before.css_filter.ops[1], FilterOp::DropShadow {dx,dy,color,..} if dx == 60.0 && dy == 20.0 && color == Color::rgb(10,20,30))
+    );
     let after = a.style.after_style.as_ref().unwrap();
     assert_eq!(after.rare().backdrop_filter, "blur(56px)");
 }
@@ -7368,43 +8647,73 @@ fn pseudo_filter_lengths_use_pseudo_font_root_and_viewport() {
 #[test]
 fn filter_lengths_resolve_in_element_context_and_inherit_computed_values() {
     use crate::types::{Color, FilterOp};
-    let mut doc = parse_html(r#"<html><head><style>
+    let mut doc = parse_html(
+        r#"<html><head><style>
       html{font-size:20px}
       #a{font-size:30px;filter:blur(calc(1em + 1rem + 1vw)) drop-shadow(1em 1rem 1vh);color:rgb(10,20,30)}
       #b{font-size:60px;filter:inherit}
       #c{font-size:30px;backdrop-filter:blur(calc(1em + 1rem + 1vw))}
-    </style></head><body><div id=a><div id=b>child</div></div><div id=c>backdrop</div></body></html>"#);
-    for (w, h, blur, shadow_blur) in [(800.0,600.0,58.0,6.0), (1000.0,400.0,60.0,4.0)] {
+    </style></head><body><div id=a><div id=b>child</div></div><div id=c>backdrop</div></body></html>"#,
+    );
+    for (w, h, blur, shadow_blur) in [(800.0, 600.0, 58.0, 6.0), (1000.0, 400.0, 60.0, 4.0)] {
         doc.set_viewport(w, h);
         for id in ["a", "b"] {
             let node = doc.get_node(doc.get_element_by_id(id).unwrap()).unwrap();
-            assert!(matches!(node.style.css_filter.ops[0], FilterOp::Blur(v) if v == blur), "{id}: {:?}", node.style.css_filter);
-            assert!(matches!(node.style.css_filter.ops[1], FilterOp::DropShadow {dx,dy,blur,color} if dx == 30.0 && dy == 20.0 && blur == shadow_blur && color == Color::rgb(10,20,30)), "{id}: {:?}", node.style.css_filter);
+            assert!(
+                matches!(node.style.css_filter.ops[0], FilterOp::Blur(v) if v == blur),
+                "{id}: {:?}",
+                node.style.css_filter
+            );
+            assert!(
+                matches!(node.style.css_filter.ops[1], FilterOp::DropShadow {dx,dy,blur,color} if dx == 30.0 && dy == 20.0 && blur == shadow_blur && color == Color::rgb(10,20,30)),
+                "{id}: {:?}",
+                node.style.css_filter
+            );
         }
         let c = doc.get_element_by_id("c").unwrap();
-        assert_eq!(doc.get_node(c).unwrap().style.rare().backdrop_filter, format!("blur({blur}px)"));
+        assert_eq!(
+            doc.get_node(c).unwrap().style.rare().backdrop_filter,
+            format!("blur({blur}px)")
+        );
     }
 }
 
 #[test]
 fn filter_math_and_nested_colors_reach_filter_operations() {
     use crate::types::{Color, FilterOp};
-    let filters = crate::css::parse_css_filter("brightness(sqrt(4)) contrast(calc(50% + 25%)) hue-rotate(calc(.25turn + 90deg)) blur(calc(1px + 2px)) drop-shadow(rgb(10, 20, 30) calc(1px + 2px) -2px 4px)");
+    let filters = crate::css::parse_css_filter(
+        "brightness(sqrt(4)) contrast(calc(50% + 25%)) hue-rotate(calc(.25turn + 90deg)) blur(calc(1px + 2px)) drop-shadow(rgb(10, 20, 30) calc(1px + 2px) -2px 4px)",
+    );
     assert_eq!(filters.ops.len(), 5);
     assert!(matches!(filters.ops[0], FilterOp::Brightness(v) if v == 2.0));
     assert!(matches!(filters.ops[1], FilterOp::Contrast(v) if v == 0.75));
     assert!(matches!(filters.ops[2], FilterOp::HueRotate(v) if (v - 180.0).abs() < 0.001));
     assert!(matches!(filters.ops[3], FilterOp::Blur(v) if v == 3.0));
-    assert!(matches!(filters.ops[4], FilterOp::DropShadow {dx,dy,blur,color} if dx == 3.0 && dy == -2.0 && blur == 4.0 && color == Color::rgb(10,20,30)));
+    assert!(
+        matches!(filters.ops[4], FilterOp::DropShadow {dx,dy,blur,color} if dx == 3.0 && dy == -2.0 && blur == 4.0 && color == Color::rgb(10,20,30))
+    );
     let mut style = ComputedStyle::default();
-    for bad in ["brightness(oops)", "brightness(-1)", "blur(10%)", "hue-rotate(2)",
-        "blur(2px) garbage", "blur(calc(2px)", "drop-shadow(1px 2px -3px)"] {
+    for bad in [
+        "brightness(oops)",
+        "brightness(-1)",
+        "blur(10%)",
+        "hue-rotate(2)",
+        "blur(2px) garbage",
+        "blur(calc(2px)",
+        "drop-shadow(1px 2px -3px)",
+    ] {
         apply_property(&mut style, "filter", "brightness(2)");
         apply_property(&mut style, "filter", bad);
-        assert!(matches!(style.css_filter.ops.as_slice(), [FilterOp::Brightness(v)] if *v == 2.0), "{bad}");
+        assert!(
+            matches!(style.css_filter.ops.as_slice(), [FilterOp::Brightness(v)] if *v == 2.0),
+            "{bad}"
+        );
     }
-    let filters = crate::css::parse_css_filter("brightness(calc(-1)) opacity(calc(150%)) blur(calc(-1px))");
-    assert!(matches!(filters.ops.as_slice(), [FilterOp::Brightness(a), FilterOp::Opacity(b), FilterOp::Blur(c)] if *a == 0.0 && *b == 1.0 && *c == 0.0));
+    let filters =
+        crate::css::parse_css_filter("brightness(calc(-1)) opacity(calc(150%)) blur(calc(-1px))");
+    assert!(
+        matches!(filters.ops.as_slice(), [FilterOp::Brightness(a), FilterOp::Opacity(b), FilterOp::Blur(c)] if *a == 0.0 && *b == 1.0 && *c == 0.0)
+    );
 }
 
 #[test]
@@ -8894,11 +10203,19 @@ fn ancestor_has_matches_sibling_subtree_in_parallel_selector_context() {
         "<div id=container><div class=lead><div class=media></div></div><div class=secondary></div></div>",
         900.0,
     );
-    let container = find_box(&doc.root, &|b| b.attributes.get("id").is_some_and(|id| id == "container")).unwrap();
-    let secondary = find_box(container, &|b| b.attributes.get("class").is_some_and(|class| class == "secondary")).unwrap();
+    let container = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "container")
+    })
+    .unwrap();
+    let secondary = find_box(container, &|b| {
+        b.attributes
+            .get("class")
+            .is_some_and(|class| class == "secondary")
+    })
+    .unwrap();
     let ancestors = [crate::css::AncestorInfo {
         tag: container.tag.clone(),
-        attributes: container.attributes.clone(),
+        attributes: container.attributes.clone().into(),
         node_id: container.node_id,
         ..Default::default()
     }];
@@ -8923,12 +10240,145 @@ fn ancestor_has_matches_sibling_subtree_in_parallel_selector_context() {
     };
     let selector = crate::css::parser::parse_selector(":not(:has(.lead .media)) .secondary");
     assert!(!crate::css::matching::matches_selector_with_ancestors(
-        &selector.parts, &secondary.tag, &secondary.attributes, 0, 1, &ancestors, &ctx
+        &selector.parts,
+        &secondary.tag,
+        &secondary.attributes,
+        0,
+        1,
+        &ancestors,
+        &ctx
     ));
     let positive = crate::css::parser::parse_selector(":has(.lead .media) .secondary");
     assert!(crate::css::matching::matches_selector_with_ancestors(
-        &positive.parts, &secondary.tag, &secondary.attributes, 0, 1, &ancestors, &ctx
+        &positive.parts,
+        &secondary.tag,
+        &secondary.attributes,
+        0,
+        1,
+        &ancestors,
+        &ctx
     ));
+}
+
+#[test]
+fn ancestor_has_selects_descendant_styles_in_the_document_cascade() {
+    let mut doc = parse(
+        r#"<style>
+        .card .secondary { color: black; }
+        .card:has(.lead .media) .secondary { color: green; }
+        .card:not(:has(.lead .media)) .secondary { color: red; }
+    </style>
+    <div class="card"><div class="lead"><div class="media"></div></div><div class="secondary" id="present"></div></div>
+    <div class="card"><div class="lead"></div><div class="secondary" id="absent"></div></div>"#,
+    );
+    let present = crate::dom::query_selector(&doc.root, "#present").unwrap();
+    let absent = crate::dom::query_selector(&doc.root, "#absent").unwrap();
+    assert_eq!(present.style.color, Color::rgb(0, 128, 0));
+    assert_eq!(absent.style.color, Color::rgb(255, 0, 0));
+
+    doc.root.cascade_dirty = true;
+    crate::css::apply_cascade_incremental(
+        &mut doc.root,
+        &doc.stylesheet,
+        None,
+        16.0,
+        900.0,
+        700.0,
+        0,
+        false,
+        &std::collections::HashSet::new(),
+    );
+    let present = crate::dom::query_selector(&doc.root, "#present").unwrap();
+    assert_eq!(present.style.color, Color::rgb(0, 128, 0));
+
+    let media = crate::dom::query_selector_mut(&mut doc.root, ".media").unwrap();
+    media.attributes.insert("class", "media-off");
+    doc.root.cascade_dirty = true;
+    crate::css::apply_cascade_incremental(
+        &mut doc.root,
+        &doc.stylesheet,
+        None,
+        16.0,
+        900.0,
+        700.0,
+        0,
+        false,
+        &std::collections::HashSet::new(),
+    );
+    let present = crate::dom::query_selector(&doc.root, "#present").unwrap();
+    assert_eq!(present.style.color, Color::rgb(255, 0, 0));
+}
+
+#[test]
+fn sibling_has_selects_following_element_in_the_document_cascade() {
+    let mut doc = parse(
+        r#"<style>
+        .lead + .secondary { color: black; }
+        .lead:has(.media) + .secondary { color: green; }
+        .lead:not(:has(.media)) + .secondary { color: red; }
+        .lead:has(.media) ~ .later { color: green; }
+        .lead:not(:has(.media)) ~ .later { color: red; }
+    </style>
+    <div><div class="lead"><span class="media"></span></div><div class="secondary" id="present"></div><div class="later" id="present-later"></div></div>
+    <div><div class="lead"></div><div class="secondary" id="absent"></div><div class="later" id="absent-later"></div></div>"#,
+    );
+    assert_eq!(
+        crate::dom::query_selector(&doc.root, "#present")
+            .unwrap()
+            .style
+            .color,
+        Color::rgb(0, 128, 0)
+    );
+    assert_eq!(
+        crate::dom::query_selector(&doc.root, "#absent")
+            .unwrap()
+            .style
+            .color,
+        Color::rgb(255, 0, 0)
+    );
+    assert_eq!(
+        crate::dom::query_selector(&doc.root, "#present-later")
+            .unwrap()
+            .style
+            .color,
+        Color::rgb(0, 128, 0)
+    );
+    assert_eq!(
+        crate::dom::query_selector(&doc.root, "#absent-later")
+            .unwrap()
+            .style
+            .color,
+        Color::rgb(255, 0, 0)
+    );
+
+    let media = crate::dom::query_selector_mut(&mut doc.root, ".media").unwrap();
+    media.attributes.insert("class", "media-off");
+    doc.root.cascade_dirty = true;
+    crate::css::apply_cascade_incremental(
+        &mut doc.root,
+        &doc.stylesheet,
+        None,
+        16.0,
+        900.0,
+        700.0,
+        0,
+        false,
+        &std::collections::HashSet::new(),
+    );
+    assert_eq!(
+        crate::dom::query_selector(&doc.root, "#present")
+            .unwrap()
+            .style
+            .color,
+        Color::rgb(255, 0, 0)
+    );
+    assert_eq!(
+        crate::dom::query_selector(&doc.root, "#present-later")
+            .unwrap()
+            .style
+            .color,
+        Color::rgb(255, 0, 0)
+    );
 }
 
 /// The parser bug above, on its own terms: a selector that STARTS with a
@@ -11118,7 +12568,10 @@ fn clip_path_keeps_nested_env_and_calc_tokens_intact() {
         "circle(env(--r, calc(10px + 5px)) at env(--cx, 40%) env(--cy, calc(20px + 5px)))",
     );
     assert_eq!(style.clip_path.kind, ClipPathKind::Circle);
-    assert!((style.clip_path.circle_radius.resolve(16.0, 100.0, 16.0) - 15.0).abs() < 0.1);
+    let ShapeRadius::Length(radius) = &style.clip_path.circle_radius else {
+        panic!("explicit circle radius");
+    };
+    assert!((radius.resolve(16.0, 100.0, 16.0) - 15.0).abs() < 0.1);
     assert!((style.clip_path.center_x.resolve(16.0, 200.0, 16.0) - 80.0).abs() < 0.1);
     assert!((style.clip_path.center_y.resolve(16.0, 100.0, 16.0) - 25.0).abs() < 0.1);
 
@@ -11129,6 +12582,323 @@ fn clip_path_keeps_nested_env_and_calc_tokens_intact() {
     );
     assert_eq!(style.clip_path.kind, ClipPathKind::Polygon);
     assert_eq!(style.clip_path.points.len(), 3);
+}
+
+#[test]
+fn clip_path_geometry_box_parsing_preserves_valid_value_on_invalid_input() {
+    let mut style = ComputedStyle::default();
+    for (value, reference_box) in [
+        ("margin-box", ClipPathBox::Margin),
+        ("padding-box circle(25% at 50% 50%)", ClipPathBox::Padding),
+        (
+            "polygon(0 0, 100% 0, 0 100%) content-box",
+            ClipPathBox::Content,
+        ),
+        ("border-box inset(1px)", ClipPathBox::Border),
+    ] {
+        apply_property(&mut style, "clip-path", value);
+        assert_eq!(style.clip_path.reference_box, reference_box, "{value}");
+        assert_eq!(
+            style.clip_path.kind == ClipPathKind::Box,
+            value == "margin-box",
+            "{value}"
+        );
+    }
+    let previous = style.clip_path.clone();
+    for invalid in [
+        "",
+        "none padding-box",
+        "inset(0) margin-box padding-box",
+        "inset(0) nonsense",
+    ] {
+        apply_property(&mut style, "clip-path", invalid);
+        assert_eq!(style.clip_path, previous, "{invalid}");
+    }
+}
+
+#[test]
+fn clip_path_inset_round_preserves_valid_value_and_resets_on_replacement() {
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "clip-path", "inset(10px round 20px / 8px)");
+    let round = style
+        .rare
+        .as_ref()
+        .unwrap()
+        .clip_path_inset_round
+        .as_ref()
+        .unwrap();
+    assert_eq!(round.0[0], CssLength::Px(20.0));
+    assert_eq!(round.1[0], CssLength::Px(8.0));
+    let previous = style.clip_path.clone();
+    for invalid in ["inset(10px round)", "inset(10px round 2px 3px 4px 5px 6px)"] {
+        apply_property(&mut style, "clip-path", invalid);
+        assert_eq!(style.clip_path, previous, "{invalid}");
+        assert!(style.rare.as_ref().unwrap().clip_path_inset_round.is_some());
+    }
+    apply_property(&mut style, "clip-path", "inset(10px)");
+    assert!(style.rare.as_ref().unwrap().clip_path_inset_round.is_none());
+
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        "<style>#parent{clip-path:inset(5px round 12px / 6px)}#child{clip-path:inherit}</style><div id=parent><div id=child></div></div>",
+        800.0,
+    );
+    let child = doc.get_element_by_id("child").unwrap();
+    let child = find_box(&doc.root, &|node: &WebCore| node.node_id == child).unwrap();
+    let inherited = child.style.rare().clip_path_inset_round.as_ref().unwrap();
+    assert_eq!(inherited.0[0], CssLength::Px(12.0));
+    assert_eq!(inherited.1[0], CssLength::Px(6.0));
+}
+
+#[test]
+fn clip_path_rectangles_share_inset_paint_geometry_without_inset_overconstraint() {
+    let mut style = ComputedStyle::default();
+    let reference = Rect::new(5.0, 7.0, 100.0, 80.0);
+    apply_property(
+        &mut style,
+        "clip-path",
+        "content-box xywh(10px 20px 40px 30px round 8px / 4px)",
+    );
+    assert_eq!(style.clip_path.kind, ClipPathKind::Inset);
+    assert_eq!(style.clip_path.reference_box, ClipPathBox::Content);
+    let rect = style.clip_path.inset_rect(reference, 16.0, 16.0);
+    assert_eq!(rect, Rect::new(15.0, 27.0, 40.0, 30.0));
+    let radii = style
+        .rare
+        .as_ref()
+        .unwrap()
+        .clip_path_inset_round
+        .as_ref()
+        .unwrap();
+    assert_eq!(radii.0[0], CssLength::Px(8.0));
+    assert_eq!(radii.1[0], CssLength::Px(4.0));
+
+    apply_property(&mut style, "clip-path", "rect(20px 50px 60px 10px)");
+    assert_eq!(
+        style.clip_path.inset_rect(reference, 16.0, 16.0),
+        Rect::new(15.0, 27.0, 40.0, 40.0)
+    );
+    assert!(style.rare.as_ref().unwrap().clip_path_inset_round.is_none());
+    apply_property(&mut style, "clip-path", "rect(auto auto auto auto)");
+    assert_eq!(style.clip_path.inset_rect(reference, 16.0, 16.0), reference);
+    apply_property(
+        &mut style,
+        "clip-path",
+        "xywh(calc(5px + 5px) 20px 40% 30px)",
+    );
+    assert_eq!(
+        style.clip_path.inset_rect(reference, 16.0, 16.0),
+        Rect::new(15.0, 27.0, 40.0, 30.0)
+    );
+    apply_property(&mut style, "clip-path", "rect(10px 0 0 20px)");
+    assert_eq!(
+        style.clip_path.inset_rect(reference, 16.0, 16.0),
+        Rect::new(25.0, 17.0, 0.0, 0.0)
+    );
+
+    let previous = style.clone();
+    for invalid in [
+        "xywh(1px 2px 3px)",
+        "xywh(1px 2px -3px 4px)",
+        "xywh(1px 2px 3px -2em)",
+        "rect(1px 2px 3px)",
+        "rect(1px 2px 3px 4px round)",
+    ] {
+        apply_property(&mut style, "clip-path", invalid);
+        assert_eq!(style, previous, "{invalid}");
+    }
+}
+
+#[test]
+fn clip_path_basic_shape_function_names_are_ascii_case_insensitive() {
+    let mut style = ComputedStyle::default();
+    for (value, kind) in [
+        ("INSET(10px)", ClipPathKind::Inset),
+        ("XYWH(10px 20px 30px 40px)", ClipPathKind::Inset),
+        ("RECT(10px 50px 60px 20px)", ClipPathKind::Inset),
+        ("CIRCLE(20px)", ClipPathKind::Circle),
+        ("ELLIPSE(20px 10px)", ClipPathKind::Ellipse),
+        ("POLYGON(0 0, 100% 0, 0 100%)", ClipPathKind::Polygon),
+    ] {
+        apply_property(&mut style, "clip-path", value);
+        assert_eq!(style.clip_path.kind, kind, "{value}");
+    }
+    apply_property(&mut style, "clip-path", "NONE");
+    assert_eq!(style.clip_path.kind, ClipPathKind::None);
+}
+
+#[test]
+fn circle_and_ellipse_radial_extents_resolve_against_reference_box() {
+    let mut style = ComputedStyle::default();
+    let reference = Rect::new(0.0, 0.0, 100.0, 60.0);
+    apply_property(&mut style, "clip-path", "circle()");
+    assert_eq!(style.clip_path.circle_radius, ShapeRadius::ClosestSide);
+    assert_eq!(
+        style.clip_path.circle_rect(reference, 16.0, 16.0),
+        Rect::new(20.0, 0.0, 60.0, 60.0)
+    );
+    apply_property(
+        &mut style,
+        "clip-path",
+        "circle(farthest-side at 20px 10px)",
+    );
+    assert_eq!(
+        style.clip_path.circle_rect(reference, 16.0, 16.0),
+        Rect::new(-60.0, -70.0, 160.0, 160.0)
+    );
+    apply_property(
+        &mut style,
+        "clip-path",
+        "circle(closest-corner at 20px 10px)",
+    );
+    assert!(
+        (style.clip_path.circle_rect(reference, 16.0, 16.0).w - 2.0 * 20.0_f32.hypot(10.0)).abs()
+            < 0.01
+    );
+    apply_property(&mut style, "clip-path", "circle(50%)");
+    let normalized = 100.0_f32.hypot(60.0) / std::f32::consts::SQRT_2;
+    assert!((style.clip_path.circle_rect(reference, 16.0, 16.0).w - normalized).abs() < 0.01);
+
+    apply_property(&mut style, "clip-path", "ellipse()");
+    assert_eq!(
+        style.clip_path.ellipse_rect(reference, 16.0, 16.0),
+        reference
+    );
+    apply_property(
+        &mut style,
+        "clip-path",
+        "ellipse(farthest-corner at 20px 10px)",
+    );
+    let ellipse = style.clip_path.ellipse_rect(reference, 16.0, 16.0);
+    assert!((ellipse.w - 160.0 * std::f32::consts::SQRT_2).abs() < 0.01);
+    assert!((ellipse.h - 100.0 * std::f32::consts::SQRT_2).abs() < 0.01);
+    apply_property(&mut style, "clip-path", "ellipse(20px 10px at center)");
+    assert_eq!(
+        style.clip_path.ellipse_rect(reference, 16.0, 16.0),
+        Rect::new(30.0, 20.0, 40.0, 20.0)
+    );
+    apply_property(&mut style, "clip-path", "ellipse(closest-corner at left center)");
+    assert_eq!(
+        style.clip_path.ellipse_rect(reference, 16.0, 16.0),
+        Rect::new(0.0, 0.0, 0.0, 60.0)
+    );
+    apply_property(&mut style, "clip-path", "ellipse(closest-corner at center top)");
+    assert_eq!(
+        style.clip_path.ellipse_rect(reference, 16.0, 16.0),
+        Rect::new(0.0, 0.0, 100.0, 0.0)
+    );
+    apply_property(&mut style, "clip-path", "circle(0 at 0 0)");
+    assert_eq!(
+        style.clip_path.circle_rect(reference, 16.0, 16.0),
+        Rect::new(0.0, 0.0, 0.0, 0.0)
+    );
+
+    let previous = style.clone();
+    for invalid in [
+        "circle(10px 20px)",
+        "circle(-5px)",
+        "circle(5)",
+        "ellipse(20px)",
+        "ellipse(-5px 10px)",
+        "ellipse(5 10px)",
+        "circle(10px at)",
+    ] {
+        apply_property(&mut style, "clip-path", invalid);
+        assert_eq!(style, previous, "{invalid}");
+    }
+}
+
+#[test]
+fn radial_clip_positions_follow_position_grammar() {
+    let mut style = ComputedStyle::default();
+    let reference = Rect::new(0.0, 0.0, 100.0, 60.0);
+    for (value, expected) in [
+        ("circle(1px at left top)", Rect::new(-1.0, -1.0, 2.0, 2.0)),
+        ("circle(1px at top left)", Rect::new(-1.0, -1.0, 2.0, 2.0)),
+        ("circle(1px at center 20px)", Rect::new(49.0, 19.0, 2.0, 2.0)),
+        ("circle(1px at 20px center)", Rect::new(19.0, 29.0, 2.0, 2.0)),
+        ("circle(1px at center center)", Rect::new(49.0, 29.0, 2.0, 2.0)),
+        (
+            "circle(1px at right 10px bottom 5px)",
+            Rect::new(89.0, 54.0, 2.0, 2.0),
+        ),
+        (
+            "ellipse(1px 1px at bottom 5px right 10px)",
+            Rect::new(89.0, 54.0, 2.0, 2.0),
+        ),
+    ] {
+        apply_property(&mut style, "clip-path", value);
+        let actual = if style.clip_path.kind == ClipPathKind::Ellipse {
+            style.clip_path.ellipse_rect(reference, 16.0, 16.0)
+        } else {
+            style.clip_path.circle_rect(reference, 16.0, 16.0)
+        };
+        assert_eq!(actual, expected, "{value}");
+    }
+
+    let previous = style.clone();
+    for invalid in [
+        "circle(1px at left right)",
+        "circle(1px at top bottom)",
+        "circle(1px at top 20px)",
+        "circle(1px at 20px left)",
+        "circle(1px at left top 5px)",
+        "circle(1px at left 5px top)",
+        "circle(1px at 5)",
+        "circle(1px at left 5 top 5px)",
+    ] {
+        apply_property(&mut style, "clip-path", invalid);
+        assert_eq!(style, previous, "{invalid}");
+    }
+}
+
+#[test]
+fn clip_path_path_parses_fill_rule_and_preserves_previous_value_on_invalid_input() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "clip-path",
+        "path(evenodd, 'M0 0 L100 0 L100 100 Z')",
+    );
+    assert_eq!(style.clip_path.kind, ClipPathKind::Path);
+    let (path, rule) = style
+        .rare
+        .as_ref()
+        .unwrap()
+        .clip_path_data
+        .as_ref()
+        .unwrap();
+    assert!(path.len() >= 4);
+    assert_eq!(*rule, tiny_skia::FillRule::EvenOdd);
+    apply_property(
+        &mut style,
+        "clip-path",
+        "PATH(EVENODD, 'M0 0 L100 0 L100 100 Z')",
+    );
+    assert_eq!(style.clip_path.kind, ClipPathKind::Path);
+    assert_eq!(
+        style
+            .rare
+            .as_ref()
+            .unwrap()
+            .clip_path_data
+            .as_ref()
+            .unwrap()
+            .1,
+        tiny_skia::FillRule::EvenOdd
+    );
+    let previous = style.clone();
+    for invalid in [
+        "path(not-a-rule, 'M0 0 L10 0 Z')",
+        "path(M0 0 L10 0 Z)",
+        "path('bad')",
+    ] {
+        apply_property(&mut style, "clip-path", invalid);
+        assert_eq!(style, previous, "{invalid}");
+    }
+    apply_property(&mut style, "clip-path", "circle(10px)");
+    assert_eq!(style.clip_path.kind, ClipPathKind::Circle);
+    assert!(style.rare.as_ref().unwrap().clip_path_data.is_none());
 }
 
 #[test]
@@ -11770,6 +13540,94 @@ fn hover_applies_to_the_element_and_its_subtree() {
     );
 }
 
+#[test]
+fn incremental_hover_matches_has_ancestor_rules_in_dirty_subtree() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<style>body{margin:0}.card{height:40px}.label{display:block;height:20px}\
+         .card:has(.lead) .label:hover{color:rgb(255,0,0)}</style>\
+         <div class='card'><span class='lead'></span><span id='target' class='label'>Target</span></div>\
+         <div class='card'><span class='lead'></span><span id='other' class='label'>Other</span></div>",
+        400.0,
+    );
+    let target = doc.get_element_by_id("target").expect("target");
+    let rect = doc.get_bounding_client_rect(target).expect("target rect");
+    doc.process_mouse_event(
+        crate::dom::HtmlEventType::MouseMove,
+        (rect.x + 4.0, rect.y + 4.0),
+        0,
+    );
+    renderer.layout_engine().layout(&mut doc, 400.0);
+    let find = |id: &str| {
+        find_box(&doc.root, &|node| {
+            node.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .expect("node")
+    };
+    assert_eq!(
+        find("target").style.color,
+        crate::types::Color::rgb(255, 0, 0)
+    );
+    assert_ne!(
+        find("other").style.color,
+        crate::types::Color::rgb(255, 0, 0)
+    );
+}
+
+#[test]
+fn hover_inside_has_updates_ancestor_and_sibling_then_reverts() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<style>body{margin:0}.card{height:50px}.trigger{display:block;width:80px;height:20px}\
+         .card:has(.trigger:hover){background-color:rgb(0,0,255)}\
+         .card:has(.trigger:hover) .label{color:rgb(255,0,0)}</style>\
+         <div id='card' class='card'><span id='trigger' class='trigger'>Trigger</span>\
+         <span id='label' class='label'>Label</span></div><div id='outside' style='height:30px'>Outside</div>",
+        400.0,
+    );
+    let style = |doc: &crate::types::Document, id: &str| {
+        find_box(&doc.root, &|node| {
+            node.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .expect("node")
+        .style
+        .clone()
+    };
+    let trigger = doc.get_element_by_id("trigger").expect("trigger");
+    let trigger_rect = doc.get_bounding_client_rect(trigger).expect("trigger rect");
+    doc.process_mouse_event(
+        crate::dom::HtmlEventType::MouseMove,
+        (trigger_rect.x + 4.0, trigger_rect.y + 4.0),
+        0,
+    );
+    renderer.layout_engine().layout(&mut doc, 400.0);
+    assert_eq!(
+        style(&doc, "card").background_color,
+        crate::types::Color::rgb(0, 0, 255)
+    );
+    assert_eq!(
+        style(&doc, "label").color,
+        crate::types::Color::rgb(255, 0, 0)
+    );
+
+    let outside = doc.get_element_by_id("outside").expect("outside");
+    let outside_rect = doc.get_bounding_client_rect(outside).expect("outside rect");
+    doc.process_mouse_event(
+        crate::dom::HtmlEventType::MouseMove,
+        (outside_rect.x + 4.0, outside_rect.y + 4.0),
+        0,
+    );
+    renderer.layout_engine().layout(&mut doc, 400.0);
+    assert_ne!(
+        style(&doc, "card").background_color,
+        crate::types::Color::rgb(0, 0, 255)
+    );
+    assert_ne!(
+        style(&doc, "label").color,
+        crate::types::Color::rgb(255, 0, 0)
+    );
+}
+
 /// `:hover` applies to every element on the pointer's ANCESTOR chain, not only
 /// the innermost one (CSS 2.1 §5.11.3 — the hover chain).
 ///
@@ -12319,16 +14177,23 @@ fn test_bootstrap_icons_glyph_shaping() {
     let data = include_bytes!("fixtures/fonts/bootstrap-icons-1.11.3.woff2");
     let sfnt = crate::woff::decode(data).expect("Bootstrap Icons must decode");
     let mut fs = FontSystem::new();
-    let ids = fs.db_mut()
+    let ids = fs
+        .db_mut()
         .load_font_source(fontdb::Source::Binary(std::sync::Arc::new(sfnt)));
     assert!(!ids.is_empty(), "decoded font must register");
     let mut buf = Buffer::new(&mut fs, Metrics::new(17.6, 22.0));
     let attrs = Attrs::new().family(cosmic_text::Family::Name("bootstrap-icons"));
     buf.set_text(&mut fs, "\u{f3d7}", &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(&mut fs, false);
-    let glyphs: Vec<_> = buf.layout_runs().flat_map(|run| run.glyphs.iter()).collect();
+    let glyphs: Vec<_> = buf
+        .layout_runs()
+        .flat_map(|run| run.glyphs.iter())
+        .collect();
     assert_eq!(glyphs.len(), 1, "one icon must shape to one glyph");
-    assert!(ids.contains(&glyphs[0].font_id), "must not use a fallback font");
+    assert!(
+        ids.contains(&glyphs[0].font_id),
+        "must not use a fallback font"
+    );
     assert_ne!(glyphs[0].glyph_id, 0, "must not shape to .notdef");
 
     let mut cache = cosmic_text::SwashCache::new();
@@ -12336,16 +14201,23 @@ fn test_bootstrap_icons_glyph_shaping() {
     let mut pixels = 0;
     let mut min_x = i32::MAX;
     let mut max_x = i32::MIN;
-    cache.with_pixels(&mut fs, glyph.cache_key, cosmic_text::Color::rgb(0, 0, 0), |x, _, color| {
-        if color.a() != 0 {
-            pixels += 1;
-            min_x = min_x.min(glyph.x + x);
-            max_x = max_x.max(glyph.x + x);
-        }
-    });
+    cache.with_pixels(
+        &mut fs,
+        glyph.cache_key,
+        cosmic_text::Color::rgb(0, 0, 0),
+        |x, _, color| {
+            if color.a() != 0 {
+                pixels += 1;
+                min_x = min_x.min(glyph.x + x);
+                max_x = max_x.max(glyph.x + x);
+            }
+        },
+    );
     assert!(pixels > 0, "icon must produce visible pixels");
-    assert!(min_x >= 0 && max_x <= 20,
-        "glyph pixel bounds must be within [0, 20], got [{min_x}, {max_x}]");
+    assert!(
+        min_x >= 0 && max_x <= 20,
+        "glyph pixel bounds must be within [0, 20], got [{min_x}, {max_x}]"
+    );
 }
 #[test]
 fn test_wpt_woff2_suite() {
@@ -12766,8 +14638,18 @@ fn data_url_background_rule_survives_between_neighboring_rules() {
     let css = r#".img-contain{position:relative}.loader{background-image:url("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=");background-position:50%;background-repeat:no-repeat;background-size:12rem}.disabled{opacity:.4}"#;
     let mut sheet = crate::css::Stylesheet::default();
     sheet.parse_and_add_with_base(css, "https://example.test/main.css");
-    assert!(sheet.rules.iter().any(|rule| rule.original_selector == ".loader"),
-        "missing .loader among {:?}", sheet.rules.iter().map(|rule| &rule.original_selector).collect::<Vec<_>>());
+    assert!(
+        sheet
+            .rules
+            .iter()
+            .any(|rule| rule.original_selector == ".loader"),
+        "missing .loader among {:?}",
+        sheet
+            .rules
+            .iter()
+            .map(|rule| &rule.original_selector)
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -12780,8 +14662,11 @@ fn absolute_auto_width_badge_shrinks_to_its_label() {
         800.0,
     );
     let badge = crate::tests::test_grid::find_by_id(&doc.root, "badge").unwrap();
-    assert!(badge.layout.border_rect.w > 30.0 && badge.layout.border_rect.w < 100.0,
-        "badge should shrink to its label, got {:?}", badge.layout.border_rect);
+    assert!(
+        badge.layout.border_rect.w > 30.0 && badge.layout.border_rect.w < 100.0,
+        "badge should shrink to its label, got {:?}",
+        badge.layout.border_rect
+    );
 }
 
 #[test]
@@ -12793,10 +14678,16 @@ fn column_flex_auto_width_tag_uses_max_content_not_wrapped_content() {
         800.0,
     );
     let tag = crate::tests::test_grid::find_by_id(&doc.root, "tag").unwrap();
-    assert!(tag.layout.border_rect.w > 160.0 && tag.layout.border_rect.w <= 220.0,
-        "tag should fit its unwrapped text and padding, got {:?}", tag.layout.border_rect);
-    assert!(tag.layout.border_rect.h <= 40.0,
-        "tag text should stay on one line, got {:?}", tag.layout.border_rect);
+    assert!(
+        tag.layout.border_rect.w > 160.0 && tag.layout.border_rect.w <= 220.0,
+        "tag should fit its unwrapped text and padding, got {:?}",
+        tag.layout.border_rect
+    );
+    assert!(
+        tag.layout.border_rect.h <= 40.0,
+        "tag text should stay on one line, got {:?}",
+        tag.layout.border_rect
+    );
 }
 
 /// **A `}` inside a string is string content, not a block end.** Brace matching
@@ -12862,9 +14753,56 @@ fn a_comment_marker_inside_a_string_is_not_stripped() {
         rule.declarations.contains_key("content"),
         "the declaration was emptied and dropped by comment stripping inside a string"
     );
+    assert_eq!(rule.declarations.get("content").map(String::as_str), Some("\"/* x */\""));
+    let css = r#".foo { content: "escaped \"/* still text */\""; /* real comment */ color: red }"#;
+    let rules = crate::css::parse_stylesheet(css).unwrap_or_default();
+    let rule = &rules[0];
+    assert_eq!(
+        rule.declarations.get("content").map(String::as_str),
+        Some(r#""escaped \"/* still text */\"""#)
+    );
+    assert_eq!(rule.declarations.get("color").map(String::as_str), Some("red"));
+    assert_eq!(crate::css::parser::strip_css_comments("a{}/* unfinished"), "a{}");
 }
 
 // ── Media query evaluation (mediaqueries-5) ─────────────────────────────────
+
+#[test]
+fn nested_media_lists_distribute_the_outer_condition() {
+    let combined = crate::css::MediaConditions::default()
+        .with_query("screen, speech")
+        .with_query("(min-width: 800px), print");
+    assert!(combined.matches(900.0, 600.0));
+    assert!(!combined.matches(600.0, 600.0));
+
+    let negated = crate::css::MediaConditions::default()
+        .with_query("not print")
+        .with_query("(min-width: 800px), print");
+    assert!(negated.matches(900.0, 600.0));
+    assert!(!negated.matches(600.0, 600.0));
+    assert!(!crate::css::evaluate_media("(print)", 900.0, 600.0));
+    assert!(!crate::css::evaluate_media("(screen)", 900.0, 600.0));
+
+    let mut sheet = crate::css::Stylesheet::default();
+    sheet.parse_and_add(
+        "@media screen, speech { @media (min-width: 800px), print { .nested { color: red } } }",
+    );
+    let rule = sheet.rules.iter().find(|rule| rule.original_selector == ".nested").unwrap();
+    assert!(rule.media_condition.matches(900.0, 600.0));
+    assert!(!rule.media_condition.matches(600.0, 600.0));
+}
+
+#[test]
+fn linked_media_condition_also_applies_inside_media_rules() {
+    let mut sheet = crate::css::Stylesheet::default();
+    sheet.parse_and_add_with_base_media(
+        "@media screen, speech { .linked { color: red } }",
+        "https://site.test/base.css",
+        "print",
+    );
+    let rule = sheet.rules.iter().find(|rule| rule.original_selector == ".linked").unwrap();
+    assert!(!rule.media_condition.matches(900.0, 600.0));
+}
 
 /// **A preference feature must not match both of its mutually exclusive
 /// values.** Unrecognised features fell through to a fail-open `true`, so
@@ -12894,6 +14832,45 @@ fn unknown_media_features_do_not_match() {
     assert!(
         !crate::css::evaluate_media("(definitely-not-a-media-feature: yes)", 1280.0, 900.0),
         "unknown parenthesized media features must not fail open"
+    );
+}
+
+#[test]
+fn unknown_media_types_and_invalid_discrete_values_do_not_apply() {
+    let matches = |query| crate::css::evaluate_media(query, 900.0, 600.0);
+    for query in [
+        "future-display",
+        "screen and future-display",
+        "(orientation: diagonal)",
+        "(hover: maybe)",
+        "(pointer: precise)",
+    ] {
+        assert!(!matches(query), "{query} must not match");
+    }
+    assert!(matches("not future-display"));
+    assert!(matches("future-display, screen"));
+    assert!(matches("(orientation: landscape)"));
+    assert!(!matches("(orientation: portrait)"));
+    assert!(!matches("not (made-up-feature: yes)"));
+    assert!(!matches("not (orientation: diagonal)"));
+    assert!(!matches("not (prefers-reduced-motion: typo)"));
+    assert!(!matches("not (forced-colors: maybe)"));
+    assert!(matches("not (prefers-reduced-motion: reduce)"));
+    assert!(!matches("(made-up-feature: yes) or print"));
+    assert!(matches("(made-up-feature: yes) or screen"));
+    assert!(!matches("(made-up-feature: yes) and screen"));
+    assert!(!matches("(made-up-feature: yes), print"));
+
+    let mut sheet = crate::css::Stylesheet::default();
+    sheet.parse_and_add(
+        "@media future-display { .unknown { display: none } } \
+         @media (hover: maybe) { .invalid { display: none } }",
+    );
+    assert!(
+        sheet
+            .rules
+            .iter()
+            .all(|rule| !rule.media_condition.matches(900.0, 600.0))
     );
 }
 
@@ -12929,10 +14906,35 @@ fn media_two_sided_ranges_match_only_inside_bounds() {
         1200.0,
         600.0
     ));
+    for condition in [
+        "(768px<=width<=1024px)",
+        "(1024px>=width>768px)",
+        "(768px<width)",
+        "(width=900px)",
+        "(width > -100px)",
+    ] {
+        assert!(
+            crate::css::evaluate_media(condition, 900.0, 600.0),
+            "{condition}"
+        );
+    }
+    for condition in [
+        "(768px<width>1024px)",
+        "(bogus<=width<=1024px)",
+        "(width>bogus)",
+        "(100px<width<1000px<1200px)",
+        "(min-width: bogus)",
+        "(width<=-100px)",
+    ] {
+        assert!(
+            !crate::css::evaluate_media(condition, 900.0, 600.0),
+            "{condition}"
+        );
+    }
 
     let mut frame = EngineFrame::new(
         parse_html(
-            r#"<style>#a{width:10px}@media (768px <= width <= 1024px){#a{width:33px}}</style><div id="a"></div>"#,
+            r#"<style>#a{width:10px}@media (768px<=width<=1024px){#a{width:33px}}</style><div id="a"></div>"#,
         ),
         900.0,
         600.0,
@@ -13126,9 +15128,12 @@ fn unsupported_transform_function_invalidates_the_declaration() {
 fn transform_math_validates_dimensions_and_keeps_both_skew_axes() {
     use crate::types::TransformOp;
     let parse = crate::css::parse_css_transform_checked;
-    let value = parse("scale(calc(100% + 50%), sqrt(4)) skew(calc(15deg + .125turn), 30deg)").unwrap();
+    let value =
+        parse("scale(calc(100% + 50%), sqrt(4)) skew(calc(15deg + .125turn), 30deg)").unwrap();
     assert!(matches!(value.ops[0], TransformOp::Scale(x, y) if x == 1.5 && y == 2.0));
-    let TransformOp::Matrix(a, b, c, d, e, f) = value.ops[1] else { panic!("expected skew matrix") };
+    let TransformOp::Matrix(a, b, c, d, e, f) = value.ops[1] else {
+        panic!("expected skew matrix")
+    };
     assert_eq!((a, d, e, f), (1.0, 1.0, 0.0, 0.0));
     assert!((b - 30.0_f32.to_radians().tan()).abs() < 0.001);
     assert!((c - 60.0_f32.to_radians().tan()).abs() < 0.001);
@@ -13136,15 +15141,35 @@ fn transform_math_validates_dimensions_and_keeps_both_skew_axes() {
     assert!(parse("matrix(calc(1in / 48px), 0, 0, 1, sqrt(9), 4)").is_some());
     let mut style = ComputedStyle::default();
     crate::css::apply_property(&mut style, "transform", "translateX(12px)");
-    for invalid in ["", "scale()", "scale(1,,2)", "scale(1,)", "scale(1 2)",
-        "scale(1,2,3)", "scale(2px)", "scale(calc(1 + 50%))", "rotate(90)",
-        "rotate(bogusdeg)", "rotate(calc(1px))", "rotate(1deg, 2deg)", "rotate(1deg + 2deg)",
-        "translate(auto)", "translate(3)", "translate(calc(1px + 1s))",
-        "translateZ(10%)", "matrix(1,0,0,1,0)", "matrix(1,0,0,1,0,1px)",
-        "skew(10deg, bogus)", "translateX(4px) scale(bogus)"] {
+    for invalid in [
+        "",
+        "scale()",
+        "scale(1,,2)",
+        "scale(1,)",
+        "scale(1 2)",
+        "scale(1,2,3)",
+        "scale(2px)",
+        "scale(calc(1 + 50%))",
+        "rotate(90)",
+        "rotate(bogusdeg)",
+        "rotate(calc(1px))",
+        "rotate(1deg, 2deg)",
+        "rotate(1deg + 2deg)",
+        "translate(auto)",
+        "translate(3)",
+        "translate(calc(1px + 1s))",
+        "translateZ(10%)",
+        "matrix(1,0,0,1,0)",
+        "matrix(1,0,0,1,0,1px)",
+        "skew(10deg, bogus)",
+        "translateX(4px) scale(bogus)",
+    ] {
         assert!(parse(invalid).is_none(), "must reject {invalid}");
         crate::css::apply_property(&mut style, "transform", invalid);
-        assert_eq!(style.transform, "translateX(12px)", "preserve fallback for {invalid}");
+        assert_eq!(
+            style.transform, "translateX(12px)",
+            "preserve fallback for {invalid}"
+        );
     }
 }
 
@@ -13187,10 +15212,20 @@ fn emergency_wrapping_preserves_words_graphemes_and_nowrap() {
         renderer.render(&mut doc, &mut pm, 1.0);
         let words = crate::dom::query_selector(&doc.root, "#words").unwrap();
         assert_eq!(words.layout.line_cache.len(), 2, "{mode}");
-        assert_eq!(words.layout.line_cache[0].text_length, 3, "prefer normal word boundary");
-        assert_eq!(words.layout.line_cache[1].text_length, 4, "do not split a word fitting the next line");
+        assert_eq!(
+            words.layout.line_cache[0].text_length, 3,
+            "prefer normal word boundary"
+        );
+        assert_eq!(
+            words.layout.line_cache[1].text_length, 4,
+            "do not split a word fitting the next line"
+        );
         let clusters = crate::dom::query_selector(&doc.root, "#clusters").unwrap();
-        let boundaries: Vec<_> = text.grapheme_indices(true).map(|(i, _)| i).chain(std::iter::once(text.len())).collect();
+        let boundaries: Vec<_> = text
+            .grapheme_indices(true)
+            .map(|(i, _)| i)
+            .chain(std::iter::once(text.len()))
+            .collect();
         assert!(clusters.layout.line_cache.len() > 1);
         for line in &clusters.layout.line_cache {
             assert!(boundaries.contains(&line.text_start));
@@ -13199,7 +15234,10 @@ fn emergency_wrapping_preserves_words_graphemes_and_nowrap() {
         let nowrap = crate::dom::query_selector(&doc.root, "#nowrap").unwrap();
         assert_eq!(nowrap.layout.line_cache.len(), 1);
         let hyphen = crate::dom::query_selector(&doc.root, "#hyphen").unwrap();
-        assert!(hyphen.layout.line_cache.len() > 2, "long hyphenated segments also need emergency breaks");
+        assert!(
+            hyphen.layout.line_cache.len() > 2,
+            "long hyphenated segments also need emergency breaks"
+        );
     }
 }
 
@@ -13207,15 +15245,21 @@ fn emergency_wrapping_preserves_words_graphemes_and_nowrap() {
 fn break_all_preserves_graphemes_and_respects_nowrap() {
     use unicode_segmentation::UnicodeSegmentation;
 
-    for text in ["a\u{0301}a\u{0301}a\u{0301}a\u{0301}", "\u{1f469}\u{200d}\u{1f4bb}\u{1f469}\u{200d}\u{1f4bb}"] {
+    for text in [
+        "a\u{0301}a\u{0301}a\u{0301}a\u{0301}",
+        "\u{1f469}\u{200d}\u{1f4bb}\u{1f469}\u{200d}\u{1f4bb}",
+    ] {
         let mut renderer = crate::Renderer::new();
         let mut doc = renderer.load_html(&format!(
             "<style>div{{font:16px/20px monospace;word-break:break-all;width:12px}}</style><div id=wrap>{text}</div><div id=nowrap style='white-space:nowrap'>{text}</div><div id=pre style='white-space:pre'>{text}</div>"
         ), 400.0);
         let mut pm = tiny_skia::Pixmap::new(400, 400).unwrap();
         renderer.render(&mut doc, &mut pm, 1.0);
-        let boundaries: Vec<_> = text.grapheme_indices(true).map(|(i, _)| i)
-            .chain(std::iter::once(text.len())).collect();
+        let boundaries: Vec<_> = text
+            .grapheme_indices(true)
+            .map(|(i, _)| i)
+            .chain(std::iter::once(text.len()))
+            .collect();
         let wrapped = crate::dom::query_selector(&doc.root, "#wrap").unwrap();
         assert!(wrapped.layout.line_cache.len() > 1);
         for line in &wrapped.layout.line_cache {
@@ -13238,15 +15282,36 @@ fn overflow_wrap_min_content_distinguishes_anywhere_from_break_word() {
     );
     let mut pm = tiny_skia::Pixmap::new(400, 800).unwrap();
     renderer.render(&mut doc, &mut pm, 1.0);
-    let width = |id| crate::dom::query_selector(&doc.root, id).unwrap().layout.content_rect.w;
+    let width = |id| {
+        crate::dom::query_selector(&doc.root, id)
+            .unwrap()
+            .layout
+            .content_rect
+            .w
+    };
     let normal = width("#normal");
     assert!(normal > 50.0);
     let anywhere = width("#any");
-    assert!(anywhere < normal / 4.0, "anywhere min-content: {anywhere}, normal: {normal}");
-    assert!((width("#word") - normal).abs() < 1.0, "break-word must not lower min-content");
-    assert!((width("#nowrap") - normal).abs() < 1.0, "nowrap suppresses emergency opportunities");
-    assert!((width("#legacy") - anywhere).abs() < 1.0, "legacy word-break behaves as overflow-wrap:anywhere");
-    assert!((width("#nested") - anywhere).abs() < 1.0, "nested inline text shares the intrinsic break path");
+    assert!(
+        anywhere < normal / 4.0,
+        "anywhere min-content: {anywhere}, normal: {normal}"
+    );
+    assert!(
+        (width("#word") - normal).abs() < 1.0,
+        "break-word must not lower min-content"
+    );
+    assert!(
+        (width("#nowrap") - normal).abs() < 1.0,
+        "nowrap suppresses emergency opportunities"
+    );
+    assert!(
+        (width("#legacy") - anywhere).abs() < 1.0,
+        "legacy word-break behaves as overflow-wrap:anywhere"
+    );
+    assert!(
+        (width("#nested") - anywhere).abs() < 1.0,
+        "nested inline text shares the intrinsic break path"
+    );
 }
 
 #[test]
@@ -13260,8 +15325,16 @@ fn overflow_wrap_intrinsics_reach_flex_and_grid_auto_minimums() {
         renderer.render(&mut doc, &mut pm, 1.0);
         let any = crate::dom::query_selector(&doc.root, "#any").unwrap();
         let word = crate::dom::query_selector(&doc.root, "#word").unwrap();
-        assert!(any.layout.content_rect.w <= 40.5, "{display}: anywhere must fit the container, got {}", any.layout.content_rect.w);
-        assert!(word.layout.content_rect.w > 60.0, "{display}: break-word must retain the word's automatic minimum, got {}", word.layout.content_rect.w);
+        assert!(
+            any.layout.content_rect.w <= 40.5,
+            "{display}: anywhere must fit the container, got {}",
+            any.layout.content_rect.w
+        );
+        assert!(
+            word.layout.content_rect.w > 60.0,
+            "{display}: break-word must retain the word's automatic minimum, got {}",
+            word.layout.content_rect.w
+        );
     }
 }
 
@@ -13485,10 +15558,14 @@ fn block_before_pseudo_on_inline_anchor_materializes_icon_box() {
 }
 #[test]
 fn individual_transforms_accept_typed_math_and_mixed_units() {
-    use crate::css::transform_parse::{parse_individual_translate, parse_individual_rotate, parse_individual_scale};
+    use crate::css::transform_parse::{
+        parse_individual_rotate, parse_individual_scale, parse_individual_translate,
+    };
     use crate::types::TransformOp;
     let transform = parse_individual_translate("calc(50% - 2em + 1rem) min(10vh, 40px)").unwrap();
-    let TransformOp::Translate(x, y) = &transform.ops[0] else { panic!("expected translation") };
+    let TransformOp::Translate(x, y) = &transform.ops[0] else {
+        panic!("expected translation")
+    };
     assert_eq!(x.resolve_vp(30.0, 200.0, 20.0, 800.0, 600.0), 60.0);
     assert_eq!(x.resolve_vp(20.0, 400.0, 10.0, 800.0, 600.0), 170.0);
     assert_eq!(y.resolve_vp(30.0, 200.0, 20.0, 800.0, 600.0), 40.0);

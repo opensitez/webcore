@@ -36,10 +36,11 @@ fn the_data_model_sizes_are_what_the_plan_says() {
     // change that moved them.
     //
     // Current model includes the newer layout and image-set style fields;
+    // node and layout-box storage grew by eight bytes each.
     // these numbers are a measured record, not a size budget.
     // This assertion is a measured record, not a threshold; update it with the
     // feature that intentionally moves the data model.
-    assert_eq!(sizes, (1488, 3592, 280), "sizes moved");
+    assert_eq!(sizes, (1496, 3592, 288), "sizes moved");
 }
 
 #[test]
@@ -51,7 +52,7 @@ fn a_real_page_costs_what_the_plan_says() {
     // sizes above, so widening WebCore or ComputedStyle changes this record.
     assert_eq!(
         (nodes, node_bytes, distinct_styles, total),
-        (160, 238_080, 160, 812_800),
+        (160, 239_360, 160, 814_080),
         "demo.html: nodes, node bytes, DISTINCT styles, total"
     );
 }
@@ -1170,7 +1171,8 @@ fn completed_opacity_paint_survives_cached_replay() {
     let id = doc.query_selector("#box").unwrap();
     let rect = crate::types::Rect::new(0.0, 0.0, 80.0, 80.0);
     let mut pixels = tiny_skia::Pixmap::new(320, 240).unwrap();
-    doc.animation_overrides.insert(id, vec![("opacity".into(), "0".into())]);
+    doc.animation_overrides
+        .insert(id, vec![("opacity".into(), "0".into())]);
     renderer.render(&mut doc, &mut pixels, 1.0);
     doc.animation_overrides.clear();
     renderer.invalidate_paint_rects([rect]);
@@ -1225,8 +1227,11 @@ fn partial_transform_repaint_matches_full_repaint_across_neighboring_tracks() {
     for (a, b) in [(180, 0), (400, 120), (75, 350), (0, 400), (300, 20)] {
         for (selector, x) in [("#a", a), ("#b", b)] {
             let value = vec![("transform".into(), format!("translateX({x}px)"))];
-            doc.animation_overrides.insert(doc.query_selector(selector).unwrap(), value.clone());
-            expected_doc.animation_overrides.insert(expected_doc.query_selector(selector).unwrap(), value);
+            doc.animation_overrides
+                .insert(doc.query_selector(selector).unwrap(), value.clone());
+            expected_doc
+                .animation_overrides
+                .insert(expected_doc.query_selector(selector).unwrap(), value);
         }
         renderer.invalidate_animation_paint_rects(&doc, 640.0, 400.0);
         renderer.render(&mut doc, &mut pixels, 1.0);
@@ -1234,14 +1239,28 @@ fn partial_transform_repaint_matches_full_repaint_across_neighboring_tracks() {
         reference.render(&mut expected_doc, &mut expected, 1.0);
         // Fractional top/bottom edges have up to two bytes of alpha-rounding
         // difference between tiled and direct replay. Interior pixels are exact.
-        if let Some(byte) = pixels.data().iter().zip(expected.data()).enumerate().find_map(|(i, (a, b))| {
-            let y = i / 4 / 640;
-            let tolerance = if [24, 124, 149, 249].contains(&y) { 2 } else { 0 };
-            (a.abs_diff(*b) > tolerance).then_some(i)
-        }) {
+        if let Some(byte) = pixels
+            .data()
+            .iter()
+            .zip(expected.data())
+            .enumerate()
+            .find_map(|(i, (a, b))| {
+                let y = i / 4 / 640;
+                let tolerance = if [24, 124, 149, 249].contains(&y) {
+                    2
+                } else {
+                    0
+                };
+                (a.abs_diff(*b) > tolerance).then_some(i)
+            })
+        {
             let x = (byte / 4 % 640) as u32;
             let y = (byte / 4 / 640) as u32;
-            panic!("partial paint differs for tracks {a}, {b} at {x},{y}: {:?} vs {:?}", pixels.pixel(x, y), expected.pixel(x, y));
+            panic!(
+                "partial paint differs for tracks {a}, {b} at {x},{y}: {:?} vs {:?}",
+                pixels.pixel(x, y),
+                expected.pixel(x, y)
+            );
         }
     }
 }
@@ -1254,7 +1273,8 @@ fn fractional_repaint_damage_does_not_leave_clear_color_seams() {
             "<style>body{margin:0}#box{width:300px;height:200px;background:#168b70}</style><div id='box'></div>",
             320.0,
         );
-        let mut pixels = tiny_skia::Pixmap::new((320.0 * scale) as u32, (240.0 * scale) as u32).unwrap();
+        let mut pixels =
+            tiny_skia::Pixmap::new((320.0 * scale) as u32, (240.0 * scale) as u32).unwrap();
         renderer.render(&mut doc, &mut pixels, scale);
         let expected = pixels.data().to_vec();
         for rect in [
@@ -1263,7 +1283,10 @@ fn fractional_repaint_damage_does_not_leave_clear_color_seams() {
         ] {
             renderer.invalidate_paint_rects([rect]);
             renderer.render(&mut doc, &mut pixels, scale);
-            assert!(pixels.data() == expected, "fractional repaint changed pixels at scale {scale}");
+            assert!(
+                pixels.data() == expected,
+                "fractional repaint changed pixels at scale {scale}"
+            );
         }
     }
 }
@@ -1277,16 +1300,22 @@ fn translated_animation_damage_covers_the_entire_moving_box() {
     );
     let id = doc.query_selector("#box").unwrap();
     let mut pixels = tiny_skia::Pixmap::new(640, 240).unwrap();
-    doc.animation_overrides.insert(id, vec![("transform".into(), "translateX(400px)".into())]);
+    doc.animation_overrides
+        .insert(id, vec![("transform".into(), "translateX(400px)".into())]);
     renderer.render(&mut doc, &mut pixels, 1.0);
     for x in [150, 400, 250, 10] {
-        doc.animation_overrides.insert(id, vec![("transform".into(), format!("translateX({x}px)"))]);
+        doc.animation_overrides
+            .insert(id, vec![("transform".into(), format!("translateX({x}px)"))]);
         renderer.invalidate_animation_paint_rects(&doc, 640.0, 240.0);
         renderer.render(&mut doc, &mut pixels, 1.0);
         for px in 0..640 {
             let actual = pixels.pixel(px, 50).unwrap();
             let expected_green = if (x..x + 100).contains(&px) { 0 } else { 255 };
-            assert_eq!(actual.green(), expected_green, "translation {x}, pixel {px}");
+            assert_eq!(
+                actual.green(),
+                expected_green,
+                "translation {x}, pixel {px}"
+            );
         }
     }
 }

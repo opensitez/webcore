@@ -530,7 +530,11 @@ pub fn build_box_rects(
         mr_w,
         mr_h,
     );
-    node.layout.baseline = find_last_in_flow_baseline(node).unwrap_or(content_y + content_h);
+    node.layout.baseline = if node.style.content_visibility == ContentVisibility::Hidden {
+        content_y + content_h
+    } else {
+        find_last_in_flow_baseline(node).unwrap_or(content_y + content_h)
+    };
 
     // Cache resolved values
     node.layout.resolved_margin_top = rbox.margin_top;
@@ -578,7 +582,28 @@ pub fn layout_block_with_fc(
     node: &mut WebCore,
     rbox: &ResolvedBox,
     c: &Constraints,
+    mut parent_fc: Option<&mut FloatContext>,
+) -> f32 {
+    let auto_scrollbar = matches!(node.style.overflow_y, Overflow::Auto)
+        && !scrollbar_gutter_stable(&node.style.scrollbar_gutter)
+        && node.style.scrollbar_width_px() > 0.0;
+    let first_height = layout_block_pass(engine, node, rbox, c, parent_fc.as_deref_mut(), false);
+    if auto_scrollbar && node.layout.scroll_height > node.layout.content_rect.h + 0.5 {
+        // overflow:auto establishes a BFC, so the first pass did not mutate
+        // the parent's float context. Only the child width changes on retry.
+        layout_block_pass(engine, node, rbox, c, parent_fc, true)
+    } else {
+        first_height
+    }
+}
+
+fn layout_block_pass(
+    engine: &LayoutEngine,
+    node: &mut WebCore,
+    rbox: &ResolvedBox,
+    c: &Constraints,
     parent_fc: Option<&mut FloatContext>,
+    auto_scrollbar_present: bool,
 ) -> f32 {
     let is_bfc = c.force_independent_formatting_context || establishes_bfc(&node.style);
     let mut containing_w = c.available_width;
@@ -729,17 +754,15 @@ pub fn layout_block_with_fc(
     // their rightmost strip gets painted over by the scrollbar.
     //
     // • overflow-y: scroll → scrollbar is always present: always reserve.
-    // • overflow-y: auto with max-height → scrollbar appears when content
-    //   overflows max-height, which is the common case for demo panels; reserve
-    //   proactively.  (A full two-pass layout would be needed for perfect accuracy
-    //   but is unnecessary for the demos that trigger this path.)
+    // • overflow-y: auto → reserve only after a measured first pass overflows.
     let sbw = node.style.scrollbar_width_px();
-    let reserve_v_scrollbar = matches!(node.style.overflow_y, Overflow::Scroll)
-        || (matches!(node.style.overflow_y, Overflow::Auto)
-            && !node.style.max_height.is_none()
-            && !node.style.max_height.is_auto());
+    let reserve_v_scrollbar =
+        matches!(node.style.overflow_y, Overflow::Scroll) || auto_scrollbar_present;
     let stable_gutter = scrollbar_gutter_stable(&node.style.scrollbar_gutter)
-        && !matches!(node.style.overflow_y, Overflow::Visible);
+        && matches!(
+            node.style.overflow_y,
+            Overflow::Hidden | Overflow::Scroll | Overflow::Auto
+        );
     let reserve_scrollbar_gutter = reserve_v_scrollbar || stable_gutter;
     let gutter_edges = if reserve_scrollbar_gutter && sbw > 0.0 {
         if scrollbar_gutter_both_edges(&node.style.scrollbar_gutter) {
@@ -856,6 +879,7 @@ pub fn layout_block_with_fc(
         fc_owned.origin_y = content_y;
         &mut fc_owned
     };
+    let float_count_before = fc.floats.len();
 
     // ─── Multi-column layout (early return path) ──────────────────────────────
     if establishes_column_context(&node.style) && !node.children.is_empty() {
@@ -971,13 +995,20 @@ pub fn layout_block_with_fc(
             continue;
         }
 
-        // Handle clear
+        // A cleared float moves itself below earlier floats without advancing
+        // the normal-flow cursor used by following siblings.
+        let mut float_child_y = child_y;
         match child_clear {
             Clear::None => {}
             clear => {
-                child_y = fc.clear_y(content_y + child_y - fc.origin_y, clear)
+                let cleared_y = fc.clear_y(content_y + child_y - fc.origin_y, clear)
                     - (content_y - fc.origin_y);
-                prev_bottom_margin = 0.0;
+                if matches!(child_float, Float::None) {
+                    child_y = cleared_y;
+                    prev_bottom_margin = 0.0;
+                } else {
+                    float_child_y = cleared_y;
+                }
             }
         }
 
@@ -1003,7 +1034,7 @@ pub fn layout_block_with_fc(
             // Layout float to get natural size
             engine.layout_box(
                 grid_child_mut(node, path),
-                &child_c(child_content_w, content_x, content_y + child_y),
+                &child_c(child_content_w, content_x, content_y + float_child_y),
             );
             // Tables already shrink using their column widths and border spacing.
             if grid_child_ref(node, path).style.width.is_auto()
@@ -1034,15 +1065,20 @@ pub fn layout_block_with_fc(
                         + irb.layout.resolved_margin_right;
                     engine.layout_box(
                         grid_child_mut(node, path),
-                        &child_c(shrink_w, content_x, content_y + child_y),
+                        &child_c(shrink_w, content_x, content_y + float_child_y),
                     );
                 }
             }
             let ch = grid_child_ref(node, path);
-            let effective_w = ch.layout.border_rect.w
+            let signed_outer_w = ch.layout.border_rect.w
                 + ch.layout.resolved_margin_left
                 + ch.layout.resolved_margin_right;
-            let float_w = effective_w.max(0.0);
+            let float_w =
+                if ch.layout.resolved_margin_left < 0.0 || ch.layout.resolved_margin_right < 0.0 {
+                    signed_outer_w.max(0.0)
+                } else {
+                    ch.layout.margin_rect.w.max(0.0)
+                };
             let float_h = ch.layout.margin_rect.h;
             let side = if child_float == Float::Left {
                 FloatSide::Left
@@ -1052,7 +1088,7 @@ pub fn layout_block_with_fc(
             let local_x = content_x - fc.origin_x;
             let placed = fc.place_float_in(
                 local_x,
-                content_y + child_y - fc.origin_y,
+                content_y + float_child_y - fc.origin_y,
                 float_w,
                 float_h,
                 child_content_w,
@@ -1130,6 +1166,7 @@ pub fn layout_block_with_fc(
             let can_skip = !child.layout.layout_dirty
                 && !child.has_dirty_descendant
                 && !child.has_dirty_layout_descendant
+                && child.layout.escaping_float_count == 0
                 && child.layout.last_containing_width > 0.0
                 && (child.layout.last_containing_width - child_content_w).abs() < 0.01
                 && super::same_containing_height(child.layout.last_containing_height, child_h)
@@ -1186,19 +1223,36 @@ pub fn layout_block_with_fc(
 
             let ch = grid_child_ref(node, path);
             let child_h = ch.layout.margin_rect.h;
+            let child_outer_w = ch.layout.margin_rect.w;
             let mut left_edge = 0.0f32;
             let mut right_edge = child_content_w;
             let child_is_bfc = establishes_bfc(&ch.style);
             if child_is_bfc {
                 let local_x = content_x - fc.origin_x;
-                fc.available_width_in(
-                    local_x,
-                    content_y + child_y - fc.origin_y,
-                    child_h,
-                    child_content_w,
-                    &mut left_edge,
-                    &mut right_edge,
-                );
+                let mut placement_y = content_y + child_y;
+                loop {
+                    fc.available_width_in(
+                        local_x,
+                        placement_y - fc.origin_y,
+                        child_h,
+                        child_content_w,
+                        &mut left_edge,
+                        &mut right_edge,
+                    );
+                    let constrained = left_edge > 0.0 || right_edge < child_content_w;
+                    if !constrained || child_outer_w <= right_edge - left_edge + 0.5 {
+                        break;
+                    }
+                    let Some(next_clear) = fc.next_clear_y(placement_y - fc.origin_y) else {
+                        break;
+                    };
+                    let next_y = fc.origin_y + next_clear;
+                    if next_y <= placement_y + 0.01 {
+                        break;
+                    }
+                    placement_y = next_y;
+                }
+                child_y = placement_y - content_y;
             }
 
             let ch = grid_child_ref(node, path);
@@ -1223,9 +1277,33 @@ pub fn layout_block_with_fc(
                 content_width: Some(ch.layout.resolved_content_width),
                 content_height: Some(child_content_h),
             };
+            let flow_left_edge = if child_is_bfc
+                && node.style.direction == Direction::RTL
+                && child_outer_w > child_content_w
+                && left_edge == 0.0
+                && right_edge == child_content_w
+            {
+                child_content_w - child_outer_w
+            } else {
+                left_edge
+            };
+            let table_auto_margin_left = if ch.style.display == Display::Table
+                && (ch.style.margin_left.is_auto() || ch.style.margin_right.is_auto())
+            {
+                let free = (right_edge - left_edge - ch.layout.border_rect.w).max(0.0);
+                if ch.style.margin_left.is_auto() && ch.style.margin_right.is_auto() {
+                    free / 2.0
+                } else if ch.style.margin_left.is_auto() {
+                    (free - child_margin_right).max(0.0)
+                } else {
+                    child_margin_left
+                }
+            } else {
+                child_margin_left
+            };
             let cx = content_x
-                + left_edge
-                + child_margin_left
+                + flow_left_edge
+                + table_auto_margin_left
                 + child_rbox_copy.border_left
                 + child_rbox_copy.padding_left;
             let cy = content_y + child_y + child_border_top + child_pad_top;
@@ -1508,6 +1586,38 @@ pub fn layout_block_with_fc(
     } else {
         0.0
     };
+    let empty_editing_host = node.effective_children().is_empty()
+        && node.layout.line_cache.is_empty()
+        && node.attributes.get("contenteditable").is_some_and(|value| {
+            value.is_empty()
+                || value.eq_ignore_ascii_case("true")
+                || value.eq_ignore_ascii_case("plaintext-only")
+        });
+    if empty_editing_host {
+        let line_h = crate::layout::inline_layout::strut_line_height(
+            engine,
+            node,
+            font_px,
+            root_font_px,
+            0.0,
+        );
+        node.layout.line_cache.push(LayoutLine {
+            text_start: 0,
+            text_length: 0,
+            x: content_x,
+            y: content_y,
+            width: 0.0,
+            height: line_h,
+            ascent: line_h,
+            descent: 0.0,
+            extra_space_per_word: 0.0,
+            text_x_offset: 0.0,
+            visual_segments: Vec::new(),
+            char_x: Vec::new(),
+            has_clamped_continuation: false,
+            char_x_key: 0,
+        });
+    }
     // Include inline content (line_cache) height
     let inline_bottom = if !node.layout.line_cache.is_empty() {
         let last = node.layout.line_cache.last().unwrap();
@@ -1560,7 +1670,9 @@ pub fn layout_block_with_fc(
     if node.style.writing_mode == WritingMode::HorizontalTB {
         let spare = (content_h - natural_h).max(0.0);
         let offset = match node.style.align_content {
-            AlignContent::Center | AlignContent::SpaceAround | AlignContent::SpaceEvenly => spare / 2.0,
+            AlignContent::Center | AlignContent::SpaceAround | AlignContent::SpaceEvenly => {
+                spare / 2.0
+            }
             AlignContent::FlexEnd => spare,
             _ => 0.0,
         };
@@ -1570,7 +1682,9 @@ pub fn layout_block_with_fc(
                     shift_rects(child, 0.0, offset);
                 }
             }
-            for line in &mut node.layout.line_cache { line.y += offset; }
+            for line in &mut node.layout.line_cache {
+                line.y += offset;
+            }
         }
     }
 
@@ -1587,28 +1701,53 @@ pub fn layout_block_with_fc(
     );
 
     // ─── Scroll extent ────────────────────────────────────────────────────────
+    let (child_scroll_w, natural_scroll_h) = node
+        .children
+        .iter()
+        .filter(|child| {
+            !matches!(child.style.display, Display::None)
+                && (child.layout.margin_rect.w > 0.0 || child.layout.margin_rect.h > 0.0)
+        })
+        .fold(
+            (
+                content_w,
+                child_y.max(float_bottom).max(inline_bottom).max(content_h),
+            ),
+            |(width, height), child| {
+                let own_right = child.layout.margin_rect.x + child.layout.margin_rect.w;
+                let overflow_right = if matches!(child.style.overflow_x, Overflow::Visible) {
+                    child.layout.content_rect.x + child.layout.scroll_width
+                } else {
+                    own_right
+                };
+                let own_bottom = child.layout.margin_rect.y + child.layout.margin_rect.h;
+                let overflow_bottom = if matches!(child.style.overflow_y, Overflow::Visible) {
+                    child.layout.content_rect.y + child.layout.scroll_height
+                } else {
+                    own_bottom
+                };
+                (
+                    width.max(own_right.max(overflow_right) - content_x),
+                    height.max(own_bottom.max(overflow_bottom) - content_y),
+                )
+            },
+        );
+    let natural_scroll_w = node
+        .layout
+        .line_cache
+        .iter()
+        .map(|line| line.x + line.width - content_x)
+        .fold(child_scroll_w, f32::max);
+    node.layout.scroll_width = natural_scroll_w;
+    node.layout.scroll_height = natural_scroll_h;
     if matches!(node.style.overflow_x, Overflow::Scroll | Overflow::Auto)
         || matches!(node.style.overflow_y, Overflow::Scroll | Overflow::Auto)
     {
-        let natural_scroll_h = child_y.max(float_bottom).max(inline_bottom).max(content_h);
-        let natural_scroll_w = node
-            .children
-            .iter()
-            .filter(|child| {
-                !matches!(child.style.display, Display::None)
-                    && (child.layout.margin_rect.w > 0.0 || child.layout.margin_rect.h > 0.0)
-            })
-            .map(|child| child.layout.margin_rect.x + child.layout.margin_rect.w - content_x)
-            .fold(content_w, f32::max);
-        node.layout.scroll_height = natural_scroll_h;
-        node.layout.scroll_width = natural_scroll_w;
         let max_scroll_y = (node.layout.scroll_height - content_h).max(0.0);
         let max_scroll_x = (node.layout.scroll_width - content_w).max(0.0);
         node.layout.scroll_top = node.layout.scroll_top.min(max_scroll_y).max(0.0);
         node.layout.scroll_left = node.layout.scroll_left.min(max_scroll_x).max(0.0);
     } else {
-        node.layout.scroll_height = content_h;
-        node.layout.scroll_width = content_w;
         node.layout.scroll_top = 0.0;
         node.layout.scroll_left = 0.0;
     }
@@ -1687,6 +1826,11 @@ pub fn layout_block_with_fc(
 
     node.layout.layout_dirty = false;
     node.layout.last_containing_width = containing_w;
+    node.layout.escaping_float_count = if is_bfc {
+        0
+    } else {
+        fc.floats.len().saturating_sub(float_count_before)
+    };
 
     node.layout.margin_rect.h
 }
@@ -1873,9 +2017,18 @@ pub fn layout_columns(
                 child,
                 &Constraints::new(col_w, content_x, content_y, font_px, root_font_px),
             );
-            child_heights.push((h, child.style.column_span_all,
-                matches!(child.style.break_before, BreakValue::Column | BreakValue::Always),
-                matches!(child.style.break_after, BreakValue::Column | BreakValue::Always)));
+            child_heights.push((
+                h,
+                child.style.column_span_all,
+                matches!(
+                    child.style.break_before,
+                    BreakValue::Column | BreakValue::Always
+                ),
+                matches!(
+                    child.style.break_after,
+                    BreakValue::Column | BreakValue::Always
+                ),
+            ));
         }
     }
 
@@ -1886,7 +2039,8 @@ pub fn layout_columns(
     let mut start = 0;
     while start < child_heights.len() {
         let end = (start..child_heights.len())
-            .find(|&i| child_heights[i].1).unwrap_or(child_heights.len());
+            .find(|&i| child_heights[i].1)
+            .unwrap_or(child_heights.len());
         let balanced = node.style.column_fill || end < child_heights.len();
         let budget = if balanced {
             balanced_column_height(&child_heights[start..end], n_cols as usize)
@@ -2013,9 +2167,14 @@ pub fn layout_columns(
 /// rounded-down budget that would move an extra item into the final column.
 fn balanced_column_height(items: &[(f32, bool, bool, bool)], columns: usize) -> f32 {
     let mut upper: f32 = items.iter().map(|item| item.0.max(0.0)).sum();
-    let mut lower = items.iter().map(|item| item.0.max(0.0)).fold(0.0, f32::max)
+    let mut lower = items
+        .iter()
+        .map(|item| item.0.max(0.0))
+        .fold(0.0, f32::max)
         .max(upper / columns as f32);
-    if columns <= 1 || !upper.is_finite() { return upper; }
+    if columns <= 1 || !upper.is_finite() {
+        return upper;
+    }
     let fits = |height: f32| {
         let mut column = 0;
         let mut used = 0.0;
@@ -2025,23 +2184,40 @@ fn balanced_column_height(items: &[(f32, bool, bool, bool)], columns: usize) -> 
                 column += 1;
                 used = 0.0;
             }
-            if column >= columns { return false; }
+            if column >= columns {
+                return false;
+            }
             used += h;
             break_after = after;
         }
         true
     };
-    if fits(lower) { return lower; }
+    if fits(lower) {
+        return lower;
+    }
     loop {
         let middle = lower + (upper - lower) / 2.0;
-        if middle <= lower || middle >= upper { return upper; }
-        if fits(middle) { upper = middle; } else { lower = middle; }
+        if middle <= lower || middle >= upper {
+            return upper;
+        }
+        if fits(middle) {
+            upper = middle;
+        } else {
+            lower = middle;
+        }
     }
 }
 
 fn multicol_collapsed_whitespace(node: &WebCore) -> bool {
-    node.is_text_node() && node.text.chars().all(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c'))
-        && matches!(node.style.white_space, WhiteSpace::Normal | WhiteSpace::Nowrap)
+    node.is_text_node()
+        && node
+            .text
+            .chars()
+            .all(|c| matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c'))
+        && matches!(
+            node.style.white_space,
+            WhiteSpace::Normal | WhiteSpace::Nowrap
+        )
 }
 
 fn is_in_flow_block(c: &WebCore) -> bool {
@@ -2090,8 +2266,15 @@ pub fn unwrap_all_anonymous_blocks(node: &mut WebCore) {
     while let Some(node) = pending.pop() {
         // Flatten here before borrowing children for traversal. Repeating also
         // removes nested synthetic wrappers while preserving sibling order.
-        let is_fragment = |child: &WebCore| matches!(child.tag.as_str(),
-            "anonymous-block" | "anonymous-table" | "anonymous-table-row" | "anonymous-table-cell");
+        let is_fragment = |child: &WebCore| {
+            matches!(
+                child.tag.as_str(),
+                "anonymous-block"
+                    | "anonymous-table"
+                    | "anonymous-table-row"
+                    | "anonymous-table-cell"
+            )
+        };
         while node.children.iter().any(is_fragment) {
             node.layout.layout_dirty = true;
             let old_children = std::mem::take(&mut node.children);
@@ -2129,10 +2312,17 @@ pub(crate) fn unwrap_anonymous_children(node: &mut WebCore) {
 pub fn wrap_mixed_children_in_anonymous_blocks(node: &mut WebCore) {
     // Most blocks do not need normalization. Keep their path outside the
     // frame that owns/moves WebCore boxes, especially during deep layout.
-    if !node.children.iter().any(|child| child.tag == "anonymous-block")
+    if !node
+        .children
+        .iter()
+        .any(|child| child.tag == "anonymous-block")
         && (!node.children.iter().any(is_in_flow_block)
-            || !node.children.iter().any(|child| is_in_flow_inline(child)
-                && !(child.is_text_node() && child.text.chars().all(|ch| ch.is_ascii_whitespace())))) {
+            || !node.children.iter().any(|child| {
+                is_in_flow_inline(child)
+                    && !(child.is_text_node()
+                        && child.text.chars().all(|ch| ch.is_ascii_whitespace()))
+            }))
+    {
         return;
     }
     wrap_mixed_children_in_anonymous_blocks_inner(node);

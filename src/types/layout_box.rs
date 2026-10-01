@@ -67,6 +67,8 @@ pub struct LayoutBox {
     pub paint_dirty: bool,
     pub last_containing_width: f32,
     pub last_containing_height: Option<f32>,
+    /// Floats contributed to an ancestor formatting context by this block.
+    pub escaping_float_count: usize,
 
     // Resolved box-model cache (set by layout, read by parent layout)
     pub resolved_margin_top: f32,
@@ -118,6 +120,7 @@ impl Default for LayoutBox {
             paint_dirty: false,
             last_containing_width: 0.0,
             last_containing_height: None,
+            escaping_float_count: 0,
             resolved_margin_top: 0.0,
             resolved_margin_right: 0.0,
             resolved_margin_bottom: 0.0,

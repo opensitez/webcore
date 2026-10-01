@@ -39,6 +39,13 @@ pub enum PendingImageTarget {
 
 #[derive(Clone)]
 pub enum PendingImageResult {
+    Dimensions {
+        node_id: u32,
+        path: Vec<usize>,
+        target: PendingImageTarget,
+        width: u32,
+        height: u32,
+    },
     Loaded {
         node_id: u32,
         path: Vec<usize>,
@@ -136,6 +143,8 @@ pub struct Document {
     /// All author stylesheets in document order (both `<link>` and `<style>`).
     pub document_stylesheets: Vec<DocumentStylesheet>,
     pub(crate) inline_stylesheet_cache: HashMap<usize, CachedInlineStylesheet>,
+    /// Styles created through DOM APIs, mapped to their author-sheet slots.
+    pub(crate) dynamic_style_slots: HashMap<u32, Option<usize>>,
     /// Linked author stylesheet fragments that have arrived from background
     /// fetches, keyed by their resolved URL. Exact/document-order loading
     /// rebuilds the CSSOM from `document_stylesheets` so late sheets keep
@@ -163,6 +172,7 @@ pub struct Document {
     pub scroll_y: f32,
     /// Active scrollbar drag state (None when not dragging).
     pub scrollbar_drag: Option<ScrollbarDrag>,
+    pub resize_drag: Option<ResizeDrag>,
     /// Currently hovered element (node_id, 0 if none).
     pub hovered_box: u32,
     /// Suppresses the next hover change after a hover-triggered relayout.
@@ -285,10 +295,8 @@ pub struct Document {
     pub(crate) transition_states: HashMap<u32, Vec<TransitionState>>,
     /// Previous transitionable style values per element, for change detection.
     pub(crate) prev_styles: HashMap<u32, HashMap<String, String>>,
-    /// Clean cascade-time style snapshot, keyed by element pointer.
-    /// Populated when the cascade runs; never mutated by animation overrides.
-    /// Used by sync_transitions so hover-out correctly reads the base (not overridden) values.
-    pub(crate) cascade_styles: HashMap<u32, HashMap<String, String>>,
+    /// Keeps the compared style alive so an in-place mutation changes its Arc identity.
+    pub(crate) transition_style_refs: HashMap<u32, std::sync::Arc<ComputedStyle>>,
     /// Interpolated CSS property overrides produced by `tick_animations`.
     /// Applied on top of the cascade result before geometry runs.
     pub(crate) animation_overrides: HashMap<u32, Vec<(String, String)>>,
@@ -323,6 +331,7 @@ pub struct Document {
     /// Scroll extent is stable between layout generations; scroll input must not
     /// walk the full DOM just to clamp a viewport offset.
     pub(crate) scroll_height_cache: std::cell::Cell<Option<(u64, f32)>>,
+    pub(crate) scroll_width_cache: std::cell::Cell<Option<(u64, f32)>>,
 
     // ── Async image loading ─────────────────────────────────────────────────
     /// Receiver for images arriving from background fetch threads.
@@ -786,6 +795,7 @@ impl Clone for Document {
             linked_stylesheets: self.linked_stylesheets.clone(),
             document_stylesheets: self.document_stylesheets.clone(),
             inline_stylesheet_cache: self.inline_stylesheet_cache.clone(),
+            dynamic_style_slots: self.dynamic_style_slots.clone(),
             loaded_linked_stylesheets: self.loaded_linked_stylesheets.clone(),
             loaded_stylesheet_slots: self.loaded_stylesheet_slots.clone(),
             preserve_stylesheet_document_order: self.preserve_stylesheet_document_order,
@@ -800,6 +810,7 @@ impl Clone for Document {
             scroll_x: self.scroll_x,
             scroll_y: self.scroll_y,
             scrollbar_drag: self.scrollbar_drag.clone(),
+            resize_drag: self.resize_drag.clone(),
             hovered_box: self.hovered_box,
             hover_suppress_count: self.hover_suppress_count,
             active_box: self.active_box,
@@ -836,7 +847,7 @@ impl Clone for Document {
             active_animations: self.active_animations.clone(),
             transition_states: self.transition_states.clone(),
             prev_styles: self.prev_styles.clone(),
-            cascade_styles: self.cascade_styles.clone(),
+            transition_style_refs: self.transition_style_refs.clone(),
             animation_overrides: self.animation_overrides.clone(),
             needs_animation_frame: self.needs_animation_frame,
             smooth_scrolls: self.smooth_scrolls.clone(),
@@ -849,6 +860,7 @@ impl Clone for Document {
             live_regions_initialized: self.live_regions_initialized,
             layout_generation: self.layout_generation,
             scroll_height_cache: std::cell::Cell::new(self.scroll_height_cache.get()),
+            scroll_width_cache: std::cell::Cell::new(self.scroll_width_cache.get()),
             // Async image state is not cloned — cloned docs start with no pending fetches.
             pending_images: None,
             image_load_errors: self.image_load_errors.clone(),

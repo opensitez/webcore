@@ -341,6 +341,7 @@ impl WebCore {
             bg_image_width: 0,
             bg_image_height: 0,
             bg_image_ratio_only: false,
+            bg_image_resolution: 1.0,
             additional_bg_images: Vec::new(),
 
             svg_document: None,
@@ -370,6 +371,7 @@ impl WebCore {
             cascade_dirty: false,
             has_dirty_descendant: false,
             has_dirty_layout_descendant: false,
+            parser_suppressed: false,
         }
     }
 
@@ -377,6 +379,9 @@ impl WebCore {
     /// and extracts `<style>` blocks into a scoped stylesheet.
     pub fn attach_shadow(&mut self, mode: ShadowMode, html: &str) {
         let (children, stylesheet) = Self::build_shadow_content(html);
+        self.layout.layout_dirty = true;
+        self.layout.intrinsic_dirty = true;
+        self.layout.line_cache.clear();
         // The shadow root takes the next node id, so it can be named like any
         // other node.
         let node_id = crate::dom::arena::next_shadow_node_id();
@@ -411,6 +416,9 @@ impl WebCore {
             Some(root) => {
                 root.children = children;
                 root.stylesheet = stylesheet;
+                self.layout.layout_dirty = true;
+                self.layout.intrinsic_dirty = true;
+                self.layout.line_cache.clear();
                 true
             }
             None => false,
@@ -420,6 +428,7 @@ impl WebCore {
     /// Parse a shadow tree's markup into its children and its scoped sheet.
     fn build_shadow_content(html: &str) -> (Vec<WebCore>, crate::css::Stylesheet) {
         let doc = crate::html::parse_html(html);
+        let stylesheet = doc.stylesheet;
         let mut children = doc.root.children;
         // Move <body> children up: the parser wraps a fragment in
         // `<html><head></head><body>…`, and a shadow tree wants the CONTENT.
@@ -429,28 +438,6 @@ impl WebCore {
         // synthesising `<head>` as HTML §13.2.6 requires.
         if let Some(at) = children.iter().position(|c| c.tag == "body") {
             children = std::mem::take(&mut children[at].children);
-        }
-        // Start with UA stylesheet so shadow tree gets default styles
-        let mut stylesheet = crate::css::ua_stylesheet();
-        // Extract <style> elements into the scoped stylesheet
-        let mut styles_css = String::new();
-        children.retain(|c| {
-            if c.tag == "style" {
-                styles_css.push_str(&c.text);
-                for ch in &c.children {
-                    if ch.tag == "#text" {
-                        styles_css.push_str(&ch.text);
-                    }
-                }
-                false
-            } else {
-                true
-            }
-        });
-        if !styles_css.is_empty() {
-            // Author origin — the shadow root's `<style>` outranks the UA sheet
-            // it was seeded with (see `css::AUTHOR_ORIGIN_BOOST`).
-            stylesheet.parse_and_add_author(&styles_css);
         }
         // ⛔ Renumber the whole shadow subtree.
         //

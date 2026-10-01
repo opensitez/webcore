@@ -85,13 +85,13 @@ impl std::fmt::Debug for AncestorBloom {
 #[derive(Clone, Debug, Default)]
 pub struct AncestorInfo {
     pub tag: String,
-    pub attributes: crate::dom::attrs::AttrMap,
+    pub attributes: std::sync::Arc<crate::dom::attrs::AttrMap>,
     pub child_index: usize,        // 0-based position among parent's children
     pub sibling_count: usize,      // total children of parent
     pub type_child_index: usize,   // 0-based among same-tag siblings
     pub type_sibling_count: usize, // count of same-tag siblings
     pub node_id: u32,              // stable node id for hover chain check
-    pub prev_siblings: Vec<SiblingInfo>,
+    pub prev_siblings: std::sync::Arc<Vec<SiblingInfo>>,
 }
 
 /// Previous/following element sibling state used by sibling combinators.
@@ -249,23 +249,24 @@ pub fn matches_selector_with_ancestors(
                     // Left parts must match the direct parent (last ancestor)
                     if let Some(parent) = ancestors.last() {
                         let parent_ancestors = &ancestors[..ancestors.len() - 1];
-	                        let parent_ctx = MatchContext {
-	                            focused_box: ctx.focused_box,
-	                            keyboard_focus: ctx.keyboard_focus,
-	                            type_child_index: parent.type_child_index,
-	                            type_sibling_count: parent.type_sibling_count,
-	                            html_box: ctx.ancestor_nodes.last().copied(),
-	                            ancestor_nodes: &ctx.ancestor_nodes[..ctx.ancestor_nodes.len().saturating_sub(1)],
-	                            hover_chain: ctx.hover_chain,
-	                            focus_within_chain: ctx.focus_within_chain,
-	                            element_id: parent.node_id,
-	                            scope_root_id: ctx.scope_root_id,
-	                            target_id: ctx.target_id,
-	                            document_url: ctx.document_url,
-	                            prev_siblings: &parent.prev_siblings,
-	                            next_siblings: &[],
-	                            next_sibling_nodes: &[],
-	                        };
+                        let parent_ctx = MatchContext {
+                            focused_box: ctx.focused_box,
+                            keyboard_focus: ctx.keyboard_focus,
+                            type_child_index: parent.type_child_index,
+                            type_sibling_count: parent.type_sibling_count,
+                            html_box: ctx.ancestor_nodes.last().copied(),
+                            ancestor_nodes: &ctx.ancestor_nodes
+                                [..ctx.ancestor_nodes.len().saturating_sub(1)],
+                            hover_chain: ctx.hover_chain,
+                            focus_within_chain: ctx.focus_within_chain,
+                            element_id: parent.node_id,
+                            scope_root_id: ctx.scope_root_id,
+                            target_id: ctx.target_id,
+                            document_url: ctx.document_url,
+                            prev_siblings: &parent.prev_siblings,
+                            next_siblings: &[],
+                            next_sibling_nodes: &[],
+                        };
                         matches_selector_with_ancestors(
                             left_parts,
                             &parent.tag,
@@ -333,6 +334,18 @@ fn matches_sibling(
     ancestors: &[AncestorInfo],
     ctx: &MatchContext<'_>,
 ) -> bool {
+    let sibling_node = left_parts
+        .iter()
+        .any(crate::css::stylesheet::selector_part_contains_has)
+        .then(|| {
+            ctx.ancestor_nodes.last().and_then(|parent| {
+                parent
+                    .children
+                    .iter()
+                    .find(|child| child.node_id == sib.node_id)
+            })
+        })
+        .flatten();
     let attrs = if sib.checkedness || sib.selectedness {
         let mut attrs = sib.attributes.clone();
         if sib.checkedness {
@@ -350,9 +363,7 @@ fn matches_sibling(
         keyboard_focus: ctx.keyboard_focus,
         type_child_index: 0,
         type_sibling_count: 0,
-        // ⛔ Not the subject's box: `:has()` and the other box-state
-        // pseudo-classes must not answer for the sibling from it.
-        html_box: None,
+        html_box: sibling_node,
         ancestor_nodes: ctx.ancestor_nodes,
         hover_chain: ctx.hover_chain,
         focus_within_chain: ctx.focus_within_chain,
@@ -871,7 +882,8 @@ pub(crate) fn matches_part_with_context(
                                 type_child_index: anc.type_child_index,
                                 type_sibling_count: anc.type_sibling_count,
                                 html_box: None,
-                                ancestor_nodes: &ctx.ancestor_nodes[..i.min(ctx.ancestor_nodes.len())],
+                                ancestor_nodes: &ctx.ancestor_nodes
+                                    [..i.min(ctx.ancestor_nodes.len())],
                                 hover_chain: ctx.hover_chain,
                                 focus_within_chain: ctx.focus_within_chain,
                                 element_id: anc.node_id,
@@ -1176,14 +1188,23 @@ fn has_descendant_matching(
     }
     parts.extend(sel.parts.iter().cloned());
     let mut ancestors = vec![AncestorInfo {
-        tag: node.tag.clone(), attributes: node.attributes.clone(),
-        child_index: 0, sibling_count: 1,
-        type_child_index: ctx.type_child_index, type_sibling_count: ctx.type_sibling_count,
-        node_id: node.node_id, prev_siblings: ctx.prev_siblings.to_vec(),
+        tag: node.tag.clone(),
+        attributes: std::sync::Arc::new(node.attributes.clone()),
+        child_index: 0,
+        sibling_count: 1,
+        type_child_index: ctx.type_child_index,
+        type_sibling_count: ctx.type_sibling_count,
+        node_id: node.node_id,
+        prev_siblings: std::sync::Arc::new(ctx.prev_siblings.to_vec()),
     }];
-    let anchored = MatchContext { scope_root_id: node.node_id, ..*ctx };
-    node.children.iter().filter(|child| child.is_element()).any(|child|
-        matches_element_or_descendant(child, &parts, &mut ancestors, &anchored))
+    let anchored = MatchContext {
+        scope_root_id: node.node_id,
+        ..*ctx
+    };
+    node.children
+        .iter()
+        .filter(|child| child.is_element())
+        .any(|child| matches_element_or_descendant(child, &parts, &mut ancestors, &anchored))
 }
 
 fn matches_element_or_descendant(
@@ -1220,16 +1241,16 @@ fn matches_element_or_descendant(
     ) {
         return true;
     }
-	    ancestors.push(AncestorInfo {
-	        tag: elem.tag.clone(),
-	        attributes: elem.attributes.clone(),
-	        child_index: 0,
-	        sibling_count: 1,
-	        type_child_index: 0,
-	        type_sibling_count: 1,
-	        node_id: elem.node_id,
-	        prev_siblings: Vec::new(),
-	    });
+    ancestors.push(AncestorInfo {
+        tag: elem.tag.clone(),
+        attributes: std::sync::Arc::new(elem.attributes.clone()),
+        child_index: 0,
+        sibling_count: 1,
+        type_child_index: 0,
+        type_sibling_count: 1,
+        node_id: elem.node_id,
+        prev_siblings: std::sync::Arc::new(Vec::new()),
+    });
     for child in elem.children.iter().filter(|c| c.is_element()) {
         if matches_element_or_descendant(child, parts, ancestors, ctx) {
             ancestors.pop();

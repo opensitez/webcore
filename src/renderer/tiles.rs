@@ -87,14 +87,12 @@ impl TileManager {
     /// Ensure a tile exists, creating it if needed. Returns whether it needs rasterization.
     pub fn ensure_tile(&mut self, tx: i32, ty: i32) -> bool {
         let phys_size = (TILE_SIZE * self.scale).ceil() as u32;
-        let tile = self.tiles.entry((tx, ty)).or_insert_with(|| {
-            RasterTile {
-                tile_x: tx,
-                tile_y: ty,
-                pixmap: tiny_skia::Pixmap::new(phys_size.max(1), phys_size.max(1))
-                    .unwrap_or_else(|| tiny_skia::Pixmap::new(1, 1).unwrap()),
-                dirty: true,
-            }
+        let tile = self.tiles.entry((tx, ty)).or_insert_with(|| RasterTile {
+            tile_x: tx,
+            tile_y: ty,
+            pixmap: tiny_skia::Pixmap::new(phys_size.max(1), phys_size.max(1))
+                .unwrap_or_else(|| tiny_skia::Pixmap::new(1, 1).unwrap()),
+            dirty: true,
         });
         if tile.pixmap.width() != phys_size || tile.pixmap.height() != phys_size {
             tile.pixmap = tiny_skia::Pixmap::new(phys_size.max(1), phys_size.max(1))

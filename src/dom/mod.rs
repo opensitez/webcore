@@ -871,6 +871,7 @@ pub struct Editor {
     pub mouse_down: bool,
     pub has_focus: bool,
     pub read_only: bool,
+    selection_only: bool,
     /// Set to `true` immediately after `insert_br` so that:
     /// (a) rendering prefers the start of the next line over the end of
     ///     the previous one when the caret sits at an exact line boundary,
@@ -893,6 +894,7 @@ impl Default for Editor {
             mouse_down: false,
             has_focus: false,
             read_only: true,
+            selection_only: false,
             caret_at_line_start: false,
         }
     }
@@ -908,7 +910,11 @@ impl Editor {
     }
 
     pub fn caret_info(&self) -> Option<(u32, usize)> {
-        self.caret_box.map(|id| (id, self.caret_local))
+        if self.selection_only {
+            None
+        } else {
+            self.caret_box.map(|id| (id, self.caret_local))
+        }
     }
 
     pub fn sel_args(&self) -> (Option<usize>, Option<usize>) {
@@ -920,6 +926,7 @@ impl Editor {
     }
 
     pub fn set_caret_from_hit(&mut self, node_id: u32, local: usize, extend: bool) {
+        self.selection_only = false;
         if !extend {
             self.sel_anchor = local;
             self.sel_start = local;
@@ -982,6 +989,7 @@ impl Editor {
     }
 
     fn select_entire_node(&mut self, node: &WebCore) {
+        self.selection_only = false;
         let flat = crate::layout::inline_layout::collect_flat_text(node);
         self.caret_box = Some(node.node_id);
         self.caret_local = flat.len();
@@ -1020,23 +1028,18 @@ impl Editor {
                 self.mouse_down = true;
                 self.has_focus = true;
                 if let Some(hit) = point_to_hit(root, doc_pt, button) {
-                    if !is_in_contenteditable_by_id(root, hit.node_id) {
-                        self.mouse_down = false;
-                        self.caret_box = None;
-                        self.sel_anchor = 0;
-                        self.sel_start = 0;
-                        self.sel_end = 0;
-                        return false;
-                    }
                     if !user_select_allows_selection(root, hit.node_id) {
                         self.mouse_down = false;
                         return false;
                     }
+                    let selection_only = !is_in_contenteditable_by_id(root, hit.node_id);
                     if let Some(all_node) = nearest_user_select_all_node(root, hit.node_id) {
                         self.select_entire_node(all_node);
+                        self.selection_only = selection_only;
                         return true;
                     }
                     self.set_caret_from_hit(hit.node_id, hit.local_offset, false);
+                    self.selection_only = selection_only;
                     return true;
                 }
             }
@@ -1077,6 +1080,9 @@ impl Editor {
         ch: Option<char>,
         _ctrl: bool,
     ) -> bool {
+        if self.selection_only {
+            return false;
+        }
         if self.read_only {
             // Allow editing inside contenteditable="true" elements even when the document is read-only.
             // The caret_box may be a child text node, so we walk the tree from root to check ancestry.

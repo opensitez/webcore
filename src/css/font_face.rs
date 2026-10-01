@@ -67,6 +67,24 @@ pub fn parse_font_face_sources(src: &str) -> Vec<FontFaceSource> {
         .collect()
 }
 
+pub(crate) fn supports_font_format(format: &str) -> bool {
+    matches!(
+        format.to_ascii_lowercase().as_str(),
+        "woff2"
+            | "woff"
+            | "embedded-opentype"
+            | "eot"
+            | "opentype"
+            | "truetype"
+            | "collection"
+            | "font/woff2"
+            | "font/woff"
+            | "application/vnd.ms-fontobject"
+            | "font/otf"
+            | "font/ttf"
+    )
+}
+
 pub fn unicode_range_intersects_text(range: Option<&str>, text: &str) -> bool {
     let Some(range) = range else {
         return true;
@@ -83,6 +101,60 @@ pub fn unicode_range_intersects_text(range: Option<&str>, text: &str) -> bool {
         let cp = ch as u32;
         ranges.iter().any(|(start, end)| cp >= *start && cp <= *end)
     })
+}
+
+pub(crate) struct UnicodeTextCoverage {
+    words: Vec<u64>,
+    empty: bool,
+}
+
+impl UnicodeTextCoverage {
+    pub(crate) fn new(text: &str) -> Self {
+        let mut words = vec![0; 0x110000 / 64];
+        for ch in text.chars() {
+            let cp = ch as usize;
+            words[cp / 64] |= 1 << (cp % 64);
+        }
+        Self {
+            words,
+            empty: text.is_empty(),
+        }
+    }
+
+    pub(crate) fn intersects(&self, range: Option<&str>) -> bool {
+        let Some(range) = range else {
+            return true;
+        };
+        if self.empty || range.trim().is_empty() {
+            return true;
+        }
+        let ranges = parse_unicode_ranges(range);
+        if ranges.is_empty() {
+            return true;
+        }
+        ranges.into_iter().any(|(start, end)| {
+            let start = start.min(0x10ffff) as usize;
+            let end = end.min(0x10ffff) as usize;
+            if start > end {
+                return false;
+            }
+            let first = start / 64;
+            let last = end / 64;
+            (first..=last).any(|word| {
+                let low = if word == first {
+                    u64::MAX << (start % 64)
+                } else {
+                    u64::MAX
+                };
+                let high = if word == last {
+                    u64::MAX >> (63 - end % 64)
+                } else {
+                    u64::MAX
+                };
+                self.words[word] & low & high != 0
+            })
+        })
+    }
 }
 
 pub fn parse_font_display(value: &str) -> Option<String> {

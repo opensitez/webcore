@@ -3315,21 +3315,39 @@ fn apply_opacity(s: &mut ComputedStyle, v: &str) {
     } else {
         super::calc::parse_math_alpha(v)
     };
-    if let Some(op) = op { s.opacity = op.clamp(0.0, 1.0); }
+    if let Some(op) = op {
+        s.opacity = op.clamp(0.0, 1.0);
+    }
 }
 
 fn apply_svg_stroke_width(s: &mut ComputedStyle, v: &str) {
     if let Some(length) = parse_length_checked(v) {
         let valid = match &length {
-            CssLength::Px(n) | CssLength::Em(n) | CssLength::Rem(n) | CssLength::Percent(n)
-            | CssLength::Vw(n) | CssLength::Vh(n) | CssLength::Vmin(n) | CssLength::Vmax(n)
-            | CssLength::Cqw(n) | CssLength::Cqh(n) | CssLength::Cqi(n) | CssLength::Cqb(n)
-            | CssLength::Cqmin(n) | CssLength::Cqmax(n) => n.is_finite() && *n >= 0.0,
-            CssLength::Zero | CssLength::Calc(_) | CssLength::CalcExpr(_)
-            | CssLength::Min(_) | CssLength::Max(_) | CssLength::Clamp(_) => true,
+            CssLength::Px(n)
+            | CssLength::Em(n)
+            | CssLength::Rem(n)
+            | CssLength::Percent(n)
+            | CssLength::Vw(n)
+            | CssLength::Vh(n)
+            | CssLength::Vmin(n)
+            | CssLength::Vmax(n)
+            | CssLength::Cqw(n)
+            | CssLength::Cqh(n)
+            | CssLength::Cqi(n)
+            | CssLength::Cqb(n)
+            | CssLength::Cqmin(n)
+            | CssLength::Cqmax(n) => n.is_finite() && *n >= 0.0,
+            CssLength::Zero
+            | CssLength::Calc(_)
+            | CssLength::CalcExpr(_)
+            | CssLength::Min(_)
+            | CssLength::Max(_)
+            | CssLength::Clamp(_) => true,
             _ => false,
         };
-        if valid { s.rare_mut().svg_stroke_width = Some(length); }
+        if valid {
+            s.rare_mut().svg_stroke_width = Some(length);
+        }
     }
 }
 
@@ -4247,16 +4265,31 @@ fn parse_radius_pair(input: &str) -> (CssLength, CssLength) {
 // ── Border image ────────────────────────────────────────────────────────────
 
 fn is_border_image_repeat_keyword(v: &str) -> bool {
-    matches!(v, "stretch" | "repeat" | "round" | "space")
+    matches!(
+        v.to_ascii_lowercase().as_str(),
+        "stretch" | "repeat" | "round" | "space"
+    )
 }
 
 fn is_border_image_source_token(v: &str) -> bool {
     let value = v.trim().to_ascii_lowercase();
     value == "none"
-        || value.starts_with("url(")
-        || value.starts_with("image-set(")
-        || value.starts_with("-webkit-image-set(")
-        || value.contains("gradient(")
+        || value.ends_with(')')
+            && [
+                "url(",
+                "image-set(",
+                "-webkit-image-set(",
+                "linear-gradient(",
+                "radial-gradient(",
+                "conic-gradient(",
+                "repeating-linear-gradient(",
+                "repeating-radial-gradient(",
+                "repeating-conic-gradient(",
+                "-webkit-linear-gradient(",
+                "-webkit-radial-gradient(",
+            ]
+            .iter()
+            .any(|prefix| value.starts_with(prefix))
 }
 
 fn apply_border_image_source(s: &mut ComputedStyle, v: &str) {
@@ -4268,100 +4301,207 @@ fn apply_border_image_source(s: &mut ComputedStyle, v: &str) {
 
 fn apply_border_image_slice(s: &mut ComputedStyle, v: &str) {
     let value = v.trim();
-    if !value.is_empty() {
+    let tokens = split_top_level_whitespace(value);
+    let numbers = tokens.iter().filter(|token| !token.eq_ignore_ascii_case("fill"));
+    let number_count = numbers.clone().count();
+    if (1..=4).contains(&number_count)
+        && tokens.len() - number_count <= 1
+        && numbers.clone().all(|token| valid_border_image_slice(token))
+    {
         s.border_image_slice = value.to_string();
     }
 }
 
 fn apply_border_image_width(s: &mut ComputedStyle, v: &str) {
     let value = v.trim();
-    if !value.is_empty() {
+    let tokens = split_top_level_whitespace(value);
+    if (1..=4).contains(&tokens.len()) && tokens.iter().all(|token| valid_border_image_width(token)) {
         s.border_image_width = value.to_string();
     }
 }
 
 fn apply_border_image_outset(s: &mut ComputedStyle, v: &str) {
     let value = v.trim();
-    if !value.is_empty() {
+    let tokens = split_top_level_whitespace(value);
+    if (1..=4).contains(&tokens.len()) && tokens.iter().all(|token| valid_border_image_outset(token)) {
         s.border_image_outset = value.to_string();
     }
 }
 
 fn apply_border_image_repeat(s: &mut ComputedStyle, v: &str) {
-    apply_keyword_list(
-        &mut s.border_image_repeat,
-        v,
-        &["stretch", "repeat", "round", "space"],
-    );
+    let tokens = split_top_level_whitespace(v);
+    if (1..=2).contains(&tokens.len()) && tokens.iter().all(|token| is_border_image_repeat_keyword(token)) {
+        s.border_image_repeat = tokens.join(" ").to_ascii_lowercase();
+    }
 }
 
 fn apply_border_image(s: &mut ComputedStyle, v: &str) {
-    s.border_image_source = String::from("none");
-    s.border_image_slice = String::from("100%");
-    s.border_image_width = String::from("1");
-    s.border_image_outset = String::from("0");
-    s.border_image_repeat = String::from("stretch");
-
+    if v.trim().is_empty() {
+        return;
+    }
     let first_slash = find_top_level_char(v, '/');
     let before_slash = first_slash.map_or(v, |index| &v[..index]).trim();
     let (width, outset) = first_slash.map_or((None, None), |index| {
         let rest = &v[index + 1..];
-        find_top_level_char(rest, '/')
-            .map_or((Some(rest.trim()), None), |second| {
-                (Some(rest[..second].trim()), Some(rest[second + 1..].trim()))
-            })
+        find_top_level_char(rest, '/').map_or((Some(rest.trim()), None), |second| {
+            (Some(rest[..second].trim()), Some(rest[second + 1..].trim()))
+        })
     });
-    let mut repeat_tokens = Vec::new();
-
-    if let Some(width) = width.filter(|part| !part.is_empty()) {
-        let width_tokens: Vec<&str> = split_top_level_whitespace(width)
-            .into_iter()
-            .filter(|token| {
-                if is_border_image_repeat_keyword(token) {
-                    repeat_tokens.push(*token);
-                    false
-                } else {
-                    true
-                }
-            })
-            .collect();
-        if !width_tokens.is_empty() {
-            apply_border_image_width(s, &width_tokens.join(" "));
-        }
+    if before_slash.is_empty()
+        || outset.is_some_and(|part| part.is_empty() || find_top_level_char(part, '/').is_some())
+    {
+        return;
     }
-    if let Some(outset) = outset.filter(|part| !part.is_empty()) {
-        let outset_tokens: Vec<&str> = split_top_level_whitespace(outset)
-            .into_iter()
-            .filter(|token| {
-                if is_border_image_repeat_keyword(token) {
-                    repeat_tokens.push(*token);
-                    false
-                } else {
-                    true
-                }
-            })
-            .collect();
-        if !outset_tokens.is_empty() {
-            apply_border_image_outset(s, &outset_tokens.join(" "));
-        }
-    }
-
+    let mut source = None;
     let mut slice_tokens = Vec::new();
+    let mut repeat_tokens = Vec::new();
     for token in split_top_level_whitespace(before_slash) {
         if is_border_image_source_token(token) {
-            apply_border_image_source(s, token);
+            if source.replace(token).is_some() {
+                return;
+            }
         } else if is_border_image_repeat_keyword(token) {
             repeat_tokens.push(token);
         } else {
             slice_tokens.push(token);
         }
     }
-    if !slice_tokens.is_empty() {
-        apply_border_image_slice(s, &slice_tokens.join(" "));
+    let mut width_tokens = Vec::new();
+    if let Some(width) = width {
+        for token in split_top_level_whitespace(width) {
+            if is_border_image_repeat_keyword(token) {
+                repeat_tokens.push(token);
+            } else {
+                width_tokens.push(token);
+            }
+        }
     }
-    if !repeat_tokens.is_empty() {
-        apply_border_image_repeat(s, &repeat_tokens.join(" "));
+    let mut outset_tokens = Vec::new();
+    if let Some(outset) = outset {
+        for token in split_top_level_whitespace(outset) {
+            if is_border_image_repeat_keyword(token) {
+                repeat_tokens.push(token);
+            } else {
+                outset_tokens.push(token);
+            }
+        }
     }
+    let slice_values = slice_tokens.iter().filter(|token| !token.eq_ignore_ascii_case("fill"));
+    let slice_count = slice_values.clone().count();
+    let fill_count = slice_tokens.len() - slice_count;
+    if fill_count > 1
+        || slice_count > 4
+        || slice_values.clone().any(|token| !valid_border_image_slice(token))
+        || (fill_count != 0 && slice_count == 0)
+        || (first_slash.is_some() && slice_count == 0)
+        || (width.is_some() && outset.is_none() && width_tokens.is_empty())
+        || width_tokens.len() > 4
+        || width_tokens.iter().any(|token| !valid_border_image_width(token))
+        || outset.is_some() && (outset_tokens.is_empty() || outset_tokens.len() > 4)
+        || outset_tokens.iter().any(|token| !valid_border_image_outset(token))
+        || repeat_tokens.len() > 2
+        || (source.is_none() && slice_tokens.is_empty() && repeat_tokens.is_empty())
+    {
+        return;
+    }
+    s.border_image_source = source.unwrap_or("none").to_string();
+    s.border_image_slice = if slice_tokens.is_empty() {
+        "100%".to_string()
+    } else {
+        slice_tokens.join(" ")
+    };
+    s.border_image_width = if width_tokens.is_empty() {
+        "1".to_string()
+    } else {
+        width_tokens.join(" ")
+    };
+    s.border_image_outset = if outset_tokens.is_empty() {
+        "0".to_string()
+    } else {
+        outset_tokens.join(" ")
+    };
+    s.border_image_repeat = if repeat_tokens.is_empty() {
+        "stretch".to_string()
+    } else {
+        repeat_tokens.join(" ").to_ascii_lowercase()
+    };
+}
+
+fn valid_border_image_number(token: &str, allow_percent: bool) -> bool {
+    let value = if allow_percent {
+        token.strip_suffix('%').unwrap_or(token)
+    } else {
+        token
+    };
+    value
+        .parse::<f32>()
+        .is_ok_and(|number| number.is_finite() && number >= 0.0)
+}
+
+fn valid_border_image_slice(token: &str) -> bool {
+    parse_border_image_slice_value(token).is_some()
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum BorderImageSliceValue {
+    Number(f32),
+    Percent(f32),
+}
+
+pub(crate) fn parse_border_image_slice_value(token: &str) -> Option<BorderImageSliceValue> {
+    let token = token.trim();
+    if let Some(inner) = token.strip_prefix("env(").and_then(|s| s.strip_suffix(')')) {
+        let parts = crate::css::value_parse::split_top_level_commas(inner);
+        if crate::css::value_parse::is_zero_env_length(parts.first()?.trim()) {
+            return None;
+        }
+        return parse_border_image_slice_value(parts.get(1)?.trim());
+    }
+    let value = if let Some(percent) = token.strip_suffix('%') {
+        BorderImageSliceValue::Percent(percent.parse().ok()?)
+    } else if let Ok(number) = token.parse() {
+        BorderImageSliceValue::Number(number)
+    } else if let Some(number) = crate::css::calc::parse_calc_number(token) {
+        BorderImageSliceValue::Number(number)
+    } else {
+        BorderImageSliceValue::Percent(crate::css::calc::parse_math_percentage(token)?)
+    };
+    let magnitude = match value {
+        BorderImageSliceValue::Number(number) | BorderImageSliceValue::Percent(number) => number,
+    };
+    (magnitude.is_finite() && magnitude >= 0.0).then_some(value)
+}
+
+fn valid_border_image_width(token: &str) -> bool {
+    token.eq_ignore_ascii_case("auto")
+        || valid_border_image_number(token, true)
+        || valid_border_image_length(token, true)
+}
+
+fn valid_border_image_outset(token: &str) -> bool {
+    valid_border_image_number(token, false) || valid_border_image_length(token, false)
+}
+
+fn valid_border_image_length(token: &str, allow_percent: bool) -> bool {
+    if token.ends_with('%') || token.parse::<f32>().is_ok() {
+        return false;
+    }
+    parse_length_checked(token).is_some_and(|length| {
+        match length {
+            CssLength::Px(value) | CssLength::Em(value) | CssLength::Rem(value)
+            | CssLength::Vw(value) | CssLength::Vh(value)
+            | CssLength::Vmin(value) | CssLength::Vmax(value)
+            | CssLength::Cqw(value) | CssLength::Cqh(value)
+            | CssLength::Cqi(value) | CssLength::Cqb(value)
+            | CssLength::Cqmin(value) | CssLength::Cqmax(value) => {
+                value.is_finite() && value >= 0.0
+            }
+            CssLength::Percent(value) => allow_percent && value.is_finite() && value >= 0.0,
+            CssLength::Calc(_) | CssLength::CalcExpr(_) | CssLength::Min(_)
+            | CssLength::Max(_) | CssLength::Clamp(_) | CssLength::Zero => true,
+            _ => false,
+        }
+    })
 }
 
 fn copy_border_image_source(d: &mut ComputedStyle, s: &ComputedStyle) {
@@ -4586,10 +4726,18 @@ fn apply_text_overflow(s: &mut ComputedStyle, v: &str) {
         };
         Some((value, &source[end..]))
     }
-    let Some((first, rest)) = marker(v.trim()) else { return; };
-    let value = if rest.trim().is_empty() { first } else {
-        let Some((second, rest)) = marker(rest.trim_start()) else { return; };
-        if !rest.trim().is_empty() { return; }
+    let Some((first, rest)) = marker(v.trim()) else {
+        return;
+    };
+    let value = if rest.trim().is_empty() {
+        first
+    } else {
+        let Some((second, rest)) = marker(rest.trim_start()) else {
+            return;
+        };
+        if !rest.trim().is_empty() {
+            return;
+        }
         TextOverflow::Pair(Box::new([first, second]))
     };
     s.text_overflow = value;
@@ -4813,10 +4961,14 @@ fn apply_flex_wrap(s: &mut ComputedStyle, v: &str) {
     };
 }
 fn apply_flex_grow(s: &mut ComputedStyle, v: &str) {
-    if let Some(value) = super::calc::parse_nonnegative_number(v) { s.flex_grow = value; }
+    if let Some(value) = super::calc::parse_nonnegative_number(v) {
+        s.flex_grow = value;
+    }
 }
 fn apply_flex_shrink(s: &mut ComputedStyle, v: &str) {
-    if let Some(value) = super::calc::parse_nonnegative_number(v) { s.flex_shrink = value; }
+    if let Some(value) = super::calc::parse_nonnegative_number(v) {
+        s.flex_shrink = value;
+    }
 }
 fn apply_flex_basis(s: &mut ComputedStyle, v: &str) {
     // `content` is legal on `flex-basis` alone (Flexbox §7.2.3), so it is read
@@ -4828,7 +4980,9 @@ fn apply_flex_basis(s: &mut ComputedStyle, v: &str) {
     };
 }
 fn apply_order(s: &mut ComputedStyle, v: &str) {
-    if let Some(value) = super::calc::parse_css_integer(v) { s.order = value; }
+    if let Some(value) = super::calc::parse_css_integer(v) {
+        s.order = value;
+    }
 }
 
 fn apply_flex(s: &mut ComputedStyle, v: &str) {
@@ -4861,12 +5015,16 @@ fn apply_flex(s: &mut ComputedStyle, v: &str) {
             }
             continue;
         }
-        if super::calc::parse_css_number(t).is_some() { return; }
+        if super::calc::parse_css_number(t).is_some() {
+            return;
+        }
         if basis.is_none() {
             basis = Some(if t.eq_ignore_ascii_case("content") {
                 CssLength::Content
             } else {
-                let Some(length) = super::parse_length_checked(t) else { return; };
+                let Some(length) = super::parse_length_checked(t) else {
+                    return;
+                };
                 length
             });
         } else {
@@ -4953,6 +5111,7 @@ fn apply_justify_content(s: &mut ComputedStyle, v: &str) {
     set_safety(s, SAFETY_JUSTIFY_CONTENT, safe);
     s.justify_content = match v {
         "normal" => JustifyContent::Normal,
+        "flex-start" | "start" | "self-start" => JustifyContent::FlexStart,
         "flex-end" | "end" | "self-end" => JustifyContent::FlexEnd,
         "center" => JustifyContent::Center,
         "space-between" => JustifyContent::SpaceBetween,
@@ -5094,8 +5253,11 @@ fn copy_column_gap(d: &mut ComputedStyle, s: &ComputedStyle) {
 
 fn apply_grid_template_columns(s: &mut ComputedStyle, v: &str) {
     let mut names = std::collections::HashMap::new();
-    let tracks =
-        super::parse_track_list_with_names(v, &mut s.rare_mut().auto_repeat_columns, &mut names);
+    let mut auto_repeat = Vec::new();
+    let mut auto_fit = false;
+    let tracks = super::parse_track_list_with_names(v, &mut auto_repeat, &mut names, &mut auto_fit);
+    s.rare_mut().auto_repeat_columns = auto_repeat;
+    s.rare_mut().auto_fit_columns = auto_fit;
     if tracks.first().map(|t| t.is_subgrid()).unwrap_or(false) {
         s.subgrid_columns = true;
         s.rare_mut().grid_template_columns = Vec::new();
@@ -5108,7 +5270,8 @@ fn apply_grid_template_columns(s: &mut ComputedStyle, v: &str) {
 fn apply_grid_template_rows(s: &mut ComputedStyle, v: &str) {
     let mut dummy = Vec::new();
     let mut names = std::collections::HashMap::new();
-    let tracks = super::parse_track_list_with_names(v, &mut dummy, &mut names);
+    let mut auto_fit = false;
+    let tracks = super::parse_track_list_with_names(v, &mut dummy, &mut names, &mut auto_fit);
     if tracks.first().map(|t| t.is_subgrid()).unwrap_or(false) {
         s.subgrid_rows = true;
         s.rare_mut().grid_template_rows = Vec::new();
@@ -5244,6 +5407,7 @@ fn apply_grid_template(s: &mut ComputedStyle, v: &str) {
 fn copy_grid_template_columns(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.rare_mut().grid_template_columns = s.rare().grid_template_columns.clone();
     d.rare_mut().auto_repeat_columns = s.rare().auto_repeat_columns.clone();
+    d.rare_mut().auto_fit_columns = s.rare().auto_fit_columns;
     d.grid_col_line_names = s.grid_col_line_names.clone();
     d.subgrid_columns = s.subgrid_columns;
 }
@@ -5284,6 +5448,13 @@ fn copy_grid_row_end(d: &mut ComputedStyle, s: &ComputedStyle) {
 // ── Background ──────────────────────────────────────────────────────────────
 
 fn apply_background(s: &mut ComputedStyle, v: &str) {
+    if crate::css::value_parse::split_top_level_commas(v)
+        .iter()
+        .filter_map(|layer| remove_top_level_function(layer, "image-set("))
+        .any(|(image_set, _)| extract_image_set_url(&image_set).is_none())
+    {
+        return;
+    }
     let layers = crate::css::value_parse::split_top_level_commas(v);
     if layers.len() > 1 {
         reset_background_fields(s);
@@ -5644,7 +5815,7 @@ fn find_top_level_char(s: &str, needle: char) -> Option<usize> {
     None
 }
 
-fn split_top_level_whitespace(s: &str) -> Vec<&str> {
+pub(crate) fn split_top_level_whitespace(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0usize;
     let mut start = None;
@@ -5720,6 +5891,11 @@ fn apply_background_misc_tokens(s: &mut ComputedStyle, tokens: &[&str]) {
 
 fn apply_background_image(s: &mut ComputedStyle, v: &str) {
     let layers = crate::css::value_parse::split_top_level_commas(v);
+    if layers.iter().any(|layer| {
+        is_image_set_function(layer.trim()) && extract_image_set_url(layer.trim()).is_none()
+    }) {
+        return;
+    }
     if layers.len() > 1 {
         reset_background_image_fields(s);
         let mut all_image_layers: Vec<ComputedStyle> = Vec::new();
@@ -5775,7 +5951,10 @@ fn apply_single_background_image(s: &mut ComputedStyle, v: &str) {
         super::apply_gradient(s, v);
     } else if lower.trim() == "none" {
         reset_background_image_fields(s);
-    } else if let Some(url) = extract_image_set_url(v) {
+    } else if is_image_set_function(v) {
+        let Some(url) = extract_image_set_url(v) else {
+            return;
+        };
         reset_background_image_fields(s);
         s.background_image_url = url;
         s.rare_mut().background_image_set_source = Some(v.trim().to_string());
@@ -5795,27 +5974,22 @@ fn extract_image_set_url(v: &str) -> Option<String> {
     extract_image_set_url_for_device_pixel_ratio(v, 1.0)
 }
 
+fn is_image_set_function(v: &str) -> bool {
+    let v = v.trim();
+    v.get(..10)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image-set("))
+        || v.get(..18)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("-webkit-image-set("))
+}
+
 pub(crate) fn extract_image_set_url_for_device_pixel_ratio(
     v: &str,
     device_pixel_ratio: f32,
 ) -> Option<String> {
-    let value = v.trim();
-    let lower = value.to_ascii_lowercase();
-    let inner = if lower.starts_with("image-set(") && value.ends_with(')') {
-        &value["image-set(".len()..value.len() - 1]
-    } else if lower.starts_with("-webkit-image-set(") && value.ends_with(')') {
-        &value["-webkit-image-set(".len()..value.len() - 1]
-    } else {
-        return None;
-    };
-
-    let mut candidates = Vec::new();
-    for candidate in super::split_top_level_commas(inner) {
-        if let Some(parsed) = parse_image_set_candidate(candidate.trim()) {
-            candidates.push(parsed);
-        }
+    let candidates = parse_image_set_candidates(v)?;
+    if candidates.is_empty() {
+        return Some(String::new());
     }
-
     let device_pixel_ratio = device_pixel_ratio.max(0.01);
     candidates
         .iter()
@@ -5831,42 +6005,89 @@ pub(crate) fn extract_image_set_url_for_device_pixel_ratio(
         .map(|candidate| candidate.url.clone())
 }
 
-fn parse_image_set_candidate(candidate: &str) -> Option<ImageSetCandidate> {
-    let (url, descriptors) = if candidate.starts_with(['\'', '"']) {
-        super::apply::consume_css_string(candidate)?
+pub(crate) fn image_set_resolution_for_url(
+    source: &str,
+    resolved_url: &str,
+    base_url: &str,
+) -> Option<f32> {
+    parse_image_set_candidates(source)?
+        .into_iter()
+        .find(|candidate| crate::html::resolve_url(&candidate.url, base_url) == resolved_url)
+        .map(|candidate| candidate.resolution)
+}
+
+fn parse_image_set_candidates(v: &str) -> Option<Vec<ImageSetCandidate>> {
+    let value = v.trim();
+    let lower = value.to_ascii_lowercase();
+    let inner = if lower.starts_with("image-set(") && value.ends_with(')') {
+        &value["image-set(".len()..value.len() - 1]
+    } else if lower.starts_with("-webkit-image-set(") && value.ends_with(')') {
+        &value["-webkit-image-set(".len()..value.len() - 1]
     } else {
-        let (url, consumed) = super::apply::parse_url_function(candidate)?;
-        (url, &candidate[consumed..])
-    };
-    if url.is_empty() {
         return None;
-    }
-    let mut resolution = None;
-    let mut mime_type_seen = false;
-    for descriptor in super::split_shorthand_values(descriptors.trim()) {
-        if descriptor.get(..5).is_some_and(|prefix| prefix.eq_ignore_ascii_case("type(")) {
-            if mime_type_seen || !image_set_candidate_type_is_supported(descriptor) {
-                return None;
-            }
-            mime_type_seen = true;
-        } else if resolution.is_none() {
-            resolution = Some(parse_image_set_resolution_descriptor(descriptor)?);
-        } else {
-            return None;
+    };
+
+    let mut candidates = Vec::new();
+    for candidate in super::split_top_level_commas(inner) {
+        if let Some(parsed) = parse_image_set_candidate(candidate.trim()).ok()? {
+            candidates.push(parsed);
         }
     }
+
+    Some(candidates)
+}
+
+fn parse_image_set_candidate(candidate: &str) -> Result<Option<ImageSetCandidate>, ()> {
+    let (url, descriptors) = if candidate.starts_with(['\'', '"']) {
+        super::apply::consume_css_string(candidate).ok_or(())?
+    } else {
+        let (url, consumed) = super::apply::parse_url_function(candidate).ok_or(())?;
+        (url, &candidate[consumed..])
+    };
+    let mut resolution = None;
+    let mut mime_type_seen = false;
+    let mut supported_type = true;
+    for descriptor in super::split_shorthand_values(descriptors.trim()) {
+        if descriptor
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("type("))
+        {
+            if mime_type_seen {
+                return Err(());
+            }
+            mime_type_seen = true;
+            supported_type = image_set_candidate_type_is_supported(descriptor).ok_or(())?;
+        } else if resolution.is_none() {
+            resolution = Some(parse_image_set_resolution_descriptor(descriptor).ok_or(())?);
+        } else {
+            return Err(());
+        }
+    }
+    if !supported_type {
+        return Ok(None);
+    }
     let resolution = resolution.unwrap_or(1.0);
-    Some(ImageSetCandidate { url, resolution })
+    Ok(Some(ImageSetCandidate { url, resolution }))
 }
 
 fn parse_image_set_resolution_descriptor(token: &str) -> Option<f32> {
     let token = token.trim().trim_end_matches(',');
+    if super::calc::is_math_function(token) {
+        return super::calc::parse_math_resolution_dppx(token)
+            .filter(|value| value.is_finite() && *value > 0.0);
+    }
     let lower = token.to_ascii_lowercase();
     if let Some(value) = lower.strip_suffix("dppx") {
-        return value.parse::<f32>().ok().filter(|v| v.is_finite() && *v > 0.0);
+        return value
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite() && *v > 0.0);
     }
     if let Some(value) = lower.strip_suffix('x') {
-        return value.parse::<f32>().ok().filter(|v| v.is_finite() && *v > 0.0);
+        return value
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite() && *v > 0.0);
     }
     if let Some(value) = lower.strip_suffix("dpi") {
         return value
@@ -5885,15 +6106,18 @@ fn parse_image_set_resolution_descriptor(token: &str) -> Option<f32> {
     None
 }
 
-fn image_set_candidate_type_is_supported(descriptor: &str) -> bool {
-    let Some(inner) = descriptor.get(5..).and_then(|value| value.strip_suffix(')')) else {
-        return false;
+fn image_set_candidate_type_is_supported(descriptor: &str) -> Option<bool> {
+    let Some(inner) = descriptor
+        .get(5..)
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return None;
     };
     let Some((mime, rest)) = super::apply::consume_css_string(inner.trim()) else {
-        return false;
+        return None;
     };
     if !rest.trim().is_empty() {
-        return false;
+        return None;
     }
     let mime = mime
         .split(';')
@@ -5901,7 +6125,7 @@ fn image_set_candidate_type_is_supported(descriptor: &str) -> bool {
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
-    matches!(
+    Some(matches!(
         mime.as_str(),
         "image/png"
             | "image/jpeg"
@@ -5910,7 +6134,7 @@ fn image_set_candidate_type_is_supported(descriptor: &str) -> bool {
             | "image/webp"
             | "image/bmp"
             | "image/svg+xml"
-    )
+    ))
 }
 fn parse_background_size_layer(v: &str) -> (BackgroundSize, CssLength, CssLength) {
     let tokens = background_size_tokens(v);
@@ -6480,6 +6704,11 @@ fn copy_background_blend_mode(d: &mut ComputedStyle, s: &ComputedStyle) {
 }
 
 fn apply_mask(s: &mut ComputedStyle, v: &str) {
+    if remove_top_level_function(v, "image-set(")
+        .is_some_and(|(image_set, _)| extract_image_set_url(&image_set).is_none())
+    {
+        return;
+    }
     apply_mask_initials(s);
     let (before, after) = find_top_level_char(v, '/')
         .map(|index| (&v[..index], &v[index + 1..]))
@@ -6540,7 +6769,10 @@ fn apply_mask_image(s: &mut ComputedStyle, v: &str) {
     if v == "none" {
         s.rare_mut().mask_image_url.clear();
         s.rare_mut().mask_image_set_source = None;
-    } else if let Some(url) = extract_image_set_url(v) {
+    } else if is_image_set_function(v) {
+        let Some(url) = extract_image_set_url(v) else {
+            return;
+        };
         s.rare_mut().mask_image_url = url;
         s.rare_mut().mask_image_set_source = Some(v.trim().to_string());
     } else if let Some(url) = super::extract_url(v) {
@@ -6792,6 +7024,8 @@ fn apply_resize(s: &mut ComputedStyle, v: &str) {
         "both" => Resize::Both,
         "horizontal" => Resize::Horizontal,
         "vertical" => Resize::Vertical,
+        "block" => Resize::Block,
+        "inline" => Resize::Inline,
         _ => Resize::None,
     };
 }
@@ -6926,26 +7160,42 @@ fn apply_aspect_ratio(s: &mut ComputedStyle, v: &str) {
     // otherwise". Matching the whole value against `"auto"` left `"auto 16"`
     // to be read as a number, which failed and fell back to 1: 1/9, not 16/9.
     let mut tokens = split_top_level_whitespace(v);
-    if tokens.is_empty() { return; }
-    let has_auto = if tokens.first().is_some_and(|t| t.eq_ignore_ascii_case("auto")) {
+    if tokens.is_empty() {
+        return;
+    }
+    let has_auto = if tokens
+        .first()
+        .is_some_and(|t| t.eq_ignore_ascii_case("auto"))
+    {
         tokens.remove(0);
         true
-    } else if tokens.last().is_some_and(|t| t.eq_ignore_ascii_case("auto")) {
+    } else if tokens
+        .last()
+        .is_some_and(|t| t.eq_ignore_ascii_case("auto"))
+    {
         tokens.pop();
         true
-    } else { false };
+    } else {
+        false
+    };
     let rest = tokens.join(" ");
     let rest = rest.trim();
     if rest.is_empty() {
-        if has_auto { s.aspect_ratio = None; }
+        if has_auto {
+            s.aspect_ratio = None;
+        }
         return;
     }
     let (numerator, denominator) = match find_top_level_char(rest, '/') {
         Some(slash) => (&rest[..slash], &rest[slash + 1..]),
         None => (rest, "1"),
     };
-    let Some(w) = super::parse_nonnegative_number(numerator) else { return; };
-    let Some(h) = super::parse_nonnegative_number(denominator) else { return; };
+    let Some(w) = super::parse_nonnegative_number(numerator) else {
+        return;
+    };
+    let Some(h) = super::parse_nonnegative_number(denominator) else {
+        return;
+    };
     // A zero component is a valid but degenerate ratio, with auto sizing.
     s.aspect_ratio = (w > 0.0 && h > 0.0).then_some(w / h);
 }
@@ -7032,12 +7282,16 @@ fn apply_backface_visibility(s: &mut ComputedStyle, v: &str) {
     apply_keyword_list(&mut s.backface_visibility, v, &["visible", "hidden"]);
 }
 fn apply_filter(s: &mut ComputedStyle, v: &str) {
-    let Some(filters) = super::parse_css_filter_checked(v, s.color) else { return; };
+    let Some(filters) = super::parse_css_filter_checked(v, s.color) else {
+        return;
+    };
     s.rare_mut().filter = v.to_string();
     s.css_filter = filters;
 }
 fn apply_backdrop_filter(s: &mut ComputedStyle, v: &str) {
-    if super::parse_css_filter_checked(v, s.color).is_none() { return; }
+    if super::parse_css_filter_checked(v, s.color).is_none() {
+        return;
+    }
     s.rare_mut().backdrop_filter = v.to_string();
 }
 
@@ -7514,11 +7768,19 @@ fn copy_caret_color(d: &mut ComputedStyle, s: &ComputedStyle) {
 
 fn apply_quotes(s: &mut ComputedStyle, v: &str) {
     let mut rest = v.trim();
-    if rest.eq_ignore_ascii_case("auto") { s.rare_mut().quotes = None; return; }
-    if rest.eq_ignore_ascii_case("none") { s.rare_mut().quotes = Some(Vec::new()); return; }
+    if rest.eq_ignore_ascii_case("auto") {
+        s.rare_mut().quotes = None;
+        return;
+    }
+    if rest.eq_ignore_ascii_case("none") {
+        s.rare_mut().quotes = Some(Vec::new());
+        return;
+    }
     let mut pairs = Vec::new();
     while !rest.is_empty() {
-        let Some((text, tail)) = super::apply::consume_css_string(rest) else { return; };
+        let Some((text, tail)) = super::apply::consume_css_string(rest) else {
+            return;
+        };
         pairs.push(text);
         rest = tail.trim_start();
     }
@@ -7594,79 +7856,424 @@ fn apply_clip(s: &mut ComputedStyle, v: &str) {
     }
 }
 fn apply_clip_path(s: &mut ComputedStyle, v: &str) {
-    if v == "none" {
+    if v.trim().is_empty() {
+        return;
+    }
+    let mut reference_box = None;
+    let mut shape = None;
+    for token in split_top_level_whitespace(v.trim()) {
+        let geometry_box = match token.to_ascii_lowercase().as_str() {
+            "margin-box" => Some(ClipPathBox::Margin),
+            "border-box" => Some(ClipPathBox::Border),
+            "padding-box" => Some(ClipPathBox::Padding),
+            "content-box" => Some(ClipPathBox::Content),
+            _ => None,
+        };
+        if let Some(geometry_box) = geometry_box {
+            if reference_box.replace(geometry_box).is_some() {
+                return;
+            }
+        } else if shape.replace(token).is_some() {
+            return;
+        }
+    }
+    let box_only = shape.is_none();
+    let shape = shape.unwrap_or("inset(0)");
+    if shape.eq_ignore_ascii_case("none") && reference_box.is_some() {
+        return;
+    }
+    let parsed_path = if shape
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("path("))
+    {
+        let Some(parsed) = parse_css_clip_path_data(shape) else {
+            return;
+        };
+        Some(parsed)
+    } else {
+        None
+    };
+    if !shape.eq_ignore_ascii_case("none")
+        && parsed_path.is_none()
+        && (!shape.ends_with(')')
+            || ![
+                "inset(", "xywh(", "rect(", "circle(", "ellipse(", "polygon(",
+            ]
+            .iter()
+            .any(|prefix| clip_path_function(shape, prefix)))
+    {
+        return;
+    }
+    let parsed_inset = if !box_only && clip_path_function(shape, "inset(") {
+        let inner = shape[6..shape.len() - 1].trim();
+        let Some(parsed) = parse_clip_path_inset(inner) else {
+            return;
+        };
+        Some(parsed)
+    } else if clip_path_function(shape, "xywh(") || clip_path_function(shape, "rect(") {
+        let Some(parsed) = parse_clip_path_rectangle(shape) else {
+            return;
+        };
+        Some(parsed)
+    } else {
+        None
+    };
+    let parsed_radial =
+        if clip_path_function(shape, "circle(") || clip_path_function(shape, "ellipse(") {
+            let Some(parsed) = parse_clip_path_radial(shape) else {
+                return;
+            };
+            Some(parsed)
+        } else {
+            None
+        };
+    if let Some(rare) = s.rare.as_mut() {
+        rare.clip_path_inset_round = None;
+        if parsed_path.is_none() {
+            rare.clip_path_data = None;
+        }
+    }
+    if box_only {
         s.clip_path = ClipPath::default();
-    } else if v.starts_with("inset(") {
-        let inner = v[6..v.len().saturating_sub(1)].trim();
+        s.clip_path.kind = ClipPathKind::Box;
+    } else if let Some(path) = parsed_path {
+        s.clip_path = ClipPath::default();
+        s.clip_path.kind = ClipPathKind::Path;
+        s.rare_mut().clip_path_data = Some(path);
+    } else if let Some((insets, round)) = parsed_inset {
         s.clip_path = ClipPath::default();
         s.clip_path.kind = ClipPathKind::Inset;
-        let pts = split_top_level_whitespace(inner);
-        s.clip_path.inset_top = parse_length(pts.first().copied().unwrap_or("0"));
-        s.clip_path.inset_right = parse_length(
-            pts.get(1)
-                .copied()
-                .unwrap_or(pts.first().copied().unwrap_or("0")),
-        );
-        s.clip_path.inset_bottom = parse_length(
-            pts.get(2)
-                .copied()
-                .unwrap_or(pts.first().copied().unwrap_or("0")),
-        );
-        s.clip_path.inset_left = parse_length(
-            pts.get(3).copied().unwrap_or(
-                pts.get(1)
-                    .copied()
-                    .unwrap_or(pts.first().copied().unwrap_or("0")),
-            ),
-        );
-    } else if v.starts_with("circle(") {
-        let inner = v[7..v.len().saturating_sub(1)].trim();
-        s.clip_path = ClipPath::default();
-        s.clip_path.kind = ClipPathKind::Circle;
-        if let Some(at) = inner.find(" at ") {
-            s.clip_path.circle_radius = parse_length(&inner[..at]);
-            let center = split_top_level_whitespace(&inner[at + 4..]);
-            s.clip_path.center_x = parse_length(center.first().copied().unwrap_or("50%"));
-            s.clip_path.center_y = parse_length(
-                center
-                    .get(1)
-                    .copied()
-                    .unwrap_or(center.first().copied().unwrap_or("50%")),
-            );
-        } else {
-            s.clip_path.circle_radius = parse_length(inner);
-            s.clip_path.center_x = CssLength::Percent(50.0);
-            s.clip_path.center_y = CssLength::Percent(50.0);
+        s.clip_path.inset_top = insets[0].clone();
+        s.clip_path.inset_right = insets[1].clone();
+        s.clip_path.inset_bottom = insets[2].clone();
+        s.clip_path.inset_left = insets[3].clone();
+        if let Some(round) = round {
+            s.rare_mut().clip_path_inset_round = Some(round);
         }
-    } else if v.starts_with("ellipse(") {
-        let inner = v[8..v.len().saturating_sub(1)].trim();
-        s.clip_path = ClipPath::default();
-        s.clip_path.kind = ClipPathKind::Ellipse;
-        let (radii, center) = if let Some(at) = inner.find(" at ") {
-            (&inner[..at], Some(&inner[at + 4..]))
-        } else {
-            (inner, None)
+    } else if let Some(radial) = parsed_radial {
+        s.clip_path = radial;
+    } else {
+        apply_clip_path_shape(s, shape);
+    }
+    if let Some(reference_box) = reference_box {
+        s.clip_path.reference_box = reference_box;
+    }
+}
+
+fn parse_clip_path_radial(shape: &str) -> Option<ClipPath> {
+    let circle = clip_path_function(shape, "circle(");
+    let prefix = if circle { "circle(" } else { "ellipse(" };
+    let inner = shape.get(prefix.len()..shape.len() - 1)?;
+    let tokens = split_top_level_whitespace(inner.trim());
+    let at = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("at"));
+    let size_tokens = &tokens[..at.unwrap_or(tokens.len())];
+    let mut clip = ClipPath::default();
+    clip.kind = if circle {
+        ClipPathKind::Circle
+    } else {
+        ClipPathKind::Ellipse
+    };
+    let extent = |token: &str| match token.to_ascii_lowercase().as_str() {
+        "closest-side" => Some(ShapeRadius::ClosestSide),
+        "farthest-side" => Some(ShapeRadius::FarthestSide),
+        "closest-corner" => Some(ShapeRadius::ClosestCorner),
+        "farthest-corner" => Some(ShapeRadius::FarthestCorner),
+        _ => None,
+    };
+    if circle {
+        clip.circle_radius = match size_tokens {
+            [] => ShapeRadius::ClosestSide,
+            [one] => match extent(one) {
+                Some(radius) => radius,
+                None => ShapeRadius::Length(parse_clip_nonnegative_length(one)?),
+            },
+            _ => return None,
         };
-        let rv = split_top_level_whitespace(radii);
-        s.clip_path.ellipse_rx = parse_length(rv.first().copied().unwrap_or("50%"));
-        s.clip_path.ellipse_ry = parse_length(
-            rv.get(1)
-                .copied()
-                .unwrap_or(rv.first().copied().unwrap_or("50%")),
-        );
-        if let Some(c) = center {
-            let cv = split_top_level_whitespace(c);
-            s.clip_path.center_x = parse_length(cv.first().copied().unwrap_or("50%"));
-            s.clip_path.center_y = parse_length(
-                cv.get(1)
-                    .copied()
-                    .unwrap_or(cv.first().copied().unwrap_or("50%")),
-            );
-        } else {
-            s.clip_path.center_x = CssLength::Percent(50.0);
-            s.clip_path.center_y = CssLength::Percent(50.0);
+    } else {
+        let (rx, ry) = match size_tokens {
+            [] => (ShapeRadius::ClosestSide, ShapeRadius::ClosestSide),
+            [one] => {
+                let radius = extent(one)?;
+                (radius.clone(), radius)
+            }
+            [x, y] => (
+                ShapeRadius::Length(parse_clip_nonnegative_length(x)?),
+                ShapeRadius::Length(parse_clip_nonnegative_length(y)?),
+            ),
+            _ => return None,
+        };
+        clip.ellipse_rx = rx;
+        clip.ellipse_ry = ry;
+    }
+    let position = if let Some(index) = at {
+        let position = tokens.get(index + 1..)?;
+        if position.is_empty() {
+            return None;
         }
-    } else if v.starts_with("polygon(") {
+        position
+    } else {
+        &[]
+    };
+    let (x, y) = parse_clip_path_radial_position(position)?;
+    clip.center_x = x;
+    clip.center_y = y;
+    Some(clip)
+}
+
+fn parse_clip_path_radial_position(parts: &[&str]) -> Option<(CssLength, CssLength)> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Part {
+        Horizontal,
+        Vertical,
+        Center,
+        Length,
+    }
+    let classify = |token: &str| match position_axis(token) {
+        Some(PositionAxis::Horizontal(_)) => Some(Part::Horizontal),
+        Some(PositionAxis::Vertical(_)) => Some(Part::Vertical),
+        Some(PositionAxis::Center) => Some(Part::Center),
+        None => {
+            parse_clip_path_length(token)?;
+            Some(Part::Length)
+        }
+    };
+    use Part::{Center, Horizontal, Length, Vertical};
+    let valid = match parts {
+        [] => true,
+        [one] => classify(one).is_some(),
+        [a, b] => matches!(
+            (classify(a)?, classify(b)?),
+            (Horizontal, Vertical | Center | Length)
+                | (Vertical, Horizontal | Center)
+                | (Center, Horizontal | Vertical | Center | Length)
+                | (Length, Vertical | Center | Length)
+        ),
+        [a, b, c, d] => matches!(
+            (classify(a)?, classify(b)?, classify(c)?, classify(d)?),
+            (Horizontal, Length, Vertical, Length) | (Vertical, Length, Horizontal, Length)
+        ),
+        _ => false,
+    };
+    if !valid {
+        return None;
+    }
+    match parts {
+        [a, b] if classify(a) == Some(Center) && classify(b) == Some(Length) => {
+            Some((CssLength::Percent(50.0), parse_length(b)))
+        }
+        [a, b] if classify(a) == Some(Length) && classify(b) == Some(Center) => {
+            Some((parse_length(a), CssLength::Percent(50.0)))
+        }
+        [a, b] if classify(a) == Some(Center) && classify(b) == Some(Center) => {
+            Some((CssLength::Percent(50.0), CssLength::Percent(50.0)))
+        }
+        _ => Some(parse_object_position_tokens(parts)),
+    }
+}
+
+fn parse_clip_nonnegative_length(value: &str) -> Option<CssLength> {
+    let length = parse_clip_path_length(value)?;
+    let negative = matches!(&length,
+        CssLength::Px(v) | CssLength::Em(v) | CssLength::Rem(v) | CssLength::Percent(v)
+        | CssLength::Vw(v) | CssLength::Vh(v) | CssLength::Vmin(v) | CssLength::Vmax(v)
+        | CssLength::Cqw(v) | CssLength::Cqh(v) | CssLength::Cqi(v) | CssLength::Cqb(v)
+        | CssLength::Cqmin(v) | CssLength::Cqmax(v) if *v < 0.0);
+    (!negative).then_some(length)
+}
+
+fn clip_path_function(value: &str, prefix: &str) -> bool {
+    value
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+}
+
+fn parse_clip_path_inset(
+    inner: &str,
+) -> Option<([CssLength; 4], Option<([CssLength; 4], [CssLength; 4])>)> {
+    let tokens = split_top_level_whitespace(inner);
+    let round_at = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("round"));
+    let inset_tokens = &tokens[..round_at.unwrap_or(tokens.len())];
+    if !(1..=4).contains(&inset_tokens.len()) {
+        return None;
+    }
+    let mut parsed = Vec::with_capacity(inset_tokens.len());
+    for token in inset_tokens {
+        parsed.push(parse_clip_path_length(token)?);
+    }
+    let insets = [
+        parsed[0].clone(),
+        parsed.get(1).unwrap_or(&parsed[0]).clone(),
+        parsed.get(2).unwrap_or(&parsed[0]).clone(),
+        parsed
+            .get(3)
+            .unwrap_or(parsed.get(1).unwrap_or(&parsed[0]))
+            .clone(),
+    ];
+    let round = if let Some(index) = round_at {
+        let radii = tokens.get(index + 1..)?.join(" ");
+        let (horizontal, vertical) = find_top_level_char(&radii, '/')
+            .map(|slash| (&radii[..slash], &radii[slash + 1..]))
+            .unwrap_or((&radii, &radii));
+        Some((
+            parse_clip_round_set(horizontal)?,
+            parse_clip_round_set(vertical)?,
+        ))
+    } else {
+        None
+    };
+    Some((insets, round))
+}
+
+fn parse_clip_path_rectangle(
+    shape: &str,
+) -> Option<([CssLength; 4], Option<([CssLength; 4], [CssLength; 4])>)> {
+    let xywh = clip_path_function(shape, "xywh(");
+    let prefix = if xywh { "xywh(" } else { "rect(" };
+    let inner = shape.get(prefix.len()..shape.len() - 1)?;
+    let tokens = split_top_level_whitespace(inner.trim());
+    let round_at = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("round"));
+    let positions = &tokens[..round_at.unwrap_or(tokens.len())];
+    if positions.len() != 4 {
+        return None;
+    }
+    let mut values = Vec::with_capacity(4);
+    for (index, token) in positions.iter().enumerate() {
+        if !xywh && token.eq_ignore_ascii_case("auto") {
+            values.push(CssLength::Percent(if index == 0 || index == 3 {
+                0.0
+            } else {
+                100.0
+            }));
+        } else {
+            values.push(parse_clip_path_length(token)?);
+        }
+    }
+    let round = if let Some(index) = round_at {
+        let radii = tokens.get(index + 1..)?.join(" ");
+        let (horizontal, vertical) = find_top_level_char(&radii, '/')
+            .map(|slash| (&radii[..slash], &radii[slash + 1..]))
+            .unwrap_or((&radii, &radii));
+        Some((
+            parse_clip_round_set(horizontal)?,
+            parse_clip_round_set(vertical)?,
+        ))
+    } else {
+        None
+    };
+    let percent_minus = |value: CssLength| {
+        CssLength::CalcExpr(Box::new(CalcNode::Sub(
+            Box::new(CalcNode::Value(CssLength::Percent(100.0))),
+            Box::new(CalcNode::Value(value)),
+        )))
+    };
+    if xywh {
+        if parse_clip_nonnegative_length(positions[2]).is_none()
+            || parse_clip_nonnegative_length(positions[3]).is_none()
+        {
+            return None;
+        }
+        let right_edge = CssLength::CalcExpr(Box::new(CalcNode::Add(
+            Box::new(CalcNode::Value(values[0].clone())),
+            Box::new(CalcNode::Value(values[2].clone())),
+        )));
+        let bottom_edge = CssLength::CalcExpr(Box::new(CalcNode::Add(
+            Box::new(CalcNode::Value(values[1].clone())),
+            Box::new(CalcNode::Value(values[3].clone())),
+        )));
+        Some((
+            [
+                values[1].clone(),
+                percent_minus(right_edge),
+                percent_minus(bottom_edge),
+                values[0].clone(),
+            ],
+            round,
+        ))
+    } else {
+        // rect() coordinates are measured from the top/left. Crossed edges
+        // collapse at the start edge, unlike inset()'s proportional reduction.
+        let right_edge = CssLength::Max(Box::new(vec![values[3].clone(), values[1].clone()]));
+        let bottom_edge = CssLength::Max(Box::new(vec![values[0].clone(), values[2].clone()]));
+        Some((
+            [
+                values[0].clone(),
+                percent_minus(right_edge),
+                percent_minus(bottom_edge),
+                values[3].clone(),
+            ],
+            round,
+        ))
+    }
+}
+
+fn parse_clip_round_set(input: &str) -> Option<[CssLength; 4]> {
+    let tokens = split_top_level_whitespace(input);
+    if !(1..=4).contains(&tokens.len()) {
+        return None;
+    }
+    for token in tokens {
+        parse_clip_path_length(token)?;
+    }
+    Some(parse_radius_set(input))
+}
+
+fn parse_clip_path_length(value: &str) -> Option<CssLength> {
+    if value.trim().parse::<f32>().is_ok_and(|number| number != 0.0) {
+        return None;
+    }
+    let length = parse_length(value);
+    (!matches!(
+        length,
+        CssLength::Auto
+            | CssLength::None
+            | CssLength::Stretch
+            | CssLength::MinContent
+            | CssLength::MaxContent
+            | CssLength::FitContent
+            | CssLength::FitContentArg(_)
+    ))
+    .then_some(length)
+}
+
+fn parse_css_clip_path_data(
+    value: &str,
+) -> Option<(std::sync::Arc<tiny_skia::Path>, tiny_skia::FillRule)> {
+    if !value.get(..5)?.eq_ignore_ascii_case("path(") || !value.ends_with(')') {
+        return None;
+    }
+    let inner = value.get(5..value.len() - 1)?.trim();
+    let parts = crate::css::value_parse::split_top_level_commas(inner);
+    let (rule, data) = match parts.as_slice() {
+        [data] => (tiny_skia::FillRule::Winding, data.trim()),
+        [rule, data] => {
+            let rule = match rule.trim().to_ascii_lowercase().as_str() {
+                "nonzero" => tiny_skia::FillRule::Winding,
+                "evenodd" => tiny_skia::FillRule::EvenOdd,
+                _ => return None,
+            };
+            (rule, data.trim())
+        }
+        _ => return None,
+    };
+    let quote = data.chars().next()?;
+    if !matches!(quote, '"' | '\'') || !data.ends_with(quote) || data.len() < 2 {
+        return None;
+    }
+    let path_data = super::apply::unescape_css_string(&data[1..data.len() - 1]);
+    let path = crate::svg::path::parse_path_data(&path_data)?;
+    (path.len() > 0).then(|| (std::sync::Arc::new(path), rule))
+}
+
+fn apply_clip_path_shape(s: &mut ComputedStyle, v: &str) {
+    if v.eq_ignore_ascii_case("none") {
+        s.clip_path = ClipPath::default();
+    } else if clip_path_function(v, "polygon(") {
         let inner = v[8..v.len().saturating_sub(1)].trim();
         s.clip_path = ClipPath::default();
         s.clip_path.kind = ClipPathKind::Polygon;
@@ -7686,6 +8293,21 @@ fn copy_clip(d: &mut ComputedStyle, s: &ComputedStyle) {
 }
 fn copy_clip_path(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.clip_path = s.clip_path.clone();
+    let data = s.rare.as_ref().and_then(|rare| rare.clip_path_data.clone());
+    let inset_round = s
+        .rare
+        .as_ref()
+        .and_then(|rare| rare.clip_path_inset_round.clone());
+    if let Some(data) = data {
+        d.rare_mut().clip_path_data = Some(data);
+    } else if let Some(rare) = d.rare.as_mut() {
+        rare.clip_path_data = None;
+    }
+    if let Some(inset_round) = inset_round {
+        d.rare_mut().clip_path_inset_round = Some(inset_round);
+    } else if let Some(rare) = d.rare.as_mut() {
+        rare.clip_path_inset_round = None;
+    }
 }
 
 fn apply_shape_outside(s: &mut ComputedStyle, v: &str) {
@@ -7763,24 +8385,39 @@ fn copy_line_clamp(d: &mut ComputedStyle, s: &ComputedStyle) {
 // ── Multi-column ────────────────────────────────────────────────────────────
 
 fn apply_column_count(s: &mut ComputedStyle, v: &str) {
-    if v.eq_ignore_ascii_case("auto") { s.column_count = None; }
-    else if let Some(n) = super::calc::parse_positive_integer(v) { s.column_count = Some(n); }
+    if v.eq_ignore_ascii_case("auto") {
+        s.column_count = None;
+    } else if let Some(n) = super::calc::parse_positive_integer(v) {
+        s.column_count = Some(n);
+    }
 }
 fn apply_column_width(s: &mut ComputedStyle, v: &str) {
     s.column_width = parse_length(v);
 }
 fn apply_columns(s: &mut ComputedStyle, v: &str) {
     let tokens = super::split_css_shorthand_values(v);
-    if tokens.is_empty() || tokens.len() > 2 { return; }
+    if tokens.is_empty() || tokens.len() > 2 {
+        return;
+    }
     let mut count = None;
     let mut width = None;
     for tok in tokens {
-        if tok.eq_ignore_ascii_case("auto") { continue; }
+        if tok.eq_ignore_ascii_case("auto") {
+            continue;
+        }
         if let Some(n) = super::calc::parse_positive_integer(&tok) {
-            if count.replace(n).is_some() { return; }
+            if count.replace(n).is_some() {
+                return;
+            }
         } else if let Some(length) = parse_length_checked(&tok) {
-            if tok.parse::<f32>().is_ok_and(|number| number != 0.0) || width.replace(length).is_some() { return; }
-        } else { return; }
+            if tok.parse::<f32>().is_ok_and(|number| number != 0.0)
+                || width.replace(length).is_some()
+            {
+                return;
+            }
+        } else {
+            return;
+        }
     }
     s.column_count = count;
     s.column_width = width.unwrap_or(CssLength::Auto);
@@ -7836,13 +8473,19 @@ fn copy_column_span(d: &mut ComputedStyle, s: &ComputedStyle) {
 // ── Counter ─────────────────────────────────────────────────────────────────
 
 fn apply_counter_reset(s: &mut ComputedStyle, v: &str) {
-    if let Some(value) = super::apply::parse_counter_reset_checked(v) { s.counter_reset = value; }
+    if let Some(value) = super::apply::parse_counter_reset_checked(v) {
+        s.counter_reset = value;
+    }
 }
 fn apply_counter_increment(s: &mut ComputedStyle, v: &str) {
-    if let Some(value) = super::apply::parse_counter_list_checked(v, 1) { s.counter_increment = value; }
+    if let Some(value) = super::apply::parse_counter_list_checked(v, 1) {
+        s.counter_increment = value;
+    }
 }
 fn apply_counter_set(s: &mut ComputedStyle, v: &str) {
-    if let Some(value) = super::apply::parse_counter_list_checked(v, 0) { s.counter_set = value; }
+    if let Some(value) = super::apply::parse_counter_list_checked(v, 0) {
+        s.counter_set = value;
+    }
 }
 
 fn copy_counter_reset(d: &mut ComputedStyle, s: &ComputedStyle) {
@@ -8114,14 +8757,29 @@ fn apply_contain(s: &mut ComputedStyle, v: &str) {
         _ => {
             let mut seen = std::collections::HashSet::new();
             for token in &tokens {
-                if !matches!(*token, "size" | "inline-size" | "layout" | "style" | "paint")
-                    || !seen.insert(*token) { return; }
+                if !matches!(
+                    *token,
+                    "size" | "inline-size" | "layout" | "style" | "paint"
+                ) || !seen.insert(*token)
+                {
+                    return;
+                }
             }
-            if seen.contains("size") && seen.contains("inline-size") { return; }
+            if seen.contains("size") && seen.contains("inline-size") {
+                return;
+            }
             let ordered: Vec<_> = ["size", "inline-size", "layout", "style", "paint"]
-                .into_iter().filter(|token| seen.contains(token)).collect();
-            (seen.contains("size"), seen.contains("inline-size"), seen.contains("layout"),
-                seen.contains("style"), seen.contains("paint"), ordered.join(" "))
+                .into_iter()
+                .filter(|token| seen.contains(token))
+                .collect();
+            (
+                seen.contains("size"),
+                seen.contains("inline-size"),
+                seen.contains("layout"),
+                seen.contains("style"),
+                seen.contains("paint"),
+                ordered.join(" "),
+            )
         }
     };
     s.contain_size = size;
@@ -8213,11 +8871,30 @@ fn apply_scroll_snap_type(s: &mut ComputedStyle, v: &str) {
     s.scroll_snap_type = ScrollSnapType { axis, mandatory };
 }
 fn apply_scroll_snap_align(s: &mut ComputedStyle, v: &str) {
-    s.scroll_snap_align = match v.split_whitespace().next().unwrap_or("none") {
-        "start" => ScrollSnapAlign::Start,
-        "end" => ScrollSnapAlign::End,
-        "center" => ScrollSnapAlign::Center,
-        _ => ScrollSnapAlign::None,
+    let parse = |word| match word {
+        "none" => Some(ScrollSnapAlignValue::None),
+        "start" => Some(ScrollSnapAlignValue::Start),
+        "end" => Some(ScrollSnapAlignValue::End),
+        "center" => Some(ScrollSnapAlignValue::Center),
+        _ => None,
+    };
+    let mut words = v.split_whitespace();
+    let Some(block) = words.next().and_then(parse) else {
+        return;
+    };
+    let inline = words.next().map(parse);
+    if words.next().is_some() {
+        return;
+    }
+    s.scroll_snap_align = match inline {
+        Some(Some(inline)) => ScrollSnapAlign::two(block, inline),
+        Some(None) => return,
+        None => match block {
+            ScrollSnapAlignValue::None => ScrollSnapAlign::None,
+            ScrollSnapAlignValue::Start => ScrollSnapAlign::Start,
+            ScrollSnapAlignValue::End => ScrollSnapAlign::End,
+            ScrollSnapAlignValue::Center => ScrollSnapAlign::Center,
+        },
     };
 }
 fn apply_scroll_snap_stop(s: &mut ComputedStyle, v: &str) {
@@ -8326,7 +9003,12 @@ fn note_logical_pair(s: &mut ComputedStyle, start: LogicalSlot, end: LogicalSlot
     note_logical(s, end, parts.get(1).copied().unwrap_or(parts[0]));
 }
 fn apply_margin_block(s: &mut ComputedStyle, v: &str) {
-    note_logical_pair(s, LogicalSlot::MarginBlockStart, LogicalSlot::MarginBlockEnd, v);
+    note_logical_pair(
+        s,
+        LogicalSlot::MarginBlockStart,
+        LogicalSlot::MarginBlockEnd,
+        v,
+    );
 }
 fn apply_margin_block_start(s: &mut ComputedStyle, v: &str) {
     note_logical(s, LogicalSlot::MarginBlockStart, v);
@@ -8335,7 +9017,12 @@ fn apply_margin_block_end(s: &mut ComputedStyle, v: &str) {
     note_logical(s, LogicalSlot::MarginBlockEnd, v);
 }
 fn apply_margin_inline(s: &mut ComputedStyle, v: &str) {
-    note_logical_pair(s, LogicalSlot::MarginInlineStart, LogicalSlot::MarginInlineEnd, v);
+    note_logical_pair(
+        s,
+        LogicalSlot::MarginInlineStart,
+        LogicalSlot::MarginInlineEnd,
+        v,
+    );
 }
 fn apply_margin_inline_start(s: &mut ComputedStyle, v: &str) {
     note_logical(s, LogicalSlot::MarginInlineStart, v);
@@ -8344,7 +9031,12 @@ fn apply_margin_inline_end(s: &mut ComputedStyle, v: &str) {
     note_logical(s, LogicalSlot::MarginInlineEnd, v);
 }
 fn apply_padding_block(s: &mut ComputedStyle, v: &str) {
-    note_logical_pair(s, LogicalSlot::PaddingBlockStart, LogicalSlot::PaddingBlockEnd, v);
+    note_logical_pair(
+        s,
+        LogicalSlot::PaddingBlockStart,
+        LogicalSlot::PaddingBlockEnd,
+        v,
+    );
 }
 fn apply_padding_block_start(s: &mut ComputedStyle, v: &str) {
     note_logical(s, LogicalSlot::PaddingBlockStart, v);
@@ -8353,7 +9045,12 @@ fn apply_padding_block_end(s: &mut ComputedStyle, v: &str) {
     note_logical(s, LogicalSlot::PaddingBlockEnd, v);
 }
 fn apply_padding_inline(s: &mut ComputedStyle, v: &str) {
-    note_logical_pair(s, LogicalSlot::PaddingInlineStart, LogicalSlot::PaddingInlineEnd, v);
+    note_logical_pair(
+        s,
+        LogicalSlot::PaddingInlineStart,
+        LogicalSlot::PaddingInlineEnd,
+        v,
+    );
 }
 fn apply_padding_inline_start(s: &mut ComputedStyle, v: &str) {
     note_logical(s, LogicalSlot::PaddingInlineStart, v);
@@ -8497,10 +9194,20 @@ fn apply_inset(s: &mut ComputedStyle, v: &str) {
     );
 }
 fn apply_inset_block(s: &mut ComputedStyle, v: &str) {
-    note_logical_pair(s, LogicalSlot::InsetBlockStart, LogicalSlot::InsetBlockEnd, v);
+    note_logical_pair(
+        s,
+        LogicalSlot::InsetBlockStart,
+        LogicalSlot::InsetBlockEnd,
+        v,
+    );
 }
 fn apply_inset_inline(s: &mut ComputedStyle, v: &str) {
-    note_logical_pair(s, LogicalSlot::InsetInlineStart, LogicalSlot::InsetInlineEnd, v);
+    note_logical_pair(
+        s,
+        LogicalSlot::InsetInlineStart,
+        LogicalSlot::InsetInlineEnd,
+        v,
+    );
 }
 
 // ── Place shorthands ────────────────────────────────────────────────────────

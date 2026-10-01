@@ -4,26 +4,28 @@ use crate::layout::{LayoutEngine, ResolvedBox, layout_positioned, shift_rects};
 use crate::types::*;
 
 // ─── Border conflict resolution for border-collapse ───────────────────────────
-// CSS 2.1 §17.6.2.1: hidden > wider > style-priority > first cell wins.
-// Mirrors C++ BorderStylePriority / BorderWins / ResolveCollapsedBorders.
+// CSS Tables 3 border specificity: hidden > wider > style priority.
 
 fn border_style_priority(s: BorderStyle) -> i32 {
     match s {
-        BorderStyle::Double => 4,
-        BorderStyle::Groove => 4,
-        BorderStyle::Ridge => 4,
-        BorderStyle::Solid => 3,
-        BorderStyle::Inset => 3,
-        BorderStyle::Outset => 3,
-        BorderStyle::Dashed => 2,
-        BorderStyle::Dotted => 1,
-        BorderStyle::Hidden => 5,
+        BorderStyle::Double => 9,
+        BorderStyle::Solid => 8,
+        BorderStyle::Dashed => 7,
+        BorderStyle::Dotted => 6,
+        BorderStyle::Ridge => 5,
+        BorderStyle::Outset => 4,
+        BorderStyle::Groove => 3,
+        BorderStyle::Inset => 2,
+        BorderStyle::Hidden => 10,
         BorderStyle::None => 0,
     }
 }
 
 /// Returns true if side `a` wins over side `b` in border-collapse conflict resolution.
 fn border_wins(a_width: f32, a_style: BorderStyle, b_width: f32, b_style: BorderStyle) -> bool {
+    if a_style == BorderStyle::Hidden || b_style == BorderStyle::Hidden {
+        return a_style == BorderStyle::Hidden;
+    }
     if a_style == BorderStyle::None && b_style == BorderStyle::None {
         return true;
     }
@@ -200,10 +202,18 @@ fn anonymous_table_cell(parent: &WebCore) -> WebCore {
 fn unwrap_anonymous_outer_tables(node: &mut WebCore) {
     let mut work = vec![node];
     while let Some(node) = work.pop() {
-        while node.children.iter().any(|child| matches!(child.tag.as_str(), "anonymous-table" | "anonymous-table-row")) {
+        while node.children.iter().any(|child| {
+            matches!(
+                child.tag.as_str(),
+                "anonymous-table" | "anonymous-table-row"
+            )
+        }) {
             let old_children = std::mem::take(&mut node.children);
             for child in old_children {
-                if matches!(child.tag.as_str(), "anonymous-table" | "anonymous-table-row") {
+                if matches!(
+                    child.tag.as_str(),
+                    "anonymous-table" | "anonymous-table-row"
+                ) {
                     node.children.extend(child.children);
                 } else {
                     node.children.push(child);
@@ -217,7 +227,11 @@ fn unwrap_anonymous_outer_tables(node: &mut WebCore) {
 fn unwrap_anonymous_table_row_cells(row: &mut WebCore) {
     let mut work = vec![row];
     while let Some(node) = work.pop() {
-        while node.children.iter().any(|child| child.tag == "anonymous-table-cell") {
+        while node
+            .children
+            .iter()
+            .any(|child| child.tag == "anonymous-table-cell")
+        {
             let old_children = std::mem::take(&mut node.children);
             for child in old_children {
                 if child.tag == "anonymous-table-cell" {
@@ -443,7 +457,7 @@ fn collect_rows(
     table: &WebCore,
     abs_children: &mut Vec<usize>,
     caption_idx: &mut Option<usize>,
-    col_indices: &mut Vec<usize>,
+    col_indices: &mut Vec<(usize, Option<usize>)>,
 ) -> Vec<RowRef> {
     let mut thead: Vec<RowRef> = Vec::new();
     let mut tbody: Vec<RowRef> = Vec::new();
@@ -518,19 +532,19 @@ fn collect_rows(
                 }
             }
             Display::TableColumn => {
-                col_indices.push(i);
+                col_indices.push((i, None));
             }
             Display::TableColumnGroup => {
                 // Collect col children, or treat group itself as implicit col
                 let mut has_cols = false;
-                for (_, gc) in child.children.iter().enumerate() {
+                for (j, gc) in child.children.iter().enumerate() {
                     if matches!(gc.style.display, Display::TableColumn) {
-                        col_indices.push(i);
+                        col_indices.push((i, Some(j)));
                         has_cols = true;
                     }
                 }
                 if !has_cols {
-                    col_indices.push(i);
+                    col_indices.push((i, None));
                 }
             }
             _ => {}
@@ -595,6 +609,74 @@ fn cell_min_content_outer_width(
     let min_content = engine.min_content_width_of_content(cell, font_px, root_font_px);
     let rb = engine.res_box(&cell.style, font_px, containing_w, root_font_px);
     min_content + rb.h_space()
+}
+
+pub(super) fn intrinsic_min_content_width(
+    engine: &LayoutEngine,
+    table: &WebCore,
+    font_px: f32,
+    root_font_px: f32,
+) -> f32 {
+    let mut abs_children = Vec::new();
+    let mut caption_idx = None;
+    let mut col_indices = Vec::new();
+    let rows = collect_rows(table, &mut abs_children, &mut caption_idx, &mut col_indices);
+    let num_cols = rows
+        .iter()
+        .map(|rr| {
+            row_ref(table, rr)
+                .children
+                .iter()
+                .filter(|cell| {
+                    matches!(
+                        cell.style.display,
+                        Display::TableCell | Display::TableHeaderCell
+                    )
+                })
+                .map(get_colspan)
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0);
+    if num_cols == 0 {
+        return 0.0;
+    }
+
+    let spacing = if table.style.border_collapse {
+        0.0
+    } else {
+        engine.res_len(&table.style.border_spacing_h, font_px, 0.0, root_font_px)
+    };
+    let mut columns = vec![0.0f32; num_cols];
+    for rr in &rows {
+        let mut col = 0usize;
+        for cell in &row_ref(table, rr).children {
+            if !matches!(
+                cell.style.display,
+                Display::TableCell | Display::TableHeaderCell
+            ) {
+                continue;
+            }
+            let span = get_colspan(cell).min(num_cols - col);
+            if span == 0 {
+                break;
+            }
+            let cell_font = cell.style.font_size_px(font_px, root_font_px);
+            let mut min_width =
+                cell_min_content_outer_width(engine, cell, cell_font, 0.0, root_font_px);
+            if !cell.style.width.is_auto() && !cell.style.width.has_percentage() {
+                min_width =
+                    min_width.max(engine.res_len(&cell.style.width, cell_font, 0.0, root_font_px));
+            }
+            distribute_spanned_width(&mut columns, col, span, min_width, spacing);
+            col += span;
+        }
+    }
+    let mut width = columns.iter().sum::<f32>() + spacing * (num_cols + 1) as f32;
+    if let Some(ci) = caption_idx {
+        width = width.max(engine.min_content_width(&table.children[ci], font_px, root_font_px));
+    }
+    width
 }
 
 /// Get a reference to a row box given a RowRef.
@@ -704,7 +786,7 @@ pub fn layout_table(
     // ── Collect rows ─────────────────────────────────────────────────────────
     let mut abs_children: Vec<usize> = Vec::new();
     let mut caption_idx: Option<usize> = None;
-    let mut col_indices: Vec<usize> = Vec::new();
+    let mut col_indices: Vec<(usize, Option<usize>)> = Vec::new();
     let row_refs = collect_rows(node, &mut abs_children, &mut caption_idx, &mut col_indices);
     let num_rows = row_refs.len();
     let caption_side = caption_idx.map(|ci| node.children[ci].style.caption_side);
@@ -786,16 +868,16 @@ pub fn layout_table(
         }
     }
 
-    // ── For auto-width tables, pre-measure content to shrink-to-fit ──────────
+    // ── Measure the minimum table width before distributing columns ──────────
     let total_spacing = spacing_h * (num_cols + 1) as f32;
     // Auto-width tables: measure intrinsic content width, then clamp to containing width.
     // This is the CSS shrink-to-fit algorithm (CSS 2.1 §10.3.5):
     // width = min(max(preferred minimum width, available width), preferred width)
     // For tables: preferred width = sum of column max-content widths.
-    if node.style.width.is_auto() {
-        // Measure each column's min/max-content width. An auto table may
-        // overflow its containing block; it must not squeeze columns below
-        // min-content just to fit the container.
+    {
+        // Both auto and specified table widths have a min-content floor.
+        // Auto tables additionally need max-content for shrink-to-fit.
+        let auto_width = node.style.width.is_auto() && c.forced_width.is_none();
         let mut col_min_content: Vec<f32> = vec![0.0; num_cols];
         let mut col_max_content: Vec<f32> = vec![0.0; num_cols];
         for r in 0..num_rows {
@@ -809,7 +891,9 @@ pub fn layout_table(
                         continue;
                     }
                     let cell = &row_ref(node, &row_refs[row_idx]).children[ci];
-                    let (mn, cw) = if !cell.style.width.is_auto() {
+                    let (mn, cw) = if !cell.style.width.is_auto()
+                        && !cell.style.width.has_percentage()
+                    {
                         let w =
                             engine.res_len(&cell.style.width, font_px, containing_w, root_font_px);
                         let min_outer = cell_min_content_outer_width(
@@ -821,8 +905,19 @@ pub fn layout_table(
                         );
                         let constrained = w.max(min_outer);
                         (constrained, constrained)
-                    } else {
+                    } else if auto_width {
                         cell_intrinsic_outer_width(engine, cell, font_px, content_w, root_font_px)
+                    } else {
+                        (
+                            cell_min_content_outer_width(
+                                engine,
+                                cell,
+                                font_px,
+                                content_w,
+                                root_font_px,
+                            ),
+                            0.0,
+                        )
                     };
                     if slot.colspan == 1 {
                         if mn > col_min_content[c] {
@@ -862,15 +957,20 @@ pub fn layout_table(
                 preferred_min_w = cap.min_content;
             }
         }
-        let available_w = content_w.max(0.0);
-        let mut shrunk = preferred_min_w.max(available_w).min(intrinsic_w).max(0.0);
-        if !node.style.min_width.is_auto() {
-            let min_w = engine.res_len(&node.style.min_width, font_px, containing_w, root_font_px);
-            if min_w > shrunk {
-                shrunk = min_w;
+        if auto_width {
+            let available_w = content_w.max(0.0);
+            let mut shrunk = preferred_min_w.max(available_w).min(intrinsic_w).max(0.0);
+            if !node.style.min_width.is_auto() {
+                let min_w =
+                    engine.res_len(&node.style.min_width, font_px, containing_w, root_font_px);
+                if min_w > shrunk {
+                    shrunk = min_w;
+                }
             }
+            table_width = shrunk;
+        } else {
+            table_width = table_width.max(preferred_min_w);
         }
-        table_width = shrunk;
     }
 
     // ── Determine column widths ───────────────────────────────────────────────
@@ -883,11 +983,14 @@ pub fn layout_table(
     // Apply COL element widths (respecting col span)
     {
         let mut ci = 0usize;
-        for &col_idx in &col_indices {
+        for &(col_idx, child_idx) in &col_indices {
             if ci >= num_cols {
                 break;
             }
-            let col_box = &node.children[col_idx];
+            let group_or_col = &node.children[col_idx];
+            let col_box = child_idx
+                .map(|j| &group_or_col.children[j])
+                .unwrap_or(group_or_col);
             let span = col_box
                 .attributes
                 .get("span")
@@ -974,6 +1077,7 @@ pub fn layout_table(
         // Pass 1: Collect explicit widths AND measure min/max content for auto columns.
         let mut col_content_widths: Vec<f32> = vec![0.0; num_cols]; // max-content per col
         let mut col_min_widths: Vec<f32> = vec![0.0; num_cols]; // min-content per col
+        let mut col_percent_widths: Vec<f32> = vec![0.0; num_cols];
         for r in 0..num_rows {
             for c in 0..num_cols {
                 let slot = &grid[r][c];
@@ -986,6 +1090,11 @@ pub fn layout_table(
                     }
                     let cell = &row_ref(node, &row_refs[row_idx]).children[ci];
                     if !cell.style.width.is_auto() {
+                        if let CssLength::Percent(percent) = &cell.style.width
+                            && slot.colspan == 1
+                        {
+                            col_percent_widths[c] = col_percent_widths[c].max((*percent).max(0.0));
+                        }
                         let w = engine.res_len(&cell.style.width, font_px, cell_area, root_font_px);
                         let min_outer = cell_min_content_outer_width(
                             engine,
@@ -994,6 +1103,9 @@ pub fn layout_table(
                             cell_area,
                             root_font_px,
                         );
+                        if slot.colspan == 1 {
+                            col_min_widths[c] = col_min_widths[c].max(min_outer);
+                        }
                         let w = w.max(min_outer);
                         if slot.colspan == 1 {
                             if w > col_widths[c] {
@@ -1048,6 +1160,15 @@ pub fn layout_table(
                         }
                     }
                 }
+            }
+        }
+
+        let mut assigned_percent = 0.0_f32;
+        for c in 0..num_cols {
+            if col_percent_widths[c] > 0.0 {
+                let percent = col_percent_widths[c].min((100.0 - assigned_percent).max(0.0));
+                assigned_percent += percent;
+                col_widths[c] = (cell_area * percent / 100.0).max(col_min_widths[c]);
             }
         }
 
@@ -1412,11 +1533,12 @@ pub fn layout_table(
                 _ => 0.0,
             };
 
-            let cell_x = grid_content_x + if node.style.direction == Direction::RTL {
-                table_width - col_x[c] - cell_w
-            } else {
-                col_x[c]
-            };
+            let cell_x = grid_content_x
+                + if node.style.direction == Direction::RTL {
+                    table_width - col_x[c] - cell_w
+                } else {
+                    col_x[c]
+                };
 
             // Position cell: shift entire subtree from layout position to final grid position
             {
@@ -1451,7 +1573,6 @@ pub fn layout_table(
                     let target_y = cell.layout.padding_rect.y + pad_top + v_offset;
                     let dy_align = target_y - cell.layout.content_rect.y;
                     if dy_align.abs() > 0.01 {
-                        cell.layout.content_rect.y = target_y;
                         for ln in &mut cell.layout.line_cache {
                             ln.y += dy_align;
                         }
@@ -1717,7 +1838,7 @@ fn resolve_collapsed_borders(
         rect: Rect,
         axis: u8,
     ) {
-        if winner.width <= 0.0 || winner.style == BorderStyle::None {
+        if winner.width <= 0.0 || matches!(winner.style, BorderStyle::None | BorderStyle::Hidden) {
             return;
         }
         let segment = CollapsedBorderSegment {
@@ -1830,8 +1951,8 @@ fn resolve_collapsed_borders(
         if let Some((ri, ci)) = grid[0][c].box_path {
             let rect = cell_rect(node, row_refs, (ri, ci));
             let winner = winning_border(
-                table_border_candidate(node, 0),
                 cell_border_candidate(node, row_refs, (ri, ci), 0),
+                table_border_candidate(node, 0),
             );
             add_segment(
                 node,
@@ -1847,8 +1968,8 @@ fn resolve_collapsed_borders(
         if let Some((ri, ci)) = grid[num_rows - 1][c].box_path {
             let rect = cell_rect(node, row_refs, (ri, ci));
             let winner = winning_border(
-                table_border_candidate(node, 2),
                 cell_border_candidate(node, row_refs, (ri, ci), 2),
+                table_border_candidate(node, 2),
             );
             add_segment(
                 node,
@@ -1869,8 +1990,8 @@ fn resolve_collapsed_borders(
         if let Some((ri, ci)) = grid[r][0].box_path {
             let rect = cell_rect(node, row_refs, (ri, ci));
             let winner = winning_border(
-                table_border_candidate(node, 3),
                 cell_border_candidate(node, row_refs, (ri, ci), 3),
+                table_border_candidate(node, 3),
             );
             add_segment(
                 node,
@@ -1886,8 +2007,8 @@ fn resolve_collapsed_borders(
         if let Some((ri, ci)) = grid[r][num_cols - 1].box_path {
             let rect = cell_rect(node, row_refs, (ri, ci));
             let winner = winning_border(
-                table_border_candidate(node, 1),
                 cell_border_candidate(node, row_refs, (ri, ci), 1),
+                table_border_candidate(node, 1),
             );
             add_segment(
                 node,

@@ -35,6 +35,18 @@ pub(crate) fn evaluate_container_for_type_and_style(
     container_type: crate::types::ContainerType,
     style: Option<&crate::types::ComputedStyle>,
 ) -> bool {
+    evaluate_container_with_viewport(condition, w, h, container_type, style, w, h)
+}
+
+pub(crate) fn evaluate_container_with_viewport(
+    condition: &str,
+    w: f32,
+    h: f32,
+    container_type: crate::types::ContainerType,
+    style: Option<&crate::types::ComputedStyle>,
+    viewport_width: f32,
+    viewport_height: f32,
+) -> bool {
     let cond = condition.trim();
     if cond.is_empty() {
         return true;
@@ -53,10 +65,22 @@ pub(crate) fn evaluate_container_for_type_and_style(
                     }
                 }
                 b',' if depth == 0 => {
-                    return evaluate_container_for_type_and_style(
-                        &cond[..i], w, h, container_type, style,
-                    ) || evaluate_container_for_type_and_style(
-                        &cond[i + 1..], w, h, container_type, style,
+                    return evaluate_container_with_viewport(
+                        &cond[..i],
+                        w,
+                        h,
+                        container_type,
+                        style,
+                        viewport_width,
+                        viewport_height,
+                    ) || evaluate_container_with_viewport(
+                        &cond[i + 1..],
+                        w,
+                        h,
+                        container_type,
+                        style,
+                        viewport_width,
+                        viewport_height,
                     );
                 }
                 _ => {}
@@ -65,27 +89,53 @@ pub(crate) fn evaluate_container_for_type_and_style(
     }
 
     if let Some(rest) = cond.strip_prefix("not ") {
-        return !evaluate_container_for_type_and_style(rest.trim(), w, h, container_type, style);
+        return !evaluate_container_with_viewport(
+            rest.trim(),
+            w,
+            h,
+            container_type,
+            style,
+            viewport_width,
+            viewport_height,
+        );
     }
     if let Some((start, end)) = find_keyword_outside_parens(cond, "and") {
-        return evaluate_container_for_type_and_style(&cond[..start], w, h, container_type, style)
-            && evaluate_container_for_type_and_style(
-                &cond[end..],
-                w,
-                h,
-                container_type,
-                style,
-            );
+        return evaluate_container_with_viewport(
+            &cond[..start],
+            w,
+            h,
+            container_type,
+            style,
+            viewport_width,
+            viewport_height,
+        ) && evaluate_container_with_viewport(
+            &cond[end..],
+            w,
+            h,
+            container_type,
+            style,
+            viewport_width,
+            viewport_height,
+        );
     }
     if let Some((start, end)) = find_keyword_outside_parens(cond, "or") {
-        return evaluate_container_for_type_and_style(&cond[..start], w, h, container_type, style)
-            || evaluate_container_for_type_and_style(
-                &cond[end..],
-                w,
-                h,
-                container_type,
-                style,
-            );
+        return evaluate_container_with_viewport(
+            &cond[..start],
+            w,
+            h,
+            container_type,
+            style,
+            viewport_width,
+            viewport_height,
+        ) || evaluate_container_with_viewport(
+            &cond[end..],
+            w,
+            h,
+            container_type,
+            style,
+            viewport_width,
+            viewport_height,
+        );
     }
 
     // Strip outer parens
@@ -97,8 +147,7 @@ pub(crate) fn evaluate_container_for_type_and_style(
     let lower = inner.to_ascii_lowercase();
     let lower = lower.trim();
 
-    // So `vw`/`vh` inside the query mean the viewport being queried.
-    crate::css::media_query::set_media_viewport(w, h);
+    crate::css::media_query::set_media_viewport(viewport_width, viewport_height);
 
     if lower.starts_with("style(") {
         return style.is_some_and(|s| container_style_query_matches(inner.trim(), s));
@@ -109,25 +158,25 @@ pub(crate) fn evaluate_container_for_type_and_style(
         if container_type == crate::types::ContainerType::Normal {
             return false;
         }
-        return w >= parse_media_px(rest.trim());
+        return parse_container_query_px(rest.trim()).is_some_and(|value| w >= value);
     }
     if let Some(rest) = lower.strip_prefix("max-width:") {
         if container_type == crate::types::ContainerType::Normal {
             return false;
         }
-        return w <= parse_media_px(rest.trim());
+        return parse_container_query_px(rest.trim()).is_some_and(|value| w <= value);
     }
     if let Some(rest) = lower.strip_prefix("min-height:") {
         if container_type != crate::types::ContainerType::Size {
             return false;
         }
-        return h >= parse_media_px(rest.trim());
+        return parse_container_query_px(rest.trim()).is_some_and(|value| h >= value);
     }
     if let Some(rest) = lower.strip_prefix("max-height:") {
         if container_type != crate::types::ContainerType::Size {
             return false;
         }
-        return h <= parse_media_px(rest.trim());
+        return parse_container_query_px(rest.trim()).is_some_and(|value| h <= value);
     }
     if let Some(rest) = lower.strip_prefix("orientation:") {
         if container_type != crate::types::ContainerType::Size {
@@ -140,7 +189,7 @@ pub(crate) fn evaluate_container_for_type_and_style(
         };
     }
     if lower.contains("aspect-ratio") {
-        if container_type != crate::types::ContainerType::Size || h <= 0.0 {
+        if container_type != crate::types::ContainerType::Size || w < 0.0 || h < 0.0 {
             return false;
         }
         let ratio = w / h;
@@ -151,38 +200,78 @@ pub(crate) fn evaluate_container_for_type_and_style(
             return parse_container_ratio(rest).is_some_and(|value| ratio <= value);
         }
         if let Some(rest) = lower.strip_prefix("aspect-ratio:") {
-            return parse_container_ratio(rest).is_some_and(|value| (ratio - value).abs() < 0.0001);
+            return parse_container_ratio(rest)
+                .is_some_and(|value| compare_container_ratio(ratio, value, "="));
         }
         if let Some(rest) = lower.strip_prefix("aspect-ratio") {
             return parse_container_ratio_comparison(ratio, rest);
         }
         let parts = lower.split_whitespace().collect::<Vec<_>>();
         if parts.len() == 5 && parts[2] == "aspect-ratio" {
-            let Some(left) = parse_container_ratio(parts[0]) else { return false };
-            let Some(right) = parse_container_ratio(parts[4]) else { return false };
+            let Some(left) = parse_container_ratio(parts[0]) else {
+                return false;
+            };
+            let Some(right) = parse_container_ratio(parts[4]) else {
+                return false;
+            };
             return compare_container_ratio(left, ratio, parts[1])
                 && compare_container_ratio(ratio, right, parts[3]);
         }
         return false;
     }
 
+    if let Some(range) = split_range_comparisons(lower) {
+        if !range.valid {
+            return false;
+        }
+        let operands = range.operands();
+        let operators = range.operators();
+        if operands.len() == 2 {
+            if let Some(dim) = container_size_dimension(operands[1], w, h, container_type) {
+                return parse_container_query_px(operands[0])
+                    .is_some_and(|value| compare_container_size(value, dim, operators[0]));
+            }
+        } else if operands.len() == 3 {
+            if let Some(dim) = container_size_dimension(operands[1], w, h, container_type) {
+                let ordered = (operators[0].starts_with('<') && operators[1].starts_with('<'))
+                    || (operators[0].starts_with('>') && operators[1].starts_with('>'));
+                return ordered
+                    && parse_container_query_px(operands[0])
+                        .zip(parse_container_query_px(operands[2]))
+                        .is_some_and(|(left, right)| {
+                            compare_container_size(left, dim, operators[0])
+                                && compare_container_size(dim, right, operators[1])
+                        });
+            }
+        }
+    }
+
     // Modern range syntax: `width >= 300px`, `width > 300px`, etc.
     fn parse_range(expr: &str, dim: f32) -> Option<bool> {
         let e = expr.trim();
         if let Some(rest) = e.strip_prefix(">=") {
-            return Some(dim >= parse_media_px(rest.trim()));
+            return Some(parse_container_query_px(rest.trim()).is_some_and(|value| dim >= value));
         }
         if let Some(rest) = e.strip_prefix("<=") {
-            return Some(dim <= parse_media_px(rest.trim()));
+            return Some(parse_container_query_px(rest.trim()).is_some_and(|value| dim <= value));
         }
         if let Some(rest) = e.strip_prefix('>') {
-            return Some(dim > parse_media_px(rest.trim()));
+            return Some(parse_container_query_px(rest.trim()).is_some_and(|value| dim > value));
         }
         if let Some(rest) = e.strip_prefix('<') {
-            return Some(dim < parse_media_px(rest.trim()));
+            return Some(parse_container_query_px(rest.trim()).is_some_and(|value| dim < value));
         }
         if let Some(rest) = e.strip_prefix(':') {
-            return Some((dim - parse_media_px(rest.trim())).abs() < 0.5);
+            return Some(
+                parse_container_query_px(rest.trim())
+                    .is_some_and(|value| compare_container_size(dim, value, "=")),
+            );
+        }
+        if let Some(rest) = e.strip_prefix('=') {
+            return Some(
+                parse_container_query_px(rest.trim())
+                    .is_some_and(|value| compare_container_size(dim, value, "=")),
+            );
         }
         None
     }
@@ -223,12 +312,61 @@ pub(crate) fn evaluate_container_for_type_and_style(
     false
 }
 
+fn container_size_dimension(
+    feature: &str,
+    width: f32,
+    height: f32,
+    container_type: crate::types::ContainerType,
+) -> Option<f32> {
+    use crate::types::ContainerType;
+    match feature {
+        "width" | "inline-size" if container_type != ContainerType::Normal => Some(width),
+        "height" | "block-size" if container_type == ContainerType::Size => Some(height),
+        _ => None,
+    }
+}
+
+fn compare_container_size(left: f32, right: f32, operator: &str) -> bool {
+    match operator {
+        "<" => left < right,
+        "<=" => left <= right,
+        ">" => left > right,
+        ">=" => left >= right,
+        "=" => (left - right).abs() <= 0.0001,
+        _ => false,
+    }
+}
+
+fn parse_container_query_px(value: &str) -> Option<f32> {
+    use crate::types::CssLength;
+
+    let value = value.trim();
+    if value.parse::<f32>().is_ok_and(|number| number != 0.0) {
+        return None;
+    }
+    let length = crate::css::parse_length_checked(value)?;
+    match length {
+        CssLength::Auto
+        | CssLength::None
+        | CssLength::Content
+        | CssLength::MinContent
+        | CssLength::MaxContent
+        | CssLength::FitContent
+        | CssLength::FitContentArg(_)
+        | CssLength::Stretch
+        | CssLength::Percent(_) => return None,
+        _ => {}
+    }
+    let resolved = parse_media_px(value);
+    (resolved.is_finite() && resolved >= 0.0).then_some(resolved)
+}
+
 fn parse_container_ratio(raw: &str) -> Option<f32> {
     let raw = raw.trim();
     let (numerator, denominator) = raw.split_once('/').unwrap_or((raw, "1"));
     let numerator = numerator.trim().parse::<f32>().ok()?;
     let denominator = denominator.trim().parse::<f32>().ok()?;
-    (numerator >= 0.0 && denominator > 0.0 && numerator.is_finite() && denominator.is_finite())
+    (numerator >= 0.0 && denominator >= 0.0 && numerator.is_finite() && denominator.is_finite())
         .then_some(numerator / denominator)
 }
 
@@ -238,7 +376,7 @@ fn compare_container_ratio(left: f32, right: f32, operator: &str) -> bool {
         "<=" => left <= right,
         ">" => left > right,
         ">=" => left >= right,
-        "=" | ":" => (left - right).abs() < 0.0001,
+        "=" | ":" => left == right || (left - right).abs() < 0.0001,
         _ => false,
     }
 }
@@ -359,12 +497,30 @@ struct StyleRangeValue {
     value: f32,
 }
 
-fn evaluate_style_range(
-    body: &str,
-    style: &crate::types::ComputedStyle,
-) -> Option<bool> {
-    let mut operands = Vec::new();
-    let mut operators = Vec::new();
+struct RangeComparisons<'a> {
+    operands: [&'a str; 3],
+    operators: [&'a str; 2],
+    operator_count: usize,
+    valid: bool,
+}
+
+impl<'a> RangeComparisons<'a> {
+    fn operands(&self) -> &[&'a str] {
+        &self.operands[..self.operator_count + 1]
+    }
+
+    fn operators(&self) -> &[&'a str] {
+        &self.operators[..self.operator_count]
+    }
+}
+
+fn split_range_comparisons(body: &str) -> Option<RangeComparisons<'_>> {
+    let mut range = RangeComparisons {
+        operands: [""; 3],
+        operators: [""; 2],
+        operator_count: 0,
+        valid: true,
+    };
     let mut start = 0;
     let mut depth = 0usize;
     let mut quote = None;
@@ -386,22 +542,37 @@ fn evaluate_style_range(
             '(' => depth += 1,
             ')' => depth = depth.saturating_sub(1),
             '<' | '>' | '=' if depth == 0 => {
-                operands.push(body[start..index].trim());
+                if range.operator_count == range.operators.len() {
+                    range.valid = false;
+                    return Some(range);
+                }
+                range.operands[range.operator_count] = body[start..index].trim();
                 let end = if chars.peek().is_some_and(|(_, next)| *next == '=') {
                     chars.next().unwrap().0 + 1
                 } else {
                     index + 1
                 };
-                operators.push(&body[index..end]);
+                range.operators[range.operator_count] = &body[index..end];
+                range.operator_count += 1;
                 start = end;
             }
             _ => {}
         }
     }
-    if operators.is_empty() {
+    if range.operator_count == 0 {
         return None;
     }
-    operands.push(body[start..].trim());
+    range.operands[range.operator_count] = body[start..].trim();
+    Some(range)
+}
+
+fn evaluate_style_range(body: &str, style: &crate::types::ComputedStyle) -> Option<bool> {
+    let range = split_range_comparisons(body)?;
+    if !range.valid {
+        return Some(false);
+    }
+    let operands = range.operands();
+    let operators = range.operators();
     if operands.len() < 2 || operands.len() > 3 || operands.iter().any(|part| part.is_empty()) {
         return Some(false);
     }
@@ -411,15 +582,15 @@ fn evaluate_style_range(
     {
         return Some(false);
     }
-    let Some(values) = operands
-        .iter()
-        .map(|part| parse_style_range_value(part, style))
-        .collect::<Option<Vec<_>>>()
-    else {
-        return Some(false);
-    };
+    let mut values = [None; 3];
+    for (index, operand) in operands.iter().enumerate() {
+        values[index] = parse_style_range_value(operand, style);
+        if values[index].is_none() {
+            return Some(false);
+        }
+    }
     Some(operators.iter().enumerate().all(|(index, operator)| {
-        compare_style_range_values(values[index], values[index + 1], operator)
+        compare_style_range_values(values[index].unwrap(), values[index + 1].unwrap(), operator)
     }))
 }
 
@@ -435,10 +606,37 @@ fn parse_style_range_value(
     };
     let resolved = crate::css::resolve_var_references(&resolved, &style.custom_props);
     let value = resolved.trim().to_ascii_lowercase();
-    let typed = if let Ok(number) = value.parse::<f32>() {
-        StyleRangeValue { kind: StyleRangeKind::Number, value: number }
+    let typed = if calc::is_math_function(&value) {
+        [
+            (StyleRangeKind::Number, calc::parse_calc_number(&value)),
+            (
+                StyleRangeKind::Percentage,
+                calc::parse_math_percentage(&value),
+            ),
+            (StyleRangeKind::Length, calc::parse_math_length_px(&value)),
+            (StyleRangeKind::Angle, calc::parse_math_angle_deg(&value)),
+            (StyleRangeKind::Time, calc::parse_math_time_ms(&value)),
+            (
+                StyleRangeKind::Frequency,
+                calc::parse_math_frequency_hz(&value),
+            ),
+            (
+                StyleRangeKind::Resolution,
+                calc::parse_math_resolution_dppx(&value),
+            ),
+        ]
+        .into_iter()
+        .find_map(|(kind, value)| value.map(|value| StyleRangeValue { kind, value }))?
+    } else if let Ok(number) = value.parse::<f32>() {
+        StyleRangeValue {
+            kind: StyleRangeKind::Number,
+            value: number,
+        }
     } else if let Some(number) = value.strip_suffix('%').and_then(|v| v.parse::<f32>().ok()) {
-        StyleRangeValue { kind: StyleRangeKind::Percentage, value: number }
+        StyleRangeValue {
+            kind: StyleRangeKind::Percentage,
+            value: number,
+        }
     } else {
         let units = [
             ("dppx", StyleRangeKind::Resolution, 1.0),
@@ -454,10 +652,15 @@ fn parse_style_range_value(
             ("s", StyleRangeKind::Time, 1000.0),
         ];
         if let Some((number, kind, factor)) = units.iter().find_map(|(unit, kind, factor)| {
-            value.strip_suffix(unit).and_then(|v| v.parse::<f32>().ok())
+            value
+                .strip_suffix(unit)
+                .and_then(|v| v.parse::<f32>().ok())
                 .map(|number| (number, *kind, *factor))
         }) {
-            StyleRangeValue { kind, value: number * factor }
+            StyleRangeValue {
+                kind,
+                value: number * factor,
+            }
         } else if ["px", "cm", "mm", "q", "in", "pt", "pc"]
             .iter()
             .any(|unit| value.ends_with(unit))
@@ -465,7 +668,10 @@ fn parse_style_range_value(
             let crate::types::CssLength::Px(px) = crate::css::parse_length_checked(&value)? else {
                 return None;
             };
-            StyleRangeValue { kind: StyleRangeKind::Length, value: px }
+            StyleRangeValue {
+                kind: StyleRangeKind::Length,
+                value: px,
+            }
         } else {
             return None;
         }
@@ -473,10 +679,18 @@ fn parse_style_range_value(
     typed.value.is_finite().then_some(typed)
 }
 
-fn compare_style_range_values(left: StyleRangeValue, right: StyleRangeValue, operator: &str) -> bool {
+fn compare_style_range_values(
+    left: StyleRangeValue,
+    right: StyleRangeValue,
+    operator: &str,
+) -> bool {
     let same_kind = left.kind == right.kind
-        || (left.kind == StyleRangeKind::Number && left.value == 0.0 && right.kind == StyleRangeKind::Length)
-        || (right.kind == StyleRangeKind::Number && right.value == 0.0 && left.kind == StyleRangeKind::Length);
+        || (left.kind == StyleRangeKind::Number
+            && left.value == 0.0
+            && right.kind == StyleRangeKind::Length)
+        || (right.kind == StyleRangeKind::Number
+            && right.value == 0.0
+            && left.kind == StyleRangeKind::Length);
     if !same_kind {
         return false;
     }

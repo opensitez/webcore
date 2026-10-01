@@ -16,9 +16,13 @@ use crate::types::Document;
 impl Document {
     fn computed_font_px(&self, id: u32) -> f32 {
         let root = self.root_font_px();
-        self.get_computed_style(id).map(|style|
-            style.font_size.resolve_vp(root, root, root, self.viewport_w, self.viewport_h)
-        ).unwrap_or(root)
+        self.get_computed_style(id)
+            .map(|style| {
+                style
+                    .font_size
+                    .resolve_vp(root, root, root, self.viewport_w, self.viewport_h)
+            })
+            .unwrap_or(root)
     }
 
     /// `getComputedStyle(element).getPropertyValue(property)` — the RESOLVED
@@ -66,12 +70,22 @@ impl Document {
                 return String::new();
             };
             let font_px = self.computed_font_px(id);
-            let Some(node) = self.get_node(id) else { return String::new(); };
+            let Some(node) = self.get_node(id) else {
+                return String::new();
+            };
             let resolve = |l: &crate::types::CssLength, basis: Option<f32>| -> Option<f32> {
-                if l.has_percentage() && basis.is_none() { return None; }
+                if l.has_percentage() && basis.is_none() {
+                    return None;
+                }
                 match l {
                     crate::types::CssLength::Auto | crate::types::CssLength::None => None,
-                    other => Some(other.resolve_vp(font_px, basis.unwrap_or(0.0), self.root_font_px(), self.viewport_w, self.viewport_h)),
+                    other => Some(other.resolve_vp(
+                        font_px,
+                        basis.unwrap_or(0.0),
+                        self.root_font_px(),
+                        self.viewport_w,
+                        self.viewport_h,
+                    )),
                 }
             };
             let width = Some(node.layout.last_containing_width);
@@ -107,7 +121,13 @@ impl Document {
             // placed. Percentages stay percentages, as the spec's computed
             // value for an inset does.
             return serialize_computed_length(&declared, &|value| {
-                value.resolve_vp(font_px, 0.0, self.root_font_px(), self.viewport_w, self.viewport_h)
+                value.resolve_vp(
+                    font_px,
+                    0.0,
+                    self.root_font_px(),
+                    self.viewport_w,
+                    self.viewport_h,
+                )
             });
         }
         if matches!(
@@ -226,8 +246,14 @@ impl Document {
             "background-color" => serialize_color(style.background_color),
             "font-size" => {
                 let origin_font = self.computed_font_px(id);
-                px(style.font_size.resolve_vp(origin_font, origin_font, self.root_font_px(), self.viewport_w, self.viewport_h))
-            },
+                px(style.font_size.resolve_vp(
+                    origin_font,
+                    origin_font,
+                    self.root_font_px(),
+                    self.viewport_w,
+                    self.viewport_h,
+                ))
+            }
             "font-weight" => style.font_weight.value().to_string(),
             "font-style" => match style.font_style {
                 crate::types::FontStyle::Normal => "normal",
@@ -266,9 +292,11 @@ impl Document {
         let font_px = self.computed_font_px(id);
         let vw = self.viewport_w;
         let root_px = self.root_font_px();
-        let len = |l: &CssLength| serialize_computed_length(l, &|value: &CssLength| {
-            value.resolve_vp(font_px, 0.0, root_px, vw, self.viewport_h)
-        });
+        let len = |l: &CssLength| {
+            serialize_computed_length(l, &|value: &CssLength| {
+                value.resolve_vp(font_px, 0.0, root_px, vw, self.viewport_h)
+            })
+        };
         let is_flex_item = self
             .parent_element(id)
             .and_then(|parent| self.get_computed_style(parent))
@@ -323,7 +351,12 @@ impl Document {
                 .svg_stroke
                 .map(serialize_color)
                 .unwrap_or_else(|| "none".to_string()),
-            "stroke-width" => s.rare().svg_stroke_width.as_ref().map(len).unwrap_or_else(|| "1px".to_string()),
+            "stroke-width" => s
+                .rare()
+                .svg_stroke_width
+                .as_ref()
+                .map(len)
+                .unwrap_or_else(|| "1px".to_string()),
             "font-size" => format!("{font_px}px"),
             // ⛔ A NUMBER, not the keyword: `font-weight: bold` serializes as
             // `"700"` (measured).
@@ -560,13 +593,28 @@ impl Document {
             }
             "list-style-position" => serialize_list_style_position(s.list_style_position),
             "list-style-image" => serialize_list_style_image(&s.list_style_image),
-            "counter-reset" => if s.counter_reset.is_empty() { "none".to_owned() } else {
-                s.counter_reset.iter().map(|reset| {
-                    let name = serialize_identifier(&reset.name);
-                    let name = if reset.reversed { format!("reversed({name})") } else { name };
-                    match reset.value { Some(value) => format!("{name} {value}"), None => name }
-                }).collect::<Vec<_>>().join(" ")
-            },
+            "counter-reset" => {
+                if s.counter_reset.is_empty() {
+                    "none".to_owned()
+                } else {
+                    s.counter_reset
+                        .iter()
+                        .map(|reset| {
+                            let name = serialize_identifier(&reset.name);
+                            let name = if reset.reversed {
+                                format!("reversed({name})")
+                            } else {
+                                name
+                            };
+                            match reset.value {
+                                Some(value) => format!("{name} {value}"),
+                                None => name,
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                }
+            }
             "counter-increment" => serialize_counters(&s.counter_increment),
             "counter-set" => serialize_counters(&s.counter_set),
             "mask-image" => {
@@ -601,7 +649,13 @@ impl Document {
             "flex-shrink" => trim_f32(s.flex_shrink),
             "flex-basis" => len(&s.flex_basis),
             "order" => s.order.to_string(),
-            "contain" => if s.rare().contain.is_empty() { "none".to_string() } else { s.rare().contain.clone() },
+            "contain" => {
+                if s.rare().contain.is_empty() {
+                    "none".to_string()
+                } else {
+                    s.rare().contain.clone()
+                }
+            }
             "content-visibility" => match s.content_visibility {
                 ContentVisibility::Visible => "visible",
                 ContentVisibility::Auto => "auto",
@@ -719,9 +773,14 @@ fn px(v: f32) -> String {
 }
 
 fn serialize_counters(counters: &[(String, i32)]) -> String {
-    if counters.is_empty() { return "none".to_owned(); }
-    counters.iter().map(|(name, value)| format!("{} {value}", serialize_identifier(name)))
-        .collect::<Vec<_>>().join(" ")
+    if counters.is_empty() {
+        return "none".to_owned();
+    }
+    counters
+        .iter()
+        .map(|(name, value)| format!("{} {value}", serialize_identifier(name)))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn serialize_identifier(identifier: &str) -> String {
@@ -751,8 +810,11 @@ fn serialize_quotes(quotes: Option<&[String]>) -> String {
     match quotes {
         None => "auto".to_string(),
         Some([]) => "none".to_string(),
-        Some(pairs) => pairs.iter().map(|s| format!("\"{}\"", serialize_css_string(s)))
-            .collect::<Vec<_>>().join(" "),
+        Some(pairs) => pairs
+            .iter()
+            .map(|s| format!("\"{}\"", serialize_css_string(s)))
+            .collect::<Vec<_>>()
+            .join(" "),
     }
 }
 
@@ -762,7 +824,11 @@ fn serialize_text_overflow(value: &crate::types::TextOverflow) -> String {
         TextOverflow::Clip => "clip".into(),
         TextOverflow::Ellipsis => "ellipsis".into(),
         TextOverflow::String(text) => format!("\"{}\"", serialize_css_string(text)),
-        TextOverflow::Pair(edges) => format!("{} {}", serialize_text_overflow(&edges[0]), serialize_text_overflow(&edges[1])),
+        TextOverflow::Pair(edges) => format!(
+            "{} {}",
+            serialize_text_overflow(&edges[0]),
+            serialize_text_overflow(&edges[1])
+        ),
     }
 }
 
@@ -772,8 +838,13 @@ fn serialize_css_string(s: &str) -> String {
     for ch in s.chars() {
         match ch {
             '\0' => result.push('\u{fffd}'),
-            '\x01'..='\x1f' | '\x7f' => { let _ = write!(result, "\\{:x} ", ch as u32); }
-            '"' | '\\' => { result.push('\\'); result.push(ch); }
+            '\x01'..='\x1f' | '\x7f' => {
+                let _ = write!(result, "\\{:x} ", ch as u32);
+            }
+            '"' | '\\' => {
+                result.push('\\');
+                result.push(ch);
+            }
             _ => result.push(ch),
         }
     }
@@ -848,36 +919,57 @@ fn serialize_computed_length(
         CssLength::MaxContent => "max-content".into(),
         CssLength::FitContent => "fit-content".into(),
         CssLength::Stretch => "stretch".into(),
-        CssLength::FitContentArg(arg) => format!("fit-content({})", serialize_computed_length(arg, resolve)),
+        CssLength::FitContentArg(arg) => {
+            format!("fit-content({})", serialize_computed_length(arg, resolve))
+        }
         CssLength::Percent(p) => format!("{p}%"),
         CssLength::Calc(terms) if terms[0] != 0.0 => {
             let absolute = resolve(value);
             let sign = if absolute < 0.0 { "-" } else { "+" };
             format!("calc({}% {sign} {})", terms[0], px(absolute.abs()))
         }
-        CssLength::CalcExpr(node) if value.has_percentage() => format!("calc({})",
-            crate::css::serialize_calculation(node, &|value| serialize_computed_length(value, resolve))),
+        CssLength::CalcExpr(node) if value.has_percentage() => format!(
+            "calc({})",
+            crate::css::serialize_calculation(node, &|value| serialize_computed_length(
+                value, resolve
+            ))
+        ),
         CssLength::Min(args) | CssLength::Max(args) if value.has_percentage() => {
-            let name = if matches!(value, CssLength::Min(_)) { "min" } else { "max" };
-            let args: Vec<_> = args.iter().map(|arg| serialize_computed_length(arg, resolve)).collect();
+            let name = if matches!(value, CssLength::Min(_)) {
+                "min"
+            } else {
+                "max"
+            };
+            let args: Vec<_> = args
+                .iter()
+                .map(|arg| serialize_computed_length(arg, resolve))
+                .collect();
             format!("{name}({})", args.join(", "))
         }
         CssLength::Clamp(args) if value.has_percentage() => {
-            let args: Vec<_> = args.iter().enumerate().map(|(i, arg)| {
-                if (i == 0 && matches!(arg, CssLength::Px(v) if *v == f32::NEG_INFINITY))
-                    || (i == 2 && matches!(arg, CssLength::Px(v) if *v == f32::INFINITY)) {
-                    "none".into()
-                } else {
-                    serialize_computed_length(arg, resolve)
-                }
-            }).collect();
+            let args: Vec<_> = args
+                .iter()
+                .enumerate()
+                .map(|(i, arg)| {
+                    if (i == 0 && matches!(arg, CssLength::Px(v) if *v == f32::NEG_INFINITY))
+                        || (i == 2 && matches!(arg, CssLength::Px(v) if *v == f32::INFINITY))
+                    {
+                        "none".into()
+                    } else {
+                        serialize_computed_length(arg, resolve)
+                    }
+                })
+                .collect();
             format!("clamp({})", args.join(", "))
         }
         _ => px(resolve(value)),
     }
 }
 
-fn serialize_background_size(s: &crate::types::ComputedStyle, len: &impl Fn(&crate::types::CssLength) -> String) -> String {
+fn serialize_background_size(
+    s: &crate::types::ComputedStyle,
+    len: &impl Fn(&crate::types::CssLength) -> String,
+) -> String {
     match s.background_size {
         crate::types::BackgroundSize::Auto => "auto".to_string(),
         crate::types::BackgroundSize::Cover => "cover".to_string(),
@@ -1387,7 +1479,10 @@ fn serialize_white_space(v: crate::types::WhiteSpace) -> String {
     .to_string()
 }
 
-fn serialize_vertical_align(v: &crate::types::VerticalAlign, len: &impl Fn(&crate::types::CssLength) -> String) -> String {
+fn serialize_vertical_align(
+    v: &crate::types::VerticalAlign,
+    len: &impl Fn(&crate::types::CssLength) -> String,
+) -> String {
     use crate::types::VerticalAlign as V;
     match v {
         V::Baseline => "baseline".to_string(),
@@ -1567,6 +1662,8 @@ fn serialize_resize(v: crate::types::Resize) -> String {
         R::Both => "both",
         R::Horizontal => "horizontal",
         R::Vertical => "vertical",
+        R::Block => "block",
+        R::Inline => "inline",
     }
     .to_string()
 }

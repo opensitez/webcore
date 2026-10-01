@@ -34,13 +34,96 @@ pub fn color_scheme_preference() -> ColorSchemePreference {
 
 // ─── Media Query Evaluator ───────────────────────────────────────────────────
 
+/// A conjunction of media query lists. Each list retains its own comma/OR
+/// semantics; nested `@media`, link media, and imports add another constraint.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum MediaConditions {
+    #[default]
+    Any,
+    Query(String),
+    All(Box<[String]>),
+}
+
+impl MediaConditions {
+    pub(crate) fn with_query(&self, query: &str) -> Self {
+        let query = query.trim();
+        if query.is_empty() || query.eq_ignore_ascii_case("all") {
+            return self.clone();
+        }
+        match self {
+            Self::Any => Self::Query(query.to_string()),
+            Self::Query(previous) => Self::All(vec![previous.clone(), query.to_string()].into()),
+            Self::All(previous) => {
+                let mut queries = previous.to_vec();
+                queries.push(query.to_string());
+                Self::All(queries.into_boxed_slice())
+            }
+        }
+    }
+
+    pub(crate) fn and(&self, other: &Self) -> Self {
+        match other {
+            Self::Any => self.clone(),
+            Self::Query(query) => self.with_query(query),
+            Self::All(queries) => queries.iter().fold(self.clone(), |conditions, query| {
+                conditions.with_query(query)
+            }),
+        }
+    }
+
+    pub fn matches(&self, vw: f32, vh: f32) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Query(query) => evaluate_media(query, vw, vh),
+            Self::All(queries) => queries.iter().all(|query| evaluate_media(query, vw, vh)),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::Any)
+    }
+
+    pub fn contains(&self, text: &str) -> bool {
+        match self {
+            Self::Any => false,
+            Self::Query(query) => query.contains(text),
+            Self::All(queries) => queries.iter().any(|query| query.contains(text)),
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Self::Any => String::new(),
+            Self::Query(query) => query.clone(),
+            Self::All(queries) => queries.join(" AND "),
+        }
+    }
+
+    pub(crate) fn heap_bytes(&self) -> usize {
+        match self {
+            Self::Any => 0,
+            Self::Query(query) => query.capacity(),
+            Self::All(queries) => queries
+                .iter()
+                .map(|query| std::mem::size_of::<String>() + query.capacity())
+                .sum(),
+        }
+    }
+}
+
 /// Evaluate a CSS @media condition string.
 /// Returns true if the condition matches the given viewport dimensions.
 /// `condition` is the full text after "@media" (trimmed).
 pub fn evaluate_media(condition: &str, vw: f32, vh: f32) -> bool {
+    evaluate_media_value(condition, vw, vh).unwrap_or(false)
+}
+
+// `None` is the Media Queries "unknown" value. It is not ordinary false:
+// negating an unknown feature must not make an unsupported query match.
+fn evaluate_media_value(condition: &str, vw: f32, vh: f32) -> Option<bool> {
     let cond = condition.trim();
     if cond.is_empty() {
-        return true;
+        return Some(true);
     }
 
     // ⛔ `only` is a no-op qualifier — `only print` IS `print` (Media Queries
@@ -50,12 +133,12 @@ pub fn evaluate_media(condition: &str, vw: f32, vh: f32) -> bool {
     // the SCREEN: `display: block` everywhere, columns and floats dropped,
     // navigation hidden. A page styled that way renders as one long column,
     // exactly as if it had been printed.
-    let cond = match cond.len() >= 5 && cond[..5].eq_ignore_ascii_case("only ") {
+    let cond = match cond.len() >= 5 && cond.as_bytes()[..5].eq_ignore_ascii_case(b"only ") {
         true => cond[5..].trim_start(),
         false => cond,
     };
     if cond.is_empty() {
-        return true;
+        return Some(true);
     }
 
     // Handle comma-separated list at top level (OR semantics)
@@ -83,33 +166,51 @@ pub fn evaluate_media(condition: &str, vw: f32, vh: f32) -> bool {
         if let Some(pos) = comma_pos {
             let left = &cond[..pos];
             let right = &cond[pos + 1..];
-            return evaluate_media(left.trim(), vw, vh) || evaluate_media(right.trim(), vw, vh);
+            return Some(
+                evaluate_media(left.trim(), vw, vh) || evaluate_media(right.trim(), vw, vh),
+            );
         }
     }
 
     // Handle `not` prefix (before `and`/`or` splitting)
     // `not` folds case like every other CSS keyword.
     if cond.len() >= 4 && cond.as_bytes()[..4].eq_ignore_ascii_case(b"not ") {
-        return !evaluate_media(cond[4..].trim(), vw, vh);
+        return evaluate_media_value(cond[4..].trim(), vw, vh).map(|value| !value);
     }
 
     // Handle `and` combinator outside parens
     if let Some((start, end)) = find_keyword_outside_parens(cond, "and") {
         let left = &cond[..start];
         let right = &cond[end..];
-        return evaluate_media(left.trim(), vw, vh) && evaluate_media(right.trim(), vw, vh);
+        let left = evaluate_media_value(left.trim(), vw, vh);
+        if left == Some(false) {
+            return Some(false);
+        }
+        return match (left, evaluate_media_value(right.trim(), vw, vh)) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (Some(true), Some(true)) => Some(true),
+            _ => None,
+        };
     }
 
     // Handle `or` combinator outside parens
     if let Some((start, end)) = find_keyword_outside_parens(cond, "or") {
         let left = &cond[..start];
         let right = &cond[end..];
-        return evaluate_media(left.trim(), vw, vh) || evaluate_media(right.trim(), vw, vh);
+        let left = evaluate_media_value(left.trim(), vw, vh);
+        if left == Some(true) {
+            return Some(true);
+        }
+        return match (left, evaluate_media_value(right.trim(), vw, vh)) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        };
     }
 
     // Named media types (no parens)
     if !cond.starts_with('(') {
-        return match cond.to_ascii_lowercase().as_str() {
+        return Some(match cond.to_ascii_lowercase().as_str() {
             "screen" | "all" => true,
             // Everything that is not a screen. The deprecated types are listed
             // because they must not match either — a `<link media="handheld">`
@@ -117,11 +218,9 @@ pub fn evaluate_media(condition: &str, vw: f32, vh: f32) -> bool {
             // print one.
             "print" | "speech" | "aural" | "braille" | "embossed" | "handheld" | "projection"
             | "tty" | "tv" => false,
-            // Anything unrecognised is more likely a parse artefact than a
-            // real media type, so it stays permissive rather than silently
-            // dropping a stylesheet.
-            _ => true,
-        };
+            // Media Queries 4: an unknown media type never matches.
+            _ => false,
+        });
     }
 
     if cond.starts_with('(') && cond.ends_with(')') {
@@ -131,7 +230,7 @@ pub fn evaluate_media(condition: &str, vw: f32, vh: f32) -> bool {
             || find_keyword_outside_parens(inner, "and").is_some()
             || find_keyword_outside_parens(inner, "or").is_some();
         if is_parenthesized_logical {
-            return evaluate_media(inner, vw, vh);
+            return evaluate_media_value(inner, vw, vh);
         }
     }
 
@@ -144,44 +243,76 @@ pub fn evaluate_media(condition: &str, vw: f32, vh: f32) -> bool {
     let lower = inner.to_ascii_lowercase();
     let lower = lower.trim();
 
+    fn media_query_px(value: &str) -> Option<f32> {
+        let value = value.trim();
+        if value.parse::<f32>().is_ok_and(|number| number != 0.0) {
+            return None;
+        }
+        let length = parse_length_checked(value)?;
+        if matches!(
+            length,
+            CssLength::Auto
+                | CssLength::None
+                | CssLength::Content
+                | CssLength::MinContent
+                | CssLength::MaxContent
+                | CssLength::FitContent
+                | CssLength::FitContentArg(_)
+                | CssLength::Stretch
+                | CssLength::Percent(_)
+        ) {
+            return None;
+        }
+        let resolved = parse_media_px(value);
+        resolved.is_finite().then_some(resolved)
+    }
+
+    fn media_dimension(feature: &str, width: f32, height: f32) -> Option<f32> {
+        match feature {
+            "width" | "inline-size" => Some(width),
+            "height" | "block-size" => Some(height),
+            _ => None,
+        }
+    }
+
     if let Some(rest) = lower.strip_prefix("min-width:") {
-        return vw >= parse_media_px(rest.trim());
+        return media_query_px(rest).map(|value| vw >= value);
     }
     if let Some(rest) = lower.strip_prefix("max-width:") {
-        return vw <= parse_media_px(rest.trim());
+        return media_query_px(rest).map(|value| vw <= value);
     }
     if let Some(rest) = lower.strip_prefix("min-height:") {
-        return vh >= parse_media_px(rest.trim());
+        return media_query_px(rest).map(|value| vh >= value);
     }
     if let Some(rest) = lower.strip_prefix("max-height:") {
-        return vh <= parse_media_px(rest.trim());
+        return media_query_px(rest).map(|value| vh <= value);
     }
     if let Some(rest) = lower.strip_prefix("orientation:") {
         return match rest.trim() {
-            "landscape" => vw > vh,
-            "portrait" => vh >= vw,
-            _ => true,
+            "landscape" => Some(vw > vh),
+            "portrait" => Some(vh >= vw),
+            _ => None,
         };
     }
     if let Some(rest) = lower.strip_prefix("prefers-color-scheme:") {
         return match rest.trim() {
-            "light" => color_scheme_preference() == ColorSchemePreference::Light,
-            "dark" => color_scheme_preference() == ColorSchemePreference::Dark,
-            _ => false,
+            "light" => Some(color_scheme_preference() == ColorSchemePreference::Light),
+            "dark" => Some(color_scheme_preference() == ColorSchemePreference::Dark),
+            _ => None,
         };
     }
     if let Some(rest) = lower.strip_prefix("hover:") {
         return match rest.trim() {
-            "hover" => true,
-            "none" => false,
-            _ => true,
+            "hover" => Some(true),
+            "none" => Some(false),
+            _ => None,
         };
     }
     if let Some(rest) = lower.strip_prefix("pointer:") {
         return match rest.trim() {
-            "fine" => true,
-            "coarse" | "none" => false,
-            _ => true,
+            "fine" => Some(true),
+            "coarse" | "none" => Some(false),
+            _ => None,
         };
     }
     // ⛔ ANSWER THE PREFERENCE FEATURES. Falling through to the fail-open
@@ -190,20 +321,37 @@ pub fn evaluate_media(condition: &str, vw: f32, vh: f32) -> bool {
     // source order decided. This engine has no OS preference channel, so it
     // reports the defaults of an ordinary desktop UA — which is a real answer,
     // not a guess, and stops the self-contradiction.
-    for (feature, matching) in [
-        ("prefers-reduced-motion:", "no-preference"),
-        ("prefers-contrast:", "no-preference"),
-        ("prefers-reduced-transparency:", "no-preference"),
-        ("prefers-reduced-data:", "no-preference"),
-        ("forced-colors:", "none"),
-        ("inverted-colors:", "none"),
-        ("any-hover:", "hover"),
-        ("any-pointer:", "fine"),
-        ("scripting:", "none"),
-        ("update:", "fast"),
+    for (feature, matching, allowed) in [
+        (
+            "prefers-reduced-motion:",
+            "no-preference",
+            &["no-preference", "reduce"][..],
+        ),
+        (
+            "prefers-contrast:",
+            "no-preference",
+            &["no-preference", "more", "less", "custom"],
+        ),
+        (
+            "prefers-reduced-transparency:",
+            "no-preference",
+            &["no-preference", "reduce"],
+        ),
+        (
+            "prefers-reduced-data:",
+            "no-preference",
+            &["no-preference", "reduce"],
+        ),
+        ("forced-colors:", "none", &["none", "active"]),
+        ("inverted-colors:", "none", &["none", "inverted"]),
+        ("any-hover:", "hover", &["none", "hover"]),
+        ("any-pointer:", "fine", &["none", "coarse", "fine"]),
+        ("scripting:", "none", &["none", "initial-only", "enabled"]),
+        ("update:", "fast", &["none", "slow", "fast"]),
     ] {
         if let Some(rest) = lower.strip_prefix(feature) {
-            return rest.trim() == matching;
+            let value = rest.trim();
+            return allowed.contains(&value).then_some(value == matching);
         }
     }
 
@@ -220,98 +368,61 @@ pub fn evaluate_media(condition: &str, vw: f32, vh: f32) -> bool {
         None
     }
     if let Some(rest) = lower.strip_prefix("min-resolution:") {
-        return media_dpi(rest).map(|d| 96.0 >= d).unwrap_or(false);
+        return media_dpi(rest).map(|d| 96.0 >= d);
     }
     if let Some(rest) = lower.strip_prefix("max-resolution:") {
-        return media_dpi(rest).map(|d| 96.0 <= d).unwrap_or(false);
+        return media_dpi(rest).map(|d| 96.0 <= d);
     }
     if let Some(rest) = lower.strip_prefix("resolution:") {
-        return media_dpi(rest)
-            .map(|d| (d - 96.0).abs() < 0.5)
-            .unwrap_or(false);
+        return media_dpi(rest).map(|d| (d - 96.0).abs() < 0.5);
     }
 
-    fn parse_media_two_sided_range(expr: &str, feature: &str, dim: f32) -> Option<bool> {
-        let parts: Vec<&str> = expr.split_whitespace().collect();
-        if parts.len() != 5 || parts[2] != feature {
+    if let Some(range) = split_range_comparisons(lower) {
+        if !range.valid {
             return None;
         }
-        let left = parse_media_px(parts[0]);
-        let right = parse_media_px(parts[4]);
-        let left_ok = match parts[1] {
-            "<" => left < dim,
-            "<=" => left <= dim,
-            ">" => left > dim,
-            ">=" => left >= dim,
-            _ => return None,
-        };
-        let right_ok = match parts[3] {
-            "<" => dim < right,
-            "<=" => dim <= right,
-            ">" => dim > right,
-            ">=" => dim >= right,
-            _ => return None,
-        };
-        Some(left_ok && right_ok)
-    }
-    if let Some(v) = parse_media_two_sided_range(lower, "width", vw) {
-        return v;
-    }
-    if let Some(v) = parse_media_two_sided_range(lower, "height", vh) {
-        return v;
-    }
-    if let Some(v) = parse_media_two_sided_range(lower, "inline-size", vw) {
-        return v;
-    }
-    if let Some(v) = parse_media_two_sided_range(lower, "block-size", vh) {
-        return v;
-    }
-
-    // Modern range syntax: `width >= 300px`, `width > 300px`, etc.
-    fn parse_media_range(expr: &str, dim: f32) -> Option<bool> {
-        let e = expr.trim();
-        if let Some(rest) = e.strip_prefix(">=") {
-            return Some(dim >= parse_media_px(rest.trim()));
+        let operands = range.operands();
+        let operators = range.operators();
+        if operands.len() == 2 {
+            if let Some(dim) = media_dimension(operands[0], vw, vh) {
+                return media_query_px(operands[1])
+                    .map(|value| compare_container_size(dim, value, operators[0]));
+            }
+            if let Some(dim) = media_dimension(operands[1], vw, vh) {
+                return media_query_px(operands[0])
+                    .map(|value| compare_container_size(value, dim, operators[0]));
+            }
+        } else if operands.len() == 3 {
+            if let Some(dim) = media_dimension(operands[1], vw, vh) {
+                let ordered = (operators[0].starts_with('<') && operators[1].starts_with('<'))
+                    || (operators[0].starts_with('>') && operators[1].starts_with('>'));
+                return media_query_px(operands[0])
+                    .zip(media_query_px(operands[2]))
+                    .map(|(left, right)| {
+                        ordered
+                            && compare_container_size(left, dim, operators[0])
+                            && compare_container_size(dim, right, operators[1])
+                    });
+            }
         }
-        if let Some(rest) = e.strip_prefix("<=") {
-            return Some(dim <= parse_media_px(rest.trim()));
-        }
-        if let Some(rest) = e.strip_prefix('>') {
-            return Some(dim > parse_media_px(rest.trim()));
-        }
-        if let Some(rest) = e.strip_prefix('<') {
-            return Some(dim < parse_media_px(rest.trim()));
-        }
-        if let Some(rest) = e.strip_prefix(':') {
-            return Some((dim - parse_media_px(rest.trim())).abs() < 0.5);
-        }
-        None
+        return None;
     }
-    if let Some(rest) = lower.strip_prefix("width") {
-        if let Some(v) = parse_media_range(rest, vw) {
-            return v;
-        }
-    }
-    if let Some(rest) = lower.strip_prefix("height") {
-        if let Some(v) = parse_media_range(rest, vh) {
-            return v;
-        }
-    }
-    if let Some(rest) = lower.strip_prefix("inline-size") {
-        if let Some(v) = parse_media_range(rest, vw) {
-            return v;
-        }
-    }
-    if let Some(rest) = lower.strip_prefix("block-size") {
-        if let Some(v) = parse_media_range(rest, vh) {
-            return v;
+    for (feature, dim) in [
+        ("width", vw),
+        ("height", vh),
+        ("inline-size", vw),
+        ("block-size", vh),
+    ] {
+        if let Some(value) = lower
+            .strip_prefix(feature)
+            .and_then(|rest| rest.strip_prefix(':'))
+        {
+            return media_query_px(value).map(|value| (dim - value).abs() < 0.5);
         }
     }
 
-    // Unknown feature — fail closed. A parenthesized media feature is a real
-    // feature query, not a media type; treating it as true makes mutually
-    // exclusive unknown branches both match.
-    false
+    // Unknown features stay unknown through negation and logical combinations.
+    None
 }
 
 /// Find an `and`/`or` token outside parentheses. Parentheses delimit tokens
@@ -340,8 +451,10 @@ pub(crate) fn find_keyword_outside_parens(s: &str, keyword: &str) -> Option<(usi
                 // `@media screen AND (min-width: 500px)` matched at every
                 // width and desktop-only rules applied on mobile.
                 let end = i + kw.len();
-                let left_boundary = i == 0 || bytes[i - 1].is_ascii_whitespace() || bytes[i - 1] == b')';
-                let right_boundary = end == bytes.len() || bytes[end].is_ascii_whitespace() || bytes[end] == b'(';
+                let left_boundary =
+                    i == 0 || bytes[i - 1].is_ascii_whitespace() || bytes[i - 1] == b')';
+                let right_boundary =
+                    end == bytes.len() || bytes[end].is_ascii_whitespace() || bytes[end] == b'(';
                 if depth == 0
                     && bytes.len() - i >= kw.len()
                     && left_boundary
