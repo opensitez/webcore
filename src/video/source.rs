@@ -42,19 +42,18 @@ pub(crate) fn can_play_type(tag: &str, media_type: &str) -> Option<&'static str>
 }
 
 fn can_play_type_for_kind(kind: MediaKind, media_type: &str) -> &'static str {
-    let lower = media_type
-        .split(';')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_ascii_lowercase();
+    let lower = media_type.to_ascii_lowercase();
+    let mime = lower.split(';').next().unwrap_or("").trim();
     let playable = match kind {
-        MediaKind::Video => matches!(
-            lower.as_str(),
-            "video/mp4" | "video/webm" | "video/ogg" | "application/ogg" | "video/x-yuv4mpeg2"
-        ),
+        MediaKind::Video => match mime {
+            "video/mp4" => {
+                !lower.contains("codecs=") || lower.contains("avc1") || lower.contains("avc3")
+            }
+            "video/x-yuv4mpeg2" => true,
+            _ => false,
+        },
         MediaKind::Audio => matches!(
-            lower.as_str(),
+            mime,
             "audio/mpeg"
                 | "audio/mp3"
                 | "audio/mp4"
@@ -67,4 +66,29 @@ fn can_play_type_for_kind(kind: MediaKind, media_type: &str) -> &'static str {
         ),
     };
     if playable { "maybe" } else { "" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_selection_skips_hevc_and_webm() {
+        let doc = crate::html::parse_html(
+            "<video id=v><source src=a.mp4 type='video/mp4; codecs=&quot;hvc1&quot;'><source src=b.webm type=video/webm>Video not supported.</video>",
+        );
+        let node = doc
+            .find_webcore(doc.get_element_by_id("v").unwrap())
+            .unwrap();
+        assert_eq!(current_src(node, "http://localhost/"), Some(String::new()));
+        assert_eq!(
+            can_play_type("video", "video/mp4; codecs=\"hvc1\""),
+            Some("")
+        );
+        assert_eq!(can_play_type("video", "video/webm"), Some(""));
+        assert_eq!(
+            can_play_type("video", "video/mp4; codecs=\"avc1.640028\""),
+            Some("maybe")
+        );
+    }
 }

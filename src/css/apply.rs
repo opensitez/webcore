@@ -27,7 +27,7 @@ pub fn apply_property(style: &mut ComputedStyle, prop: &str, value: &str) {
     // CSS custom properties (--*) are not resolved by PropertyId
     let v = value.trim();
     if prop.starts_with("--") {
-        style.custom_props.insert(prop.to_string(), v.to_string());
+        std::sync::Arc::make_mut(&mut style.custom_props).insert(prop.to_string(), v.to_string());
         return;
     }
     let id = properties::resolve(prop);
@@ -1029,6 +1029,21 @@ pub(crate) fn resolve_var_references_for_color_scheme(
 ) -> String {
     let resolved = resolve_var_references(val, variables);
     resolve_light_dark_functions(&resolved, color_scheme)
+}
+
+pub(crate) fn value_needs_substitution(value: &str) -> bool {
+    value.contains("var(")
+        || value
+            .as_bytes()
+            .windows(b"light-dark(".len())
+            .any(|part| part.eq_ignore_ascii_case(b"light-dark("))
+}
+
+pub(crate) fn value_mentions_revert(value: &str) -> bool {
+    value
+        .as_bytes()
+        .windows(b"revert".len())
+        .any(|part| part.eq_ignore_ascii_case(b"revert"))
 }
 
 pub(crate) fn resolve_light_dark_functions(val: &str, color_scheme: &str) -> String {

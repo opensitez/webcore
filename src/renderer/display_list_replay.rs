@@ -33,12 +33,677 @@ pub fn replay(list: &DisplayList, pixmap: &mut Pixmap, scale: f32) {
     );
 }
 
+#[inline]
+fn rgba_is_opaque(rgba: &[u8]) -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        return unsafe { rgba_is_opaque_neon(rgba) };
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    rgba.chunks_exact(4).all(|pixel| pixel[3] == 255)
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn rgba_is_opaque_neon(rgba: &[u8]) -> bool {
+    use std::arch::aarch64::*;
+    let mut offset = 0;
+    while offset + 64 <= rgba.len() {
+        let channels = unsafe { vld4q_u8(rgba.as_ptr().add(offset)) };
+        if vminvq_u8(channels.3) != 255 {
+            return false;
+        }
+        offset += 64;
+    }
+    rgba[offset..].chunks_exact(4).all(|pixel| pixel[3] == 255)
+}
+
+#[test]
+fn rgba_opacity_check_covers_vector_and_tail_pixels() {
+    for count in [1, 15, 16, 17, 31, 32, 33] {
+        let mut pixels = vec![255; count * 4];
+        assert!(rgba_is_opaque(&pixels));
+        for index in [0, count / 2, count - 1] {
+            pixels[index * 4 + 3] = 254;
+            assert!(!rgba_is_opaque(&pixels));
+            pixels[index * 4 + 3] = 255;
+        }
+    }
+}
+
+fn blit_opaque_unscaled_image(
+    target: &mut Pixmap,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    transform: Transform,
+) -> bool {
+    if transform.sx != 1.0
+        || transform.sy != 1.0
+        || transform.kx != 0.0
+        || transform.ky != 0.0
+        || !transform.tx.is_finite()
+        || !transform.ty.is_finite()
+        || transform.tx.fract() != 0.0
+        || transform.ty.fract() != 0.0
+        || !rgba_is_opaque(rgba)
+    {
+        return false;
+    }
+    let left = transform.tx as i64;
+    let top = transform.ty as i64;
+    let x0 = left.max(0);
+    let y0 = top.max(0);
+    let x1 = left
+        .saturating_add(i64::from(width))
+        .min(i64::from(target.width()));
+    let y1 = top
+        .saturating_add(i64::from(height))
+        .min(i64::from(target.height()));
+    if x0 >= x1 || y0 >= y1 {
+        return true;
+    }
+    let copy_bytes = (x1 - x0) as usize * 4;
+    let source_stride = width as usize * 4;
+    let target_stride = target.width() as usize * 4;
+    let source_x = (x0 - left) as usize * 4;
+    let target_x = x0 as usize * 4;
+    let target_bytes = target.data_mut();
+    for y in y0..y1 {
+        let source = (y - top) as usize * source_stride + source_x;
+        let destination = y as usize * target_stride + target_x;
+        target_bytes[destination..destination + copy_bytes]
+            .copy_from_slice(&rgba[source..source + copy_bytes]);
+    }
+    true
+}
+
+fn blit_opaque_scaled_image(
+    target: &mut Pixmap,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    transform: Transform,
+    mask: Option<&tiny_skia::Mask>,
+) -> bool {
+    blit_opaque_scaled_image_impl::<true>(target, rgba, width, height, transform, mask)
+}
+
+fn blit_opaque_scaled_image_impl<const CACHE_ROWS: bool>(
+    target: &mut Pixmap,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    transform: Transform,
+    mask: Option<&tiny_skia::Mask>,
+) -> bool {
+    if transform.kx != 0.0
+        || transform.ky != 0.0
+        || !transform.sx.is_finite()
+        || !transform.sy.is_finite()
+        || transform.sx <= 0.0
+        || transform.sy <= 0.0
+        || !transform.tx.is_finite()
+        || !transform.ty.is_finite()
+        || width < 2
+        || height < 2
+        || !rgba_is_opaque(rgba)
+    {
+        return false;
+    }
+    let tw = target.width() as usize;
+    let th = target.height() as usize;
+    let x0 = (transform.tx.ceil() as i64).clamp(0, tw as i64) as usize;
+    let y0 = (transform.ty.ceil() as i64).clamp(0, th as i64) as usize;
+    let x1 =
+        ((transform.tx + width as f32 * transform.sx).ceil() as i64).clamp(0, tw as i64) as usize;
+    let y1 =
+        ((transform.ty + height as f32 * transform.sy).ceil() as i64).clamp(0, th as i64) as usize;
+    if x0 >= x1 || y0 >= y1 {
+        return true;
+    }
+    let sample = |pixel: usize, origin: f32, scale: f32, limit: u32| {
+        let position = (pixel as f32 + 0.5 - origin) / scale - 0.5;
+        let base = position.floor().clamp(0.0, (limit - 2) as f32) as usize;
+        let fraction = (position - base as f32).clamp(0.0, 1.0);
+        (base, (fraction * 256.0).round() as u32)
+    };
+    let columns: Vec<_> = (x0..x1)
+        .map(|x| sample(x, transform.tx, transform.sx, width))
+        .collect();
+    let mut upper_row = vec![[0u16; 3]; columns.len()];
+    let mut lower_row = vec![[0u16; 3]; columns.len()];
+    let coverage = mask.map(tiny_skia::Mask::data);
+    let pixels = target.data_mut();
+    let source_stride = width as usize * 4;
+    let interpolate_row = |source_y: usize, output: &mut [[u16; 3]]| {
+        let source_row = source_y * source_stride;
+        for (column, &(sx, wx)) in columns.iter().enumerate() {
+            let source = source_row + sx * 4;
+            for channel in 0..3 {
+                output[column][channel] = (u32::from(rgba[source + channel]) * (256 - wx)
+                    + u32::from(rgba[source + 4 + channel]) * wx)
+                    as u16;
+            }
+        }
+    };
+    let mut cached_source_y = None;
+    for y in y0..y1 {
+        let (sy, wy) = sample(y, transform.ty, transform.sy, height);
+        if CACHE_ROWS && cached_source_y != Some(sy) {
+            if cached_source_y.is_some_and(|previous| previous + 1 == sy) {
+                std::mem::swap(&mut upper_row, &mut lower_row);
+            } else {
+                interpolate_row(sy, &mut upper_row);
+            }
+            interpolate_row(sy + 1, &mut lower_row);
+            cached_source_y = Some(sy);
+        }
+        for column in 0..columns.len() {
+            let x = x0 + column;
+            let index = y * tw + x;
+            let alpha = coverage.map_or(255, |coverage| u32::from(coverage[index]));
+            if alpha == 0 {
+                continue;
+            }
+            let destination = index * 4;
+            for channel in 0..3 {
+                let (upper, lower) = if CACHE_ROWS {
+                    (
+                        u32::from(upper_row[column][channel]),
+                        u32::from(lower_row[column][channel]),
+                    )
+                } else {
+                    let (sx, wx) = columns[column];
+                    let top = sy * source_stride + sx * 4;
+                    let bottom = top + source_stride;
+                    (
+                        (u32::from(rgba[top + channel]) * (256 - wx)
+                            + u32::from(rgba[top + 4 + channel]) * wx
+                            + 128)
+                            >> 8,
+                        (u32::from(rgba[bottom + channel]) * (256 - wx)
+                            + u32::from(rgba[bottom + 4 + channel]) * wx
+                            + 128)
+                            >> 8,
+                    )
+                };
+                let value = if CACHE_ROWS {
+                    (upper * (256 - wy) + lower * wy + 32768) >> 16
+                } else {
+                    (upper * (256 - wy) + lower * wy + 128) >> 8
+                };
+                pixels[destination + channel] = if alpha == 255 {
+                    value as u8
+                } else {
+                    ((value * alpha
+                        + u32::from(pixels[destination + channel]) * (255 - alpha)
+                        + 127)
+                        / 255) as u8
+                };
+            }
+            pixels[destination + 3] = if alpha == 255 {
+                255
+            } else {
+                (alpha + u32::from(pixels[destination + 3]) * (255 - alpha) / 255) as u8
+            };
+        }
+    }
+    true
+}
+
+#[test]
+fn opaque_blit_matches_pixmap_paint_and_rejects_other_cases() {
+    let rgba: Vec<u8> = (0..16)
+        .flat_map(|index| [index as u8 * 13, index as u8 * 7, index as u8 * 3, 255])
+        .collect();
+    let source = tiny_skia::PixmapRef::from_bytes(&rgba, 4, 4).unwrap();
+    let paint = tiny_skia::PixmapPaint {
+        quality: tiny_skia::FilterQuality::Bilinear,
+        ..tiny_skia::PixmapPaint::default()
+    };
+    for (x, y) in [(0, 0), (2, 3), (-2, -1), (7, 7), (-8, 0)] {
+        let transform = Transform::from_translate(x as f32, y as f32);
+        let mut expected = Pixmap::new(8, 8).unwrap();
+        let mut actual = Pixmap::new(8, 8).unwrap();
+        expected.draw_pixmap(0, 0, source, &paint, transform, None);
+        assert!(blit_opaque_unscaled_image(
+            &mut actual,
+            &rgba,
+            4,
+            4,
+            transform
+        ));
+        assert_eq!(actual.data(), expected.data(), "offset ({x}, {y})");
+    }
+    let mut target = Pixmap::new(8, 8).unwrap();
+    let mut transparent = rgba.clone();
+    transparent[3] = 128;
+    assert!(!blit_opaque_unscaled_image(
+        &mut target,
+        &transparent,
+        4,
+        4,
+        Transform::identity(),
+    ));
+    assert!(!blit_opaque_unscaled_image(
+        &mut target,
+        &rgba,
+        4,
+        4,
+        Transform::from_scale(2.0, 2.0),
+    ));
+}
+
+#[test]
+fn opaque_scaled_blit_tracks_bilinear_clip() {
+    let rgba: Vec<u8> = (0..32 * 24)
+        .flat_map(|index| {
+            let index = index as u32;
+            [
+                (index * 13) as u8,
+                (index * 7) as u8,
+                (index * 3) as u8,
+                255,
+            ]
+        })
+        .collect();
+    let source = tiny_skia::PixmapRef::from_bytes(&rgba, 32, 24).unwrap();
+    let mut mask = tiny_skia::Mask::new(32, 24).unwrap();
+    mask.fill_path(
+        &PathBuilder::from_circle(16.0, 12.0, 10.0).unwrap(),
+        FillRule::Winding,
+        true,
+        Transform::identity(),
+    );
+    let transform = Transform::from_translate(-3.5, -2.0).pre_scale(1.25, 1.25);
+    let mut expected = Pixmap::new(32, 24).unwrap();
+    let mut actual = Pixmap::new(32, 24).unwrap();
+    let paint = tiny_skia::PixmapPaint {
+        quality: tiny_skia::FilterQuality::Bilinear,
+        ..tiny_skia::PixmapPaint::default()
+    };
+    expected.draw_pixmap(0, 0, source, &paint, transform, Some(&mask));
+    assert!(blit_opaque_scaled_image(
+        &mut actual,
+        &rgba,
+        32,
+        24,
+        transform,
+        Some(&mask)
+    ));
+    let mut max_error = 0u8;
+    for (actual, expected) in actual.data().iter().zip(expected.data()) {
+        max_error = max_error.max(actual.abs_diff(*expected));
+    }
+    assert!(max_error <= 2, "maximum channel error {max_error}");
+}
+
+#[test]
+fn opaque_scaled_blit_tracks_unclipped_bilinear() {
+    let rgba: Vec<u8> = (0..32 * 24)
+        .flat_map(|index| {
+            let index = index as u32;
+            [(index * 13) as u8, (index * 7) as u8, (index * 3) as u8, 255]
+        })
+        .collect();
+    let source = tiny_skia::PixmapRef::from_bytes(&rgba, 32, 24).unwrap();
+    let paint = tiny_skia::PixmapPaint {
+        quality: tiny_skia::FilterQuality::Bilinear,
+        ..tiny_skia::PixmapPaint::default()
+    };
+    for transform in [
+        Transform::from_translate(-3.5, -2.0).pre_scale(1.25, 1.25),
+        Transform::from_translate(2.25, 1.5).pre_scale(2.0, 2.0),
+    ] {
+        let mut expected = Pixmap::new(64, 48).unwrap();
+        let mut actual = Pixmap::new(64, 48).unwrap();
+        expected.fill(tiny_skia::Color::from_rgba8(20, 30, 40, 255));
+        actual.fill(tiny_skia::Color::from_rgba8(20, 30, 40, 255));
+        expected.draw_pixmap(0, 0, source, &paint, transform, None);
+        assert!(blit_opaque_scaled_image(
+            &mut actual, &rgba, 32, 24, transform, None
+        ));
+        let max_error = actual
+            .data()
+            .iter()
+            .zip(expected.data())
+            .map(|(actual, expected)| actual.abs_diff(*expected))
+            .max()
+            .unwrap();
+        assert!(max_error <= 2, "maximum channel error {max_error}");
+    }
+}
+
+#[test]
+fn opaque_scaled_blit_matches_video_edges_on_background() {
+    let rgba: Vec<u8> = (0..32 * 24)
+        .flat_map(|index| {
+            let index = index as u32;
+            [
+                (index * 13) as u8,
+                (index * 7) as u8,
+                (index * 3) as u8,
+                255,
+            ]
+        })
+        .collect();
+    let source = tiny_skia::PixmapRef::from_bytes(&rgba, 32, 24).unwrap();
+    let mut mask = tiny_skia::Mask::new(32, 29).unwrap();
+    mask.fill_path(
+        &PathBuilder::from_rect(SkRect::from_xywh(0.0, 0.0, 32.0, 29.0).unwrap()),
+        FillRule::Winding,
+        true,
+        Transform::identity(),
+    );
+    let transform = Transform::from_translate(-3.0, 0.0).pre_scale(1.1875, 1.1875);
+    let mut expected = Pixmap::new(32, 29).unwrap();
+    let mut actual = Pixmap::new(32, 29).unwrap();
+    expected.fill(tiny_skia::Color::from_rgba8(20, 30, 40, 255));
+    actual.fill(tiny_skia::Color::from_rgba8(20, 30, 40, 255));
+    let paint = tiny_skia::PixmapPaint {
+        quality: tiny_skia::FilterQuality::Bilinear,
+        ..tiny_skia::PixmapPaint::default()
+    };
+    expected.draw_pixmap(0, 0, source, &paint, transform, Some(&mask));
+    assert!(blit_opaque_scaled_image(
+        &mut actual,
+        &rgba,
+        32,
+        24,
+        transform,
+        Some(&mask)
+    ));
+    let mut max_error = 0u8;
+    let mut worst = 0usize;
+    for (index, (actual, expected)) in actual.data().iter().zip(expected.data()).enumerate() {
+        let error = actual.abs_diff(*expected);
+        if error > max_error {
+            max_error = error;
+            worst = index;
+        }
+    }
+    assert!(
+        max_error <= 2,
+        "maximum channel error {max_error} at byte {worst}"
+    );
+}
+
+#[test]
+fn opaque_scaled_blit_avoids_double_rounding() {
+    let (width, height) = (19u32, 13u32);
+    let rgba: Vec<u8> = (0..width * height)
+        .flat_map(|index| {
+            [
+                (index * 37) as u8,
+                (index * 83) as u8,
+                (index * 149) as u8,
+                255,
+            ]
+        })
+        .collect();
+    let mut mask = tiny_skia::Mask::new(37, 27).unwrap();
+    mask.fill_path(
+        &PathBuilder::from_rect(SkRect::from_xywh(0.0, 0.0, 37.0, 27.0).unwrap()),
+        FillRule::Winding,
+        false,
+        Transform::identity(),
+    );
+    let transform = Transform::from_scale(1.7, 1.7);
+    let mut old = Pixmap::new(37, 27).unwrap();
+    let mut precise = Pixmap::new(37, 27).unwrap();
+    assert!(blit_opaque_scaled_image_impl::<false>(
+        &mut old, &rgba, width, height, transform, Some(&mask)
+    ));
+    assert!(blit_opaque_scaled_image_impl::<true>(
+        &mut precise,
+        &rgba,
+        width,
+        height,
+        transform,
+        Some(&mask)
+    ));
+    let mut old_error = 0u64;
+    let mut precise_error = 0u64;
+    for y in 0..(height as f64 * 1.7).ceil() as usize {
+        for x in 0..(width as f64 * 1.7).ceil() as usize {
+            let sx = ((x as f64 + 0.5) / 1.7 - 0.5).clamp(0.0, width as f64 - 1.0);
+            let sy = ((y as f64 + 0.5) / 1.7 - 0.5).clamp(0.0, height as f64 - 1.0);
+            let x0 = sx.floor() as usize;
+            let y0 = sy.floor() as usize;
+            let x1 = (x0 + 1).min(width as usize - 1);
+            let y1 = (y0 + 1).min(height as usize - 1);
+            let fx = sx - x0 as f64;
+            let fy = sy - y0 as f64;
+            for channel in 0..3 {
+                let at =
+                    |cx: usize, cy: usize| rgba[(cy * width as usize + cx) * 4 + channel] as f64;
+                let top = at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx;
+                let bottom = at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx;
+                let expected = (top * (1.0 - fy) + bottom * fy).round() as u8;
+                let pixel = (y * 37 + x) * 4 + channel;
+                old_error += u64::from(old.data()[pixel].abs_diff(expected));
+                precise_error += u64::from(precise.data()[pixel].abs_diff(expected));
+            }
+        }
+    }
+    assert!(
+        precise_error < old_error,
+        "precise={precise_error} old={old_error}"
+    );
+}
+
+#[test]
+#[ignore = "run explicitly when measuring 720p video paint"]
+fn benchmark_video_sized_image_paint() {
+    let (width, height) = (1280u32, 720u32);
+    let rgba = vec![255u8; (width * height * 4) as usize];
+    let source = tiny_skia::PixmapRef::from_bytes(&rgba, width, height).unwrap();
+    let mut target = Pixmap::new(width, height).unwrap();
+    let paint = tiny_skia::PixmapPaint {
+        quality: tiny_skia::FilterQuality::Bilinear,
+        ..tiny_skia::PixmapPaint::default()
+    };
+    let start = std::time::Instant::now();
+    for _ in 0..40 {
+        target.draw_pixmap(0, 0, source, &paint, Transform::identity(), None);
+        std::hint::black_box(&target);
+    }
+    let draw_time = start.elapsed();
+    let start = std::time::Instant::now();
+    for _ in 0..40 {
+        assert!(blit_opaque_unscaled_image(
+            &mut target,
+            &rgba,
+            width,
+            height,
+            Transform::identity(),
+        ));
+        std::hint::black_box(&target);
+    }
+    eprintln!(
+        "720p paint x40: tiny-skia {draw_time:?}, opaque blit {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+#[ignore = "run explicitly when measuring scaled video paint"]
+fn benchmark_scaled_video_paint() {
+    let (width, height) = (1280u32, 720u32);
+    let rgba = vec![255u8; (width * height * 4) as usize];
+    let source = tiny_skia::PixmapRef::from_bytes(&rgba, width, height).unwrap();
+    let mut target = Pixmap::new(1280, 855).unwrap();
+    let mut mask = tiny_skia::Mask::new(1280, 855).unwrap();
+    mask.fill_path(
+        &PathBuilder::from_circle(640.0, 427.0, 425.0).unwrap(),
+        FillRule::Winding,
+        true,
+        Transform::identity(),
+    );
+    let transform = Transform::from_translate(-120.0, 0.0).pre_scale(1.1875, 1.1875);
+    let paint = tiny_skia::PixmapPaint {
+        quality: tiny_skia::FilterQuality::Bilinear,
+        ..tiny_skia::PixmapPaint::default()
+    };
+    let start = std::time::Instant::now();
+    for _ in 0..20 {
+        target.draw_pixmap(0, 0, source, &paint, transform, Some(&mask));
+        std::hint::black_box(&target);
+    }
+    let baseline = start.elapsed();
+    for cache_rows in [false, true, true, false] {
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            let painted = if cache_rows {
+                blit_opaque_scaled_image_impl::<true>(
+                    &mut target,
+                    &rgba,
+                    width,
+                    height,
+                    transform,
+                    Some(&mask),
+                )
+            } else {
+                blit_opaque_scaled_image_impl::<false>(
+                    &mut target,
+                    &rgba,
+                    width,
+                    height,
+                    transform,
+                    Some(&mask),
+                )
+            };
+            assert!(painted);
+            std::hint::black_box(&target);
+        }
+        eprintln!(
+            "scaled 720p x20 cached rows={cache_rows}: {:?}",
+            start.elapsed()
+        );
+    }
+    eprintln!("scaled 720p x20 tiny-skia: {baseline:?}");
+}
+
+#[test]
+#[ignore = "run explicitly when measuring tiled video paint"]
+fn benchmark_scaled_video_tiles() {
+    let (width, height) = (1280u32, 720u32);
+    let rgba = vec![255u8; (width * height * 4) as usize];
+    let source = tiny_skia::PixmapRef::from_bytes(&rgba, width, height).unwrap();
+    let mut target = Pixmap::new(512, 512).unwrap();
+    let mut mask = tiny_skia::Mask::new(512, 512).unwrap();
+    mask.fill_path(
+        &PathBuilder::from_rect(SkRect::from_xywh(0.0, 0.0, 512.0, 512.0).unwrap()),
+        FillRule::Winding,
+        true,
+        Transform::identity(),
+    );
+    let paint = tiny_skia::PixmapPaint {
+        quality: tiny_skia::FilterQuality::Bilinear,
+        ..tiny_skia::PixmapPaint::default()
+    };
+    let transforms: Vec<_> = (0..2)
+        .flat_map(|row| {
+            (0..3).map(move |col| {
+                Transform::from_translate(-120.0 - col as f32 * 512.0, -(row as f32) * 512.0)
+                    .pre_scale(1.1875, 1.1875)
+            })
+        })
+        .collect();
+    let start = std::time::Instant::now();
+    for _ in 0..20 {
+        for transform in &transforms {
+            target.draw_pixmap(0, 0, source, &paint, *transform, Some(&mask));
+            std::hint::black_box(&target);
+        }
+    }
+    let baseline = start.elapsed();
+    let start = std::time::Instant::now();
+    for _ in 0..20 {
+        for transform in &transforms {
+            assert!(blit_opaque_scaled_image(
+                &mut target,
+                &rgba,
+                width,
+                height,
+                *transform,
+                Some(&mask)
+            ));
+            std::hint::black_box(&target);
+        }
+    }
+    eprintln!(
+        "scaled video six tiles x20: tiny-skia {baseline:?}, opaque scaler {:?}",
+        start.elapsed()
+    );
+}
+
 /// Replay with text rendering via cosmic_text.
 /// How far outside the viewport a command is still painted. Generous, because
 /// a command's own bounds do not account for shadows, outlines or decoration
 /// that spill beyond them.
 const CULL_MARGIN: f32 = 512.0;
 const DIRTY_CULL_MARGIN: f32 = 64.0;
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+struct ShadowRasterKey {
+    outer: [u32; 4],
+    interior: [u32; 4],
+    radii: [u32; 8],
+    transform: [u32; 6],
+    size: [u32; 2],
+    blur: u32,
+    spread: u32,
+    color: [u8; 4],
+}
+
+#[derive(Default)]
+struct ShadowRasterCache {
+    entries: HashMap<ShadowRasterKey, (Arc<Pixmap>, u64)>,
+    bytes: usize,
+    access: u64,
+}
+
+impl ShadowRasterCache {
+    const MAX_BYTES: usize = 32 * 1024 * 1024;
+    const MAX_ENTRY_BYTES: usize = 8 * 1024 * 1024;
+
+    fn get(&mut self, key: &ShadowRasterKey) -> Option<Arc<Pixmap>> {
+        self.access = self.access.wrapping_add(1);
+        let (pixmap, last_access) = self.entries.get_mut(key)?;
+        *last_access = self.access;
+        Some(pixmap.clone())
+    }
+
+    fn insert(&mut self, key: ShadowRasterKey, pixmap: Arc<Pixmap>) {
+        let bytes = pixmap.data().len();
+        if bytes > Self::MAX_ENTRY_BYTES {
+            return;
+        }
+        while self.bytes + bytes > Self::MAX_BYTES {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, access))| *access)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            if let Some((old, _)) = self.entries.remove(&oldest) {
+                self.bytes -= old.data().len();
+            }
+        }
+        self.access = self.access.wrapping_add(1);
+        self.bytes += bytes;
+        self.entries.insert(key, (pixmap, self.access));
+    }
+}
+
+thread_local! {
+    static SHADOW_RASTER_CACHE: std::cell::RefCell<ShadowRasterCache> =
+        std::cell::RefCell::new(ShadowRasterCache::default());
+}
 
 #[derive(Clone)]
 struct SharedClipMask {
@@ -360,11 +1025,11 @@ fn cmd_bounds(cmd: &PaintCmd) -> Option<Rect> {
         | PaintCmd::Border { rect, .. }
         | PaintCmd::BorderImage { rect, .. }
         | PaintCmd::Image { rect, .. }
-        | PaintCmd::Gradient { rect, .. }
         | PaintCmd::BackdropFilter { rect, .. }
         | PaintCmd::Outline { rect, .. }
         | PaintCmd::ResizeGrip { rect, .. }
         | PaintCmd::FormElement { rect, .. } => Some(*rect),
+        PaintCmd::Gradient { clip, .. } => Some(*clip),
         PaintCmd::BackgroundImage { clip, .. } => Some(*clip),
         PaintCmd::HorizontalRule { x1, y1, x2 } => {
             let left = x1.min(*x2);
@@ -925,6 +1590,164 @@ fn bounded_opacity_matches_full_surface_compositing() {
 }
 
 #[test]
+fn opacity_gradient_uses_paint_clip_without_cropping_repeated_tiles() {
+    for repeat in [0, 1] {
+        let gradient = PaintCmd::Gradient {
+            rect: Rect::new(25.0, 20.0, 30.0, 18.0),
+            clip: Rect::new(12.0, 10.0, 115.0, 72.0),
+            repeat_x_mode: repeat,
+            repeat_y_mode: repeat,
+            gradient_type: 1,
+            angle: 90.0,
+            direction: GradientDirection::Angle(90.0),
+            radial_center_x: 0.5,
+            radial_center_y: 0.5,
+            radial_radius_x: 0.5,
+            radial_radius_y: 0.5,
+            stops: vec![
+                (Color::rgb(210, 30, 20), 0.0),
+                (Color::rgb(20, 60, 220), 1.0),
+            ],
+            radii: [0.0; 4],
+            radii_y: [0.0; 4],
+            opacity: 1.0,
+            blend_mode: 0,
+        };
+        assert_eq!(
+            cmd_bounds(&gradient),
+            Some(Rect::new(12.0, 10.0, 115.0, 72.0))
+        );
+        for scale in [1.0, 1.5] {
+            let mut layer = Pixmap::new(200, 150).unwrap();
+            replay_commands_inner(
+                &[gradient.clone()],
+                &mut layer,
+                scale,
+                None,
+                0.0,
+                0.0,
+                None,
+                None,
+                None,
+            );
+            let mut expected = Pixmap::new(200, 150).unwrap();
+            expected.fill(tiny_skia::Color::from_rgba8(80, 90, 100, 255));
+            let mut actual = expected.clone();
+            expected.draw_pixmap(
+                0,
+                0,
+                layer.as_ref(),
+                &tiny_skia::PixmapPaint {
+                    opacity: 0.6,
+                    ..Default::default()
+                },
+                Transform::identity(),
+                None,
+            );
+            replay_commands_inner(
+                &[
+                    PaintCmd::PushOpacity { alpha: 0.6 },
+                    gradient.clone(),
+                    PaintCmd::PopOpacity,
+                ],
+                &mut actual,
+                scale,
+                None,
+                0.0,
+                0.0,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(
+                actual.data(),
+                expected.data(),
+                "repeat={repeat}, scale={scale}"
+            );
+        }
+    }
+}
+
+#[test]
+fn blurred_shadow_cache_preserves_pixels_and_skips_empty_boxes() {
+    let shadow = |height: f32, color: Color| PaintCmd::BoxShadow {
+        rect: Rect::new(50.0, 50.0, 80.0, height),
+        color,
+        offset_x: 0.0,
+        offset_y: 4.0,
+        blur: 10.0,
+        spread: 0.0,
+        inset: false,
+        radii: [4.0; 4],
+        radii_y: [4.0; 4],
+    };
+    let render = |command| {
+        let mut pixmap = Pixmap::new(200, 200).unwrap();
+        replay_commands_inner(
+            &[command],
+            &mut pixmap,
+            1.0,
+            None,
+            0.0,
+            0.0,
+            None,
+            None,
+            None,
+        );
+        pixmap
+    };
+    let first = render(shadow(80.0, Color::rgba(0, 0, 0, 180)));
+    let repeated = render(shadow(80.0, Color::rgba(0, 0, 0, 180)));
+    assert_eq!(first.data(), repeated.data());
+    let recolored = render(shadow(80.0, Color::rgba(180, 0, 0, 180)));
+    assert_ne!(first.data(), recolored.data());
+    let empty = render(shadow(0.0, Color::rgba(0, 0, 0, 180)));
+    assert!(empty.data().iter().all(|channel| *channel == 0));
+}
+
+#[test]
+fn translated_blurred_shadows_share_a_raster() {
+    let shadow = |x: f32| PaintCmd::BoxShadow {
+        rect: Rect::new(x, 50.0, 80.0, 80.0),
+        color: Color::rgba(0, 0, 0, 180),
+        offset_x: 0.0,
+        offset_y: 4.0,
+        blur: 10.0,
+        spread: 0.0,
+        inset: false,
+        radii: [4.0; 4],
+        radii_y: [4.0; 4],
+    };
+    let render = |x| {
+        let mut pixmap = Pixmap::new(240, 200).unwrap();
+        replay_commands_inner(
+            &[shadow(x)],
+            &mut pixmap,
+            1.0,
+            None,
+            0.0,
+            0.0,
+            None,
+            None,
+            None,
+        );
+        pixmap
+    };
+    let first = render(50.0);
+    let entries_after_first = SHADOW_RASTER_CACHE.with(|cache| cache.borrow().entries.len());
+    let second = render(100.0);
+    let entries_after_second = SHADOW_RASTER_CACHE.with(|cache| cache.borrow().entries.len());
+    assert_eq!(entries_after_second, entries_after_first);
+    for y in 0..200 {
+        for x in 0..140 {
+            let a = ((y * 240 + x) * 4) as usize;
+            let b = ((y * 240 + x + 50) * 4) as usize;
+            assert_eq!(&first.data()[a..a + 4], &second.data()[b..b + 4]);
+        }
+    }
+}
+
+#[test]
 fn culled_opacity_groups_preserve_nested_visible_content() {
     let fill = |y| PaintCmd::FillRect {
         rect: Rect::new(0.0, y, 20.0, 20.0),
@@ -966,6 +1789,46 @@ fn culled_opacity_groups_preserve_nested_visible_content() {
     );
     assert_eq!(pixel.red(), pixel.alpha());
     assert_eq!(actual.pixel(30, 30).unwrap().alpha(), 0);
+}
+
+#[test]
+fn culled_blend_groups_preserve_nested_visible_content() {
+    let fill = |y| PaintCmd::FillRect {
+        rect: Rect::new(0.0, y, 20.0, 20.0),
+        color: crate::types::Color::rgb(255, 0, 0),
+        radius: [0.0; 4],
+        radius_y: [0.0; 4],
+    };
+    let mut commands = Vec::new();
+    for _ in 0..100 {
+        commands.extend([
+            PaintCmd::PushBlendMode { mode: 2 },
+            fill(5000.0),
+            PaintCmd::PopBlendMode,
+        ]);
+    }
+    commands.extend([
+        PaintCmd::PushBlendMode { mode: 2 },
+        PaintCmd::PushBlendMode { mode: 2 },
+        fill(0.0),
+        PaintCmd::PopBlendMode,
+        PaintCmd::PopBlendMode,
+    ]);
+    let mut actual = Pixmap::new(32, 32).unwrap();
+    replay_commands_inner(
+        &commands,
+        &mut actual,
+        1.0,
+        None,
+        0.0,
+        0.0,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(actual.pixel(10, 10).unwrap().red(), 255);
+    assert_eq!(actual.pixel(10, 10).unwrap().alpha(), 255);
+    assert_eq!(actual.pixel(25, 25).unwrap().alpha(), 0);
 }
 
 #[test]
@@ -1268,6 +2131,7 @@ fn replay_commands_on_surface(
                         | PaintCmd::Border { .. }
                         | PaintCmd::Image { .. }
                         | PaintCmd::BackgroundImage { .. }
+                        | PaintCmd::Gradient { .. }
                         | PaintCmd::BoxShadow { .. }
                 );
             if bounded_paint {
@@ -1311,6 +2175,7 @@ fn replay_commands_on_surface(
                         | PaintCmd::Border { .. }
                         | PaintCmd::Image { .. }
                         | PaintCmd::BackgroundImage { .. }
+                        | PaintCmd::Gradient { .. }
                 );
             let bounds = if bounded {
                 transformed_bounds_to_viewport(ts, bounds, scale)
@@ -1605,6 +2470,14 @@ fn replay_commands_on_surface(
                         .last_mut()
                         .map(|l| &mut l.pixmap)
                         .unwrap_or(pixmap);
+                    if clip_mask.is_none()
+                        && blit_opaque_unscaled_image(target, rgba, iw, ih, img_ts)
+                    {
+                        continue;
+                    }
+                    if blit_opaque_scaled_image(target, rgba, iw, ih, img_ts, clip_mask) {
+                        continue;
+                    }
                     let paint = tiny_skia::PixmapPaint {
                         quality: tiny_skia::FilterQuality::Bilinear,
                         ..tiny_skia::PixmapPaint::default()
@@ -1953,14 +2826,13 @@ fn replay_commands_on_surface(
             PaintCmd::PopFilter => {
                 let filters = filter_stack.pop().unwrap_or_default();
                 if let Some(layer) = layer_stack.pop() {
+                    if !layer.has_content {
+                        continue;
+                    }
                     let mut pm = layer.pixmap;
-                    // A viewport tile may contain the filter commands for an
-                    // offscreen element but none of its pixels. Filtering an
-                    // empty layer cannot change the destination.
                     if !pm.pixels().iter().any(|pixel| pixel.alpha() != 0) {
                         continue;
                     }
-                    // Apply each filter to the layer pixels
                     for (filter_type, value, dx, dy, color) in &filters {
                         if *filter_type == 9 {
                             crate::canvas::effects::drop_shadow(&mut pm, *dx, *dy, *value, *color);
@@ -2055,7 +2927,6 @@ fn replay_commands_on_surface(
                 }
             }
             PaintCmd::PushBlendMode { mode } => {
-                // Create a temporary layer for blend compositing
                 if let Some(layer_pixmap) = Pixmap::new(pw, ph) {
                     layer_stack.push(Layer {
                         pixmap: layer_pixmap,
@@ -2068,6 +2939,9 @@ fn replay_commands_on_surface(
             }
             PaintCmd::PopBlendMode => {
                 if let Some(layer) = layer_stack.pop() {
+                    if !layer.has_content {
+                        continue;
+                    }
                     // Composite into the current stacking context, not always
                     // the root pixmap.
                     let target = layer_stack
@@ -2135,12 +3009,33 @@ fn replay_commands_on_surface(
                         rect.w + spread * 2.0,
                         rect.h + spread * 2.0,
                     );
+                    if sr.w <= 0.0 || sr.h <= 0.0 {
+                        continue;
+                    }
                     let c = apply_opacity(color, alpha);
                     let target = layer_stack
                         .last_mut()
                         .map(|l| &mut l.pixmap)
                         .unwrap_or(pixmap);
                     if *blur > 0.0 {
+                        if transform_depth == 0
+                            && paint_cached_outer_shadow(
+                                target,
+                                *rect,
+                                sr,
+                                *radii,
+                                *radii_y,
+                                *blur,
+                                *spread,
+                                c,
+                                scale,
+                                active_scroll_x,
+                                active_scroll_y,
+                                clip_mask,
+                            )
+                        {
+                            continue;
+                        }
                         if let Some(shadow_bounds) = transformed_bounds_to_viewport(ts, sr, scale) {
                             let shadow_pad = (*blur * scale * 4.0 + 4.0).ceil();
                             let dev_left =
@@ -2159,50 +3054,94 @@ fn replay_commands_on_surface(
                                     .max(dev_top as f32) as u32;
                             let local_w = dev_right.saturating_sub(dev_left);
                             let local_h = dev_bottom.saturating_sub(dev_top);
-                            if local_w > 0
-                                && local_h > 0
-                                && let Some(mut layer) = Pixmap::new(local_w, local_h)
-                            {
-                                let mut paint = Paint::default();
-                                paint.set_color(to_sk_color(&c));
+                            if local_w > 0 && local_h > 0 {
                                 let mut local_ts = ts;
                                 local_ts.tx -= dev_left as f32;
                                 local_ts.ty -= dev_top as f32;
-                                let max_r = radii[0].max(radii[1]).max(radii[2]).max(radii[3]);
-                                if max_r > 0.5 {
-                                    let (expanded_radii, expanded_radii_y) =
-                                        outer_shadow_radii(*rect, *radii, *radii_y, *spread);
-                                    if let Some(path) = rounded_rect_path_corners_xy(
-                                        sr.x,
-                                        sr.y,
-                                        sr.w,
-                                        sr.h,
-                                        expanded_radii,
-                                        expanded_radii_y,
-                                    ) {
-                                        layer.fill_path(
-                                            &path,
-                                            &paint,
-                                            FillRule::Winding,
-                                            local_ts,
-                                            None,
-                                        );
+                                let key = ShadowRasterKey {
+                                    outer: [
+                                        sr.x.to_bits(),
+                                        sr.y.to_bits(),
+                                        sr.w.to_bits(),
+                                        sr.h.to_bits(),
+                                    ],
+                                    interior: [
+                                        rect.x.to_bits(),
+                                        rect.y.to_bits(),
+                                        rect.w.to_bits(),
+                                        rect.h.to_bits(),
+                                    ],
+                                    radii: std::array::from_fn(|i| {
+                                        if i < 4 {
+                                            radii[i].to_bits()
+                                        } else {
+                                            radii_y[i - 4].to_bits()
+                                        }
+                                    }),
+                                    transform: [
+                                        local_ts.sx.to_bits(),
+                                        local_ts.kx.to_bits(),
+                                        local_ts.ky.to_bits(),
+                                        local_ts.sy.to_bits(),
+                                        local_ts.tx.to_bits(),
+                                        local_ts.ty.to_bits(),
+                                    ],
+                                    size: [local_w, local_h],
+                                    blur: (*blur * scale).to_bits(),
+                                    spread: spread.to_bits(),
+                                    color: [c.r, c.g, c.b, c.a],
+                                };
+                                let cached =
+                                    SHADOW_RASTER_CACHE.with(|cache| cache.borrow_mut().get(&key));
+                                let layer = cached.or_else(|| {
+                                    let mut layer = Pixmap::new(local_w, local_h)?;
+                                    let mut paint = Paint::default();
+                                    paint.set_color(to_sk_color(&c));
+                                    let max_r = radii[0].max(radii[1]).max(radii[2]).max(radii[3]);
+                                    if max_r > 0.5 {
+                                        let (expanded_radii, expanded_radii_y) =
+                                            outer_shadow_radii(*rect, *radii, *radii_y, *spread);
+                                        if let Some(path) = rounded_rect_path_corners_xy(
+                                            sr.x,
+                                            sr.y,
+                                            sr.w,
+                                            sr.h,
+                                            expanded_radii,
+                                            expanded_radii_y,
+                                        ) {
+                                            layer.fill_path(
+                                                &path,
+                                                &paint,
+                                                FillRule::Winding,
+                                                local_ts,
+                                                None,
+                                            );
+                                        }
+                                    } else if let Some(r) =
+                                        SkRect::from_xywh(sr.x, sr.y, sr.w, sr.h)
+                                    {
+                                        layer.fill_rect(r, &paint, local_ts, None);
                                     }
-                                } else if let Some(r) = SkRect::from_xywh(sr.x, sr.y, sr.w, sr.h) {
-                                    layer.fill_rect(r, &paint, local_ts, None);
+                                    crate::canvas::blur_pixmap(&mut layer, *blur * scale);
+                                    clear_outer_shadow_interior(
+                                        &mut layer, *rect, *radii, *radii_y, local_ts,
+                                    );
+                                    let layer = Arc::new(layer);
+                                    SHADOW_RASTER_CACHE.with(|cache| {
+                                        cache.borrow_mut().insert(key, layer.clone())
+                                    });
+                                    Some(layer)
+                                });
+                                if let Some(layer) = layer {
+                                    target.draw_pixmap(
+                                        dev_left as i32,
+                                        dev_top as i32,
+                                        layer.as_ref().as_ref(),
+                                        &tiny_skia::PixmapPaint::default(),
+                                        Transform::identity(),
+                                        clip_mask,
+                                    );
                                 }
-                                crate::canvas::blur_pixmap(&mut layer, *blur * scale);
-                                clear_outer_shadow_interior(
-                                    &mut layer, *rect, *radii, *radii_y, local_ts,
-                                );
-                                target.draw_pixmap(
-                                    dev_left as i32,
-                                    dev_top as i32,
-                                    layer.as_ref(),
-                                    &tiny_skia::PixmapPaint::default(),
-                                    Transform::identity(),
-                                    clip_mask,
-                                );
                             }
                         } else if let Some(mut layer) = Pixmap::new(pw, ph) {
                             let mut paint = Paint::default();
@@ -3570,7 +4509,18 @@ fn replay_commands_on_surface(
                         .as_mut()
                         .or_else(|| layer_stack.last_mut().map(|l| &mut l.pixmap))
                         .unwrap_or(pixmap);
-                    if *repeat_x_mode != 0 || *repeat_y_mode != 0 {
+                    if iw == 1
+                        && ih == 1
+                        && rgba[3] == 255
+                        && *repeat_x_mode == 1
+                        && *repeat_y_mode == 1
+                    {
+                        let mut fill = Paint::default();
+                        fill.set_color(SkColor::from_rgba8(rgba[0], rgba[1], rgba[2], 255));
+                        if let Some(rect) = SkRect::from_xywh(clip.x, clip.y, clip.w, clip.h) {
+                            target.fill_rect(rect, &fill, ts, bg_clip_ref);
+                        }
+                    } else if *repeat_x_mode != 0 || *repeat_y_mode != 0 {
                         let xs = background_axis_tiles(
                             *repeat_x_mode,
                             *pos_x,
@@ -5546,6 +6496,120 @@ fn outer_shadow_radii(
     (out_x, out_y)
 }
 
+fn paint_cached_outer_shadow(
+    target: &mut Pixmap,
+    rect: Rect,
+    sr: Rect,
+    radii: [f32; 4],
+    radii_y: [f32; 4],
+    blur: f32,
+    spread: f32,
+    color: Color,
+    scale: f32,
+    scroll_x: f32,
+    scroll_y: f32,
+    clip_mask: Option<&tiny_skia::Mask>,
+) -> bool {
+    let scroll_px_x = scroll_x * scale;
+    let scroll_px_y = scroll_y * scale;
+    if !scroll_px_x.is_finite()
+        || !scroll_px_y.is_finite()
+        || scroll_px_x.fract() != 0.0
+        || scroll_px_y.fract() != 0.0
+    {
+        return false;
+    }
+    let pad = (blur * scale * 4.0 + 4.0).ceil();
+    let left = (sr.x * scale - pad).floor();
+    let top = (sr.y * scale - pad).floor();
+    let right = ((sr.x + sr.w) * scale + pad).ceil();
+    let bottom = ((sr.y + sr.h) * scale + pad).ceil();
+    if ![left, top, right, bottom].iter().all(|v| v.is_finite()) {
+        return false;
+    }
+    let width = (right - left) as u32;
+    let height = (bottom - top) as u32;
+    if width == 0
+        || height == 0
+        || (width as usize) * (height as usize) * 4 > ShadowRasterCache::MAX_ENTRY_BYTES
+    {
+        return false;
+    }
+
+    let local_sr = Rect::new(sr.x - left / scale, sr.y - top / scale, sr.w, sr.h);
+    let local_rect = Rect::new(rect.x - left / scale, rect.y - top / scale, rect.w, rect.h);
+    let local_ts = Transform::from_scale(scale, scale);
+    let key = ShadowRasterKey {
+        outer: [
+            local_sr.x.to_bits(),
+            local_sr.y.to_bits(),
+            local_sr.w.to_bits(),
+            local_sr.h.to_bits(),
+        ],
+        interior: [
+            local_rect.x.to_bits(),
+            local_rect.y.to_bits(),
+            local_rect.w.to_bits(),
+            local_rect.h.to_bits(),
+        ],
+        radii: std::array::from_fn(|i| {
+            if i < 4 {
+                radii[i].to_bits()
+            } else {
+                radii_y[i - 4].to_bits()
+            }
+        }),
+        transform: [scale.to_bits(), 0, 0, scale.to_bits(), 0, 0],
+        size: [width, height],
+        blur: (blur * scale).to_bits(),
+        spread: spread.to_bits(),
+        color: [color.r, color.g, color.b, color.a],
+    };
+    let layer = SHADOW_RASTER_CACHE
+        .with(|cache| cache.borrow_mut().get(&key))
+        .or_else(|| {
+            let mut layer = Pixmap::new(width, height)?;
+            let mut paint = Paint::default();
+            paint.set_color(to_sk_color(&color));
+            let max_r = radii[0].max(radii[1]).max(radii[2]).max(radii[3]);
+            if max_r > 0.5 {
+                let (expanded_radii, expanded_radii_y) =
+                    outer_shadow_radii(rect, radii, radii_y, spread);
+                if let Some(path) = rounded_rect_path_corners_xy(
+                    local_sr.x,
+                    local_sr.y,
+                    local_sr.w,
+                    local_sr.h,
+                    expanded_radii,
+                    expanded_radii_y,
+                ) {
+                    layer.fill_path(&path, &paint, FillRule::Winding, local_ts, None);
+                }
+            } else if let Some(r) =
+                SkRect::from_xywh(local_sr.x, local_sr.y, local_sr.w, local_sr.h)
+            {
+                layer.fill_rect(r, &paint, local_ts, None);
+            }
+            crate::canvas::blur_pixmap(&mut layer, blur * scale);
+            clear_outer_shadow_interior(&mut layer, local_rect, radii, radii_y, local_ts);
+            let layer = Arc::new(layer);
+            SHADOW_RASTER_CACHE.with(|cache| cache.borrow_mut().insert(key, layer.clone()));
+            Some(layer)
+        });
+    let Some(layer) = layer else {
+        return false;
+    };
+    target.draw_pixmap(
+        (left - scroll_px_x) as i32,
+        (top - scroll_px_y) as i32,
+        layer.as_ref().as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        Transform::identity(),
+        clip_mask,
+    );
+    true
+}
+
 fn fill_outer_box_shadow_shape(
     target: &mut Pixmap,
     shadow_rect: Rect,
@@ -5947,6 +7011,10 @@ fn fill_inset_box_shadow_shape(
 
 /// Composite a layer onto the destination pixmap with a blend mode.
 fn blend_composite(dst: &mut Pixmap, src: &Pixmap, mode: u8) {
+    if mode == 1 {
+        blend_common_multiply(dst, src);
+        return;
+    }
     let dst_pixels = dst.pixels_mut();
     let src_pixels = src.pixels();
     for (d, s) in dst_pixels.iter_mut().zip(src_pixels.iter()) {
@@ -6074,6 +7142,110 @@ fn blend_composite(dst: &mut Pixmap, src: &Pixmap, mode: u8) {
         if let Some(p) = tiny_skia::PremultipliedColorU8::from_rgba(fr, fg, fb, fa) {
             *d = p;
         }
+    }
+}
+
+fn blend_common_multiply(dst: &mut Pixmap, src: &Pixmap) {
+    let pixels = src.pixels();
+    let Some(common) = pixels
+        .get(pixels.len() / 2)
+        .filter(|pixel| pixel.alpha() != 0)
+        .or_else(|| pixels.iter().find(|pixel| pixel.alpha() != 0))
+    else {
+        return;
+    };
+    let color = (common.red(), common.green(), common.blue(), common.alpha());
+
+    let alpha = color.3 as u32;
+    let source = [color.0 as u32, color.1 as u32, color.2 as u32];
+    let mut table = [[0u8; 256]; 3];
+    for (channel, &premultiplied) in source.iter().enumerate() {
+        let straight = premultiplied * 255 / alpha;
+        for value in 0..=255u32 {
+            let blended = value * straight / 255;
+            table[channel][value as usize] =
+                (blended * alpha / 255 + value * (255 - alpha) / 255).min(255) as u8;
+        }
+    }
+
+    for (pixel, source) in dst.pixels_mut().iter_mut().zip(pixels) {
+        if source.alpha() == 0 {
+            continue;
+        }
+        if pixel.alpha() == 255
+            && (source.red(), source.green(), source.blue(), source.alpha()) == color
+        {
+            *pixel = tiny_skia::PremultipliedColorU8::from_rgba(
+                table[0][pixel.red() as usize],
+                table[1][pixel.green() as usize],
+                table[2][pixel.blue() as usize],
+                255,
+            )
+            .unwrap();
+        } else {
+            let sa = source.alpha() as u32;
+            let da = pixel.alpha() as u32;
+            let blend = |s: u8, d: u8| {
+                let s = s as u32;
+                let d = d as u32;
+                let straight_source = s * 255 / sa;
+                let straight_dest = d.min(255);
+                let multiplied = straight_dest * straight_source / 255;
+                (multiplied * sa / 255 + d * (255 - sa) / 255).min(255) as u8
+            };
+            *pixel = tiny_skia::PremultipliedColorU8::from_rgba(
+                blend(source.red(), pixel.red()),
+                blend(source.green(), pixel.green()),
+                blend(source.blue(), pixel.blue()),
+                (sa + da * (255 - sa) / 255).min(255) as u8,
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn solid_multiply_matches_general_blend_for_opaque_backdrop() {
+    let mut destination = Pixmap::new(4, 1).unwrap();
+    let mut source = Pixmap::new(4, 1).unwrap();
+    let overlay = tiny_skia::PremultipliedColorU8::from_rgba(4, 7, 22, 61).unwrap();
+    for (index, pixel) in destination.pixels_mut().iter_mut().enumerate() {
+        *pixel = tiny_skia::PremultipliedColorU8::from_rgba(
+            [0, 64, 128, 255][index],
+            [255, 128, 32, 0][index],
+            [17, 31, 63, 127][index],
+            255,
+        )
+        .unwrap();
+        source.pixels_mut()[index] = overlay;
+    }
+    source.pixels_mut()[0] = tiny_skia::PremultipliedColorU8::from_rgba(1, 2, 6, 17).unwrap();
+    source.pixels_mut()[3] = tiny_skia::PremultipliedColorU8::from_rgba(0, 0, 0, 0).unwrap();
+    let original = destination.clone();
+    blend_common_multiply(&mut destination, &source);
+    for ((actual, before), overlay) in destination
+        .pixels()
+        .iter()
+        .zip(original.pixels())
+        .zip(source.pixels())
+    {
+        if overlay.alpha() == 0 {
+            assert_eq!(actual, before);
+            continue;
+        }
+        let expected = |d: u8, s: u8| {
+            let d = d as u32;
+            let s = s as u32;
+            let alpha = overlay.alpha() as u32;
+            let straight = s * 255 / alpha;
+            let multiplied = d * straight / 255;
+            (multiplied * alpha / 255 + d * (255 - alpha) / 255) as u8
+        };
+        assert_eq!(actual.red(), expected(before.red(), overlay.red()));
+        assert_eq!(actual.green(), expected(before.green(), overlay.green()));
+        assert_eq!(actual.blue(), expected(before.blue(), overlay.blue()));
+        assert_eq!(actual.alpha(), 255);
     }
 }
 

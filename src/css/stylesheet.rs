@@ -18,6 +18,49 @@ fn is_root_variable_selector(selector: &str) -> bool {
         || selector.eq_ignore_ascii_case("html")
 }
 
+fn effective_layer_ranks(order: &[String]) -> HashMap<String, u32> {
+    let mut children: HashMap<String, Vec<String>> = HashMap::new();
+    let mut seen = HashSet::new();
+    for name in order {
+        let mut parent = String::new();
+        for segment in name.split('.') {
+            if segment.is_empty() {
+                continue;
+            }
+            let qualified = if parent.is_empty() {
+                segment.to_string()
+            } else {
+                format!("{parent}.{segment}")
+            };
+            if seen.insert(qualified.clone()) {
+                children
+                    .entry(parent.clone())
+                    .or_default()
+                    .push(qualified.clone());
+            }
+            parent = qualified;
+        }
+    }
+
+    // Postorder places each parent's own declarations after all its sublayers.
+    let mut ranks = HashMap::with_capacity(seen.len());
+    let mut stack = Vec::new();
+    if let Some(roots) = children.get("") {
+        stack.extend(roots.iter().rev().map(|name| (name.clone(), false)));
+    }
+    while let Some((name, visited)) = stack.pop() {
+        if visited {
+            ranks.insert(name, ranks.len() as u32);
+        } else {
+            stack.push((name.clone(), true));
+            if let Some(nested) = children.get(&name) {
+                stack.extend(nested.iter().rev().map(|child| (child.clone(), false)));
+            }
+        }
+    }
+    ranks
+}
+
 // ─── Stylesheet ───────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, Default)]
@@ -30,6 +73,7 @@ pub struct Stylesheet {
     pub page_rules: Vec<PageRule>,
     /// Parsed `@counter-style` rules, preserved for custom list marker support.
     pub counter_styles: Vec<CounterStyleRule>,
+    pub(crate) counter_style_viewport: (f32, f32),
     /// Parsed `@keyframes` blocks, keyed by animation name.
     pub keyframes: HashMap<String, Vec<KeyframeStop>>,
     /// Selector index: rule indices bucketed by the key selector's id/class/tag.
@@ -42,6 +86,11 @@ pub struct Stylesheet {
     idx_dirty: bool,
     /// `@layer` names in declaration order. See `layer_rank`.
     pub layer_order: Vec<String>,
+    /// Every declaration, including duplicates: the first matching one fixes
+    /// order at the current viewport.
+    pub(crate) layer_declarations: Vec<(String, MediaConditions)>,
+    layer_viewport: (f32, f32),
+    indexed_layer_order: Vec<String>,
     /// When true, the cascade stores matched CSS rules on each WebCore
     /// for inspector display. Off by default to avoid memory overhead.
     pub inspect_mode: bool,
@@ -145,9 +194,13 @@ impl Stylesheet {
     /// `input { width: 200px }` on specificity alone.
     pub fn parse_and_add_author(&mut self, css: &str) {
         let before = self.rules.len();
+        let before_counters = self.counter_styles.len();
         self.parse_and_add(css);
         for rule in &mut self.rules[before..] {
             rule.specificity = rule.specificity.saturating_add(AUTHOR_ORIGIN_BOOST);
+        }
+        for rule in &mut self.counter_styles[before_counters..] {
+            rule.author_origin = true;
         }
     }
 
@@ -174,6 +227,8 @@ impl Stylesheet {
         self.page_rules.append(&mut fragment.page_rules);
         self.counter_styles.append(&mut fragment.counter_styles);
         self.keyframes.extend(fragment.keyframes);
+        self.layer_declarations
+            .append(&mut fragment.layer_declarations);
         for name in fragment.layer_order {
             if !self.layer_order.iter().any(|n| *n == name) {
                 self.layer_order.push(name);
@@ -225,9 +280,17 @@ impl Stylesheet {
             self.parse_and_add_with_base(css, css_base_url);
         } else {
             let before = self.rules.len();
+            let before_counters = self.counter_styles.len();
+            let before_layers = self.layer_declarations.len();
             self.parse_and_add_with_base(css, css_base_url);
             for rule in &mut self.rules[before..] {
                 rule.media_condition = rule.media_condition.and(media);
+            }
+            for rule in &mut self.counter_styles[before_counters..] {
+                rule.media_condition = rule.media_condition.and(media);
+            }
+            for (_, condition) in &mut self.layer_declarations[before_layers..] {
+                *condition = condition.and(media);
             }
         }
     }
@@ -240,11 +303,37 @@ impl Stylesheet {
         if layer.is_empty() {
             return u32::MAX;
         }
-        self.layer_order
-            .iter()
-            .position(|n| n == layer)
-            .map(|i| i as u32)
+        effective_layer_ranks(&self.active_layer_order())
+            .get(layer)
+            .copied()
             .unwrap_or(0)
+    }
+
+    pub(crate) fn set_layer_viewport(&mut self, vw: f32, vh: f32) {
+        self.layer_viewport = (vw, vh);
+    }
+
+    fn active_layer_order(&self) -> Vec<String> {
+        if self.layer_declarations.is_empty() {
+            return self.layer_order.clone();
+        }
+        let mut order = Vec::new();
+        let mut seen = HashSet::new();
+        let mut declared = HashSet::new();
+        for (name, condition) in &self.layer_declarations {
+            declared.insert(name.as_str());
+            if condition.matches(self.layer_viewport.0, self.layer_viewport.1)
+                && seen.insert(name.as_str())
+            {
+                order.push(name.clone());
+            }
+        }
+        for name in &self.layer_order {
+            if !declared.contains(name.as_str()) && seen.insert(name.as_str()) {
+                order.push(name.clone());
+            }
+        }
+        order
     }
 
     pub fn parse_and_add(&mut self, css: &str) {
@@ -261,15 +350,14 @@ impl Stylesheet {
         // Preserve @page rules for print/pagination consumers.
         self.page_rules
             .extend(crate::css::parser::extract_page_rules_cleaned(cleaned));
-        self.counter_styles
-            .extend(crate::css::parser::extract_counter_style_rules_cleaned(
-                cleaned,
-            ));
         // Extract @keyframes blocks
         let kf = extract_keyframes_cleaned(cleaned);
         self.keyframes.extend(kf);
         crate::css::parser::reset_declared_layers();
-        if let Some(rules) = parse_stylesheet_cleaned(cleaned) {
+        let (parsed, counter_styles) =
+            crate::css::parser::parse_stylesheet_with_counter_styles_cleaned(cleaned);
+        self.counter_styles.extend(counter_styles);
+        if let Some(rules) = parsed {
             // Pick up the layer order this sheet declared, appending any name
             // we have not seen — a later sheet may add layers but cannot
             // reorder the ones already fixed.
@@ -278,6 +366,8 @@ impl Stylesheet {
                     self.layer_order.push(name);
                 }
             }
+            self.layer_declarations
+                .extend(crate::css::parser::declared_layer_events());
             for r in rules {
                 self.rules.push(r);
             }
@@ -289,6 +379,8 @@ impl Stylesheet {
     /// stylesheet parser has already evaluated @supports and retained media
     /// conditions, so arriving fragments do not need to rescan all prior CSS.
     pub fn resolve_variables_for_viewport(&mut self, vw: f32, vh: f32) {
+        self.counter_style_viewport = (vw, vh);
+        self.layer_viewport = (vw, vh);
         self.variables.clear();
         for important in [false, true] {
             for rule in &self.rules {
@@ -335,8 +427,22 @@ impl Stylesheet {
     /// Update the selector index before each cascade pass. Appended rule indices
     /// are stable; insertions and deletions clear the indexed prefix above.
     pub fn rebuild_index(&mut self) {
-        if !self.idx_dirty && self.idx_rule_flags.len() == self.rules.len() {
+        let active_layer_order = self.active_layer_order();
+        let layer_order_changed = self.indexed_layer_order != active_layer_order;
+        if !self.idx_dirty && self.idx_rule_flags.len() == self.rules.len() && !layer_order_changed
+        {
             return;
+        }
+        let layer_ranks = effective_layer_ranks(&active_layer_order);
+        if layer_order_changed {
+            for rule in &mut self.rules {
+                rule.layer_rank = if rule.layer.is_empty() {
+                    u32::MAX
+                } else {
+                    layer_ranks.get(&rule.layer).copied().unwrap_or(0)
+                };
+            }
+            self.indexed_layer_order = active_layer_order;
         }
         let first = if self.idx_rule_flags.len() > self.rules.len() {
             0
@@ -372,7 +478,11 @@ impl Stylesheet {
                     }
                 }
             }
-            let rank = self.layer_rank(&self.rules[i].layer);
+            let rank = if self.rules[i].layer.is_empty() {
+                u32::MAX
+            } else {
+                layer_ranks.get(&self.rules[i].layer).copied().unwrap_or(0)
+            };
             self.rules[i].layer_rank = rank;
             self.rules[i].compile_declarations();
         }
@@ -679,5 +789,42 @@ mod index_tests {
         assert_eq!(candidates, [0]);
         sheet.candidate_rules("div", None, &["tail"], &mut candidates);
         assert_eq!(candidates, [1]);
+    }
+
+    #[test]
+    fn streamed_sublayer_declaration_reranks_existing_parent_rule() {
+        let mut sheet = Stylesheet::default();
+        sheet.parse_and_add_author("@layer parent { #target { color: blue; } }");
+        sheet.rebuild_index();
+        assert_eq!(sheet.rules[0].layer_rank, 0);
+
+        let mut fragment = Stylesheet::default();
+        fragment.parse_and_add_author("@layer parent.child;");
+        assert!(fragment.rules.is_empty());
+        sheet.append_fragment(fragment);
+        sheet.rebuild_index();
+
+        assert_eq!(sheet.layer_rank("parent.child"), 0);
+        assert_eq!(sheet.rules[0].layer_rank, 1);
+    }
+
+    #[test]
+    fn linked_media_condition_controls_streamed_layer_order() {
+        let mut sheet = Stylesheet::default();
+        let mut linked = Stylesheet::default();
+        let media = crate::css::MediaConditions::default().with_query("(min-width: 700px)");
+        linked.parse_and_add_with_base_media_conditions(
+            "@layer layout;",
+            "https://example.test/layout.css",
+            &media,
+        );
+        sheet.append_fragment(linked);
+        sheet.parse_and_add_author("@layer theme, layout;");
+
+        for (width, first) in [(600.0, "theme"), (800.0, "layout"), (600.0, "theme")] {
+            sheet.set_layer_viewport(width, 600.0);
+            sheet.rebuild_index();
+            assert_eq!(sheet.layer_rank(first), 0, "{width}");
+        }
     }
 }

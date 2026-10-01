@@ -101,6 +101,8 @@ pub fn layout_grid_subgrid(
     font_px: f32,
     root_font_px: f32,
 ) -> f32 {
+    let _profile = crate::profile::span(crate::profile::Phase::LayoutGrid);
+    let _hot = crate::layout::perf::node_span("layout-grid", node.node_id);
     let track_lengths = GridTrackLengthContext::from_engine(engine);
     let content_x = x + rbox.margin_left + rbox.border_left + rbox.padding_left;
     let content_y = y + rbox.margin_top + rbox.border_top + rbox.padding_top;
@@ -525,12 +527,28 @@ pub fn layout_grid_subgrid(
 /// CSS Grid layout.
 /// Returns total outer height.
 /// Mirrors C++ LayoutGrid.
+fn subtree_uses_percentage_block_size(root: &WebCore) -> bool {
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if node.style.height.has_percentage()
+            || node.style.min_height.has_percentage()
+            || node.style.max_height.has_percentage()
+        {
+            return true;
+        }
+        pending.extend(&node.children);
+    }
+    false
+}
+
 pub fn layout_grid(
     engine: &LayoutEngine,
     node: &mut WebCore,
     rbox: &ResolvedBox,
     c: &Constraints,
 ) -> f32 {
+    let _profile = crate::profile::span(crate::profile::Phase::LayoutGrid);
+    let _hot = crate::layout::perf::node_span("layout-grid", node.node_id);
     let track_lengths = GridTrackLengthContext::from_engine(engine);
     unwrap_anonymous_children(node);
 
@@ -1682,16 +1700,25 @@ pub fn layout_grid(
             } else {
                 fitted_grid_item_css_width(engine, child, &crbox, span_w, font_px, root_font_px)
             };
-            let saved = child.style.width.clone();
-            std::sync::Arc::make_mut(&mut child.style).width = CssLength::Px(css_w);
-            child.layout.layout_dirty = true;
-            Some(saved)
+            let measured_w = if child.style.box_sizing == BoxSizing::BorderBox {
+                child.layout.border_rect.w
+            } else {
+                child.layout.content_rect.w
+            };
+            if (css_w - measured_w).abs() <= 0.01 {
+                None
+            } else {
+                let saved = child.style.width.clone();
+                std::sync::Arc::make_mut(&mut child.style).width = CssLength::Px(css_w);
+                child.layout.layout_dirty = true;
+                Some(saved)
+            }
         } else {
             None
         };
 
         // Stretch align-self: set explicit height and re-layout
-        if eff_align == AlignItems::Stretch
+        let stretch_height = if eff_align == AlignItems::Stretch
             && child.style.height.is_auto()
             && child.style.height.intrinsic().is_none()
         {
@@ -1713,15 +1740,32 @@ pub fn layout_grid(
                     - crbox.border_bottom)
                     .max(0.0)
             };
+            let measured_h = if child.style.box_sizing == BoxSizing::BorderBox {
+                child.layout.border_rect.h
+            } else {
+                child.layout.content_rect.h
+            };
+            ((css_h - measured_h).abs() > 0.01).then_some(css_h)
+        } else {
+            None
+        };
+        let reuse_measurement = saved_w.is_none()
+            && stretch_height.is_none()
+            && !child.layout.layout_dirty
+            && !child.has_dirty_layout_descendant
+            && (child.layout.last_containing_width - span_w).abs() < 0.01
+            && matches!(child.style.position, Position::Static)
+            && !subtree_uses_percentage_block_size(child);
+        if let Some(css_h) = stretch_height {
             let saved_h = child.style.height.clone();
             std::sync::Arc::make_mut(&mut child.style).height = CssLength::Px(css_h);
-            child.layout.layout_dirty = true; // force re-layout with new height
+            child.layout.layout_dirty = true;
             engine.layout_box(
                 child,
                 &Constraints::with_height(span_w, cell_h, ix, iy, font_px, root_font_px),
             );
             std::sync::Arc::make_mut(&mut child.style).height = saved_h;
-        } else {
+        } else if !reuse_measurement {
             engine.layout_box(
                 child,
                 &Constraints::with_height(span_w, cell_h, ix, iy, font_px, root_font_px),

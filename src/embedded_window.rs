@@ -143,8 +143,11 @@ impl<P: EmbeddedPage> ApplicationHandler for Shell<P> {
             }
             WindowEvent::CursorLeft { .. } => {
                 self.dispatch(UiEvent {
-                    kind: "mousemove".into(), client_x: -1, client_y: -1,
-                    buttons: self.buttons, ..UiEvent::default()
+                    kind: "mousemove".into(),
+                    client_x: -1,
+                    client_y: -1,
+                    buttons: self.buttons,
+                    ..UiEvent::default()
                 });
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -183,7 +186,11 @@ impl<P: EmbeddedPage> ApplicationHandler for Shell<P> {
                 });
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let scale = self.platform.as_ref().map(Platform::scale_factor).unwrap_or(1.0);
+                let scale = self
+                    .platform
+                    .as_ref()
+                    .map(Platform::scale_factor)
+                    .unwrap_or(1.0);
                 let delta_y = match delta {
                     MouseScrollDelta::LineDelta(_, y) => -(y as f64) * 100.0,
                     MouseScrollDelta::PixelDelta(p) => -p.y / f64::from(scale),

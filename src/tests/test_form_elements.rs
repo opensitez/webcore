@@ -3126,6 +3126,44 @@ fn number_input_respects_min() {
     assert_eq!(input_value(input), "0", "should not go below min");
 }
 
+#[test]
+fn number_input_spinner_clicks_use_the_same_step_and_bounds_as_arrow_keys() {
+    let mut doc = layout_html(
+        r#"<input type="number" id="n" value="3" min="0" max="5" step="2">"#,
+        400.0,
+    );
+    let rect = find_by_id(&doc.root, "n").unwrap().layout.border_rect;
+    let x = rect.x + rect.w - crate::widgets::Stepper::well_width(rect.h) / 2.0;
+    let click = |doc: &mut Document, y| {
+        doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, (x, y), 0);
+        doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, (x, y), 0);
+    };
+    click(&mut doc, rect.y + rect.h * 0.25);
+    assert_eq!(doc.value(doc.get_element_by_id("n").unwrap()), "5");
+    click(&mut doc, rect.y + rect.h * 0.25);
+    assert_eq!(doc.value(doc.get_element_by_id("n").unwrap()), "5");
+    click(&mut doc, rect.y + rect.h * 0.75);
+    assert_eq!(doc.value(doc.get_element_by_id("n").unwrap()), "3");
+}
+
+#[test]
+fn number_input_spinner_clicks_match_the_painted_well_with_padding() {
+    let mut doc = layout_html(
+        r#"<input type="number" id="n" value="3" style="width:120px;height:23px;padding:4px;border:1px solid #888">"#,
+        400.0,
+    );
+    let node = find_by_id(&doc.root, "n").unwrap();
+    let content = node.layout.content_rect;
+    let border = node.layout.border_rect;
+    let well = crate::widgets::Stepper::well_width(content.h);
+    let x = content.x + content.w - well + 2.0;
+    assert!(x < border.x + border.w - crate::widgets::Stepper::well_width(border.h));
+    let point = (x, content.y + content.h * 0.25);
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, point, 0);
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, point, 0);
+    assert_eq!(doc.value(doc.get_element_by_id("n").unwrap()), "4");
+}
+
 // ── Autofocus ───────────────────────────────────────────────────────────────
 
 #[test]
@@ -3702,6 +3740,30 @@ fn a_date_input_opens_a_calendar_and_a_day_sets_the_value() {
         "2026-08-10",
         "the pick writes the date in the format the control's value takes"
     );
+}
+
+#[test]
+fn datetime_local_picker_changes_the_day_without_losing_the_time() {
+    let mut doc = layout_html(
+        r#"<input type="datetime-local" id="dt" value="2026-08-24T12:30">"#,
+        400.0,
+    );
+    let id = doc.get_element_by_id("dt").unwrap();
+    let rect = find_by_id(&doc.root, "dt").unwrap().layout.border_rect;
+    let center = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, center, 0);
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, center, 0);
+    assert_eq!(doc.open_picker, id);
+    let (px, py, _, _) = doc.picker_rect(id).unwrap();
+    let day_index = crate::widgets::first_weekday(2026, 8) + 9;
+    let cell = crate::widgets::Calendar::CELL;
+    let point = (
+        px + (day_index % 7) as f32 * cell + cell / 2.0,
+        py + crate::widgets::Calendar::HEADER + (day_index / 7) as f32 * cell + cell / 2.0,
+    );
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, point, 0);
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, point, 0);
+    assert_eq!(doc.value(id), "2026-08-10T12:30");
 }
 
 // ── List box and range: the click paths (HTML §4.10.7, §4.10.5.1.13) ────────

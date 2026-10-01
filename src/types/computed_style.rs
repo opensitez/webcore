@@ -128,6 +128,9 @@ pub struct RareStyle {
     pub transform_origin: Option<(CssLength, CssLength)>,
     /// Additional background layers (2nd, 3rd, etc.) for multi-layer backgrounds.
     pub additional_background_layers: Vec<BackgroundLayer>,
+    /// Authored list lengths for size, position-x/y, repeat, clip, origin,
+    /// attachment, and blend mode. Needed when an image list grows later.
+    pub background_list_lengths: [u16; 8],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -179,6 +182,7 @@ impl RareStyle {
         logical_corners: Vec::new(),
         transform_origin: None,
         additional_background_layers: Vec::new(),
+        background_list_lengths: [1; 8],
         grid_template_columns: Vec::new(),
         grid_template_rows: Vec::new(),
         grid_template_areas: Vec::new(),
@@ -249,6 +253,12 @@ impl ComputedStyle {
         comparable.hover_style = old.hover_style.clone();
         comparable.active_style = old.active_style.clone();
         comparable.visited_style = old.visited_style.clone();
+        if comparable.rare.is_some() {
+            comparable.rare_mut().background_list_lengths = old.rare().background_list_lengths;
+        }
+        if comparable.rare.as_deref() == Some(&RareStyle::EMPTY) && old.rare.is_none() {
+            comparable.rare = None;
+        }
         comparable == *old
     }
 
@@ -277,6 +287,31 @@ impl ComputedStyle {
             "thin" => 6.0,
             _ => 10.0,
         }
+    }
+
+    /// Gutters occupied at the physical left and right edges. This UA places
+    /// its classic vertical scrollbar on the right.
+    pub(crate) fn scrollbar_gutter_edges(&self, show_vertical: bool) -> (bool, bool) {
+        if self.scrollbar_width_px() <= 0.0 {
+            return (false, false);
+        }
+        let stable = self
+            .scrollbar_gutter
+            .split_whitespace()
+            .any(|token| token == "stable");
+        let right = show_vertical
+            || (stable
+                && matches!(
+                    self.overflow_y,
+                    Overflow::Hidden | Overflow::Scroll | Overflow::Auto
+                ));
+        let left = right
+            && stable
+            && self
+                .scrollbar_gutter
+                .split_whitespace()
+                .any(|token| token == "both-edges");
+        (left, right)
     }
 }
 
@@ -688,7 +723,7 @@ pub struct ComputedStyle {
     pub font_synthesis_position: bool,
 
     // Custom properties (CSS variables)
-    pub custom_props: HashMap<String, String>,
+    pub custom_props: Arc<HashMap<String, String>>,
 
     /// Link URL (inherited from `<a>` tags)
     pub href: String,

@@ -4,7 +4,8 @@
 //! Enable with `LayoutEngine::enable_perf_tracking()`.
 
 use std::cell::RefCell;
-use std::time::Instant;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// Performance counters for one layout pass.
 #[derive(Clone, Debug, Default)]
@@ -85,6 +86,69 @@ impl PerfCounters {
 // on a macro invocation is silently dropped, which is what the warning says.
 thread_local! {
     static PERF: RefCell<PerfState> = RefCell::new(PerfState::default());
+    static HOT_NODES: RefCell<HashMap<(&'static str, u32), HotNode>> = RefCell::new(HashMap::new());
+}
+
+struct HotNode {
+    calls: u32,
+    total: Duration,
+    max: Duration,
+}
+
+pub struct LayoutNodeSpan {
+    kind: &'static str,
+    node_id: u32,
+    started: Option<Instant>,
+}
+
+pub fn node_span(kind: &'static str, node_id: u32) -> LayoutNodeSpan {
+    let started = crate::profile::is_enabled().then(Instant::now);
+    LayoutNodeSpan {
+        kind,
+        node_id,
+        started,
+    }
+}
+
+impl Drop for LayoutNodeSpan {
+    fn drop(&mut self) {
+        let Some(started) = self.started else { return };
+        let elapsed = started.elapsed();
+        HOT_NODES.with(|nodes| {
+            let mut nodes = nodes.borrow_mut();
+            let entry = nodes
+                .entry((self.kind, self.node_id))
+                .or_insert_with(|| HotNode {
+                    calls: 0,
+                    total: Duration::ZERO,
+                    max: Duration::ZERO,
+                });
+            entry.calls += 1;
+            entry.total += elapsed;
+            entry.max = entry.max.max(elapsed);
+        });
+    }
+}
+
+pub fn flush_hot_nodes() {
+    if !crate::profile::is_enabled() {
+        return;
+    }
+    let epoch = crate::profile::epoch();
+    HOT_NODES.with(|nodes| {
+        let mut entries: Vec<_> = std::mem::take(&mut *nodes.borrow_mut())
+            .into_iter()
+            .collect();
+        entries.sort_unstable_by_key(|(_, node)| std::cmp::Reverse(node.total));
+        for ((kind, id), node) in entries.into_iter().take(20) {
+            let label = format!(
+                "node:{id} calls:{} max:{:.1}ms",
+                node.calls,
+                node.max.as_secs_f64() * 1000.0
+            );
+            crate::profile::record_resource_for(epoch, kind, &label, "inclusive", 0, node.total);
+        }
+    });
 }
 
 #[derive(Default)]
@@ -111,6 +175,7 @@ pub fn is_enabled() -> bool {
 
 /// Reset counters for a new frame.
 pub fn reset() {
+    HOT_NODES.with(|nodes| nodes.borrow_mut().clear());
     PERF.with(|p| {
         let mut s = p.borrow_mut();
         s.counters = PerfCounters::default();

@@ -690,6 +690,34 @@ fn build_for_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext) {
     build_for_box_inner(node, list, ctx, false);
 }
 
+fn sticky_subtree_has_paint(commands: &[PaintCmd]) -> bool {
+    commands.iter().any(|cmd| {
+        !matches!(
+            cmd,
+            PaintCmd::PushTextGradient { .. }
+                | PaintCmd::PopTextGradient
+                | PaintCmd::PushClip { .. }
+                | PaintCmd::PushClipPath { .. }
+                | PaintCmd::PushClipSvgPath { .. }
+                | PaintCmd::PopClip
+                | PaintCmd::PushTransform { .. }
+                | PaintCmd::PopTransform
+                | PaintCmd::PushOpacity { .. }
+                | PaintCmd::PopOpacity
+                | PaintCmd::PushFilter { .. }
+                | PaintCmd::PopFilter
+                | PaintCmd::PushMask { .. }
+                | PaintCmd::PopMask
+                | PaintCmd::PushBlendMode { .. }
+                | PaintCmd::PopBlendMode
+                | PaintCmd::BeginStackingContext { .. }
+                | PaintCmd::EndStackingContext
+                | PaintCmd::BeginFixedPosition
+                | PaintCmd::EndFixedPosition
+        )
+    })
+}
+
 fn build_for_box_inner(
     node: &WebCore,
     list: &mut DisplayList,
@@ -736,6 +764,9 @@ fn build_for_box_inner(
         }
         return;
     }
+
+    let sticky_command_start =
+        (node.style.position == Position::Sticky).then_some(list.commands.len());
 
     let sx = ctx.scroll_x;
     let sy = ctx.scroll_y;
@@ -833,7 +864,6 @@ fn build_for_box_inner(
 
     // ── Sticky positioning ───────────────────────────────────────────────────
     let (px, py) = if node.style.position == Position::Sticky {
-        list.has_scroll_dependent_sticky = true;
         let (viewport_left, viewport_top, viewport_right, viewport_bottom) =
             if let Some(sc) = ctx.sticky_scroll_container {
                 (
@@ -1212,6 +1242,123 @@ fn build_for_box_inner(
         }
     }
 
+    // CSS paints the first background image on top. Emit the remaining layers
+    // from back to front, keeping each gradient/image at its own stack level.
+    if paint_self {
+        for (layer_index, layer) in eff_style
+            .rare()
+            .additional_background_layers
+            .iter()
+            .enumerate()
+            .rev()
+        {
+            let bg_image = if layer.image_url.is_empty() {
+                None
+            } else {
+                node.additional_bg_images
+                    .get(layer_index)
+                    .and_then(Option::as_ref)
+            };
+            if layer.gradient_type == GradientType::None && bg_image.is_none() {
+                continue;
+            }
+            let layer_clip_rect = background_box(layer.clip);
+            let (layer_clip_radii, layer_clip_radii_y) = background_radii(layer.clip);
+            let layer_origin_rect = background_box(layer.origin);
+            let blend_mode = background_blend_mode_to_u8(&layer.blend_mode);
+            if layer.gradient_type != GradientType::None && layer.gradient_stops.len() >= 2 {
+                let grad_type_u8 = match layer.gradient_type {
+                    GradientType::Linear => 1u8,
+                    GradientType::Radial => 2u8,
+                    GradientType::None => 0u8,
+                };
+                let stops = layer
+                    .gradient_stops
+                    .iter()
+                    .map(|stop| (stop.color, stop.position))
+                    .collect();
+                let gradient_rect = background_gradient_rect(
+                    layer.size,
+                    &layer.size_w,
+                    &layer.size_h,
+                    &layer.position_x,
+                    &layer.position_y,
+                    font_px,
+                    ctx.transform_ctx.root_font_px,
+                    layer_origin_rect,
+                );
+                let radial_center_x = layer.gradient_radial_position_x.resolve(
+                    font_px,
+                    gradient_rect.w,
+                    ctx.transform_ctx.root_font_px,
+                );
+                let radial_center_y = layer.gradient_radial_position_y.resolve(
+                    font_px,
+                    gradient_rect.h,
+                    ctx.transform_ctx.root_font_px,
+                );
+                let mut temp_style = ComputedStyle::default();
+                temp_style.gradient_radial_shape = layer.gradient_radial_shape;
+                temp_style.gradient_radial_size = layer.gradient_radial_size;
+                temp_style.gradient_radial_radius_x = layer.gradient_radial_radius_x.clone();
+                temp_style.gradient_radial_radius_y = layer.gradient_radial_radius_y.clone();
+                let (radial_radius_x, radial_radius_y) = radial_gradient_used_radii(
+                    &temp_style,
+                    gradient_rect.w,
+                    gradient_rect.h,
+                    radial_center_x,
+                    radial_center_y,
+                    font_px,
+                    ctx.transform_ctx.root_font_px,
+                );
+                let (repeat_x_mode, repeat_y_mode) = layer.repeat.axis_modes();
+                list.push(PaintCmd::Gradient {
+                    rect: gradient_rect,
+                    clip: layer_clip_rect,
+                    repeat_x_mode,
+                    repeat_y_mode,
+                    gradient_type: grad_type_u8,
+                    angle: layer.gradient_angle,
+                    direction: layer.gradient_direction,
+                    radial_center_x,
+                    radial_center_y,
+                    radial_radius_x,
+                    radial_radius_y,
+                    stops,
+                    radii: layer_clip_radii,
+                    radii_y: layer_clip_radii_y,
+                    opacity: 1.0,
+                    blend_mode,
+                });
+            }
+            if let Some(bg_image) = bg_image {
+                push_background_image_paint(
+                    list,
+                    BackgroundImagePaint {
+                        data: bg_image.data.clone(),
+                        image_width: bg_image.width,
+                        image_height: bg_image.height,
+                        ratio_only: bg_image.ratio_only,
+                        resolution: bg_image.resolution,
+                        size: layer.size,
+                        size_w: &layer.size_w,
+                        size_h: &layer.size_h,
+                        position_x: &layer.position_x,
+                        position_y: &layer.position_y,
+                        repeat: layer.repeat,
+                    },
+                    font_px,
+                    ctx.transform_ctx.root_font_px,
+                    layer_origin_rect,
+                    layer_clip_rect,
+                    layer_clip_radii,
+                    layer_clip_radii_y,
+                    blend_mode,
+                );
+            }
+        }
+    }
+
     // ── (c) Gradient background ──────────────────────────────────────────────
     let mut has_text_gradient = false;
     if paint_self
@@ -1321,84 +1468,6 @@ fn build_for_box_inner(
         });
     }
 
-    // ── (b2) Additional background gradient layers ───────────────────────────
-    if paint_self {
-        for layer in &eff_style.rare().additional_background_layers {
-            if layer.gradient_type != GradientType::None && layer.gradient_stops.len() >= 2 {
-                let opacity = 1.0;
-                let grad_type_u8 = match layer.gradient_type {
-                    GradientType::Linear => 1u8,
-                    GradientType::Radial => 2u8,
-                    GradientType::None => 0u8,
-                };
-                let stops: Vec<(Color, f32)> = layer
-                    .gradient_stops
-                    .iter()
-                    .map(|s| {
-                        let a = ((s.color.a as f32) * opacity) as u8;
-                        (Color::rgba(s.color.r, s.color.g, s.color.b, a), s.position)
-                    })
-                    .collect();
-                let layer_clip_rect = background_box(layer.clip);
-                let (layer_clip_radii, layer_clip_radii_y) = background_radii(layer.clip);
-                let layer_origin_rect = background_box(layer.origin);
-                let gradient_rect = background_gradient_rect(
-                    layer.size,
-                    &layer.size_w,
-                    &layer.size_h,
-                    &layer.position_x,
-                    &layer.position_y,
-                    font_px,
-                    ctx.transform_ctx.root_font_px,
-                    layer_origin_rect,
-                );
-                let radial_center_x = layer.gradient_radial_position_x.resolve(
-                    font_px,
-                    gradient_rect.w,
-                    ctx.transform_ctx.root_font_px,
-                );
-                let radial_center_y = layer.gradient_radial_position_y.resolve(
-                    font_px,
-                    gradient_rect.h,
-                    ctx.transform_ctx.root_font_px,
-                );
-                let mut temp_style = ComputedStyle::default();
-                temp_style.gradient_radial_shape = layer.gradient_radial_shape;
-                temp_style.gradient_radial_size = layer.gradient_radial_size;
-                temp_style.gradient_radial_radius_x = layer.gradient_radial_radius_x.clone();
-                temp_style.gradient_radial_radius_y = layer.gradient_radial_radius_y.clone();
-                let (radial_radius_x, radial_radius_y) = radial_gradient_used_radii(
-                    &temp_style,
-                    gradient_rect.w,
-                    gradient_rect.h,
-                    radial_center_x,
-                    radial_center_y,
-                    font_px,
-                    ctx.transform_ctx.root_font_px,
-                );
-                let (layer_repeat_x_mode, layer_repeat_y_mode) = layer.repeat.axis_modes();
-                list.push(PaintCmd::Gradient {
-                    rect: gradient_rect,
-                    clip: layer_clip_rect,
-                    repeat_x_mode: layer_repeat_x_mode,
-                    repeat_y_mode: layer_repeat_y_mode,
-                    gradient_type: grad_type_u8,
-                    angle: layer.gradient_angle,
-                    direction: layer.gradient_direction,
-                    radial_center_x,
-                    radial_center_y,
-                    radial_radius_x,
-                    radial_radius_y,
-                    stops,
-                    radii: layer_clip_radii,
-                    radii_y: layer_clip_radii_y,
-                    opacity,
-                    blend_mode: background_blend_mode_to_u8(&layer.blend_mode),
-                });
-            }
-        }
-    }
-
     // ── (d) Background image ─────────────────────────────────────────────────
     if paint_self && let Some(ref bg_data) = node.bg_image_data {
         push_background_image_paint(
@@ -1424,45 +1493,6 @@ fn build_for_box_inner(
             bg_clip_radii_y,
             background_blend_mode_to_u8(&eff_style.background_blend_mode),
         );
-    }
-
-    if paint_self {
-        for (layer_index, layer) in eff_style
-            .rare()
-            .additional_background_layers
-            .iter()
-            .enumerate()
-        {
-            let Some(Some(bg_image)) = node.additional_bg_images.get(layer_index) else {
-                continue;
-            };
-            let layer_clip_rect = background_box(layer.clip);
-            let (layer_clip_radii, layer_clip_radii_y) = background_radii(layer.clip);
-            let layer_origin_rect = background_box(layer.origin);
-            push_background_image_paint(
-                list,
-                BackgroundImagePaint {
-                    data: bg_image.data.clone(),
-                    image_width: bg_image.width,
-                    image_height: bg_image.height,
-                    ratio_only: bg_image.ratio_only,
-                    resolution: bg_image.resolution,
-                    size: layer.size,
-                    size_w: &layer.size_w,
-                    size_h: &layer.size_h,
-                    position_x: &layer.position_x,
-                    position_y: &layer.position_y,
-                    repeat: layer.repeat,
-                },
-                font_px,
-                ctx.transform_ctx.root_font_px,
-                layer_origin_rect,
-                layer_clip_rect,
-                layer_clip_radii,
-                layer_clip_radii_y,
-                background_blend_mode_to_u8(&layer.blend_mode),
-            );
-        }
     }
 
     // ── (e) Inset box-shadow ─────────────────────────────────────────────────
@@ -2004,7 +2034,8 @@ fn build_for_box_inner(
                         let raster_h = cr.h.round() as u32;
                         if raster_w > 0 && raster_h > 0 {
                             let c = node.style.color;
-                            let _profile_svg = crate::profile::span(crate::profile::Phase::SvgRaster);
+                            let _profile_svg =
+                                crate::profile::span(crate::profile::Phase::SvgRaster);
                             let rgba = if let Some(ref doc) = node.svg_document {
                                 let sampled_overrides;
                                 let overrides = if node.svg_animation_overrides.is_empty() {
@@ -2058,7 +2089,11 @@ fn build_for_box_inner(
                                     current_color,
                                     fill,
                                     stroke,
-                                    if inline { &node.style.custom_props } else { &empty_props },
+                                    if inline {
+                                        &node.style.custom_props
+                                    } else {
+                                        &empty_props
+                                    },
                                     inline.then_some(node),
                                     inline.then_some(ctx.svg_ids),
                                     ctx.svg_ids_fingerprint,
@@ -2079,11 +2114,7 @@ fn build_for_box_inner(
                                 }
                                 list.push(PaintCmd::Image {
                                     rect: Rect::new(cr.x - eff_sx, cr.y - eff_sy, cr.w, cr.h),
-                                    data: ImageRef::Shared(
-                                        rgba,
-                                        raster_w,
-                                        raster_h,
-                                    ),
+                                    data: ImageRef::Shared(rgba, raster_w, raster_h),
                                 });
                                 if clips_radius {
                                     list.push(PaintCmd::PopClip);
@@ -2139,7 +2170,7 @@ fn build_for_box_inner(
 
             if !matches!(
                 node.tag.as_str(),
-                "input" | "select" | "textarea" | "progress" | "meter"
+                "input" | "select" | "textarea" | "progress" | "meter" | "video" | "audio"
             ) {
                 let mut contents_work = Vec::new();
                 for child in eff_children {
@@ -2231,6 +2262,11 @@ fn build_for_box_inner(
     if stacking {
         list.push(PaintCmd::EndStackingContext);
     }
+    if let Some(start) = sticky_command_start
+        && sticky_subtree_has_paint(&list.commands[start..])
+    {
+        list.has_scroll_dependent_sticky = true;
+    }
     // TODO: clip-path masks — no PaintCmd variant yet
 }
 
@@ -2246,11 +2282,9 @@ fn build_element_scrollbar(
     let scrollbar_w = style.scrollbar_width_px();
     let show_vertical = matches!(style.overflow_y, Overflow::Scroll)
         || (matches!(style.overflow_y, Overflow::Auto) && node.layout.scroll_height > cr.h);
+    let scrollport_w = node.scrollport_content_width();
     let show_horizontal = matches!(style.overflow_x, Overflow::Scroll)
-        || (matches!(style.overflow_x, Overflow::Auto) && node.layout.scroll_width > cr.w);
-    let vertical_active = show_vertical && node.layout.scroll_height > cr.h;
-    let horizontal_active = show_horizontal && node.layout.scroll_width > cr.w;
-
+        || (matches!(style.overflow_x, Overflow::Auto) && node.layout.scroll_width > scrollport_w);
     if scrollbar_w <= 0.0 {
         return;
     }
@@ -2262,10 +2296,10 @@ fn build_element_scrollbar(
         .scrollbar_track_color
         .unwrap_or(Color::rgba(128, 128, 128, 40));
 
-    if vertical_active {
-        let track_h = (pr.h - if horizontal_active { scrollbar_w } else { 0.0 }).max(0.0);
+    if show_vertical {
+        let track_h = (pr.h - if show_horizontal { scrollbar_w } else { 0.0 }).max(0.0);
         if track_h > 0.0 {
-            let scrollable_h = node.layout.scroll_height + (pr.h - cr.h).max(0.0);
+            let scrollable_h = node.layout.scroll_height.max(cr.h) + (pr.h - cr.h).max(0.0);
             let thumb_h = (track_h * pr.h / scrollable_h).max(20.0).min(track_h);
             let max_scroll = (node.layout.scroll_height - cr.h).max(0.0);
             let thumb_y = if max_scroll > 0.0 && track_h > thumb_h {
@@ -2296,18 +2330,23 @@ fn build_element_scrollbar(
         }
     }
 
-    if horizontal_active {
-        let track_w = (pr.w - if vertical_active { scrollbar_w } else { 0.0 }).max(0.0);
+    if show_horizontal {
+        let (left_gutter, right_gutter) = style.scrollbar_gutter_edges(show_vertical);
+        let track_x = pr.x - sx + if left_gutter { scrollbar_w } else { 0.0 };
+        let track_w = (pr.w
+            - if left_gutter { scrollbar_w } else { 0.0 }
+            - if right_gutter { scrollbar_w } else { 0.0 })
+        .max(0.0);
         if track_w > 0.0 {
-            let scrollable_w = node.layout.scroll_width + (pr.w - cr.w).max(0.0);
-            let thumb_w = (track_w * pr.w / scrollable_w).max(20.0).min(track_w);
-            let max_scroll = (node.layout.scroll_width - cr.w).max(0.0);
+            let scrollable_w =
+                node.layout.scroll_width.max(scrollport_w) + (track_w - scrollport_w).max(0.0);
+            let thumb_w = (track_w * track_w / scrollable_w).max(20.0).min(track_w);
+            let max_scroll = (node.layout.scroll_width - scrollport_w).max(0.0);
             let thumb_x = if max_scroll > 0.0 && track_w > thumb_w {
                 node.layout.scroll_left * (track_w - thumb_w) / max_scroll
             } else {
                 0.0
             };
-            let track_x = pr.x - sx;
             let track_y = pr.y - sy + pr.h - scrollbar_w;
 
             list.push(PaintCmd::FillRect {
@@ -2330,7 +2369,7 @@ fn build_element_scrollbar(
         }
     }
 
-    if vertical_active && horizontal_active {
+    if show_vertical && show_horizontal {
         list.push(PaintCmd::FillRect {
             rect: Rect::new(
                 pr.x - sx + pr.w - scrollbar_w,

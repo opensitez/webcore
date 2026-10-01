@@ -15,7 +15,15 @@ pub fn parse_stylesheet(css: &str) -> Option<Vec<CssRule>> {
 }
 
 pub(crate) fn parse_stylesheet_cleaned(css: &str) -> Option<Vec<CssRule>> {
-    parse_stylesheet_inner(css, &MediaConditions::default(), "")
+    parse_stylesheet_with_counter_styles_cleaned(css).0
+}
+
+pub(crate) fn parse_stylesheet_with_counter_styles_cleaned(
+    css: &str,
+) -> (Option<Vec<CssRule>>, Vec<CounterStyleRule>) {
+    let mut counter_styles = Vec::new();
+    let rules = parse_stylesheet_inner(css, &MediaConditions::default(), "", &mut counter_styles);
+    (rules, counter_styles)
 }
 
 pub(crate) fn extract_page_rules_cleaned(css: &str) -> Vec<PageRule> {
@@ -143,31 +151,6 @@ fn is_page_margin_at_rule(name: &str) -> bool {
             | "right-middle"
             | "right-bottom"
     )
-}
-
-pub(crate) fn extract_counter_style_rules_cleaned(css: &str) -> Vec<CounterStyleRule> {
-    let mut rules = Vec::new();
-    let mut s = css;
-
-    while let Some(at) = s.to_ascii_lowercase().find("@counter-style") {
-        s = &s[at + "@counter-style".len()..];
-        let Some(brace) = s.find('{') else {
-            break;
-        };
-        let name = s[..brace].trim().to_string();
-        let (block, after) = consume_block(&s[brace..]);
-        let (declarations, important_declarations) = parse_declarations_important(block);
-        if !name.is_empty() && (!declarations.is_empty() || !important_declarations.is_empty()) {
-            rules.push(CounterStyleRule {
-                name,
-                declarations,
-                important_declarations,
-            });
-        }
-        s = after;
-    }
-
-    rules
 }
 
 pub(crate) fn supports_condition_matches(condition: &str) -> bool {
@@ -657,6 +640,7 @@ fn parse_stylesheet_inner(
     css: &str,
     parent_media: &MediaConditions,
     parent_layer: &str,
+    counter_styles: &mut Vec<CounterStyleRule>,
 ) -> Option<Vec<CssRule>> {
     let mut rules = Vec::new();
     let mut s = css.trim();
@@ -696,7 +680,7 @@ fn parse_stylesheet_inner(
                         let n = name.trim();
                         if !n.is_empty() {
                             let qualified = qualify_layer_name(parent_layer, n);
-                            declare_layer(&qualified);
+                            declare_layer(&qualified, parent_media);
                         }
                     }
                     s = &s[semi + 1..];
@@ -726,7 +710,7 @@ fn parse_stylesheet_inner(
                 let media_cond = parent_media.with_query(condition);
                 // Recursively parse inner block
                 if let Some(inner_rules) =
-                    parse_stylesheet_inner(inner_block, &media_cond, parent_layer)
+                    parse_stylesheet_inner(inner_block, &media_cond, parent_layer, counter_styles)
                 {
                     for r in inner_rules {
                         rules.push(r);
@@ -742,7 +726,7 @@ fn parse_stylesheet_inner(
                     .unwrap_or(header);
                 let (cname, _) = crate::css::container::parse_container_branch_header(first);
                 if let Some(mut inner_rules) =
-                    parse_stylesheet_inner(inner_block, parent_media, parent_layer)
+                    parse_stylesheet_inner(inner_block, parent_media, parent_layer, &mut Vec::new())
                 {
                     for r in &mut inner_rules {
                         let inner =
@@ -759,9 +743,12 @@ fn parse_stylesheet_inner(
             } else if at_lower.starts_with("@supports") {
                 let condition = at_header["@supports".len()..].trim();
                 if supports_condition_matches(condition) {
-                    if let Some(inner_rules) =
-                        parse_stylesheet_inner(inner_block, parent_media, parent_layer)
-                    {
+                    if let Some(inner_rules) = parse_stylesheet_inner(
+                        inner_block,
+                        parent_media,
+                        parent_layer,
+                        counter_styles,
+                    ) {
                         for r in inner_rules {
                             rules.push(r);
                         }
@@ -769,7 +756,7 @@ fn parse_stylesheet_inner(
                 }
             } else if at_lower.starts_with("@scope") {
                 if let Some(inner_rules) =
-                    parse_stylesheet_inner(inner_block, parent_media, parent_layer)
+                    parse_stylesheet_inner(inner_block, parent_media, parent_layer, &mut Vec::new())
                 {
                     let (scope_selector, scope_limit_selector) = extract_scope_selectors(at_header);
                     let frame = crate::css::rule::ScopeFrame {
@@ -800,8 +787,9 @@ fn parse_stylesheet_inner(
                 } else {
                     name = qualify_layer_name(parent_layer, &name);
                 }
-                declare_layer(&name);
-                if let Some(inner_rules) = parse_stylesheet_inner(inner_block, parent_media, &name)
+                declare_layer(&name, parent_media);
+                if let Some(inner_rules) =
+                    parse_stylesheet_inner(inner_block, parent_media, &name, counter_styles)
                 {
                     for mut r in inner_rules {
                         // An inner `@layer` wins — it is the more specific one.
@@ -810,6 +798,22 @@ fn parse_stylesheet_inner(
                         }
                         rules.push(r);
                     }
+                }
+            } else if at_lower.starts_with("@counter-style") {
+                let name = at_header["@counter-style".len()..].trim();
+                let (declarations, important_declarations) =
+                    parse_declarations_important(inner_block);
+                if !name.is_empty()
+                    && (!declarations.is_empty() || !important_declarations.is_empty())
+                {
+                    counter_styles.push(CounterStyleRule {
+                        name: name.to_string(),
+                        declarations,
+                        important_declarations,
+                        media_condition: parent_media.clone(),
+                        layer: parent_layer.to_string(),
+                        author_origin: false,
+                    });
                 }
             }
             // else: @keyframes, @font-face, etc. — skip the block
@@ -911,7 +915,7 @@ fn parse_stylesheet_inner(
                 format!("{} {{{}}}", expanded, nested_block)
             };
             if let Some(inner_rules) =
-                parse_stylesheet_inner(&nested_css, parent_media, parent_layer)
+                parse_stylesheet_inner(&nested_css, parent_media, parent_layer, &mut Vec::new())
             {
                 rules.extend(inner_rules);
             }
@@ -1913,10 +1917,13 @@ thread_local! {
     /// the first `@layer a { … }` block. CSS Cascade 5 §6.4.4.
     static LAYER_ORDER: std::cell::RefCell<Vec<String>> =
         std::cell::RefCell::new(Vec::new());
+    static LAYER_DECLARATIONS: std::cell::RefCell<Vec<(String, MediaConditions)>> =
+        std::cell::RefCell::new(Vec::new());
 }
 
 pub(crate) fn reset_declared_layers() {
     LAYER_ORDER.with(|l| l.borrow_mut().clear());
+    LAYER_DECLARATIONS.with(|l| l.borrow_mut().clear());
 }
 
 fn next_anonymous_layer_name() -> String {
@@ -1932,11 +1939,12 @@ fn qualify_layer_name(parent_layer: &str, name: &str) -> String {
     }
 }
 
-fn declare_layer(name: &str) {
+fn declare_layer(name: &str, media: &MediaConditions) {
     let name = name.trim();
     if name.is_empty() {
         return;
     }
+    LAYER_DECLARATIONS.with(|l| l.borrow_mut().push((name.to_string(), media.clone())));
     LAYER_ORDER.with(|l| {
         let mut l = l.borrow_mut();
         if !l.iter().any(|n| n == name) {
@@ -1948,4 +1956,8 @@ fn declare_layer(name: &str) {
 /// The layer names declared so far, in order.
 pub fn declared_layers() -> Vec<String> {
     LAYER_ORDER.with(|l| l.borrow().clone())
+}
+
+pub(crate) fn declared_layer_events() -> Vec<(String, MediaConditions)> {
+    LAYER_DECLARATIONS.with(|l| l.borrow().clone())
 }

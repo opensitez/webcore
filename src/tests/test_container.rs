@@ -1048,7 +1048,7 @@ fn container_style_ranges_evaluate_typed_math_without_mixing_dimensions() {
         ("--frequency", "2kHz"),
         ("--density", "2dppx"),
     ] {
-        style.custom_props.insert(name.into(), value.into());
+        std::sync::Arc::make_mut(&mut style.custom_props).insert(name.into(), value.into());
     }
     let matches = |condition| {
         crate::css::evaluate_container_for_type_and_style(

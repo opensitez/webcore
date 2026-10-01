@@ -2604,8 +2604,11 @@ impl Document {
 
     /// `element.clientWidth` — padding box width, excluding borders.
     pub fn client_width(&self, id: u32) -> f32 {
-        self.raw_padding_rect_document(id)
-            .map(|r| r.w)
+        self.find_webcore(id)
+            .map(|node| {
+                let (left, right) = node.scrollbar_gutter_widths();
+                (node.layout.padding_rect.w - left - right).max(0.0)
+            })
             .unwrap_or(0.0)
     }
 

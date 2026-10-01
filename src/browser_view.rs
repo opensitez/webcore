@@ -258,7 +258,10 @@ fn style_string_bytes(style: &crate::types::ComputedStyle) -> usize {
     bytes
 }
 
-fn style_bytes(style: &crate::types::ComputedStyle) -> usize {
+fn style_bytes(
+    style: &crate::types::ComputedStyle,
+    seen_custom_props: &mut std::collections::HashSet<usize>,
+) -> usize {
     let mut bytes = std::mem::size_of::<crate::types::ComputedStyle>()
         .saturating_add(style_string_bytes(style))
         .saturating_add(
@@ -288,13 +291,30 @@ fn style_bytes(style: &crate::types::ComputedStyle) -> usize {
             );
         }
     }
+    let props_ptr = std::sync::Arc::as_ptr(&style.custom_props) as usize;
+    if seen_custom_props.insert(props_ptr) {
+        bytes = bytes
+            .saturating_add(std::mem::size_of::<usize>() * 2)
+            .saturating_add(std::mem::size_of::<std::collections::HashMap<String, String>>())
+            .saturating_add(
+                style
+                    .custom_props
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(String, String)>() + 1),
+            );
+        for (name, value) in style.custom_props.iter() {
+            bytes = bytes
+                .saturating_add(string_bytes(name))
+                .saturating_add(string_bytes(value));
+        }
+    }
     if let Some(rare) = &style.rare {
         bytes = bytes.saturating_add(std::mem::size_of_val(rare.as_ref()));
     }
     macro_rules! boxed_style {
         ($field:ident) => {
             if let Some(child) = &style.$field {
-                bytes = bytes.saturating_add(style_bytes(child));
+                bytes = bytes.saturating_add(style_bytes(child, seen_custom_props));
             }
         };
     }
@@ -380,6 +400,11 @@ fn stylesheet_bytes(sheet: &crate::css::Stylesheet) -> usize {
     }
     for layer in &sheet.layer_order {
         bytes = bytes.saturating_add(string_bytes(layer));
+    }
+    for (layer, condition) in &sheet.layer_declarations {
+        bytes = bytes
+            .saturating_add(string_bytes(layer))
+            .saturating_add(condition.heap_bytes());
     }
     for rule in &sheet.rules {
         bytes = bytes
@@ -770,6 +795,7 @@ impl BrowserView {
         if let Some(doc) = self.active_doc() {
             let mut seen = std::collections::HashSet::<usize>::new();
             let mut seen_styles = std::collections::HashSet::<usize>::new();
+            let mut seen_custom_props = std::collections::HashSet::<usize>::new();
             stats.stylesheet_estimated_bytes = stylesheet_bytes(&doc.stylesheet);
             for cached in doc.inline_stylesheet_cache.values() {
                 stats.stylesheet_estimated_bytes = stats
@@ -821,7 +847,7 @@ impl BrowserView {
                     stats.unique_styles += 1;
                     stats.style_estimated_bytes = stats
                         .style_estimated_bytes
-                        .saturating_add(style_bytes(&node.style));
+                        .saturating_add(style_bytes(&node.style, &mut seen_custom_props));
                 }
                 add_arc_bytes(
                     &mut seen,
@@ -2252,12 +2278,15 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut sheet = crate::css::Stylesheet::default();
         sheet.parse_and_add_author("p{color:red}");
-        tx.send((
-            0,
-            "https://example.test/late.css".to_string(),
-            sheet,
-            String::new(),
-        ).into())
+        tx.send(
+            (
+                0,
+                "https://example.test/late.css".to_string(),
+                sheet,
+                String::new(),
+            )
+                .into(),
+        )
         .unwrap();
         view.stream_frame.as_mut().unwrap().doc.pending_stylesheets = Some(rx);
 
@@ -2405,12 +2434,15 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut sheet = crate::css::Stylesheet::default();
         sheet.parse_and_add_author("div{color:red}");
-        tx.send((
-            0,
-            "https://example.test/late.css".to_string(),
-            sheet,
-            String::new(),
-        ).into())
+        tx.send(
+            (
+                0,
+                "https://example.test/late.css".to_string(),
+                sheet,
+                String::new(),
+            )
+                .into(),
+        )
         .unwrap();
         view.stream_frame.as_mut().unwrap().doc.pending_stylesheets = Some(rx);
 

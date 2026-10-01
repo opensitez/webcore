@@ -130,56 +130,7 @@ impl Document {
                     && focused.attributes.get("type").map(|s| s.as_str()) == Some("number")
                     && (key_code == 38 || key_code == 40)
                 {
-                    let fid = self.focused_box;
-                    fn find_n<'a>(n: &'a mut WebCore, t: u32) -> Option<&'a mut WebCore> {
-                        if n.node_id == t {
-                            return Some(n);
-                        }
-                        for c in &mut n.children {
-                            if let Some(r) = find_n(c, t) {
-                                return Some(r);
-                            }
-                        }
-                        None
-                    }
-                    if let Some(input) = find_n(&mut self.root, fid) {
-                        // Read the VALUE, not the default value — an arrow key
-                        // after typing used to step from whatever the markup
-                        // said rather than from what the field shows.
-                        let val: f64 =
-                            crate::html::forms::parse_floating_point(&input_value(input))
-                                .unwrap_or(0.0);
-                        let step: f64 = input
-                            .attributes
-                            .get("step")
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(1.0);
-                        let min: Option<f64> =
-                            input.attributes.get("min").and_then(|s| s.parse().ok());
-                        let max: Option<f64> =
-                            input.attributes.get("max").and_then(|s| s.parse().ok());
-                        let new_val = if key_code == 38 {
-                            val + step
-                        } else {
-                            val - step
-                        };
-                        let new_val = if let Some(mx) = max {
-                            new_val.min(mx)
-                        } else {
-                            new_val
-                        };
-                        let new_val = if let Some(mn) = min {
-                            new_val.max(mn)
-                        } else {
-                            new_val
-                        };
-                        if new_val != val {
-                            input.value_state =
-                                Some(crate::html::forms::best_representation(new_val));
-                            input.dirty_value = true;
-                            input.layout.layout_dirty = true;
-                        }
-                    }
+                    self.step_number_input(self.focused_box, key_code == 38);
                     true
                 } else if is_text_input(focused) {
                     // Find the focused node mutably and process the key
@@ -258,6 +209,56 @@ impl Document {
         }
 
         redraw
+    }
+
+    pub(crate) fn step_number_input(&mut self, id: u32, up: bool) -> bool {
+        let changed = {
+            let Some(input) = self.find_webcore_mut(id) else {
+                return false;
+            };
+            if input.attributes.contains_key("disabled") || input.attributes.contains_key("readonly") {
+                return false;
+            }
+            let old = crate::html::forms::parse_floating_point(&input_value(input)).unwrap_or(0.0);
+            let step = input.attributes.get("step")
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(1.0);
+            let min = input.attributes.get("min")
+                .and_then(|value| crate::html::forms::parse_floating_point(value));
+            let max = input.attributes.get("max")
+                .and_then(|value| crate::html::forms::parse_floating_point(value));
+            let mut next = old + if up { step } else { -step };
+            if let Some(max) = max { next = next.min(max); }
+            if let Some(min) = min { next = next.max(min); }
+            if next == old {
+                None
+            } else {
+                let value = crate::html::forms::best_representation(next);
+                input.value_state = Some(value.clone());
+                input.dirty_value = true;
+                input.layout.layout_dirty = true;
+                Some((
+                    input.attributes.get("id").cloned().unwrap_or_default(),
+                    input.attributes.get("name").cloned().unwrap_or_default(),
+                    value,
+                ))
+            }
+        };
+        if let Some((field_id, name, value)) = changed {
+            if let Some(callback) = &mut self.on_form_event {
+                callback(&FormEvent {
+                    tag: "input".to_string(),
+                    id: field_id,
+                    name,
+                    kind: FormEventKind::Input(value),
+                    element: id,
+                });
+            }
+            true
+        } else {
+            false
+        }
     }
 }
 

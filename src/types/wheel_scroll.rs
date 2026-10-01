@@ -130,7 +130,7 @@ pub(crate) fn scroll_box_at(
     let can_h = node.style.visibility
         && delta_x.abs() > 0.1
         && matches!(node.style.overflow_x, Overflow::Scroll | Overflow::Auto)
-        && node.layout.scroll_width > node.layout.content_rect.w;
+        && node.layout.scroll_width > node.scrollport_content_width();
 
     let mut scrolled = false;
 
@@ -144,7 +144,7 @@ pub(crate) fn scroll_box_at(
         }
     }
     if can_h {
-        let max_scroll = (node.layout.scroll_width - node.layout.content_rect.w).max(0.0);
+        let max_scroll = (node.layout.scroll_width - node.scrollport_content_width()).max(0.0);
         let before = node.layout.scroll_left;
         node.layout.scroll_left = (node.layout.scroll_left - delta_x).clamp(0.0, max_scroll);
         if (node.layout.scroll_left - before).abs() > 1e-3 {
@@ -276,7 +276,7 @@ pub(crate) fn snapped_scroll_x(
     current: f32,
     context: ScrollSnapContext,
 ) -> f32 {
-    let max_scroll = (node.layout.scroll_width - node.layout.content_rect.w).max(0.0);
+    let max_scroll = (node.layout.scroll_width - node.scrollport_content_width()).max(0.0);
     snapped_scroll_x_in_port(
         node,
         before,
@@ -373,7 +373,7 @@ fn for_each_snap_area(node: &WebCore, mut visit: impl FnMut(&WebCore)) {
             continue;
         }
         visit(child);
-        let scrolls_x = child.layout.scroll_width > child.layout.content_rect.w;
+        let scrolls_x = child.layout.scroll_width > child.scrollport_content_width();
         let scrolls_y = child.layout.scroll_height > child.layout.content_rect.h;
         let owns_scrollport = matches!(child.style.overflow_x, Overflow::Scroll | Overflow::Hidden)
             || matches!(child.style.overflow_y, Overflow::Scroll | Overflow::Hidden)

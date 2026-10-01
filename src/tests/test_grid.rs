@@ -3,6 +3,40 @@ use crate::tests::harness::{find_box, parse, parse_and_layout};
 use crate::types::*;
 
 #[test]
+fn nested_grid_measurement_reuses_unchanged_child_layout() {
+    let mut html = String::from(
+        "<style>*{margin:0;padding:0}.nest{display:grid;grid-template-columns:1fr;grid-template-rows:1fr;width:400px}</style>",
+    );
+    for _ in 0..8 {
+        html.push_str("<div class=nest>");
+    }
+    html.push_str("<div id=leaf style='height:24px'></div>");
+    for _ in 0..8 {
+        html.push_str("</div>");
+    }
+
+    crate::layout::perf::enable();
+    let doc = parse_and_layout(&html, 500.0);
+    let calls = crate::layout::perf::counters().layout_calls;
+    crate::layout::perf::disable();
+    assert_eq!(
+        find_by_id(&doc.root, "leaf").unwrap().layout.border_rect.h,
+        24.0
+    );
+    assert!(calls < 180, "nested grid layout calls grew to {calls}");
+}
+
+#[test]
+fn grid_percentage_height_descendant_relayouts_with_final_cell_height() {
+    let doc = parse_and_layout(
+        "<style>*{margin:0;padding:0}#grid{display:grid;grid-template-columns:1fr;grid-template-rows:40px;width:100px}#item{display:grid}#leaf{height:100%}</style><div id=grid><div id=item><div id=leaf></div></div></div>",
+        200.0,
+    );
+    let leaf = find_by_id(&doc.root, "leaf").unwrap();
+    assert!((leaf.layout.border_rect.h - 40.0).abs() < 0.1, "{leaf:?}");
+}
+
+#[test]
 fn auto_width_grid_respects_max_width_and_centers_tracks() {
     for direction in ["ltr", "rtl"] {
         let doc = parse_and_layout(

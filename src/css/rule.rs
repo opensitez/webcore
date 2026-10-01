@@ -161,6 +161,9 @@ pub struct CounterStyleRule {
     pub name: String,
     pub declarations: Declarations,
     pub important_declarations: Declarations,
+    pub media_condition: MediaConditions,
+    pub layer: String,
+    pub author_origin: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -205,6 +208,10 @@ pub struct CssRule {
     pub is_hover: bool,
     /// True if any declaration value contains `var(` — needs slow-path resolution.
     pub has_var_refs: bool,
+    /// True if either declaration tier defines a custom property.
+    pub has_custom_properties: bool,
+    /// A declaration may resolve to `revert` or `revert-layer`.
+    pub has_revert_value: bool,
     pub pseudo_element: PseudoElement,
     /// True for `::slotted(...)` rules from a shadow stylesheet.
     ///
@@ -240,6 +247,8 @@ impl Default for CssRule {
             original_selector: String::new(),
             is_hover: false,
             has_var_refs: false,
+            has_custom_properties: false,
+            has_revert_value: false,
             pseudo_element: PseudoElement::None,
             is_slotted: false,
             slotted_slot_selector: None,
@@ -274,6 +283,16 @@ impl CssRule {
                 .important_declarations
                 .values()
                 .any(|v| v.contains("var("));
+        self.has_custom_properties = self.declarations.keys().any(|p| p.starts_with("--"))
+            || self
+                .important_declarations
+                .keys()
+                .any(|p| p.starts_with("--"));
+        self.has_revert_value = self
+            .declarations
+            .values()
+            .chain(self.important_declarations.values())
+            .any(|value| super::apply::value_mentions_revert(value));
     }
 }
 

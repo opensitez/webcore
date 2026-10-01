@@ -7,6 +7,9 @@ use crate::dom::*;
 use crate::html::*;
 use std::collections::{HashMap, HashSet};
 
+static EMPTY_CUSTOM_PROPS: std::sync::LazyLock<std::sync::Arc<HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(HashMap::new()));
+
 // ─── New CSS types ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1010,7 +1013,7 @@ impl Default for ComputedStyle {
             font_synthesis_small_caps: true,
             font_synthesis_position: true,
 
-            custom_props: HashMap::new(),
+            custom_props: EMPTY_CUSTOM_PROPS.clone(),
 
             href: String::new(),
         }

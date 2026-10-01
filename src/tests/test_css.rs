@@ -12,6 +12,224 @@ use crate::renderer::display_list_builder::build_display_list;
 use crate::types::*;
 
 #[test]
+fn compiled_rule_custom_property_flag_follows_both_declaration_tiers() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add(
+        ".normal { --ink: red; color: var(--ink) } .important { --ink: blue !important; color: var(--ink) } .plain { color: green }",
+    );
+    sheet.rebuild_index();
+    assert!(sheet.rules[0].has_custom_properties);
+    assert!(sheet.rules[1].has_custom_properties);
+    assert!(!sheet.rules[2].has_custom_properties);
+
+    let mut node = WebCore::new("p");
+    node.node_id = 1;
+    node.attributes.insert("class", "important");
+    crate::css::apply_cascade(&mut node, &sheet, None, 16.0);
+    assert_eq!(node.style.color, Color::rgb(0, 0, 255));
+
+    sheet.delete_rule(1).unwrap();
+    assert!(!sheet.rules[1].has_custom_properties);
+}
+
+#[test]
+fn changed_custom_properties_resolve_without_recomputing_inherited_values() {
+    let mut parent = std::collections::HashMap::from([
+        ("--base".to_string(), "red".to_string()),
+        ("--inherited".to_string(), "var(--base)".to_string()),
+    ]);
+    crate::css::pre_resolve_variables(&mut parent);
+    let mut child = parent.clone();
+    child.insert("--base".to_string(), "blue".to_string());
+    child.insert("--local".to_string(), "var(--base)".to_string());
+    child.insert("--chain".to_string(), "var(--local)".to_string());
+    child.insert("--cycle-a".to_string(), "var(--cycle-b)".to_string());
+    child.insert("--cycle-b".to_string(), "var(--cycle-a)".to_string());
+    let changed =
+        std::collections::HashSet::from(["--base", "--local", "--chain", "--cycle-a", "--cycle-b"]);
+    crate::css::pre_resolve_changed_variables(&mut child, &changed);
+    assert_eq!(child["--inherited"], "red");
+    assert_eq!(child["--local"], "blue");
+    assert_eq!(child["--chain"], "blue");
+    assert_eq!(child["--cycle-a"], "");
+    assert_eq!(child["--cycle-b"], "");
+}
+
+#[test]
+fn child_custom_property_override_keeps_parent_computed_value() {
+    let doc = parse_and_layout(
+        "<div style='--base:red;--inherited:var(--base)'>\
+         <span id=child style='--base:blue;--local:var(--base);\
+         color:var(--inherited);background-color:var(--local)'>x</span></div>",
+        800.0,
+    );
+    let child = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "child")
+    })
+    .expect("child");
+    assert_eq!(child.style.color, Color::rgb(255, 0, 0));
+    assert_eq!(child.style.background_color, Color::rgb(0, 0, 255));
+}
+
+#[test]
+fn identical_child_custom_property_shares_inherited_scope() {
+    let doc = parse_and_layout(
+        "<div id=parent style='--ink:red'><span id=child style='--ink:red;color:var(--ink)'>x</span></div>",
+        800.0,
+    );
+    let parent = find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "parent")
+    })
+    .expect("parent");
+    let child = find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "child")
+    })
+    .expect("child");
+    assert!(std::sync::Arc::ptr_eq(
+        &parent.style.custom_props,
+        &child.style.custom_props
+    ));
+    assert_eq!(child.style.color, Color::rgb(255, 0, 0));
+}
+
+#[test]
+fn sibling_custom_property_overrides_share_resolved_scope() {
+    let doc = parse_and_layout(
+        "<div style='--base:red'>\
+         <span id=first style='--ink:var(--base);color:var(--ink)'>one</span>\
+         <span id=second style='--ink:var(--base);color:var(--ink)'>two</span>\
+         </div>\
+         <div style='--base:blue'>\
+         <span id=other style='--ink:var(--base);color:var(--ink)'>three</span>\
+         </div>",
+        800.0,
+    );
+    let style = |id| {
+        find_box(&doc.root, &|node| {
+            node.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .expect("styled span")
+        .style
+        .clone()
+    };
+    let first = style("first");
+    let second = style("second");
+    let other = style("other");
+    assert!(std::sync::Arc::ptr_eq(
+        &first.custom_props,
+        &second.custom_props
+    ));
+    assert!(!std::sync::Arc::ptr_eq(
+        &first.custom_props,
+        &other.custom_props
+    ));
+    assert_eq!(first.color, Color::rgb(255, 0, 0));
+    assert_eq!(other.color, Color::rgb(0, 0, 255));
+}
+
+#[test]
+fn child_custom_property_redeclaration_uses_child_dependencies() {
+    let doc = parse_and_layout(
+        "<div style='--base:red;--ink:var(--base)'>\
+         <span id=child style='--base:blue;--ink:var(--base);color:var(--ink)'>x</span></div>",
+        800.0,
+    );
+    let child = find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "child")
+    })
+    .expect("child");
+    assert_eq!(child.style.color, Color::rgb(0, 0, 255));
+}
+
+#[test]
+fn important_custom_properties_follow_stylesheet_and_inline_tiers() {
+    let doc = parse_and_layout(
+        "<style>.item { --ink:red !important; color:var(--ink) }</style>\
+         <span id=sheet class=item style='--ink:blue'>Sheet wins</span>\
+         <span id=inline class=item style='--ink:blue !important'>Inline wins</span>",
+        800.0,
+    );
+    for (id, expected) in [
+        ("sheet", Color::rgb(255, 0, 0)),
+        ("inline", Color::rgb(0, 0, 255)),
+    ] {
+        let node = find_box(&doc.root, &|node| {
+            node.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .expect("styled span");
+        assert_eq!(node.style.color, expected, "{id}");
+    }
+}
+
+#[test]
+fn mixed_custom_property_rule_substitutes_only_values_that_need_it() {
+    assert!(!crate::css::apply::value_needs_substitution(
+        "3px solid green"
+    ));
+    assert!(crate::css::apply::value_needs_substitution("var(--gap)"));
+    assert!(crate::css::apply::value_needs_substitution(
+        "LiGhT-DaRk(white, black)"
+    ));
+
+    let mut frame = EngineFrame::empty(800.0, 600.0);
+    frame.load_html(
+        "<style>#target { --gap: 4px; width: var(--gap); margin-left: 3px; color-scheme: dark; color: LiGhT-DaRk(white, black) }</style><p id=target>Text</p>",
+    );
+    frame.update_frame();
+    let target = find_box(&frame.doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "target")
+    })
+    .unwrap();
+    assert_eq!(target.style.width, CssLength::Px(4.0));
+    assert_eq!(target.style.margin_left, CssLength::Px(3.0));
+    assert_eq!(target.style.color, Color::rgb(0, 0, 0));
+}
+
+#[test]
+fn presentational_hints_run_once_without_revert_snapshots() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add_author(".x { text-align: left } .x { color: red }");
+    sheet.rebuild_index();
+    assert!(sheet.rules.iter().all(|rule| !rule.has_revert_value));
+
+    let mut node = WebCore::new("p");
+    node.node_id = 1;
+    node.attributes.insert("class", "x");
+    node.attributes.insert("align", "center");
+    crate::css::apply_cascade(&mut node, &sheet, None, 16.0);
+    assert_eq!(node.style.text_align, TextAlign::Left);
+    assert_eq!(node.style.color, Color::rgb(255, 0, 0));
+}
+
+#[test]
+fn layer_snapshots_are_kept_when_revert_can_be_resolved() {
+    assert!(crate::css::apply::value_mentions_revert("ReVeRt-LaYeR"));
+    assert!(!crate::css::apply::value_mentions_revert("var(--color)"));
+
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add(
+        "@layer base, top; @layer base { .literal, .variable { color: red } } \
+         @layer top { .literal { color: revert-layer } \
+         .variable { --choice: revert-layer; color: var(--choice) } \
+         .plain { --choice: blue; color: var(--choice) } }",
+    );
+    sheet.rebuild_index();
+    assert!(sheet.rules.iter().any(|rule| rule.has_revert_value));
+
+    for (class, expected) in [
+        ("literal", Color::rgb(255, 0, 0)),
+        ("variable", Color::rgb(255, 0, 0)),
+        ("plain", Color::rgb(0, 0, 255)),
+    ] {
+        let mut node = WebCore::new("p");
+        node.node_id = 1;
+        node.attributes.insert("class", class);
+        crate::css::apply_cascade(&mut node, &sheet, None, 16.0);
+        assert_eq!(node.style.color, expected, "class={class}");
+    }
+}
+
+#[test]
 fn identical_recascade_preserves_clean_layout() {
     let mut root = WebCore::new("main");
     root.node_id = 1;
@@ -1736,6 +1954,91 @@ fn background_shorthand_resets_omitted_longhands() {
 }
 
 #[test]
+fn background_shorthand_rejects_nonfinal_colors_and_empty_layers_atomically() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "background",
+        "url(before.png) right no-repeat blue",
+    );
+    assert_eq!(style.background_image_url, "before.png");
+    assert_eq!(style.background_color, Color::rgb(0, 0, 255));
+
+    for invalid in [
+        "red, url(after.png)",
+        "url(after.png), red, blue",
+        "url(after.png), red blue",
+        "url(after.png),",
+        ", red",
+    ] {
+        apply_property(&mut style, "background", invalid);
+        assert_eq!(style.background_image_url, "before.png", "{invalid}");
+        assert_eq!(style.background_color, Color::rgb(0, 0, 255), "{invalid}");
+        assert_eq!(
+            style.background_repeat,
+            BackgroundRepeat::NoRepeat,
+            "{invalid}"
+        );
+    }
+
+    apply_property(
+        &mut style,
+        "background",
+        "url(front.png), url(back.png) blue",
+    );
+    assert_eq!(style.background_image_url, "front.png");
+    assert_eq!(
+        style.rare().additional_background_layers[0].image_url,
+        "back.png"
+    );
+    assert_eq!(style.background_color, Color::rgb(0, 0, 255));
+}
+
+#[test]
+fn background_shorthand_validates_each_component_before_resetting_style() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "background",
+        "url(before.png) right no-repeat blue",
+    );
+
+    for invalid in [
+        "url(after.png) mystery",
+        "url(after.png) repeat-x no-repeat",
+        "url(after.png) repeat space round",
+        "url(after.png) fixed scroll",
+        "url(after.png) border-box padding-box content-box",
+        "url(after.png) left right",
+        "url(after.png) left / cover contain",
+        "url(after.png) / cover",
+        "url(after.png) left / negative",
+        "url(after.png), url(other.png) left / cover mystery",
+    ] {
+        apply_property(&mut style, "background", invalid);
+        assert_eq!(style.background_image_url, "before.png", "{invalid}");
+        assert_eq!(style.background_color, Color::rgb(0, 0, 255), "{invalid}");
+        assert_eq!(
+            style.background_repeat,
+            BackgroundRepeat::NoRepeat,
+            "{invalid}"
+        );
+    }
+
+    apply_property(
+        &mut style,
+        "background",
+        "url(after.png) Right Top/20px auto No-Repeat Fixed Padding-Box Content-Box blue",
+    );
+    assert_eq!(style.background_image_url, "after.png");
+    assert_eq!(style.background_repeat, BackgroundRepeat::NoRepeat);
+    assert_eq!(style.background_attachment, BackgroundAttachment::Fixed);
+    assert_eq!(style.background_origin, BackgroundClip::PaddingBox);
+    assert_eq!(style.background_clip, BackgroundClip::ContentBox);
+    assert_eq!(style.background_color, Color::rgb(0, 0, 255));
+}
+
+#[test]
 fn background_image_cascade_preserves_additional_url_layers() {
     let mut style = ComputedStyle::default();
     apply_property(
@@ -1774,6 +2077,366 @@ fn background_longhands_apply_to_additional_layers() {
     assert_eq!(layer.clip, BackgroundClip::Text);
     assert_eq!(layer.attachment, BackgroundAttachment::Local);
     assert_eq!(layer.blend_mode, "screen");
+}
+
+#[test]
+fn background_blend_modes_follow_layers_regardless_of_declaration_order() {
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "background-blend-mode", "multiply, screen");
+    apply_property(
+        &mut style,
+        "background-image",
+        "linear-gradient(red, red), linear-gradient(blue, blue)",
+    );
+    assert_eq!(style.background_blend_mode, "multiply, screen");
+    assert_eq!(style.rare().additional_background_layers.len(), 1);
+    assert_eq!(
+        style.rare().additional_background_layers[0].blend_mode,
+        "screen"
+    );
+
+    apply_property(
+        &mut style,
+        "background",
+        "linear-gradient(red, red), linear-gradient(blue, blue)",
+    );
+    assert_eq!(style.background_blend_mode, "multiply, screen");
+    assert_eq!(
+        style.rare().additional_background_layers[0].blend_mode,
+        "screen"
+    );
+}
+
+#[test]
+fn empty_background_layers_keep_later_layer_options_aligned() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "background-blend-mode",
+        "multiply, screen, overlay",
+    );
+    apply_property(
+        &mut style,
+        "background-image",
+        "none, linear-gradient(red, red), linear-gradient(blue, blue)",
+    );
+    assert_eq!(style.gradient_type, GradientType::None);
+    let layers = &style.rare().additional_background_layers;
+    assert_eq!(layers.len(), 2);
+    assert_eq!(layers[0].blend_mode, "screen");
+    assert_eq!(layers[1].blend_mode, "overlay");
+
+    apply_property(
+        &mut style,
+        "background",
+        "none, linear-gradient(red, red), linear-gradient(blue, blue)",
+    );
+    let layers = &style.rare().additional_background_layers;
+    assert_eq!(layers.len(), 2);
+    assert_eq!(layers[0].blend_mode, "screen");
+    assert_eq!(layers[1].blend_mode, "overlay");
+}
+
+#[test]
+fn background_image_does_not_reset_previous_size_or_position() {
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "background-size", "cover");
+    apply_property(&mut style, "background-position", "right bottom");
+    apply_property(
+        &mut style,
+        "background-image",
+        "linear-gradient(red, red), linear-gradient(blue, blue)",
+    );
+    assert_eq!(style.background_size, BackgroundSize::Cover);
+    assert_eq!(style.background_position_x, CssLength::Percent(100.0));
+    assert_eq!(style.background_position_y, CssLength::Percent(100.0));
+}
+
+#[test]
+fn multilayer_background_longhands_are_independent_of_image_declaration_order() {
+    const IMAGES: &str = "url(first.png), url(second.png), url(third.png)";
+    const OPTIONS: &[(&str, &str)] = &[
+        ("background-size", "cover, contain, 12px 8px"),
+        (
+            "background-position",
+            "left top, center center, right bottom",
+        ),
+        ("background-position-x", "left, center, right"),
+        ("background-position-y", "top, center, bottom"),
+        ("background-repeat", "repeat-x, no-repeat, round"),
+        ("background-attachment", "fixed, local, scroll"),
+        ("background-origin", "border-box, content-box, padding-box"),
+        ("background-clip", "content-box, padding-box, border-box"),
+        ("background-blend-mode", "multiply, screen, overlay"),
+    ];
+
+    let mut image_first = ComputedStyle::default();
+    apply_property(&mut image_first, "background-image", IMAGES);
+    for &(name, value) in OPTIONS {
+        apply_property(&mut image_first, name, value);
+    }
+
+    let mut options_first = ComputedStyle::default();
+    for &(name, value) in OPTIONS {
+        apply_property(&mut options_first, name, value);
+    }
+    apply_property(&mut options_first, "background-image", IMAGES);
+
+    assert_eq!(options_first.background_size, image_first.background_size);
+    assert_eq!(
+        options_first.background_position_x,
+        image_first.background_position_x
+    );
+    assert_eq!(
+        options_first.background_repeat,
+        image_first.background_repeat
+    );
+    assert_eq!(
+        options_first.rare().additional_background_layers,
+        image_first.rare().additional_background_layers
+    );
+    assert_eq!(options_first.rare().additional_background_layers.len(), 2);
+
+    apply_property(
+        &mut options_first,
+        "background-image",
+        "url(replacement.png)",
+    );
+    assert_eq!(options_first.rare().additional_background_layers.len(), 2);
+    assert!(
+        options_first
+            .rare()
+            .additional_background_layers
+            .iter()
+            .all(|layer| layer.image_url.is_empty())
+    );
+}
+
+#[test]
+fn shorter_background_lists_cycle_across_later_image_layers() {
+    const IMAGES: &str = "url(a.png), url(b.png), url(c.png), url(d.png)";
+    const OPTIONS: &[(&str, &str)] = &[
+        ("background-size", "cover, contain"),
+        ("background-position", "left top, right bottom"),
+        ("background-repeat", "no-repeat, repeat-x"),
+        ("background-origin", "border-box, content-box"),
+        ("background-clip", "content-box, padding-box"),
+        ("background-attachment", "fixed, local"),
+        ("background-blend-mode", "multiply, screen"),
+    ];
+
+    let build = |image_first| {
+        let mut style = ComputedStyle::default();
+        if image_first {
+            apply_property(&mut style, "background-image", IMAGES);
+        }
+        for &(name, value) in OPTIONS {
+            apply_property(&mut style, name, value);
+        }
+        if !image_first {
+            apply_property(&mut style, "background-image", IMAGES);
+        }
+        style
+    };
+    let before = build(false);
+    let after = build(true);
+    assert_eq!(
+        before.rare().additional_background_layers,
+        after.rare().additional_background_layers
+    );
+    let layers = &before.rare().additional_background_layers;
+    assert_eq!(layers.len(), 3);
+    assert_eq!(layers[0].size, BackgroundSize::Contain);
+    assert_eq!(layers[1].size, BackgroundSize::Cover);
+    assert_eq!(layers[2].size, BackgroundSize::Contain);
+    assert_eq!(layers[0].position_x, layers[2].position_x);
+    assert_eq!(layers[0].blend_mode, layers[2].blend_mode);
+    assert_ne!(layers[0].repeat, layers[1].repeat);
+}
+
+#[test]
+fn copying_background_image_preserves_existing_longhand_cycle() {
+    let mut images = ComputedStyle::default();
+    apply_property(
+        &mut images,
+        "background-image",
+        "url(a.png), url(b.png), url(c.png), url(d.png)",
+    );
+    let mut target = ComputedStyle::default();
+    apply_property(&mut target, "background-size", "cover, contain");
+    apply_property(&mut target, "background-blend-mode", "multiply, screen");
+    (crate::css::property_defs::get(crate::css::properties::PropertyId::BackgroundImage).copy)(
+        &mut target,
+        &images,
+    );
+
+    let layers = &target.rare().additional_background_layers;
+    assert_eq!(layers.len(), 3);
+    assert_eq!(layers[0].image_url, "b.png");
+    assert_eq!(layers[1].image_url, "c.png");
+    assert_eq!(layers[2].image_url, "d.png");
+    assert_eq!(layers[0].size, BackgroundSize::Contain);
+    assert_eq!(layers[1].size, BackgroundSize::Cover);
+    assert_eq!(layers[2].size, BackgroundSize::Contain);
+    assert_eq!(layers[0].blend_mode, "screen");
+    assert_eq!(layers[1].blend_mode, "multiply");
+    assert_eq!(layers[2].blend_mode, "screen");
+}
+
+#[test]
+fn background_position_checks_two_to_four_value_grammar_atomically() {
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "background-position", "center 10px");
+    assert_eq!(style.background_position_x, CssLength::Percent(50.0));
+    assert_eq!(style.background_position_y, CssLength::Px(10.0));
+
+    apply_property(&mut style, "background-position", "bottom 20px right 10px");
+    assert!(matches!(
+        style.background_position_x,
+        CssLength::CalcExpr(_)
+    ));
+    assert!(matches!(
+        style.background_position_y,
+        CssLength::CalcExpr(_)
+    ));
+    let previous = style.clone();
+
+    for invalid in [
+        "top 10px",
+        "left right",
+        "left 10px right",
+        "left top 10px 20px",
+        "10px left",
+    ] {
+        apply_property(&mut style, "background-position", invalid);
+        assert_eq!(
+            style.background_position_x, previous.background_position_x,
+            "{invalid}"
+        );
+        assert_eq!(
+            style.background_position_y, previous.background_position_y,
+            "{invalid}"
+        );
+    }
+
+    apply_property(&mut style, "background-position", "left top, right bottom");
+    let before = style.clone();
+    apply_property(&mut style, "background-position", "center, left right");
+    assert_eq!(style.background_position_x, before.background_position_x);
+    assert_eq!(style.background_position_y, before.background_position_y);
+    assert_eq!(
+        style.rare().additional_background_layers,
+        before.rare().additional_background_layers
+    );
+}
+
+#[test]
+fn background_size_rejects_invalid_layers_without_changing_existing_style() {
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "background-size", "cover, 20px auto");
+    let previous = style.clone();
+    for invalid in [
+        "cover auto",
+        "20px garbage",
+        "-4px",
+        "contain, 10px 20px 30px",
+    ] {
+        apply_property(&mut style, "background-size", invalid);
+        assert_eq!(style.background_size, previous.background_size, "{invalid}");
+        assert_eq!(
+            style.rare().additional_background_layers,
+            previous.rare().additional_background_layers,
+            "{invalid}"
+        );
+    }
+    apply_property(&mut style, "background-size", "auto 25%");
+    assert_eq!(style.background_size, BackgroundSize::Explicit);
+    assert_eq!(style.background_size_w, CssLength::Auto);
+    assert_eq!(style.background_size_h, CssLength::Percent(25.0));
+}
+
+#[test]
+fn background_shorthand_uses_edge_offset_position_grammar() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "background",
+        "url(hero.png) bottom 20px right 10px / 40px auto no-repeat",
+    );
+    assert_eq!(style.background_image_url, "hero.png");
+    assert!(matches!(
+        style.background_position_x,
+        CssLength::CalcExpr(_)
+    ));
+    assert!(matches!(
+        style.background_position_y,
+        CssLength::CalcExpr(_)
+    ));
+    assert_eq!(style.background_size_w, CssLength::Px(40.0));
+    assert_eq!(style.background_size_h, CssLength::Auto);
+}
+
+#[test]
+fn background_keyword_lists_reject_invalid_layers_atomically() {
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "background-image", "url(a.png), url(b.png)");
+    apply_property(&mut style, "background-repeat", "space, repeat round");
+    apply_property(&mut style, "background-clip", "content-box, padding-box");
+    apply_property(&mut style, "background-origin", "border-box, content-box");
+    apply_property(&mut style, "background-attachment", "local, fixed");
+    let before = style.clone();
+
+    for (property, invalid) in [
+        ("background-repeat", "repeat-x no-repeat"),
+        ("background-repeat", "repeat, round garbage"),
+        ("background-clip", "content-box, missing-box"),
+        ("background-origin", "border-box, text"),
+        ("background-attachment", "local, sticky"),
+    ] {
+        apply_property(&mut style, property, invalid);
+        assert_eq!(style, before, "{property}: {invalid}");
+    }
+
+    apply_property(&mut style, "background-repeat", "repeat-y, round space");
+    assert_eq!(style.background_repeat, BackgroundRepeat::RepeatY);
+    assert_eq!(
+        style.rare().additional_background_layers[0].repeat,
+        BackgroundRepeat::TwoValue(BackgroundRepeatAxis::Round, BackgroundRepeatAxis::Space)
+    );
+}
+
+#[test]
+fn background_position_axis_lists_accept_edge_offsets_and_reject_invalid_layers() {
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "background-image", "url(a.png), url(b.png)");
+    apply_property(&mut style, "background-position-x", "right 10px, left 5px");
+    apply_property(&mut style, "background-position-y", "bottom 20px, top 3px");
+    assert!(matches!(
+        style.background_position_x,
+        CssLength::CalcExpr(_)
+    ));
+    assert!(matches!(
+        style.background_position_y,
+        CssLength::CalcExpr(_)
+    ));
+    assert_eq!(
+        style.rare().additional_background_layers[0].position_x,
+        CssLength::Px(5.0)
+    );
+    assert_eq!(
+        style.rare().additional_background_layers[0].position_y,
+        CssLength::Px(3.0)
+    );
+    let before = style.clone();
+    for (property, invalid) in [
+        ("background-position-x", "right 4px, top"),
+        ("background-position-x", "center 10px"),
+        ("background-position-y", "bottom 2px, auto"),
+        ("background-position-y", "top bottom"),
+    ] {
+        apply_property(&mut style, property, invalid);
+        assert_eq!(style, before, "{property}: {invalid}");
+    }
 }
 
 #[test]
@@ -1971,7 +2634,11 @@ fn border_image_longhands_reject_invalid_values_without_resetting() {
         ("border-image-slice", "30 fill", "30 fill fill"),
         ("border-image-width", "2px auto", "2px -1px"),
         ("border-image-outset", "2px 1", "2px 10%"),
-        ("border-image-repeat", "round stretch", "round stretch repeat"),
+        (
+            "border-image-repeat",
+            "round stretch",
+            "round stretch repeat",
+        ),
     ] {
         apply_property(&mut style, property, valid);
         let previous = style.clone();
@@ -6810,6 +7477,49 @@ fn css_variable_with_fallback() {
     assert!(!ss.rules.is_empty());
 }
 
+#[test]
+fn inherited_custom_properties_share_storage_until_overridden() {
+    let empty_a = ComputedStyle::default();
+    let empty_b = ComputedStyle::default();
+    assert!(std::sync::Arc::ptr_eq(
+        &empty_a.custom_props,
+        &empty_b.custom_props
+    ));
+    let mut frame = EngineFrame::empty(800.0, 600.0);
+    frame.load_html(
+        "<style>:root { --ink: red } #override { --ink: blue } \
+         .item { color: var(--ink) }</style>\
+         <div id=parent><span id=first class=item>First</span>\
+         <span id=second class=item>Second</span>\
+         <span id=override><i id=local class=item>Local</i></span></div>",
+    );
+    frame.update_frame();
+    let by_id = |id: &str| {
+        find_box(&frame.doc.root, &|node| {
+            node.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .unwrap()
+    };
+    let parent = by_id("parent");
+    let first = by_id("first");
+    let second = by_id("second");
+    let local = by_id("local");
+    assert!(std::sync::Arc::ptr_eq(
+        &parent.style.custom_props,
+        &first.style.custom_props
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &first.style.custom_props,
+        &second.style.custom_props
+    ));
+    assert!(!std::sync::Arc::ptr_eq(
+        &parent.style.custom_props,
+        &local.style.custom_props
+    ));
+    assert_eq!(first.style.color, Color::rgb(255, 0, 0));
+    assert_eq!(local.style.color, Color::rgb(0, 0, 255));
+}
+
 // ── Hover and pseudo-element rules ────────────────────────────────────────────
 
 #[test]
@@ -7499,6 +8209,23 @@ fn scrollbar_gutter_stable_follows_overflow_kind() {
             "overflow-y:{overflow}"
         );
     }
+}
+
+#[test]
+fn stable_gutters_define_horizontal_scrollport_and_scroll_range() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<style>body{margin:0} #box{width:100px;height:40px;overflow-x:auto;overflow-y:hidden;scrollbar-gutter:stable both-edges} #child{width:90px;height:10px}</style><div id=box><div id=child></div></div>",
+        800.0,
+    );
+    let id = doc.get_element_by_id("box").unwrap();
+    let node = doc.find_webcore(id).unwrap();
+    assert_eq!(node.scrollport_content_width(), 80.0);
+    assert_eq!(doc.client_width(id), 80.0);
+    assert_eq!(doc.element_scroll_width(id), 90.0);
+
+    doc.element_scroll_to(id, 100.0, 0.0);
+    assert_eq!(doc.element_scroll_left(id), 10.0);
 }
 
 #[test]
@@ -8515,6 +9242,44 @@ fn state_revert_layer_uses_state_layer_context() {
         hover.color,
         Color::rgb(200, 0, 0),
         "state `revert-layer` should roll back only the current state cascade layer"
+    );
+}
+
+#[test]
+fn state_variable_revert_layer_keeps_layer_snapshot() {
+    let doc = parse_and_layout(
+        "<style>@layer base, theme;\
+         @layer base { #t:hover { color: rgb(200, 0, 0); } }\
+         @layer theme { #t:hover { color: rgb(0, 0, 200); --choice: revert-layer; color: var(--choice); } }</style>\
+         <div id=t>x</div>",
+        900.0,
+    );
+    let div = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "t")
+    })
+    .expect("target");
+    let hover = div.style.hover_style.as_ref().expect("hover style");
+    assert_eq!(hover.color, Color::rgb(200, 0, 0));
+}
+
+#[test]
+fn state_important_custom_property_overrides_normal_value() {
+    let doc = parse_and_layout(
+        "<style>@layer base, theme;\
+         @layer base { #t:hover { --ink: red; color: var(--ink); } }\
+         @layer theme { #t:hover { --ink: blue !important; } }</style>\
+         <div id=t>x</div>",
+        900.0,
+    );
+    let div = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "t")
+    })
+    .expect("target");
+    let hover = div.style.hover_style.as_ref().expect("hover style");
+    assert_eq!(hover.color, Color::rgb(0, 0, 255));
+    assert_eq!(
+        hover.custom_props.get("--ink").map(String::as_str),
+        Some("blue")
     );
 }
 
@@ -10074,6 +10839,70 @@ fn nested_layer_names_are_qualified_by_the_parent_layer() {
         "rgb(0, 128, 0)",
         "nested framework.base must not collapse into the top-level base layer"
     );
+}
+
+#[test]
+fn nested_layers_stay_grouped_and_parent_rules_follow_sublayers() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<style>\
+         @layer first.child { #outer { color: rgb(255, 0, 0) } }\
+         @layer second { #outer { color: rgb(0, 128, 0) } }\
+         @layer first { #outer { color: rgb(0, 0, 255) }\
+           #parent { color: rgb(0, 0, 255) }\
+           @layer child { #parent { color: rgb(255, 0, 0) } }\
+         }</style><div id=outer>x</div><div id=parent>x</div>",
+        900.0,
+    );
+    let outer = doc.get_element_by_id("outer").unwrap();
+    assert_eq!(
+        doc.computed_style_property(outer, "color"),
+        "rgb(0, 128, 0)"
+    );
+    let parent = doc.get_element_by_id("parent").unwrap();
+    assert_eq!(
+        doc.computed_style_property(parent, "color"),
+        "rgb(0, 0, 255)"
+    );
+}
+
+#[test]
+fn important_nested_layer_precedes_its_parent() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<style>@layer first {\
+           #target { color: rgb(0, 0, 255) !important }\
+           @layer child { #target { color: rgb(255, 0, 0) !important } }\
+         }</style><div id=target>x</div>",
+        900.0,
+    );
+    let node = doc.get_element_by_id("target").unwrap();
+    assert_eq!(doc.computed_style_property(node, "color"), "rgb(255, 0, 0)");
+}
+
+#[test]
+fn media_conditioned_layer_declaration_changes_order_on_resize() {
+    let mut doc = crate::parse_html(
+        "<style>\
+         @media (min-width: 700px) { @layer layout; }\
+         @layer theme, layout;\
+         @layer theme { #target { color: rgb(0, 0, 255) } }\
+         @layer layout { #target { color: rgb(0, 128, 0) } }\
+         </style><div id=target>x</div>",
+    );
+    for (width, expected) in [
+        (600.0, "rgb(0, 128, 0)"),
+        (800.0, "rgb(0, 0, 255)"),
+        (600.0, "rgb(0, 128, 0)"),
+    ] {
+        doc.set_viewport(width, 600.0);
+        let node = doc.get_element_by_id("target").unwrap();
+        assert_eq!(
+            doc.computed_style_property(node, "color"),
+            expected,
+            "{width}"
+        );
+    }
 }
 
 #[test]
@@ -12777,12 +13606,20 @@ fn circle_and_ellipse_radial_extents_resolve_against_reference_box() {
         style.clip_path.ellipse_rect(reference, 16.0, 16.0),
         Rect::new(30.0, 20.0, 40.0, 20.0)
     );
-    apply_property(&mut style, "clip-path", "ellipse(closest-corner at left center)");
+    apply_property(
+        &mut style,
+        "clip-path",
+        "ellipse(closest-corner at left center)",
+    );
     assert_eq!(
         style.clip_path.ellipse_rect(reference, 16.0, 16.0),
         Rect::new(0.0, 0.0, 0.0, 60.0)
     );
-    apply_property(&mut style, "clip-path", "ellipse(closest-corner at center top)");
+    apply_property(
+        &mut style,
+        "clip-path",
+        "ellipse(closest-corner at center top)",
+    );
     assert_eq!(
         style.clip_path.ellipse_rect(reference, 16.0, 16.0),
         Rect::new(0.0, 0.0, 100.0, 0.0)
@@ -12815,9 +13652,18 @@ fn radial_clip_positions_follow_position_grammar() {
     for (value, expected) in [
         ("circle(1px at left top)", Rect::new(-1.0, -1.0, 2.0, 2.0)),
         ("circle(1px at top left)", Rect::new(-1.0, -1.0, 2.0, 2.0)),
-        ("circle(1px at center 20px)", Rect::new(49.0, 19.0, 2.0, 2.0)),
-        ("circle(1px at 20px center)", Rect::new(19.0, 29.0, 2.0, 2.0)),
-        ("circle(1px at center center)", Rect::new(49.0, 29.0, 2.0, 2.0)),
+        (
+            "circle(1px at center 20px)",
+            Rect::new(49.0, 19.0, 2.0, 2.0),
+        ),
+        (
+            "circle(1px at 20px center)",
+            Rect::new(19.0, 29.0, 2.0, 2.0),
+        ),
+        (
+            "circle(1px at center center)",
+            Rect::new(49.0, 29.0, 2.0, 2.0),
+        ),
         (
             "circle(1px at right 10px bottom 5px)",
             Rect::new(89.0, 54.0, 2.0, 2.0),
@@ -14753,7 +15599,10 @@ fn a_comment_marker_inside_a_string_is_not_stripped() {
         rule.declarations.contains_key("content"),
         "the declaration was emptied and dropped by comment stripping inside a string"
     );
-    assert_eq!(rule.declarations.get("content").map(String::as_str), Some("\"/* x */\""));
+    assert_eq!(
+        rule.declarations.get("content").map(String::as_str),
+        Some("\"/* x */\"")
+    );
     let css = r#".foo { content: "escaped \"/* still text */\""; /* real comment */ color: red }"#;
     let rules = crate::css::parse_stylesheet(css).unwrap_or_default();
     let rule = &rules[0];
@@ -14761,8 +15610,14 @@ fn a_comment_marker_inside_a_string_is_not_stripped() {
         rule.declarations.get("content").map(String::as_str),
         Some(r#""escaped \"/* still text */\"""#)
     );
-    assert_eq!(rule.declarations.get("color").map(String::as_str), Some("red"));
-    assert_eq!(crate::css::parser::strip_css_comments("a{}/* unfinished"), "a{}");
+    assert_eq!(
+        rule.declarations.get("color").map(String::as_str),
+        Some("red")
+    );
+    assert_eq!(
+        crate::css::parser::strip_css_comments("a{}/* unfinished"),
+        "a{}"
+    );
 }
 
 // ── Media query evaluation (mediaqueries-5) ─────────────────────────────────
@@ -14787,7 +15642,11 @@ fn nested_media_lists_distribute_the_outer_condition() {
     sheet.parse_and_add(
         "@media screen, speech { @media (min-width: 800px), print { .nested { color: red } } }",
     );
-    let rule = sheet.rules.iter().find(|rule| rule.original_selector == ".nested").unwrap();
+    let rule = sheet
+        .rules
+        .iter()
+        .find(|rule| rule.original_selector == ".nested")
+        .unwrap();
     assert!(rule.media_condition.matches(900.0, 600.0));
     assert!(!rule.media_condition.matches(600.0, 600.0));
 }
@@ -14800,7 +15659,11 @@ fn linked_media_condition_also_applies_inside_media_rules() {
         "https://site.test/base.css",
         "print",
     );
-    let rule = sheet.rules.iter().find(|rule| rule.original_selector == ".linked").unwrap();
+    let rule = sheet
+        .rules
+        .iter()
+        .find(|rule| rule.original_selector == ".linked")
+        .unwrap();
     assert!(!rule.media_condition.matches(900.0, 600.0));
 }
 

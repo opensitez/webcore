@@ -227,6 +227,38 @@ fn inline_block_with_percentage_table_uses_available_width() {
 }
 
 #[test]
+fn direct_inline_children_keep_logical_end_margins() {
+    let plain = parse_and_layout(
+        "<style>body{margin:0}</style><div id=tags><a id=one>One</a><a id=two>Two</a></div>",
+        500.0,
+    );
+    let doc = parse_and_layout(
+        "<style>body{margin:0}#tags a{margin-inline-end:16px}</style><div id=tags><a id=one>One</a><a id=two>Two</a></div>",
+        500.0,
+    );
+    let plain_two = find_box(&plain.root, &|n| {
+        n.attributes.get("id").is_some_and(|s| s == "two")
+    })
+    .unwrap();
+    let one = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|s| s == "one")
+    })
+    .unwrap();
+    let two = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|s| s == "two")
+    })
+    .unwrap();
+    assert!(
+        (two.layout.border_rect.x - plain_two.layout.border_rect.x - 16.0).abs() < 0.5,
+        "plain={:?}, with margin={:?}",
+        plain_two.layout.border_rect,
+        two.layout.border_rect
+    );
+    assert!((one.layout.resolved_margin_right - 16.0).abs() < 0.5);
+    assert!((one.layout.border_rect.right() + 16.0 - two.layout.border_rect.x).abs() < 0.5);
+}
+
+#[test]
 fn block_inside_inline_link_wraps_beside_sibling_float() {
     let doc = parse_and_layout(
         "<style>body{margin:0}#list{width:300px}li{list-style:none}p{margin:0;font-size:16px;line-height:20px}img{float:left;width:90px;height:120px;margin-right:10px}</style><ul id=list><li><div><a>\n <img id=cover>\n </a>\n <a><p id=title>Report on monetary policy for the current year</p></a></div></li></ul>",
@@ -1475,6 +1507,35 @@ fn layoutadv_min_height_percent() {
     apply_property(&mut s, "min-height", "50%");
     assert!(matches!(s.min_height, CssLength::Percent(_)));
     assert_eq!(s.min_height.resolve(16.0, 400.0, 16.0), 200.0);
+}
+
+#[test]
+fn percentage_min_height_uses_definite_containing_block_height() {
+    let doc = parse_and_layout(
+        "<div style='position:relative;width:200px;height:300px'>\
+         <span id=overlay style='position:absolute;left:0;top:0;width:100%;min-height:100%'></span>\
+         <div id=child style='min-height:50%'></div>\
+         </div>",
+        800.0,
+    );
+    let overlay = find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "overlay")
+    })
+    .expect("absolute child");
+    let child = find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "child")
+    })
+    .expect("normal child");
+    assert!(
+        (overlay.layout.content_rect.h - 300.0).abs() < 1.0,
+        "absolute child: {:?}",
+        overlay.layout.content_rect
+    );
+    assert!(
+        (child.layout.content_rect.h - 150.0).abs() < 1.0,
+        "normal child: {:?}",
+        child.layout.content_rect
+    );
 }
 
 #[test]

@@ -1103,6 +1103,107 @@ fn two_axis_element_scrollbars_leave_a_separate_corner() {
 }
 
 #[test]
+fn stable_vertical_gutters_bound_the_horizontal_scrollbar() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list;
+    use crate::types::Color;
+
+    for (gutter, expected_x, expected_width) in
+        [("stable", 0.0, 30.0), ("stable both-edges", 10.0, 20.0)]
+    {
+        let doc = parse_and_layout(
+            &format!(
+                "<style>* {{ margin:0; padding:0 }} #box {{ width:40px; height:40px; overflow-x:scroll; overflow-y:hidden; scrollbar-gutter:{gutter}; scrollbar-color:red rgb(0,255,0) }}</style><div id=box></div>"
+            ),
+            80.0,
+        );
+        let list = build_display_list(&doc.root, 80.0, 80.0);
+        let tracks: Vec<_> = list
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                PaintCmd::FillRect { rect, color, .. } if *color == Color::rgb(0, 255, 0) => {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tracks.len(), 1, "{gutter}: {tracks:?}");
+        assert_eq!(tracks[0].x, expected_x, "{gutter}");
+        assert_eq!(tracks[0].y, 30.0, "{gutter}");
+        assert_eq!(tracks[0].w, expected_width, "{gutter}");
+        assert_eq!(tracks[0].h, 10.0, "{gutter}");
+    }
+}
+
+#[test]
+fn stable_gutter_auto_overflow_paints_horizontal_scrollbar() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list;
+    use crate::types::Color;
+
+    let doc = parse_and_layout(
+        "<style>*{margin:0;padding:0} #box{width:100px;height:40px;overflow-x:auto;overflow-y:hidden;scrollbar-gutter:stable both-edges;scrollbar-color:red rgb(0,255,0)} #child{width:90px;height:10px}</style><div id=box><div id=child></div></div>",
+        800.0,
+    );
+    let list = build_display_list(&doc.root, 800.0, 80.0);
+    assert!(list.commands.iter().any(|command| matches!(
+        command,
+        PaintCmd::FillRect { rect, color, .. }
+            if *color == Color::rgb(0, 255, 0)
+                && rect.x == 10.0
+                && rect.y == 30.0
+                && rect.w == 80.0
+                && rect.h == 10.0
+    )));
+}
+
+#[test]
+fn overflow_scroll_paints_both_tracks_without_content_overflow() {
+    use crate::renderer::display_list::PaintCmd;
+    use crate::renderer::display_list_builder::build_display_list;
+    use crate::types::Color;
+
+    for (overflow, expected_tracks) in [("scroll", 3), ("auto", 0)] {
+        let doc = parse_and_layout(
+            &format!(
+                "<style>* {{ margin:0; padding:0 }} #box {{ width:40px; height:40px; overflow:{overflow}; scrollbar-color:red rgb(0,255,0) }}</style><div id=box></div>"
+            ),
+            80.0,
+        );
+        let list = build_display_list(&doc.root, 80.0, 80.0);
+        let tracks: Vec<_> = list
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                PaintCmd::FillRect { rect, color, .. } if *color == Color::rgb(0, 255, 0) => {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tracks.len(), expected_tracks, "{overflow}: {tracks:?}");
+        if overflow == "scroll" {
+            assert!(
+                tracks
+                    .iter()
+                    .any(|r| r.x == 30.0 && r.y == 0.0 && r.h == 30.0)
+            );
+            assert!(
+                tracks
+                    .iter()
+                    .any(|r| r.x == 0.0 && r.y == 30.0 && r.w == 30.0)
+            );
+            assert!(
+                tracks
+                    .iter()
+                    .any(|r| r.x == 30.0 && r.y == 30.0 && r.w == 10.0 && r.h == 10.0)
+            );
+        }
+    }
+}
+
+#[test]
 fn padded_scrollbar_tracks_reach_the_padding_box_corner() {
     use crate::renderer::display_list::PaintCmd;
     use crate::renderer::display_list_builder::build_display_list;
@@ -1155,10 +1256,12 @@ fn padded_scrollbar_tracks_reach_the_padding_box_corner() {
         / (box_node.layout.scroll_height + padding.h - content.h))
         .max(20.0)
         .min(50.0);
-    let expected_thumb_w = (50.0 * padding.w
-        / (box_node.layout.scroll_width + padding.w - content.w))
+    let track_w = padding.w - box_node.style.scrollbar_width_px();
+    let scrollport_w = box_node.scrollport_content_width();
+    let expected_thumb_w = (track_w * track_w
+        / (box_node.layout.scroll_width.max(scrollport_w) + track_w - scrollport_w))
         .max(20.0)
-        .min(50.0);
+        .min(track_w);
     let thumbs: Vec<_> = list
         .commands
         .iter()

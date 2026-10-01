@@ -837,8 +837,8 @@ impl EngineFrame {
 
     /// Set a CSS variable on the root element.
     pub fn set_css_var(&mut self, name: &str, value: &str) {
-        std::sync::Arc::make_mut(&mut self.doc.root.style)
-            .custom_props
+        let style = std::sync::Arc::make_mut(&mut self.doc.root.style);
+        std::sync::Arc::make_mut(&mut style.custom_props)
             .insert(name.to_string(), value.to_string());
         self.mark_style_dirty();
         self.engine.invalidate_cascade();
@@ -846,10 +846,10 @@ impl EngineFrame {
 
     /// Apply a theme (set of CSS variables) on :root.
     pub fn set_theme(&mut self, vars: &[(&str, &str)]) {
+        let style = std::sync::Arc::make_mut(&mut self.doc.root.style);
+        let props = std::sync::Arc::make_mut(&mut style.custom_props);
         for &(name, value) in vars {
-            std::sync::Arc::make_mut(&mut self.doc.root.style)
-                .custom_props
-                .insert(name.to_string(), value.to_string());
+            props.insert(name.to_string(), value.to_string());
         }
         self.mark_style_dirty();
         self.engine.invalidate_cascade();
@@ -1489,6 +1489,11 @@ impl EngineFrame {
             if !(is_y4m || is_mp4) || !self.scheduled_videos.insert((node_id, url.clone())) {
                 continue;
             }
+            if self.doc.media_autoplay(node_id) == Some(true)
+                && self.doc.media_paused(node_id) == Some(true)
+            {
+                self.doc.media_play(node_id);
+            }
             let tx = self
                 .video_tx
                 .get_or_insert_with(|| {
@@ -1498,68 +1503,89 @@ impl EngineFrame {
                 })
                 .clone();
             let wake = self.resource_wake.clone();
+            let should_loop = self.doc.media_loop(node_id) == Some(true);
             std::thread::spawn(move || {
                 use std::io::Read;
 
-                let mut reader: Box<dyn Read + Send> =
+                let open = || -> Option<Box<dyn Read + Send>> {
                     if url.starts_with("http://") || url.starts_with("https://") {
-                        match crate::http_client().get(&url).send() {
-                            Ok(response) if response.status().is_success() => Box::new(response),
-                            _ => return,
-                        }
+                        let response = crate::http_client().get(&url).send().ok()?;
+                        response
+                            .status()
+                            .is_success()
+                            .then(|| Box::new(response) as _)
                     } else {
-                        match std::fs::File::open(&url) {
-                            Ok(file) => Box::new(file),
-                            Err(_) => return,
-                        }
-                    };
-                let mut decoder: Box<dyn crate::video::backend::StreamingVideoDecoder> = if is_mp4 {
-                    Box::new(crate::video::mp4_avc::Mp4AvcStream::new())
-                } else {
-                    Box::new(crate::video::y4m::Y4mStream::new())
+                        std::fs::File::open(&url)
+                            .ok()
+                            .map(|file| Box::new(file) as _)
+                    }
                 };
                 let mut metadata_sent = false;
                 let mut bytes = [0u8; 16 * 1024];
+                let mut loop_start = 0.0_f32;
                 loop {
-                    let count = match reader.read(&mut bytes) {
-                        Ok(0) => break,
-                        Ok(count) => count,
-                        Err(_) => return,
-                    };
-                    let frames = match decoder.push(&bytes[..count]) {
-                        Ok(frames) => frames,
-                        Err(_) => return,
-                    };
-                    if !metadata_sent {
-                        if let Some(metadata) = decoder.metadata() {
+                    let Some(mut reader) = open() else { return };
+                    let mut decoder: Box<dyn crate::video::backend::StreamingVideoDecoder> =
+                        if is_mp4 {
+                            Box::new(crate::video::mp4_avc::Mp4AvcStream::new())
+                        } else {
+                            Box::new(crate::video::y4m::Y4mStream::new())
+                        };
+                    let mut last_frame_time = None;
+                    loop {
+                        let count = match reader.read(&mut bytes) {
+                            Ok(0) => break,
+                            Ok(count) => count,
+                            Err(_) => return,
+                        };
+                        let frames = match decoder.push(&bytes[..count]) {
+                            Ok(frames) => frames,
+                            Err(_) => return,
+                        };
+                        if !metadata_sent {
+                            if let Some(metadata) = decoder.metadata() {
+                                if tx
+                                    .send(PendingVideoUpdate::Metadata { node_id, metadata })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                                metadata_sent = true;
+                                if let Some(wake) = &wake {
+                                    wake();
+                                }
+                            }
+                        }
+                        for mut frame in frames {
+                            last_frame_time = Some(frame.timestamp);
+                            frame.timestamp += loop_start;
                             if tx
-                                .send(PendingVideoUpdate::Metadata { node_id, metadata })
+                                .send(PendingVideoUpdate::Frames {
+                                    node_id,
+                                    frames: vec![frame],
+                                })
                                 .is_err()
                             {
                                 return;
                             }
-                            metadata_sent = true;
                             if let Some(wake) = &wake {
                                 wake();
                             }
                         }
                     }
-                    for frame in frames {
-                        if tx
-                            .send(PendingVideoUpdate::Frames {
-                                node_id,
-                                frames: vec![frame],
-                            })
-                            .is_err()
-                        {
-                            return;
-                        }
-                        if let Some(wake) = &wake {
-                            wake();
-                        }
+                    if decoder.finish().is_err() || !should_loop {
+                        return;
                     }
+                    let pass_duration = decoder
+                        .metadata()
+                        .and_then(|metadata| metadata.duration)
+                        .filter(|duration| duration.is_finite() && *duration > 0.0)
+                        .or_else(|| last_frame_time.map(|time| time + 1.0 / 30.0));
+                    let Some(pass_duration) = pass_duration else {
+                        return;
+                    };
+                    loop_start += pass_duration;
                 }
-                let _ = decoder.finish();
             });
         }
     }
@@ -2251,6 +2277,19 @@ mod tests {
         assert_eq!(frame.scheduled_videos.len(), 1);
         assert!(frame.video_rx.is_some());
         assert_eq!(frame.doc.layout_generation, 0);
+    }
+
+    #[test]
+    fn streamed_muted_autoplay_video_starts_without_a_click() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("/private/tmp/");
+        frame.feed_html_chunk(
+            b"<html><body><video id=movie autoplay muted preload=none><source src='/private/tmp/missing-stream.mp4' type='video/mp4'>",
+        );
+        let id = frame.doc.get_element_by_id("movie").unwrap();
+        assert_eq!(frame.scheduled_videos.len(), 1);
+        assert_eq!(frame.doc.media_muted(id), Some(true));
+        assert_eq!(frame.doc.media_paused(id), Some(false));
     }
 
     #[test]

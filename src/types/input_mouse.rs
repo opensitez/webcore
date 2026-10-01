@@ -332,7 +332,18 @@ impl Document {
                         let picked = match self.picker_kind(picker_id) {
                             Some(PickerKind::Calendar) => self
                                 .calendar_hit(picker_id, doc_pt)
-                                .map(|(y, m, d)| crate::widgets::to_date_value(y, m, d)),
+                                .map(|(y, m, d)| {
+                                    let date = crate::widgets::to_date_value(y, m, d);
+                                    let is_datetime = self.find_webcore(picker_id)
+                                        .and_then(|node| node.attributes.get("type"))
+                                        .is_some_and(|kind| kind.eq_ignore_ascii_case("datetime-local"));
+                                    if is_datetime {
+                                        let old = self.find_webcore(picker_id).map(input_value).unwrap_or_default();
+                                        format!("{date}T{}", old.split_once('T').map(|(_, time)| time).unwrap_or("00:00"))
+                                    } else {
+                                        date
+                                    }
+                                }),
                             _ => self
                                 .picker_hit(picker_id, doc_pt)
                                 .map(crate::widgets::to_simple_colour),
@@ -618,6 +629,22 @@ impl Document {
                                     // handling it here as well would move the
                                     // knob a second time to wherever the
                                     // pointer happened to end.
+                                } else if let Some(rect) = self.find_webcore(effective_id)
+                                    .filter(|node| node.tag == "input"
+                                        && node.attributes.get("type").map(String::as_str) == Some("number"))
+                                    .map(|node| node.layout.content_rect)
+                                {
+                                    let well = crate::widgets::Stepper::well_width(rect.h);
+                                    if doc_pt.0 >= rect.x + rect.w - well
+                                        && doc_pt.0 < rect.x + rect.w
+                                        && doc_pt.1 >= rect.y
+                                        && doc_pt.1 < rect.y + rect.h
+                                        && self.step_number_input(effective_id, doc_pt.1 < rect.y + rect.h / 2.0)
+                                    {
+                                        self.sync_form_state_to_arena();
+                                        self.style_dirty = true;
+                                        redraw = true;
+                                    }
                                 } else if self.picker_kind(effective_id).is_some() {
                                     // Activating the control opens its picker —
                                     // HTML leaves each picker's FORM to the
@@ -785,18 +812,18 @@ fn normalize_pointer_target(root: &WebCore, target_id: u32) -> u32 {
         return 0;
     }
 
-    fn walk(
-        node: &WebCore,
-        target_id: u32,
-        nearest_element: u32,
-    ) -> Option<u32> {
+    fn walk(node: &WebCore, target_id: u32, nearest_element: u32) -> Option<u32> {
         let current_element = if node.is_element() && node.node_id != 0 {
             node.node_id
         } else {
             nearest_element
         };
         if node.node_id == target_id {
-            return Some(if current_element != 0 { current_element } else { target_id });
+            return Some(if current_element != 0 {
+                current_element
+            } else {
+                target_id
+            });
         }
         for child in &node.children {
             if let Some(found) = walk(child, target_id, current_element) {

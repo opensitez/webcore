@@ -229,7 +229,7 @@ fn clear_layout_children(node: &mut WebCore) {
 fn is_native_replaced_control(node: &WebCore) -> bool {
     matches!(
         node.tag.as_str(),
-        "input" | "select" | "textarea" | "progress" | "meter"
+        "input" | "select" | "textarea" | "progress" | "meter" | "video" | "audio"
     )
 }
 
@@ -303,9 +303,13 @@ pub(crate) fn update_scroll_extents_from_children(
         });
     node.layout.scroll_width = natural_scroll_w;
     node.layout.scroll_height = natural_scroll_h;
-    if matches!(node.style.overflow_x, Overflow::Scroll | Overflow::Auto | Overflow::Hidden)
-        || matches!(node.style.overflow_y, Overflow::Scroll | Overflow::Auto | Overflow::Hidden)
-    {
+    if matches!(
+        node.style.overflow_x,
+        Overflow::Scroll | Overflow::Auto | Overflow::Hidden
+    ) || matches!(
+        node.style.overflow_y,
+        Overflow::Scroll | Overflow::Auto | Overflow::Hidden
+    ) {
         let max_scroll_x = (node.layout.scroll_width - content_w).max(0.0);
         let max_scroll_y = (node.layout.scroll_height - content_h).max(0.0);
         node.layout.scroll_left = node.layout.scroll_left.min(max_scroll_x).max(0.0);
@@ -2639,6 +2643,7 @@ impl LayoutEngine {
         parent_font_px: f32,
         root_font_px: f32,
     ) -> IntrinsicSizes {
+        let _profile = crate::profile::span(crate::profile::Phase::LayoutIntrinsic);
         IntrinsicSizes {
             min_content: self.min_content_width(node, parent_font_px, root_font_px),
             max_content: self.max_content_width(node, parent_font_px, root_font_px),
@@ -2652,6 +2657,7 @@ impl LayoutEngine {
         root_font_px: f32,
         width_basis: f32,
     ) -> IntrinsicSizes {
+        let _profile = crate::profile::span(crate::profile::Phase::LayoutIntrinsic);
         IntrinsicSizes {
             min_content: self.min_content_width_inner(
                 node,
@@ -4250,6 +4256,8 @@ impl LayoutEngine {
         }
 
         // Rebuild selector index if rules changed (lazy, skips if already up-to-date).
+        doc.stylesheet
+            .set_layer_viewport(self.viewport_w, self.viewport_h);
         doc.stylesheet.rebuild_index();
 
         // Load @font-face fonts (non-blocking — remote fonts arrive via poll_pending_fonts).
@@ -4282,7 +4290,8 @@ impl LayoutEngine {
             || (self.cached_has_media_q
                 && doc.stylesheet.rules.iter().any(|r| {
                     !r.media_condition.is_empty()
-                        && r.media_condition.matches(self.last_cascade_vw, self.viewport_h)
+                        && r.media_condition
+                            .matches(self.last_cascade_vw, self.viewport_h)
                             != r.media_condition.matches(viewport_width, self.viewport_h)
                 }));
 
@@ -4636,6 +4645,7 @@ impl LayoutEngine {
         doc.root.layout.margin_rect.h = h;
 
         perf::end_layout();
+        perf::flush_hot_nodes();
         perf::set_counts(
             count_nodes(&doc.root) as u32,
             doc.stylesheet.rules.len() as u32,
@@ -5091,6 +5101,10 @@ impl LayoutEngine {
                     .unwrap_or(0.0),
                 "textarea" => 200.0,
                 "progress" | "meter" => 160.0,
+                "video" | "audio" => self
+                    .intrinsic_dimensions(node)
+                    .map(|(width, _)| width)
+                    .unwrap_or(300.0),
                 _ => 0.0,
             };
             let fallback_h = match node.tag.as_str() {
@@ -5110,6 +5124,10 @@ impl LayoutEngine {
                 }
                 "textarea" => (font_px * 1.35 * 2.0).ceil().max(40.0),
                 "progress" | "meter" => 16.0,
+                "video" | "audio" => self
+                    .intrinsic_dimensions(node)
+                    .map(|(_, height)| height)
+                    .unwrap_or(150.0),
                 _ => 0.0,
             };
             let final_w = rbox.content_width.unwrap_or(fallback_w).max(0.0);
@@ -5305,9 +5323,7 @@ impl LayoutEngine {
         // Build child constraints from resolved font size
         let mut child_c = Constraints::new(containing_w, x, y, font_px, root_font_px);
         child_c.force_independent_formatting_context = c.force_independent_formatting_context;
-        if effective_display == Display::Inline {
-            child_c.available_height = c.available_height;
-        }
+        child_c.available_height = c.available_height;
 
         let h = match effective_display {
             Display::Flex | Display::InlineFlex => flex::layout_flex(self, node, &rbox, &child_c),

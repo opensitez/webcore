@@ -572,6 +572,49 @@ pub(crate) fn pre_resolve_variables(vars: &mut HashMap<String, String>) {
     }
 }
 
+/// Resolve declarations added on this element against already-computed inherited values.
+/// Inherited custom properties are computed values, so a child override must not
+/// cause the parent's variables to be evaluated again.
+pub(crate) fn pre_resolve_changed_variables(
+    vars: &mut HashMap<String, String>,
+    changed: &HashSet<&str>,
+) {
+    for &key in changed {
+        if key.starts_with("--csstools-light-dark-toggle-") {
+            vars.remove(key);
+        }
+    }
+    let keys: Vec<&str> = changed
+        .iter()
+        .copied()
+        .filter(|key| vars.contains_key(*key))
+        .collect();
+    for _ in 0..keys.len().min(50) {
+        let mut updates = Vec::new();
+        for &key in &keys {
+            if let Some(val) = vars.get(key) {
+                if val.contains("var(") {
+                    let resolved = resolve_var_pass(val, vars);
+                    if resolved != *val {
+                        updates.push((key, resolved));
+                    }
+                }
+            }
+        }
+        if updates.is_empty() {
+            break;
+        }
+        for (key, value) in updates {
+            vars.insert(key.to_string(), value);
+        }
+    }
+    for key in keys {
+        if vars.get(key).is_some_and(|value| value.contains("var(")) {
+            vars.insert(key.to_string(), String::new());
+        }
+    }
+}
+
 /// Extract @font-face declarations from a CSS string.
 pub fn extract_font_faces(css: &str, faces: &mut Vec<FontFaceDecl>) {
     let cleaned = strip_css_comments(css);

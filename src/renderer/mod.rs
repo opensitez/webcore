@@ -213,11 +213,7 @@ mod retained_paint_band_tests {
     #[test]
     fn far_offscreen_media_enters_band_only_when_scrolled_near() {
         let mut renderer = Renderer::new();
-        let mut doc = renderer.load_html_vp(
-            "<div style='height:10000px'></div>",
-            1280.0,
-            820.0,
-        );
+        let mut doc = renderer.load_html_vp("<div style='height:10000px'></div>", 1280.0, 820.0);
         let initial = retained_paint_band_for_doc(&doc, 1280.0, 820.0);
         assert!(initial.bottom() < 3200.0);
         doc.scroll_y = 3000.0;

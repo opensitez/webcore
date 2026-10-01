@@ -1166,6 +1166,11 @@ pub fn layout_inline_block(
                         text_start,
                         text_len,
                     } => {
+                        if *text_len == 0 {
+                            cur_x += item.advance;
+                            prefix_w += item.advance;
+                            continue;
+                        }
                         let seg_start = floor_cb(&flat_text, *text_start);
                         let seg_end =
                             floor_cb(&flat_text, (*text_start + *text_len).min(flat_text.len()));
@@ -1547,6 +1552,10 @@ pub fn layout_inline_block(
                 target.layout.resolved_border_right = rb.border_right;
                 target.layout.resolved_border_bottom = rb.border_bottom;
                 target.layout.resolved_border_left = rb.border_left;
+                target.layout.resolved_margin_top = rb.margin_top;
+                target.layout.resolved_margin_right = rb.margin_right;
+                target.layout.resolved_margin_bottom = rb.margin_bottom;
+                target.layout.resolved_margin_left = rb.margin_left;
                 target.layout.padding_rect = Rect::new(
                     rect.x - rb.padding_left,
                     rect.y - rb.padding_top,
@@ -2491,7 +2500,8 @@ fn collect_items_inner(
     // ── Inline box decoration: account for padding/border/margin ────────
     // CSS inline elements (not the block container itself) with
     // padding/border/margin add to the line width at the start and end.
-    let has_inline_decoration = !is_direct_child && matches!(node.style.display, Display::Inline);
+    let has_inline_decoration =
+        !node.is_text_node() && matches!(node.style.display, Display::Inline);
     let (inline_left, inline_right) = if has_inline_decoration {
         // ⛔ THROUGH `res_box`, which is the one place that knows a border with
         // no style occupies nothing (CSS Backgrounds §4.3). `border-width`
@@ -4274,15 +4284,15 @@ fn align_char_x_to_inline_items(line: &mut LayoutLine, items: &[InlineItem]) {
         return;
     }
     let text_budget = (line.width - line.text_x_offset).max(0.0);
-    // Shaping sees only the flat text, not atomic inline boxes between runs.
+    // Shaping sees only flat text, not atomic boxes or inline edge spacing.
     // Even when the text fits, its caret origins must include those advances.
-    if !items
-        .iter()
-        .any(|item| matches!(item.kind, InlineItemKind::Atomic { .. }))
-        && line
-            .char_x
-            .last()
-            .is_some_and(|end| *end <= text_budget + 2.0)
+    if !items.iter().any(|item| {
+        matches!(item.kind, InlineItemKind::Atomic { .. })
+            || matches!(item.kind, InlineItemKind::Text { text_len: 0, .. }) && item.advance != 0.0
+    }) && line
+        .char_x
+        .last()
+        .is_some_and(|end| *end <= text_budget + 2.0)
     {
         return;
     }
@@ -4303,7 +4313,11 @@ fn align_char_x_to_inline_items(line: &mut LayoutLine, items: &[InlineItem]) {
         {
             let start = text_start.saturating_sub(line.text_start);
             let end = start.saturating_add(*text_len);
-            if *text_start >= line.text_start && end < line.char_x.len() && end < shaped.len() {
+            if *text_len > 0
+                && *text_start >= line.text_start
+                && end < line.char_x.len()
+                && end < shaped.len()
+            {
                 let raw_width = shaped[end] - shaped[start];
                 let target_start = advance - line.text_x_offset;
                 for offset in start..=end {

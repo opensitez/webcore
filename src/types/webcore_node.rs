@@ -273,6 +273,23 @@ pub enum ShadowMode {
 }
 
 impl WebCore {
+    pub(crate) fn scrollbar_gutter_widths(&self) -> (f32, f32) {
+        let show_vertical = self.style.overflow_y == Overflow::Scroll
+            || (self.style.overflow_y == Overflow::Auto
+                && self.layout.scroll_height > self.layout.content_rect.h);
+        let (left, right) = self.style.scrollbar_gutter_edges(show_vertical);
+        let width = self.style.scrollbar_width_px();
+        (
+            if left { width } else { 0.0 },
+            if right { width } else { 0.0 },
+        )
+    }
+
+    pub(crate) fn scrollport_content_width(&self) -> f32 {
+        let (left, right) = self.scrollbar_gutter_widths();
+        (self.layout.content_rect.w - left - right).max(0.0)
+    }
+
     /// Everything a SELECTOR can match on that is not an attribute.
     ///
     /// ⛔ The style-sharing key used to be `(parent, tag, attributes)`, on the

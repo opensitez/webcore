@@ -78,8 +78,7 @@ impl RasterCache {
     }
 }
 
-static CACHE: LazyLock<Mutex<RasterCache>> =
-    LazyLock::new(|| Mutex::new(RasterCache::default()));
+static CACHE: LazyLock<Mutex<RasterCache>> = LazyLock::new(|| Mutex::new(RasterCache::default()));
 
 fn color_bytes(color: Option<Color>) -> Option<[u8; 4]> {
     color.map(|c| [c.r, c.g, c.b, c.a])
@@ -165,12 +164,19 @@ pub(super) fn rasterize(
     let mut hash = DefaultHasher::new();
     let static_content = hash_svg_node(&doc.root, &mut hash) && !animated;
     if !static_content {
-        crate::profile::record(crate::profile::Phase::SvgRasterBypass, std::time::Duration::ZERO);
+        crate::profile::record(
+            crate::profile::Phase::SvgRasterBypass,
+            std::time::Duration::ZERO,
+        );
     }
     let key = static_content.then(|| RasterKey {
         svg: hash.finish(),
         dom: dom_fingerprint(dom_root),
-        ids: if document_ids.is_some() { ids_fingerprint } else { 0 },
+        ids: if document_ids.is_some() {
+            ids_fingerprint
+        } else {
+            0
+        },
         props: props_fingerprint(props),
         width,
         height,
@@ -185,7 +191,10 @@ pub(super) fn rasterize(
         && let Ok(mut cache) = CACHE.lock()
         && let Some(image) = cache.get(key)
     {
-        crate::profile::record(crate::profile::Phase::SvgRasterHit, std::time::Duration::ZERO);
+        crate::profile::record(
+            crate::profile::Phase::SvgRasterHit,
+            std::time::Duration::ZERO,
+        );
         return Some(image);
     }
     drop(_profile_key);
@@ -204,19 +213,28 @@ pub(super) fn rasterize(
         document_ids,
     )?);
     if crate::profile::is_enabled() {
-        let location = paint_context.map_or_else(String::new, |(border_y, content_y, top, bottom)| {
-            format!(" border_y:{border_y:.0} content_y:{content_y:.0} clip:{top:.0}-{bottom:.0}")
-        });
+        let location =
+            paint_context.map_or_else(String::new, |(border_y, content_y, top, bottom)| {
+                format!(
+                    " border_y:{border_y:.0} content_y:{content_y:.0} clip:{top:.0}-{bottom:.0}"
+                )
+            });
         crate::profile::record_resource_for(
             crate::profile::epoch(),
             "svg-raster",
             &format!("node:{node_id} {}x{}{location}", width, height),
-            if static_content { "cache-miss" } else { "dynamic" },
+            if static_content {
+                "cache-miss"
+            } else {
+                "dynamic"
+            },
             image.len(),
             started.elapsed(),
         );
     }
-    if let Some(key) = key && let Ok(mut cache) = CACHE.lock() {
+    if let Some(key) = key
+        && let Ok(mut cache) = CACHE.lock()
+    {
         cache.insert(key, Arc::clone(&image));
     }
     Some(image)

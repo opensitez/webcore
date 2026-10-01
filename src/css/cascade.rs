@@ -271,6 +271,44 @@ fn apply_state_matched_rules(
     revert_base: Option<&ComputedStyle>,
 ) {
     matched.sort_by(|&a, &b| normal_cascade_cmp(&stylesheet.rules, a, b));
+    let has_state_vars = matched
+        .iter()
+        .any(|(_, ri, _)| stylesheet.rules[*ri].has_custom_properties);
+    let mut state_vars_owned = has_state_vars.then(|| local_vars.clone());
+    if let Some(vars) = state_vars_owned.as_mut() {
+        for &(_, ri, _) in matched.iter() {
+            for (prop, value) in &stylesheet.rules[ri].declarations {
+                if prop.starts_with("--") {
+                    vars.insert(prop.clone(), value.clone());
+                }
+            }
+        }
+        matched.sort_by(|&a, &b| important_cascade_cmp(&stylesheet.rules, a, b));
+        for author_pass in [true, false] {
+            for &(sp, ri, _) in matched.iter() {
+                if is_author_origin(sp) != author_pass {
+                    continue;
+                }
+                for (prop, value) in &stylesheet.rules[ri].important_declarations {
+                    if prop.starts_with("--") {
+                        vars.insert(prop.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        pre_resolve_variables(vars);
+        matched.sort_by(|&a, &b| normal_cascade_cmp(&stylesheet.rules, a, b));
+    }
+    let local_vars = state_vars_owned.as_ref().unwrap_or(local_vars);
+    let needs_layer_snapshot = matched
+        .iter()
+        .any(|(_, ri, _)| stylesheet.rules[*ri].has_revert_value)
+        || (matched
+            .iter()
+            .any(|(_, ri, _)| stylesheet.rules[*ri].has_var_refs)
+            && local_vars
+                .values()
+                .any(|value| value_mentions_revert(value)));
     let mut current_layer: Option<(bool, u32)> = None;
     let mut layer_start_style = state.clone();
     for &(sp, ri, _) in matched.iter() {
@@ -278,7 +316,9 @@ fn apply_state_matched_rules(
         let layer_key = (is_author_origin(sp), rule.layer_rank);
         if current_layer != Some(layer_key) {
             current_layer = Some(layer_key);
-            layer_start_style = state.clone();
+            if needs_layer_snapshot {
+                layer_start_style = state.clone();
+            }
         }
         for &(id, ref val) in &rule.compiled_decls {
             apply_css_value_with_cascade_context(
@@ -296,7 +336,6 @@ fn apply_state_matched_rules(
     matched.sort_by(|&a, &b| important_cascade_cmp(&stylesheet.rules, a, b));
     for author_pass in [true, false] {
         let mut current_layer: Option<(bool, u32)> = None;
-        let mut layer_start_style = state.clone();
         for &(sp, ri, _) in matched.iter() {
             if is_author_origin(sp) != author_pass {
                 continue;
@@ -305,7 +344,9 @@ fn apply_state_matched_rules(
             let layer_key = (is_author_origin(sp), rule.layer_rank);
             if current_layer != Some(layer_key) {
                 current_layer = Some(layer_key);
-                layer_start_style = state.clone();
+                if needs_layer_snapshot {
+                    layer_start_style = state.clone();
+                }
             }
             for &(id, ref val) in &rule.compiled_important {
                 apply_css_value_with_cascade_context(
@@ -319,6 +360,9 @@ fn apply_state_matched_rules(
                 );
             }
         }
+    }
+    if let Some(vars) = state_vars_owned {
+        state.custom_props = std::sync::Arc::new(vars);
     }
 }
 
@@ -473,7 +517,12 @@ fn apply_host_projected_rules_with_ancestors(
     matched.sort_by(|&a, &b| normal_cascade_cmp(&stylesheet.rules, a, b));
     let mut style = (*node.style).clone();
     let mut local_vars = stylesheet.variables.clone();
-    local_vars.extend(style.custom_props.clone());
+    local_vars.extend(
+        style
+            .custom_props
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone())),
+    );
     let has_vars = !local_vars.is_empty();
     let mut current_layer: Option<(bool, u32)> = None;
     let mut layer_start_style = style.clone();
@@ -944,7 +993,7 @@ pub fn apply_cascade_vp_hover_target_url(
     let mut ancestors: Vec<AncestorInfo> = Vec::new();
     let mut candidates_buf: Vec<usize> = Vec::new();
     let mut counters = CounterState::default();
-    let mut share_cache: ShareCache = HashMap::new();
+    let mut share_cache = ShareCache::new();
     apply_cascade_inner(
         root,
         stylesheet,
@@ -996,23 +1045,55 @@ fn resolve_custom_counter_style_marker(
     resolve_custom_counter_style_marker_inner(stylesheet, name, index, &mut Vec::new())
 }
 
+fn find_counter_style<'a>(
+    stylesheet: &'a Stylesheet,
+    name: &str,
+) -> Option<&'a crate::css::CounterStyleRule> {
+    let (vw, vh) = stylesheet.counter_style_viewport;
+    stylesheet
+        .counter_styles
+        .iter()
+        .enumerate()
+        .filter(|(_, rule)| rule.name == name && rule.media_condition.matches(vw, vh))
+        .max_by_key(|(source_order, rule)| {
+            (
+                rule.author_origin,
+                stylesheet.layer_rank(&rule.layer),
+                *source_order,
+            )
+        })
+        .map(|(_, rule)| rule)
+}
+
+// CSS Counter Styles 3 permits fallback for representations longer than 60 codepoints.
+const MAX_COUNTER_REPRESENTATION_CODEPOINTS: usize = 60;
+
 fn resolve_custom_counter_style_marker_inner(
     stylesheet: &Stylesheet,
     name: &str,
     index: i32,
     resolving: &mut Vec<String>,
 ) -> Option<String> {
-    if name.is_empty() {
-        return None;
-    }
-    let rule = stylesheet
-        .counter_styles
-        .iter()
-        .find(|rule| rule.name.eq_ignore_ascii_case(name))?;
-    if resolving
-        .iter()
-        .any(|seen| seen.eq_ignore_ascii_case(&rule.name))
-    {
+    let rule = find_counter_style(stylesheet, name)?;
+    let prefix = counter_style_decl(stylesheet, rule, "prefix", resolving)
+        .map(|value| resolve_content_value_with_context(value, None, None))
+        .unwrap_or_default();
+    let suffix = counter_style_decl(stylesheet, rule, "suffix", resolving)
+        .map(|value| resolve_content_value_with_context(value, None, None))
+        .unwrap_or_else(|| ". ".to_string());
+    let body =
+        resolve_custom_counter_style_representation_inner(stylesheet, name, index, resolving)?;
+    Some(format!("{prefix}{body}{suffix}"))
+}
+
+fn resolve_custom_counter_style_representation_inner(
+    stylesheet: &Stylesheet,
+    name: &str,
+    index: i32,
+    resolving: &mut Vec<String>,
+) -> Option<String> {
+    let rule = find_counter_style(stylesheet, name)?;
+    if resolving.iter().any(|seen| seen == &rule.name) {
         return None;
     }
     resolving.push(rule.name.clone());
@@ -1020,58 +1101,95 @@ fn resolve_custom_counter_style_marker_inner(
     let symbols = if system.starts_with("additive") {
         Vec::new()
     } else {
-        let symbols =
-            counter_style_symbols(counter_style_decl(stylesheet, rule, "symbols", resolving)?)?;
+        let symbols = counter_style_decl(stylesheet, rule, "symbols", resolving)
+            .and_then(|value| counter_style_symbols(value));
+        let Some(symbols) = symbols else {
+            resolving.pop();
+            return None;
+        };
         if symbols.is_empty() {
             resolving.pop();
             return None;
         }
         symbols
     };
-    let prefix = counter_style_decl(stylesheet, rule, "prefix", resolving)
-        .map(|value| resolve_content_value_with_context(value, None, None))
-        .unwrap_or_default();
-    let suffix = counter_style_decl(stylesheet, rule, "suffix", resolving)
-        .map(|value| resolve_content_value_with_context(value, None, None))
-        .unwrap_or_else(|| ". ".to_string());
-    let mut body = (if !counter_style_range_contains(
+    let uses_negative_sign = index < 0
+        && (system.starts_with("symbolic")
+            || system.starts_with("alphabetic")
+            || system.starts_with("numeric")
+            || system.starts_with("additive"));
+    let algorithm_value = if uses_negative_sign {
+        i64::from(index).abs()
+    } else {
+        i64::from(index)
+    };
+    let representation = if !counter_style_range_contains(
         counter_style_decl(stylesheet, rule, "range", resolving),
+        &system,
         index,
     ) {
-        counter_style_fallback_body(stylesheet, rule, index, resolving)
+        None
     } else if system.starts_with("cyclic") {
-        let idx = (index - 1).rem_euclid(symbols.len() as i32) as usize;
+        let idx = (i64::from(index) - 1).rem_euclid(symbols.len() as i64) as usize;
         Some(symbols[idx].clone())
     } else if system.starts_with("fixed") {
         let first = fixed_counter_first_value(&system);
-        let offset = index - first;
+        let offset = i64::from(index) - i64::from(first);
         if offset < 0 || offset as usize >= symbols.len() {
-            counter_style_fallback_body(stylesheet, rule, index, resolving)
+            None
         } else {
             Some(symbols[offset as usize].clone())
         }
     } else if system.starts_with("numeric") && symbols.len() >= 2 {
-        Some(numeric_counter_symbols(index, &symbols))
+        Some(numeric_counter_symbols(algorithm_value, &symbols))
     } else if system.starts_with("alphabetic") && symbols.len() >= 2 {
-        Some(alphabetic_counter_symbols(index, &symbols))
+        alphabetic_counter_symbols(algorithm_value, &symbols)
     } else if system.starts_with("additive") {
         counter_style_additive_body(
             counter_style_decl(stylesheet, rule, "additive-symbols", resolving),
-            index,
+            algorithm_value,
         )
     } else {
-        let repeats = index.max(1) as usize;
-        Some(symbols[0].repeat(repeats))
-    })
-    .unwrap_or_else(|| crate::css::format_counter_value(index, "decimal"));
-    if let Some(padded) = counter_style_padded_body(
-        counter_style_decl(stylesheet, rule, "pad", resolving),
-        &body,
-    ) {
-        body = padded;
-    }
+        let repeats = usize::try_from(algorithm_value).unwrap_or(0);
+        (repeats > 0
+            && symbols[0].chars().count().saturating_mul(repeats)
+                <= MAX_COUNTER_REPRESENTATION_CODEPOINTS)
+            .then(|| symbols[0].repeat(repeats))
+    };
+    let representation = representation.and_then(|mut body| {
+        match counter_style_padded_body(
+            counter_style_decl(stylesheet, rule, "pad", resolving),
+            &body,
+        ) {
+            Ok(Some(padded)) => body = padded,
+            Ok(None) => {}
+            Err(()) => return None,
+        }
+        if uses_negative_sign {
+            let negative = counter_style_decl(stylesheet, rule, "negative", resolving)
+                .and_then(|value| counter_style_symbols(value));
+            let before = negative
+                .as_ref()
+                .and_then(|symbols| symbols.first())
+                .map(String::as_str)
+                .unwrap_or("-");
+            let after = negative
+                .as_ref()
+                .and_then(|symbols| symbols.get(1))
+                .map(String::as_str)
+                .unwrap_or("");
+            body = format!("{before}{body}{after}");
+        }
+        Some(body)
+    });
+    let Some(body) = representation else {
+        let fallback = counter_style_fallback_body(stylesheet, rule, index, resolving)
+            .unwrap_or_else(|| crate::css::format_counter_value(index, "decimal"));
+        resolving.pop();
+        return Some(fallback);
+    };
     resolving.pop();
-    Some(format!("{prefix}{body}{suffix}"))
+    Some(body)
 }
 
 fn counter_style_decl<'a>(
@@ -1085,13 +1203,10 @@ fn counter_style_decl<'a>(
     }
     let system = rule.declarations.get("system")?.trim();
     let base = counter_style_extends_name(system)?;
-    if resolving.iter().any(|seen| seen.eq_ignore_ascii_case(base)) {
+    if resolving.iter().any(|seen| seen == base) {
         return None;
     }
-    let base_rule = stylesheet
-        .counter_styles
-        .iter()
-        .find(|candidate| candidate.name.eq_ignore_ascii_case(base))?;
+    let base_rule = find_counter_style(stylesheet, base)?;
     counter_style_decl(stylesheet, base_rule, key, resolving)
 }
 
@@ -1108,13 +1223,10 @@ fn counter_style_system(
     let Some(base) = counter_style_extends_name(own) else {
         return own.to_ascii_lowercase();
     };
-    if resolving.iter().any(|seen| seen.eq_ignore_ascii_case(base)) {
+    if resolving.iter().any(|seen| seen == base) {
         return "symbolic".to_string();
     }
-    stylesheet
-        .counter_styles
-        .iter()
-        .find(|candidate| candidate.name.eq_ignore_ascii_case(base))
+    find_counter_style(stylesheet, base)
         .map(|base_rule| counter_style_system(stylesheet, base_rule, resolving))
         .unwrap_or_else(|| base.to_ascii_lowercase())
 }
@@ -1127,8 +1239,8 @@ fn counter_style_extends_name(system: &str) -> Option<&str> {
     parts.next().filter(|name| !name.is_empty())
 }
 
-fn counter_style_additive_body(additive: Option<&String>, index: i32) -> Option<String> {
-    if index <= 0 {
+fn counter_style_additive_body(additive: Option<&String>, index: i64) -> Option<String> {
+    if index < 0 {
         return None;
     }
     let mut remaining = index;
@@ -1138,12 +1250,26 @@ fn counter_style_additive_body(additive: Option<&String>, index: i32) -> Option<
         let split = part
             .char_indices()
             .find_map(|(idx, ch)| ch.is_whitespace().then_some(idx))?;
-        let weight = part[..split].trim().parse::<i32>().ok()?;
-        if weight <= 0 {
+        let weight = part[..split].trim().parse::<i64>().ok()?;
+        if weight < 0 {
             return None;
         }
         let symbol = resolve_content_value_with_context(part[split..].trim(), None, None);
         if symbol.is_empty() {
+            return None;
+        }
+        if index == 0 && weight == 0 {
+            return Some(symbol);
+        }
+        if weight == 0 {
+            continue;
+        }
+        if symbol
+            .chars()
+            .count()
+            .saturating_mul((remaining / weight) as usize)
+            > MAX_COUNTER_REPRESENTATION_CODEPOINTS
+        {
             return None;
         }
         while remaining >= weight {
@@ -1172,26 +1298,22 @@ fn counter_style_fallback_body(
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .unwrap_or("decimal");
-    if fallback.eq_ignore_ascii_case("decimal") {
+    if fallback == "decimal" {
         Some(crate::css::format_counter_value(index, "decimal"))
-    } else if stylesheet
-        .counter_styles
-        .iter()
-        .any(|candidate| candidate.name.eq_ignore_ascii_case(fallback))
-    {
-        resolve_custom_counter_style_marker_inner(stylesheet, fallback, index, resolving)
+    } else if find_counter_style(stylesheet, fallback).is_some() {
+        resolve_custom_counter_style_representation_inner(stylesheet, fallback, index, resolving)
     } else {
         Some(crate::css::format_counter_value(index, fallback))
     }
 }
 
-fn counter_style_range_contains(range: Option<&String>, index: i32) -> bool {
+fn counter_style_range_contains(range: Option<&String>, system: &str, index: i32) -> bool {
     let Some(range) = range else {
-        return true;
+        return counter_style_auto_range_contains(system, index);
     };
     let range = range.trim();
     if range.eq_ignore_ascii_case("auto") || range.is_empty() {
-        return true;
+        return counter_style_auto_range_contains(system, index);
     }
     range.split(',').any(|pair| {
         let mut parts = pair.split_whitespace();
@@ -1205,6 +1327,16 @@ fn counter_style_range_contains(range: Option<&String>, index: i32) -> bool {
     })
 }
 
+fn counter_style_auto_range_contains(system: &str, index: i32) -> bool {
+    if system.starts_with("alphabetic") || system.starts_with("symbolic") {
+        index >= 1
+    } else if system.starts_with("additive") {
+        index >= 0
+    } else {
+        true
+    }
+}
+
 fn counter_range_bound(value: &str) -> Option<i32> {
     if value.eq_ignore_ascii_case("infinite") {
         Some(i32::MAX)
@@ -1215,20 +1347,34 @@ fn counter_range_bound(value: &str) -> Option<i32> {
     }
 }
 
-fn counter_style_padded_body(pad: Option<&String>, body: &str) -> Option<String> {
-    let pad = pad?.trim();
+fn counter_style_padded_body(pad: Option<&String>, body: &str) -> Result<Option<String>, ()> {
+    let Some(pad) = pad else { return Ok(None) };
+    let pad = pad.trim();
     let mut parts = pad.splitn(2, char::is_whitespace);
-    let width = parts.next()?.parse::<usize>().ok()?;
-    let symbol_src = parts.next()?.trim();
+    let Some(width) = parts.next().and_then(|value| value.parse::<usize>().ok()) else {
+        return Ok(None);
+    };
+    let Some(symbol_src) = parts.next().map(str::trim) else {
+        return Ok(None);
+    };
     let symbol = counter_style_symbols(symbol_src)
         .and_then(|mut symbols| symbols.pop())
         .filter(|symbol| !symbol.is_empty())
         .unwrap_or_else(|| resolve_content_value_with_context(symbol_src, None, None));
     let body_len = body.chars().count();
     if symbol.is_empty() || body_len >= width {
-        return None;
+        return Ok(None);
     }
-    Some(format!("{}{}", symbol.repeat(width - body_len), body))
+    if symbol
+        .chars()
+        .count()
+        .saturating_mul(width - body_len)
+        .saturating_add(body_len)
+        > MAX_COUNTER_REPRESENTATION_CODEPOINTS
+    {
+        return Err(());
+    }
+    Ok(Some(format!("{}{}", symbol.repeat(width - body_len), body)))
 }
 
 fn counter_style_symbols(value: &str) -> Option<Vec<String>> {
@@ -1266,37 +1412,167 @@ fn counter_style_symbols(value: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
-fn numeric_counter_symbols(value: i32, symbols: &[String]) -> String {
+fn numeric_counter_symbols(value: i64, symbols: &[String]) -> String {
     if value == 0 {
         return symbols[0].clone();
     }
-    let negative = value < 0;
-    let mut n = value.abs();
-    let base = symbols.len() as i32;
+    let mut n = value;
+    let base = symbols.len() as i64;
     let mut parts = Vec::new();
     while n > 0 {
         parts.push(symbols[(n % base) as usize].clone());
         n /= base;
     }
-    let mut out = parts.into_iter().rev().collect::<String>();
-    if negative {
-        out.insert(0, '-');
-    }
-    out
+    parts.into_iter().rev().collect()
 }
 
-fn alphabetic_counter_symbols(mut value: i32, symbols: &[String]) -> String {
+fn alphabetic_counter_symbols(mut value: i64, symbols: &[String]) -> Option<String> {
     if value <= 0 {
-        return crate::css::format_counter_value(value, "decimal");
+        return None;
     }
-    let base = symbols.len() as i32;
+    let base = symbols.len() as i64;
     let mut parts = Vec::new();
     while value > 0 {
         value -= 1;
         parts.push(symbols[(value % base) as usize].clone());
         value /= base;
     }
-    parts.into_iter().rev().collect()
+    Some(parts.into_iter().rev().collect())
+}
+
+#[cfg(test)]
+mod counter_style_tests {
+    use super::*;
+
+    #[test]
+    fn conditional_and_layered_counter_styles_follow_the_cascade() {
+        let mut sheet = Stylesheet::default();
+        sheet.parse_and_add_author(
+            r#"
+            @layer early, late;
+            @layer late {
+                @counter-style badge { system: cyclic; symbols: "L"; suffix: "."; }
+            }
+            @layer early {
+                @counter-style badge { system: cyclic; symbols: "E"; suffix: "."; }
+            }
+            @supports (unknown-property: impossible) {
+                @counter-style badge { system: cyclic; symbols: "X"; suffix: "."; }
+            }
+            @media (min-width: 700px) {
+                @layer late {
+                    @counter-style badge { system: cyclic; symbols: "W"; suffix: "."; }
+                }
+            }
+            "#,
+        );
+        sheet.resolve_variables_for_viewport(600.0, 800.0);
+        assert_eq!(
+            resolve_custom_counter_style_marker(&sheet, "badge", 1).as_deref(),
+            Some("L.")
+        );
+        sheet.resolve_variables_for_viewport(800.0, 800.0);
+        assert_eq!(
+            resolve_custom_counter_style_marker(&sheet, "badge", 1).as_deref(),
+            Some("W.")
+        );
+
+        sheet.parse_and_add_author(
+            "@counter-style badge { system: cyclic; symbols: 'U'; suffix: '.'; }",
+        );
+        assert_eq!(
+            resolve_custom_counter_style_marker(&sheet, "badge", 1).as_deref(),
+            Some("U.")
+        );
+    }
+
+    #[test]
+    fn linked_counter_styles_keep_link_media_and_author_origin() {
+        let mut sheet = Stylesheet::default();
+        sheet.parse_and_add("@counter-style badge { system: cyclic; symbols: 'UA'; }");
+        sheet.parse_and_add_with_base_media_conditions(
+            "@layer linked { @counter-style badge { system: cyclic; symbols: 'LINK'; } }",
+            "https://example.test/site.css",
+            &crate::css::MediaConditions::default().with_query("(min-width: 700px)"),
+        );
+        sheet.resolve_variables_for_viewport(600.0, 800.0);
+        assert_eq!(
+            resolve_custom_counter_style_marker(&sheet, "badge", 1).as_deref(),
+            Some("UA. ")
+        );
+        sheet.resolve_variables_for_viewport(800.0, 800.0);
+        assert_eq!(
+            resolve_custom_counter_style_marker(&sheet, "badge", 1).as_deref(),
+            Some("LINK. ")
+        );
+    }
+
+    #[test]
+    fn custom_names_are_case_sensitive_and_later_definitions_replace_earlier_ones() {
+        let mut sheet = Stylesheet::default();
+        sheet.parse_and_add(
+            r##"
+            @counter-style Badge { system: cyclic; symbols: "A"; suffix: "!"; }
+            @counter-style badge { system: cyclic; symbols: "b"; suffix: "?"; }
+            @counter-style Badge { system: cyclic; symbols: "C"; suffix: "#"; }
+            @counter-style limited {
+                system: fixed 2;
+                symbols: "L";
+                fallback: badge;
+                suffix: ")";
+            }
+        "##,
+        );
+        assert_eq!(
+            resolve_custom_counter_style_marker(&sheet, "Badge", 1).as_deref(),
+            Some("C#")
+        );
+        assert_eq!(
+            resolve_custom_counter_style_marker(&sheet, "badge", 1).as_deref(),
+            Some("b?")
+        );
+        assert_eq!(
+            resolve_custom_counter_style_marker(&sheet, "BADGE", 1),
+            None
+        );
+        assert_eq!(
+            resolve_custom_counter_style_marker(&sheet, "limited", 1).as_deref(),
+            Some("b)")
+        );
+    }
+
+    #[test]
+    fn negative_minimum_zero_and_large_repetitions_use_bounded_representations() {
+        let mut sheet = Stylesheet::default();
+        sheet.parse_and_add(
+            r#"
+            @counter-style binary { system: numeric; symbols: "0" "1"; suffix: " "; }
+            @counter-style tally { system: additive; additive-symbols: 5 "V", 1 "I", 0 "Z"; }
+            @counter-style repeated { system: symbolic; symbols: "R"; }
+            @counter-style padded { system: cyclic; symbols: "X"; pad: 1000000000 "0"; }
+        "#,
+        );
+        assert_eq!(
+            resolve_custom_counter_style_marker(&sheet, "binary", i32::MIN),
+            Some(format!("-{:b} ", i32::MIN.unsigned_abs()))
+        );
+        assert_eq!(
+            resolve_custom_counter_style_marker(&sheet, "tally", 0).as_deref(),
+            Some("Z. ")
+        );
+        assert_eq!(
+            resolve_custom_counter_style_marker(&sheet, "repeated", 60),
+            Some(format!("{}. ", "R".repeat(60)))
+        );
+        assert_eq!(
+            resolve_custom_counter_style_marker(&sheet, "repeated", 61).as_deref(),
+            Some("61. ")
+        );
+        assert_eq!(
+            resolve_custom_counter_style_marker(&sheet, "padded", 1).as_deref(),
+            Some("1. ")
+        );
+    }
 }
 
 /// The last word on `display`, run once every declaration has been applied.
@@ -2093,7 +2369,90 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
 ///
 /// Item 1 is what made this cheap: a parent style is an `Arc` now, so its
 /// identity is a pointer rather than a deep comparison.
-pub(crate) type ShareCache = HashMap<(usize, String, String), std::sync::Arc<ComputedStyle>>;
+pub(crate) struct ShareCache {
+    styles: HashMap<(usize, String, String), std::sync::Arc<ComputedStyle>>,
+    variable_scopes: HashMap<(usize, u64), Vec<VariableScopeEntry>>,
+    variable_scope_count: usize,
+}
+
+struct VariableScopeEntry {
+    declarations: Vec<(String, String)>,
+    _parent_scope: std::sync::Arc<HashMap<String, String>>,
+    scope: std::sync::Arc<HashMap<String, String>>,
+}
+
+impl ShareCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            styles: HashMap::new(),
+            variable_scopes: HashMap::new(),
+            variable_scope_count: 0,
+        }
+    }
+
+    fn get(&self, key: &(usize, String, String)) -> Option<&std::sync::Arc<ComputedStyle>> {
+        self.styles.get(key)
+    }
+
+    fn contains_key(&self, key: &(usize, String, String)) -> bool {
+        self.styles.contains_key(key)
+    }
+
+    fn insert(&mut self, key: (usize, String, String), style: std::sync::Arc<ComputedStyle>) {
+        self.styles.insert(key, style);
+    }
+
+    fn variable_scope_key(
+        inherited: &HashMap<String, String>,
+        declarations: &[(&str, &str)],
+    ) -> (usize, u64) {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        declarations.hash(&mut hasher);
+        (inherited as *const _ as usize, hasher.finish())
+    }
+
+    fn find_variable_scope(
+        &self,
+        key: (usize, u64),
+        declarations: &[(&str, &str)],
+    ) -> Option<std::sync::Arc<HashMap<String, String>>> {
+        self.variable_scopes.get(&key)?.iter().find_map(|entry| {
+            (entry.declarations.len() == declarations.len()
+                && entry.declarations.iter().zip(declarations).all(
+                    |((name, value), (other_name, other_value))| {
+                        name == other_name && value == other_value
+                    },
+                ))
+            .then(|| entry.scope.clone())
+        })
+    }
+
+    fn insert_variable_scope(
+        &mut self,
+        key: (usize, u64),
+        declarations: &[(&str, &str)],
+        parent_scope: std::sync::Arc<HashMap<String, String>>,
+        scope: std::sync::Arc<HashMap<String, String>>,
+    ) {
+        const MAX_SCOPES: usize = 4096;
+        if self.variable_scope_count >= MAX_SCOPES {
+            return;
+        }
+        self.variable_scopes
+            .entry(key)
+            .or_default()
+            .push(VariableScopeEntry {
+                declarations: declarations
+                    .iter()
+                    .map(|&(name, value)| (name.to_owned(), value.to_owned()))
+                    .collect(),
+                _parent_scope: parent_scope,
+                scope,
+            });
+        self.variable_scope_count += 1;
+    }
+}
 
 /// Every rule that matched one element, bucketed by what it styles.
 ///
@@ -3135,7 +3494,7 @@ impl CounterState {
 
 struct CascadedNodeState {
     root_font_px: f32,
-    local_vars: Option<HashMap<String, String>>,
+    local_vars: Option<std::sync::Arc<HashMap<String, String>>>,
     counter_containment: bool,
     pending_after: Option<String>,
 }
@@ -3168,7 +3527,7 @@ fn apply_cascade_node(
     prev_siblings: &[SiblingInfo],
     next_siblings: &[SiblingInfo],
     next_sibling_nodes: &[&crate::types::WebCore],
-    _share_cache: &mut ShareCache,
+    share_cache: &mut ShareCache,
     // Selector matches computed off-thread by the parallel pass, keyed by
     // `node_id`. `None`, or a miss, means match inline — never "no rules".
     precomputed: Option<&mut MatchMap>,
@@ -3211,6 +3570,8 @@ fn apply_cascade_node(
         return None;
     }
 
+    let profile_style_started = crate::profile::is_enabled().then(std::time::Instant::now);
+
     // ⚠ A style-sharing stub stood here: four bindings feeding an EMPTY `if`,
     // whose own comment said the sharing "actually happens in cascade_children
     // where we have access to the sibling WebCore objects". It computed a class
@@ -3224,6 +3585,10 @@ fn apply_cascade_node(
         style.inherit_from(p);
         style.relative_font_weight_base = Some(p.font_weight);
     }
+    if let Some(started) = profile_style_started {
+        crate::profile::record(crate::profile::Phase::CascadeApplyInit, started.elapsed());
+    }
+    let profile_matches_started = crate::profile::is_enabled().then(std::time::Instant::now);
     // Selector matching — the SAME function the parallel pass runs, so a
     // precomputed result and an inline one can never disagree.
     let precomputed_here = precomputed
@@ -3278,94 +3643,243 @@ fn apply_cascade_node(
         mut first_letter_matched,
     } = sets;
     matched.sort_by(|&a, &b| normal_cascade_cmp(&stylesheet.rules, a, b));
+    if let Some(started) = profile_matches_started {
+        crate::profile::record(
+            crate::profile::Phase::CascadeApplyMatches,
+            started.elapsed(),
+        );
+    }
+    let profile_variables_started = crate::profile::is_enabled().then(std::time::Instant::now);
     // Build variable scope: inherited from parent + any --custom-properties from matched rules.
     // Only clone the map when new custom properties are actually defined — most elements
     // don't define any, so we avoid O(vars) cloning at every node.
-    let has_new_vars = matched.iter().any(|(_, ri, _)| {
-        stylesheet.rules[*ri]
-            .declarations
-            .keys()
-            .any(|p| p.starts_with("--"))
-            || stylesheet.rules[*ri]
-                .important_declarations
-                .keys()
-                .any(|p| p.starts_with("--"))
-    });
+    let mut has_new_vars = false;
+    let mut has_revert_rule = false;
+    let mut has_var_ref_rule = false;
+    for &(_, ri, _) in &matched {
+        let rule = &stylesheet.rules[ri];
+        has_new_vars |= rule.has_custom_properties;
+        has_revert_rule |= rule.has_revert_value;
+        has_var_ref_rule |= rule.has_var_refs;
+    }
     // Also check inline style for custom properties — these must be available
     // during var() resolution of stylesheet rules on the same element.
+    let profile_inline_parse_started = crate::profile::is_enabled().then(std::time::Instant::now);
     let inline_decls = root
         .attributes
         .get("style")
-        .cloned()
-        .map(|s| parse_declarations_important(&s));
-    let has_inline_vars = inline_decls
-        .as_ref()
-        .map(|(n, _)| n.keys().any(|p| p.starts_with("--")))
-        .unwrap_or(false);
+        .map(|s| parse_declarations_important(s));
+    if let Some(started) = profile_inline_parse_started {
+        crate::profile::record(
+            crate::profile::Phase::CascadeApplyInlineParse,
+            started.elapsed(),
+        );
+    }
+    let has_inline_vars = inline_decls.as_ref().is_some_and(|(normal, important)| {
+        normal
+            .keys()
+            .chain(important.keys())
+            .any(|p| p.starts_with("--"))
+    });
 
     let local_vars_owned = if has_new_vars || has_inline_vars {
-        let mut vars = inherited_vars.clone();
+        let mut declarations = Vec::new();
         for &(_, ri, _) in &matched {
             for (prop, val) in &stylesheet.rules[ri].declarations {
                 if prop.starts_with("--") {
-                    vars.insert(prop.clone(), val.clone());
+                    declarations.push((prop.as_str(), val.as_str()));
                 }
+            }
+        }
+        if let Some((normal, _)) = &inline_decls {
+            for (prop, val) in normal {
+                if prop.starts_with("--") {
+                    declarations.push((prop.as_str(), val.as_str()));
+                }
+            }
+        }
+        let mut important_custom_rules: Vec<_> = matched
+            .iter()
+            .copied()
+            .filter(|&(_, ri, _)| {
+                stylesheet.rules[ri]
+                    .important_declarations
+                    .keys()
+                    .any(|prop| prop.starts_with("--"))
+            })
+            .collect();
+        important_custom_rules.sort_by(|&a, &b| important_cascade_cmp(&stylesheet.rules, a, b));
+        for &(sp, ri, _) in &important_custom_rules {
+            if !is_author_origin(sp) {
+                continue;
             }
             for (prop, val) in &stylesheet.rules[ri].important_declarations {
                 if prop.starts_with("--") {
-                    vars.insert(prop.clone(), val.clone());
+                    declarations.push((prop.as_str(), val.as_str()));
                 }
             }
         }
-        // Inline custom properties override stylesheet ones (higher specificity)
-        if let Some((ref n, _)) = inline_decls {
-            for (prop, val) in n {
+        if let Some((_, important)) = &inline_decls {
+            for (prop, val) in important {
                 if prop.starts_with("--") {
-                    vars.insert(prop.clone(), val.clone());
+                    declarations.push((prop.as_str(), val.as_str()));
                 }
             }
         }
-        pre_resolve_variables(&mut vars);
-        Some(vars)
+        for &(sp, ri, _) in &important_custom_rules {
+            if is_author_origin(sp) {
+                continue;
+            }
+            for (prop, val) in &stylesheet.rules[ri].important_declarations {
+                if prop.starts_with("--") {
+                    declarations.push((prop.as_str(), val.as_str()));
+                }
+            }
+        }
+        let inherited_scope = parent_style
+            .map(|parent| &parent.custom_props)
+            .filter(|scope| std::ptr::eq(std::sync::Arc::as_ref(*scope), inherited_vars));
+        let scope_key =
+            inherited_scope.map(|_| ShareCache::variable_scope_key(inherited_vars, &declarations));
+        if declarations.iter().all(|&(prop, val)| {
+            !val.contains('(')
+                && inherited_vars
+                    .get(prop)
+                    .is_some_and(|inherited| inherited == val)
+        }) {
+            None
+        } else if let Some(scope) =
+            scope_key.and_then(|key| share_cache.find_variable_scope(key, &declarations))
+        {
+            Some(scope)
+        } else {
+            let profile_var_clone_started =
+                crate::profile::is_enabled().then(std::time::Instant::now);
+            let mut vars = inherited_vars.clone();
+            if let Some(started) = profile_var_clone_started {
+                crate::profile::record(
+                    crate::profile::Phase::CascadeApplyVarClone,
+                    started.elapsed(),
+                );
+            }
+            let mut changed_vars = HashSet::new();
+            for &(prop, val) in &declarations {
+                changed_vars.insert(prop);
+                vars.insert(prop.to_string(), val.to_string());
+            }
+            let profile_var_resolve_started =
+                crate::profile::is_enabled().then(std::time::Instant::now);
+            pre_resolve_changed_variables(&mut vars, &changed_vars);
+            if let Some(started) = profile_var_resolve_started {
+                crate::profile::record(
+                    crate::profile::Phase::CascadeApplyVarResolve,
+                    started.elapsed(),
+                );
+            }
+            let scope = std::sync::Arc::new(vars);
+            if let (Some(key), Some(parent_scope)) = (scope_key, inherited_scope) {
+                share_cache.insert_variable_scope(
+                    key,
+                    &declarations,
+                    parent_scope.clone(),
+                    scope.clone(),
+                );
+            }
+            Some(scope)
+        }
     } else {
         None
     };
-    let local_vars: &HashMap<String, String> = local_vars_owned.as_ref().unwrap_or(inherited_vars);
+    let local_vars: &HashMap<String, String> =
+        local_vars_owned.as_deref().unwrap_or(inherited_vars);
+    if let Some(started) = profile_variables_started {
+        crate::profile::record(
+            crate::profile::Phase::CascadeApplyVarScope,
+            started.elapsed(),
+        );
+    }
+    let profile_var_checks_started = crate::profile::is_enabled().then(std::time::Instant::now);
     // Track properties whose highest-specificity declaration is `inherit`.
     // After all rules are applied, these properties are reset to the parent's value.
     let mut inherit_props: HashSet<String> = HashSet::new();
     let has_vars = !local_vars.is_empty();
+    let needs_revert_snapshot = has_revert_rule
+        || inline_decls.as_ref().is_some_and(|(normal, important)| {
+            normal
+                .values()
+                .chain(important.values())
+                .any(|value| value_mentions_revert(value))
+        })
+        || (has_vars
+            && has_var_ref_rule
+            && local_vars
+                .values()
+                .any(|value| value_mentions_revert(value)));
     let mut pre_author_normal_style: Option<ComputedStyle> = None;
     let mut current_normal_layer: Option<(bool, u32)> = None;
-    let mut normal_layer_start_style = style.clone();
+    let mut normal_layer_start_style = needs_revert_snapshot.then(|| style.clone());
     let mut hints_applied = false;
+    if let Some(started) = profile_var_checks_started {
+        crate::profile::record(
+            crate::profile::Phase::CascadeApplyVarChecks,
+            started.elapsed(),
+        );
+    }
+    let profile_color_scheme_started = crate::profile::is_enabled().then(std::time::Instant::now);
     let normal_color_scheme =
         prescan_color_scheme(&style, &stylesheet.rules, &matched, local_vars, false, None);
     style.color_scheme = normal_color_scheme;
+    if let Some(started) = profile_color_scheme_started {
+        crate::profile::record(
+            crate::profile::Phase::CascadeApplyColorScheme,
+            started.elapsed(),
+        );
+    }
+    if let Some(started) = profile_variables_started {
+        crate::profile::record(
+            crate::profile::Phase::CascadeApplyVariables,
+            started.elapsed(),
+        );
+    }
+    if let Some(started) = profile_style_started {
+        crate::profile::record(crate::profile::Phase::CascadeApplySetup, started.elapsed());
+    }
+    let profile_rules_started = crate::profile::is_enabled().then(std::time::Instant::now);
     for &(sp, ri, _) in &matched {
-        if is_author_origin(sp) && pre_author_normal_style.is_none() {
+        if is_author_origin(sp) && !hints_applied {
             apply_presentational_hints(&mut style, root, ancestors);
             hints_applied = true;
-            pre_author_normal_style = Some(style.clone());
+            pre_author_normal_style = needs_revert_snapshot.then(|| style.clone());
         }
         let rule = &stylesheet.rules[ri];
         let layer_key = (is_author_origin(sp), rule.layer_rank);
         if current_normal_layer != Some(layer_key) {
             current_normal_layer = Some(layer_key);
-            normal_layer_start_style = style.clone();
+            if needs_revert_snapshot {
+                normal_layer_start_style = Some(style.clone());
+            }
         }
         let revert_base = if is_author_origin(sp) {
             pre_author_normal_style.as_ref()
         } else {
             None
         };
-        let revert_layer_base = &normal_layer_start_style;
+        let revert_layer_base = normal_layer_start_style
+            .as_ref()
+            .unwrap_or(root.style.as_ref());
         // Fast path: use pre-compiled declarations (PropertyId dispatch, no string matching).
         // Only fall back to raw declarations when var() resolution is needed.
         if has_vars && rule.has_var_refs {
             if let Some(val) = rule.declarations.get("color-scheme") {
-                let resolved =
-                    resolve_var_references_for_color_scheme(val, local_vars, &style.color_scheme);
+                let resolved = if value_needs_substitution(val) {
+                    std::borrow::Cow::Owned(resolve_var_references_for_color_scheme(
+                        val,
+                        local_vars,
+                        &style.color_scheme,
+                    ))
+                } else {
+                    std::borrow::Cow::Borrowed(val.as_str())
+                };
                 if !resolved.trim().is_empty() && !resolved.contains("var(") {
                     clear_inherit_tracking_for_property(&mut inherit_props, "color-scheme");
                     apply_property(&mut style, "color-scheme", &resolved);
@@ -3376,8 +3890,15 @@ fn apply_cascade_node(
                 if prop.starts_with("--") {
                     continue;
                 }
-                let resolved =
-                    resolve_var_references_for_color_scheme(val, local_vars, &style.color_scheme);
+                let resolved = if value_needs_substitution(val) {
+                    std::borrow::Cow::Owned(resolve_var_references_for_color_scheme(
+                        val,
+                        local_vars,
+                        &style.color_scheme,
+                    ))
+                } else {
+                    std::borrow::Cow::Borrowed(val.as_str())
+                };
                 if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var("))
                 {
                     continue;
@@ -3438,7 +3959,7 @@ fn apply_cascade_node(
                     // Raw values may contain var() even when has_vars is false
                     // (the rule has var refs but no variables are defined in scope).
                     // Resolve var() with empty vars — triggers fallback values.
-                    if s.contains("var(") || s.to_ascii_lowercase().contains("light-dark(") {
+                    if value_needs_substitution(s) {
                         let resolved = resolve_var_references_for_color_scheme(
                             s,
                             local_vars,
@@ -3528,7 +4049,7 @@ fn apply_cascade_node(
             );
             style.color_scheme = important_color_scheme;
             let mut current_important_layer: Option<(bool, u32)> = None;
-            let mut important_layer_start_style = style.clone();
+            let mut important_layer_start_style = needs_revert_snapshot.then(|| style.clone());
             for &(sp, ri, _) in &important_matched {
                 if is_author_origin(sp) != author_pass {
                     continue;
@@ -3537,8 +4058,13 @@ fn apply_cascade_node(
                 let layer_key = (is_author_origin(sp), rule.layer_rank);
                 if current_important_layer != Some(layer_key) {
                     current_important_layer = Some(layer_key);
-                    important_layer_start_style = style.clone();
+                    if needs_revert_snapshot {
+                        important_layer_start_style = Some(style.clone());
+                    }
                 }
+                let important_layer_base = important_layer_start_style
+                    .as_ref()
+                    .unwrap_or(root.style.as_ref());
                 let revert_base = if is_author_origin(sp) {
                     pre_author_normal_style.as_ref()
                 } else {
@@ -3559,7 +4085,7 @@ fn apply_cascade_node(
                                 &resolved,
                                 parent_style,
                                 revert_base,
-                                &important_layer_start_style,
+                                important_layer_base,
                             );
                         }
                     }
@@ -3588,7 +4114,7 @@ fn apply_cascade_node(
                             &resolved,
                             parent_style,
                             revert_base,
-                            &important_layer_start_style,
+                            important_layer_base,
                         );
                     }
                 } else {
@@ -3600,7 +4126,7 @@ fn apply_cascade_node(
                             &local_vars,
                             parent_style,
                             revert_base,
-                            &important_layer_start_style,
+                            important_layer_base,
                         );
                     }
                 }
@@ -3798,6 +4324,10 @@ fn apply_cascade_node(
             }
         }
     }
+    if let Some(started) = profile_rules_started {
+        crate::profile::record(crate::profile::Phase::CascadeApplyRules, started.elapsed());
+    }
+    let profile_finalize_started = crate::profile::is_enabled().then(std::time::Instant::now);
     // Capture href from attributes (non-standard CSS, but useful for our editor)
     if let Some(href) = root.attributes.get("href") {
         style.href = href.clone();
@@ -3827,7 +4357,12 @@ fn apply_cascade_node(
     style.list_index = root.style.list_index;
     // Preserve the resolved custom-property scope on computed style. Paint-time
     // consumers such as inline SVG need these inherited variables after cascade.
-    style.custom_props = local_vars.clone();
+    style.custom_props = local_vars_owned
+        .as_ref()
+        .cloned()
+        .or_else(|| parent_style.map(|parent| parent.custom_props.clone()))
+        .unwrap_or_else(|| std::sync::Arc::new(inherited_vars.clone()));
+    let local_vars = local_vars_owned.as_deref().unwrap_or(inherited_vars);
     let has_explicit_display = matched.iter().any(|&(_, ri, _)| {
         stylesheet.rules[ri]
             .declarations
@@ -3922,6 +4457,16 @@ fn apply_cascade_node(
     // ── CSS counters: reset, increment, then resolve counter() in content ──
     // Element-created instances live through following siblings. Descendant
     // instances are removed when this element's child scope finishes.
+    if let Some(started) = profile_style_started {
+        crate::profile::record(crate::profile::Phase::CascadeApplyStyle, started.elapsed());
+    }
+    if let Some(started) = profile_finalize_started {
+        crate::profile::record(
+            crate::profile::Phase::CascadeApplyFinalize,
+            started.elapsed(),
+        );
+    }
+    let profile_counters_started = crate::profile::is_enabled().then(std::time::Instant::now);
     counters.apply_element(&root.style);
     if root.style.display == Display::ListItem {
         if let Some(value) = counters
@@ -4111,6 +4656,12 @@ fn apply_cascade_node(
             });
         }
     }
+    if let Some(started) = profile_counters_started {
+        crate::profile::record(
+            crate::profile::Phase::CascadeApplyCounters,
+            started.elapsed(),
+        );
+    }
     Some(CascadedNodeState {
         root_font_px,
         local_vars: local_vars_owned,
@@ -4181,7 +4732,7 @@ pub(crate) fn apply_cascade_inner(
         counter_containment,
         pending_after,
     } = state;
-    let local_vars = local_vars.as_ref().unwrap_or(inherited_vars);
+    let local_vars = local_vars.as_deref().unwrap_or(inherited_vars);
 
     let has_descendants = !root.children.is_empty() || root.shadow_root.is_some();
     if has_descendants {

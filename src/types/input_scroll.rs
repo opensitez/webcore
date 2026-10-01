@@ -129,8 +129,9 @@ impl Document {
                             let new_scroll = (drag.start_scroll + dx * drag.scroll_per_px).max(0.0);
                             if let Some(node) = self.get_box_by_id_mut(nid) {
                                 let old_x = node.layout.scroll_left;
-                                let max_s = (node.layout.scroll_width - node.layout.content_rect.w)
-                                    .max(0.0);
+                                let max_s = (node.layout.scroll_width
+                                    - node.scrollport_content_width())
+                                .max(0.0);
                                 node.layout.scroll_left = new_scroll.min(max_s);
                                 if (node.layout.scroll_left - old_x).abs() > 0.01 {
                                     scrolled_element = Some(nid);

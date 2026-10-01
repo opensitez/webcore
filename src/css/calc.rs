@@ -355,6 +355,7 @@ impl<'a> MathParser<'a> {
     }
 
     fn parse_hint(input: &'a str, percentage_hint: Option<Dimension>) -> Option<Calculation> {
+        let _profile = crate::profile::span(crate::profile::Phase::CssMathParse);
         let mut parser = Self {
             input,
             pos: 0,

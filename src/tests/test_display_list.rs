@@ -1856,7 +1856,10 @@ fn data_svg_background_decodes_before_first_paint() {
 
 #[test]
 fn image_set_background_uses_selected_candidate_resolution_for_auto_size() {
-    fn find_by_id_mut<'a>(node: &'a mut crate::WebCore, id: &str) -> Option<&'a mut crate::WebCore> {
+    fn find_by_id_mut<'a>(
+        node: &'a mut crate::WebCore,
+        id: &str,
+    ) -> Option<&'a mut crate::WebCore> {
         if node.attributes.get("id").map(String::as_str) == Some(id) {
             return Some(node);
         }
@@ -3330,6 +3333,43 @@ fn replay_scrolls_background_image_clips_with_the_image() {
 }
 
 #[test]
+fn opaque_one_pixel_repeated_background_respects_scroll_and_clip() {
+    let mut list = DisplayList::new();
+    list.push(PaintCmd::BackgroundImage {
+        container: Rect::new(10.0, 100.0, 20.0, 20.0),
+        clip: Rect::new(10.0, 100.0, 20.0, 20.0),
+        data: ImageRef::Owned(vec![255, 0, 0, 255], 1, 1),
+        size_mode: 0,
+        draw_w: 1.0,
+        draw_h: 1.0,
+        pos_x: 10.4,
+        pos_y: 100.4,
+        repeat_x_mode: 1,
+        repeat_y_mode: 1,
+        radii: [4.0; 4],
+        radii_y: [4.0; 4],
+        blend_mode: 0,
+    });
+    let mut pixmap = tiny_skia::Pixmap::new(80, 80).unwrap();
+    pixmap.fill(tiny_skia::Color::WHITE);
+    let mut font_system = cosmic_text::FontSystem::new();
+    let mut swash_cache = cosmic_text::SwashCache::new();
+    replay_with_scroll(
+        &list,
+        &mut pixmap,
+        1.0,
+        &mut font_system,
+        &mut swash_cache,
+        0.0,
+        50.0,
+    );
+    assert_eq!(pixmap.pixel(20, 60).unwrap().red(), 255);
+    assert_eq!(pixmap.pixel(20, 60).unwrap().green(), 0);
+    assert_eq!(pixmap.pixel(10, 50).unwrap().green(), 255);
+    assert_eq!(pixmap.pixel(30, 60).unwrap().green(), 255);
+}
+
+#[test]
 fn replay_transforms_background_image_clip_with_the_image() {
     let mut list = DisplayList::new();
     list.push(PaintCmd::PushTransform {
@@ -3795,6 +3835,20 @@ fn sticky_position_creates_a_stacking_context() {
     assert!(
         list.has_scroll_dependent_sticky,
         "display lists with sticky content must be rebuilt when scroll changes"
+    );
+}
+
+#[test]
+fn empty_sticky_subtree_does_not_invalidate_scroll_tiles() {
+    let html = r#"
+        <style>body { margin: 0; } #sticky { position: sticky; top: 40px; z-index: 10; }</style>
+        <div style="height: 900px; background: white"></div>
+        <div id="sticky"><div id="empty"></div></div>
+    "#;
+    let (_frame, list) = build_full(html);
+    assert!(
+        !list.has_scroll_dependent_sticky,
+        "an empty sticky stacking context cannot change the painted scroll tiles"
     );
 }
 
@@ -5089,7 +5143,7 @@ fn object_position_edge_offsets_place_the_painted_object() {
 // ── Gradient parsing: colour-stop fixup and layers (css-images-3 §4.3.1) ─────
 
 fn gradient_stops(list: &DisplayList) -> Option<Vec<(crate::types::Color, f32)>> {
-    list.commands.iter().find_map(|cmd| match cmd {
+    list.commands.iter().rev().find_map(|cmd| match cmd {
         PaintCmd::Gradient { stops, .. } => Some(stops.clone()),
         _ => None,
     })
@@ -5176,7 +5230,7 @@ fn additional_background_layers_use_their_own_origin_clip_and_blend() {
     let paints = gradient_paints_with_blend(&list);
     assert_eq!(paints.len(), 2, "expected two gradients, got {paints:?}");
 
-    let (first_rect, first_clip, _, _, first_blend) = paints[0];
+    let (first_rect, first_clip, _, _, first_blend) = paints[1];
     assert_eq!(first_blend, 1, "primary layer should use multiply");
     assert!(
         first_rect.x.abs() < 0.01
@@ -5193,7 +5247,7 @@ fn additional_background_layers_use_their_own_origin_clip_and_blend() {
         "primary clip should be the border box, got {first_clip:?}"
     );
 
-    let (second_rect, second_clip, _, _, second_blend) = paints[1];
+    let (second_rect, second_clip, _, _, second_blend) = paints[0];
     assert_eq!(second_blend, 2, "second layer should use screen");
     assert!(
         (second_rect.x - 15.0).abs() < 0.01
@@ -5277,7 +5331,7 @@ fn background_shorthand_multiple_gradient_layers_keep_independent_options() {
     let paints = gradient_paints(&list);
     assert_eq!(paints.len(), 2, "expected two gradients, got {paints:?}");
 
-    let (first_rect, first_clip, first_repeat_x, first_repeat_y) = paints[0];
+    let (first_rect, first_clip, first_repeat_x, first_repeat_y) = paints[1];
     assert_eq!((first_repeat_x, first_repeat_y), (0, 0));
     assert!(
         (first_clip.w - 100.0).abs() < 0.01 && (first_clip.h - 50.0).abs() < 0.01,
@@ -5291,7 +5345,7 @@ fn background_shorthand_multiple_gradient_layers_keep_independent_options() {
         "first layer should keep its underline geometry, got {first_rect:?}"
     );
 
-    let (second_rect, _, second_repeat_x, second_repeat_y) = paints[1];
+    let (second_rect, _, second_repeat_x, second_repeat_y) = paints[0];
     assert_eq!((second_repeat_x, second_repeat_y), (1, 0));
     assert!(
         (second_rect.w - 10.0).abs() < 0.01
@@ -5499,6 +5553,78 @@ fn multiple_background_gradient_layers_are_painted() {
 }
 
 #[test]
+fn multiple_background_layers_paint_back_to_front() {
+    let (_, list) = build(
+        r#"<div style="width:100px;height:50px;background-image:linear-gradient(red,red),linear-gradient(green,green),linear-gradient(blue,blue)"></div>"#,
+    );
+    let painted_colors: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Gradient { stops, .. } => stops.first().map(|stop| stop.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(painted_colors.len(), 3);
+    assert!(painted_colors[0].b > painted_colors[0].r);
+    assert!(painted_colors[1].g > painted_colors[1].r);
+    assert!(painted_colors[2].r > painted_colors[2].b);
+
+    let mut pixmap = tiny_skia::Pixmap::new(120, 80).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let i = (25 * 120 + 50) * 4;
+    let pixel = &pixmap.data()[i..i + 4];
+    assert!(
+        pixel[0] > pixel[2],
+        "the first red layer should cover blue: {pixel:?}"
+    );
+}
+
+#[test]
+fn multilayer_background_options_survive_stylesheet_declaration_order() {
+    let images = "background-image:linear-gradient(red,red),linear-gradient(green,green),linear-gradient(blue,blue);";
+    let options = "background-size:cover,contain,12px 8px;background-position:left top,center center,right bottom;background-repeat:repeat-x,no-repeat,round;background-origin:border-box,content-box,padding-box;background-clip:content-box,padding-box,border-box;background-blend-mode:multiply,screen,overlay;";
+    let html = |style: String| {
+        format!("<body style='margin:0'><div style='width:100px;height:50px;{style}'></div></body>")
+    };
+    let (_, before) = build(&html(format!("{options}{images}")));
+    let (_, after) = build(&html(format!("{images}{options}")));
+    let before_paints = gradient_paints_with_blend(&before);
+    let after_paints = gradient_paints_with_blend(&after);
+    assert_eq!(before_paints.len(), 3);
+    assert_eq!(before_paints, after_paints);
+    assert_eq!(
+        before_paints
+            .iter()
+            .map(|paint| paint.4)
+            .collect::<Vec<_>>(),
+        vec![3, 2, 1]
+    );
+}
+
+#[test]
+fn shorter_background_lists_cycle_through_four_painted_layers() {
+    let images = "background-image:linear-gradient(red,red),linear-gradient(green,green),linear-gradient(blue,blue),linear-gradient(yellow,yellow);";
+    let options = "background-size:cover,contain;background-position:left top,right bottom;background-repeat:repeat-x,no-repeat;background-origin:border-box,content-box;background-clip:content-box,padding-box;background-blend-mode:multiply,screen;";
+    let html = |style: String| {
+        format!("<body style='margin:0'><div style='width:100px;height:50px;{style}'></div></body>")
+    };
+    let (_, before) = build(&html(format!("{options}{images}")));
+    let (_, after) = build(&html(format!("{images}{options}")));
+    let before_paints = gradient_paints_with_blend(&before);
+    let after_paints = gradient_paints_with_blend(&after);
+    assert_eq!(before_paints.len(), 4);
+    assert_eq!(before_paints, after_paints);
+    assert_eq!(
+        before_paints
+            .iter()
+            .map(|paint| paint.4)
+            .collect::<Vec<_>>(),
+        vec![2, 1, 2, 1]
+    );
+}
+
+#[test]
 fn additional_background_url_layer_after_gradient_is_painted() {
     fn find_by_id_mut<'a>(
         node: &'a mut crate::WebCore,
@@ -5541,6 +5667,20 @@ fn additional_background_url_layer_after_gradient_is_painted() {
         0,
         &std::collections::HashSet::new(),
         "",
+    );
+    let image_index = list
+        .commands
+        .iter()
+        .position(|cmd| matches!(cmd, PaintCmd::BackgroundImage { .. }))
+        .unwrap();
+    let gradient_index = list
+        .commands
+        .iter()
+        .position(|cmd| matches!(cmd, PaintCmd::Gradient { .. }))
+        .unwrap();
+    assert!(
+        image_index < gradient_index,
+        "the second URL layer must paint behind the first gradient"
     );
     assert!(
         list.commands
@@ -6962,9 +7102,95 @@ fn custom_counter_style_applies_range_fixed_start_pad_and_fallback() {
     assert_eq!(marker("one").as_deref(), Some("0O) "));
     assert_eq!(
         marker("two").as_deref(),
-        Some("0b) "),
-        "out-of-range values should use the declared fallback style and then apply pad"
+        Some("b) "),
+        "fallback representation must not receive the original style's padding"
     );
+}
+
+#[test]
+fn custom_counter_style_fallback_uses_its_representation_not_its_marker() {
+    let (frame, _) = build(
+        r#"
+        <style>
+        @counter-style fallback-symbol {
+            system: fixed 1;
+            symbols: "F";
+            pad: 2 "0";
+            prefix: "X";
+            suffix: "Y";
+        }
+        @counter-style primary-symbol {
+            system: fixed 2;
+            symbols: "P";
+            fallback: fallback-symbol;
+            pad: 5 "Z";
+            prefix: "[";
+            suffix: "]";
+        }
+        li { list-style-type: primary-symbol; }
+        </style>
+        <ol><li id=first>first</li></ol>
+    "#,
+    );
+    let item = crate::tests::harness::find_box(&frame.doc.root, &|node| {
+        node.tag == "li"
+            && node
+                .attributes
+                .get("id")
+                .is_some_and(|value| value == "first")
+    })
+    .unwrap();
+    assert_eq!(item.style.marker_content, "[0F]");
+}
+
+#[test]
+fn custom_counter_style_negative_sign_and_auto_ranges_follow_the_system() {
+    let (frame, _) = build(
+        r#"
+        <style>
+        @counter-style binary-sign {
+            system: numeric;
+            symbols: "0" "1";
+            negative: "(" ")";
+            pad: 4 "0";
+            suffix: " ";
+        }
+        @counter-style alpha-sign {
+            system: alphabetic;
+            symbols: "a" "b";
+            negative: "(" ")";
+            suffix: " ";
+        }
+        @counter-style cyclic-sign {
+            system: cyclic;
+            symbols: "A" "B";
+            negative: "(" ")";
+            suffix: " ";
+        }
+        @counter-style repeated {
+            system: symbolic;
+            symbols: "R";
+            suffix: " ";
+        }
+        ol { counter-reset: list-item -3; }
+        #numeric { list-style-type: binary-sign; }
+        #alpha { list-style-type: alpha-sign; counter-set: list-item -2; }
+        #cyclic { list-style-type: cyclic-sign; counter-set: list-item -2; }
+        #huge { list-style-type: repeated; counter-set: list-item 1000000000; }
+        </style>
+        <ol><li id=numeric>numeric</li><li id=alpha>alpha</li><li id=cyclic>cyclic</li><li id=huge>huge</li></ol>
+    "#,
+    );
+    let marker = |id: &str| {
+        crate::tests::harness::find_box(&frame.doc.root, &|node| {
+            node.tag == "li" && node.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .map(|node| node.style.marker_content.clone())
+    };
+    assert_eq!(marker("numeric").as_deref(), Some("(0010) "));
+    assert_eq!(marker("alpha").as_deref(), Some("-2 "));
+    assert_eq!(marker("cyclic").as_deref(), Some("B "));
+    assert_eq!(marker("huge").as_deref(), Some("1000000000 "));
 }
 
 #[test]

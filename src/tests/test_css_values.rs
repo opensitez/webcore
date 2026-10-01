@@ -441,6 +441,96 @@ fn background_image_image_set_selects_supported_one_x_candidate() {
 }
 
 #[test]
+fn non_streaming_image_scan_reselects_loaded_image_set_layers_and_mask() {
+    use crate::types::{DecodedBackgroundImage, PendingImageTarget, WebCore};
+
+    let mut node = WebCore::new("div");
+    node.layout.content_rect.w = 40.0;
+    node.layout.border_rect.w = 40.0;
+    node.layout.border_rect.h = 40.0;
+    node.bg_image_data = Some(std::sync::Arc::new(vec![0; 4]));
+    node.mask_image_data = Some(std::sync::Arc::new(vec![0; 4]));
+    node.additional_bg_images.push(Some(DecodedBackgroundImage {
+        data: std::sync::Arc::new(vec![0; 4]),
+        width: 1,
+        height: 1,
+        ratio_only: false,
+        resolution: 1.0,
+    }));
+    let style = std::sync::Arc::make_mut(&mut node.style);
+    crate::css::apply_property(
+        style,
+        "background-image",
+        "image-set(url(file:///main-1.png) 1x, url(file:///main-2.png) 2x), image-set(url(file:///layer-1.png) 1x, url(file:///layer-2.png) 2x)",
+    );
+    crate::css::apply_property(
+        style,
+        "mask-image",
+        "image-set(url(file:///mask-1.png) 1x, url(file:///mask-2.png) 2x)",
+    );
+
+    let mut pending = Vec::new();
+    crate::collect_remote_images(
+        &node,
+        "file:///",
+        320.0,
+        240.0,
+        2.0,
+        &mut Vec::new(),
+        &mut pending,
+    );
+    assert!(
+        pending.iter().any(|(_, _, target, url)| {
+            *target == PendingImageTarget::Background && url == "/main-2.png"
+        }),
+        "pending={pending:?}, selected={}",
+        node.style.background_image_url_for_dpr(2.0)
+    );
+    assert!(pending.iter().any(|(_, _, target, url)| {
+        *target == PendingImageTarget::BackgroundLayer(0) && url == "/layer-2.png"
+    }));
+    assert!(pending.iter().any(|(_, _, target, url)| {
+        *target == PendingImageTarget::Mask && url == "/mask-2.png"
+    }));
+    assert!(node.bg_image_data.is_some());
+    assert!(node.mask_image_data.is_some());
+    assert!(node.additional_bg_images[0].is_some());
+}
+
+#[test]
+fn non_streaming_cached_image_set_replaces_loaded_lower_density_background() {
+    let mut doc = crate::Document::new();
+    let mut node = crate::types::WebCore::new("div");
+    node.layout.content_rect.w = 40.0;
+    node.layout.border_rect.w = 40.0;
+    node.layout.border_rect.h = 40.0;
+    crate::css::apply_property(
+        std::sync::Arc::make_mut(&mut node.style),
+        "background-image",
+        "image-set(url(file:///cached-low-density.png) 1x, url(file:///cached-high-density.png) 2x)",
+    );
+    node.bg_image_data = Some(std::sync::Arc::new(vec![10, 0, 0, 255]));
+    node.bg_image_width = 1;
+    node.bg_image_height = 1;
+    doc.root.children.push(node);
+    doc.base_url = "file:///".to_string();
+    doc.device_pixel_ratio = 2.0;
+
+    let loader = |_: &str| {
+        Some(crate::html::DecodedImage::Raster(
+            std::sync::Arc::new(vec![20, 0, 0, 255]),
+            1,
+            1,
+        ))
+    };
+    crate::cached_decoded_image("/cached-high-density.png", Some(&loader)).unwrap();
+    crate::apply_ready_cached_images(&mut doc);
+
+    assert_eq!(doc.root.children[0].bg_image_data.as_ref().unwrap()[0], 20);
+    assert_eq!(doc.root.children[0].bg_image_resolution, 2.0);
+}
+
+#[test]
 fn image_set_density_units_and_equal_density_order() {
     use crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio as select;
     for (source, ratio, expected) in [

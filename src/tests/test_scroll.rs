@@ -993,6 +993,66 @@ fn two_axis_scrollbar_corner_does_not_start_a_vertical_drag() {
 }
 
 #[test]
+fn stable_gutter_corner_does_not_start_horizontal_drag() {
+    let mut doc = layout(
+        r#"<style>
+        html, body { margin:0; padding:0 }
+        #box { position:absolute; left:0; top:0; width:40px; height:40px;
+               overflow-x:scroll; overflow-y:hidden; scrollbar-gutter:stable both-edges }
+        </style><div id=box></div>"#,
+    );
+    assert!(!doc.process_scrollbar_event(
+        crate::dom::HtmlEventType::MouseDown,
+        35.0,
+        35.0,
+        400.0,
+        300.0,
+    ));
+    assert!(!doc.process_scrollbar_event(
+        crate::dom::HtmlEventType::MouseDown,
+        5.0,
+        35.0,
+        400.0,
+        300.0,
+    ));
+    assert!(doc.process_scrollbar_event(
+        crate::dom::HtmlEventType::MouseDown,
+        15.0,
+        35.0,
+        400.0,
+        300.0,
+    ));
+}
+
+#[test]
+fn overflow_scroll_tracks_hit_test_without_content_overflow() {
+    let mut doc = layout(
+        r#"<style>
+        html, body { margin:0; padding:0 }
+        #box { position:absolute; left:0; top:0; width:40px; height:40px;
+               overflow:scroll; scrollbar-width:auto }
+        </style><div id=box></div>"#,
+    );
+    assert!(doc.process_scrollbar_event(
+        crate::dom::HtmlEventType::MouseDown,
+        35.0,
+        5.0,
+        400.0,
+        300.0,
+    ));
+    doc.process_scrollbar_event(crate::dom::HtmlEventType::MouseUp, 35.0, 5.0, 400.0, 300.0);
+    assert!(doc.process_scrollbar_event(
+        crate::dom::HtmlEventType::MouseDown,
+        5.0,
+        35.0,
+        400.0,
+        300.0,
+    ));
+    assert_eq!(query(&doc, "#box").unwrap().layout.scroll_top, 0.0);
+    assert_eq!(query(&doc, "#box").unwrap().layout.scroll_left, 0.0);
+}
+
+#[test]
 fn padded_scrollbar_hit_regions_match_the_painted_tracks() {
     let mut doc = layout(
         r#"<html><head><style>

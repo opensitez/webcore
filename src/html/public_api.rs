@@ -330,6 +330,9 @@ fn parse_html_full(
     stylesheet
         .counter_styles
         .extend(parser.stylesheet.counter_styles);
+    stylesheet
+        .layer_declarations
+        .extend(parser.stylesheet.layer_declarations);
     for name in parser.stylesheet.layer_order {
         if !stylesheet.layer_order.iter().any(|n| *n == name) {
             stylesheet.layer_order.push(name);

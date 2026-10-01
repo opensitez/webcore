@@ -35,12 +35,11 @@ fn the_data_model_sizes_are_what_the_plan_says() {
     // (WebCore, ComputedStyle, LayoutBox) — update deliberately, with the
     // change that moved them.
     //
-    // Current model includes the newer layout and image-set style fields;
-    // node and layout-box storage grew by eight bytes each.
+    // Shared custom-property maps replace the inline HashMap in ComputedStyle.
     // these numbers are a measured record, not a size budget.
     // This assertion is a measured record, not a threshold; update it with the
     // feature that intentionally moves the data model.
-    assert_eq!(sizes, (1496, 3592, 288), "sizes moved");
+    assert_eq!(sizes, (1496, 3552, 288), "sizes moved");
 }
 
 #[test]
@@ -52,7 +51,7 @@ fn a_real_page_costs_what_the_plan_says() {
     // sizes above, so widening WebCore or ComputedStyle changes this record.
     assert_eq!(
         (nodes, node_bytes, distinct_styles, total),
-        (160, 239_360, 160, 814_080),
+        (160, 239_360, 160, 807_680),
         "demo.html: nodes, node bytes, DISTINCT styles, total"
     );
 }

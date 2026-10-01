@@ -226,6 +226,8 @@ pub fn layout_flex(
     rbox: &ResolvedBox,
     c: &Constraints,
 ) -> f32 {
+    let _profile = crate::profile::span(crate::profile::Phase::LayoutFlex);
+    let _hot = crate::layout::perf::node_span("layout-flex", node.node_id);
     unwrap_anonymous_children(node);
 
     let containing_w = c.available_width;

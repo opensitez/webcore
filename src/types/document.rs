@@ -76,12 +76,29 @@ pub struct PendingStylesheetResult {
 }
 
 impl PendingStylesheetResult {
-    pub fn fragment(slot: usize, url: String, sheet: crate::css::Stylesheet, media: String) -> Self {
-        Self { slot, url, sheet, media, kind: StylesheetUpdateKind::Fragment }
+    pub fn fragment(
+        slot: usize,
+        url: String,
+        sheet: crate::css::Stylesheet,
+        media: String,
+    ) -> Self {
+        Self {
+            slot,
+            url,
+            sheet,
+            media,
+            kind: StylesheetUpdateKind::Fragment,
+        }
     }
 
     pub fn replace(slot: usize, url: String, sheet: crate::css::Stylesheet, media: String) -> Self {
-        Self { slot, url, sheet, media, kind: StylesheetUpdateKind::Replace }
+        Self {
+            slot,
+            url,
+            sheet,
+            media,
+            kind: StylesheetUpdateKind::Replace,
+        }
     }
 }
 
@@ -471,8 +488,8 @@ impl Document {
             // `month` and `week` open a calendar too in a browser, but they
             // pick a MONTH and a WEEK, not a day — a day grid would write a
             // value their format cannot hold. Until each has its own grid,
-            // only `date` opens one.
-            "date" => Some(PickerKind::Calendar),
+            // `datetime-local` picks a day too and retains its time component.
+            "date" | "datetime-local" => Some(PickerKind::Calendar),
             _ => None,
         }
     }
@@ -764,7 +781,7 @@ impl Document {
     /// current month when it has none — which is what a browser opens on.
     pub(crate) fn picker_month(&self, id: u32) -> (i32, u32, Option<u32>) {
         let value = self.find_webcore(id).map(input_value).unwrap_or_default();
-        match crate::widgets::parse_date(&value) {
+        match crate::widgets::parse_date(value.split('T').next().unwrap_or(&value)) {
             Some((y, m, d)) => (y, m, Some(d)),
             // No date library here, and none needed: an empty control opens on
             // a fixed, obviously-neutral month rather than pretending to know

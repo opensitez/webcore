@@ -164,6 +164,11 @@ fn stylesheet_cache_bytes(sheet: &css::Stylesheet) -> usize {
     for layer in &sheet.layer_order {
         bytes = bytes.saturating_add(string_bytes(layer));
     }
+    for (layer, condition) in &sheet.layer_declarations {
+        bytes = bytes
+            .saturating_add(string_bytes(layer))
+            .saturating_add(condition.heap_bytes());
+    }
     for rule in &sheet.rules {
         bytes =
             bytes
@@ -266,12 +271,12 @@ pub(crate) fn parsed_css_cache_stats() -> CacheMemoryStats {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
+pub(crate) use images::cache::cached_decoded_image;
 pub(crate) use images::cache::{
     cached_decoded_image_ready, cached_decoded_image_result,
     cached_decoded_image_result_from_option_loader, decoded_image_cache_stats,
 };
-#[cfg(test)]
-pub(crate) use images::cache::cached_decoded_image;
 
 fn stream_stylesheet_fragments(
     css_text: &str,
@@ -470,7 +475,17 @@ fn scope_imported_layer(sheet: &mut css::Stylesheet, layer: &str) {
     for name in &mut sheet.layer_order {
         *name = format!("{layer}.{name}");
     }
+    for (name, _) in &mut sheet.layer_declarations {
+        *name = format!("{layer}.{name}");
+    }
     for rule in &mut sheet.rules {
+        rule.layer = if rule.layer.is_empty() {
+            layer.to_string()
+        } else {
+            format!("{layer}.{}", rule.layer)
+        };
+    }
+    for rule in &mut sheet.counter_styles {
         rule.layer = if rule.layer.is_empty() {
             layer.to_string()
         } else {
@@ -509,9 +524,13 @@ fn emit_css_imports(
             continue;
         }
         let layer = imported_layer_name(parent_layer, target.layer);
+        let effective_media = media.with_query(target.media);
         if target.layer.is_some() {
             let mut declaration = css::Stylesheet::default();
             declaration.layer_order.push(layer.clone().unwrap());
+            declaration
+                .layer_declarations
+                .push((layer.clone().unwrap(), effective_media.clone()));
             count += 1;
             emit(declaration);
         }
@@ -519,7 +538,6 @@ fn emit_css_imports(
         if !stack.insert(url.clone()) {
             continue;
         }
-        let effective_media = media.with_query(target.media);
         let mut consume = |text: &str| {
             count += emit_css_imports(
                 text,
@@ -650,13 +668,18 @@ impl ImportWorker {
                 );
                 failed_for_task.store(failed, std::sync::atomic::Ordering::Release);
             });
-            self.active.push_back(ImportTask { fragments, stream_failed });
+            self.active.push_back(ImportTask {
+                fragments,
+                stream_failed,
+            });
         }
     }
 
     fn finish_front(&mut self) {
         if let Some(task) = self.active.pop_front() {
-            self.stream_failed |= task.stream_failed.load(std::sync::atomic::Ordering::Acquire);
+            self.stream_failed |= task
+                .stream_failed
+                .load(std::sync::atomic::Ordering::Acquire);
         }
         self.schedule();
     }
@@ -930,9 +953,19 @@ fn parse_complete_stylesheet(
     let mut sheet = css::Stylesheet::default();
     let mut stack = std::collections::HashSet::from([css_url.to_string()]);
     let mut stream_failed = false;
-    emit_css_imports(text, css_url, media, loader, None, &mut stack, None, &mut stream_failed, &mut |fragment| {
-        sheet.append_fragment(fragment);
-    });
+    emit_css_imports(
+        text,
+        css_url,
+        media,
+        loader,
+        None,
+        &mut stack,
+        None,
+        &mut stream_failed,
+        &mut |fragment| {
+            sheet.append_fragment(fragment);
+        },
+    );
     stream_stylesheet_fragments(text, css_url, media, |fragment| {
         sheet.append_fragment(fragment);
     });
@@ -1439,8 +1472,20 @@ mod stylesheet_loader_tests {
             |_| {},
         );
         assert_eq!(result.sheet.rules.len(), 2);
-        assert_eq!(result.sheet.rules[0].declarations.get("color").map(String::as_str), Some("red"));
-        assert_eq!(result.sheet.rules[1].declarations.get("color").map(String::as_str), Some("blue"));
+        assert_eq!(
+            result.sheet.rules[0]
+                .declarations
+                .get("color")
+                .map(String::as_str),
+            Some("red")
+        );
+        assert_eq!(
+            result.sheet.rules[1]
+                .declarations
+                .get("color")
+                .map(String::as_str),
+            Some("blue")
+        );
     }
 
     #[test]
@@ -1505,7 +1550,8 @@ mod stylesheet_loader_tests {
                 "@import 'skip.css' supports(display: invented-value);",
                 "@import 'use.css' supports(display: grid);",
                 ".title { color: blue }"
-            ).into()),
+            )
+            .into()),
             "https://site.test/use.css" => Ok(".title { color: red }".into()),
             _ => panic!("unexpected import fetch: {url}"),
         });
@@ -1519,16 +1565,26 @@ mod stylesheet_loader_tests {
             |_| {},
         );
         assert_eq!(result.sheet.rules.len(), 2);
-        assert_eq!(result.sheet.rules[0].declarations.get("color").map(String::as_str), Some("red"));
-        assert_eq!(result.sheet.rules[1].declarations.get("color").map(String::as_str), Some("blue"));
+        assert_eq!(
+            result.sheet.rules[0]
+                .declarations
+                .get("color")
+                .map(String::as_str),
+            Some("red")
+        );
+        assert_eq!(
+            result.sheet.rules[1]
+                .declarations
+                .get("color")
+                .map(String::as_str),
+            Some("blue")
+        );
     }
 
     #[test]
     fn imported_media_list_stays_bounded_by_the_link_media() {
         let loader: StylesheetLoader = Arc::new(|url| match url {
-            "https://site.test/base.css" => {
-                Ok("@import 'theme.css' screen, print;".into())
-            }
+            "https://site.test/base.css" => Ok("@import 'theme.css' screen, print;".into()),
             "https://site.test/theme.css" => Ok(".title { color: red }".into()),
             _ => Err(format!("unexpected URL: {url}")),
         });
@@ -1551,11 +1607,13 @@ mod stylesheet_loader_tests {
             "https://site.test/base.css" => Ok(concat!(
                 "@import 'theme.css' supports(display: grid) layer(theme);",
                 "@layer override { .title { color: blue } }"
-            ).into()),
+            )
+            .into()),
             "https://site.test/theme.css" => Ok(concat!(
                 ".title { color: red }",
                 "@layer accent { .title { color: green } }"
-            ).into()),
+            )
+            .into()),
             _ => panic!("unexpected import fetch: {url}"),
         });
         let result = load_stylesheet_cached(
@@ -1567,10 +1625,54 @@ mod stylesheet_loader_tests {
             false,
             |_| {},
         );
-        assert_eq!(result.sheet.layer_order, ["theme", "theme.accent", "override"]);
-        assert_eq!(result.sheet.rules.iter().map(|rule| rule.layer.as_str()).collect::<Vec<_>>(),
-            ["theme", "theme.accent", "override"]);
-        assert_eq!(css_import_target("@import 'x.css' layer(foo) supports(display: grid); ").unwrap().layer, Some(Some("foo")));
+        assert_eq!(
+            result.sheet.layer_order,
+            ["theme", "theme.accent", "override"]
+        );
+        assert_eq!(
+            result
+                .sheet
+                .rules
+                .iter()
+                .map(|rule| rule.layer.as_str())
+                .collect::<Vec<_>>(),
+            ["theme", "theme.accent", "override"]
+        );
+        assert_eq!(
+            css_import_target("@import 'x.css' layer(foo) supports(display: grid); ")
+                .unwrap()
+                .layer,
+            Some(Some("foo"))
+        );
+    }
+
+    #[test]
+    fn imported_layer_media_condition_controls_layer_order() {
+        let loader: StylesheetLoader = Arc::new(|url| match url {
+            "https://site.test/base.css" => Ok(concat!(
+                "@import 'layout.css' layer(layout) (min-width: 700px);",
+                "@layer theme, layout;",
+                "@layer theme { .title { color: blue } }"
+            )
+            .into()),
+            "https://site.test/layout.css" => Ok(".title { color: green }".into()),
+            _ => panic!("unexpected import fetch: {url}"),
+        });
+        let mut sheet = load_stylesheet_cached(
+            "test-conditional-layered-import".into(),
+            "https://site.test/base.css".into(),
+            String::new(),
+            loader,
+            None,
+            false,
+            |_| {},
+        )
+        .sheet;
+        for (width, first) in [(600.0, "theme"), (800.0, "layout"), (600.0, "theme")] {
+            sheet.set_layer_viewport(width, 600.0);
+            sheet.rebuild_index();
+            assert_eq!(sheet.layer_rank(first), 0, "{width}");
+        }
     }
 
     #[test]
@@ -1637,15 +1739,12 @@ mod stylesheet_loader_tests {
 
     #[test]
     fn nested_css_imports_use_the_streaming_loader_in_source_order() {
-        let loader: StylesheetLoader = Arc::new(|url| Err(format!("complete fetch forbidden: {url}")));
+        let loader: StylesheetLoader =
+            Arc::new(|url| Err(format!("complete fetch forbidden: {url}")));
         let streaming_loader: StreamingStylesheetLoader = Arc::new(|url, emit| {
             let css = match url {
-                "https://site.test/base.css" => {
-                    "@import 'theme.css'; .title { color: blue }"
-                }
-                "https://site.test/theme.css" => {
-                    "@import 'colors.css'; .title { color: red }"
-                }
+                "https://site.test/base.css" => "@import 'theme.css'; .title { color: blue }",
+                "https://site.test/theme.css" => "@import 'colors.css'; .title { color: red }",
                 "https://site.test/colors.css" => ".title { color: green }",
                 _ => return Err(format!("unexpected URL: {url}")),
             };
@@ -1679,7 +1778,8 @@ mod stylesheet_loader_tests {
     fn imported_rule_is_emitted_before_its_stream_finishes() {
         let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let checked = observed.clone();
-        let loader: StylesheetLoader = Arc::new(|url| Err(format!("complete fetch forbidden: {url}")));
+        let loader: StylesheetLoader =
+            Arc::new(|url| Err(format!("complete fetch forbidden: {url}")));
         let streaming_loader: StreamingStylesheetLoader = Arc::new(move |url, emit| {
             match url {
                 "https://site.test/base.css" => emit("@import 'theme.css';"),
@@ -1700,7 +1800,11 @@ mod stylesheet_loader_tests {
             Some(streaming_loader),
             false,
             |sheet| {
-                if sheet.rules.iter().any(|rule| rule.original_selector == ".title") {
+                if sheet
+                    .rules
+                    .iter()
+                    .any(|rule| rule.original_selector == ".title")
+                {
                     observed.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
             },
@@ -1711,8 +1815,9 @@ mod stylesheet_loader_tests {
     #[test]
     fn failed_import_stream_replaces_published_rules_in_parent_sheet() {
         let loader: StylesheetLoader = Arc::new(|url| match url {
-            "https://site.test/base.css" =>
-                Ok("@import 'theme.css'; .parent { color: blue }".into()),
+            "https://site.test/base.css" => {
+                Ok("@import 'theme.css'; .parent { color: blue }".into())
+            }
             "https://site.test/theme.css" => Ok(".theme { color: green }".into()),
             _ => Err(format!("unexpected URL: {url}")),
         });
@@ -1739,7 +1844,10 @@ mod stylesheet_loader_tests {
         );
         assert!(published.iter().any(|selector| selector == ".theme"));
         assert!(loaded.replace_emitted);
-        let colors: Vec<_> = loaded.sheet.rules.iter()
+        let colors: Vec<_> = loaded
+            .sheet
+            .rules
+            .iter()
             .filter_map(|rule| rule.declarations.get("color"))
             .map(String::as_str)
             .collect();
@@ -1770,7 +1878,10 @@ mod stylesheet_loader_tests {
             |_| {},
         );
         assert!(!loaded.replace_emitted);
-        let colors: Vec<_> = loaded.sheet.rules.iter()
+        let colors: Vec<_> = loaded
+            .sheet
+            .rules
+            .iter()
             .filter_map(|rule| rule.declarations.get("color"))
             .map(String::as_str)
             .collect();
@@ -1780,10 +1891,12 @@ mod stylesheet_loader_tests {
     #[test]
     fn nested_import_stream_failure_replaces_entire_parent_sheet() {
         let loader: StylesheetLoader = Arc::new(|url| match url {
-            "https://site.test/base.css" =>
-                Ok("@import 'middle.css'; .parent { color: blue }".into()),
-            "https://site.test/middle.css" =>
-                Ok("@import 'child.css'; .middle { color: red }".into()),
+            "https://site.test/base.css" => {
+                Ok("@import 'middle.css'; .parent { color: blue }".into())
+            }
+            "https://site.test/middle.css" => {
+                Ok("@import 'child.css'; .middle { color: red }".into())
+            }
             "https://site.test/child.css" => Ok(".child { color: orange }".into()),
             _ => Err(format!("unexpected URL: {url}")),
         });
@@ -1812,7 +1925,10 @@ mod stylesheet_loader_tests {
             |_| {},
         );
         assert!(loaded.replace_emitted);
-        let colors: Vec<_> = loaded.sheet.rules.iter()
+        let colors: Vec<_> = loaded
+            .sheet
+            .rules
+            .iter()
             .filter_map(|rule| rule.declarations.get("color"))
             .map(String::as_str)
             .collect();
@@ -1827,7 +1943,8 @@ mod stylesheet_loader_tests {
         let import_timed_out = Arc::new(AtomicBool::new(false));
         let advanced = parent_advanced.clone();
         let timed_out = import_timed_out.clone();
-        let loader: StylesheetLoader = Arc::new(|url| Err(format!("complete fetch forbidden: {url}")));
+        let loader: StylesheetLoader =
+            Arc::new(|url| Err(format!("complete fetch forbidden: {url}")));
         let streaming_loader: StreamingStylesheetLoader = Arc::new(move |url, emit| {
             match url {
                 "https://site.test/base.css" => {
@@ -1881,7 +1998,8 @@ mod stylesheet_loader_tests {
         let first_timed_out = Arc::new(AtomicBool::new(false));
         let started = second_started.clone();
         let timed_out = first_timed_out.clone();
-        let loader: StylesheetLoader = Arc::new(|url| Err(format!("complete fetch forbidden: {url}")));
+        let loader: StylesheetLoader =
+            Arc::new(|url| Err(format!("complete fetch forbidden: {url}")));
         let streaming_loader: StreamingStylesheetLoader = Arc::new(move |url, emit| {
             match url {
                 "https://site.test/base.css" => {
@@ -1928,7 +2046,8 @@ mod stylesheet_loader_tests {
 
         let late_import_fetched = Arc::new(AtomicBool::new(false));
         let fetched = late_import_fetched.clone();
-        let loader: StylesheetLoader = Arc::new(|url| Err(format!("complete fetch forbidden: {url}")));
+        let loader: StylesheetLoader =
+            Arc::new(|url| Err(format!("complete fetch forbidden: {url}")));
         let streaming_loader: StreamingStylesheetLoader = Arc::new(move |url, emit| {
             match url {
                 "https://site.test/base.css" => {
@@ -1954,7 +2073,10 @@ mod stylesheet_loader_tests {
         );
         assert!(!late_import_fetched.load(Ordering::SeqCst));
         assert_eq!(result.sheet.rules.len(), 1);
-        assert_eq!(result.sheet.rules[0].declarations.get("color"), Some(&"blue".to_string()));
+        assert_eq!(
+            result.sheet.rules[0].declarations.get("color"),
+            Some(&"blue".to_string())
+        );
     }
 
     #[test]
@@ -1981,7 +2103,10 @@ mod stylesheet_loader_tests {
         assert_eq!(emitted, [".title"]);
         assert!(loaded.replace_emitted);
         assert_eq!(loaded.sheet.rules.len(), 2);
-        assert_eq!(loaded.sheet.rules[0].declarations.get("color"), Some(&"blue".to_string()));
+        assert_eq!(
+            loaded.sheet.rules[0].declarations.get("color"),
+            Some(&"blue".to_string())
+        );
     }
 
     #[test]
@@ -2081,16 +2206,24 @@ mod stylesheet_loader_tests {
             false,
             std::time::Duration::from_secs(1),
         );
-        assert!(doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".first"));
-        assert!(doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".second"));
+        assert!(
+            doc.stylesheet
+                .rules
+                .iter()
+                .any(|rule| rule.original_selector == ".first")
+        );
+        assert!(
+            doc.stylesheet
+                .rules
+                .iter()
+                .any(|rule| rule.original_selector == ".second")
+        );
         assert!(doc.pending_stylesheets.is_none());
     }
 
     #[test]
     fn css_wait_replaces_failed_stream_before_first_paint() {
-        let loader: StylesheetLoader = Arc::new(|_| {
-            Ok(".target { color: blue }".to_string())
-        });
+        let loader: StylesheetLoader = Arc::new(|_| Ok(".target { color: blue }".to_string()));
         let streaming_loader: StreamingStylesheetLoader = Arc::new(|_, emit| {
             emit(".target { color: red }");
             Err("interrupted stream".into())
@@ -2143,18 +2276,38 @@ mod stylesheet_loader_tests {
             false,
             std::time::Duration::from_millis(10),
         );
-        assert!(!doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".second"));
+        assert!(
+            !doc.stylesheet
+                .rules
+                .iter()
+                .any(|rule| rule.original_selector == ".second")
+        );
         assert!(doc.pending_stylesheets.is_some());
         resume_tx.send(()).unwrap();
         for _ in 0..100 {
             doc.poll_pending_stylesheets_budgeted(usize::MAX, std::time::Duration::ZERO);
-            if doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".second") {
+            if doc
+                .stylesheet
+                .rules
+                .iter()
+                .any(|rule| rule.original_selector == ".second")
+            {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        assert!(doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".first"));
-        assert!(doc.stylesheet.rules.iter().any(|rule| rule.original_selector == ".second"));
+        assert!(
+            doc.stylesheet
+                .rules
+                .iter()
+                .any(|rule| rule.original_selector == ".first")
+        );
+        assert!(
+            doc.stylesheet
+                .rules
+                .iter()
+                .any(|rule| rule.original_selector == ".second")
+        );
     }
 }
 
@@ -2449,11 +2602,17 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
                         if loaded.replace_emitted || loaded.emitted_fragments == 0 {
                             let update = if loaded.replace_emitted {
                                 types::PendingStylesheetResult::replace(
-                                    idx, abs.clone(), loaded.sheet.clone(), media.clone(),
+                                    idx,
+                                    abs.clone(),
+                                    loaded.sheet.clone(),
+                                    media.clone(),
                                 )
                             } else {
                                 types::PendingStylesheetResult::fragment(
-                                    idx, abs.clone(), loaded.sheet.clone(), media.clone(),
+                                    idx,
+                                    abs.clone(),
+                                    loaded.sheet.clone(),
+                                    media.clone(),
                                 )
                             };
                             let _ = sender.send(update);
@@ -2502,7 +2661,11 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
         t1.elapsed().as_millis(),
         css_results.len(),
         expected_count,
-        if css_finished { " complete" } else { " pending" }
+        if css_finished {
+            " complete"
+        } else {
+            " pending"
+        }
     );
     let has_pending_css = !css_finished;
     if !doc.document_stylesheets.is_empty() {
@@ -2511,7 +2674,13 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
         let mut fetched_slots: std::collections::HashMap<usize, crate::css::Stylesheet> =
             std::collections::HashMap::new();
         for update in css_results {
-            let types::PendingStylesheetResult { slot, url, sheet, kind, .. } = update;
+            let types::PendingStylesheetResult {
+                slot,
+                url,
+                sheet,
+                kind,
+                ..
+            } = update;
             if kind == types::StylesheetUpdateKind::Replace {
                 fetched_slots.insert(slot, sheet.clone());
                 fetched_map.insert(url, sheet);
@@ -2579,7 +2748,13 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
             doc.pending_stylesheet_base = Some(doc.stylesheet.clone());
         }
         for update in css_results {
-            let types::PendingStylesheetResult { slot, url, sheet, kind, .. } = update;
+            let types::PendingStylesheetResult {
+                slot,
+                url,
+                sheet,
+                kind,
+                ..
+            } = update;
             if kind == types::StylesheetUpdateKind::Replace {
                 doc.loaded_stylesheet_slots.insert(slot, sheet.clone());
                 doc.loaded_linked_stylesheets.insert(url, sheet);
@@ -2893,7 +3068,7 @@ fn collect_remote_images(
         }
     }
     if can_paint_resource
-        && node.bg_image_data.is_none()
+        && (node.bg_image_data.is_none() || node.style.rare().background_image_set_source.is_some())
         && !node.style.background_image_url.is_empty()
     {
         let selected = node.style.background_image_url_for_dpr(device_pixel_ratio);
@@ -2923,7 +3098,7 @@ fn collect_remote_images(
             .get(layer_index)
             .and_then(|image| image.as_ref())
             .is_some();
-        if loaded {
+        if loaded && layer.image_set_source.is_none() {
             continue;
         }
         let selected = layer.image_url_for_dpr(device_pixel_ratio);
@@ -2939,7 +3114,7 @@ fn collect_remote_images(
         }
     }
     if can_paint_resource
-        && node.mask_image_data.is_none()
+        && (node.mask_image_data.is_none() || node.style.rare().mask_image_set_source.is_some())
         && !node.style.rare().mask_image_url.is_empty()
     {
         let selected = node.style.mask_image_url_for_dpr(device_pixel_ratio);
@@ -3015,19 +3190,24 @@ fn resolve_css_url(base: &str, href: &str) -> String {
     html::resolve_url(href, base)
 }
 
-/// Build a `reqwest::blocking::Client` with browser-like defaults.
+/// Return a shared `reqwest::blocking::Client` with browser-like defaults.
 /// Handles gzip/brotli/deflate decompression and redirects automatically.
 /// Only sets shared headers (UA, Accept-Language, Sec-CH-UA); callers should
 /// add request-specific headers (Accept, Sec-Fetch-Dest, etc.) per request.
+/// Clones retain the connection pool across resources and navigations.
 pub fn http_client() -> reqwest::blocking::Client {
-    build_http_client(false)
+    static CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
+        std::sync::LazyLock::new(|| build_http_client(false));
+    CLIENT.clone()
 }
 
 /// Lenient client that accepts certs where the base domain (without www.)
 /// is in the SAN but the exact subdomain isn't — matches Chrome behaviour
 /// for shared-hosting certs.
 pub fn http_client_lenient() -> reqwest::blocking::Client {
-    build_http_client(true)
+    static CLIENT: std::sync::LazyLock<reqwest::blocking::Client> =
+        std::sync::LazyLock::new(|| build_http_client(true));
+    CLIENT.clone()
 }
 
 fn build_http_client(accept_invalid_certs: bool) -> reqwest::blocking::Client {

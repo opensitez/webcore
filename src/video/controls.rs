@@ -102,6 +102,33 @@ pub(crate) fn build_media_element(node: &WebCore, list: &mut DisplayList, sx: f3
         );
     }
 
+    if is_video && node.media_paused && cr.w >= 72.0 && cr.h >= 72.0 {
+        let size = cr.w.min(cr.h).min(64.0).max(40.0);
+        let cx = x + cr.w * 0.5;
+        let cy = y + cr.h * 0.5;
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(cx - size * 0.5, cy - size * 0.5, size, size),
+            color: Color::rgba(0, 0, 0, 180),
+            radius: [size * 0.5; 4],
+            radius_y: [size * 0.5; 4],
+        });
+        let half = size * 0.22;
+        list.push(PaintCmd::PushClipPath {
+            points: vec![
+                (cx - half * 0.65, cy - half),
+                (cx + half, cy),
+                (cx - half * 0.65, cy + half),
+            ],
+        });
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(cx - half, cy - half, half * 2.0, half * 2.0),
+            color: Color::WHITE,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+        list.push(PaintCmd::PopClip);
+    }
+
     if controls {
         paint_media_controls(node, list, x, y, cr, font_px, is_video);
     }

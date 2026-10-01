@@ -77,10 +77,6 @@ fn scrollbar_gutter_stable(value: &str) -> bool {
     value.split_whitespace().any(|token| token == "stable")
 }
 
-fn scrollbar_gutter_both_edges(value: &str) -> bool {
-    value.split_whitespace().any(|token| token == "both-edges")
-}
-
 fn propagate_text_decoration_to_inline_runs(node: &mut WebCore, parent: &ComputedStyle) {
     for run in &mut node.layout.inline_runs {
         apply_parent_text_decoration(&mut run.style, parent);
@@ -758,26 +754,9 @@ fn layout_block_pass(
     let sbw = node.style.scrollbar_width_px();
     let reserve_v_scrollbar =
         matches!(node.style.overflow_y, Overflow::Scroll) || auto_scrollbar_present;
-    let stable_gutter = scrollbar_gutter_stable(&node.style.scrollbar_gutter)
-        && matches!(
-            node.style.overflow_y,
-            Overflow::Hidden | Overflow::Scroll | Overflow::Auto
-        );
-    let reserve_scrollbar_gutter = reserve_v_scrollbar || stable_gutter;
-    let gutter_edges = if reserve_scrollbar_gutter && sbw > 0.0 {
-        if scrollbar_gutter_both_edges(&node.style.scrollbar_gutter) {
-            2.0
-        } else {
-            1.0
-        }
-    } else {
-        0.0
-    };
-    let child_content_w = if gutter_edges > 0.0 {
-        (content_w - sbw * gutter_edges).max(0.0)
-    } else {
-        content_w
-    };
+    let (left_gutter, right_gutter) = node.style.scrollbar_gutter_edges(reserve_v_scrollbar);
+    let gutter_width = sbw * (u8::from(left_gutter) + u8::from(right_gutter)) as f32;
+    let child_content_w = (content_w - gutter_width).max(0.0);
     let _query_container_scope = engine.enter_query_container(
         &node.style,
         content_w,
@@ -839,7 +818,7 @@ fn layout_block_pass(
         + margin_left
         + rbox.border_left
         + rbox.padding_left
-        + if gutter_edges > 1.0 { sbw } else { 0.0 };
+        + if left_gutter { sbw } else { 0.0 };
     let content_y = y + rbox.margin_top + rbox.border_top + rbox.padding_top;
 
     // ─── CSS margin collapsing setup ──────────────────────────────────────────
@@ -897,16 +876,14 @@ fn layout_block_pass(
             Some(h) => h,
             None => col_h,
         };
-        let min_h = engine.res_len(&node.style.min_height, font_px, 0.0, root_font_px);
+        let height_basis = c.available_height.unwrap_or(0.0);
+        let min_h = engine.res_len(&node.style.min_height, font_px, height_basis, root_font_px);
         let max_h = if node.style.max_height.is_none() || node.style.max_height.is_auto() {
             f32::MAX
+        } else if c.available_height.is_none() && node.style.max_height.has_percentage() {
+            f32::MAX
         } else {
-            let v = engine.res_len(&node.style.max_height, font_px, 0.0, root_font_px);
-            if v == 0.0 && matches!(node.style.max_height, CssLength::Percent(_)) {
-                f32::MAX
-            } else {
-                v
-            }
+            engine.res_len(&node.style.max_height, font_px, height_basis, root_font_px)
         };
         let content_h = content_h.max(min_h).min(max_h).max(0.0);
         build_box_rects(
@@ -1637,16 +1614,14 @@ fn layout_block_pass(
     };
 
     // Apply min/max-height
-    let min_h = engine.res_len(&node.style.min_height, font_px, 0.0, root_font_px);
+    let height_basis = c.available_height.unwrap_or(0.0);
+    let min_h = engine.res_len(&node.style.min_height, font_px, height_basis, root_font_px);
     let max_h = if node.style.max_height.is_none() || node.style.max_height.is_auto() {
         f32::MAX
+    } else if c.available_height.is_none() && node.style.max_height.has_percentage() {
+        f32::MAX
     } else {
-        let v = engine.res_len(&node.style.max_height, font_px, 0.0, root_font_px);
-        if v == 0.0 && matches!(node.style.max_height, CssLength::Percent(_)) {
-            f32::MAX
-        } else {
-            v
-        }
+        engine.res_len(&node.style.max_height, font_px, height_basis, root_font_px)
     };
     let content_h = content_h.max(min_h).min(max_h).max(0.0);
 
@@ -1710,7 +1685,7 @@ fn layout_block_pass(
         })
         .fold(
             (
-                content_w,
+                child_content_w,
                 child_y.max(float_bottom).max(inline_bottom).max(content_h),
             ),
             |(width, height), child| {
@@ -1744,7 +1719,7 @@ fn layout_block_pass(
         || matches!(node.style.overflow_y, Overflow::Scroll | Overflow::Auto)
     {
         let max_scroll_y = (node.layout.scroll_height - content_h).max(0.0);
-        let max_scroll_x = (node.layout.scroll_width - content_w).max(0.0);
+        let max_scroll_x = (node.layout.scroll_width - child_content_w).max(0.0);
         node.layout.scroll_top = node.layout.scroll_top.min(max_scroll_y).max(0.0);
         node.layout.scroll_left = node.layout.scroll_left.min(max_scroll_x).max(0.0);
     } else {

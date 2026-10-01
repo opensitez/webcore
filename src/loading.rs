@@ -719,7 +719,7 @@ where
     F: FnMut(String, String),
 {
     let do_fetch = |client: &reqwest::blocking::Client,
-                        on_chunk: &mut dyn FnMut(String, String)|
+                    on_chunk: &mut dyn FnMut(String, String)|
      -> Result<(String, String, bool), (String, bool)> {
         let method = reqwest::Method::from_bytes(options.request_method.as_bytes())
             .unwrap_or(reqwest::Method::GET);
@@ -1268,23 +1268,23 @@ where
     let profile_epoch = crate::profile::epoch();
     let do_fetch = |client: &reqwest::blocking::Client,
                     on_chunk: &mut dyn FnMut(&[u8], Option<&'static encoding_rs::Encoding>)|
-     -> Result<(), String> {
+     -> Result<(), (String, bool)> {
         let mut resp = client
             .get(url)
             .header("Accept", "text/css,*/*;q=0.1")
             .header("Sec-Fetch-Dest", "style")
             .header("Sec-Fetch-Mode", "no-cors")
             .send()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| (e.to_string(), true))?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(format!("HTTP {status} loading stylesheet {url}"));
+            return Err((format!("HTTP {status} loading stylesheet {url}"), false));
         }
         let http_encoding = css_http_encoding(resp.headers());
         let mut buf = [0u8; 16 * 1024];
         let mut saw = false;
         loop {
-            let n = resp.read(&mut buf).map_err(|e| e.to_string())?;
+            let n = resp.read(&mut buf).map_err(|e| (e.to_string(), false))?;
             if n == 0 {
                 break;
             }
@@ -1292,7 +1292,7 @@ where
             on_chunk(&buf[..n], http_encoding);
         }
         if !saw {
-            return Err(format!("empty stylesheet response from {url}"));
+            return Err((format!("empty stylesheet response from {url}"), false));
         }
         Ok(())
     };
@@ -1303,8 +1303,10 @@ where
     };
     let result = match do_fetch(&crate::http_client(), &mut first) {
         Ok(()) => Ok(()),
-        Err(err) if saw => Err(err),
-        Err(_) => do_fetch(&crate::http_client_lenient(), &mut on_chunk),
+        Err((_, true)) if !saw && url.starts_with("https://") => {
+            do_fetch(&crate::http_client_lenient(), &mut on_chunk).map_err(|(err, _)| err)
+        }
+        Err((err, _)) => Err(err),
     };
     if let Some(started) = started {
         crate::profile::record_resource_for(
@@ -1747,6 +1749,52 @@ mod tests {
         let error = fetch_bytes(&url).unwrap_err();
         running.store(false, std::sync::atomic::Ordering::Relaxed);
         assert!(error.contains("403"));
+        assert_eq!(server.join().unwrap(), 1);
+    }
+
+    #[test]
+    fn stylesheet_http_error_is_not_retried_with_certificate_fallback() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/missing.css", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let server_running = running.clone();
+        let server = std::thread::spawn(move || {
+            let mut requests = 0;
+            while server_running.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut request = [0; 2048];
+                        let mut received = Vec::new();
+                        loop {
+                            let count = stream.read(&mut request).unwrap();
+                            if count == 0 {
+                                break;
+                            }
+                            received.extend_from_slice(&request[..count]);
+                            if received.windows(4).any(|window| window == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        stream
+                            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .unwrap();
+                        requests += 1;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(e) => panic!("local stylesheet server: {e}"),
+                }
+            }
+            requests
+        });
+
+        let error = fetch_text_resource(&url, None).unwrap_err();
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(error.contains("404"));
         assert_eq!(server.join().unwrap(), 1);
     }
 

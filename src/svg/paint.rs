@@ -43,7 +43,10 @@ impl SvgTextSystem {
     fn take() -> Self {
         SVG_TEXT_SYSTEM.with(|slot| {
             Self(Some(slot.borrow_mut().take().unwrap_or_else(|| {
-                (cosmic_text::FontSystem::new(), cosmic_text::SwashCache::new())
+                (
+                    cosmic_text::FontSystem::new(),
+                    cosmic_text::SwashCache::new(),
+                )
             })))
         })
     }
@@ -109,8 +112,7 @@ impl ForeignObjectCache {
         self.generation = self.generation.wrapping_add(1).max(1);
         self.bytes += bytes;
         self.order.push_back((key.clone(), self.generation));
-        self.entries
-            .insert(key, (image, bytes, self.generation));
+        self.entries.insert(key, (image, bytes, self.generation));
         self.compact_order_if_needed();
     }
 
@@ -1538,7 +1540,10 @@ fn paint_foreign_object(
     let cached = if dynamic {
         None
     } else {
-        FOREIGN_OBJECT_CACHE.lock().ok().and_then(|mut cache| cache.get(&key))
+        FOREIGN_OBJECT_CACHE
+            .lock()
+            .ok()
+            .and_then(|mut cache| cache.get(&key))
     };
     let layer = match cached {
         Some(layer) => layer,
@@ -2318,7 +2323,7 @@ fn apply_dom_computed_style(
     } else if is_root && style.svg_stroke.is_none() && !own_stroke {
         state.stroke = None;
     }
-    state.custom_props = style.custom_props.clone();
+    state.custom_props = (*style.custom_props).clone();
     state.font_family = style.font_family.clone();
     state.font_size = font_px;
     state.font_weight = if style.font_weight.is_bold() {
@@ -5443,14 +5448,22 @@ mod tests {
         let image = Arc::new(Pixmap::new(20, 10).unwrap());
         cache.insert(key.clone(), Arc::clone(&image));
         assert!(Arc::ptr_eq(&cache.get(&key).unwrap(), &image));
-        assert!(cache.get(&ForeignObjectKey {
-            markup: "<div>second</div>".to_string(),
-            ..key.clone()
-        }).is_none());
-        assert!(cache.get(&ForeignObjectKey {
-            width_bits: 21.0f32.to_bits(),
-            ..key.clone()
-        }).is_none());
+        assert!(
+            cache
+                .get(&ForeignObjectKey {
+                    markup: "<div>second</div>".to_string(),
+                    ..key.clone()
+                })
+                .is_none()
+        );
+        assert!(
+            cache
+                .get(&ForeignObjectKey {
+                    width_bits: 21.0f32.to_bits(),
+                    ..key.clone()
+                })
+                .is_none()
+        );
         for _ in 0..100 {
             cache.get(&key);
         }

@@ -130,7 +130,14 @@ impl Document {
     }
 
     pub fn media_current_time(&mut self, id: u32) -> Option<f32> {
-        self.ensure_media_state(id).map(|s| s.current_time)
+        let should_loop = self.media_loop(id).unwrap_or(false);
+        self.ensure_media_state(id).map(|state| {
+            if should_loop && let Some(duration) = state.duration.filter(|value| *value > 0.0) {
+                state.current_time % duration
+            } else {
+                state.current_time
+            }
+        })
     }
 
     pub fn media_paused(&mut self, id: u32) -> Option<bool> {
@@ -536,10 +543,10 @@ impl Document {
             events.push((id, "timeupdate"));
             if let Some(duration) = state.duration {
                 if state.current_time >= duration {
-                    if should_loop && duration > 0.0 {
+                    if should_loop && duration > 0.0 && !is_video {
                         state.current_time = 0.0;
                         events.push((id, "timeupdate"));
-                    } else {
+                    } else if !should_loop {
                         state.current_time = duration;
                         state.ended = true;
                         state.paused = true;
@@ -579,7 +586,14 @@ impl Document {
         }
         let duration = self.media_duration_from_markup(id);
         let has_source = self.media_has_source(id);
-        let state = self.media_states.entry(id).or_default();
+        let muted = self.media_bool_attr(id, "muted").unwrap_or(false);
+        let state = self
+            .media_states
+            .entry(id)
+            .or_insert_with(|| MediaElementState {
+                muted,
+                ..MediaElementState::default()
+            });
         if !state.metadata_loaded {
             state.duration = duration;
             state.network_state = if has_source {
@@ -607,7 +621,15 @@ impl Document {
                 || node.media_ended != state.ended
                 || node.media_seeking != state.seeking
                 || node.media_muted != state.muted;
-            node.media_current_time = state.current_time;
+            node.media_current_time = if node.attributes.contains_key("loop") {
+                state
+                    .duration
+                    .filter(|duration| *duration > 0.0)
+                    .map(|duration| state.current_time % duration)
+                    .unwrap_or(state.current_time)
+            } else {
+                state.current_time
+            };
             node.media_duration = state.duration;
             node.media_paused = state.paused;
             node.media_ended = state.ended;

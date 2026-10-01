@@ -108,25 +108,23 @@ pub(crate) fn scrollbar_hit_test(
 
     let show_v = node.style.overflow_y == Overflow::Scroll
         || (node.style.overflow_y == Overflow::Auto && node.layout.scroll_height > cr.h);
+    let scrollport_w = node.scrollport_content_width();
     let show_h = node.style.overflow_x == Overflow::Scroll
-        || (node.style.overflow_x == Overflow::Auto && node.layout.scroll_width > cr.w);
+        || (node.style.overflow_x == Overflow::Auto && node.layout.scroll_width > scrollport_w);
     let sbw = node.style.scrollbar_width_px();
-    let vertical_active = show_v && node.layout.scroll_height > cr.h;
-    let horizontal_active = show_h && node.layout.scroll_width > cr.w;
-
-    if vertical_active && sbw > 0.0 {
+    if show_v && sbw > 0.0 {
         // Scrollbar is at the right edge of the padding box (matches draw_scrollbars).
         let track_x = prx + pr.w - sbw;
-        let track_h = (pr.h - if horizontal_active { sbw } else { 0.0 }).max(0.0);
+        let track_h = (pr.h - if show_h { sbw } else { 0.0 }).max(0.0);
         if track_h > 0.0
             && screen_x >= track_x
             && screen_x < prx + pr.w
             && screen_y >= pry
             && screen_y < pry + track_h
         {
-            let scrollable_h = node.layout.scroll_height + (pr.h - cr.h).max(0.0);
+            let scrollable_h = node.layout.scroll_height.max(cr.h) + (pr.h - cr.h).max(0.0);
             let thumb_h = (track_h * pr.h / scrollable_h).max(20.0).min(track_h);
-            let max_s = node.layout.scroll_height - cr.h;
+            let max_s = (node.layout.scroll_height - cr.h).max(0.0);
             let scroll_per_px = if track_h - thumb_h > 0.0 {
                 max_s / (track_h - thumb_h)
             } else {
@@ -156,18 +154,23 @@ pub(crate) fn scrollbar_hit_test(
         }
     }
 
-    if horizontal_active && sbw > 0.0 {
-        let track_w = (pr.w - if vertical_active { sbw } else { 0.0 }).max(0.0);
+    if show_h && sbw > 0.0 {
+        let (left_gutter, right_gutter) = node.style.scrollbar_gutter_edges(show_v);
+        let track_x = prx + if left_gutter { sbw } else { 0.0 };
+        let track_w =
+            (pr.w - if left_gutter { sbw } else { 0.0 } - if right_gutter { sbw } else { 0.0 })
+                .max(0.0);
         let track_y = pry + pr.h - sbw;
         if track_w > 0.0
-            && screen_x >= prx
-            && screen_x < prx + track_w
+            && screen_x >= track_x
+            && screen_x < track_x + track_w
             && screen_y >= track_y
             && screen_y < track_y + sbw
         {
-            let scrollable_w = node.layout.scroll_width + (pr.w - cr.w).max(0.0);
-            let thumb_w = (track_w * pr.w / scrollable_w).max(20.0).min(track_w);
-            let max_s = node.layout.scroll_width - cr.w;
+            let scrollable_w =
+                node.layout.scroll_width.max(scrollport_w) + (track_w - scrollport_w).max(0.0);
+            let thumb_w = (track_w * track_w / scrollable_w).max(20.0).min(track_w);
+            let max_s = (node.layout.scroll_width - scrollport_w).max(0.0);
             let scroll_per_px = if track_w - thumb_w > 0.0 {
                 max_s / (track_w - thumb_w)
             } else {
@@ -178,7 +181,7 @@ pub(crate) fn scrollbar_hit_test(
             } else {
                 0.0
             };
-            let local_x = screen_x - prx;
+            let local_x = screen_x - track_x;
 
             if !(local_x >= thumb_x && local_x < thumb_x + thumb_w) {
                 let new_thumb_x = (local_x - thumb_w * 0.5).clamp(0.0, track_w - thumb_w);
