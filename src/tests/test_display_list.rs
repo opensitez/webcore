@@ -462,6 +462,23 @@ fn closed_disclosure_marker_points_toward_inline_end() {
 }
 
 #[test]
+fn predefined_numeric_list_markers_paint_local_digits() {
+    for (style, marker) in [
+        ("arabic-indic", "١٢."),
+        ("persian", "۱۲."),
+        ("cjk-decimal", "一二、"),
+        ("lower-armenian", "ժբ."),
+    ] {
+        let (_, list) = build(&format!(
+            "<ol style='list-style-type:{style}' start='12'><li>Item</li></ol>"
+        ));
+        assert!(list.commands.iter().any(|cmd| matches!(cmd,
+            PaintCmd::ListMarker { text, .. } if text == marker
+        )), "{style} should paint {marker}");
+    }
+}
+
+#[test]
 fn text_controls_preserve_authored_color_even_when_background_matches() {
     for markup in ["<input value='ABC'>", "<textarea>ABC</textarea>"] {
         for color in ["black", "white", "#345678"] {
@@ -2845,7 +2862,7 @@ fn backdrop_filter_emits_a_backdrop_filter_command() {
     );
 
     let command = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::BackdropFilter { rect, filters } => Some((rect, filters)),
+        PaintCmd::BackdropFilter { rect, filters, .. } => Some((rect, filters)),
         _ => None,
     });
 
@@ -2857,6 +2874,109 @@ fn backdrop_filter_emits_a_backdrop_filter_command() {
             .any(|(kind, value, _, _, _)| *kind == 3 && (*value - 1.0).abs() < 0.001),
         "grayscale backdrop filter should use the shared filter encoding"
     );
+}
+
+#[test]
+fn backdrop_filter_uses_rounded_border_box() {
+    let (_, list) = build(
+        r#"<style>body{margin:0}</style><div style="width:20px;height:20px;padding:4px;border:2px solid red;border-radius:8px;backdrop-filter:invert(1)"></div>"#,
+    );
+    let (rect, radii) = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::BackdropFilter { rect, radii, .. } => Some((rect, radii)),
+        _ => None,
+    }).unwrap();
+    assert_eq!((rect.x, rect.y, rect.w, rect.h), (0.0, 0.0, 32.0, 32.0));
+    assert!(radii[0] >= 7.5);
+
+    let list = DisplayList {
+        commands: vec![
+            PaintCmd::FillRect {
+                rect: Rect::new(0.0, 0.0, 40.0, 40.0),
+                color: Color::rgb(255, 0, 0),
+                radius: [0.0; 4],
+                radius_y: [0.0; 4],
+            },
+            PaintCmd::BackdropFilter {
+                rect: Rect::new(5.0, 5.0, 20.0, 20.0),
+                radii: [8.0; 4],
+                radii_y: [8.0; 4],
+                filters: vec![(5, 1.0, 0.0, 0.0, Color::BLACK)],
+            },
+        ],
+        has_scroll_dependent_sticky: false,
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(40, 40).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let pixel = |x: usize, y: usize| &pixmap.data()[(y * 40 + x) * 4..][..4];
+    assert_eq!(pixel(5, 5)[0], 255, "rounded corner retains original red");
+    assert_eq!(pixel(15, 15)[0], 0, "center receives inverted backdrop");
+}
+
+#[test]
+fn backdrop_filter_samples_transformed_position() {
+    let list = DisplayList {
+        commands: vec![
+            PaintCmd::FillRect {
+                rect: Rect::new(0.0, 0.0, 40.0, 30.0),
+                color: Color::rgb(255, 0, 0),
+                radius: [0.0; 4],
+                radius_y: [0.0; 4],
+            },
+            PaintCmd::PushTransform {
+                node_id: 1,
+                transform: [1.0, 0.0, 0.0, 1.0, 10.0, 0.0],
+            },
+            PaintCmd::BackdropFilter {
+                rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+                radii: [0.0; 4],
+                radii_y: [0.0; 4],
+                filters: vec![(5, 1.0, 0.0, 0.0, Color::BLACK)],
+            },
+            PaintCmd::PopTransform,
+        ],
+        has_scroll_dependent_sticky: false,
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(40, 30).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let red_at = |x: usize| pixmap.data()[(5 * 40 + x) * 4];
+    assert_eq!(red_at(5), 255);
+    assert_eq!(red_at(15), 0);
+}
+
+#[test]
+fn backdrop_filter_respects_parent_clip() {
+    let list = DisplayList {
+        commands: vec![
+            PaintCmd::FillRect {
+                rect: Rect::new(0.0, 0.0, 40.0, 20.0),
+                color: Color::rgb(255, 0, 0),
+                radius: [0.0; 4],
+                radius_y: [0.0; 4],
+            },
+            PaintCmd::PushClip {
+                rect: Rect::new(10.0, 0.0, 10.0, 20.0),
+                radius: [0.0; 4],
+                radius_y: [0.0; 4],
+            },
+            PaintCmd::BackdropFilter {
+                rect: Rect::new(5.0, 0.0, 20.0, 20.0),
+                radii: [0.0; 4],
+                radii_y: [0.0; 4],
+                filters: vec![(5, 1.0, 0.0, 0.0, Color::BLACK)],
+            },
+            PaintCmd::PopClip,
+        ],
+        has_scroll_dependent_sticky: false,
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(40, 20).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let red_at = |x: usize| pixmap.data()[(10 * 40 + x) * 4];
+    assert_eq!(red_at(7), 255);
+    assert_eq!(red_at(15), 0);
+    assert_eq!(red_at(23), 255);
 }
 
 #[test]
@@ -3544,6 +3664,7 @@ fn placeholder_typography_changes_placeholder_paint_but_not_input_value() {
     } = &mut styled
     {
         *placeholder_typography = Some(PlaceholderTypography {
+            opacity: 1.0,
             font_size: 28.0,
             font_weight: 700,
             font_style: 1,
@@ -3587,6 +3708,45 @@ fn placeholder_typography_changes_placeholder_paint_but_not_input_value() {
         paint(value_styled).data(),
         "value must keep the input font"
     );
+}
+
+#[test]
+fn zero_opacity_placeholder_paints_no_text_or_shadow() {
+    let (_, mut list) = build(
+        r#"<style>input::placeholder { opacity: 0; text-shadow: 2px 2px red; }</style>
+           <input type="email" placeholder="you@domain.com" style="width:200px;height:50px">"#,
+    );
+    let command = list
+        .commands
+        .iter_mut()
+        .find(|command| matches!(command, PaintCmd::FormElement { .. }))
+        .expect("form paint command");
+    let PaintCmd::FormElement {
+        placeholder,
+        placeholder_typography,
+        ..
+    } = command
+    else {
+        unreachable!()
+    };
+    assert_eq!(placeholder_typography.as_ref().unwrap().opacity, 0.0);
+    assert_eq!(placeholder.as_str(), "you@domain.com");
+    let mut no_placeholder = list.clone();
+    if let Some(PaintCmd::FormElement { placeholder, .. }) = no_placeholder
+        .commands
+        .iter_mut()
+        .find(|command| matches!(command, PaintCmd::FormElement { .. }))
+    {
+        placeholder.clear();
+    }
+    let paint = |list: &DisplayList| {
+        let mut pixmap = tiny_skia::Pixmap::new(240, 80).unwrap();
+        let mut fonts = cosmic_text::FontSystem::new();
+        let mut glyphs = cosmic_text::SwashCache::new();
+        replay_with_text(list, &mut pixmap, 1.0, &mut fonts, &mut glyphs);
+        pixmap
+    };
+    assert_eq!(paint(&list).data(), paint(&no_placeholder).data());
 }
 
 #[test]
@@ -3853,6 +4013,35 @@ fn empty_sticky_subtree_does_not_invalidate_scroll_tiles() {
 }
 
 #[test]
+fn empty_fixed_subtree_does_not_force_scroll_rasterization() {
+    let html = r#"
+        <style>body { margin: 0; } #fixed { position: fixed; bottom: 0; right: 0; z-index: 10; }</style>
+        <div style="height: 900px; background: white"></div>
+        <div id="fixed"><div id="empty"></div></div>
+    "#;
+    let (_frame, list) = build_full(html);
+    assert!(
+        !list
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::BeginFixedPosition)),
+        "an empty fixed subtree cannot change the painted scroll tiles"
+    );
+
+    let (_frame, visible) = build_full(&html.replace(
+        "<div id=\"empty\"></div>",
+        "<div id=\"empty\" style=\"background: red; width: 20px; height: 20px\"></div>",
+    ));
+    assert!(
+        visible
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::BeginFixedPosition)),
+        "visible fixed content must remain anchored to the viewport"
+    );
+}
+
+#[test]
 fn sticky_inside_overflow_scroll_container_uses_container_scrollport() {
     let html = r#"
         <style>
@@ -4102,6 +4291,24 @@ fn positioned_negative_z_before_background_paints() {
         red_generated_backgrounds, 1,
         "positioned generated backgrounds must not be replayed by every ancestor"
     );
+}
+
+#[test]
+fn body_canvas_color_precedes_negative_z_descendant() {
+    let (_, list) = build_full(
+        r#"<html><head><style>
+          html, body { margin: 0; }
+          body { background: white; }
+          #video { position: relative; z-index: -1; width: 200px; height: 100px; background: red; }
+        </style></head><body><div id="video"></div></body></html>"#,
+    );
+    let white = list.commands.iter().position(|command| {
+        matches!(command, PaintCmd::FillRect { color, .. } if *color == Color::rgb(255, 255, 255))
+    }).unwrap();
+    let red = list.commands.iter().position(|command| {
+        matches!(command, PaintCmd::FillRect { color, .. } if *color == Color::rgb(255, 0, 0))
+    }).unwrap();
+    assert!(white < red, "body canvas color must be behind negative-z content");
 }
 
 #[test]
@@ -7578,6 +7785,9 @@ fn mask_layer_applies_to_nested_paint_commands() {
         commands: vec![
             PaintCmd::PushMask {
                 rect: Rect::new(0.0, 0.0, 20.0, 10.0),
+                no_clip: false,
+                origin: Rect::new(0.0, 0.0, 20.0, 10.0),
+                tile: Rect::new(0.0, 0.0, 20.0, 10.0),
                 data: ImageRef::Owned(
                     vec![
                         255, 255, 255, 255, // left half visible
@@ -7586,6 +7796,9 @@ fn mask_layer_applies_to_nested_paint_commands() {
                     2,
                     1,
                 ),
+                luminance: false,
+                repeat_x_mode: 0,
+                repeat_y_mode: 0,
             },
             PaintCmd::FillRect {
                 rect: Rect::new(0.0, 0.0, 20.0, 10.0),
@@ -7623,7 +7836,13 @@ fn mask_layer_uses_alpha_for_black_svg_icons() {
         commands: vec![
             PaintCmd::PushMask {
                 rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+                no_clip: false,
+                origin: Rect::new(0.0, 0.0, 10.0, 10.0),
+                tile: Rect::new(0.0, 0.0, 10.0, 10.0),
                 data: ImageRef::Owned(vec![0, 0, 0, 255], 1, 1),
+                luminance: false,
+                repeat_x_mode: 0,
+                repeat_y_mode: 0,
             },
             PaintCmd::FillRect {
                 rect: Rect::new(0.0, 0.0, 10.0, 10.0),
@@ -7643,6 +7862,421 @@ fn mask_layer_uses_alpha_for_black_svg_icons() {
         data[(5 * 12 + 5) * 4 + 3] > 200,
         "opaque black mask pixels should reveal the masked fill"
     );
+}
+
+#[test]
+fn mask_layer_luminance_multiplies_color_by_alpha() {
+    let list = DisplayList {
+        commands: vec![
+            PaintCmd::PushMask {
+                rect: Rect::new(0.0, 0.0, 30.0, 10.0),
+                no_clip: false,
+                origin: Rect::new(0.0, 0.0, 30.0, 10.0),
+                tile: Rect::new(0.0, 0.0, 30.0, 10.0),
+                data: ImageRef::Owned(
+                    vec![0, 0, 0, 255, 128, 128, 128, 128, 128, 128, 128, 255],
+                    3,
+                    1,
+                ),
+                luminance: true,
+                repeat_x_mode: 0,
+                repeat_y_mode: 0,
+            },
+            PaintCmd::FillRect {
+                rect: Rect::new(0.0, 0.0, 30.0, 10.0),
+                color: Color::rgba(200, 40, 20, 255),
+                radius: [0.0; 4],
+                radius_y: [0.0; 4],
+            },
+            PaintCmd::PopMask,
+        ],
+        has_scroll_dependent_sticky: false,
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(30, 10).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let alpha_at = |x: usize| pixmap.data()[(5 * 30 + x) * 4 + 3];
+    assert_eq!(alpha_at(5), 0);
+    assert!((alpha_at(15) as i32 - 128).abs() <= 1);
+    assert!((alpha_at(25) as i32 - 128).abs() <= 1);
+}
+
+#[test]
+fn mask_mode_luminance_reaches_display_list() {
+    let doc = parse_html(
+        r#"<div id="masked" style="width:30px;height:10px;mask-image:url(mask.png);mask-mode:luminance;background:red"></div>"#,
+    );
+    let mut frame = EngineFrame::new(doc, 100.0, 50.0);
+    frame.update_frame();
+    let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
+    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(0, crate::types::DecodedMaskImage {
+        data: std::sync::Arc::new(vec![255, 255, 255, 255]),
+        width: 1,
+        height: 1,
+        resolution: 1.0,
+    });
+    let list = build_display_list(&frame.doc.root, 100.0, 50.0);
+    assert!(list.commands.iter().any(|cmd| matches!(
+        cmd,
+        PaintCmd::PushMask {
+            luminance: true,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn mask_size_position_repeat_and_clip_reach_pixels() {
+    let commands = vec![
+        PaintCmd::PushMask {
+            rect: Rect::new(0.0, 0.0, 18.0, 10.0),
+            no_clip: false,
+            origin: Rect::new(0.0, 0.0, 20.0, 10.0),
+            tile: Rect::new(15.0, 0.0, 5.0, 10.0),
+            data: ImageRef::Owned(vec![255, 255, 255, 255], 1, 1),
+            luminance: false,
+            repeat_x_mode: 0,
+            repeat_y_mode: 0,
+        },
+        PaintCmd::FillRect {
+            rect: Rect::new(0.0, 0.0, 20.0, 10.0),
+            color: Color::rgb(200, 30, 10),
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        },
+        PaintCmd::PopMask,
+    ];
+    let list = DisplayList {
+        commands,
+        has_scroll_dependent_sticky: false,
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(20, 10).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let alpha = |x: usize| pixmap.data()[(5 * 20 + x) * 4 + 3];
+    assert_eq!(alpha(14), 0, "outside the positioned mask tile");
+    assert_eq!(alpha(16), 255, "inside the positioned mask tile");
+    assert_eq!(alpha(19), 0, "outside mask-clip");
+}
+
+#[test]
+fn intrinsic_mask_repeats_its_source_pixels_without_stretching() {
+    let list = DisplayList {
+        commands: vec![
+            PaintCmd::PushMask {
+                rect: Rect::new(0.0, 0.0, 8.0, 4.0),
+                no_clip: false,
+                origin: Rect::new(0.0, 0.0, 8.0, 4.0),
+                tile: Rect::new(0.0, 0.0, 2.0, 1.0),
+                data: ImageRef::Owned(vec![255, 255, 255, 255, 0, 0, 0, 0], 2, 1),
+                luminance: false,
+                repeat_x_mode: 1,
+                repeat_y_mode: 1,
+            },
+            PaintCmd::FillRect {
+                rect: Rect::new(0.0, 0.0, 8.0, 4.0),
+                color: Color::rgb(200, 30, 10),
+                radius: [0.0; 4],
+                radius_y: [0.0; 4],
+            },
+            PaintCmd::PopMask,
+        ],
+        has_scroll_dependent_sticky: false,
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(8, 4).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    for y in 0..4 {
+        for x in 0..8 {
+            assert_eq!(
+                pixmap.data()[(y * 8 + x) * 4 + 3],
+                if x % 2 == 0 { 255 } else { 0 },
+                "({x}, {y})"
+            );
+        }
+    }
+}
+
+#[test]
+fn mask_no_clip_can_reveal_paint_outside_the_border_box() {
+    for no_clip in [false, true] {
+        let list = DisplayList {
+            commands: vec![
+                PaintCmd::PushMask {
+                    rect: Rect::new(0.0, 0.0, 10.0, 10.0),
+                    no_clip,
+                    origin: Rect::new(0.0, 0.0, 10.0, 10.0),
+                    tile: Rect::new(12.0, 0.0, 4.0, 10.0),
+                    data: ImageRef::Owned(vec![255, 255, 255, 255], 1, 1),
+                    luminance: false,
+                    repeat_x_mode: 0,
+                    repeat_y_mode: 0,
+                },
+                PaintCmd::FillRect {
+                    rect: Rect::new(12.0, 0.0, 4.0, 10.0),
+                    color: Color::rgb(200, 30, 10),
+                    radius: [0.0; 4],
+                    radius_y: [0.0; 4],
+                },
+                PaintCmd::PopMask,
+            ],
+            has_scroll_dependent_sticky: false,
+            fixed_commands: Vec::new(),
+        };
+        let mut pixmap = tiny_skia::Pixmap::new(20, 10).unwrap();
+        replay(&list, &mut pixmap, 1.0);
+        assert_eq!(
+            pixmap.data()[(5 * 20 + 14) * 4 + 3],
+            if no_clip { 255 } else { 0 }
+        );
+    }
+}
+
+#[test]
+fn mask_geometry_uses_css_boxes_and_authored_image_size() {
+    let doc = parse_html(
+        r#"<div id="masked" style="width:40px;height:20px;padding:4px;border:2px solid black;mask-image:url(mask.png);mask-origin:content-box;mask-clip:padding-box;mask-size:10px 5px;mask-position:right bottom;mask-repeat:no-repeat;background:red"></div>"#,
+    );
+    let mut frame = EngineFrame::new(doc, 100.0, 60.0);
+    frame.update_frame();
+    let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
+    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(0, crate::types::DecodedMaskImage {
+        data: std::sync::Arc::new(vec![255, 255, 255, 255]),
+        width: 1,
+        height: 1,
+        resolution: 1.0,
+    });
+    let list = build_display_list(&frame.doc.root, 100.0, 60.0);
+    let PaintCmd::PushMask {
+        rect,
+        origin,
+        tile,
+        repeat_x_mode,
+        repeat_y_mode,
+        ..
+    } = list.commands.iter().find(|cmd| matches!(cmd, PaintCmd::PushMask { .. })).unwrap() else {
+        unreachable!()
+    };
+    assert!((origin.w - 40.0).abs() < 0.01);
+    assert!((origin.h - 20.0).abs() < 0.01);
+    assert!((rect.w - 48.0).abs() < 0.01);
+    assert!((rect.h - 28.0).abs() < 0.01);
+    assert!((tile.x - (origin.x + origin.w - 10.0)).abs() < 0.01);
+    assert!((tile.y - (origin.y + origin.h - 5.0)).abs() < 0.01);
+    assert!((tile.w - 10.0).abs() < 0.01);
+    assert!((tile.h - 5.0).abs() < 0.01);
+    assert_eq!((*repeat_x_mode, *repeat_y_mode), (0, 0));
+}
+
+#[test]
+fn mask_fill_box_maps_differently_for_origin_and_clip_on_html() {
+    let doc = parse_html(
+        r#"<div id="masked" style="width:40px;height:20px;padding:4px;border:2px solid black;mask-image:url(mask.png);mask-origin:fill-box;mask-clip:fill-box;background:red"></div>"#,
+    );
+    let mut frame = EngineFrame::new(doc, 100.0, 60.0);
+    frame.update_frame();
+    let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
+    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(0, crate::types::DecodedMaskImage {
+        data: std::sync::Arc::new(vec![255, 255, 255, 255]),
+        width: 1,
+        height: 1,
+        resolution: 1.0,
+    });
+    let list = build_display_list(&frame.doc.root, 100.0, 60.0);
+    let PaintCmd::PushMask { origin, rect, .. } = list
+        .commands
+        .iter()
+        .find(|cmd| matches!(cmd, PaintCmd::PushMask { .. }))
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    assert!((origin.w - 52.0).abs() < 0.01);
+    assert!((origin.h - 32.0).abs() < 0.01);
+    assert!((rect.w - 40.0).abs() < 0.01);
+    assert!((rect.h - 20.0).abs() < 0.01);
+}
+
+#[test]
+fn mask_shorthand_no_clip_reaches_display_list() {
+    let doc = parse_html(
+        r#"<div id="masked" style="width:20px;height:10px;mask:url(mask.png) left top / 5px 5px no-repeat content-box no-clip;background:red"></div>"#,
+    );
+    let mut frame = EngineFrame::new(doc, 60.0, 40.0);
+    frame.update_frame();
+    let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
+    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(0, crate::types::DecodedMaskImage {
+        data: std::sync::Arc::new(vec![255, 255, 255, 255]),
+        width: 1,
+        height: 1,
+        resolution: 1.0,
+    });
+    let list = build_display_list(&frame.doc.root, 60.0, 40.0);
+    assert!(list.commands.iter().any(|cmd| matches!(
+        cmd,
+        PaintCmd::PushMask { no_clip: true, tile, .. }
+            if (tile.w - 5.0).abs() < 0.01 && (tile.h - 5.0).abs() < 0.01
+    )));
+}
+
+#[test]
+fn image_set_mask_uses_selected_candidate_resolution_for_auto_size() {
+    let doc = parse_html(
+        r#"<div id="masked" style="width:250px;height:100px;mask-image:image-set(url(one.png) 1x,url(two.png) 2x);mask-repeat:no-repeat;background:red"></div>"#,
+    );
+    let mut frame = EngineFrame::new(doc, 300.0, 150.0);
+    frame.update_frame();
+    let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
+    let bitmap = std::sync::Arc::new(vec![255; 200 * 100 * 4]);
+    assert!(crate::images::set_decoded_mask_image_for_url_on_node(
+        node,
+        crate::images::DecodedImage::Raster(bitmap, 200, 100),
+        "https://example.test/two.png",
+        "https://example.test/page",
+    ));
+    assert_eq!(node.mask_images.as_ref().unwrap().first.as_ref().unwrap().resolution, 2.0);
+    let list = build_display_list(&frame.doc.root, 300.0, 150.0);
+    let tile = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::PushMask { tile, .. } => Some(*tile),
+            _ => None,
+        })
+        .expect("mask paint command");
+    assert!((tile.w - 100.0).abs() < 0.1, "width={}", tile.w);
+    assert!((tile.h - 50.0).abs() < 0.1, "height={}", tile.h);
+}
+
+#[test]
+fn mask_image_none_does_not_paint_retained_decoded_pixels() {
+    let doc = parse_html(
+        r#"<div id="masked" style="width:20px;height:10px;mask-image:url(mask.png);background:red"></div>"#,
+    );
+    let mut frame = EngineFrame::new(doc, 60.0, 40.0);
+    frame.update_frame();
+    let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
+    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(0, crate::types::DecodedMaskImage {
+        data: std::sync::Arc::new(vec![255, 255, 255, 255]),
+        width: 1,
+        height: 1,
+        resolution: 1.0,
+    });
+    assert!(build_display_list(&frame.doc.root, 60.0, 40.0)
+        .commands
+        .iter()
+        .any(|cmd| matches!(cmd, PaintCmd::PushMask { .. })));
+    let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
+    crate::css::apply_property(std::sync::Arc::make_mut(&mut node.style), "mask-image", "none");
+    assert!(build_display_list(&frame.doc.root, 60.0, 40.0)
+        .commands
+        .iter()
+        .all(|cmd| !matches!(cmd, PaintCmd::PushMask { .. })));
+}
+
+#[test]
+fn mask_images_keep_none_layers_and_repeat_geometry_values() {
+    let doc = parse_html(
+        r#"<div id="masked" style="width:20px;height:10px;mask-image:none,url(second.png),url(third.png);mask-size:4px 5px,6px 7px;mask-repeat:no-repeat;background:red"></div>"#,
+    );
+    let mut frame = EngineFrame::new(doc, 60.0, 40.0);
+    frame.update_frame();
+    let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
+    let images = std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default));
+    for index in 1..=2 {
+        images.set(index, crate::types::DecodedMaskImage {
+            data: std::sync::Arc::new(vec![255, 255, 255, 255]),
+            width: 1,
+            height: 1,
+            resolution: 1.0,
+        });
+    }
+    let list = build_display_list(&frame.doc.root, 60.0, 40.0);
+    let layers = list.commands.iter().find_map(|cmd| match cmd {
+        PaintCmd::PushMaskGroup { layers } => Some(layers),
+        _ => None,
+    }).unwrap();
+    assert_eq!(layers.len(), 3);
+    assert!(layers[0].data.is_none());
+    assert_eq!((layers[1].tile.w, layers[1].tile.h), (6.0, 7.0));
+    assert_eq!((layers[2].tile.w, layers[2].tile.h), (4.0, 5.0));
+    assert_eq!(layers[2].repeat_x_mode, 0);
+}
+
+#[test]
+fn all_none_mask_layers_leave_content_visible() {
+    let (_, list) = build(
+        r#"<div style="width:20px;height:10px;background:red;mask-image:none,none"></div>"#,
+    );
+    assert!(list.commands.iter().all(|cmd| !matches!(cmd, PaintCmd::PushMaskGroup { .. })));
+    assert!(list.commands.iter().any(|cmd| matches!(cmd,
+        PaintCmd::FillRect { color, .. } if color.r == 255 && color.g == 0 && color.b == 0
+    )));
+}
+
+#[test]
+fn changed_mask_source_does_not_paint_old_decoded_pixels() {
+    let doc = parse_html(
+        r#"<div id="masked" style="width:20px;height:10px;mask-image:url(old.png);background:red"></div>"#,
+    );
+    let mut frame = EngineFrame::new(doc, 60.0, 40.0);
+    frame.update_frame();
+    let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
+    let image = crate::types::DecodedMaskImage {
+        data: std::sync::Arc::new(vec![255, 255, 255, 255]),
+        width: 1,
+        height: 1,
+        resolution: 1.0,
+    };
+    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default))
+        .set_with_source(0, image.clone(), "old.png".to_string());
+    assert!(build_display_list(&frame.doc.root, 60.0, 40.0).commands.iter()
+        .any(|cmd| matches!(cmd, PaintCmd::PushMask { .. })));
+    let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
+    crate::css::apply_property(std::sync::Arc::make_mut(&mut node.style), "mask-image", "url(new.png)");
+    assert!(build_display_list(&frame.doc.root, 60.0, 40.0).commands.iter()
+        .all(|cmd| !matches!(cmd, PaintCmd::PushMask { .. })));
+    let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
+    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default))
+        .set_with_source(0, image, "new.png".to_string());
+    assert!(build_display_list(&frame.doc.root, 60.0, 40.0).commands.iter()
+        .any(|cmd| matches!(cmd, PaintCmd::PushMask { .. })));
+}
+
+#[test]
+fn mask_composite_uses_front_layer_operator() {
+    use crate::renderer::display_list::MaskPaintLayer;
+    let rgba = |alpha: u8| ImageRef::Owned(vec![alpha, alpha, alpha, alpha], 1, 1);
+    let layer = |alpha: u8, composite: u8| MaskPaintLayer {
+        rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+        no_clip: false,
+        origin: Rect::new(0.0, 0.0, 1.0, 1.0),
+        tile: Rect::new(0.0, 0.0, 1.0, 1.0),
+        data: Some(rgba(alpha)),
+        luminance: false,
+        repeat_x_mode: 0,
+        repeat_y_mode: 0,
+        composite,
+    };
+    for (operator, expected) in [(0, 208), (1, 144), (2, 48), (3, 160)] {
+        let list = DisplayList {
+            commands: vec![
+                PaintCmd::PushMaskGroup { layers: vec![layer(192, operator), layer(64, 1)] },
+                PaintCmd::FillRect {
+                    rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+                    color: Color::rgba(255, 0, 0, 255),
+                    radius: [0.0; 4],
+                    radius_y: [0.0; 4],
+                },
+                PaintCmd::PopMask,
+            ],
+            has_scroll_dependent_sticky: false,
+            fixed_commands: Vec::new(),
+        };
+        let mut pixmap = tiny_skia::Pixmap::new(1, 1).unwrap();
+        replay(&list, &mut pixmap, 1.0);
+        assert!((pixmap.data()[3] as i32 - expected).abs() <= 1, "operator {operator}");
+    }
 }
 
 #[test]

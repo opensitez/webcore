@@ -571,16 +571,19 @@ pub fn apply_property_by_id_str(
     value: &str,
 ) {
     let v = value.trim();
-    if v == "inherit" {
+    if v.eq_ignore_ascii_case("inherit") {
         return;
     }
     note_specified_svg_paint(style, id);
     note_current_color(style, id, v);
     // Same rule as the typed path above — see `apply_css_value`.
-    if v == "unset" && properties::is_inherited(id) {
+    if v.eq_ignore_ascii_case("unset") && properties::is_inherited(id) {
         return;
     }
-    if matches!(v, "initial" | "unset" | "revert" | "revert-layer") {
+    if ["initial", "unset", "revert", "revert-layer"]
+        .iter()
+        .any(|keyword| v.eq_ignore_ascii_case(keyword))
+    {
         reset_to_initial(style, id);
         return;
     }
@@ -1003,14 +1006,14 @@ pub(crate) fn parse_css_filter_resolved(
 /// empty string into a larger value like `calc(100% / var(--n))` corrupts valid
 /// CSS into a different invalid value, which then may parse as `auto`/zero.
 pub fn resolve_var_references(val: &str, variables: &HashMap<String, String>) -> String {
-    if !val.contains("var(") {
+    if !contains_var_function(val) {
         return val.to_string();
     }
     let mut result = resolve_var_pass(val, variables);
     // Iterate to resolve chained vars (var(--a) → var(--b) → value).
     // Max 10 iterations to prevent infinite loops from circular refs.
     for _ in 0..10 {
-        if !result.contains("var(") {
+        if !contains_var_function(&result) {
             return result;
         }
         let next = resolve_var_pass(&result, variables);
@@ -1032,7 +1035,7 @@ pub(crate) fn resolve_var_references_for_color_scheme(
 }
 
 pub(crate) fn value_needs_substitution(value: &str) -> bool {
-    value.contains("var(")
+    contains_var_function(value)
         || value
             .as_bytes()
             .windows(b"light-dark(".len())
@@ -1212,41 +1215,20 @@ fn split_top_level_comma(s: &str) -> Option<(&str, &str)> {
 }
 
 pub(crate) fn resolve_var_pass(val: &str, variables: &HashMap<String, String>) -> String {
-    if !val.contains("var(") {
+    if !contains_var_function(val) {
         return val.to_string();
     }
     let mut out = String::new();
     let mut rest = val;
     while !rest.is_empty() {
-        if let Some(start) = rest.find("var(") {
+        if let Some((start, end)) = find_var_function(rest) {
             out.push_str(&rest[..start]);
-            rest = &rest[start + 4..]; // skip "var("
-            // find matching closing paren
-            let mut depth = 1usize;
-            let mut end = 0;
-            let bytes = rest.as_bytes();
-            while end < bytes.len() {
-                match bytes[end] {
-                    b'(' => depth += 1,
-                    b')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-                end += 1;
-            }
-            let inner = &rest[..end];
-            rest = if end < rest.len() {
-                &rest[end + 1..]
-            } else {
-                ""
-            };
+            let inner = &rest[start + 4..end - 1];
+            let original = &rest[start..end];
+            rest = &rest[end..];
             // inner = "--name" or "--name, fallback"
-            let (name, fallback) = if let Some(comma) = inner.find(',') {
-                (inner[..comma].trim(), Some(inner[comma + 1..].trim()))
+            let (name, fallback) = if let Some((name, fallback)) = split_top_level_comma(inner) {
+                (name.trim(), Some(fallback.trim()))
             } else {
                 (inner.trim(), None)
             };
@@ -1270,9 +1252,7 @@ pub(crate) fn resolve_var_pass(val: &str, variables: &HashMap<String, String>) -
                     out.push(' ');
                 }
             } else {
-                out.push_str("var(");
-                out.push_str(inner);
-                out.push(')');
+                out.push_str(original);
             }
         } else {
             out.push_str(rest);
@@ -1280,6 +1260,73 @@ pub(crate) fn resolve_var_pass(val: &str, variables: &HashMap<String, String>) -
         }
     }
     out
+}
+
+pub(crate) fn contains_var_function(value: &str) -> bool {
+    value.contains("var(") && find_var_function(value).is_some()
+}
+
+pub(crate) fn find_var_function(value: &str) -> Option<(usize, usize)> {
+    let bytes = value.as_bytes();
+    let mut quote = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        match quote {
+            Some(q) => {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == q {
+                    quote = None;
+                }
+            }
+            None if bytes[i] == b'\\' => {
+                i += 2;
+                continue;
+            }
+            None if matches!(bytes[i], b'\'' | b'"') => quote = Some(bytes[i]),
+            None if bytes[i..].starts_with(b"var(")
+                && (i == 0
+                    || !matches!(bytes[i - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | 0x80..=0xff)) =>
+            {
+                let mut depth = 1usize;
+                let mut j = i + 4;
+                let mut inner_quote = None;
+                while j < bytes.len() {
+                    match inner_quote {
+                        Some(q) => {
+                            if bytes[j] == b'\\' {
+                                j += 2;
+                                continue;
+                            }
+                            if bytes[j] == q {
+                                inner_quote = None;
+                            }
+                        }
+                        None if bytes[j] == b'\\' => {
+                            j += 2;
+                            continue;
+                        }
+                        None if matches!(bytes[j], b'\'' | b'"') => inner_quote = Some(bytes[j]),
+                        None if bytes[j] == b'(' => depth += 1,
+                        None if bytes[j] == b')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                return Some((i, j + 1));
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                return None;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 fn needs_var_substitution_separator(inserted: &str, rest: &str) -> bool {
@@ -1703,6 +1750,18 @@ fn unquote_content_arg(arg: &str) -> String {
 }
 
 pub(crate) fn format_counter_value(value: i32, style: &str) -> String {
+    if let Some((_, zero)) = predefined_numeric_counter(style.trim()) {
+        return value
+            .to_string()
+            .chars()
+            .map(|digit| {
+                digit
+                    .to_digit(10)
+                    .and_then(|n| char::from_u32(zero as u32 + n))
+                    .unwrap_or(digit)
+            })
+            .collect();
+    }
     match style.trim().to_ascii_lowercase().as_str() {
         "decimal-leading-zero" => {
             if (0..10).contains(&value) {
@@ -1719,7 +1778,11 @@ pub(crate) fn format_counter_value(value: i32, style: &str) -> String {
         "upper-roman" => roman_counter(value, true),
         "lower-greek" => greek_counter(value),
         "cjk-decimal" => cjk_decimal_counter(value),
-        "armenian" => armenian_counter(value),
+        "armenian" | "upper-armenian" => armenian_counter(value),
+        "lower-armenian" => armenian_counter(value)
+            .chars()
+            .flat_map(char::to_lowercase)
+            .collect(),
         "georgian" => georgian_counter(value),
         "hebrew" => hebrew_counter(value),
         "hiragana" => kana_counter(value, HIRAGANA_GOJUON),
@@ -1728,6 +1791,30 @@ pub(crate) fn format_counter_value(value: i32, style: &str) -> String {
         "katakana-iroha" => kana_counter(value, KATAKANA_IROHA),
         _ => value.to_string(),
     }
+}
+
+pub(crate) fn predefined_numeric_counter(name: &str) -> Option<(&'static str, char)> {
+    Some(match name {
+        "arabic-indic" => ("arabic-indic", '\u{0660}'),
+        "bengali" => ("bengali", '\u{09e6}'),
+        "cambodian" => ("cambodian", '\u{17e0}'),
+        "khmer" => ("khmer", '\u{17e0}'),
+        "devanagari" => ("devanagari", '\u{0966}'),
+        "gujarati" => ("gujarati", '\u{0ae6}'),
+        "gurmukhi" => ("gurmukhi", '\u{0a66}'),
+        "kannada" => ("kannada", '\u{0ce6}'),
+        "lao" => ("lao", '\u{0ed0}'),
+        "malayalam" => ("malayalam", '\u{0d66}'),
+        "mongolian" => ("mongolian", '\u{1810}'),
+        "myanmar" => ("myanmar", '\u{1040}'),
+        "oriya" => ("oriya", '\u{0b66}'),
+        "persian" => ("persian", '\u{06f0}'),
+        "tamil" => ("tamil", '\u{0be6}'),
+        "telugu" => ("telugu", '\u{0c66}'),
+        "thai" => ("thai", '\u{0e50}'),
+        "tibetan" => ("tibetan", '\u{0f20}'),
+        _ => return None,
+    })
 }
 
 fn alpha_counter(mut value: i32, uppercase: bool) -> String {
@@ -1794,6 +1881,9 @@ fn additive_counter(value: i32, table: &[(i32, &str)]) -> String {
 }
 
 fn armenian_counter(value: i32) -> String {
+    if !(1..=9999).contains(&value) {
+        return value.to_string();
+    }
     additive_counter(
         value,
         &[
@@ -2534,12 +2624,12 @@ fn greek_counter(mut value: i32) -> String {
 }
 
 fn cjk_decimal_counter(value: i32) -> String {
+    if value < 0 {
+        return value.to_string();
+    }
     let digits = ['〇', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
     let mut out = String::new();
-    if value < 0 {
-        out.push('-');
-    }
-    for ch in value.abs().to_string().chars() {
+    for ch in value.to_string().chars() {
         if let Some(digit) = ch.to_digit(10) {
             out.push(digits[digit as usize]);
         }

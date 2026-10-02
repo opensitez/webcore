@@ -68,6 +68,39 @@ fn streamed_frame_is_painted_by_video_element() {
 }
 
 #[test]
+fn external_video_layer_omits_software_frame_and_keeps_background() {
+    let doc = crate::html::parse_html("<video id=movie width=100 height=80></video>");
+    let mut engine = crate::frame::EngineFrame::new(doc, 200.0, 150.0);
+    let id = engine.doc.get_element_by_id("movie").unwrap();
+    engine.update_frame();
+    assert!(engine.doc.media_present_video_frame(
+        id,
+        crate::video::backend::VideoFrame {
+            width: 2,
+            height: 2,
+            rgba: std::sync::Arc::new(vec![90, 120, 150, 255].repeat(4)),
+            timestamp: 0.0,
+        },
+    ));
+    engine.doc.find_webcore_mut(id).unwrap().external_video_overlay = true;
+    let list = crate::renderer::display_list_builder::build_display_list(
+        &engine.doc.root, 200.0, 150.0,
+    );
+    assert!(!list.commands.iter().any(|cmd| matches!(
+        cmd,
+        crate::renderer::display_list::PaintCmd::Image {
+            data: crate::renderer::display_list::ImageRef::Shared(_, 2, 2),
+            ..
+        }
+    )));
+    assert!(list.commands.iter().any(|cmd| matches!(
+        cmd,
+        crate::renderer::display_list::PaintCmd::FillRect { radius, .. }
+            if *radius == [4.0; 4]
+    )));
+}
+
+#[test]
 fn video_shows_center_play_affordance_only_when_paused() {
     let doc = crate::html::parse_html("<video id=movie width=100 height=80 src=clip.y4m></video>");
     let mut engine = crate::frame::EngineFrame::new(doc, 200.0, 150.0);

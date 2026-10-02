@@ -1177,7 +1177,7 @@ fn local_font_face_alias_is_available_to_fallback_stack() {
         @font-face { font-family: Other Fallback; src: local("Arial"); }
         #title { font-family: Missing Site Face, Site Fallback; }
     </style><div id="title">Fallback text</div>"#;
-    let _ = renderer.load_html(html, 400.0);
+    let mut doc = renderer.load_html(html, 400.0);
     let fs = &renderer.font_system;
     let arial = fontdb::Query {
         families: &[fontdb::Family::Name("Arial")],
@@ -1200,14 +1200,10 @@ fn local_font_face_alias_is_available_to_fallback_stack() {
         ),
         "the local @font-face alias should resolve before a generic fallback"
     );
-    assert!(
-        matches!(
-            crate::layout::inline_layout::resolve_css_family(fs, "Other Fallback"),
-            crate::layout::inline_layout::ResolvedFamily::Named(name)
-                if name.as_ref() == "Other Fallback"
-        ),
-        "different aliases for the same local family must both be registered"
-    );
+    assert!(fs.db().query(&fontdb::Query {
+        families: &[fontdb::Family::Name("Other Fallback")],
+        ..fontdb::Query::default()
+    }).is_none(), "unused local aliases should stay inactive");
     let alias_normal = crate::layout::inline_layout::measure_text_width_weighted(
         "Darüber spricht Deutschland",
         20.0,
@@ -1256,6 +1252,14 @@ fn local_font_face_alias_is_available_to_fallback_stack() {
         (alias_width - arial_width).abs() < 1.0,
         "local alias should shape like Arial: alias bold={alias_width}, Arial bold={arial_width}, alias normal={alias_normal}, Arial normal={arial_normal}"
     );
+
+    let title = doc.query_selector("#title").unwrap();
+    doc.set_style_property(title, "font-family", "Other Fallback");
+    renderer.layout_engine().layout(&mut doc, 400.0);
+    assert!(renderer.font_system.db().query(&fontdb::Query {
+        families: &[fontdb::Family::Name("Other Fallback")],
+        ..fontdb::Query::default()
+    }).is_some(), "a newly used local alias should register on relayout");
 }
 
 #[test]
@@ -1623,6 +1627,19 @@ fn supports_invalid_known_declaration_value_drops_inner_rules() {
 }
 
 #[test]
+fn supports_only_treats_var_function_tokens_as_deferred_values() {
+    use crate::css::parser::supports_condition_matches;
+
+    assert!(supports_condition_matches("(display: var(--mode))"));
+    assert!(supports_condition_matches("(display: var(--mód))"));
+    assert!(supports_condition_matches("(width: calc(100% - var(--gap, 1px)))"));
+    assert!(!supports_condition_matches("(display: \"var(--mode)\")"));
+    assert!(!supports_condition_matches("(display: url('var(--mode)'))"));
+    assert!(!supports_condition_matches("(display: var(not-a-custom-property))"));
+    assert!(!supports_condition_matches("(display: prefix-var(--mode))"));
+}
+
+#[test]
 fn supports_boolean_condition_controls_inner_rules() {
     let doc = parse(
         r#"<html><head><style>
@@ -1661,6 +1678,46 @@ fn supports_selector_condition_uses_selector_parser() {
     );
     let p = find_box(&doc.root, &|b| b.tag == "p").unwrap();
 
+    assert_eq!(p.style.color, Color::rgb(4, 5, 6));
+}
+
+#[test]
+fn supports_selector_rejects_unimplemented_and_prefix_pseudo_elements() {
+    for selector in [
+        "p::part(label)",
+        "p::beforebogus",
+        "p::before.extra",
+        "p::unknown",
+        "p, div",
+        "p:is(.known, :unknown-pseudo)",
+        "p:where(.known, :unknown-pseudo)",
+        "p:not(:is(.known, :unknown-pseudo))",
+        "p:is(.known, ::unknown)",
+        "p:where(.known, ::part(label))",
+    ] {
+        assert!(
+            !crate::css::parser::supports_condition_matches(&format!("selector({selector})")),
+            "{selector}"
+        );
+    }
+    assert!(crate::css::parser::supports_condition_matches(
+        "selector(p::before)"
+    ));
+    assert!(crate::css::parser::supports_condition_matches(
+        "selector(p:is(.known, .other))"
+    ));
+    assert!(crate::css::parser::parse_selector("p:is(.known, :unknown-pseudo)").valid);
+    assert!(crate::css::parser::parse_selector("p:is(.known, ::unknown)").valid);
+
+    let doc = parse(
+        r#"<style>
+              p { color: rgb(1, 2, 3); }
+              @supports selector(p::before) { p { color: rgb(4, 5, 6); } }
+              @supports selector(p::part(label)) { p { color: rgb(7, 8, 9); } }
+              @supports selector(p::beforebogus) { p { color: rgb(10, 11, 12); } }
+           </style><p>Text</p>"#,
+    );
+    let p = find_box(&doc.root, &|b| b.tag == "p").unwrap();
     assert_eq!(p.style.color, Color::rgb(4, 5, 6));
 }
 
@@ -2353,6 +2410,139 @@ fn background_size_rejects_invalid_layers_without_changing_existing_style() {
     assert_eq!(style.background_size, BackgroundSize::Explicit);
     assert_eq!(style.background_size_w, CssLength::Auto);
     assert_eq!(style.background_size_h, CssLength::Percent(25.0));
+}
+
+#[test]
+fn mask_geometry_longhands_validate_every_layer_atomically() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "mask-position",
+        "right 10px bottom 20px, center 25%",
+    );
+    apply_property(&mut style, "mask-size", "contain, auto 25%");
+    assert_eq!(
+        style.rare().mask_position,
+        "right 10px bottom 20px, center 25%"
+    );
+    assert_eq!(style.rare().mask_size, "contain, auto 25%");
+
+    for invalid in ["left nonsense", "center, left right top", "left,"] {
+        apply_property(&mut style, "mask-position", invalid);
+        assert_eq!(
+            style.rare().mask_position,
+            "right 10px bottom 20px, center 25%",
+            "{invalid}"
+        );
+    }
+    for invalid in ["cover auto", "contain, -10px", "10px 20px 30px"] {
+        apply_property(&mut style, "mask-size", invalid);
+        assert_eq!(style.rare().mask_size, "contain, auto 25%", "{invalid}");
+    }
+}
+
+#[test]
+fn mask_repeat_accepts_two_axis_values_and_rejects_bad_layers() {
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "mask-repeat", "repeat no-repeat, space round");
+    assert_eq!(style.rare().mask_repeat, "repeat no-repeat, space round");
+    for invalid in ["repeat nonsense", "repeat, no-repeat garbage", "repeat,"] {
+        apply_property(&mut style, "mask-repeat", invalid);
+        assert_eq!(style.rare().mask_repeat, "repeat no-repeat, space round", "{invalid}");
+    }
+}
+
+#[test]
+fn mask_image_layer_list_preserves_none_and_rejects_invalid_tail() {
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "mask-image", "none, url(second.svg), url(third.svg)");
+    assert!(style.rare().mask_image_url.is_empty());
+    assert_eq!(style.rare().additional_mask_images.len(), 2);
+    assert_eq!(style.rare().additional_mask_images[0].url, "second.svg");
+    assert_eq!(style.rare().additional_mask_images[1].url, "third.svg");
+    apply_property(&mut style, "mask-image", "url(replacement.svg), nonsense");
+    assert!(style.rare().mask_image_url.is_empty());
+    assert_eq!(style.rare().additional_mask_images[0].url, "second.svg");
+    for invalid in ["junk url(replacement.svg)", "url(replacement.svg) trailing"] {
+        apply_property(&mut style, "mask-image", invalid);
+        assert!(style.rare().mask_image_url.is_empty(), "{invalid}");
+        assert_eq!(style.rare().additional_mask_images[0].url, "second.svg", "{invalid}");
+    }
+}
+
+#[test]
+fn mask_shorthand_parses_geometry_and_rejects_invalid_values_atomically() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "mask",
+        "url(icon.svg) right 10px bottom 20px / 12px auto repeat no-repeat content-box luminance",
+    );
+    assert_eq!(style.rare().mask_image_url, "icon.svg");
+    assert_eq!(style.rare().mask_position, "right 10px bottom 20px");
+    assert_eq!(style.rare().mask_size, "12px auto");
+    assert_eq!(style.rare().mask_repeat, "repeat no-repeat");
+    assert_eq!(style.rare().mask_origin, "content-box");
+    assert_eq!(style.rare().mask_clip, "content-box");
+    assert_eq!(style.rare().mask_mode, "luminance");
+
+    let previous = style.rare().clone();
+    for invalid in [
+        "url(other.svg) right nonsense / cover",
+        "url(other.svg) left / -5px",
+        "url(other.svg) left / contain repeat garbage",
+        "url(other.svg) repeat repeat repeat",
+        "url(other.svg) border-box content-box padding-box",
+        "url(other.svg) left /",
+        "url(other.svg) left / contain / repeat",
+        "url(other.svg) alpha luminance",
+        "url(other.svg), url(second.svg) left / nonsense",
+    ] {
+        apply_property(&mut style, "mask", invalid);
+        assert_eq!(style.rare().mask_image_url, previous.mask_image_url, "{invalid}");
+        assert_eq!(style.rare().mask_position, previous.mask_position, "{invalid}");
+        assert_eq!(style.rare().mask_size, previous.mask_size, "{invalid}");
+        assert_eq!(style.rare().mask_repeat, previous.mask_repeat, "{invalid}");
+        assert_eq!(style.rare().mask_origin, previous.mask_origin, "{invalid}");
+        assert_eq!(style.rare().mask_clip, previous.mask_clip, "{invalid}");
+        assert_eq!(style.rare().mask_mode, previous.mask_mode, "{invalid}");
+    }
+
+    apply_property(&mut style, "mask", "url(next.svg) center / contain border-box no-clip");
+    assert_eq!(style.rare().mask_origin, "border-box");
+    assert_eq!(style.rare().mask_clip, "no-clip");
+    apply_property(&mut style, "mask", "url(next.svg) padding-box content-box");
+    assert_eq!(style.rare().mask_origin, "padding-box");
+    assert_eq!(style.rare().mask_clip, "content-box");
+}
+
+#[test]
+fn mask_shorthand_parses_multiple_layers_with_independent_defaults() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "mask",
+        "url(top.svg) center / 10px 20px no-repeat subtract alpha, none, url(bottom.svg) padding-box",
+    );
+    let rare = style.rare();
+    assert_eq!(rare.mask_image_url, "top.svg");
+    assert_eq!(rare.additional_mask_images.len(), 2);
+    assert!(rare.additional_mask_images[0].url.is_empty());
+    assert_eq!(rare.additional_mask_images[1].url, "bottom.svg");
+    assert_eq!(rare.mask_size, "10px 20px, auto, auto");
+    assert_eq!(rare.mask_position, "center, 0% 0%, 0% 0%");
+    assert_eq!(rare.mask_composite, "subtract, add, add");
+    assert_eq!(rare.mask_origin, "border-box, border-box, padding-box");
+    assert_eq!(rare.mask_clip, "border-box, border-box, padding-box");
+
+    let mut doc = parse_html(
+        r#"<div id="masked" style="mask:url(top.svg) center / 10px 20px no-repeat subtract alpha, none, url(bottom.svg) padding-box"></div>"#,
+    );
+    let id = doc.get_element_by_id("masked").unwrap();
+    let serialized = doc.computed_style_property(id, "mask");
+    assert!(serialized.contains("url(\"top.svg\") center / 10px 20px no-repeat"));
+    assert!(serialized.contains(", none 0% 0% / auto repeat"));
+    assert!(serialized.contains(", url(\"bottom.svg\") 0% 0% / auto repeat padding-box"));
 }
 
 #[test]
@@ -5080,6 +5270,8 @@ fn counter_style_argument_formats_generated_content() {
     counters.insert("chapter".to_string(), vec![4]);
     let content = resolve_content_value("counter(chapter, upper-roman)");
     assert_eq!(resolve_counters_in_content(&content, &counters), "IV");
+    let content = resolve_content_value("counter(chapter, arabic-indic)");
+    assert_eq!(resolve_counters_in_content(&content, &counters), "٤");
 }
 
 #[test]
@@ -5478,6 +5670,49 @@ fn content_attr_reads_originating_element_attribute() {
         texts.iter().any(|text| text.contains("Name: ")),
         "attr() content should paint the originating element attribute; painted texts were {texts:?}"
     );
+}
+
+#[test]
+fn var_substitution_ignores_quoted_text_but_resolves_function_tokens() {
+    let html = r#"<style>
+        :root { --word: 'resolved'; }
+        p::before { content: "var(--word)"; }
+        p::after { content: var(--word); }
+    </style><p>middle</p>"#;
+    let texts = build_display_texts(html);
+    assert!(
+        texts.iter().any(|text| text.contains("var(--word)")),
+        "quoted text must remain literal: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text.contains("resolved")),
+        "function token must still substitute: {texts:?}"
+    );
+
+    let vars = std::collections::HashMap::from([("--word".to_string(), "blue".to_string())]);
+    assert_eq!(
+        crate::css::resolve_var_references(r#""var(--word)" var(--word)"#, &vars),
+        "\"var(--word)\" blue"
+    );
+    assert_eq!(
+        crate::css::resolve_var_references("myvar(--word) évar(--word) var(--word)", &vars),
+        "myvar(--word) évar(--word) blue"
+    );
+    assert_eq!(
+        crate::css::resolve_var_references(r#"var(--missing, "a,b")"#, &vars),
+        "\"a,b\""
+    );
+    let mut literal = std::collections::HashMap::from([(
+        "--literal".to_string(),
+        "\"var(--missing)\"".to_string(),
+    )]);
+    crate::css::pre_resolve_variables(&mut literal);
+    assert_eq!(literal["--literal"], "\"var(--missing)\"");
+
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add(r#"p::before { content: "var(--word)" }"#);
+    sheet.rebuild_index();
+    assert!(!sheet.rules[0].has_var_refs);
 }
 
 #[test]
@@ -7429,6 +7664,8 @@ fn css_list_style_type_property() {
     assert_eq!(style.list_style_type, ListStyleType::CjkDecimal);
     apply_property(&mut style, "list-style-type", "armenian");
     assert_eq!(style.list_style_type, ListStyleType::Armenian);
+    apply_property(&mut style, "list-style-type", "lower-armenian");
+    assert_eq!(style.list_style_type, ListStyleType::LowerArmenian);
     apply_property(&mut style, "list-style-type", "circle");
     assert_eq!(style.list_style_type, ListStyleType::Circle);
     apply_property(&mut style, "list-style-type", "disclosure-closed");
@@ -7437,6 +7674,61 @@ fn css_list_style_type_property() {
     assert_eq!(style.list_style_type, ListStyleType::DisclosureOpen);
     apply_property(&mut style, "list-style-type", "none");
     assert_eq!(style.list_style_type, ListStyleType::None);
+}
+
+#[test]
+fn predefined_numeric_counter_styles_use_their_own_digits() {
+    let samples = [
+        ("arabic-indic", "١٢"),
+        ("bengali", "১২"),
+        ("cambodian", "១២"),
+        ("khmer", "១២"),
+        ("devanagari", "१२"),
+        ("gujarati", "૧૨"),
+        ("gurmukhi", "੧੨"),
+        ("kannada", "೧೨"),
+        ("lao", "໑໒"),
+        ("malayalam", "൧൨"),
+        ("mongolian", "᠑᠒"),
+        ("myanmar", "၁၂"),
+        ("oriya", "୧୨"),
+        ("persian", "۱۲"),
+        ("tamil", "௧௨"),
+        ("telugu", "౧౨"),
+        ("thai", "๑๒"),
+        ("tibetan", "༡༢"),
+    ];
+    for (name, expected) in samples {
+        let mut style = ComputedStyle::default();
+        apply_property(&mut style, "list-style-type", name);
+        assert_eq!(style.list_style_type, ListStyleType::Numeric(name), "{name}");
+        assert_eq!(crate::css::format_counter_value(12, name), expected, "{name}");
+        assert_eq!(crate::css::format_counter_value(-12, name), format!("-{expected}"));
+        assert_eq!(crate::css::format_counter_value(0, name).chars().count(), 1);
+    }
+    assert_eq!(crate::css::format_counter_value(-12, "cjk-decimal"), "-12");
+    assert_eq!(crate::css::format_counter_value(i32::MIN, "cjk-decimal"), i32::MIN.to_string());
+
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<ol id='arabic' style='list-style-type:arabic-indic'></ol><ol id='persian' style='list-style-type:persian'></ol>",
+        800.0,
+    );
+    for (id, name) in [("arabic", "arabic-indic"), ("persian", "persian")] {
+        let node = doc.get_element_by_id(id).unwrap();
+        assert_eq!(doc.computed_style_property(node, "list-style-type"), name);
+    }
+}
+
+#[test]
+fn predefined_armenian_styles_use_case_and_range() {
+    assert_eq!(crate::css::format_counter_value(12, "armenian"), "ԺԲ");
+    assert_eq!(crate::css::format_counter_value(12, "upper-armenian"), "ԺԲ");
+    assert_eq!(crate::css::format_counter_value(12, "lower-armenian"), "ժբ");
+    for value in [0, -1, 10_000, i32::MIN] {
+        assert_eq!(crate::css::format_counter_value(value, "armenian"), value.to_string());
+        assert_eq!(crate::css::format_counter_value(value, "lower-armenian"), value.to_string());
+    }
 }
 
 #[test]
@@ -9128,6 +9420,50 @@ fn unset_inherits_an_inherited_property_and_initialises_the_rest() {
         "3px",
         "`border-*-width` is NOT inherited, so `unset` is `initial` — `medium`, 3px"
     );
+}
+
+#[test]
+fn css_wide_keywords_ignore_ascii_case_across_cascade_paths() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<style>\
+         @layer base, theme;\
+         #parent { color: rgb(20, 30, 40) }\
+         #inherit { color: InHeRiT }\
+         #unset { color: UnSeT; border-top-style: solid; border-top-width: UnSeT }\
+         #initial { font-size: 40px; font-size: InItIaL }\
+         #revert { display: ReVeRt }\
+         @layer base { #layer { color: rgb(200, 0, 0) } }\
+         @layer theme { #layer { color: blue } #layer { color: ReVeRt-LaYeR } }\
+         #fallback { color: var(--missing, InHeRiT) }\
+         #important { color: red; color: InHeRiT !important }\
+         @supports (display: InHeRiT) { #supported { color: green } }\
+         </style><div id=parent><div id=inherit></div><div id=unset></div>\
+         <div id=initial></div>\
+         <div id=revert></div><div id=layer></div><div id=fallback></div>\
+         <div id=important></div><div id=inline style='color: InHeRiT'></div>\
+         <div id=supported></div></div>",
+        900.0,
+    );
+    let mut style = |id| {
+        let node = doc.get_element_by_id(id).unwrap();
+        (
+            doc.computed_style_property(node, "color"),
+            doc.computed_style_property(node, "display"),
+            doc.computed_style_property(node, "border-top-width"),
+            doc.computed_style_property(node, "font-size"),
+        )
+    };
+    assert_eq!(style("inherit").0, "rgb(20, 30, 40)");
+    assert_eq!(style("unset").0, "rgb(20, 30, 40)");
+    assert_eq!(style("unset").2, "3px");
+    assert_eq!(style("initial").3, "16px");
+    assert_eq!(style("revert").1, "block");
+    assert_eq!(style("layer").0, "rgb(200, 0, 0)");
+    assert_eq!(style("fallback").0, "rgb(20, 30, 40)");
+    assert_eq!(style("important").0, "rgb(20, 30, 40)");
+    assert_eq!(style("inline").0, "rgb(20, 30, 40)");
+    assert_eq!(style("supported").0, "rgb(0, 128, 0)");
 }
 
 #[test]
@@ -11301,6 +11637,27 @@ fn nth_last_child_of_selector_counts_only_matching_siblings_from_end() {
             "rgb(0, 128, 0)",
             "#{id} is not the 2nd `.pick` from the end"
         );
+    }
+}
+
+#[test]
+fn nth_last_child_negative_range_hides_last_two_list_items() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<style>#navbarNavDropdown .navbar-nav .nav-item:nth-last-child(-n + 2) { display: none; }</style>\
+         <div id=navbarNavDropdown><ul class=navbar-nav>\
+         <li class=nav-item id=first>One</li><li class=nav-item id=second>Two</li>\
+         <li class=nav-item id=third>Three</li><li class=nav-item id=fourth>Four</li>\
+         </ul></div>",
+        900.0,
+    );
+    for id in ["first", "second"] {
+        let element = doc.get_element_by_id(id).unwrap();
+        assert_ne!(doc.computed_style_property(element, "display"), "none", "{id}");
+    }
+    for id in ["third", "fourth"] {
+        let element = doc.get_element_by_id(id).unwrap();
+        assert_eq!(doc.computed_style_property(element, "display"), "none", "{id}");
     }
 }
 
@@ -15720,7 +16077,7 @@ fn unknown_media_types_and_invalid_discrete_values_do_not_apply() {
     assert!(!matches("not (forced-colors: maybe)"));
     assert!(matches("not (prefers-reduced-motion: reduce)"));
     assert!(!matches("(made-up-feature: yes) or print"));
-    assert!(matches("(made-up-feature: yes) or screen"));
+    assert!(!matches("(made-up-feature: yes) or screen"));
     assert!(!matches("(made-up-feature: yes) and screen"));
     assert!(!matches("(made-up-feature: yes), print"));
 
@@ -15750,6 +16107,36 @@ fn media_combinators_are_case_insensitive() {
         900.0,
         600.0
     ));
+}
+
+#[test]
+fn media_condition_not_has_feature_scope_but_media_type_not_has_query_scope() {
+    let matches = |query, width| crate::css::evaluate_media(query, width, 600.0);
+    let condition = "(not (min-width: 1000px)) and (min-width: 500px)";
+    assert!(!matches(condition, 400.0));
+    assert!(matches(condition, 800.0));
+    assert!(!matches(condition, 1200.0));
+    assert!(!matches(
+        "not (min-width: 1000px) and (min-width: 500px)",
+        800.0,
+    ));
+    assert!(matches("not screen and (min-width: 1000px)", 400.0));
+    assert!(!matches("not screen and (min-width: 1000px)", 1200.0));
+    assert!(!matches("not screen or (min-width: 500px)", 800.0));
+    assert!(!matches("screen or (min-width: 500px)", 800.0));
+    assert!(!matches(
+        "(min-width: 500px) and (min-height: 500px) or (orientation: portrait)",
+        800.0,
+    ));
+    assert!(matches(
+        "(min-width: 500px) and ((min-height: 700px) or (orientation: landscape))",
+        800.0,
+    ));
+
+    let mut sheet = crate::css::Stylesheet::default();
+    sheet.parse_and_add(&format!("@media {condition} {{ .in-range {{ width: 33px }} }}"));
+    assert!(sheet.rules[0].media_condition.matches(800.0, 600.0));
+    assert!(!sheet.rules[0].media_condition.matches(400.0, 600.0));
 }
 
 #[test]

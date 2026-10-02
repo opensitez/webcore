@@ -147,7 +147,7 @@ fn apply_css_value_with_cascade_context(
         CssValue::Raw(s) => {
             let resolved =
                 resolve_var_references_for_color_scheme(s, local_vars, &style.color_scheme);
-            if s.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var(")) {
+            if contains_var_function(s) && (resolved.trim().is_empty() || contains_var_function(&resolved)) {
                 return;
             }
             apply_resolved_property_with_cascade_context(
@@ -174,13 +174,13 @@ fn apply_resolved_property_with_cascade_context(
     revert_layer_base: &ComputedStyle,
 ) {
     let trimmed = value.trim();
-    if trimmed == "inherit" {
+    if trimmed.eq_ignore_ascii_case("inherit") {
         if let Some(parent) = parent_style {
             copy_property_from_style(style, parent, prop);
         }
-    } else if trimmed == "revert-layer" {
+    } else if trimmed.eq_ignore_ascii_case("revert-layer") {
         copy_property_from_style(style, revert_layer_base, prop);
-    } else if trimmed == "revert" {
+    } else if trimmed.eq_ignore_ascii_case("revert") {
         if let Some(base) = revert_base {
             copy_property_from_style(style, base, prop);
         } else {
@@ -212,7 +212,7 @@ fn prescan_color_scheme(
                 let current = probe.as_ref().unwrap_or(base);
                 let resolved =
                     resolve_var_references_for_color_scheme(val, local_vars, &current.color_scheme);
-                if !resolved.trim().is_empty() && !resolved.contains("var(") {
+                if !resolved.trim().is_empty() && !contains_var_function(&resolved) {
                     apply_property(
                         probe.get_or_insert_with(|| base.clone()),
                         "color-scheme",
@@ -237,7 +237,7 @@ fn prescan_color_scheme(
                 let current = probe.as_ref().unwrap_or(base);
                 let resolved =
                     resolve_var_references_for_color_scheme(val, local_vars, &current.color_scheme);
-                if !resolved.trim().is_empty() && !resolved.contains("var(") {
+                if !resolved.trim().is_empty() && !contains_var_function(&resolved) {
                     apply_property(
                         probe.get_or_insert_with(|| base.clone()),
                         "color-scheme",
@@ -399,7 +399,7 @@ pub(crate) fn projected_ancestor_info(node: &WebCore) -> AncestorInfo {
 
 pub(crate) fn apply_host_projected_rules_to_projected(
     node: &mut crate::types::WebCore,
-    host_node: Option<&crate::types::WebCore>,
+    host_node: Option<&AncestorInfo>,
     stylesheet: &Stylesheet,
     parent_style: Option<&ComputedStyle>,
     vw: f32,
@@ -413,12 +413,11 @@ pub(crate) fn apply_host_projected_rules_to_projected(
         return;
     }
 
-    let ancestors = [projected_ancestor_info(host_node)];
     let empty_hover = std::collections::HashSet::new();
     let empty_focus = std::collections::HashSet::new();
     apply_host_projected_rules_with_ancestors(
         node,
-        &ancestors,
+        std::slice::from_ref(host_node),
         stylesheet,
         parent_style,
         vw,
@@ -540,7 +539,7 @@ fn apply_host_projected_rules_with_ancestors(
                 }
                 let resolved =
                     resolve_var_references_for_color_scheme(val, &local_vars, &style.color_scheme);
-                if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var("))
+                if contains_var_function(val) && (resolved.trim().is_empty() || contains_var_function(&resolved))
                 {
                     continue;
                 }
@@ -595,8 +594,8 @@ fn apply_host_projected_rules_with_ancestors(
                         &local_vars,
                         &style.color_scheme,
                     );
-                    if val.contains("var(")
-                        && (resolved.trim().is_empty() || resolved.contains("var("))
+                    if contains_var_function(val)
+                        && (resolved.trim().is_empty() || contains_var_function(&resolved))
                     {
                         continue;
                     }
@@ -748,7 +747,7 @@ pub(crate) fn apply_slotted_rules_to_projected(
                 }
                 let resolved =
                     resolve_var_references_for_color_scheme(val, &local_vars, &style.color_scheme);
-                if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var("))
+                if contains_var_function(val) && (resolved.trim().is_empty() || contains_var_function(&resolved))
                 {
                     continue;
                 }
@@ -803,8 +802,8 @@ pub(crate) fn apply_slotted_rules_to_projected(
                         &local_vars,
                         &style.color_scheme,
                     );
-                    if val.contains("var(")
-                        && (resolved.trim().is_empty() || resolved.contains("var("))
+                    if contains_var_function(val)
+                        && (resolved.trim().is_empty() || contains_var_function(&resolved))
                     {
                         continue;
                     }
@@ -2223,10 +2222,11 @@ pub(crate) fn build_pseudo_element_boxes(root: &mut crate::types::WebCore) {
         ) {
             pseudo_box.additional_bg_images = existing.additional_bg_images.clone();
         }
-        if pseudo_box.style.rare().mask_image_url == existing.style.rare().mask_image_url {
-            pseudo_box.mask_image_data = existing.mask_image_data.clone();
-            pseudo_box.mask_image_width = existing.mask_image_width;
-            pseudo_box.mask_image_height = existing.mask_image_height;
+        if pseudo_box.style.rare().mask_image_url == existing.style.rare().mask_image_url
+            && pseudo_box.style.rare().additional_mask_images
+                == existing.style.rare().additional_mask_images
+        {
+            pseudo_box.mask_images = existing.mask_images.clone();
         }
     }
 
@@ -3880,7 +3880,7 @@ fn apply_cascade_node(
                 } else {
                     std::borrow::Cow::Borrowed(val.as_str())
                 };
-                if !resolved.trim().is_empty() && !resolved.contains("var(") {
+                if !resolved.trim().is_empty() && !contains_var_function(&resolved) {
                     clear_inherit_tracking_for_property(&mut inherit_props, "color-scheme");
                     apply_property(&mut style, "color-scheme", &resolved);
                 }
@@ -3899,16 +3899,16 @@ fn apply_cascade_node(
                 } else {
                     std::borrow::Cow::Borrowed(val.as_str())
                 };
-                if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var("))
+                if contains_var_function(val) && (resolved.trim().is_empty() || contains_var_function(&resolved))
                 {
                     continue;
                 }
                 let trimmed = resolved.trim();
-                if trimmed == "inherit" {
+                if trimmed.eq_ignore_ascii_case("inherit") {
                     track_inherit_for_id(&mut inherit_props, properties::resolve(prop));
-                } else if trimmed == "revert-layer" {
+                } else if trimmed.eq_ignore_ascii_case("revert-layer") {
                     copy_property_from_style(&mut style, revert_layer_base, prop);
-                } else if trimmed == "revert" {
+                } else if trimmed.eq_ignore_ascii_case("revert") {
                     if let Some(base) = revert_base {
                         copy_property_from_style(&mut style, base, prop);
                     } else {
@@ -3965,14 +3965,14 @@ fn apply_cascade_node(
                             local_vars,
                             &style.color_scheme,
                         );
-                        if !resolved.trim().is_empty() && !resolved.contains("var(") {
+                        if !resolved.trim().is_empty() && !contains_var_function(&resolved) {
                             let trimmed = resolved.trim();
                             let name = property_defs::get(id).name;
-                            if trimmed == "inherit" {
+                            if trimmed.eq_ignore_ascii_case("inherit") {
                                 track_inherit_for_id(&mut inherit_props, id);
-                            } else if trimmed == "revert-layer" {
+                            } else if trimmed.eq_ignore_ascii_case("revert-layer") {
                                 copy_property_from_style(&mut style, revert_layer_base, name);
-                            } else if trimmed == "revert" {
+                            } else if trimmed.eq_ignore_ascii_case("revert") {
                                 if let Some(base) = revert_base {
                                     copy_property_from_style(&mut style, base, name);
                                 } else {
@@ -3989,12 +3989,12 @@ fn apply_cascade_node(
                         }
                     } else {
                         let trimmed = s.trim();
-                        if trimmed == "inherit" {
+                        if trimmed.eq_ignore_ascii_case("inherit") {
                             track_inherit_for_id(&mut inherit_props, id);
-                        } else if trimmed == "revert-layer" {
+                        } else if trimmed.eq_ignore_ascii_case("revert-layer") {
                             let name = property_defs::get(id).name;
                             copy_property_from_style(&mut style, revert_layer_base, name);
-                        } else if trimmed == "revert" {
+                        } else if trimmed.eq_ignore_ascii_case("revert") {
                             let name = property_defs::get(id).name;
                             if let Some(base) = revert_base {
                                 copy_property_from_style(&mut style, base, name);
@@ -4077,7 +4077,7 @@ fn apply_cascade_node(
                             local_vars,
                             &style.color_scheme,
                         );
-                        if !resolved.trim().is_empty() && !resolved.contains("var(") {
+                        if !resolved.trim().is_empty() && !contains_var_function(&resolved) {
                             apply_resolved_property_with_cascade_context(
                                 &mut style,
                                 "color-scheme",
@@ -4098,8 +4098,8 @@ fn apply_cascade_node(
                             local_vars,
                             &style.color_scheme,
                         );
-                        if val.contains("var(")
-                            && (resolved.trim().is_empty() || resolved.contains("var("))
+                        if contains_var_function(val)
+                            && (resolved.trim().is_empty() || contains_var_function(&resolved))
                         {
                             continue;
                         }
@@ -4204,7 +4204,7 @@ fn apply_cascade_node(
             if let Some(real_prop) = prop.strip_prefix("hover-") {
                 let resolved =
                     resolve_var_references_for_color_scheme(val, local_vars, &style.color_scheme);
-                if val.contains("var(") && resolved.contains("var(") {
+                if contains_var_function(val) && contains_var_function(&resolved) {
                     continue;
                 }
                 inline_hover_props.push((real_prop.to_string(), resolved));
@@ -4212,13 +4212,15 @@ fn apply_cascade_node(
             }
             let resolved =
                 resolve_var_references_for_color_scheme(val, local_vars, &style.color_scheme);
-            if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var(")) {
+            if contains_var_function(val) && (resolved.trim().is_empty() || contains_var_function(&resolved)) {
                 continue;
-            } else if resolved.trim() == "inherit" {
+            } else if resolved.trim().eq_ignore_ascii_case("inherit") {
                 if let Some(p) = parent_style {
                     copy_property_from_parent(&mut style, p, prop);
                 }
-            } else if matches!(resolved.trim(), "revert" | "revert-layer") {
+            } else if resolved.trim().eq_ignore_ascii_case("revert")
+                || resolved.trim().eq_ignore_ascii_case("revert-layer")
+            {
                 if let Some(base) = &pre_author_normal_style {
                     copy_property_from_style(&mut style, base, prop);
                 } else {
@@ -4284,7 +4286,7 @@ fn apply_cascade_node(
         for (prop, val) in &inline_important {
             let resolved =
                 resolve_var_references_for_color_scheme(val, local_vars, &style.color_scheme);
-            if val.contains("var(") && (resolved.trim().is_empty() || resolved.contains("var(")) {
+            if contains_var_function(val) && (resolved.trim().is_empty() || contains_var_function(&resolved)) {
                 continue;
             }
             let id = properties::resolve(prop);

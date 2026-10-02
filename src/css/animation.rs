@@ -541,7 +541,7 @@ pub(crate) fn pre_resolve_variables(vars: &mut HashMap<String, String>) {
         let snapshot = vars.clone();
         for key in &keys {
             if let Some(val) = vars.get(key) {
-                if val.contains("var(") {
+                if super::apply::contains_var_function(val) {
                     let resolved = resolve_var_pass(val, &snapshot);
                     if resolved != *val {
                         vars.insert(key.clone(), resolved);
@@ -562,7 +562,7 @@ pub(crate) fn pre_resolve_variables(vars: &mut HashMap<String, String>) {
     for key in &keys {
         if let Some(val) = vars.get(key) {
             let mut resolved = val.clone();
-            if resolved.contains("var(") {
+            if super::apply::contains_var_function(&resolved) {
                 resolved.clear();
             }
             if resolved != *val {
@@ -593,7 +593,7 @@ pub(crate) fn pre_resolve_changed_variables(
         let mut updates = Vec::new();
         for &key in &keys {
             if let Some(val) = vars.get(key) {
-                if val.contains("var(") {
+                if super::apply::contains_var_function(val) {
                     let resolved = resolve_var_pass(val, vars);
                     if resolved != *val {
                         updates.push((key, resolved));
@@ -609,7 +609,10 @@ pub(crate) fn pre_resolve_changed_variables(
         }
     }
     for key in keys {
-        if vars.get(key).is_some_and(|value| value.contains("var(")) {
+        if vars
+            .get(key)
+            .is_some_and(|value| super::apply::contains_var_function(value))
+        {
             vars.insert(key.to_string(), String::new());
         }
     }

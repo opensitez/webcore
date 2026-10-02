@@ -68,6 +68,7 @@ pub struct BrowserView {
     scroll_priority_frame: bool,
     pointer_position: (f32, f32),
     next_frame_deadline: Option<Instant>,
+    last_stream_frame_update: Option<Instant>,
     width: f32,
     height: f32,
     viewport_pixmap: Option<Pixmap>,
@@ -496,6 +497,7 @@ impl BrowserView {
             scroll_priority_frame: false,
             pointer_position: (0.0, 0.0),
             next_frame_deadline: None,
+            last_stream_frame_update: None,
             width,
             height,
             viewport_pixmap: None,
@@ -658,6 +660,7 @@ impl BrowserView {
         if !self.stream_paint_ready {
             return false;
         }
+        self.last_stream_frame_update = Some(Instant::now());
         self.wire_streamed_font_resources();
         let Some(frame) = self.stream_frame.as_mut() else {
             return false;
@@ -751,8 +754,28 @@ impl BrowserView {
         self.active_doc_mut()
     }
 
+    pub fn set_external_video_overlay(&mut self, id: u32, enabled: bool) -> bool {
+        let Some((doc, renderer)) = self.document_and_renderer_current_mut() else {
+            return false;
+        };
+        let Some(node) = doc.find_webcore_mut(id) else {
+            return false;
+        };
+        if node.tag != "video" || node.external_video_overlay == enabled {
+            return false;
+        }
+        node.external_video_overlay = enabled;
+        renderer.invalidate_display_list();
+        true
+    }
+
     pub fn document_and_renderer_mut(&mut self) -> Option<(&mut Document, &mut Renderer)> {
         self.ensure_streamed_layout_current();
+        self.document_and_renderer_current_mut()
+    }
+
+    /// Access the already-updated page after `drive_idle`, without starting another frame update.
+    pub fn document_and_renderer_current_mut(&mut self) -> Option<(&mut Document, &mut Renderer)> {
         if let Some(frame) = self.stream_frame.as_mut() {
             return Some((&mut frame.doc, &mut self.renderer));
         }
@@ -871,11 +894,15 @@ impl BrowserView {
                     &mut stats.decoded_dom_image_bytes,
                     &node.bg_image_data,
                 );
-                add_arc_bytes(
-                    &mut seen,
-                    &mut stats.decoded_dom_image_bytes,
-                    &node.mask_image_data,
-                );
+                if let Some(masks) = node.mask_images.as_ref() {
+                    for mask in masks.first.iter().chain(masks.additional.iter().flatten()) {
+                        add_arc_bytes_ref(
+                            &mut seen,
+                            &mut stats.decoded_dom_image_bytes,
+                            &mask.data,
+                        );
+                    }
+                }
                 for layer in &node.additional_bg_images {
                     if let Some(layer) = layer.as_ref() {
                         add_arc_bytes_ref(
@@ -1252,7 +1279,13 @@ impl BrowserView {
         let scroll_priority = self.scroll_priority_frame;
         let changed = if scroll_priority { false } else { self.poll() };
         let nav_changed = self.drain_pending_navigation();
-        let stream_layout_changed = if scroll_priority || self.defer_queued_html_layout() {
+        let deferred_update = !scroll_priority
+            && !self.defer_queued_html_layout()
+            && !self.stream_frame_update_due();
+        let stream_layout_changed = if scroll_priority
+            || self.defer_queued_html_layout()
+            || deferred_update
+        {
             false
         } else {
             self.update_streamed_frame_before_paint()
@@ -1264,7 +1297,7 @@ impl BrowserView {
                 event_loop.set_control_flow(ControlFlow::WaitUntil(
                     Instant::now() + Duration::from_millis(1),
                 ));
-            } else if stream_needs_wake {
+            } else if stream_needs_wake || deferred_update {
                 let deadline = next_frame_deadline(
                     self.next_frame_deadline,
                     Instant::now(),
@@ -1276,7 +1309,7 @@ impl BrowserView {
                 self.next_frame_deadline = None;
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
-            scroll_priority || stream_layout_changed || stream_needs_redraw
+            scroll_priority || stream_layout_changed || (stream_needs_redraw && !deferred_update)
         } else {
             self.renderer.drive_document_idle(
                 event_loop,
@@ -1296,14 +1329,17 @@ impl BrowserView {
         let scroll_priority = self.scroll_priority_frame;
         let changed = if scroll_priority { false } else { self.poll() };
         let nav_changed = self.drain_pending_navigation();
-        let stream_layout_changed = if scroll_priority || self.defer_queued_html_layout() {
+        let deferred_update = !scroll_priority
+            && !self.defer_queued_html_layout()
+            && !self.stream_frame_update_due();
+        let stream_layout_changed = if scroll_priority || self.defer_queued_html_layout() || deferred_update {
             false
         } else {
             self.update_streamed_frame_before_paint()
         };
         let needs_redraw = if self.stream_frame.is_some() {
             let (_, stream_needs_redraw) = self.stream_idle_state();
-            scroll_priority || stream_layout_changed || stream_needs_redraw
+            scroll_priority || stream_layout_changed || (stream_needs_redraw && !deferred_update)
         } else {
             false
         };
@@ -1331,6 +1367,18 @@ impl BrowserView {
         let needs_redraw =
             !self.defer_queued_html_layout() && (frame_needs_redraw || self.stream_needs_layout);
         (needs_wake, needs_redraw)
+    }
+
+    fn stream_frame_update_due(&self) -> bool {
+        let Some(frame) = self.stream_frame.as_ref() else {
+            return true;
+        };
+        self.stream_needs_layout
+            || self.interaction_layout_pending
+            || frame.needs_immediate_update()
+            || self.last_stream_frame_update.is_none_or(|last| {
+                Instant::now().saturating_duration_since(last) >= Duration::from_nanos(16_666_667)
+            })
     }
 
     fn defer_queued_html_layout(&self) -> bool {
@@ -1617,7 +1665,12 @@ impl BrowserView {
         }
         self.active_doc()
             .and_then(|doc| {
-                crate::layout::hit_test::point_to_hit(&doc.root, (x, y + doc.scroll_y), 0)
+                crate::layout::hit_test::point_to_hit_scrolled(
+                    &doc.root,
+                    (x + doc.scroll_x, y + doc.scroll_y),
+                    (doc.scroll_x, doc.scroll_y),
+                    0,
+                )
             })
             .and_then(|hit| self.active_doc()?.get_box_by_id(hit.node_id))
             .map(|node| node.style.cursor)
@@ -1634,12 +1687,13 @@ impl BrowserView {
         } else {
             doc.base_url.clone()
         };
-        let pt = (x, y + doc.scroll_y);
-        if let Some(href) = crate::layout::hit_test::hit_test_link(&doc.root, pt, 0) {
+        let pt = (x + doc.scroll_x, y + doc.scroll_y);
+        let scroll = (doc.scroll_x, doc.scroll_y);
+        if let Some(href) = crate::layout::hit_test::hit_test_link_scrolled(&doc.root, pt, scroll, 0) {
             self.navigate(resolve_browser_target(&href, &current_url, &view_url));
             return;
         }
-        if let Some(hit) = crate::layout::hit_test::point_to_hit(&doc.root, pt, 0) {
+        if let Some(hit) = crate::layout::hit_test::point_to_hit_scrolled(&doc.root, pt, scroll, 0) {
             let control_id = find_form_parent_id(&doc.root, hit.node_id);
             let Some(node) = doc.get_box_by_id(control_id) else {
                 return;
@@ -1886,6 +1940,41 @@ mod tests {
                 .text_content()
                 .contains("First page")
         );
+    }
+
+    #[test]
+    fn streamed_idle_scheduler_skips_redundant_updates_but_not_dirty_frames() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+        view.feed_streaming_chunk(base, "<!doctype html><body><p>Ready</p>");
+        assert!(view.update_streamed_frame_before_paint());
+        view.last_stream_frame_update = Some(Instant::now() + Duration::from_secs(1));
+        assert!(!view.stream_frame_update_due());
+
+        view.stream_frame.as_mut().unwrap().mark_paint_dirty();
+        assert!(!view.stream_frame_update_due());
+
+        view.stream_frame.as_mut().unwrap().mark_style_dirty();
+        assert!(view.stream_frame_update_due());
+    }
+
+    #[test]
+    fn video_overlay_toggle_does_not_advance_the_frame_clock() {
+        let mut view = BrowserView::new(480.0, 320.0, PageLoadOptions::default());
+        let base = "https://example.test/";
+        view.stream_frame = Some(EngineFrame::empty(480.0, 320.0));
+        view.stream_frame.as_mut().unwrap().start_streaming(base);
+        view.feed_streaming_chunk(base, "<!doctype html><body><video id=clip></video>");
+        assert!(view.update_streamed_frame_before_paint());
+        let id = view.document().unwrap().get_element_by_id("clip").unwrap();
+        let updated_at = view.last_stream_frame_update;
+        view.stream_frame.as_mut().unwrap().doc.needs_animation_frame = true;
+
+        assert!(view.set_external_video_overlay(id, true));
+        assert_eq!(view.last_stream_frame_update, updated_at);
+        assert!(!view.set_external_video_overlay(id, true));
     }
 
     #[test]

@@ -617,15 +617,7 @@ impl Document {
             }
             "counter-increment" => serialize_counters(&s.counter_increment),
             "counter-set" => serialize_counters(&s.counter_set),
-            "mask-image" => {
-                if let Some(source) = s.rare().mask_image_set_source.as_ref() {
-                    source.clone()
-                } else if s.rare().mask_image_url.is_empty() {
-                    "none".to_string()
-                } else {
-                    format!("url(\"{}\")", s.rare().mask_image_url)
-                }
-            }
+            "mask-image" => serialize_mask_images(s),
             "mask-mode" => rare_or(&s.rare().mask_mode, "match-source"),
             "mask-repeat" => rare_or(&s.rare().mask_repeat, "repeat"),
             "mask-position" => rare_or(&s.rare().mask_position, "0% 0%"),
@@ -662,10 +654,16 @@ impl Document {
                 ContentVisibility::Hidden => "hidden",
             }
             .to_string(),
-            "contain-intrinsic-size" => shorthand_pair_values(
-                len(&s.contain_intrinsic_width),
-                len(&s.contain_intrinsic_height),
-            ),
+            "contain-intrinsic-size" => {
+                let axis = |length, auto| {
+                    let value = len(length);
+                    if auto { format!("auto {value}") } else { value }
+                };
+                shorthand_pair_values(
+                    axis(&s.contain_intrinsic_width, s.rare().contain_intrinsic_width_auto),
+                    axis(&s.contain_intrinsic_height, s.rare().contain_intrinsic_height_auto),
+                )
+            }
             "color-scheme" => s.color_scheme.clone(),
             "forced-color-adjust" => s.forced_color_adjust.clone(),
             "background-image" => serialize_background_image(s),
@@ -1131,23 +1129,56 @@ fn rare_or(value: &str, initial: &str) -> String {
 }
 
 fn serialize_mask(s: &crate::types::ComputedStyle) -> String {
-    let image = if let Some(source) = s.rare().mask_image_set_source.as_ref() {
-        source.clone()
-    } else if s.rare().mask_image_url.is_empty() {
-        "none".to_string()
-    } else {
-        format!("url(\"{}\")", s.rare().mask_image_url)
+    let rare = s.rare();
+    let images = serialize_mask_images(s);
+    let images = crate::css::value_parse::split_top_level_commas(&images);
+    let properties = [
+        (&rare.mask_position, "0% 0%"),
+        (&rare.mask_size, "auto"),
+        (&rare.mask_repeat, "repeat"),
+        (&rare.mask_origin, "border-box"),
+        (&rare.mask_clip, "border-box"),
+        (&rare.mask_composite, "add"),
+        (&rare.mask_mode, "match-source"),
+    ];
+    let lists: Vec<_> = properties.iter().map(|(value, initial)| {
+        let values = crate::css::value_parse::split_top_level_commas(value);
+        (0..images.len()).map(|index| {
+            if values.is_empty() {
+                *initial
+            } else {
+                values[index % values.len()].trim()
+            }
+        }).collect::<Vec<_>>()
+    }).collect();
+    images.iter().enumerate().map(|(index, image)| {
+        format!(
+            "{} {} / {} {} {} {} {} {}",
+            image.trim(), lists[0][index], lists[1][index], lists[2][index],
+            lists[3][index], lists[4][index], lists[5][index], lists[6][index],
+        )
+    }).collect::<Vec<_>>().join(", ")
+}
+
+pub(crate) fn serialize_mask_images(s: &crate::types::ComputedStyle) -> String {
+    let rare = s.rare();
+    let first = crate::types::MaskImageSource {
+        url: rare.mask_image_url.clone(),
+        image_set_source: rare.mask_image_set_source.clone(),
     };
-    format!(
-        "{} {} {} / {} {} {} {}",
-        image,
-        rare_or(&s.rare().mask_position, "0% 0%"),
-        rare_or(&s.rare().mask_repeat, "repeat"),
-        rare_or(&s.rare().mask_size, "auto"),
-        rare_or(&s.rare().mask_origin, "border-box"),
-        rare_or(&s.rare().mask_clip, "border-box"),
-        rare_or(&s.rare().mask_mode, "match-source"),
-    )
+    std::iter::once(&first)
+        .chain(rare.additional_mask_images.iter())
+        .map(|layer| {
+            layer.image_set_source.clone().unwrap_or_else(|| {
+                if layer.url.is_empty() {
+                    "none".to_string()
+                } else {
+                    format!("url(\"{}\")", layer.url)
+                }
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn serialize_transition_property(s: &crate::types::ComputedStyle) -> String {
@@ -1518,6 +1549,7 @@ fn serialize_list_style_type(v: crate::types::ListStyleType) -> String {
         L::Square => "square",
         L::Decimal => "decimal",
         L::DecimalLeadingZero => "decimal-leading-zero",
+        L::Numeric(name) => name,
         L::LowerAlpha => "lower-alpha",
         L::UpperAlpha => "upper-alpha",
         L::LowerLatin => "lower-latin",
@@ -1526,6 +1558,8 @@ fn serialize_list_style_type(v: crate::types::ListStyleType) -> String {
         L::UpperRoman => "upper-roman",
         L::LowerGreek => "lower-greek",
         L::Armenian => "armenian",
+        L::UpperArmenian => "upper-armenian",
+        L::LowerArmenian => "lower-armenian",
         L::Georgian => "georgian",
         L::Hebrew => "hebrew",
         L::Hiragana => "hiragana",

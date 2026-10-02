@@ -35,6 +35,7 @@ pub enum PendingImageTarget {
     Background,
     BackgroundLayer(usize),
     Mask,
+    MaskLayer(usize),
 }
 
 #[derive(Clone)]

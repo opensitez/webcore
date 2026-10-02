@@ -18,6 +18,59 @@ pub struct DecodedBackgroundImage {
     pub resolution: f32,
 }
 
+#[derive(Clone, Debug)]
+pub struct DecodedMaskImage {
+    pub data: std::sync::Arc<Vec<u8>>,
+    pub width: u32,
+    pub height: u32,
+    pub resolution: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DecodedMaskImages {
+    pub first: Option<DecodedMaskImage>,
+    pub additional: Vec<Option<DecodedMaskImage>>,
+    source_keys: Vec<Option<String>>,
+}
+
+impl DecodedMaskImages {
+    pub fn get(&self, index: usize) -> Option<&DecodedMaskImage> {
+        if index == 0 {
+            self.first.as_ref()
+        } else {
+            self.additional.get(index - 1).and_then(Option::as_ref)
+        }
+    }
+
+    pub fn set(&mut self, index: usize, image: DecodedMaskImage) {
+        self.store(index, image, None);
+    }
+
+    pub fn get_for_source(&self, index: usize, source: &str) -> Option<&DecodedMaskImage> {
+        let stored = self.source_keys.get(index).and_then(Option::as_deref);
+        (stored.is_none() || stored == Some(source)).then(|| self.get(index)).flatten()
+    }
+
+    pub fn set_with_source(&mut self, index: usize, image: DecodedMaskImage, source: String) {
+        self.store(index, image, Some(source));
+    }
+
+    fn store(&mut self, index: usize, image: DecodedMaskImage, source: Option<String>) {
+        if self.source_keys.len() <= index {
+            self.source_keys.resize_with(index + 1, || None);
+        }
+        self.source_keys[index] = source;
+        if index == 0 {
+            self.first = Some(image);
+        } else {
+            if self.additional.len() < index {
+                self.additional.resize_with(index, || None);
+            }
+            self.additional[index - 1] = Some(image);
+        }
+    }
+}
+
 /// A box/node in the box tree.  Mirrors the C++ `Box` struct.
 #[derive(Clone, Debug)]
 pub struct WebCore {
@@ -82,6 +135,8 @@ pub struct WebCore {
     pub media_ended: bool,
     pub media_seeking: bool,
     pub media_muted: bool,
+    /// The host presents this video's pixels in a separate compositor layer.
+    pub external_video_overlay: bool,
 
     // Background image pixel data (RGBA8, row-major)
     pub bg_image_data: Option<std::sync::Arc<Vec<u8>>>,
@@ -91,10 +146,7 @@ pub struct WebCore {
     pub bg_image_resolution: f32,
     pub additional_bg_images: Vec<Option<DecodedBackgroundImage>>,
 
-    // CSS mask-image data (SVG rasterized to alpha mask)
-    pub mask_image_data: Option<std::sync::Arc<Vec<u8>>>,
-    pub mask_image_width: u32,
-    pub mask_image_height: u32,
+    pub mask_images: Option<std::sync::Arc<DecodedMaskImages>>,
 
     /// Parsed native SVG tree used by the browser paint path.
     pub svg_document: Option<crate::svg::SvgDocument>,

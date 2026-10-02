@@ -1466,6 +1466,96 @@ fn hidden_content_visibility_skips_descendant_layout_but_keeps_own_size() {
 }
 
 #[test]
+fn auto_contain_intrinsic_size_is_one_value_for_both_axes() {
+    let mut doc = parse_and_layout(
+        r#"<html><body style="margin:0"><div id="box" style="display:inline-block;content-visibility:hidden;contain-intrinsic-size:auto 40px"><div style="width:200px;height:200px"></div></div></body></html>"#,
+        800.0,
+    );
+    let box_node = find_by_id(&doc.root, "box").unwrap();
+    assert!(box_node.style.rare().contain_intrinsic_width_auto);
+    assert!(box_node.style.rare().contain_intrinsic_height_auto);
+    assert_eq!(box_node.layout.content_rect.w, 40.0);
+    assert_eq!(box_node.layout.content_rect.h, 40.0);
+    assert_eq!(
+        doc.computed_style_property(box_node.node_id, "contain-intrinsic-size"),
+        "auto 40px"
+    );
+}
+
+#[test]
+fn contain_intrinsic_size_two_auto_axis_values() {
+    let mut doc = parse_and_layout(
+        r#"<html><body style="margin:0"><div id="box" style="display:inline-block;content-visibility:hidden;contain-intrinsic-size:auto 30px auto 45px"></div></body></html>"#,
+        800.0,
+    );
+    let node = find_by_id(&doc.root, "box").unwrap();
+    assert_eq!(node.layout.content_rect.w, 30.0);
+    assert_eq!(node.layout.content_rect.h, 45.0);
+    assert_eq!(
+        doc.computed_style_property(node.node_id, "contain-intrinsic-size"),
+        "auto 30px auto 45px"
+    );
+}
+
+#[test]
+fn auto_contain_intrinsic_size_remembers_visible_content_size() {
+    let mut doc = parse_and_layout(
+        r#"<html><body style="margin:0"><div id="box" style="width:100px;contain-intrinsic-size:auto 25px"><div style="height:80px"></div></div></body></html>"#,
+        800.0,
+    );
+    let id = find_by_id(&doc.root, "box").unwrap().node_id;
+    let child_id = doc.find_webcore(id).unwrap().children[0].node_id;
+    assert_eq!(doc.find_webcore(id).unwrap().layout.content_rect.h, 80.0);
+    assert_eq!(crate::hit_test_box_at(&doc.root, (10.0, 10.0), 0), child_id);
+    let node = doc.find_webcore_mut(id).unwrap();
+    std::sync::Arc::make_mut(&mut node.style).content_visibility = ContentVisibility::Hidden;
+    node.layout.layout_dirty = true;
+
+    let mut engine = crate::layout::LayoutEngine::new();
+    engine.viewport_h = 600.0;
+    engine.layout_no_cascade(&mut doc, 800.0);
+    let node = doc.find_webcore(id).unwrap();
+    assert_eq!(node.layout.content_rect.h, 80.0);
+    assert_eq!(crate::hit_test_box_at(&doc.root, (10.0, 10.0), 0), id);
+}
+
+#[test]
+fn auto_contain_intrinsic_size_survives_size_containment() {
+    let mut doc = parse_and_layout(
+        r#"<html><body style="margin:0"><div id="box" style="width:100px;contain-intrinsic-size:auto 25px"><div style="height:80px"></div></div></body></html>"#,
+        800.0,
+    );
+    let id = find_by_id(&doc.root, "box").unwrap().node_id;
+    let node = doc.find_webcore_mut(id).unwrap();
+    std::sync::Arc::make_mut(&mut node.style).contain_size = true;
+    node.layout.layout_dirty = true;
+
+    let mut engine = crate::layout::LayoutEngine::new();
+    engine.viewport_h = 600.0;
+    engine.layout_no_cascade(&mut doc, 800.0);
+    assert_eq!(doc.find_webcore(id).unwrap().layout.content_rect.h, 80.0);
+}
+
+#[test]
+fn remembered_contained_height_drives_container_query_units() {
+    let mut doc = parse_and_layout(
+        r#"<html><body style="margin:0"><div id="box" style="position:relative;container-type:normal;width:100px;contain-intrinsic-size:auto 25px"><div style="height:80px"></div><div id="query" style="position:absolute;height:10cqh;width:10px"></div></div></body></html>"#,
+        800.0,
+    );
+    let id = find_by_id(&doc.root, "box").unwrap().node_id;
+    assert_eq!(doc.find_webcore(id).unwrap().layout.content_rect.h, 80.0);
+    let node = doc.find_webcore_mut(id).unwrap();
+    std::sync::Arc::make_mut(&mut node.style).container_type = ContainerType::Size;
+    crate::css::cascade::mark_layout_subtree_dirty(node);
+
+    let mut engine = crate::layout::LayoutEngine::new();
+    engine.viewport_h = 600.0;
+    engine.layout_no_cascade(&mut doc, 800.0);
+    assert_eq!(doc.find_webcore(id).unwrap().layout.content_rect.h, 80.0);
+    assert_eq!(find_by_id(&doc.root, "query").unwrap().layout.content_rect.h, 8.0);
+}
+
+#[test]
 fn hidden_content_visibility_blocks_hits_on_previously_laid_out_children() {
     let mut doc = parse_and_layout(
         r#"<html><body style="margin:0"><div id="outer" style="width:100px;height:50px"><div id="inner" style="width:80px;height:40px"></div></div></body></html>"#,

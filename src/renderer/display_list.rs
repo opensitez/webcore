@@ -16,6 +16,7 @@ use crate::types::{Color, GradientDirection, Rect, TextTransform, TextUnderlineP
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlaceholderTypography {
+    pub opacity: f32,
     pub font_size: f32,
     pub font_weight: u16,
     pub font_style: u8,
@@ -27,6 +28,20 @@ pub struct PlaceholderTypography {
     pub text_transform: TextTransform,
     pub decoration: TextDecoration,
     pub shadow: Option<crate::types::TextShadow>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaskPaintLayer {
+    pub rect: Rect,
+    pub no_clip: bool,
+    pub origin: Rect,
+    pub tile: Rect,
+    pub data: Option<ImageRef>,
+    pub luminance: bool,
+    pub repeat_x_mode: u8,
+    pub repeat_y_mode: u8,
+    /// Operator applied to this layer over the composite of layers below it.
+    pub composite: u8,
 }
 
 /// A single paint command in the display list.
@@ -152,14 +167,30 @@ pub enum PaintCmd {
     /// Filter the already-painted backdrop within the element's border box.
     BackdropFilter {
         rect: Rect,
+        radii: [f32; 4],
+        radii_y: [f32; 4],
         filters: Vec<(u8, f32, f32, f32, crate::types::Color)>,
     },
 
     /// Push a CSS mask layer. Subsequent element content is rendered offscreen,
     /// then composited through the mask image on pop.
     PushMask {
+        /// Painting area after `mask-clip`.
         rect: Rect,
+        no_clip: bool,
+        /// Box used by `mask-position`, `mask-size`, and `mask-repeat`.
+        origin: Rect,
+        /// First mask tile, before repetition.
+        tile: Rect,
         data: ImageRef,
+        luminance: bool,
+        repeat_x_mode: u8,
+        repeat_y_mode: u8,
+    },
+
+    /// Multiple CSS mask images form one isolated mask before masking content.
+    PushMaskGroup {
+        layers: Vec<MaskPaintLayer>,
     },
 
     /// Pop the current CSS mask layer.
@@ -506,6 +537,13 @@ impl DisplayListMemoryEstimate {
             | PaintCmd::BorderImage { data, .. }
             | PaintCmd::PushMask { data, .. }
             | PaintCmd::BackgroundImage { data, .. } => self.add_image(data, seen_shared_images),
+            PaintCmd::PushMaskGroup { layers } => {
+                for layer in layers {
+                    if let Some(data) = &layer.data {
+                        self.add_image(data, seen_shared_images);
+                    }
+                }
+            }
             PaintCmd::ListMarker {
                 text,
                 image,

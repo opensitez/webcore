@@ -272,10 +272,12 @@ fn eval_functional_token(ident: &str, args: &str) -> bool {
             if selector.is_empty() {
                 return false;
             }
-            split_selectors(selector).iter().all(|sel| {
-                let sel = sel.trim();
-                !sel.is_empty() && parse_selector(&strip_pseudo_element(sel).0).valid
-            })
+            let selectors = split_selectors(selector);
+            if selectors.len() != 1 {
+                return false;
+            }
+            let (base, pseudo, _, _) = strip_pseudo_element(selectors[0].trim());
+            pseudo != PseudoElement::Ignored && parse_selector_for_support(&base).valid
         }
         "font-format" => {
             let format = unquote_css_string(args.trim());
@@ -541,13 +543,13 @@ fn supports_declaration_matches(prop: &str, value: &str) -> bool {
     }
 
     let value = value.trim();
-    if matches!(
-        value,
-        "inherit" | "initial" | "unset" | "revert" | "revert-layer"
-    ) {
+    if ["inherit", "initial", "unset", "revert", "revert-layer"]
+        .iter()
+        .any(|keyword| value.eq_ignore_ascii_case(keyword))
+    {
         return true;
     }
-    if value.contains("var(") {
+    if contains_valid_var_function(value) {
         return true;
     }
 
@@ -556,6 +558,24 @@ fn supports_declaration_matches(prop: &str, value: &str) -> bool {
     }
 
     super::supports::declaration_value(id, value)
+}
+
+fn contains_valid_var_function(value: &str) -> bool {
+    let mut rest = value;
+    while let Some((start, end)) = super::apply::find_var_function(rest) {
+        let args = &rest[start + 4..end - 1];
+        let name = args.split(',').next().unwrap_or("").trim();
+        if name.strip_prefix("--").is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix.chars().all(|ch| {
+                    ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || !ch.is_ascii()
+                })
+        }) {
+            return true;
+        }
+        rest = &rest[end..];
+    }
+    false
 }
 
 fn supports_font_format(format: &str) -> bool {
@@ -1075,34 +1095,40 @@ pub fn find_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
 
 /// Detect and strip pseudo-elements from a selector string.
 /// Returns (cleaned_selector, PseudoElement, is_slotted, slotted_slot_selector).
+fn pseudo_name_matches(source: &str, name: &str) -> bool {
+    source
+        .strip_prefix(name)
+        .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(':'))
+}
+
+fn simple_pseudo_element(source: &str) -> Option<(usize, PseudoElement)> {
+    for (name, kind) in [
+        ("before", PseudoElement::Before),
+        ("after", PseudoElement::After),
+        ("selection", PseudoElement::Selection),
+        ("marker", PseudoElement::Marker),
+        ("first-line", PseudoElement::FirstLine),
+        ("first-letter", PseudoElement::FirstLetter),
+        ("placeholder", PseudoElement::Placeholder),
+        ("file-selector-button", PseudoElement::FileSelectorButton),
+        ("details-content", PseudoElement::DetailsContent),
+        ("spelling-error", PseudoElement::SpellingError),
+        ("grammar-error", PseudoElement::GrammarError),
+        ("backdrop", PseudoElement::Backdrop),
+    ] {
+        if pseudo_name_matches(source, name) {
+            return Some((name.len(), kind));
+        }
+    }
+    None
+}
+
 fn strip_pseudo_element(sel: &str) -> (String, PseudoElement, bool, Option<CssSelector>) {
     // :: double-colon pseudo-elements
     if let Some(pos) = find_unescaped(sel, "::") {
         let pe_str = sel[pos + 2..].to_ascii_lowercase();
-        let (kw_len, pe) = if pe_str.starts_with("before") {
-            (6, PseudoElement::Before)
-        } else if pe_str.starts_with("after") {
-            (5, PseudoElement::After)
-        } else if pe_str.starts_with("selection") {
-            (9, PseudoElement::Selection)
-        } else if pe_str.starts_with("marker") {
-            (6, PseudoElement::Marker)
-        } else if pe_str.starts_with("first-line") {
-            (10, PseudoElement::FirstLine)
-        } else if pe_str.starts_with("first-letter") {
-            (12, PseudoElement::FirstLetter)
-        } else if pe_str.starts_with("placeholder") {
-            (11, PseudoElement::Placeholder)
-        } else if pe_str.starts_with("file-selector-button") {
-            (20, PseudoElement::FileSelectorButton)
-        } else if pe_str.starts_with("details-content") {
-            (15, PseudoElement::DetailsContent)
-        } else if pe_str.starts_with("spelling-error") {
-            (14, PseudoElement::SpellingError)
-        } else if pe_str.starts_with("grammar-error") {
-            (13, PseudoElement::GrammarError)
-        } else if pe_str.starts_with("backdrop") {
-            (8, PseudoElement::Backdrop)
+        let (kw_len, pe) = if let Some(simple) = simple_pseudo_element(&pe_str) {
+            simple
         } else if pe_str == "-webkit-scrollbar" {
             let clean = sel[..pos].trim();
             return (
@@ -1458,6 +1484,14 @@ fn strip_important(val: &str) -> String {
 
 /// Parse a single CSS selector string into a CssSelector.
 pub fn parse_selector(s: &str) -> CssSelector {
+    parse_selector_impl(s, false)
+}
+
+fn parse_selector_for_support(s: &str) -> CssSelector {
+    parse_selector_impl(s, true)
+}
+
+fn parse_selector_impl(s: &str, strict_support: bool) -> CssSelector {
     let mut parts = Vec::new();
     // Selectors §3.1 — an unrecognised simple selector makes the whole complex
     // selector invalid. Recorded rather than acted on here: whether that kills
@@ -1570,6 +1604,9 @@ pub fn parse_selector(s: &str) -> CssSelector {
                     // Collect balanced args (respecting nested parens)
                     chars.next(); // consume '('
                     let args = read_balanced_parens(&mut chars);
+                    if is_elem && name != "slotted" {
+                        valid = false;
+                    }
                     if !is_elem {
                         match name.as_str() {
                             // `:not()` and `:has()` take a NON-forgiving list —
@@ -1583,7 +1620,7 @@ pub fn parse_selector(s: &str) -> CssSelector {
                                 // as something far weaker than written.
                                 let selectors: Vec<CssSelector> = split_selectors(&args)
                                     .into_iter()
-                                    .map(|s| parse_selector(s.trim()))
+                                    .map(|s| parse_selector_impl(s.trim(), strict_support))
                                     .collect();
                                 if selectors.iter().any(|s| !s.valid) {
                                     valid = false;
@@ -1608,10 +1645,12 @@ pub fn parse_selector(s: &str) -> CssSelector {
                             "is" => {
                                 let selectors: Vec<CssSelector> = split_selectors(&args)
                                     .into_iter()
-                                    .map(|s| parse_selector(s.trim()))
-                                    .filter(|s| s.valid)
+                                    .map(|s| parse_selector_impl(s.trim(), strict_support))
+                                    .filter(|s| s.valid || strict_support)
                                     .collect();
-                                if selectors.is_empty() {
+                                if selectors.is_empty()
+                                    || (strict_support && selectors.iter().any(|s| !s.valid))
+                                {
                                     valid = false;
                                 }
                                 parts.push(SelectorPart::Is(selectors));
@@ -1619,10 +1658,12 @@ pub fn parse_selector(s: &str) -> CssSelector {
                             "where" => {
                                 let selectors: Vec<CssSelector> = split_selectors(&args)
                                     .into_iter()
-                                    .map(|s| parse_selector(s.trim()))
-                                    .filter(|s| s.valid)
+                                    .map(|s| parse_selector_impl(s.trim(), strict_support))
+                                    .filter(|s| s.valid || strict_support)
                                     .collect();
-                                if selectors.is_empty() {
+                                if selectors.is_empty()
+                                    || (strict_support && selectors.iter().any(|s| !s.valid))
+                                {
                                     valid = false;
                                 }
                                 parts.push(SelectorPart::Where(selectors));
@@ -1635,7 +1676,7 @@ pub fn parse_selector(s: &str) -> CssSelector {
                                 // "has an h1 that contains an h2".
                                 let selectors: Vec<CssSelector> = split_selectors(&args)
                                     .into_iter()
-                                    .map(|s| parse_selector(s.trim()))
+                                    .map(|s| parse_selector_impl(s.trim(), strict_support))
                                     .collect();
                                 if selectors.is_empty() || selectors.iter().any(|s| !s.valid) {
                                     valid = false;
@@ -1655,6 +1696,9 @@ pub fn parse_selector(s: &str) -> CssSelector {
                         parts.push(SelectorPart::PseudoElement(full_name));
                     }
                 } else if is_elem {
+                    if simple_pseudo_element(&name).is_none() && name != "-webkit-scrollbar" {
+                        valid = false;
+                    }
                     parts.push(SelectorPart::PseudoElement(name));
                 } else {
                     if !is_known_pseudo_class(&name) {

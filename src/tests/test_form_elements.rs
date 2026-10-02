@@ -3232,6 +3232,30 @@ fn placeholder_pseudo_element_sets_placeholder_color() {
 }
 
 #[test]
+fn focused_placeholder_opacity_replaces_unfocused_opacity() {
+    let mut doc = layout_html(
+        r#"<style>
+             input::placeholder { opacity: 0; }
+             input:focus::placeholder { opacity: 1; }
+           </style>
+           <input type="email" id="email" placeholder="you@domain.com">"#,
+        400.0,
+    );
+    let opacity = |doc: &crate::types::Document| {
+        find_by_id(&doc.root, "email")
+            .unwrap()
+            .style
+            .placeholder_style
+            .as_ref()
+            .unwrap()
+            .opacity
+    };
+    assert_eq!(opacity(&doc), 0.0);
+    assert!(doc.focus_next());
+    assert_eq!(opacity(&doc), 1.0);
+}
+
+#[test]
 fn placeholder_pseudo_typography_reaches_input_and_textarea_paint() {
     let doc = layout_html(
         r#"<style>

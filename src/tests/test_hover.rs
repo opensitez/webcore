@@ -1207,6 +1207,55 @@ fn hit_testing_maps_the_point_through_the_transform() {
 }
 
 #[test]
+fn fixed_hero_form_hits_above_earlier_absolute_background() {
+    let doc = layout_html(
+        r#"<style>*{margin:0;padding:0}</style>
+        <section style="position:relative;width:800px;height:600px">
+          <div id="background" style="position:absolute;inset:0;background:blue"></div>
+          <div style="position:fixed;z-index:0;left:100px;top:100px;width:300px;height:100px">
+            <input id="email" style="width:200px;height:40px">
+          </div>
+        </section>"#,
+        800.0,
+    );
+    let input = find_by_id(&doc.root, "email").unwrap();
+    let box_ = input.layout.border_rect;
+    let pt = (box_.x + box_.w * 0.5, box_.y + box_.h * 0.5);
+    let hit = crate::layout::hit_test::point_to_hit(&doc.root, pt, 0).unwrap();
+    assert_eq!(hit.node_id, input.node_id);
+    assert_eq!(hit_test_box_at(&doc.root, pt, 0), input.node_id);
+}
+
+#[test]
+fn fixed_hero_form_remains_hit_testable_after_document_scroll() {
+    let mut doc = layout_html(
+        r#"<style>*{margin:0;padding:0}</style>
+        <div style="height:2000px">
+          <div id="background" style="position:absolute;inset:0;background:blue"></div>
+          <div style="position:fixed;z-index:0;left:100px;top:100px;width:300px;height:100px">
+            <input id="email" style="width:200px;height:40px">
+          </div>
+        </div>"#,
+        800.0,
+    );
+    doc.scroll_y = 300.0;
+    let input = find_by_id(&doc.root, "email").unwrap();
+    let rect = input.layout.border_rect;
+    let doc_pt = (rect.x + rect.w * 0.5, rect.y + rect.h * 0.5 + doc.scroll_y);
+    assert_eq!(
+        crate::layout::hit_test::point_to_hit_scrolled(
+            &doc.root,
+            doc_pt,
+            (doc.scroll_x, doc.scroll_y),
+            0,
+        )
+        .unwrap()
+        .node_id,
+        input.node_id
+    );
+}
+
+#[test]
 fn mozilla_shaped_hover_dropdown_hits_and_activates_panel_link() {
     let mut doc = layout_html(
         r##"

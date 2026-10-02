@@ -416,7 +416,7 @@ pub fn layout_flex(
     let gap_main = if is_row { column_gap } else { row_gap };
     let gap_cross = if is_row { row_gap } else { column_gap };
     let _query_container_scope = engine.enter_query_container(
-        &node.style,
+        node,
         content_w,
         rbox.content_height,
         font_px,
@@ -1845,7 +1845,7 @@ pub fn layout_flex(
     let content_h = if rbox.content_height.is_none()
         && (node.style.contain_size || node.style.container_type == ContainerType::Size)
     {
-        engine.contained_intrinsic_height(&node.style, font_px, root_font_px)
+        engine.contained_intrinsic_height_for_node(node, font_px, root_font_px)
     } else {
         content_h
     };

@@ -154,6 +154,7 @@ impl PaintSegments {
                 | PaintCmd::PushOpacity { .. }
                 | PaintCmd::PushFilter { .. }
                 | PaintCmd::PushMask { .. }
+                | PaintCmd::PushMaskGroup { .. }
                 | PaintCmd::PushBlendMode { .. }
                 | PaintCmd::PushTextGradient { .. } => effect_depth += 1,
                 PaintCmd::PopTransform
@@ -297,6 +298,7 @@ fn simple_paint_damage(old: &DisplayList, new: &DisplayList, scale: f32) -> Opti
                 PaintCmd::PushTransform { .. }
                     | PaintCmd::PushFilter { .. }
                     | PaintCmd::PushMask { .. }
+                    | PaintCmd::PushMaskGroup { .. }
                     | PaintCmd::PushBlendMode { .. }
                     | PaintCmd::PushTextGradient { .. }
                     | PaintCmd::BackdropFilter { .. }
@@ -322,6 +324,7 @@ fn inserted_or_removed_paint_damage(
             PaintCmd::PushTransform { .. }
                 | PaintCmd::PushFilter { .. }
                 | PaintCmd::PushMask { .. }
+                | PaintCmd::PushMaskGroup { .. }
                 | PaintCmd::PushBlendMode { .. }
                 | PaintCmd::PushTextGradient { .. }
                 | PaintCmd::BackdropFilter { .. }
@@ -422,6 +425,7 @@ fn paint_segment_structure(cmd: &PaintCmd) -> bool {
             | PaintCmd::PushFilter { .. }
             | PaintCmd::PopFilter
             | PaintCmd::PushMask { .. }
+            | PaintCmd::PushMaskGroup { .. }
             | PaintCmd::PopMask
             | PaintCmd::PushBlendMode { .. }
             | PaintCmd::PopBlendMode
@@ -1255,6 +1259,8 @@ mod tests {
         before.commands.clear();
         before.push(PaintCmd::BackdropFilter {
             rect: Rect::new(0.0, 0.0, 100.0, 100.0),
+            radii: [0.0; 4],
+            radii_y: [0.0; 4],
             filters: Vec::new(),
         });
         after.commands = before.commands.clone();
@@ -1401,6 +1407,8 @@ mod tests {
         let mut list = two_layer_paint_list(Color::WHITE, Color::rgb(0, 0, 255));
         list.push(PaintCmd::BackdropFilter {
             rect: Rect::new(0.0, 0.0, 100.0, 100.0),
+            radii: [0.0; 4],
+            radii_y: [0.0; 4],
             filters: vec![(0, 4.0, 0.0, 0.0, Color::WHITE)],
         });
         let mut previous = PaintSegments::from_display_list(&list, 200.0, 100.0).unwrap();

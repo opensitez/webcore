@@ -1097,6 +1097,21 @@ fn set_style_property_expands_mask_shorthand() {
 }
 
 #[test]
+fn set_style_property_keeps_all_mask_shorthand_layers() {
+    let mut doc = parse_html("<div></div>");
+    let div = doc.query_selector("div").unwrap();
+    doc.set_style_property(div, "mask", "url(first.svg) no-repeat, none, url(last.svg) center");
+    assert_eq!(
+        doc.get_style_property(div, "mask-image"),
+        Some("url(\"first.svg\"), none, url(\"last.svg\")".to_string()),
+    );
+    assert_eq!(
+        doc.get_style_property(div, "mask-repeat"),
+        Some("no-repeat, repeat, repeat".to_string()),
+    );
+}
+
+#[test]
 fn set_style_property_expands_border_image_shorthand() {
     let mut doc = parse_html(
         "<div style='border-image-source: url(old.png); border-image-repeat: repeat;'></div>",
@@ -3503,4 +3518,41 @@ fn async_image_success_clears_stale_errors_for_same_target() {
         doc.image_load_errors[0].1,
         crate::types::PendingImageTarget::Background
     );
+}
+
+#[test]
+fn stale_mask_image_set_response_does_not_replace_new_source() {
+    let mut doc = parse_html(r#"<div id="masked" style="mask-image:image-set(url(https://example.test/old.png) 1x, url(https://example.test/old2.png) 2x)"></div>"#);
+    let id = doc.get_element_by_id("masked").unwrap();
+    let node = doc.find_webcore_mut(id).unwrap();
+    crate::css::apply_property(
+        std::sync::Arc::make_mut(&mut node.style),
+        "mask-image",
+        "image-set(url(https://example.test/new.png) 1x, url(https://example.test/new2.png) 2x)",
+    );
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let decoded = crate::html::DecodedImage::Raster(std::sync::Arc::new(vec![255; 4]), 1, 1);
+    tx.send(crate::types::PendingImageResult::Loaded {
+        node_id: id,
+        path: Vec::new(),
+        target: crate::types::PendingImageTarget::Mask,
+        url: "https://example.test/old.png".to_string(),
+        decoded: decoded.clone(),
+    }).unwrap();
+    doc.pending_images = Some(rx);
+    doc.poll_pending_images();
+    assert!(doc.find_webcore(id).unwrap().mask_images.is_none());
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(crate::types::PendingImageResult::Loaded {
+        node_id: id,
+        path: Vec::new(),
+        target: crate::types::PendingImageTarget::Mask,
+        url: "https://example.test/new.png".to_string(),
+        decoded,
+    }).unwrap();
+    doc.pending_images = Some(rx);
+    doc.poll_pending_images();
+    assert!(doc.find_webcore(id).unwrap().mask_images.as_ref().unwrap().first.is_some());
 }

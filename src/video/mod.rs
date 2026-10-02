@@ -12,7 +12,7 @@ mod tracks;
 #[cfg(feature = "audio-symphonia")]
 pub use webmedia::video::symphonia_backend;
 pub use webmedia::video::{
-    av1, backend, h264, h264_cabac, h264_intra, h264_transform, mp4, mp4_avc, y4m,
+    av1, backend, h264, h264_cabac, h264_intra, h264_transform, mp4, mp4_avc, webm, y4m,
 };
 
 use crate::types::Document;

@@ -241,6 +241,50 @@ pub fn set_decoded_bg_image_layer_for_url_on_node(
     true
 }
 
+pub fn set_decoded_mask_image_for_url_on_node(
+    node: &mut WebCore,
+    decoded: DecodedImage,
+    url: &str,
+    base_url: &str,
+) -> bool {
+    set_decoded_mask_image_layer_for_url_on_node(node, 0, decoded, url, base_url)
+}
+
+pub fn set_decoded_mask_image_layer_for_url_on_node(
+    node: &mut WebCore,
+    index: usize,
+    decoded: DecodedImage,
+    url: &str,
+    base_url: &str,
+) -> bool {
+    let Some(source_key) = node.style.mask_source_key(index).map(str::to_string) else {
+        return false;
+    };
+    let Some((data, width, height)) = decoded_image_pixels_arc(decoded) else {
+        return false;
+    };
+    let source = if index == 0 {
+        node.style.rare().mask_image_set_source.as_deref()
+    } else {
+        node.style.rare().additional_mask_images.get(index - 1)
+            .and_then(|layer| layer.image_set_source.as_deref())
+    };
+    let resolution = source
+        .and_then(|source| {
+            crate::css::property_defs::image_set_resolution_for_url(source, url, base_url)
+        })
+        .unwrap_or(1.0);
+    let image = crate::types::DecodedMaskImage {
+        data,
+        width,
+        height,
+        resolution,
+    };
+    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default))
+        .set_with_source(index, image, source_key);
+    true
+}
+
 /// Try to load an image from a file path or data URL.
 /// Returns (rgba_bytes, width, height) or None on failure.
 pub(crate) fn load_image_from_src(src: &str, base_url: &str) -> Option<(Vec<u8>, u32, u32)> {
@@ -713,7 +757,7 @@ pub(crate) fn poll_animated_image_expansion(
     let mut decoding = animated.clone();
     let pending = std::sync::Arc::new(std::sync::OnceLock::new());
     animated.pending_decode = Some(pending.clone());
-    crate::spawn_image_resource_task(move || {
+    crate::spawn_animation_decode_task(move || {
         let _profile = crate::profile::span(crate::profile::Phase::ImageDecode);
         expand_animated_image_to_size(&mut decoding, target_width, target_height);
         let _ = pending.set(decoding);

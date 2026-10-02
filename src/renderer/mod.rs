@@ -125,10 +125,47 @@ fn fill_physical_rect(
     if w == 0 || h == 0 {
         return;
     }
+    if color.is_opaque() {
+        let x0 = x.min(pixmap.width()) as usize;
+        let y0 = y.min(pixmap.height()) as usize;
+        let x1 = x.saturating_add(w).min(pixmap.width()) as usize;
+        let y1 = y.saturating_add(h).min(pixmap.height()) as usize;
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let stride = pixmap.width() as usize;
+        let pixel = color.premultiply().to_color_u8();
+        let pixels = pixmap.pixels_mut();
+        for row in y0..y1 {
+            pixels[row * stride + x0..row * stride + x1].fill(pixel);
+        }
+        return;
+    }
     let mut paint = Paint::default();
     paint.set_color(color);
     if let Some(rect) = SkRect::from_xywh(x as f32, y as f32, w as f32, h as f32) {
         pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+    }
+}
+
+#[test]
+fn opaque_physical_fill_matches_tiny_skia() {
+    let color = tiny_skia::Color::from_rgba8(23, 87, 151, 255);
+    for (x, y, w, h) in [(2, 3, 7, 6), (0, 0, 16, 12), (13, 9, 9, 9)] {
+        let mut actual = Pixmap::new(16, 12).unwrap();
+        let mut expected = Pixmap::new(16, 12).unwrap();
+        actual.fill(tiny_skia::Color::from_rgba8(17, 19, 29, 255));
+        expected.fill(tiny_skia::Color::from_rgba8(17, 19, 29, 255));
+        fill_physical_rect(&mut actual, x, y, w, h, color);
+        let mut paint = Paint::default();
+        paint.set_color(color);
+        expected.fill_rect(
+            SkRect::from_xywh(x as f32, y as f32, w as f32, h as f32).unwrap(),
+            &paint,
+            Transform::identity(),
+            None,
+        );
+        assert_eq!(actual.data(), expected.data());
     }
 }
 
@@ -1121,7 +1158,12 @@ impl Renderer {
                     evt.doc_pos = doc_pt;
                     evt.delta_x = dx;
                     evt.delta_y = dy;
-                    let hit_id = crate::layout::hit_test::point_to_hit(&doc.root, doc_pt, 0)
+                    let hit_id = crate::layout::hit_test::point_to_hit_scrolled(
+                        &doc.root,
+                        doc_pt,
+                        (doc.scroll_x, doc.scroll_y),
+                        0,
+                    )
                         .map(|h| h.node_id)
                         .unwrap_or(0);
                     evt.target = hit_id;
@@ -1504,16 +1546,15 @@ impl Renderer {
         // pixmap already contains the presented frame, and `cached_content_surface`
         // below is the retained scroll/compositor surface. Keeping both doubled
         // viewport backing memory and made browser.rs look far heavier than it is.
-        let canvas_color = doc
-            .root
-            .children
-            .iter()
-            .find(|c| c.tag == "body")
-            .map(|body| body.style.background_color)
-            .filter(|c| c.a > 0)
+        let canvas_color = (doc.root.style.background_color.a > 0)
+            .then_some(doc.root.style.background_color)
             .or_else(|| {
-                let c = doc.root.style.background_color;
-                if c.a > 0 { Some(c) } else { None }
+                doc.root
+                    .children
+                    .iter()
+                    .find(|c| c.tag == "body")
+                    .map(|body| body.style.background_color)
+                    .filter(|c| c.a > 0)
             })
             .map(|c| c.to_tiny_skia())
             .unwrap_or(tiny_skia::Color::WHITE);

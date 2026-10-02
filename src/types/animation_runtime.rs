@@ -246,6 +246,7 @@ impl Document {
                     animation: anim.clone(),
                     start_time: now,
                     paused_at: anim.play_state_paused.then_some(now),
+                    start_event_fired: anim.delay_ms <= 0.0,
                     last_iteration_event: 0,
                 });
                 if anim.delay_ms <= 0.0 {
@@ -468,6 +469,7 @@ impl Document {
                         delay_ms,
                         timing_fn: tr.timing_fn.clone(),
                         allow_discrete: tr.allow_discrete,
+                        start_event_fired: delay_ms <= 0.0,
                     });
                     started_events.push((elem_id, tr.delay_ms <= 0.0));
                 }
@@ -500,6 +502,7 @@ impl Document {
         let keyframes = self.stylesheet.keyframes.clone();
         let mut still_running = false;
         let mut finished_events: Vec<(&'static str, u32)> = Vec::new();
+        let mut started_events: Vec<u32> = Vec::new();
         let mut iteration_events: Vec<u32> = Vec::new();
 
         // ── CSS Animations ───────────────────────────────────────────────────
@@ -564,6 +567,10 @@ impl Document {
                     still_running = true;
                 }
                 continue;
+            }
+            if !state.start_event_fired {
+                state.start_event_fired = true;
+                started_events.push(state.element_id);
             }
 
             let duration = state.animation.duration_ms;
@@ -731,6 +738,10 @@ impl Document {
         for idx in done.into_iter().rev() {
             self.active_animations.remove(idx);
         }
+        for target in started_events {
+            let mut event = crate::dom::events::DomEvent::new("animationstart", target);
+            self.dispatch_dom_event(&mut event);
+        }
         for target in iteration_events {
             let mut event = crate::dom::events::DomEvent::new("animationiteration", target);
             self.dispatch_dom_event(&mut event);
@@ -738,9 +749,10 @@ impl Document {
 
         // ── CSS Transitions ──────────────────────────────────────────────────
         let mut empty_elems: Vec<u32> = Vec::new();
+        let mut transition_started_events: Vec<u32> = Vec::new();
         for (elem_id, trs) in &mut self.transition_states {
             let mut done_trs: Vec<usize> = Vec::new();
-            for (i, tr) in trs.iter().enumerate() {
+            for (i, tr) in trs.iter_mut().enumerate() {
                 let elapsed_ms = now.duration_since(tr.start_time).as_secs_f32() * 1000.0;
                 let delayed_ms = elapsed_ms - tr.delay_ms;
 
@@ -750,6 +762,10 @@ impl Document {
                     entry.push((tr.property.clone(), tr.from_value.clone()));
                     still_running = true;
                     continue;
+                }
+                if !tr.start_event_fired {
+                    tr.start_event_fired = true;
+                    transition_started_events.push(*elem_id);
                 }
                 if tr.duration_ms <= 0.0 {
                     done_trs.push(i);
@@ -785,6 +801,10 @@ impl Document {
         }
         for eid in empty_elems {
             self.transition_states.remove(&eid);
+        }
+        for target in transition_started_events {
+            let mut event = crate::dom::events::DomEvent::new("transitionstart", target);
+            self.dispatch_dom_event(&mut event);
         }
 
         self.needs_animation_frame = still_running;

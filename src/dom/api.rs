@@ -2825,7 +2825,12 @@ impl Document {
         if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
             return None;
         }
-        crate::layout::hit_test::point_to_hit(&self.root, (x + self.scroll_x, y + self.scroll_y), 0)
+        crate::layout::hit_test::point_to_hit_scrolled(
+            &self.root,
+            (x + self.scroll_x, y + self.scroll_y),
+            (self.scroll_x, self.scroll_y),
+            0,
+        )
             .map(|hit| hit.node_id)
     }
 
@@ -3831,19 +3836,7 @@ fn expand_inline_mask_shorthand(value: &str, important: bool) -> Vec<InlineStyle
         important,
     };
     vec![
-        make(
-            "mask-image",
-            if rare.mask_image_url.is_empty() {
-                "none".to_string()
-            } else {
-                format!(
-                    "url(\"{}\")",
-                    rare.mask_image_url
-                        .replace('\\', "\\\\")
-                        .replace('"', "\\\"")
-                )
-            },
-        ),
+        make("mask-image", super::computed_style::serialize_mask_images(&style)),
         make("mask-mode", inline_rare_or(&rare.mask_mode, "match-source")),
         make("mask-repeat", inline_rare_or(&rare.mask_repeat, "repeat")),
         make(
@@ -4260,6 +4253,7 @@ fn serialize_inline_list_style_type(value: crate::types::ListStyleType) -> Strin
         L::Square => "square",
         L::Decimal => "decimal",
         L::DecimalLeadingZero => "decimal-leading-zero",
+        L::Numeric(name) => name,
         L::LowerAlpha => "lower-alpha",
         L::UpperAlpha => "upper-alpha",
         L::LowerLatin => "lower-latin",
@@ -4268,6 +4262,8 @@ fn serialize_inline_list_style_type(value: crate::types::ListStyleType) -> Strin
         L::UpperRoman => "upper-roman",
         L::LowerGreek => "lower-greek",
         L::Armenian => "armenian",
+        L::UpperArmenian => "upper-armenian",
+        L::LowerArmenian => "lower-armenian",
         L::Georgian => "georgian",
         L::Hebrew => "hebrew",
         L::Hiragana => "hiragana",

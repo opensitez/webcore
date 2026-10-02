@@ -161,7 +161,7 @@ pub fn layout_grid_subgrid(
     let content_w: f32 =
         col_px.iter().sum::<f32>() + col_gap * col_px.len().saturating_sub(1) as f32;
     let _query_container_scope = engine.enter_query_container(
-        &node.style,
+        node,
         content_w,
         rbox.content_height,
         font_px,
@@ -629,7 +629,7 @@ pub fn layout_grid(
     );
     let row_tracks = node.style.rare().grid_template_rows.clone();
     let _query_container_scope = engine.enter_query_container(
-        &node.style,
+        node,
         content_w,
         rbox.content_height,
         font_px,
@@ -2821,7 +2821,7 @@ fn finish_grid(
 ) -> f32 {
     let ch = rbox.content_height.unwrap_or_else(|| {
         if node.style.contain_size || node.style.container_type == ContainerType::Size {
-            engine.contained_intrinsic_height(&node.style, font_px, root_font_px)
+            engine.contained_intrinsic_height_for_node(node, font_px, root_font_px)
         } else {
             content_h
         }

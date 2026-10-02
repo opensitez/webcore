@@ -333,11 +333,10 @@ impl WebCore {
             media_ended: false,
             media_seeking: false,
             media_muted: false,
+            external_video_overlay: false,
 
             bg_image_data: None,
-            mask_image_data: None,
-            mask_image_width: 0,
-            mask_image_height: 0,
+            mask_images: None,
             bg_image_width: 0,
             bg_image_height: 0,
             bg_image_ratio_only: false,
@@ -549,18 +548,19 @@ impl WebCore {
 
     /// Resolve `<slot>` elements in the shadow tree by projecting light DOM children.
     /// Must be called before layout when a shadow root is present.
-    pub fn resolve_slots(&mut self) {
+    pub fn resolve_slots(&mut self, viewport_w: f32, viewport_h: f32) {
         if self.shadow_root.is_none() {
             return;
         }
-        let light_children = self.children.clone();
-        let host_for_selector = self.clone();
+        let host_for_selector = crate::css::cascade::projected_ancestor_info(self);
         let sr = self.shadow_root.as_mut().unwrap();
         resolve_slots_inner(
             Some(&host_for_selector),
             &mut sr.children,
-            &light_children,
+            &self.children,
             Some(&sr.stylesheet),
+            viewport_w,
+            viewport_h,
         );
     }
 

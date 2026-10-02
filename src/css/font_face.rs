@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 // ─── @font-face declaration ───────────────────────────────────────────────────
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FontFaceDecl {
     pub family: String,
     pub src: String,
@@ -27,13 +27,13 @@ pub struct FontFaceDecl {
     pub language_override: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FontFaceSourceKind {
     Url(String),
     Local(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FontFaceSource {
     pub kind: FontFaceSourceKind,
     pub formats: Vec<String>,

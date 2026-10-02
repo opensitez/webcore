@@ -219,6 +219,12 @@ fn should_emit_early_preview(html: &str, sent_preview: bool) -> bool {
         || html.len() >= 4 * 1024
 }
 
+fn contains_head_end(html: &str) -> bool {
+    html.as_bytes()
+        .windows(b"</head".len())
+        .any(|window| window.eq_ignore_ascii_case(b"</head"))
+}
+
 #[derive(Clone, Debug)]
 pub struct CookieJar {
     cookies: Vec<CookieEntry>,
@@ -577,6 +583,14 @@ where
         on_chunk(url.to_string(), html.clone());
         return Ok((html, url.to_string()));
     }
+    if options.request_body.is_none()
+        && options.request_method.eq_ignore_ascii_case("get")
+        && let Some(kind) = media_kind_from_url(url)
+    {
+        let html = media_document(url, kind);
+        on_chunk(url.to_string(), html.clone());
+        return Ok((html, url.to_string()));
+    }
     if let Some(path) = url.strip_prefix("file://") {
         let file =
             std::fs::File::open(path).map_err(|e| format!("failed to read file {path}: {e}"))?;
@@ -606,6 +620,7 @@ where
     let mut html = String::new();
     let mut pending_emit = String::new();
     let mut sent_preview = false;
+    let mut sent_head = false;
     let mut next_preview_at = options.preview_after_bytes.max(1024);
     let preview_interval = options.preview_interval_bytes.max(32 * 1024);
     let mut buf = [0u8; 16 * 1024];
@@ -619,9 +634,14 @@ where
             html.push_str(&text);
             if options.emit_preview {
                 pending_emit.push_str(&text);
-                if html.len() >= next_preview_at || should_emit_early_preview(&html, sent_preview) {
+                let head_complete = !sent_head && contains_head_end(&pending_emit);
+                if html.len() >= next_preview_at
+                    || should_emit_early_preview(&html, sent_preview)
+                    || head_complete
+                {
                     on_chunk(final_url.clone(), std::mem::take(&mut pending_emit));
                     sent_preview = true;
+                    sent_head |= head_complete;
                     while next_preview_at <= html.len() {
                         next_preview_at = next_preview_at.saturating_add(preview_interval);
                     }
@@ -760,6 +780,17 @@ where
         if !status.is_success() {
             return Err((format!("HTTP {status} loading {final_url}"), false));
         }
+        if options.request_body.is_none()
+            && options.request_method.eq_ignore_ascii_case("get")
+            && let Some(kind) = headers
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(media_kind_from_content_type)
+        {
+            let html = media_document(&final_url, kind);
+            on_chunk(final_url.clone(), html.clone());
+            return Ok((html, final_url, true));
+        }
         let saw_streamed_bytes = true;
         stream_document_reader(resp, final_url, options, on_chunk)
             .map(|(html, final_url)| (html, final_url, saw_streamed_bytes))
@@ -781,6 +812,55 @@ where
             Err((err, _)) => Err(err),
         },
     }
+}
+
+#[derive(Clone, Copy)]
+enum MediaKind {
+    Video,
+    Audio,
+}
+
+fn media_kind_from_url(url: &str) -> Option<MediaKind> {
+    let path = reqwest::Url::parse(url).ok()?.path().to_ascii_lowercase();
+    let extension = path.rsplit('.').next()?;
+    match extension {
+        "mp4" | "m4v" | "mov" | "webm" | "ogv" => Some(MediaKind::Video),
+        "mp3" | "m4a" | "aac" | "ogg" | "oga" | "opus" | "flac" | "wav" | "weba" => {
+            Some(MediaKind::Audio)
+        }
+        _ => None,
+    }
+}
+
+fn media_kind_from_content_type(content_type: &str) -> Option<MediaKind> {
+    let mime: mime::Mime = content_type.parse().ok()?;
+    match mime.type_() {
+        mime::VIDEO => Some(MediaKind::Video),
+        mime::AUDIO => Some(MediaKind::Audio),
+        _ => None,
+    }
+}
+
+fn media_document(url: &str, kind: MediaKind) -> String {
+    let tag = match kind {
+        MediaKind::Video => "video",
+        MediaKind::Audio => "audio",
+    };
+    let name = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .path_segments()?
+                .next_back()
+                .map(str::to_string)
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Media".to_string());
+    let src = escape_html(url).replace('"', "&quot;");
+    format!(
+        "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{}</title><style>html,body{{margin:0;width:100%;height:100%;background:#111}}body{{display:flex;align-items:center;justify-content:center}}video{{width:100%;height:100%;object-fit:contain}}audio{{width:min(600px,calc(100% - 32px))}}</style></head><body><{tag} controls preload=\"metadata\" src=\"{src}\"></{tag}></body></html>",
+        escape_html(&name)
+    )
 }
 
 fn build_page_document(
@@ -940,6 +1020,7 @@ where
     let mut html = String::new();
     let mut bytes_read = 0usize;
     let mut sent_preview = false;
+    let mut sent_head_preview = false;
     let mut next_preview_at = options.preview_after_bytes.max(1024);
     let preview_interval = options.preview_interval_bytes.max(32 * 1024);
 
@@ -947,11 +1028,15 @@ where
         scan_html_chunk_for_resources(&mut parser, chunk.as_bytes(), options, &state);
         bytes_read = bytes_read.saturating_add(chunk.len());
         html.push_str(&chunk);
+        let head_complete = !sent_head_preview && contains_head_end(&html);
         if options.emit_preview
-            && (bytes_read >= next_preview_at || should_emit_early_preview(&html, sent_preview))
+            && (bytes_read >= next_preview_at
+                || should_emit_early_preview(&html, sent_preview)
+                || head_complete)
         {
             preview(chunk_url, html.clone());
             sent_preview = true;
+            sent_head_preview |= head_complete;
             while next_preview_at <= bytes_read {
                 next_preview_at = next_preview_at.saturating_add(preview_interval);
             }
@@ -1515,6 +1600,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn direct_media_url_opens_paused_player_without_reading_binary() {
+        let url = "file:///nonexistent/clip.mp4?name=%22sample%22";
+        let mut chunks = Vec::new();
+        let (html, final_url) = load_document_streaming_chunks(
+            url,
+            &PageLoadOptions::default(),
+            |chunk_url, chunk| chunks.push((chunk_url, chunk)),
+        )
+        .unwrap();
+        assert_eq!(final_url, url);
+        assert_eq!(chunks, [(url.to_string(), html.clone())]);
+        assert!(html.contains("<video controls preload=\"metadata\""));
+        assert!(!html.contains("autoplay"));
+        assert!(html.contains("name=%22sample%22"));
+    }
+
+    #[test]
+    fn media_document_recognizes_audio_and_escapes_source_attributes() {
+        assert!(matches!(
+            media_kind_from_url("https://example.com/tone.mp3?download=1"),
+            Some(MediaKind::Audio)
+        ));
+        assert!(matches!(
+            media_kind_from_content_type("video/mp4; codecs=avc1"),
+            Some(MediaKind::Video)
+        ));
+        let html = media_document("https://example.com/tone.mp3?a=1&b=\"2\"", MediaKind::Audio);
+        assert!(html.contains("<audio controls preload=\"metadata\""));
+        assert!(html.contains("a=1&amp;b=&quot;2&quot;"));
+    }
+
+    #[test]
     fn css_decoder_recognizes_split_charset_without_delaying_plain_css() {
         let mut plain = CssByteDecoder::default();
         assert_eq!(plain.push(b"b", false), "b");
@@ -1900,6 +2017,39 @@ mod tests {
             "closing an inline <style> should produce an early styled preview"
         );
         assert!(previews[0].contains("font-size:32px"));
+    }
+
+    #[test]
+    fn head_stylesheet_links_are_emitted_before_body_batch_threshold() {
+        let head_prefix = format!(
+            "<html><head>{}",
+            "<meta name='filler' content='a'>".repeat(700)
+        );
+        assert!(head_prefix.len() > 16 * 1024);
+        assert!(head_prefix.len() < 32 * 1024);
+        let html = format!(
+            "{head_prefix}<link rel='stylesheet' href='critical.css'></head><body>{}</body></html>",
+            "content".repeat(20_000)
+        );
+        let mut chunks = Vec::new();
+        stream_document_reader(
+            std::io::Cursor::new(html.as_bytes()),
+            "https://example.test/".to_string(),
+            &PageLoadOptions {
+                emit_preview: true,
+                preview_after_bytes: 16 * 1024,
+                preview_interval_bytes: 128 * 1024,
+                ..Default::default()
+            },
+            |_, chunk| chunks.push(chunk),
+        )
+        .unwrap();
+        assert!(chunks.len() >= 3);
+        assert!(!chunks[0].contains("critical.css"));
+        assert!(chunks[1].contains("critical.css"));
+        assert!(chunks[1].contains("</head>"));
+        assert!(chunks[0].len() + chunks[1].len() < 128 * 1024);
+        assert_eq!(chunks.concat(), html);
     }
 
     #[test]

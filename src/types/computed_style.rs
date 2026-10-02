@@ -91,10 +91,13 @@ pub struct RareStyle {
     pub content_template: Vec<GeneratedContentPart>,
     /// Canonical authored containment keywords; empty is the initial `none`.
     pub contain: String,
+    pub contain_intrinsic_width_auto: bool,
+    pub contain_intrinsic_height_auto: bool,
     pub filter: String,
     pub backdrop_filter: String,
     pub mask_image_url: String,
     pub mask_image_set_source: Option<String>,
+    pub additional_mask_images: Vec<MaskImageSource>,
     pub mask_mode: String,
     pub mask_repeat: String,
     pub mask_position: String,
@@ -131,6 +134,23 @@ pub struct RareStyle {
     /// Authored list lengths for size, position-x/y, repeat, clip, origin,
     /// attachment, and blend mode. Needed when an image list grows later.
     pub background_list_lengths: [u16; 8],
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MaskImageSource {
+    pub url: String,
+    pub image_set_source: Option<String>,
+}
+
+impl MaskImageSource {
+    pub(crate) fn url_for_dpr(&self, dpr: f32) -> String {
+        self.image_set_source
+            .as_deref()
+            .and_then(|source| {
+                crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio(source, dpr)
+            })
+            .unwrap_or_else(|| self.url.clone())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -197,10 +217,13 @@ impl RareStyle {
         content: String::new(),
         content_template: Vec::new(),
         contain: String::new(),
+        contain_intrinsic_width_auto: false,
+        contain_intrinsic_height_auto: false,
         filter: String::new(),
         backdrop_filter: String::new(),
         mask_image_url: String::new(),
         mask_image_set_source: None,
+        additional_mask_images: Vec::new(),
         mask_mode: String::new(),
         mask_repeat: String::new(),
         mask_position: String::new(),
@@ -213,6 +236,16 @@ impl RareStyle {
 }
 
 impl ComputedStyle {
+    pub(crate) fn mask_source_key(&self, index: usize) -> Option<&str> {
+        let rare = self.rare();
+        if index == 0 {
+            Some(rare.mask_image_set_source.as_deref().unwrap_or(&rare.mask_image_url))
+        } else {
+            let layer = rare.additional_mask_images.get(index - 1)?;
+            Some(layer.image_set_source.as_deref().unwrap_or(&layer.url))
+        }
+    }
+
     pub(crate) fn mask_image_url_for_dpr(&self, dpr: f32) -> String {
         self.rare()
             .mask_image_set_source

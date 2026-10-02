@@ -9,10 +9,12 @@ use std::collections::{HashMap, HashSet};
 
 /// Resolve `<slot>` elements in a shadow tree by projecting light DOM children into them.
 pub(crate) fn resolve_slots_inner(
-    host_node: Option<&WebCore>,
+    host_node: Option<&AncestorInfo>,
     shadow_children: &mut Vec<WebCore>,
     light_children: &[WebCore],
     shadow_stylesheet: Option<&Stylesheet>,
+    viewport_w: f32,
+    viewport_h: f32,
 ) {
     let mut candidates = Vec::new();
     for child in shadow_children.iter_mut() {
@@ -46,7 +48,6 @@ pub(crate) fn resolve_slots_inner(
                     .collect()
             };
             if !projected.is_empty() {
-                let slot_for_selector = child.clone();
                 for node in &mut projected {
                     mark_projected_slot_subtree(node);
                     if let Some(sheet) = shadow_stylesheet {
@@ -55,17 +56,17 @@ pub(crate) fn resolve_slots_inner(
                             host_node,
                             sheet,
                             Some(&child.style),
-                            0.0,
-                            0.0,
+                            viewport_w,
+                            viewport_h,
                             &mut candidates,
                         );
                         crate::css::cascade::apply_slotted_rules_to_projected(
                             node,
-                            Some(&slot_for_selector),
+                            Some(child),
                             sheet,
                             Some(&child.style),
-                            0.0,
-                            0.0,
+                            viewport_w,
+                            viewport_h,
                             &mut candidates,
                         );
                     }
@@ -80,15 +81,19 @@ pub(crate) fn resolve_slots_inner(
                 &mut child.children,
                 light_children,
                 shadow_stylesheet,
+                viewport_w,
+                viewport_h,
             );
             // Also recurse into shadow roots of nested shadow hosts
-            let nested_host = child.clone();
+            let nested_host = crate::css::cascade::projected_ancestor_info(child);
             if let Some(ref mut sr) = child.shadow_root {
                 resolve_slots_inner(
                     Some(&nested_host),
                     &mut sr.children,
-                    &nested_host.children,
+                    &child.children,
                     Some(&sr.stylesheet),
+                    viewport_w,
+                    viewport_h,
                 );
             }
         }

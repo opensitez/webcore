@@ -278,11 +278,14 @@ impl CssRule {
             }
             self.compiled_important.push((id, pre_parse_value(id, val)));
         }
-        self.has_var_refs = self.declarations.values().any(|v| v.contains("var("))
+        self.has_var_refs = self
+            .declarations
+            .values()
+            .any(|v| super::apply::contains_var_function(v))
             || self
                 .important_declarations
                 .values()
-                .any(|v| v.contains("var("));
+                .any(|v| super::apply::contains_var_function(v));
         self.has_custom_properties = self.declarations.keys().any(|p| p.starts_with("--"))
             || self
                 .important_declarations
@@ -305,7 +308,7 @@ pub(crate) fn pre_parse_value(id: properties::PropertyId, val: &str) -> crate::t
 
     // These functions depend on custom properties or the element's used color
     // scheme, neither of which is known while compiling the stylesheet.
-    if v.contains("var(") || v.to_ascii_lowercase().contains("light-dark(") {
+    if super::apply::value_needs_substitution(v) {
         return CssValue::Raw(val.to_string());
     }
 
@@ -315,19 +318,21 @@ pub(crate) fn pre_parse_value(id: properties::PropertyId, val: &str) -> crate::t
     }
 
     // Global keywords
-    match v {
-        "inherit" => return CssValue::Inherit,
-        // ⛔ `unset` is NOT `initial`. CSS Cascade 5 §7.3: it "acts as either
-        // `inherit` or `initial`, depending on whether the property is
-        // inherited or not". Collapsing it here destroyed that distinction
-        // before the cascade could act on it — `CssValue::Unset` existed and
-        // was never produced — so `color: unset` on a child reset to black
-        // instead of inheriting its parent's colour.
-        "unset" => return CssValue::Unset,
-        "initial" => return CssValue::Initial,
-        "revert" => return CssValue::Revert,
-        "revert-layer" => return CssValue::RevertLayer,
-        _ => {}
+    if v.eq_ignore_ascii_case("inherit") {
+        return CssValue::Inherit;
+    }
+    // `unset` inherits inherited properties and initializes the others.
+    if v.eq_ignore_ascii_case("unset") {
+        return CssValue::Unset;
+    }
+    if v.eq_ignore_ascii_case("initial") {
+        return CssValue::Initial;
+    }
+    if v.eq_ignore_ascii_case("revert") {
+        return CssValue::Revert;
+    }
+    if v.eq_ignore_ascii_case("revert-layer") {
+        return CssValue::RevertLayer;
     }
 
     // Try to parse based on property type

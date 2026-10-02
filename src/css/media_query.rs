@@ -172,16 +172,35 @@ fn evaluate_media_value(condition: &str, vw: f32, vh: f32) -> Option<bool> {
         }
     }
 
-    // Handle `not` prefix (before `and`/`or` splitting)
-    // `not` folds case like every other CSS keyword.
+    // A media-type modifier negates the whole query. A media-condition `not`
+    // takes exactly one parenthesized term; combining it requires grouping.
     if cond.len() >= 4 && cond.as_bytes()[..4].eq_ignore_ascii_case(b"not ") {
-        return evaluate_media_value(cond[4..].trim(), vw, vh).map(|value| !value);
+        let rest = cond[4..].trim();
+        if rest.starts_with('(') {
+            if find_keyword_outside_parens(rest, "and").is_some()
+                || find_keyword_outside_parens(rest, "or").is_some()
+            {
+                return None;
+            }
+        } else if find_keyword_outside_parens(rest, "or").is_some() {
+            return None;
+        }
+        return evaluate_media_value(rest, vw, vh).map(|value| !value);
     }
 
-    // Handle `and` combinator outside parens
-    if let Some((start, end)) = find_keyword_outside_parens(cond, "and") {
+    let and = find_keyword_outside_parens(cond, "and");
+    let or = find_keyword_outside_parens(cond, "or");
+    if and.is_some() && or.is_some() {
+        return None;
+    }
+
+    // A media type may lead an `and` chain; later terms must be parenthesized.
+    if let Some((start, end)) = and {
         let left = &cond[..start];
         let right = &cond[end..];
+        if left.trim().is_empty() || !right.trim().starts_with('(') {
+            return None;
+        }
         let left = evaluate_media_value(left.trim(), vw, vh);
         if left == Some(false) {
             return Some(false);
@@ -193,10 +212,13 @@ fn evaluate_media_value(condition: &str, vw: f32, vh: f32) -> Option<bool> {
         };
     }
 
-    // Handle `or` combinator outside parens
-    if let Some((start, end)) = find_keyword_outside_parens(cond, "or") {
+    // `or` joins media conditions, never bare media types.
+    if let Some((start, end)) = or {
         let left = &cond[..start];
         let right = &cond[end..];
+        if !left.trim().starts_with('(') || !right.trim().starts_with('(') {
+            return None;
+        }
         let left = evaluate_media_value(left.trim(), vw, vh);
         if left == Some(true) {
             return Some(true);

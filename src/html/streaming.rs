@@ -462,6 +462,15 @@ impl StreamingParser {
                         self.ensure_body_open(&mut mutations);
                     }
 
+                    while self.stack.len() > 1
+                        && self.stack.last().is_some_and(|open| {
+                            crate::html::tokenizer::should_auto_close(&open.tag, &tag)
+                        })
+                    {
+                        self.stack.pop();
+                        mutations.push(DomMutation::CloseElement);
+                    }
+
                     let parent_path = self.current_parent_path();
                     let child_index = self.next_child_index();
                     let mut element_path = parent_path.clone();
@@ -774,6 +783,31 @@ fn ascii_prefix_eq_ignore_case(whole: &str, prefix: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn streaming_implicitly_closes_list_items_across_chunks() {
+        let mut parser = StreamingParser::new("");
+        let first = parser.feed_str("<ul><li>Facebook");
+        let second = parser.feed_str("<li>X<li>YouTube</ul>");
+        let items: Vec<_> = first
+            .iter()
+            .chain(second.iter())
+            .filter_map(|mutation| match mutation {
+                DomMutation::InsertElement {
+                    tag,
+                    parent_path,
+                    path,
+                    ..
+                } if tag == "li" => Some((parent_path.clone(), path.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items.len(), 3);
+        assert!(items.iter().all(|item| item.0 == items[0].0));
+        assert_eq!(items[0].1.last(), Some(&0));
+        assert_eq!(items[1].1.last(), Some(&1));
+        assert_eq!(items[2].1.last(), Some(&2));
+    }
 
     #[test]
     fn streaming_svg_shapes_keep_animation_children() {

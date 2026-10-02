@@ -3,6 +3,7 @@
 use crate::svg::{SvgDocument, SvgNode};
 use crate::types::{Color, WebCore};
 use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
+use std::fmt::{self, Write};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -108,13 +109,61 @@ fn hash_svg_node(node: &SvgNode, hash: &mut impl Hasher) -> bool {
 }
 
 fn dom_fingerprint(root: Option<&WebCore>) -> u64 {
+    struct HashWriter<'a, H>(&'a mut H);
+
+    impl<H: Hasher> Write for HashWriter<'_, H> {
+        fn write_str(&mut self, value: &str) -> fmt::Result {
+            self.0.write(value.as_bytes());
+            Ok(())
+        }
+    }
+
     let mut hash = DefaultHasher::new();
     if let Some(root) = root {
         let mut stack = vec![root];
+        let mut custom_props_hashes = HashMap::new();
         while let Some(node) = stack.pop() {
             node.tag.hash(&mut hash);
             node.text.hash(&mut hash);
-            format!("{:?}", node.style).hash(&mut hash);
+            let style = node.style.as_ref();
+            let rare = style.rare();
+            write!(
+                &mut HashWriter(&mut hash),
+                "{:?}",
+                (
+                    style.visibility,
+                    style.color,
+                    style.svg_fill,
+                    style.svg_stroke,
+                    rare.specified_svg_paint_props,
+                    &rare.svg_stroke_width,
+                    &style.font_family,
+                    &style.font_size,
+                )
+            )
+            .expect("hashing SVG paint style cannot fail");
+            write!(
+                &mut HashWriter(&mut hash),
+                "{:?}",
+                (
+                    &style.font_weight,
+                    &style.font_style,
+                    &style.letter_spacing,
+                    &style.word_spacing,
+                    &style.text_align,
+                    &style.direction,
+                    style.opacity,
+                    &style.overflow_x,
+                    &style.overflow_y,
+                )
+            )
+            .expect("hashing SVG paint style cannot fail");
+            let props_ptr = Arc::as_ptr(&style.custom_props) as usize;
+            let props_hash = *custom_props_hashes
+                .entry(props_ptr)
+                .or_insert_with(|| props_fingerprint(&style.custom_props));
+            props_hash.hash(&mut hash);
+            hash.write_u8(0xff);
             stack.extend(node.children.iter());
         }
     }
@@ -162,7 +211,10 @@ pub(super) fn rasterize(
 ) -> Option<Arc<Vec<u8>>> {
     let _profile_key = crate::profile::span(crate::profile::Phase::SvgRasterKey);
     let mut hash = DefaultHasher::new();
-    let static_content = hash_svg_node(&doc.root, &mut hash) && !animated;
+    let static_content = {
+        let _profile_tree = crate::profile::span(crate::profile::Phase::SvgRasterTreeKey);
+        hash_svg_node(&doc.root, &mut hash) && !animated
+    };
     if !static_content {
         crate::profile::record(
             crate::profile::Phase::SvgRasterBypass,
@@ -171,7 +223,10 @@ pub(super) fn rasterize(
     }
     let key = static_content.then(|| RasterKey {
         svg: hash.finish(),
-        dom: dom_fingerprint(dom_root),
+        dom: {
+            let _profile_dom = crate::profile::span(crate::profile::Phase::SvgRasterDomKey);
+            dom_fingerprint(dom_root)
+        },
         ids: if document_ids.is_some() {
             ids_fingerprint
         } else {
@@ -243,6 +298,25 @@ pub(super) fn rasterize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn svg_dom_hash_tracks_paint_properties() {
+        let mut root = WebCore::new("svg");
+        Arc::make_mut(&mut root.style).color = Color::rgb(12, 34, 56);
+        let mut child = WebCore::new("path");
+        Arc::make_mut(&mut child.style).color = Color::rgb(78, 90, 123);
+        root.children.push(child);
+        let original = dom_fingerprint(Some(&root));
+        Arc::make_mut(&mut root.children[0].style).color = Color::rgb(1, 2, 3);
+        assert_ne!(dom_fingerprint(Some(&root)), original);
+        let recolored = dom_fingerprint(Some(&root));
+        Arc::make_mut(&mut root.children[0].style).opacity = 0.5;
+        assert_ne!(dom_fingerprint(Some(&root)), recolored);
+        let faded = dom_fingerprint(Some(&root));
+        Arc::make_mut(&mut root.children[0].style)
+            .custom_props = Arc::new(HashMap::from([("--accent".into(), "red".into())]));
+        assert_ne!(dom_fingerprint(Some(&root)), faded);
+    }
 
     #[test]
     fn static_svg_raster_reuses_pixels_but_color_changes_key() {

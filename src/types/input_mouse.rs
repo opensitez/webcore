@@ -55,7 +55,12 @@ impl Document {
         evt.doc_pos = doc_pt;
         evt.client_pos = client_pos;
         evt.button = button;
-        let hit_result = crate::layout::hit_test::point_to_hit(&self.root, doc_pt, button);
+        let hit_result = crate::layout::hit_test::point_to_hit_scrolled(
+            &self.root,
+            doc_pt,
+            (self.scroll_x, self.scroll_y),
+            button,
+        );
         let mut hit_node_id: u32 = hit_result.as_ref().map(|h| h.node_id).unwrap_or(0);
         hit_node_id = normalize_pointer_target(&self.root, hit_node_id);
         // For inline links: check if the hit point is inside an inline run
@@ -684,7 +689,12 @@ impl Document {
                     // Track visited links + fire on_navigate callback.
                     if button == 0 {
                         if let Some(href) =
-                            crate::layout::hit_test::hit_test_link(&self.root, doc_pt, button)
+                            crate::layout::hit_test::hit_test_link_scrolled(
+                                &self.root,
+                                doc_pt,
+                                (self.scroll_x, self.scroll_y),
+                                button,
+                            )
                         {
                             self.visited_urls.insert(href.clone());
                             if let Some(ref mut cb) = self.on_navigate {
@@ -706,7 +716,13 @@ impl Document {
         if !evt.default_prevented {
             if self
                 .editor
-                .handle_mouse_event(&self.root, etype, doc_pt, button)
+                .handle_mouse_event_scrolled(
+                    &self.root,
+                    etype,
+                    doc_pt,
+                    (self.scroll_x, self.scroll_y),
+                    button,
+                )
             {
                 redraw = true;
             }
@@ -729,7 +745,12 @@ impl Document {
     pub fn dispatch_over_out(&mut self, doc_pt: (f32, f32)) -> bool {
         use crate::dom::{HtmlEvent, HtmlEventType};
         let client_pos = (doc_pt.0, doc_pt.1 - self.scroll_y);
-        let raw_new_id: u32 = crate::layout::hit_test::point_to_hit(&self.root, doc_pt, 0)
+        let raw_new_id: u32 = crate::layout::hit_test::point_to_hit_scrolled(
+            &self.root,
+            doc_pt,
+            (self.scroll_x, self.scroll_y),
+            0,
+        )
             .map(|h| h.node_id)
             .unwrap_or(0);
         let new_id = normalize_pointer_target(&self.root, raw_new_id);

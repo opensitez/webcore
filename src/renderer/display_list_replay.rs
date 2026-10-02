@@ -12,6 +12,7 @@ use cosmic_text::{
     Attrs, Buffer, Color as CTextColor, FontSystem, Metrics, Shaping, Style as CTextStyle,
     SwashCache, Weight as CTextWeight,
 };
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tiny_skia::{
@@ -71,6 +72,78 @@ fn rgba_opacity_check_covers_vector_and_tail_pixels() {
     }
 }
 
+#[test]
+fn opaque_aligned_fill_matches_tiny_skia_with_binary_clip() {
+    let rect = Rect::new(2.0, 3.0, 20.0, 13.0);
+    let color = Color::rgba(17, 87, 153, 255);
+    let transform = Transform::from_scale(2.0, 2.0);
+    let mut mask = tiny_skia::Mask::new(48, 40).unwrap();
+    mask.fill_path(
+        &PathBuilder::from_rect(SkRect::from_xywh(8.0, 8.0, 29.0, 24.0).unwrap()),
+        FillRule::Winding,
+        false,
+        Transform::identity(),
+    );
+    for clip in [None, Some(&mask)] {
+        let mut expected = Pixmap::new(48, 40).unwrap();
+        let mut actual = Pixmap::new(48, 40).unwrap();
+        expected.fill(tiny_skia::Color::from_rgba8(40, 30, 20, 255));
+        actual.fill(tiny_skia::Color::from_rgba8(40, 30, 20, 255));
+        let mut paint = Paint::default();
+        paint.set_color(to_sk_color(&color));
+        expected.fill_rect(
+            SkRect::from_xywh(rect.x, rect.y, rect.w, rect.h).unwrap(),
+            &paint,
+            transform,
+            clip,
+        );
+        assert!(fill_opaque_aligned_rect(
+            &mut actual,
+            rect,
+            color,
+            transform,
+            clip,
+        ));
+        assert_eq!(actual.data(), expected.data());
+    }
+    assert!(!fill_opaque_aligned_rect(
+        &mut Pixmap::new(48, 40).unwrap(),
+        rect,
+        color,
+        Transform::from_translate(0.5, 0.0),
+        None,
+    ));
+}
+
+#[test]
+fn opaque_rounded_band_fill_matches_tiny_skia() {
+    let rect = Rect::new(2.0, 3.0, 20.0, 13.0);
+    let color = Color::rgba(17, 87, 153, 255);
+    let radius = [4.0; 4];
+    let transform = Transform::from_scale(2.0, 2.0);
+    let mut mask = tiny_skia::Mask::new(48, 40).unwrap();
+    mask.fill_path(
+        &PathBuilder::from_rect(SkRect::from_xywh(8.0, 8.0, 29.0, 24.0).unwrap()),
+        FillRule::Winding,
+        false,
+        Transform::identity(),
+    );
+    let path = rounded_rect_path_corners_xy(rect.x, rect.y, rect.w, rect.h, radius, radius).unwrap();
+    for clip in [None, Some(&mask)] {
+        let mut expected = Pixmap::new(48, 40).unwrap();
+        let mut actual = Pixmap::new(48, 40).unwrap();
+        expected.fill(tiny_skia::Color::from_rgba8(40, 30, 20, 255));
+        actual.fill(tiny_skia::Color::from_rgba8(40, 30, 20, 255));
+        let mut paint = Paint::default();
+        paint.set_color(to_sk_color(&color));
+        expected.fill_path(&path, &paint, FillRule::Winding, transform, clip);
+        assert!(fill_opaque_rounded_rect_bands(
+            &mut actual, rect, color, radius, radius, transform, clip,
+        ));
+        assert_eq!(actual.data(), expected.data());
+    }
+}
+
 fn blit_opaque_unscaled_image(
     target: &mut Pixmap,
     rgba: &[u8],
@@ -118,24 +191,237 @@ fn blit_opaque_unscaled_image(
     true
 }
 
+fn fill_opaque_aligned_rect(
+    target: &mut Pixmap,
+    rect: Rect,
+    color: Color,
+    transform: Transform,
+    mask: Option<&tiny_skia::Mask>,
+) -> bool {
+    if color.a != 255
+        || transform.kx != 0.0
+        || transform.ky != 0.0
+        || transform.sx <= 0.0
+        || transform.sy <= 0.0
+    {
+        return false;
+    }
+    let aligned = |value: f32| {
+        let rounded = value.round();
+        (value.is_finite() && (value - rounded).abs() < 0.0001).then_some(rounded as i64)
+    };
+    let Some(left) = aligned(rect.x * transform.sx + transform.tx) else {
+        return false;
+    };
+    let Some(top) = aligned(rect.y * transform.sy + transform.ty) else {
+        return false;
+    };
+    let Some(right) = aligned(rect.right() * transform.sx + transform.tx) else {
+        return false;
+    };
+    let Some(bottom) = aligned(rect.bottom() * transform.sy + transform.ty) else {
+        return false;
+    };
+    let tw = target.width() as usize;
+    let th = target.height() as usize;
+    let x0 = left.clamp(0, tw as i64) as usize;
+    let y0 = top.clamp(0, th as i64) as usize;
+    let x1 = right.clamp(0, tw as i64) as usize;
+    let y1 = bottom.clamp(0, th as i64) as usize;
+    if x0 >= x1 || y0 >= y1 {
+        return true;
+    }
+    let coverage = mask.map(tiny_skia::Mask::data);
+    if coverage.is_some_and(|data| data.len() != tw * th) {
+        return false;
+    }
+    let mut full_rows = Vec::new();
+    if let Some(coverage) = coverage {
+        full_rows.reserve(y1 - y0);
+        for y in y0..y1 {
+            let row = &coverage[y * tw + x0..y * tw + x1];
+            let full = row.iter().all(|&value| value == 255);
+            if !full && row.iter().any(|&value| value != 0 && value != 255) {
+                return false;
+            }
+            full_rows.push(full);
+        }
+    }
+    let pixel = tiny_skia::PremultipliedColorU8::from_rgba(color.r, color.g, color.b, 255)
+        .expect("opaque color");
+    let pixels = target.pixels_mut();
+    for y in y0..y1 {
+        let row_start = y * tw;
+        if coverage.is_none() || full_rows[y - y0] {
+            pixels[row_start + x0..row_start + x1].fill(pixel);
+        } else if let Some(coverage) = coverage {
+            let mut x = x0;
+            while x < x1 {
+                while x < x1 && coverage[row_start + x] == 0 {
+                    x += 1;
+                }
+                let start = x;
+                while x < x1 && coverage[row_start + x] == 255 {
+                    x += 1;
+                }
+                pixels[row_start + start..row_start + x].fill(pixel);
+            }
+        }
+    }
+    true
+}
+
+fn fill_opaque_rounded_rect_bands(
+    target: &mut Pixmap,
+    rect: Rect,
+    color: Color,
+    radius: [f32; 4],
+    radius_y: [f32; 4],
+    transform: Transform,
+    mask: Option<&tiny_skia::Mask>,
+) -> bool {
+    if color.a != 255
+        || transform.kx != 0.0
+        || transform.ky != 0.0
+        || transform.sx <= 0.0
+        || transform.sy <= 0.0
+    {
+        return false;
+    }
+    let top = rect.y * transform.sy + transform.ty;
+    let bottom = rect.bottom() * transform.sy + transform.ty;
+    let left = rect.x * transform.sx + transform.tx;
+    let right = rect.right() * transform.sx + transform.tx;
+    if [top, bottom, left, right]
+        .iter()
+        .any(|v| !v.is_finite() || (v.round() - v).abs() > 0.0001)
+    {
+        return false;
+    }
+    let band = (radius_y.iter().copied().fold(0.0_f32, f32::max) * transform.sy).ceil() as i64;
+    let top = top.round() as i64;
+    let bottom = bottom.round() as i64;
+    if band <= 0 || top + band >= bottom - band {
+        return false;
+    }
+    let center_top = top + band;
+    let center_bottom = bottom - band;
+    let center = Rect::new(
+        rect.x,
+        (center_top as f32 - transform.ty) / transform.sy,
+        rect.w,
+        (center_bottom - center_top) as f32 / transform.sy,
+    );
+    // The fast interior path requires a binary clip; keep antialiased clips on tiny-skia.
+    let Some(path) = rounded_rect_path_corners_xy(
+        rect.x, rect.y, rect.w, rect.h, radius, radius_y,
+    ) else {
+        return false;
+    };
+    let tw = target.width() as usize;
+    let th = target.height() as usize;
+    if let Some(clip) = mask {
+        if clip.data().len() != tw * th {
+            return false;
+        }
+    }
+    if !fill_opaque_aligned_rect(target, center, color, transform, mask) {
+        return false;
+    }
+    let mut paint = Paint::default();
+    paint.set_color(to_sk_color(&color));
+    for (start, end) in [(top, center_top), (center_bottom, bottom)] {
+        let start = start.clamp(0, th as i64) as usize;
+        let end = end.clamp(0, th as i64) as usize;
+        if start >= end {
+            continue;
+        }
+        let byte_start = start * tw * 4;
+        let byte_end = end * tw * 4;
+        let Some(mut band_target) = tiny_skia::PixmapMut::from_bytes(
+            &mut target.data_mut()[byte_start..byte_end],
+            tw as u32,
+            (end - start) as u32,
+        ) else {
+            continue;
+        };
+        let band_mask = mask.and_then(|clip| {
+            let mut cropped = tiny_skia::Mask::new(tw as u32, (end - start) as u32)?;
+            cropped.data_mut().copy_from_slice(&clip.data()[start * tw..end * tw]);
+            Some(cropped)
+        });
+        let mut local = transform;
+        local.ty -= start as f32;
+        band_target.fill_path(&path, &paint, FillRule::Winding, local, band_mask.as_ref());
+    }
+    true
+}
+
 fn blit_opaque_scaled_image(
     target: &mut Pixmap,
     rgba: &[u8],
     width: u32,
     height: u32,
     transform: Transform,
-    mask: Option<&tiny_skia::Mask>,
+    mask: &tiny_skia::Mask,
 ) -> bool {
-    blit_opaque_scaled_image_impl::<true>(target, rgba, width, height, transform, mask)
+    blit_opaque_scaled_image_impl::<true, true, true>(target, rgba, width, height, transform, mask)
 }
 
-fn blit_opaque_scaled_image_impl<const CACHE_ROWS: bool>(
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn bilinear_opaque_eight_neon(
+    upper: &[[u16; 3]],
+    lower: &[[u16; 3]],
+    weight: u16,
+    destination: &mut [u8],
+) {
+    use std::arch::aarch64::*;
+
+    #[inline]
+    unsafe fn blend(upper: uint16x8_t, lower: uint16x8_t, weight: u16) -> uint8x8_t {
+        unsafe {
+            let inverse = 256 - weight;
+            let low = vshrq_n_u32::<16>(vaddq_u32(
+                vmlal_n_u16(
+                    vmull_n_u16(vget_low_u16(upper), inverse),
+                    vget_low_u16(lower),
+                    weight,
+                ),
+                vdupq_n_u32(32768),
+            ));
+            let high = vshrq_n_u32::<16>(vaddq_u32(
+                vmlal_n_u16(
+                    vmull_n_u16(vget_high_u16(upper), inverse),
+                    vget_high_u16(lower),
+                    weight,
+                ),
+                vdupq_n_u32(32768),
+            ));
+            vqmovn_u16(vcombine_u16(vmovn_u32(low), vmovn_u32(high)))
+        }
+    }
+
+    let upper = unsafe { vld3q_u16(upper.as_ptr().cast::<u16>()) };
+    let lower = unsafe { vld3q_u16(lower.as_ptr().cast::<u16>()) };
+    let red = unsafe { blend(upper.0, lower.0, weight) };
+    let green = unsafe { blend(upper.1, lower.1, weight) };
+    let blue = unsafe { blend(upper.2, lower.2, weight) };
+    let channels = uint8x8x4_t(red, green, blue, vdup_n_u8(255));
+    unsafe { vst4_u8(destination.as_mut_ptr(), channels) };
+}
+
+fn blit_opaque_scaled_image_impl<
+    const CACHE_ROWS: bool,
+    const PARALLEL: bool,
+    const VECTOR: bool,
+>(
     target: &mut Pixmap,
     rgba: &[u8],
     width: u32,
     height: u32,
     transform: Transform,
-    mask: Option<&tiny_skia::Mask>,
+    mask: &tiny_skia::Mask,
 ) -> bool {
     if transform.kx != 0.0
         || transform.ky != 0.0
@@ -171,9 +457,7 @@ fn blit_opaque_scaled_image_impl<const CACHE_ROWS: bool>(
     let columns: Vec<_> = (x0..x1)
         .map(|x| sample(x, transform.tx, transform.sx, width))
         .collect();
-    let mut upper_row = vec![[0u16; 3]; columns.len()];
-    let mut lower_row = vec![[0u16; 3]; columns.len()];
-    let coverage = mask.map(tiny_skia::Mask::data);
+    let coverage = mask.data();
     let pixels = target.data_mut();
     let source_stride = width as usize * 4;
     let interpolate_row = |source_y: usize, output: &mut [[u16; 3]]| {
@@ -187,67 +471,101 @@ fn blit_opaque_scaled_image_impl<const CACHE_ROWS: bool>(
             }
         }
     };
-    let mut cached_source_y = None;
-    for y in y0..y1 {
-        let (sy, wy) = sample(y, transform.ty, transform.sy, height);
-        if CACHE_ROWS && cached_source_y != Some(sy) {
-            if cached_source_y.is_some_and(|previous| previous + 1 == sy) {
-                std::mem::swap(&mut upper_row, &mut lower_row);
-            } else {
-                interpolate_row(sy, &mut upper_row);
+    let paint_rows = |first_y: usize, row_pixels: &mut [u8]| {
+        let mut upper_row = vec![[0u16; 3]; columns.len()];
+        let mut lower_row = vec![[0u16; 3]; columns.len()];
+        let mut cached_source_y = None;
+        let last_y = first_y + row_pixels.len() / (tw * 4);
+        for y in y0.max(first_y)..y1.min(last_y) {
+            let (sy, wy) = sample(y, transform.ty, transform.sy, height);
+            if CACHE_ROWS && cached_source_y != Some(sy) {
+                if cached_source_y.is_some_and(|previous| previous + 1 == sy) {
+                    std::mem::swap(&mut upper_row, &mut lower_row);
+                } else {
+                    interpolate_row(sy, &mut upper_row);
+                }
+                interpolate_row(sy + 1, &mut lower_row);
+                cached_source_y = Some(sy);
             }
-            interpolate_row(sy + 1, &mut lower_row);
-            cached_source_y = Some(sy);
+            let mut column = 0;
+            while column < columns.len() {
+                let x = x0 + column;
+                let index = y * tw + x;
+                #[cfg(target_arch = "aarch64")]
+                if VECTOR
+                    && CACHE_ROWS
+                    && column + 8 <= columns.len()
+                    && coverage[index..index + 8] == [255; 8]
+                {
+                    let destination = ((y - first_y) * tw + x) * 4;
+                    unsafe {
+                        bilinear_opaque_eight_neon(
+                            &upper_row[column..],
+                            &lower_row[column..],
+                            wy as u16,
+                            &mut row_pixels[destination..destination + 32],
+                        );
+                    }
+                    column += 8;
+                    continue;
+                }
+                let alpha = u32::from(coverage[index]);
+                if alpha == 0 {
+                    column += 1;
+                    continue;
+                }
+                let destination = ((y - first_y) * tw + x) * 4;
+                for channel in 0..3 {
+                    let (upper, lower) = if CACHE_ROWS {
+                        (
+                            u32::from(upper_row[column][channel]),
+                            u32::from(lower_row[column][channel]),
+                        )
+                    } else {
+                        let (sx, wx) = columns[column];
+                        let top = sy * source_stride + sx * 4;
+                        let bottom = top + source_stride;
+                        (
+                            (u32::from(rgba[top + channel]) * (256 - wx)
+                                + u32::from(rgba[top + 4 + channel]) * wx
+                                + 128)
+                                >> 8,
+                            (u32::from(rgba[bottom + channel]) * (256 - wx)
+                                + u32::from(rgba[bottom + 4 + channel]) * wx
+                                + 128)
+                                >> 8,
+                        )
+                    };
+                    let value = if CACHE_ROWS {
+                        (upper * (256 - wy) + lower * wy + 32768) >> 16
+                    } else {
+                        (upper * (256 - wy) + lower * wy + 128) >> 8
+                    };
+                    row_pixels[destination + channel] = if alpha == 255 {
+                        value as u8
+                    } else {
+                        ((value * alpha
+                            + u32::from(row_pixels[destination + channel]) * (255 - alpha)
+                            + 127)
+                            / 255) as u8
+                    };
+                }
+                row_pixels[destination + 3] = if alpha == 255 {
+                    255
+                } else {
+                    (alpha + u32::from(row_pixels[destination + 3]) * (255 - alpha) / 255) as u8
+                };
+                column += 1;
+            }
         }
-        for column in 0..columns.len() {
-            let x = x0 + column;
-            let index = y * tw + x;
-            let alpha = coverage.map_or(255, |coverage| u32::from(coverage[index]));
-            if alpha == 0 {
-                continue;
-            }
-            let destination = index * 4;
-            for channel in 0..3 {
-                let (upper, lower) = if CACHE_ROWS {
-                    (
-                        u32::from(upper_row[column][channel]),
-                        u32::from(lower_row[column][channel]),
-                    )
-                } else {
-                    let (sx, wx) = columns[column];
-                    let top = sy * source_stride + sx * 4;
-                    let bottom = top + source_stride;
-                    (
-                        (u32::from(rgba[top + channel]) * (256 - wx)
-                            + u32::from(rgba[top + 4 + channel]) * wx
-                            + 128)
-                            >> 8,
-                        (u32::from(rgba[bottom + channel]) * (256 - wx)
-                            + u32::from(rgba[bottom + 4 + channel]) * wx
-                            + 128)
-                            >> 8,
-                    )
-                };
-                let value = if CACHE_ROWS {
-                    (upper * (256 - wy) + lower * wy + 32768) >> 16
-                } else {
-                    (upper * (256 - wy) + lower * wy + 128) >> 8
-                };
-                pixels[destination + channel] = if alpha == 255 {
-                    value as u8
-                } else {
-                    ((value * alpha
-                        + u32::from(pixels[destination + channel]) * (255 - alpha)
-                        + 127)
-                        / 255) as u8
-                };
-            }
-            pixels[destination + 3] = if alpha == 255 {
-                255
-            } else {
-                (alpha + u32::from(pixels[destination + 3]) * (255 - alpha) / 255) as u8
-            };
-        }
+    };
+    if PARALLEL && (x1 - x0) * (y1 - y0) >= 1_000_000 && rayon::current_num_threads() > 1 {
+        pixels
+            .par_chunks_mut(tw * 4 * 128)
+            .enumerate()
+            .for_each(|(chunk, rows)| paint_rows(chunk * 128, rows));
+    } else {
+        paint_rows(0, pixels);
     }
     true
 }
@@ -330,49 +648,13 @@ fn opaque_scaled_blit_tracks_bilinear_clip() {
         32,
         24,
         transform,
-        Some(&mask)
+        &mask
     ));
     let mut max_error = 0u8;
     for (actual, expected) in actual.data().iter().zip(expected.data()) {
         max_error = max_error.max(actual.abs_diff(*expected));
     }
     assert!(max_error <= 2, "maximum channel error {max_error}");
-}
-
-#[test]
-fn opaque_scaled_blit_tracks_unclipped_bilinear() {
-    let rgba: Vec<u8> = (0..32 * 24)
-        .flat_map(|index| {
-            let index = index as u32;
-            [(index * 13) as u8, (index * 7) as u8, (index * 3) as u8, 255]
-        })
-        .collect();
-    let source = tiny_skia::PixmapRef::from_bytes(&rgba, 32, 24).unwrap();
-    let paint = tiny_skia::PixmapPaint {
-        quality: tiny_skia::FilterQuality::Bilinear,
-        ..tiny_skia::PixmapPaint::default()
-    };
-    for transform in [
-        Transform::from_translate(-3.5, -2.0).pre_scale(1.25, 1.25),
-        Transform::from_translate(2.25, 1.5).pre_scale(2.0, 2.0),
-    ] {
-        let mut expected = Pixmap::new(64, 48).unwrap();
-        let mut actual = Pixmap::new(64, 48).unwrap();
-        expected.fill(tiny_skia::Color::from_rgba8(20, 30, 40, 255));
-        actual.fill(tiny_skia::Color::from_rgba8(20, 30, 40, 255));
-        expected.draw_pixmap(0, 0, source, &paint, transform, None);
-        assert!(blit_opaque_scaled_image(
-            &mut actual, &rgba, 32, 24, transform, None
-        ));
-        let max_error = actual
-            .data()
-            .iter()
-            .zip(expected.data())
-            .map(|(actual, expected)| actual.abs_diff(*expected))
-            .max()
-            .unwrap();
-        assert!(max_error <= 2, "maximum channel error {max_error}");
-    }
 }
 
 #[test]
@@ -412,7 +694,7 @@ fn opaque_scaled_blit_matches_video_edges_on_background() {
         32,
         24,
         transform,
-        Some(&mask)
+        &mask
     ));
     let mut max_error = 0u8;
     let mut worst = 0usize;
@@ -452,16 +734,16 @@ fn opaque_scaled_blit_avoids_double_rounding() {
     let transform = Transform::from_scale(1.7, 1.7);
     let mut old = Pixmap::new(37, 27).unwrap();
     let mut precise = Pixmap::new(37, 27).unwrap();
-    assert!(blit_opaque_scaled_image_impl::<false>(
-        &mut old, &rgba, width, height, transform, Some(&mask)
+    assert!(blit_opaque_scaled_image_impl::<false, false, true>(
+        &mut old, &rgba, width, height, transform, &mask
     ));
-    assert!(blit_opaque_scaled_image_impl::<true>(
+    assert!(blit_opaque_scaled_image_impl::<true, false, true>(
         &mut precise,
         &rgba,
         width,
         height,
         transform,
-        Some(&mask)
+        &mask
     ));
     let mut old_error = 0u64;
     let mut precise_error = 0u64;
@@ -491,6 +773,61 @@ fn opaque_scaled_blit_avoids_double_rounding() {
         precise_error < old_error,
         "precise={precise_error} old={old_error}"
     );
+}
+
+#[test]
+fn opaque_scaled_parallel_and_vector_blit_match_scalar_with_clip() {
+    let (width, height) = (960u32, 540u32);
+    let rgba: Vec<u8> = (0..width * height)
+        .flat_map(|index| {
+            [
+                (index * 13) as u8,
+                (index * 7) as u8,
+                (index * 3) as u8,
+                255,
+            ]
+        })
+        .collect();
+    let mut mask = tiny_skia::Mask::new(1440, 810).unwrap();
+    mask.fill_path(
+        &PathBuilder::from_circle(720.0, 405.0, 380.0).unwrap(),
+        FillRule::Winding,
+        true,
+        Transform::identity(),
+    );
+    let transform = Transform::from_scale(1.5, 1.5);
+    let mut scalar = Pixmap::new(1440, 810).unwrap();
+    let mut serial = Pixmap::new(1440, 810).unwrap();
+    let mut parallel = Pixmap::new(1440, 810).unwrap();
+    scalar.fill(tiny_skia::Color::from_rgba8(20, 30, 40, 255));
+    serial.fill(tiny_skia::Color::from_rgba8(20, 30, 40, 255));
+    parallel.fill(tiny_skia::Color::from_rgba8(20, 30, 40, 255));
+    assert!(blit_opaque_scaled_image_impl::<true, false, false>(
+        &mut scalar,
+        &rgba,
+        width,
+        height,
+        transform,
+        &mask,
+    ));
+    assert!(blit_opaque_scaled_image_impl::<true, false, true>(
+        &mut serial,
+        &rgba,
+        width,
+        height,
+        transform,
+        &mask,
+    ));
+    assert!(blit_opaque_scaled_image_impl::<true, true, true>(
+        &mut parallel,
+        &rgba,
+        width,
+        height,
+        transform,
+        &mask,
+    ));
+    assert_eq!(serial.data(), scalar.data());
+    assert_eq!(parallel.data(), scalar.data());
 }
 
 #[test]
@@ -556,22 +893,22 @@ fn benchmark_scaled_video_paint() {
         let start = std::time::Instant::now();
         for _ in 0..20 {
             let painted = if cache_rows {
-                blit_opaque_scaled_image_impl::<true>(
+                blit_opaque_scaled_image_impl::<true, false, true>(
                     &mut target,
                     &rgba,
                     width,
                     height,
                     transform,
-                    Some(&mask),
+                    &mask,
                 )
             } else {
-                blit_opaque_scaled_image_impl::<false>(
+                blit_opaque_scaled_image_impl::<false, false, true>(
                     &mut target,
                     &rgba,
                     width,
                     height,
                     transform,
-                    Some(&mask),
+                    &mask,
                 )
             };
             assert!(painted);
@@ -583,6 +920,112 @@ fn benchmark_scaled_video_paint() {
         );
     }
     eprintln!("scaled 720p x20 tiny-skia: {baseline:?}");
+    for parallel in [false, true, true, false] {
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            let painted = if parallel {
+                blit_opaque_scaled_image_impl::<true, true, true>(
+                    &mut target,
+                    &rgba,
+                    width,
+                    height,
+                    transform,
+                    &mask,
+                )
+            } else {
+                blit_opaque_scaled_image_impl::<true, false, true>(
+                    &mut target,
+                    &rgba,
+                    width,
+                    height,
+                    transform,
+                    &mask,
+                )
+            };
+            assert!(painted);
+            std::hint::black_box(&target);
+        }
+        eprintln!("scaled 720p x20 parallel={parallel}: {:?}", start.elapsed());
+    }
+}
+
+#[test]
+#[ignore = "run explicitly when measuring fullscreen video paint"]
+fn benchmark_fullscreen_scaled_video_paint() {
+    let (width, height) = (1280u32, 720u32);
+    let rgba: Vec<u8> = (0..width * height)
+        .flat_map(|index| {
+            [
+                (index * 13) as u8,
+                (index * 7) as u8,
+                (index * 3) as u8,
+                255,
+            ]
+        })
+        .collect();
+    let mut target = Pixmap::new(2560, 1440).unwrap();
+    let mut mask = tiny_skia::Mask::new(2560, 1440).unwrap();
+    mask.fill_path(
+        &PathBuilder::from_rect(SkRect::from_xywh(0.0, 0.0, 2560.0, 1440.0).unwrap()),
+        FillRule::Winding,
+        false,
+        Transform::identity(),
+    );
+    let transform = Transform::from_scale(2.0, 2.0);
+    for (parallel, vector) in [
+        (false, false),
+        (false, true),
+        (true, false),
+        (true, true),
+        (true, true),
+        (true, false),
+        (false, true),
+        (false, false),
+    ] {
+        let start = std::time::Instant::now();
+        for _ in 0..12 {
+            let painted = match (parallel, vector) {
+                (false, false) => blit_opaque_scaled_image_impl::<true, false, false>(
+                    &mut target,
+                    &rgba,
+                    width,
+                    height,
+                    transform,
+                    &mask,
+                ),
+                (false, true) => blit_opaque_scaled_image_impl::<true, false, true>(
+                    &mut target,
+                    &rgba,
+                    width,
+                    height,
+                    transform,
+                    &mask,
+                ),
+                (true, false) => blit_opaque_scaled_image_impl::<true, true, false>(
+                    &mut target,
+                    &rgba,
+                    width,
+                    height,
+                    transform,
+                    &mask,
+                ),
+                (true, true) => blit_opaque_scaled_image_impl::<true, true, true>(
+                    &mut target,
+                    &rgba,
+                    width,
+                    height,
+                    transform,
+                    &mask,
+                ),
+            };
+            assert!(painted);
+            std::hint::black_box(&target);
+        }
+        eprintln!(
+            "fullscreen scaled video x12 parallel={parallel} vector={vector}: {:?}",
+            start.elapsed()
+        );
+    }
 }
 
 #[test]
@@ -628,7 +1071,7 @@ fn benchmark_scaled_video_tiles() {
                 width,
                 height,
                 *transform,
-                Some(&mask)
+                &mask
             ));
             std::hint::black_box(&target);
         }
@@ -1847,7 +2290,13 @@ fn offscreen_mask_group_does_not_affect_visible_paint() {
     let commands = vec![
         PaintCmd::PushMask {
             rect: Rect::new(5000.0, 5000.0, 16.0, 16.0),
+            no_clip: false,
+            origin: Rect::new(5000.0, 5000.0, 16.0, 16.0),
+            tile: Rect::new(5000.0, 5000.0, 16.0, 16.0),
             data: mask.clone(),
+            luminance: false,
+            repeat_x_mode: 0,
+            repeat_y_mode: 0,
         },
         fill(
             Rect::new(5000.0, 5000.0, 16.0, 16.0),
@@ -1856,7 +2305,13 @@ fn offscreen_mask_group_does_not_affect_visible_paint() {
         PaintCmd::PopMask,
         PaintCmd::PushMask {
             rect: Rect::new(0.0, 0.0, 32.0, 32.0),
+            no_clip: false,
+            origin: Rect::new(0.0, 0.0, 32.0, 32.0),
+            tile: Rect::new(0.0, 0.0, 32.0, 32.0),
             data: mask,
+            luminance: false,
+            repeat_x_mode: 0,
+            repeat_y_mode: 0,
         },
         visible.clone(),
         PaintCmd::PopMask,
@@ -1991,7 +2446,7 @@ fn replay_commands_on_surface(
         .collect();
     let mut layer_stack: Vec<Layer> = Vec::new();
     let mut opacity_surface_pool: Vec<(Pixmap, bool)> = Vec::new();
-    let mut mask_stack: Vec<(Rect, ImageRef)> = Vec::new();
+    let mut mask_stack: Vec<Vec<MaskLayer>> = Vec::new();
     let mut text_gradient_stack: Vec<&PaintCmd> = Vec::new();
 
     // ── Viewport culling ────────────────────────────────────────────────────
@@ -2214,6 +2669,7 @@ fn replay_commands_on_surface(
         let _command_timing = if profile_replay {
             use crate::profile::Phase;
             let phase = match cmd {
+                PaintCmd::FillRect { .. } => Some(Phase::RasterFill),
                 PaintCmd::Image { .. }
                 | PaintCmd::BackgroundImage { .. }
                 | PaintCmd::BorderImage { .. } => Some(Phase::RasterImage),
@@ -2225,6 +2681,7 @@ fn replay_commands_on_surface(
                 | PaintCmd::PushFilter { .. }
                 | PaintCmd::PushBlendMode { .. }
                 | PaintCmd::PushMask { .. }
+                | PaintCmd::PushMaskGroup { .. }
                 | PaintCmd::PopOpacity
                 | PaintCmd::PopFilter
                 | PaintCmd::PopBlendMode
@@ -2262,7 +2719,15 @@ fn replay_commands_on_surface(
                     .map(|l| &mut l.pixmap)
                     .unwrap_or(pixmap);
                 let max_r = radius[0].max(radius[1]).max(radius[2]).max(radius[3]);
+                if max_r <= 0.5 && fill_opaque_aligned_rect(target, *rect, c, ts, clip_mask) {
+                    continue;
+                }
                 if max_r > 0.5 {
+                    if fill_opaque_rounded_rect_bands(
+                        target, *rect, c, *radius, *radius_y, ts, clip_mask,
+                    ) {
+                        continue;
+                    }
                     if let Some(path) = rounded_rect_path_corners_xy(
                         rect.x, rect.y, rect.w, rect.h, *radius, *radius_y,
                     ) {
@@ -2475,8 +2940,10 @@ fn replay_commands_on_surface(
                     {
                         continue;
                     }
-                    if blit_opaque_scaled_image(target, rgba, iw, ih, img_ts, clip_mask) {
-                        continue;
+                    if let Some(mask) = clip_mask {
+                        if blit_opaque_scaled_image(target, rgba, iw, ih, img_ts, mask) {
+                            continue;
+                        }
                     }
                     let paint = tiny_skia::PixmapPaint {
                         quality: tiny_skia::FilterQuality::Bilinear,
@@ -2854,12 +3321,42 @@ fn replay_commands_on_surface(
                     );
                 }
             }
-            PaintCmd::BackdropFilter { rect, filters } => {
+            PaintCmd::BackdropFilter { rect, radii, radii_y, filters } => {
                 let target = layer_stack
                     .last_mut()
                     .map(|l| &mut l.pixmap)
                     .unwrap_or(pixmap);
-                let mut backdrop = target.clone();
+                let margin = filters.iter().fold(0.0_f32, |margin, (kind, value, dx, dy, _)| {
+                    if *kind == 0 {
+                        margin + value.max(0.0) * 4.0
+                    } else if *kind == 9 {
+                        margin + dx.abs().max(dy.abs()) + value.max(0.0) * 4.0
+                    } else {
+                        margin
+                    }
+                });
+                let Some(bounds) = transformed_bounds_to_viewport(ts, *rect, 1.0) else {
+                    continue;
+                };
+                let margin = margin * scale;
+                let left = (bounds.x - margin)
+                    .floor()
+                    .clamp(0.0, pw as f32) as i32;
+                let top = (bounds.y - margin)
+                    .floor()
+                    .clamp(0.0, ph as f32) as i32;
+                let right = (bounds.right() + margin)
+                    .ceil()
+                    .clamp(0.0, pw as f32) as i32;
+                let bottom = (bounds.bottom() + margin)
+                    .ceil()
+                    .clamp(0.0, ph as f32) as i32;
+                let Some(region) = tiny_skia::IntRect::from_ltrb(left, top, right, bottom) else {
+                    continue;
+                };
+                let Some(mut backdrop) = target.clone_rect(region) else {
+                    continue;
+                };
                 for (filter_type, value, dx, dy, color) in filters {
                     if *filter_type == 9 {
                         crate::canvas::effects::drop_shadow(
@@ -2873,28 +3370,61 @@ fn replay_commands_on_surface(
                         apply_pixel_filter(&mut backdrop, *filter_type, *value);
                     }
                 }
-                let mask = build_clip_mask(
-                    rect,
-                    &[0.0; 4],
-                    &[0.0; 4],
-                    pw,
-                    ph,
-                    scale,
-                    active_scroll_x,
-                    active_scroll_y,
-                );
+                let parent = clip_mask_stack.last().and_then(|entry| entry.as_ref());
+                let mask = clip_cache.rect(rect, radii, radii_y, pw, ph, ts, parent);
                 target.draw_pixmap(
-                    0,
-                    0,
+                    left,
+                    top,
                     backdrop.as_ref(),
                     &tiny_skia::PixmapPaint::default(),
                     Transform::identity(),
-                    mask.as_ref(),
+                    mask.as_ref().map(|mask| mask.mask.as_ref()),
                 );
             }
-            PaintCmd::PushMask { rect, data } => {
+            PaintCmd::PushMask {
+                rect,
+                no_clip,
+                origin,
+                tile,
+                data,
+                luminance,
+                repeat_x_mode,
+                repeat_y_mode,
+            } => {
                 if let Some(layer_pixmap) = Pixmap::new(pw, ph) {
-                    mask_stack.push((*rect, data.clone()));
+                    mask_stack.push(vec![MaskLayer {
+                        clip: *rect,
+                        no_clip: *no_clip,
+                        origin: *origin,
+                        tile: *tile,
+                        data: Some(data.clone()),
+                        luminance: *luminance,
+                        repeat_x_mode: *repeat_x_mode,
+                        repeat_y_mode: *repeat_y_mode,
+                        composite: 0,
+                    }]);
+                    layer_stack.push(Layer {
+                        pixmap: layer_pixmap,
+                        blend_mode: 253,
+                        alpha: 1.0,
+                        has_content: false,
+                        paint_bounds: None,
+                    });
+                }
+            }
+            PaintCmd::PushMaskGroup { layers } => {
+                if let Some(layer_pixmap) = Pixmap::new(pw, ph) {
+                    mask_stack.push(layers.iter().map(|mask| MaskLayer {
+                        clip: mask.rect,
+                        no_clip: mask.no_clip,
+                        origin: mask.origin,
+                        tile: mask.tile,
+                        data: mask.data.clone(),
+                        luminance: mask.luminance,
+                        repeat_x_mode: mask.repeat_x_mode,
+                        repeat_y_mode: mask.repeat_y_mode,
+                        composite: mask.composite,
+                    }).collect());
                     layer_stack.push(Layer {
                         pixmap: layer_pixmap,
                         blend_mode: 253,
@@ -2906,7 +3436,7 @@ fn replay_commands_on_surface(
             }
             PaintCmd::PopMask => {
                 if let Some(layer) = layer_stack.pop() {
-                    if let Some((rect, data)) = mask_stack.pop() {
+                    if let Some(masks) = mask_stack.pop() {
                         if !layer.has_content {
                             continue;
                         }
@@ -2914,11 +3444,10 @@ fn replay_commands_on_surface(
                             .last_mut()
                             .map(|l| &mut l.pixmap)
                             .unwrap_or(pixmap);
-                        composite_masked_layer(
+                        composite_masked_layers(
                             target,
                             &layer.pixmap,
-                            rect,
-                            &data,
+                            &masks,
                             scale,
                             active_scroll_x,
                             active_scroll_y,
@@ -4136,7 +4665,14 @@ fn replay_commands_on_surface(
                         } else {
                             value
                         };
-                        if !display_text.is_empty() {
+                        let placeholder_alpha = if value.is_empty() {
+                            placeholder_typography
+                                .as_ref()
+                                .map_or(1.0, |style| style.opacity.clamp(0.0, 1.0))
+                        } else {
+                            1.0
+                        };
+                        if !display_text.is_empty() && placeholder_alpha > 0.0 {
                             if let Some((ref mut fs, ref mut sc)) = text_ctx {
                                 let typography = if value.is_empty() {
                                     placeholder_typography.as_ref()
@@ -4160,7 +4696,7 @@ fn replay_commands_on_surface(
                                 let word_spacing =
                                     typography.map_or(0.0, |style| style.word_spacing);
                                 let c = if value.is_empty() {
-                                    apply_opacity(placeholder_color, a2)
+                                    apply_opacity(placeholder_color, a2 * placeholder_alpha)
                                 } else {
                                     apply_opacity(color, a2)
                                 };
@@ -4218,7 +4754,10 @@ fn replay_commands_on_surface(
                                             font_style: text_font_style,
                                             font_stretch: text_font_stretch,
                                             line_height: line_h,
-                                            color: apply_opacity(&shadow.color, a2),
+                                            color: apply_opacity(
+                                                &shadow.color,
+                                                a2 * placeholder_alpha,
+                                            ),
                                             blur: shadow.blur,
                                             letter_spacing,
                                             word_spacing,
@@ -4232,6 +4771,20 @@ fn replay_commands_on_surface(
                                     super::display_list::TextDecoration::default();
                                 let decoration = typography
                                     .map_or(&default_decoration, |style| &style.decoration);
+                                let faded_decoration;
+                                let decoration = if placeholder_alpha < 1.0 {
+                                    faded_decoration = {
+                                        let mut decoration = decoration.clone();
+                                        decoration.color = apply_opacity(
+                                            &decoration.color,
+                                            placeholder_alpha,
+                                        );
+                                        decoration
+                                    };
+                                    &faded_decoration
+                                } else {
+                                    decoration
+                                };
                                 draw_text_cmd(
                                     target,
                                     *fs,
@@ -4564,46 +5117,134 @@ fn replay_commands_on_surface(
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+struct MaskLayer {
+    clip: Rect,
+    no_clip: bool,
+    origin: Rect,
+    tile: Rect,
+    data: Option<ImageRef>,
+    luminance: bool,
+    repeat_x_mode: u8,
+    repeat_y_mode: u8,
+    composite: u8,
+}
+
+fn mask_axis_sample(
+    coordinate: f32,
+    origin_start: f32,
+    origin_length: f32,
+    tile_start: f32,
+    tile_length: f32,
+    repeat_mode: u8,
+) -> Option<f32> {
+    if !coordinate.is_finite() || !tile_length.is_finite() || tile_length <= 0.0 {
+        return None;
+    }
+    let (start, length) = match repeat_mode {
+        1 => return Some((coordinate - tile_start).rem_euclid(tile_length) / tile_length),
+        2 if origin_length >= tile_length * 2.0 => {
+            let count = (origin_length / tile_length).floor();
+            let gap = (origin_length - tile_length * count) / (count - 1.0);
+            let stride = tile_length + gap;
+            let offset = coordinate - origin_start;
+            if offset < 0.0 || offset >= origin_length {
+                return None;
+            }
+            (offset.rem_euclid(stride), tile_length)
+        }
+        3 if origin_length > 0.0 => {
+            let count = (origin_length / tile_length).round().max(1.0);
+            let length = origin_length / count;
+            let offset = coordinate - origin_start;
+            if offset < 0.0 || offset >= origin_length {
+                return None;
+            }
+            (offset.rem_euclid(length), length)
+        }
+        _ => (coordinate - tile_start, tile_length),
+    };
+    (start >= 0.0 && start < length).then_some(start / length)
+}
+
+fn mask_axis_paint_bounds(
+    origin_start: f32,
+    origin_length: f32,
+    tile_start: f32,
+    tile_length: f32,
+    repeat_mode: u8,
+) -> Option<(f32, f32)> {
+    match repeat_mode {
+        1 => None,
+        2 if origin_length >= tile_length * 2.0 => {
+            Some((origin_start, origin_start + origin_length))
+        }
+        3 => Some((origin_start, origin_start + origin_length)),
+        _ => Some((tile_start, tile_start + tile_length)),
+    }
+}
+
 fn composite_masked_layer(
     target: &mut Pixmap,
     layer: &Pixmap,
-    rect: Rect,
-    mask: &ImageRef,
+    mask: &MaskLayer,
     scale: f32,
     scroll_x: f32,
     scroll_y: f32,
 ) {
-    let (mask_rgba, mw, mh) = match mask {
+    let Some(data) = mask.data.as_ref() else {
+        return;
+    };
+    let (mask_rgba, mw, mh) = match data {
         ImageRef::Owned(d, w, h) => (d.as_slice(), *w, *h),
         ImageRef::Shared(d, w, h) => (d.as_slice(), *w, *h),
     };
-    if mw == 0 || mh == 0 || rect.w <= 0.0 || rect.h <= 0.0 {
+    let rect = mask.clip;
+    if mw == 0
+        || mh == 0
+        || mask.tile.w <= 0.0
+        || mask.tile.h <= 0.0
+        || (!mask.no_clip && (rect.w <= 0.0 || rect.h <= 0.0))
+    {
         return;
     }
     let effective_scale = scale.max(0.001);
-    let device_bounds = [
-        (rect.x - scroll_x) * effective_scale,
-        (rect.y - scroll_y) * effective_scale,
-        (rect.right() - scroll_x) * effective_scale,
-        (rect.bottom() - scroll_y) * effective_scale,
-    ];
-    let region = if device_bounds.iter().all(|v| v.is_finite()) {
-        let left = (device_bounds[0].floor() - 1.0)
-            .max(0.0)
-            .min(layer.width() as f32) as i32;
-        let top = (device_bounds[1].floor() - 1.0)
-            .max(0.0)
-            .min(layer.height() as f32) as i32;
-        let right = (device_bounds[2].ceil() + 1.0)
-            .max(0.0)
-            .min(layer.width() as f32) as i32;
-        let bottom = (device_bounds[3].ceil() + 1.0)
-            .max(0.0)
-            .min(layer.height() as f32) as i32;
-        tiny_skia::IntRect::from_ltrb(left, top, right, bottom)
+    let x_bounds = if mask.no_clip {
+        mask_axis_paint_bounds(
+            mask.origin.x,
+            mask.origin.w,
+            mask.tile.x,
+            mask.tile.w,
+            mask.repeat_x_mode,
+        )
     } else {
-        tiny_skia::IntRect::from_xywh(0, 0, layer.width(), layer.height())
+        Some((rect.x, rect.right()))
     };
+    let y_bounds = if mask.no_clip {
+        mask_axis_paint_bounds(
+            mask.origin.y,
+            mask.origin.h,
+            mask.tile.y,
+            mask.tile.h,
+            mask.repeat_y_mode,
+        )
+    } else {
+        Some((rect.y, rect.bottom()))
+    };
+    let device_axis = |bounds: Option<(f32, f32)>, scroll: f32, extent: u32| {
+        bounds
+            .filter(|(start, end)| start.is_finite() && end.is_finite())
+            .map(|(start, end)| {
+                let lo = (((start - scroll) * effective_scale).floor() - 1.0)
+                    .clamp(0.0, extent as f32) as i32;
+                let hi = (((end - scroll) * effective_scale).ceil() + 1.0)
+                    .clamp(0.0, extent as f32) as i32;
+                (lo, hi)
+            })
+            .unwrap_or((0, extent as i32))
+    };
+    let (left, right) = device_axis(x_bounds, scroll_x, layer.width());
+    let (top, bottom) = device_axis(y_bounds, scroll_y, layer.height());
+    let region = tiny_skia::IntRect::from_ltrb(left, top, right, bottom);
     let Some(region) = region else {
         return;
     };
@@ -4612,36 +5253,56 @@ fn composite_masked_layer(
     };
     let width = masked.width() as usize;
     let inv_scale = 1.0 / scale.max(0.001);
+    let x_samples: Vec<Option<usize>> = (0..width)
+        .map(|x| {
+            let doc_x = (region.x() as usize + x) as f32 * inv_scale + scroll_x;
+            if !mask.no_clip && (doc_x < rect.x || doc_x >= rect.right()) {
+                return None;
+            }
+            mask_axis_sample(
+                doc_x,
+                mask.origin.x,
+                mask.origin.w,
+                mask.tile.x,
+                mask.tile.w,
+                mask.repeat_x_mode,
+            )
+            .map(|sample| (sample * mw as f32).floor().clamp(0.0, (mw - 1) as f32) as usize)
+        })
+        .collect();
+    let y_samples: Vec<Option<usize>> = (0..masked.height() as usize)
+        .map(|y| {
+            let doc_y = (region.y() as usize + y) as f32 * inv_scale + scroll_y;
+            if !mask.no_clip && (doc_y < rect.y || doc_y >= rect.bottom()) {
+                return None;
+            }
+            mask_axis_sample(
+                doc_y,
+                mask.origin.y,
+                mask.origin.h,
+                mask.tile.y,
+                mask.tile.h,
+                mask.repeat_y_mode,
+            )
+            .map(|sample| (sample * mh as f32).floor().clamp(0.0, (mh - 1) as f32) as usize)
+        })
+        .collect();
     for (i, px) in masked.data_mut().chunks_exact_mut(4).enumerate() {
         if px[3] == 0 {
             continue;
         }
-        let x = (region.x() as usize + i % width) as f32;
-        let y = (region.y() as usize + i / width) as f32;
-        let doc_x = x * inv_scale + scroll_x;
-        let doc_y = y * inv_scale + scroll_y;
-        let mask_alpha = if doc_x >= rect.x
-            && doc_x < rect.x + rect.w
-            && doc_y >= rect.y
-            && doc_y < rect.y + rect.h
-        {
-            let u = (((doc_x - rect.x) / rect.w) * mw as f32)
-                .floor()
-                .clamp(0.0, (mw - 1) as f32) as usize;
-            let v = (((doc_y - rect.y) / rect.h) * mh as f32)
-                .floor()
-                .clamp(0.0, (mh - 1) as f32) as usize;
+        let mask_alpha = if let (Some(u), Some(v)) = (x_samples[i % width], y_samples[i / width]) {
             let base = (v * mw as usize + u) * 4;
-            let mr = mask_rgba.get(base).copied().unwrap_or(0) as u32;
-            let mg = mask_rgba.get(base + 1).copied().unwrap_or(0) as u32;
-            let mb = mask_rgba.get(base + 2).copied().unwrap_or(0) as u32;
-            let ma = mask_rgba.get(base + 3).copied().unwrap_or(0) as u32;
-            // CSS mask images default to alpha masking for raster/SVG image
-            // sources. Many icon fonts ship black SVG paths with an opaque
-            // alpha channel; treating every mask as luminance turns those into
-            // fully transparent masks, so toolbar icons disappear.
-            let _lum = (mr * 77 + mg * 150 + mb * 29) >> 8;
-            ma as u8
+            if mask.luminance {
+                let r = mask_rgba.get(base).copied().unwrap_or(0) as u32;
+                let g = mask_rgba.get(base + 1).copied().unwrap_or(0) as u32;
+                let b = mask_rgba.get(base + 2).copied().unwrap_or(0) as u32;
+                // Image decoders publish premultiplied RGBA, so these RGB
+                // channels already include the mask pixel's alpha.
+                ((r * 2126 + g * 7152 + b * 722 + 5000) / 10_000) as u8
+            } else {
+                mask_rgba.get(base + 3).copied().unwrap_or(0)
+            }
         } else {
             0
         };
@@ -4659,6 +5320,140 @@ fn composite_masked_layer(
         Transform::identity(),
         None,
     );
+}
+
+fn composite_masked_layers(
+    target: &mut Pixmap,
+    layer: &Pixmap,
+    masks: &[MaskLayer],
+    scale: f32,
+    scroll_x: f32,
+    scroll_y: f32,
+) {
+    if let [mask] = masks {
+        composite_masked_layer(target, layer, mask, scale, scroll_x, scroll_y);
+        return;
+    }
+    if masks.is_empty() {
+        return;
+    }
+
+    let effective_scale = scale.max(0.001);
+    let device_axis = |bounds: Option<(f32, f32)>, scroll: f32, extent: u32| {
+        bounds
+            .filter(|(start, end)| start.is_finite() && end.is_finite())
+            .map(|(start, end)| {
+                let lo = (((start - scroll) * effective_scale).floor() - 1.0)
+                    .clamp(0.0, extent as f32) as i32;
+                let hi = (((end - scroll) * effective_scale).ceil() + 1.0)
+                    .clamp(0.0, extent as f32) as i32;
+                (lo, hi)
+            })
+            .unwrap_or((0, extent as i32))
+    };
+    let mut bounds = (layer.width() as i32, 0, layer.height() as i32, 0);
+    for mask in masks {
+        let Some(data) = mask.data.as_ref() else { continue };
+        let (_, mw, mh) = match data {
+            ImageRef::Owned(bytes, w, h) => (bytes.as_slice(), *w, *h),
+            ImageRef::Shared(bytes, w, h) => (bytes.as_slice(), *w, *h),
+        };
+        if mw == 0 || mh == 0 || mask.tile.w <= 0.0 || mask.tile.h <= 0.0 {
+            continue;
+        }
+        let x_bounds = if mask.no_clip {
+            mask_axis_paint_bounds(mask.origin.x, mask.origin.w, mask.tile.x, mask.tile.w, mask.repeat_x_mode)
+        } else {
+            Some((mask.clip.x, mask.clip.right()))
+        };
+        let y_bounds = if mask.no_clip {
+            mask_axis_paint_bounds(mask.origin.y, mask.origin.h, mask.tile.y, mask.tile.h, mask.repeat_y_mode)
+        } else {
+            Some((mask.clip.y, mask.clip.bottom()))
+        };
+        let (left, right) = device_axis(x_bounds, scroll_x, layer.width());
+        let (top, bottom) = device_axis(y_bounds, scroll_y, layer.height());
+        bounds.0 = bounds.0.min(left);
+        bounds.1 = bounds.1.max(right);
+        bounds.2 = bounds.2.min(top);
+        bounds.3 = bounds.3.max(bottom);
+    }
+    let Some(region) = tiny_skia::IntRect::from_ltrb(bounds.0, bounds.2, bounds.1, bounds.3) else {
+        return;
+    };
+    let Some(mut masked) = layer.clone_rect(region) else { return };
+    let width = masked.width() as usize;
+    let inv_scale = 1.0 / effective_scale;
+
+    struct PreparedMask<'a> {
+        rgba: &'a [u8],
+        width: usize,
+        luminance: bool,
+        x: Vec<Option<usize>>,
+        y: Vec<Option<usize>>,
+    }
+    let prepared: Vec<Option<PreparedMask<'_>>> = masks.iter().map(|mask| {
+        let data = mask.data.as_ref()?;
+        let (rgba, mw, mh) = match data {
+            ImageRef::Owned(bytes, w, h) => (bytes.as_slice(), *w, *h),
+            ImageRef::Shared(bytes, w, h) => (bytes.as_slice(), *w, *h),
+        };
+        if mw == 0 || mh == 0 || mask.tile.w <= 0.0 || mask.tile.h <= 0.0 {
+            return None;
+        }
+        let x = (0..width).map(|x| {
+            let doc_x = (region.x() as usize + x) as f32 * inv_scale + scroll_x;
+            if !mask.no_clip && (doc_x < mask.clip.x || doc_x >= mask.clip.right()) {
+                return None;
+            }
+            mask_axis_sample(doc_x, mask.origin.x, mask.origin.w, mask.tile.x, mask.tile.w, mask.repeat_x_mode)
+                .map(|sample| (sample * mw as f32).floor().clamp(0.0, (mw - 1) as f32) as usize)
+        }).collect();
+        let y = (0..masked.height() as usize).map(|y| {
+            let doc_y = (region.y() as usize + y) as f32 * inv_scale + scroll_y;
+            if !mask.no_clip && (doc_y < mask.clip.y || doc_y >= mask.clip.bottom()) {
+                return None;
+            }
+            mask_axis_sample(doc_y, mask.origin.y, mask.origin.h, mask.tile.y, mask.tile.h, mask.repeat_y_mode)
+                .map(|sample| (sample * mh as f32).floor().clamp(0.0, (mh - 1) as f32) as usize)
+        }).collect();
+        Some(PreparedMask { rgba, width: mw as usize, luminance: mask.luminance, x, y })
+    }).collect();
+
+    for (i, px) in masked.data_mut().chunks_exact_mut(4).enumerate() {
+        if px[3] == 0 { continue; }
+        let mut alpha = 0_u32;
+        for (index, mask) in masks.iter().enumerate().rev() {
+            let source = prepared[index].as_ref().and_then(|sample| {
+                let u = sample.x[i % width]?;
+                let v = sample.y[i / width]?;
+                let base = (v * sample.width + u) * 4;
+                Some(if sample.luminance {
+                    let r = sample.rgba.get(base).copied().unwrap_or(0) as u32;
+                    let g = sample.rgba.get(base + 1).copied().unwrap_or(0) as u32;
+                    let b = sample.rgba.get(base + 2).copied().unwrap_or(0) as u32;
+                    (r * 2126 + g * 7152 + b * 722 + 5000) / 10_000
+                } else {
+                    sample.rgba.get(base + 3).copied().unwrap_or(0) as u32
+                })
+            }).unwrap_or(0);
+            alpha = if index == masks.len() - 1 {
+                source
+            } else {
+                match mask.composite {
+                    1 => source * (255 - alpha) / 255,
+                    2 => source * alpha / 255,
+                    3 => (source * (255 - alpha) + alpha * (255 - source)) / 255,
+                    _ => source + alpha * (255 - source) / 255,
+                }
+            };
+        }
+        px[0] = ((px[0] as u32 * alpha) / 255) as u8;
+        px[1] = ((px[1] as u32 * alpha) / 255) as u8;
+        px[2] = ((px[2] as u32 * alpha) / 255) as u8;
+        px[3] = ((px[3] as u32 * alpha) / 255) as u8;
+    }
+    target.draw_pixmap(region.x(), region.y(), masked.as_ref(), &tiny_skia::PixmapPaint::default(), Transform::identity(), None);
 }
 
 #[test]
@@ -4711,7 +5506,24 @@ fn cropped_mask_composite_matches_full_surface_reference() {
                     Transform::identity(),
                     None,
                 );
-                composite_masked_layer(&mut actual, &layer, rect, &mask, scale, scroll_x, scroll_y);
+                composite_masked_layer(
+                    &mut actual,
+                    &layer,
+                    &MaskLayer {
+                        clip: rect,
+                        no_clip: false,
+                        origin: rect,
+                        tile: rect,
+                        data: Some(mask.clone()),
+                        luminance: false,
+                        repeat_x_mode: 0,
+                        repeat_y_mode: 0,
+                        composite: 0,
+                    },
+                    scale,
+                    scroll_x,
+                    scroll_y,
+                );
                 assert_eq!(
                     actual.data(),
                     expected.data(),
@@ -7201,6 +8013,56 @@ fn blend_common_multiply(dst: &mut Pixmap, src: &Pixmap) {
             )
             .unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn bounded_backdrop_filter_matches_full_surface() {
+    let mut original = Pixmap::new(96, 72).unwrap();
+    for (index, pixel) in original.pixels_mut().iter_mut().enumerate() {
+        let x = index % 96;
+        let y = index / 96;
+        *pixel = tiny_skia::PremultipliedColorU8::from_rgba(
+            (x * 2) as u8,
+            (y * 3) as u8,
+            ((x + y) * 2) as u8,
+            255,
+        )
+        .unwrap();
+    }
+    let rect = Rect::new(17.25, 11.5, 23.5, 19.25);
+    for (kind, value) in [(1, 1.5), (0, 2.0)] {
+        let mut bounded = original.clone();
+        let mut expected = original.clone();
+        let mut full_backdrop = expected.clone();
+        apply_pixel_filter(&mut full_backdrop, kind, value);
+        let mask = build_clip_mask(&rect, &[0.0; 4], &[0.0; 4], 96, 72, 1.0, 0.0, 0.0);
+        expected.draw_pixmap(
+            0,
+            0,
+            full_backdrop.as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            Transform::identity(),
+            mask.as_ref(),
+        );
+        replay_commands_inner(
+            &[PaintCmd::BackdropFilter {
+                rect,
+                radii: [0.0; 4],
+                radii_y: [0.0; 4],
+                filters: vec![(kind, value, 0.0, 0.0, crate::types::Color::BLACK)],
+            }],
+            &mut bounded,
+            1.0,
+            None,
+            0.0,
+            0.0,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(bounded.data(), expected.data(), "filter kind {kind}");
     }
 }
 

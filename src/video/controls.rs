@@ -80,7 +80,7 @@ pub(crate) fn build_media_element(node: &WebCore, list: &mut DisplayList, sx: f3
         });
     }
 
-    if is_video {
+    if is_video && !node.external_video_overlay {
         paint_video_poster(node, list, sx, sy, cr, rect, font_px);
     }
 

@@ -441,6 +441,83 @@ fn background_image_image_set_selects_supported_one_x_candidate() {
 }
 
 #[test]
+fn background_image_url_containing_gradient_is_not_parsed_as_a_gradient() {
+    let mut style = crate::types::ComputedStyle::default();
+    crate::css::apply_property(
+        &mut style,
+        "background-image",
+        "url('/assets/gradient-logo.png')",
+    );
+    assert_eq!(style.background_image_url, "/assets/gradient-logo.png");
+    assert!(style.rare().background_image_set_source.is_none());
+
+    crate::css::apply_property(
+        &mut style,
+        "background-image",
+        "image-set(url('/assets/gradient-logo.png') 1x, url('/assets/gradient-logo@2x.png') 2x)",
+    );
+    assert_eq!(style.background_image_url, "/assets/gradient-logo.png");
+    assert!(style.rare().background_image_set_source.is_some());
+
+    crate::css::apply_property(
+        &mut style,
+        "background",
+        "url('/assets/gradient(logo).png') no-repeat center",
+    );
+    assert_eq!(style.background_image_url, "/assets/gradient(logo).png");
+    assert!(style.rare().background_image_set_source.is_none());
+
+    crate::css::apply_property(
+        &mut style,
+        "background",
+        "image-set(url('/assets/gradient(logo).png') 1x, url('/assets/gradient(logo)@2x.png') 2x) no-repeat center",
+    );
+    assert_eq!(style.background_image_url, "/assets/gradient(logo).png");
+    assert!(style.rare().background_image_set_source.is_some());
+}
+
+#[test]
+fn invalid_background_image_layer_preserves_the_previous_declaration() {
+    let mut style = crate::types::ComputedStyle::default();
+    crate::css::apply_property(
+        &mut style,
+        "background-image",
+        "url(first.png), url(second.png)",
+    );
+    assert_eq!(style.background_image_url, "first.png");
+    assert_eq!(style.rare().additional_background_layers[0].image_url, "second.png");
+
+    for invalid in [
+        "url(replacement.png), bogus",
+        "url(replacement.png),",
+        "url(replacement.png) trailing",
+        "linear-gradient(red, blue) trailing",
+        "image-set(url(high.png) 2x, url(low.png) broken)",
+    ] {
+        crate::css::apply_property(&mut style, "background-image", invalid);
+        assert_eq!(style.background_image_url, "first.png", "{invalid}");
+        assert_eq!(
+            style.rare().additional_background_layers[0].image_url,
+            "second.png",
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn background_shorthand_keeps_parentheses_in_quoted_url() {
+    let mut style = crate::types::ComputedStyle::default();
+    crate::css::apply_property(
+        &mut style,
+        "background",
+        "URL('/assets/gradient(foo)bar).png') no-repeat center",
+    );
+    assert_eq!(style.background_image_url, "/assets/gradient(foo)bar).png");
+    assert_eq!(style.background_position_x, crate::types::CssLength::Percent(50.0));
+    assert_eq!(style.background_position_y, crate::types::CssLength::Percent(50.0));
+}
+
+#[test]
 fn non_streaming_image_scan_reselects_loaded_image_set_layers_and_mask() {
     use crate::types::{DecodedBackgroundImage, PendingImageTarget, WebCore};
 
@@ -449,7 +526,15 @@ fn non_streaming_image_scan_reselects_loaded_image_set_layers_and_mask() {
     node.layout.border_rect.w = 40.0;
     node.layout.border_rect.h = 40.0;
     node.bg_image_data = Some(std::sync::Arc::new(vec![0; 4]));
-    node.mask_image_data = Some(std::sync::Arc::new(vec![0; 4]));
+    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(
+        0,
+        crate::types::DecodedMaskImage {
+            data: std::sync::Arc::new(vec![0; 4]),
+            width: 1,
+            height: 1,
+            resolution: 1.0,
+        },
+    );
     node.additional_bg_images.push(Some(DecodedBackgroundImage {
         data: std::sync::Arc::new(vec![0; 4]),
         width: 1,
@@ -493,7 +578,7 @@ fn non_streaming_image_scan_reselects_loaded_image_set_layers_and_mask() {
         *target == PendingImageTarget::Mask && url == "/mask-2.png"
     }));
     assert!(node.bg_image_data.is_some());
-    assert!(node.mask_image_data.is_some());
+    assert!(node.mask_images.as_ref().unwrap().first.is_some());
     assert!(node.additional_bg_images[0].is_some());
 }
 

@@ -361,7 +361,7 @@ impl EngineFrame {
                         .doc
                         .media_states
                         .values()
-                        .any(|state| state.pending_video_frames.len() >= 8)
+                        .any(|state| !state.paused && state.pending_video_frames.len() >= 8)
                     {
                         break;
                     }
@@ -496,6 +496,9 @@ impl EngineFrame {
             let (media_running, presented_video_ids) = self.doc.tick_media_with_frames(now);
             let video_damage: Vec<_> = presented_video_ids
                 .into_iter()
+                .filter(|id| {
+                    !self.doc.find_webcore(*id).is_some_and(|node| node.external_video_overlay)
+                })
                 .filter_map(|id| video_paint_rect(&self.doc, id, self.viewport_h))
                 .collect();
             update.paint_rects.extend(video_damage.iter().copied());
@@ -613,6 +616,10 @@ impl EngineFrame {
         self.needs_paint || self.needs_style || self.needs_layout || self.doc.hover_changed
     }
 
+    pub(crate) fn needs_immediate_update(&self) -> bool {
+        self.needs_style || self.needs_layout || self.doc.hover_changed
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Input events — host forwards raw events, engine handles everything
     // ═══════════════════════════════════════════════════════════════════════════
@@ -650,6 +657,7 @@ impl EngineFrame {
             !key.starts_with("Background:")
                 && !key.starts_with("BackgroundLayer(")
                 && !key.starts_with("Mask:")
+                && !key.starts_with("MaskLayer(")
         });
         self.pending_density_reselection = true;
         true
@@ -677,8 +685,12 @@ impl EngineFrame {
 
     /// Mouse moved to document-space coordinates. Handles hover tracking.
     pub fn mouse_move(&mut self, doc_x: f32, doc_y: f32) {
-        let new_hovered =
-            crate::layout::hit_test::hit_test_box_at(&self.doc.root, (doc_x, doc_y), 0);
+        let new_hovered = crate::layout::hit_test::hit_test_box_at_scrolled(
+            &self.doc.root,
+            (doc_x, doc_y),
+            (self.doc.scroll_x, self.doc.scroll_y),
+            0,
+        );
         if new_hovered != self.doc.hovered_box {
             self.doc.hovered_box = new_hovered;
             self.doc.hover_changed = true;
@@ -1104,6 +1116,7 @@ impl EngineFrame {
                 delay_ms: 0.0,
                 timing_fn: easing,
                 allow_discrete: false,
+                start_event_fired: true,
             };
 
             // Add to document's active transitions
@@ -1302,6 +1315,7 @@ impl EngineFrame {
                 crate::types::PendingImageTarget::Background
                     | crate::types::PendingImageTarget::BackgroundLayer(_)
                     | crate::types::PendingImageTarget::Mask
+                    | crate::types::PendingImageTarget::MaskLayer(_)
             )
         {
             let base_url = self.doc.base_url.clone();
@@ -1328,13 +1342,14 @@ impl EngineFrame {
                                 );
                             }
                             crate::types::PendingImageTarget::Mask => {
-                                if let Some((data, w, h)) =
-                                    crate::html::decoded_image_pixels_arc(decoded)
-                                {
-                                    node.mask_image_data = Some(data);
-                                    node.mask_image_width = w;
-                                    node.mask_image_height = h;
-                                }
+                                let _ = crate::html::set_decoded_mask_image_for_url_on_node(
+                                    node, decoded, &url, &base_url,
+                                );
+                            }
+                            crate::types::PendingImageTarget::MaskLayer(layer_index) => {
+                                let _ = crate::html::set_decoded_mask_image_layer_for_url_on_node(
+                                    node, layer_index + 1, decoded, &url, &base_url,
+                                );
                             }
                             _ => {}
                         }
@@ -1486,13 +1501,17 @@ impl EngineFrame {
             let source_path = url.split(['?', '#']).next().unwrap_or("");
             let is_y4m = source_path.ends_with(".y4m");
             let is_mp4 = source_path.ends_with(".mp4");
-            if !(is_y4m || is_mp4) || !self.scheduled_videos.insert((node_id, url.clone())) {
-                continue;
-            }
+            let is_webm = source_path.ends_with(".webm");
             if self.doc.media_autoplay(node_id) == Some(true)
                 && self.doc.media_paused(node_id) == Some(true)
             {
                 self.doc.media_play(node_id);
+            }
+            if self.doc.media_paused(node_id) != Some(false)
+                || !(is_y4m || is_mp4 || is_webm)
+                || !self.scheduled_videos.insert((node_id, url.clone()))
+            {
+                continue;
             }
             let tx = self
                 .video_tx
@@ -1528,6 +1547,8 @@ impl EngineFrame {
                     let mut decoder: Box<dyn crate::video::backend::StreamingVideoDecoder> =
                         if is_mp4 {
                             Box::new(crate::video::mp4_avc::Mp4AvcStream::new())
+                        } else if is_webm {
+                            Box::new(crate::video::webm::WebmVp8Decoder::new())
                         } else {
                             Box::new(crate::video::y4m::Y4mStream::new())
                         };
@@ -1538,38 +1559,44 @@ impl EngineFrame {
                             Ok(count) => count,
                             Err(_) => return,
                         };
-                        let frames = match decoder.push(&bytes[..count]) {
-                            Ok(frames) => frames,
-                            Err(_) => return,
-                        };
-                        if !metadata_sent {
-                            if let Some(metadata) = decoder.metadata() {
+                        let mut input = Some(&bytes[..count]);
+                        loop {
+                            let frames = match decoder.push(input.take().unwrap_or(&[])) {
+                                Ok(frames) => frames,
+                                Err(_) => return,
+                            };
+                            if !metadata_sent {
+                                if let Some(metadata) = decoder.metadata() {
+                                    if tx
+                                        .send(PendingVideoUpdate::Metadata { node_id, metadata })
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
+                                    metadata_sent = true;
+                                    if let Some(wake) = &wake {
+                                        wake();
+                                    }
+                                }
+                            }
+                            for mut frame in frames {
+                                last_frame_time = Some(frame.timestamp);
+                                frame.timestamp += loop_start;
                                 if tx
-                                    .send(PendingVideoUpdate::Metadata { node_id, metadata })
+                                    .send(PendingVideoUpdate::Frames {
+                                        node_id,
+                                        frames: vec![frame],
+                                    })
                                     .is_err()
                                 {
                                     return;
                                 }
-                                metadata_sent = true;
                                 if let Some(wake) = &wake {
                                     wake();
                                 }
                             }
-                        }
-                        for mut frame in frames {
-                            last_frame_time = Some(frame.timestamp);
-                            frame.timestamp += loop_start;
-                            if tx
-                                .send(PendingVideoUpdate::Frames {
-                                    node_id,
-                                    frames: vec![frame],
-                                })
-                                .is_err()
-                            {
-                                return;
-                            }
-                            if let Some(wake) = &wake {
-                                wake();
+                            if !decoder.has_buffered_samples() {
+                                break;
                             }
                         }
                     }
@@ -1708,7 +1735,9 @@ impl EngineFrame {
                 }
             }
             if can_paint_resource
-                && (node.mask_image_data.is_none()
+                && (node.mask_images.as_ref().and_then(|images| {
+                    images.get_for_source(0, node.style.mask_source_key(0)?)
+                }).is_none()
                     || node.style.rare().mask_image_set_source.is_some())
                 && !node.style.rare().mask_image_url.is_empty()
             {
@@ -1719,6 +1748,23 @@ impl EngineFrame {
                     crate::types::PendingImageTarget::Mask,
                     crate::html::resolve_url(&selected, base_url),
                 ));
+            }
+            for (layer_index, layer) in node.style.rare().additional_mask_images.iter().enumerate() {
+                if !can_paint_resource || layer.url.is_empty() {
+                    continue;
+                }
+                let loaded = node.mask_images.as_ref().and_then(|images| {
+                    images.get_for_source(layer_index + 1, node.style.mask_source_key(layer_index + 1)?)
+                }).is_some();
+                if !loaded || layer.image_set_source.is_some() {
+                    let selected = layer.url_for_dpr(device_pixel_ratio);
+                    out.push((
+                        node.node_id,
+                        path.clone(),
+                        crate::types::PendingImageTarget::MaskLayer(layer_index),
+                        crate::html::resolve_url(&selected, base_url),
+                    ));
+                }
             }
             if let Some(shadow) = node.shadow_root.as_ref() {
                 for child in &shadow.children {
@@ -2011,16 +2057,7 @@ fn animation_overrides_are_transform_only(
 }
 
 fn retained_paint_band(doc: &Document, viewport_h: f32) -> crate::types::Rect {
-    let doc_h = doc.cached_scroll_height().max(viewport_h);
-    let overscan = (viewport_h * 8.0).max(6000.0);
-    let top = (doc.scroll_y - overscan).max(0.0);
-    let bottom = (doc.scroll_y + viewport_h + overscan).min(doc_h);
-    crate::types::Rect::new(
-        0.0,
-        top,
-        doc.root.layout.margin_rect.w.max(1.0),
-        bottom - top,
-    )
+    crate::renderer::retained_paint_band_for_doc(doc, doc.viewport_w, viewport_h)
 }
 
 fn rect_intersects(a: crate::types::Rect, b: crate::types::Rect) -> bool {
@@ -2092,6 +2129,27 @@ fn post_process_streamed_tree(node: &mut crate::types::WebCore, base_url: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_webm_vp8_video_paints_a_frame() {
+        let Ok(path) = std::env::var("WEBCORE_WEBM_FIXTURE") else { return };
+        let mut frame = EngineFrame::empty(640.0, 480.0);
+        frame.load_html(&format!("<video id=movie autoplay muted src='{path}'></video>"));
+        let id = frame.doc.get_element_by_id("movie").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            frame.update_frame();
+            let node = frame.doc.find_webcore(id).unwrap();
+            if node.image_data.is_some() {
+                assert_eq!(node.image_width, 64);
+                assert_eq!(node.image_height, 48);
+                assert!(frame.doc.media_duration(id).unwrap() > 0.0);
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "VP8 frame did not paint");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
 
     #[test]
     fn mp4_video_metadata_arrives_from_http_before_picture_data() {
@@ -3030,27 +3088,30 @@ mod tests {
         }
         {
             let loaded = find_after_mut(&mut frame.doc.root).expect("generated ::after");
-            loaded.mask_image_data = Some(std::sync::Arc::new(vec![255; 16]));
-            loaded.mask_image_width = 2;
-            loaded.mask_image_height = 2;
+            std::sync::Arc::make_mut(loaded.mask_images.get_or_insert_with(Default::default)).set(0, crate::types::DecodedMaskImage {
+                data: std::sync::Arc::new(vec![255; 16]),
+                width: 2,
+                height: 2,
+                resolution: 1.0,
+            });
         }
         let loaded = find_after(&frame.doc.root).expect("generated ::after");
         assert!(
-            loaded.mask_image_data.is_some(),
+            loaded.mask_images.as_ref().unwrap().first.is_some(),
             "test setup should attach pseudo mask pixels"
         );
-        assert_eq!(loaded.mask_image_width, 2);
-        assert_eq!(loaded.mask_image_height, 2);
+        assert_eq!(loaded.mask_images.as_ref().unwrap().first.as_ref().unwrap().width, 2);
+        assert_eq!(loaded.mask_images.as_ref().unwrap().first.as_ref().unwrap().height, 2);
 
         frame.mark_style_dirty();
         assert!(frame.update_frame(), "forced recascade should run");
         let recascaded = find_after(&frame.doc.root).expect("generated ::after after recascade");
         assert!(
-            recascaded.mask_image_data.is_some(),
+            recascaded.mask_images.as_ref().unwrap().first.is_some(),
             "pseudo rebuild must preserve loaded mask pixels"
         );
-        assert_eq!(recascaded.mask_image_width, 2);
-        assert_eq!(recascaded.mask_image_height, 2);
+        assert_eq!(recascaded.mask_images.as_ref().unwrap().first.as_ref().unwrap().width, 2);
+        assert_eq!(recascaded.mask_images.as_ref().unwrap().first.as_ref().unwrap().height, 2);
     }
 
     #[test]
@@ -3338,7 +3399,7 @@ mod tests {
         let mut frame = EngineFrame::empty(320.0, 240.0);
         frame.start_streaming("https://example.test/");
         frame.feed_html_chunk(
-            br#"<html><body style="margin:0"><div style="height:8000px"></div><img id="far" src="far.png" width="80" height="40"></body></html>"#,
+            br#"<html><body style="margin:0"><div style="height:3000px"></div><img id="far" src="far.png" width="80" height="40"></body></html>"#,
         );
         frame.finish_loading();
         assert!(frame.update_frame(), "initial layout");
@@ -3434,6 +3495,40 @@ mod tests {
         let idle_tick = frame.update_frame_detailed();
         assert!(!idle_tick.changed);
         assert!(!idle_tick.rebuild_display_list);
+    }
+
+    #[test]
+    fn paused_video_queue_does_not_block_playing_video_updates() {
+        let mut frame = EngineFrame::new(
+            crate::html::parse_html("<video id=hero src=clip.mp4></video><video id=paused></video>"),
+            320.0,
+            240.0,
+        );
+        let hero = frame.doc.get_element_by_id("hero").unwrap();
+        let paused = frame.doc.get_element_by_id("paused").unwrap();
+        for timestamp in 0..8 {
+            assert!(frame.doc.media_queue_video_frames(paused, vec![crate::video::backend::VideoFrame {
+                width: 1,
+                height: 1,
+                rgba: std::sync::Arc::new(vec![0, 0, 0, 255]),
+                timestamp: timestamp as f32,
+            }]));
+        }
+        assert!(frame.doc.media_play(hero));
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        frame.video_rx = Some(rx);
+        tx.send(PendingVideoUpdate::Frames {
+            node_id: hero,
+            frames: vec![crate::video::backend::VideoFrame {
+                width: 1,
+                height: 1,
+                rgba: std::sync::Arc::new(vec![255, 0, 0, 255]),
+                timestamp: 0.0,
+            }],
+        }).unwrap();
+        frame.update_frame();
+        assert_eq!(frame.doc.media_states[&paused].pending_video_frames.len(), 8);
+        assert_eq!(frame.doc.find_webcore(hero).unwrap().image_data.as_ref().unwrap()[0], 255);
     }
 
     #[test]

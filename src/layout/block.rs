@@ -758,7 +758,7 @@ fn layout_block_pass(
     let gutter_width = sbw * (u8::from(left_gutter) + u8::from(right_gutter)) as f32;
     let child_content_w = (content_w - gutter_width).max(0.0);
     let _query_container_scope = engine.enter_query_container(
-        &node.style,
+        node,
         content_w,
         rbox.content_height,
         font_px,
@@ -1603,7 +1603,7 @@ fn layout_block_pass(
         0.0
     };
     let natural_h = if node.style.contain_size || node.style.container_type == ContainerType::Size {
-        engine.contained_intrinsic_height(&node.style, font_px, root_font_px)
+        engine.contained_intrinsic_height_for_node(node, font_px, root_font_px)
     } else {
         child_y.max(float_bottom).max(inline_bottom)
     };

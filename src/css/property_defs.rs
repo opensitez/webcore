@@ -4867,6 +4867,10 @@ fn copy_overflow_wrap(d: &mut ComputedStyle, s: &ComputedStyle) {
 
 fn apply_list_style_type(s: &mut ComputedStyle, v: &str) {
     s.custom_list_style_type.clear();
+    if let Some((name, _)) = crate::css::predefined_numeric_counter(v) {
+        s.list_style_type = ListStyleType::Numeric(name);
+        return;
+    }
     s.list_style_type = match v {
         "none" => ListStyleType::None,
         "disc" => ListStyleType::Disc,
@@ -4882,6 +4886,8 @@ fn apply_list_style_type(s: &mut ComputedStyle, v: &str) {
         "upper-roman" => ListStyleType::UpperRoman,
         "lower-greek" => ListStyleType::LowerGreek,
         "armenian" => ListStyleType::Armenian,
+        "upper-armenian" => ListStyleType::UpperArmenian,
+        "lower-armenian" => ListStyleType::LowerArmenian,
         "georgian" => ListStyleType::Georgian,
         "hebrew" => ListStyleType::Hebrew,
         "hiragana" => ListStyleType::Hiragana,
@@ -5534,7 +5540,7 @@ fn valid_background_layer(layer: &str, final_layer: bool) -> bool {
         return false;
     }
     // Custom properties are substituted by the cascade before this parser runs.
-    if layer.contains("var(") {
+    if super::apply::contains_var_function(layer) {
         return true;
     }
     let slash = find_top_level_char(layer, '/');
@@ -5818,42 +5824,55 @@ fn background_layer_color(layer: &str) -> Option<Color> {
 
 fn remove_top_level_function(value: &str, marker: &str) -> Option<(String, String)> {
     let lower = value.to_ascii_lowercase();
-    let marker_start = lower.find(marker)?;
-    let mut start = marker_start;
-    while start > 0 {
-        let Some(prev) = value[..start].chars().next_back() else {
-            break;
-        };
-        if prev.is_ascii_alphabetic() || prev == '-' {
-            start -= prev.len_utf8();
-        } else {
-            break;
-        }
-    }
-
-    let open = value[start..].find('(').map(|idx| start + idx)?;
+    let mut quote = None;
+    let mut escaped = false;
     let mut depth = 0usize;
-    let mut end = value.len();
-    for (idx, ch) in value[open..].char_indices() {
+    let mut start = None;
+    for (idx, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if ch == delimiter {
+                quote = None;
+            }
+            continue;
+        }
         match ch {
-            '(' => depth += 1,
+            '\'' | '"' => quote = Some(ch),
+            '(' => {
+                if depth == 0 && lower[..=idx].ends_with(marker) {
+                    let mut function_start = idx + 1 - marker.len();
+                    while let Some(prev) = value[..function_start].chars().next_back() {
+                        if !prev.is_ascii_alphabetic() && prev != '-' {
+                            break;
+                        }
+                        function_start -= prev.len_utf8();
+                    }
+                    start = Some(function_start);
+                }
+                depth += 1;
+            }
             ')' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    end = open + idx + 1;
-                    break;
+                if depth > 0 {
+                    depth -= 1;
+                    if depth == 0 && let Some(start) = start {
+                        let end = idx + 1;
+                        let function = value[start..end].trim().to_string();
+                        let rest = format!("{} {}", &value[..start], &value[end..]);
+                        return Some((function, rest));
+                    }
                 }
             }
             _ => {}
         }
     }
-    if end <= open {
-        return None;
-    }
-
-    let function = value[start..end].trim().to_string();
-    let rest = format!("{} {}", &value[..start], &value[end..]);
-    Some((function, rest))
+    None
 }
 
 fn apply_background_single_layer(s: &mut ComputedStyle, v: &str) {
@@ -5871,36 +5890,14 @@ fn apply_background_single_layer(s: &mut ComputedStyle, v: &str) {
         }
     }
 
-    // Extract url() first
-    if let Some(url) = super::extract_url(&v_without_image) {
+    if let Some((url_function, rest)) = remove_top_level_function(&v_without_image, "url(")
+        && let Some((url, end)) = super::apply::parse_url_function(&url_function)
+        && end == url_function.len()
+    {
         s.background_image_url = url;
+        v_without_image = rest;
     }
-    // Strip url(...) from value before splitting
-    let v_no_url = if let Some(start) = v_without_image.find("url(") {
-        let depth_start = start;
-        let mut depth = 0;
-        let mut end = v_without_image.len();
-        for (i, ch) in v_without_image[depth_start..].char_indices() {
-            if ch == '(' {
-                depth += 1;
-            }
-            if ch == ')' {
-                depth -= 1;
-                if depth == 0 {
-                    end = depth_start + i + 1;
-                    break;
-                }
-            }
-        }
-        format!(
-            "{} {}",
-            &v_without_image[..depth_start],
-            &v_without_image[end..]
-        )
-    } else {
-        v_without_image
-    };
-    let v_rest = v_no_url.trim();
+    let v_rest = v_without_image.trim();
     let (pos_part, size_part) = if let Some(slash) = find_top_level_char(v_rest, '/') {
         (&v_rest[..slash], Some(&v_rest[slash + 1..]))
     } else {
@@ -6059,55 +6056,106 @@ fn apply_background_misc_tokens(s: &mut ComputedStyle, tokens: &[&str]) {
 
 fn apply_background_image(s: &mut ComputedStyle, v: &str) {
     let layers = crate::css::value_parse::split_top_level_commas(v);
-    if layers.iter().any(|layer| {
-        is_image_set_function(layer.trim()) && extract_image_set_url(layer.trim()).is_none()
-    }) {
+    let Some(parsed): Option<Vec<_>> = layers
+        .iter()
+        .map(|layer| parse_background_image_layer(layer.trim()))
+        .collect()
+    else {
         return;
-    }
-    if layers.len() > 1 {
-        reset_background_image_fields(s);
-        let mut all_image_layers: Vec<ComputedStyle> = Vec::new();
-        for layer in &layers {
-            let mut parsed = ComputedStyle::default();
-            apply_single_background_image(&mut parsed, layer.trim());
-            all_image_layers.push(parsed);
-        }
-        if !all_image_layers.is_empty() {
-            copy_background_image_fields(s, &all_image_layers[0]);
-            ensure_background_layer_count(s, all_image_layers.len());
-            for (dst, src) in s
-                .rare_mut()
-                .additional_background_layers
-                .iter_mut()
-                .zip(&all_image_layers[1..])
-            {
-                copy_background_image_to_layer(dst, src);
-            }
-            sync_background_blend_layers(s);
-        }
+    };
+    let Some(first) = parsed.first() else {
         return;
+    };
+    reset_background_image_fields(s);
+    first.apply_to_style(s);
+    if parsed.len() > 1 {
+        ensure_background_layer_count(s, parsed.len());
+        for (dst, src) in s
+            .rare_mut()
+            .additional_background_layers
+            .iter_mut()
+            .zip(&parsed[1..])
+        {
+            src.apply_to_layer(dst);
+        }
+        sync_background_blend_layers(s);
     }
-    apply_single_background_image(s, v);
 }
 
-fn apply_single_background_image(s: &mut ComputedStyle, v: &str) {
-    let lower = v.to_ascii_lowercase();
-    if lower.contains("gradient") {
-        reset_background_image_fields(s);
-        super::apply_gradient(s, v);
-    } else if lower.trim() == "none" {
-        reset_background_image_fields(s);
-    } else if is_image_set_function(v) {
-        let Some(url) = extract_image_set_url(v) else {
-            return;
-        };
-        reset_background_image_fields(s);
-        s.background_image_url = url;
-        s.rare_mut().background_image_set_source = Some(v.trim().to_string());
-    } else if let Some(url) = super::extract_url(v) {
-        reset_background_image_fields(s);
-        s.background_image_url = url;
+enum ParsedBackgroundImage {
+    None,
+    Url(String),
+    ImageSet { url: String, source: String },
+    Gradient(Box<ComputedStyle>),
+}
+
+impl ParsedBackgroundImage {
+    fn apply_to_style(&self, style: &mut ComputedStyle) {
+        match self {
+            Self::None => {}
+            Self::Url(url) => style.background_image_url = url.clone(),
+            Self::ImageSet { url, source } => {
+                style.background_image_url = url.clone();
+                style.rare_mut().background_image_set_source = Some(source.clone());
+            }
+            Self::Gradient(gradient) => copy_background_image_fields(style, gradient),
+        }
     }
+
+    fn apply_to_layer(&self, layer: &mut BackgroundLayer) {
+        match self {
+            Self::None => {}
+            Self::Url(url) => layer.image_url = url.clone(),
+            Self::ImageSet { url, source } => {
+                layer.image_url = url.clone();
+                layer.image_set_source = Some(source.clone());
+            }
+            Self::Gradient(gradient) => copy_background_image_to_layer(layer, gradient),
+        }
+    }
+}
+
+fn parse_background_image_layer(v: &str) -> Option<ParsedBackgroundImage> {
+    let lower = v.trim().to_ascii_lowercase();
+    if lower == "none" {
+        return Some(ParsedBackgroundImage::None);
+    }
+    if is_image_set_function(v) {
+        let url = extract_image_set_url(v)?;
+        return Some(ParsedBackgroundImage::ImageSet {
+            url,
+            source: v.trim().to_string(),
+        });
+    } else if [
+        "linear-gradient(",
+        "repeating-linear-gradient(",
+        "radial-gradient(",
+        "repeating-radial-gradient(",
+        "-webkit-linear-gradient(",
+        "-webkit-radial-gradient(",
+        "-webkit-gradient(",
+    ]
+    .iter()
+    .any(|function| lower.starts_with(function))
+    {
+        if !remove_top_level_function(v, "gradient(").is_some_and(|(function, rest)| {
+            function == v.trim() && rest.trim().is_empty()
+        }) {
+            return None;
+        }
+        let mut s = Box::new(ComputedStyle::default());
+        super::apply_gradient(&mut s, v);
+        if s.gradient_type == GradientType::None {
+            return None;
+        }
+        return Some(ParsedBackgroundImage::Gradient(s));
+    } else if let Some((url, end)) = super::apply::parse_url_function(v.trim()) {
+        if end != v.trim().len() {
+            return None;
+        }
+        return Some(ParsedBackgroundImage::Url(url));
+    }
+    None
 }
 
 #[derive(Clone)]
@@ -6282,7 +6330,7 @@ fn image_set_candidate_type_is_supported(descriptor: &str) -> Option<bool> {
             | "image/svg+xml"
     ))
 }
-fn parse_background_size_layer(v: &str) -> Option<(BackgroundSize, CssLength, CssLength)> {
+pub(crate) fn parse_background_size_layer(v: &str) -> Option<(BackgroundSize, CssLength, CssLength)> {
     fn component(token: &str) -> Option<CssLength> {
         if token.eq_ignore_ascii_case("auto") {
             return Some(CssLength::Auto);
@@ -6398,7 +6446,7 @@ fn background_position_length(token: &str) -> Option<CssLength> {
         .filter(|length| !matches!(length, CssLength::Auto | CssLength::None))
 }
 
-fn parse_background_position_pair(v: &str) -> Option<(CssLength, CssLength)> {
+pub(crate) fn parse_background_position_pair(v: &str) -> Option<(CssLength, CssLength)> {
     let parts = split_top_level_whitespace(v);
     let center = || CssLength::Percent(50.0);
     match parts.as_slice() {
@@ -6627,7 +6675,7 @@ fn background_repeat_axis(token: &str) -> Option<BackgroundRepeatAxis> {
     }
 }
 
-fn parse_background_repeat_value(value: &str) -> Option<BackgroundRepeat> {
+pub(crate) fn parse_background_repeat_value(value: &str) -> Option<BackgroundRepeat> {
     let normalized = value.to_ascii_lowercase();
     let tokens: Vec<&str> = normalized.split_whitespace().collect();
     match tokens.as_slice() {
@@ -6930,58 +6978,184 @@ fn copy_background_blend_mode(d: &mut ComputedStyle, s: &ComputedStyle) {
 }
 
 fn apply_mask(s: &mut ComputedStyle, v: &str) {
-    if remove_top_level_function(v, "image-set(")
-        .is_some_and(|(image_set, _)| extract_image_set_url(&image_set).is_none())
-    {
+    let layers = crate::css::value_parse::split_top_level_commas(v);
+    if layers.is_empty() {
         return;
     }
+    if layers.len() == 1 {
+        apply_mask_single(s, layers[0]);
+        return;
+    }
+    let mut parsed = Vec::with_capacity(layers.len());
+    for layer in layers {
+        let mut style = ComputedStyle::default();
+        if !apply_mask_single(&mut style, layer) {
+            return;
+        }
+        parsed.push(style.rare().clone());
+    }
     apply_mask_initials(s);
-    let (before, after) = find_top_level_char(v, '/')
-        .map(|index| (&v[..index], &v[index + 1..]))
-        .unwrap_or((v, ""));
-    let mut tokens = super::split_shorthand_values(before);
-    let mut after_tokens = super::split_shorthand_values(after);
-    if let Some(size) = after_tokens.first() {
-        apply_mask_size(s, size);
-        for token in after_tokens.drain(1..) {
-            tokens.push(token);
+    let rare = s.rare_mut();
+    rare.mask_image_url = parsed[0].mask_image_url.clone();
+    rare.mask_image_set_source = parsed[0].mask_image_set_source.clone();
+    rare.additional_mask_images = parsed.iter().skip(1).map(|layer| {
+        crate::types::MaskImageSource {
+            url: layer.mask_image_url.clone(),
+            image_set_source: layer.mask_image_set_source.clone(),
         }
+    }).collect();
+    let layer_list = |value: fn(&crate::types::RareStyle) -> &str, initial: &str| {
+        parsed.iter().map(|layer| {
+            let part = value(layer);
+            if part.is_empty() { initial } else { part }
+        }).collect::<Vec<_>>().join(", ")
+    };
+    rare.mask_mode = layer_list(|layer| &layer.mask_mode, "match-source");
+    rare.mask_repeat = layer_list(|layer| &layer.mask_repeat, "repeat");
+    rare.mask_position = layer_list(|layer| &layer.mask_position, "0% 0%");
+    rare.mask_size = layer_list(|layer| &layer.mask_size, "auto");
+    rare.mask_origin = layer_list(|layer| &layer.mask_origin, "border-box");
+    rare.mask_clip = layer_list(|layer| &layer.mask_clip, "border-box");
+    rare.mask_composite = layer_list(|layer| &layer.mask_composite, "add");
+}
+
+fn apply_mask_single(s: &mut ComputedStyle, v: &str) -> bool {
+    let layer = v.trim();
+    if layer.is_empty() {
+        return false;
     }
-    for token in tokens {
-        match token {
-            "none" => apply_mask_image(s, "none"),
-            "repeat" | "repeat-x" | "repeat-y" | "no-repeat" | "space" | "round" => {
-                apply_mask_repeat(s, &token)
-            }
-            "alpha" | "luminance" | "match-source" => apply_mask_mode(s, &token),
-            "add" | "subtract" | "intersect" | "exclude" => apply_mask_composite(s, &token),
-            "border-box" | "padding-box" | "content-box" | "fill-box" | "stroke-box"
-            | "view-box" | "no-clip" => {
-                if token == "no-clip" || !s.rare().mask_origin.is_empty() {
-                    apply_mask_clip(s, &token);
-                } else {
-                    apply_mask_origin(s, &token);
-                }
-            }
-            _ if token.starts_with("url(")
-                || token.starts_with("image-set(")
-                || token.starts_with("-webkit-image-set(") =>
+    let slash = find_top_level_char(layer, '/');
+    let (before, after) = slash
+        .map(|index| (&layer[..index], &layer[index + 1..]))
+        .unwrap_or((layer, ""));
+    if find_top_level_char(after, '/').is_some() {
+        return false;
+    }
+    let mut before_tokens = split_top_level_whitespace(before);
+    let mut after_tokens = split_top_level_whitespace(after);
+    let before_len = before_tokens.len();
+    let size = if slash.is_some() {
+        let width = after_tokens.first().copied().unwrap_or("");
+        if width.is_empty() {
+            return false;
+        }
+        let pair = after_tokens
+            .get(1)
+            .map(|height| format!("{width} {height}"));
+        let (size, consumed) = if pair
+            .as_deref()
+            .and_then(parse_background_size_layer)
+            .is_some()
+        {
+            (pair.unwrap(), 2)
+        } else if parse_background_size_layer(width).is_some() {
+            (width.to_string(), 1)
+        } else {
+            return false;
+        };
+        after_tokens.drain(..consumed);
+        Some(size)
+    } else {
+        None
+    };
+    let mut image = None;
+    let mut mode = None;
+    let mut composite = None;
+    let mut boxes = Vec::new();
+    let mut repeat = Vec::new();
+    let mut position = Vec::new();
+    let mut position_closed = false;
+    for (index, token) in before_tokens.drain(..).chain(after_tokens.drain(..)).enumerate() {
+        let lower = token.to_ascii_lowercase();
+        let is_image = lower == "none"
+            || lower.starts_with("url(")
+            || lower.starts_with("image-set(")
+            || lower.starts_with("-webkit-image-set(");
+        if is_image {
+            if image.is_some()
+                || (lower != "none"
+                    && if is_image_set_function(token) {
+                        extract_image_set_url(token).is_none()
+                    } else {
+                        parse_mask_url(token).is_none()
+                    })
             {
-                apply_mask_image(s, &token)
+                return false;
             }
-            _ => {
-                if !token.is_empty() {
-                    apply_mask_position(s, &token);
-                }
+            image = Some(token.to_string());
+        } else if matches!(lower.as_str(), "alpha" | "luminance" | "match-source") {
+            if mode.replace(lower).is_some() {
+                return false;
             }
+        } else if matches!(lower.as_str(), "add" | "subtract" | "intersect" | "exclude") {
+            if composite.replace(lower).is_some() {
+                return false;
+            }
+        } else if matches!(lower.as_str(), "border-box" | "padding-box" | "content-box" | "fill-box" | "stroke-box" | "view-box" | "no-clip") {
+            boxes.push(lower);
+            if boxes.len() > 2 {
+                return false;
+            }
+        } else if matches!(lower.as_str(), "repeat" | "repeat-x" | "repeat-y" | "no-repeat" | "space" | "round") {
+            repeat.push(lower);
+            if repeat.len() > 2 {
+                return false;
+            }
+        } else {
+            if slash.is_some() && index >= before_len {
+                return false;
+            }
+            if position_closed {
+                return false;
+            }
+            position.push(token);
+            if position.len() > 4 {
+                return false;
+            }
+            continue;
+        }
+        if !position.is_empty() {
+            position_closed = true;
         }
     }
+    let position = position.join(" ");
+    let repeat = repeat.join(" ");
+    if (!position.is_empty() && parse_background_position_pair(&position).is_none())
+        || (!repeat.is_empty() && parse_background_repeat_value(&repeat).is_none())
+        || (slash.is_some() && position.is_empty())
+        || (boxes.len() == 2 && boxes[1] == boxes[0])
+    {
+        return false;
+    }
+    let (origin, clip) = match boxes.as_slice() {
+        [] => ("", ""),
+        [single] if single == "no-clip" => ("", "no-clip"),
+        [single] => (single.as_str(), single.as_str()),
+        [first, second] if first == "no-clip" => (second.as_str(), "no-clip"),
+        [first, second] if second == "no-clip" => (first.as_str(), "no-clip"),
+        [origin, clip] => (origin.as_str(), clip.as_str()),
+        _ => return false,
+    };
+    apply_mask_initials(s);
+    if let Some(image) = image {
+        apply_mask_image(s, &image);
+    }
+    let rare = s.rare_mut();
+    rare.mask_mode = mode.unwrap_or_default();
+    rare.mask_repeat = repeat;
+    rare.mask_position = position;
+    rare.mask_size = size.unwrap_or_default();
+    rare.mask_origin = origin.to_string();
+    rare.mask_clip = clip.to_string();
+    rare.mask_composite = composite.unwrap_or_default();
+    true
 }
 
 fn apply_mask_initials(s: &mut ComputedStyle) {
     let rare = s.rare_mut();
     rare.mask_image_url.clear();
     rare.mask_image_set_source = None;
+    rare.additional_mask_images.clear();
     rare.mask_mode.clear();
     rare.mask_repeat.clear();
     rare.mask_position.clear();
@@ -6992,23 +7166,46 @@ fn apply_mask_initials(s: &mut ComputedStyle) {
 }
 
 fn apply_mask_image(s: &mut ComputedStyle, v: &str) {
-    if v == "none" {
-        s.rare_mut().mask_image_url.clear();
-        s.rare_mut().mask_image_set_source = None;
-    } else if is_image_set_function(v) {
-        let Some(url) = extract_image_set_url(v) else {
-            return;
-        };
-        s.rare_mut().mask_image_url = url;
-        s.rare_mut().mask_image_set_source = Some(v.trim().to_string());
-    } else if let Some(url) = super::extract_url(v) {
-        s.rare_mut().mask_image_url = url;
-        s.rare_mut().mask_image_set_source = None;
-    }
+    let Some(layers) = crate::css::value_parse::split_top_level_commas(v)
+        .into_iter()
+        .map(|layer| {
+            let layer = layer.trim();
+            if layer.eq_ignore_ascii_case("none") {
+                Some(crate::types::MaskImageSource::default())
+            } else if is_image_set_function(layer) {
+                Some(crate::types::MaskImageSource {
+                    url: extract_image_set_url(layer)?,
+                    image_set_source: Some(layer.to_string()),
+                })
+            } else {
+                Some(crate::types::MaskImageSource {
+                    url: parse_mask_url(layer)?,
+                    image_set_source: None,
+                })
+            }
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
+    let Some(first) = layers.first() else {
+        return;
+    };
+    let rare = s.rare_mut();
+    rare.mask_image_url = first.url.clone();
+    rare.mask_image_set_source = first.image_set_source.clone();
+    rare.additional_mask_images = layers.into_iter().skip(1).collect();
+}
+
+fn parse_mask_url(value: &str) -> Option<String> {
+    let value = value.trim();
+    let (url, consumed) = super::apply::parse_url_function(value)?;
+    (consumed == value.len()).then_some(url)
 }
 fn copy_mask_image(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.rare_mut().mask_image_url = s.rare().mask_image_url.clone();
     d.rare_mut().mask_image_set_source = s.rare().mask_image_set_source.clone();
+    d.rare_mut().additional_mask_images = s.rare().additional_mask_images.clone();
 }
 fn apply_mask_mode(s: &mut ComputedStyle, v: &str) {
     apply_keyword_list(
@@ -7021,30 +7218,40 @@ fn copy_mask_mode(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.rare_mut().mask_mode = s.rare().mask_mode.clone();
 }
 fn apply_mask_repeat(s: &mut ComputedStyle, v: &str) {
-    apply_keyword_list(
-        &mut s.rare_mut().mask_repeat,
-        v,
-        &[
-            "repeat",
-            "repeat-x",
-            "repeat-y",
-            "no-repeat",
-            "space",
-            "round",
-        ],
-    );
+    let layers = crate::css::value_parse::split_top_level_commas(v);
+    if !layers.is_empty()
+        && layers
+            .iter()
+            .all(|layer| parse_background_repeat_value(layer.trim()).is_some())
+    {
+        s.rare_mut().mask_repeat = v.trim().to_string();
+    }
 }
 fn copy_mask_repeat(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.rare_mut().mask_repeat = s.rare().mask_repeat.clone();
 }
 fn apply_mask_position(s: &mut ComputedStyle, v: &str) {
-    s.rare_mut().mask_position = v.to_string();
+    let layers = crate::css::value_parse::split_top_level_commas(v);
+    if !layers.is_empty()
+        && layers
+            .iter()
+            .all(|layer| parse_background_position_pair(layer.trim()).is_some())
+    {
+        s.rare_mut().mask_position = v.trim().to_string();
+    }
 }
 fn copy_mask_position(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.rare_mut().mask_position = s.rare().mask_position.clone();
 }
 fn apply_mask_size(s: &mut ComputedStyle, v: &str) {
-    s.rare_mut().mask_size = v.to_string();
+    let layers = crate::css::value_parse::split_top_level_commas(v);
+    if !layers.is_empty()
+        && layers
+            .iter()
+            .all(|layer| parse_background_size_layer(layer.trim()).is_some())
+    {
+        s.rare_mut().mask_size = v.trim().to_string();
+    }
 }
 fn copy_mask_size(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.rare_mut().mask_size = s.rare().mask_size.clone();
@@ -9047,42 +9254,61 @@ fn copy_content_visibility(d: &mut ComputedStyle, s: &ComputedStyle) {
 }
 
 fn apply_contain_intrinsic_size(s: &mut ComputedStyle, v: &str) {
-    let parts: Vec<&str> = v.split_whitespace().collect();
-    let (width, height) = match parts.as_slice() {
-        [] => return,
-        ["none"] => (CssLength::None, CssLength::None),
-        [one] => match parse_length_checked(one) {
-            Some(length) => (length.clone(), length),
-            None => return,
-        },
-        [first, second] => {
-            let first = if *first == "none" {
-                CssLength::None
-            } else {
-                match parse_length_checked(first) {
-                    Some(length) => length,
-                    None => return,
-                }
-            };
-            let second = if *second == "none" {
-                CssLength::None
-            } else {
-                match parse_length_checked(second) {
-                    Some(length) => length,
-                    None => return,
-                }
-            };
-            (first, second)
+    let parts = split_top_level_whitespace(v);
+    let mut axes = Vec::with_capacity(2);
+    let mut index = 0;
+    while index < parts.len() && axes.len() < 2 {
+        let auto = parts[index] == "auto";
+        if auto {
+            index += 1;
         }
-        _ => return,
-    };
+        let Some(token) = parts.get(index) else { return };
+        let length = if *token == "none" {
+            CssLength::None
+        } else {
+            let Some(length) = parse_length_checked(token) else { return };
+            if length.is_auto() || length.is_none() || length.has_percentage()
+                || matches!(length, CssLength::Px(n) if n < 0.0)
+            {
+                return;
+            }
+            length
+        };
+        axes.push((length, auto));
+        index += 1;
+    }
+    if axes.is_empty() || index != parts.len() {
+        return;
+    }
+    let (width, width_auto) = axes[0].clone();
+    let (height, height_auto) = axes.get(1).cloned().unwrap_or_else(|| axes[0].clone());
     s.contain_intrinsic_width = width;
     s.contain_intrinsic_height = height;
+    if width_auto
+        || height_auto
+        || s.rare().contain_intrinsic_width_auto
+        || s.rare().contain_intrinsic_height_auto
+    {
+        let rare = s.rare_mut();
+        rare.contain_intrinsic_width_auto = width_auto;
+        rare.contain_intrinsic_height_auto = height_auto;
+    }
 }
 
 fn copy_contain_intrinsic_size(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.contain_intrinsic_width = s.contain_intrinsic_width.clone();
     d.contain_intrinsic_height = s.contain_intrinsic_height.clone();
+    let width_auto = s.rare().contain_intrinsic_width_auto;
+    let height_auto = s.rare().contain_intrinsic_height_auto;
+    if width_auto
+        || height_auto
+        || d.rare().contain_intrinsic_width_auto
+        || d.rare().contain_intrinsic_height_auto
+    {
+        let rare = d.rare_mut();
+        rare.contain_intrinsic_width_auto = width_auto;
+        rare.contain_intrinsic_height_auto = height_auto;
+    }
 }
 
 // ── Scroll snap ─────────────────────────────────────────────────────────────

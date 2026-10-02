@@ -119,6 +119,7 @@ pub struct AnimState {
     pub animation: ParsedAnimation,
     pub start_time: std::time::Instant,
     pub paused_at: Option<std::time::Instant>,
+    pub start_event_fired: bool,
     pub last_iteration_event: u32,
 }
 
@@ -135,4 +136,5 @@ pub struct TransitionState {
     pub delay_ms: f32,
     pub timing_fn: EasingFn,
     pub allow_discrete: bool,
+    pub start_event_fired: bool,
 }

@@ -772,7 +772,7 @@ pub fn layout_table(
         }
     }
     let _query_container_scope = engine.enter_query_container(
-        &node.style,
+        node,
         table_width,
         rbox.content_height,
         font_px,

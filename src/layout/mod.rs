@@ -345,6 +345,19 @@ struct PendingFontResult {
     faces: Vec<crate::css::FontFaceDecl>,
     url: String,
     bytes: Option<std::sync::Arc<Vec<u8>>>,
+    requested_at: std::time::Instant,
+    completed_at: std::time::Instant,
+}
+
+const FONT_DISPLAY_FALLBACK_SWAP_PERIOD: std::time::Duration = std::time::Duration::from_secs(3);
+const FONT_DISPLAY_OPTIONAL_LOAD_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn font_face_can_swap(face: &crate::css::FontFaceDecl, elapsed: std::time::Duration) -> bool {
+    match face.display.as_deref() {
+        Some("fallback") => elapsed <= FONT_DISPLAY_FALLBACK_SWAP_PERIOD,
+        Some("optional") => elapsed <= FONT_DISPLAY_OPTIONAL_LOAD_PERIOD,
+        _ => true,
+    }
 }
 
 #[derive(Default)]
@@ -379,6 +392,152 @@ fn has_eot_magic(bytes: &[u8]) -> bool {
 mod font_data_tests {
     use super::is_font_data;
     use base64::Engine;
+
+    #[test]
+    fn document_font_loading_skips_unused_families_after_cascade() {
+        let font = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(font);
+        let html = format!(
+            "<style>@font-face{{font-family:'Used Face';src:url(data:font/woff2;base64,{encoded})}}\
+             @font-face{{font-family:'Unused Face';src:url(data:font/woff2;base64,{encoded})}}\
+             p{{font-family:'Used Face',serif}}</style><p>Text</p>"
+        );
+        let mut doc = crate::html::parse_html(&html);
+        let mut fonts = cosmic_text::FontSystem::new();
+        let mut layout = super::LayoutEngine::new();
+        layout.font_system = Some(&mut fonts);
+        layout.layout(&mut doc, 400.0);
+
+        let family_is_registered = |name| {
+            fonts
+                .db()
+                .query(&fontdb::Query {
+                    families: &[fontdb::Family::Name(name)],
+                    ..fontdb::Query::default()
+                })
+                .is_some()
+        };
+        assert!(family_is_registered("Used Face"));
+        assert!(!family_is_registered("Unused Face"));
+    }
+
+    #[test]
+    fn generated_text_activates_matching_unicode_range_font() {
+        let font = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(font);
+        let html = format!(
+            "<style>@font-face{{font-family:'Icon Face';src:url(data:font/woff2;base64,{encoded});\
+             unicode-range:U+E000-EFFF}}\
+             p::before{{content:'\\e001';font-family:'Icon Face'}}</style><p>Text</p>"
+        );
+        let mut doc = crate::html::parse_html(&html);
+        let mut fonts = cosmic_text::FontSystem::new();
+        let mut layout = super::LayoutEngine::new();
+        layout.font_system = Some(&mut fonts);
+        layout.layout(&mut doc, 400.0);
+
+        assert!(fonts.db().query(&fontdb::Query {
+            families: &[fontdb::Family::Name("Icon Face")],
+            ..fontdb::Query::default()
+        }).is_some());
+    }
+
+    #[test]
+    fn hidden_text_does_not_activate_unicode_range_font() {
+        let font = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(font);
+        let html = format!(
+            "<style>@font-face{{font-family:'Hidden Greek Face';\
+             src:url(data:font/woff2;base64,{encoded});unicode-range:U+0370-03FF}}\
+             p{{font-family:'Hidden Greek Face'}} .hidden{{display:none}}</style>\
+             <p>Latin</p><p class=hidden>Ω</p>"
+        );
+        let mut doc = crate::html::parse_html(&html);
+        let mut fonts = cosmic_text::FontSystem::new();
+        let mut layout = super::LayoutEngine::new();
+        layout.font_system = Some(&mut fonts);
+        layout.layout(&mut doc, 400.0);
+
+        assert!(fonts.db().query(&fontdb::Query {
+            families: &[fontdb::Family::Name("Hidden Greek Face")],
+            ..fontdb::Query::default()
+        }).is_none());
+    }
+
+    #[test]
+    fn changed_text_activates_unicode_range_font_without_recascade() {
+        let font = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(font);
+        let html = format!(
+            "<style>@font-face{{font-family:'Dynamic Greek Face';\
+             src:url(data:font/woff2;base64,{encoded});unicode-range:U+0370-03FF}}\
+             p{{font-family:'Dynamic Greek Face'}}</style><p id=t>Latin</p>"
+        );
+        let mut doc = crate::html::parse_html(&html);
+        let mut fonts = cosmic_text::FontSystem::new();
+        let mut layout = super::LayoutEngine::new();
+        layout.font_system = Some(&mut fonts);
+        let query = fontdb::Query {
+            families: &[fontdb::Family::Name("Dynamic Greek Face")],
+            ..fontdb::Query::default()
+        };
+
+        layout.layout(&mut doc, 400.0);
+        assert!(fonts.db().query(&query).is_none());
+        let id = doc.get_element_by_id("t").expect("paragraph");
+        doc.set_text_content(id, "Ω");
+        layout.layout(&mut doc, 400.0);
+        assert!(fonts.db().query(&query).is_some());
+    }
+
+    #[test]
+    fn unrelated_text_does_not_activate_family_scoped_unicode_range() {
+        let font = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(font);
+        let html = format!(
+            "<style>@font-face{{font-family:'Scoped Greek Face';\
+             src:url(data:font/woff2;base64,{encoded});unicode-range:U+0370-03FF}}\
+             #latin{{font-family:'Scoped Greek Face'}}</style>\
+             <ul><li id=latin>Latin</li></ul><p>Ω</p>"
+        );
+        let mut doc = crate::html::parse_html(&html);
+        let mut fonts = cosmic_text::FontSystem::new();
+        let mut layout = super::LayoutEngine::new();
+        layout.font_system = Some(&mut fonts);
+        let query = fontdb::Query {
+            families: &[fontdb::Family::Name("Scoped Greek Face")],
+            ..fontdb::Query::default()
+        };
+
+        layout.layout(&mut doc, 400.0);
+        assert!(fonts.db().query(&query).is_none());
+        let id = doc.get_element_by_id("latin").expect("paragraph");
+        doc.set_text_content(id, "Ω");
+        layout.layout(&mut doc, 400.0);
+        assert!(fonts.db().query(&query).is_some());
+    }
+
+    #[test]
+    fn first_letter_family_is_not_filtered_by_owner_text() {
+        let font = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(font);
+        let html = format!(
+            "<style>@font-face{{font-family:'Shared First Letter Face';\
+             src:url(data:font/woff2;base64,{encoded});unicode-range:U+0370-03FF}}\
+             #latin{{font-family:'Shared First Letter Face'}}\
+             #first::first-letter{{font-family:'Shared First Letter Face'}}</style>\
+             <p id=latin>Latin</p><p id=first>Ωmega</p>"
+        );
+        let mut doc = crate::html::parse_html(&html);
+        let mut fonts = cosmic_text::FontSystem::new();
+        let mut layout = super::LayoutEngine::new();
+        layout.font_system = Some(&mut fonts);
+        layout.layout(&mut doc, 400.0);
+        assert!(fonts.db().query(&fontdb::Query {
+            families: &[fontdb::Family::Name("Shared First Letter Face")],
+            ..fontdb::Query::default()
+        }).is_some());
+    }
 
     fn uncompressed_eot(font: &[u8]) -> Vec<u8> {
         let mut eot = vec![0; 82];
@@ -563,6 +722,8 @@ mod font_data_tests {
             faces: Vec::new(),
             url: remote_url.clone(),
             bytes: None,
+            requested_at: std::time::Instant::now(),
+            completed_at: std::time::Instant::now(),
         })
         .unwrap();
         engine.pending_fonts.push(rx);
@@ -604,6 +765,170 @@ mod font_data_tests {
                 })
                 .is_some()
         );
+    }
+
+    #[test]
+    fn font_display_late_faces_keep_fallback_without_relayout() {
+        let bytes = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        for (display, age) in [
+            ("fallback", std::time::Duration::from_secs(4)),
+            ("optional", std::time::Duration::from_millis(200)),
+        ] {
+            let mut fs = cosmic_text::FontSystem::new();
+            let mut engine = super::LayoutEngine::new();
+            engine.font_system = Some(&mut fs);
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(super::PendingFontResult {
+                faces: vec![crate::css::FontFaceDecl {
+                    family: format!("Late {display}"),
+                    display: Some(display.into()),
+                    ..Default::default()
+                }],
+                url: format!("https://example.test/{display}.woff2"),
+                bytes: Some(std::sync::Arc::new(bytes.to_vec())),
+                requested_at: std::time::Instant::now() - age,
+                completed_at: std::time::Instant::now(),
+            })
+            .unwrap();
+            engine.pending_fonts.push(rx);
+            assert!(!engine.poll_pending_fonts_budgeted(1, std::time::Duration::ZERO));
+            assert!(
+                fs.db()
+                    .query(&fontdb::Query {
+                        families: &[fontdb::Family::Name(&format!("Late {display}"))],
+                        ..fontdb::Query::default()
+                    })
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn font_display_on_time_faces_register_and_relayout() {
+        let bytes = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        for display in ["fallback", "optional", "swap", "block"] {
+            let mut fs = cosmic_text::FontSystem::new();
+            let mut engine = super::LayoutEngine::new();
+            engine.font_system = Some(&mut fs);
+            let (tx, rx) = std::sync::mpsc::channel();
+            tx.send(super::PendingFontResult {
+                faces: vec![crate::css::FontFaceDecl {
+                    family: format!("Ready {display}"),
+                    display: Some(display.into()),
+                    ..Default::default()
+                }],
+                url: format!("https://example.test/{display}.woff2"),
+                bytes: Some(std::sync::Arc::new(bytes.to_vec())),
+                requested_at: std::time::Instant::now(),
+                completed_at: std::time::Instant::now(),
+            })
+            .unwrap();
+            engine.pending_fonts.push(rx);
+            assert!(engine.poll_pending_fonts_budgeted(1, std::time::Duration::ZERO));
+            assert!(
+                fs.db()
+                    .query(&fontdb::Query {
+                        families: &[fontdb::Family::Name(&format!("Ready {display}"))],
+                        ..fontdb::Query::default()
+                    })
+                    .is_some()
+            );
+        }
+    }
+
+    #[test]
+    fn font_display_uses_completion_time_despite_delayed_poll() {
+        let bytes = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let mut fs = cosmic_text::FontSystem::new();
+        let mut engine = super::LayoutEngine::new();
+        engine.font_system = Some(&mut fs);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let completed_at = std::time::Instant::now() - std::time::Duration::from_secs(4);
+        tx.send(super::PendingFontResult {
+            faces: vec![crate::css::FontFaceDecl {
+                family: "On Time Optional".into(),
+                display: Some("optional".into()),
+                ..Default::default()
+            }],
+            url: "https://example.test/shared.woff2".into(),
+            bytes: Some(std::sync::Arc::new(bytes.to_vec())),
+            requested_at: completed_at - std::time::Duration::from_millis(50),
+            completed_at,
+        })
+        .unwrap();
+        engine.pending_fonts.push(rx);
+        assert!(engine.poll_pending_fonts_budgeted(1, std::time::Duration::ZERO));
+        assert!(fs
+            .db()
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::Name("On Time Optional")],
+                ..fontdb::Query::default()
+            })
+            .is_some());
+    }
+
+    #[test]
+    fn font_display_filters_shared_source_faces_independently() {
+        let bytes = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let mut fs = cosmic_text::FontSystem::new();
+        let mut engine = super::LayoutEngine::new();
+        engine.font_system = Some(&mut fs);
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(super::PendingFontResult {
+            faces: ["Expired Optional", "Swap Face"]
+                .into_iter()
+                .zip(["optional", "swap"])
+                .map(|(family, display)| crate::css::FontFaceDecl {
+                    family: family.into(),
+                    display: Some(display.into()),
+                    ..Default::default()
+                })
+                .collect(),
+            url: "https://example.test/shared.woff2".into(),
+            bytes: Some(std::sync::Arc::new(bytes.to_vec())),
+            requested_at: std::time::Instant::now() - std::time::Duration::from_millis(200),
+            completed_at: std::time::Instant::now(),
+        })
+        .unwrap();
+        engine.pending_fonts.push(rx);
+        assert!(engine.poll_pending_fonts_budgeted(1, std::time::Duration::ZERO));
+        for (family, expected) in [("Expired Optional", false), ("Swap Face", true)] {
+            assert_eq!(
+                fs.db()
+                    .query(&fontdb::Query {
+                        families: &[fontdb::Family::Name(family)],
+                        ..fontdb::Query::default()
+                    })
+                    .is_some(),
+                expected,
+                "{family}"
+            );
+        }
+    }
+
+    #[test]
+    fn decoded_but_invalid_font_source_retries_next_candidate() {
+        let mut fs = cosmic_text::FontSystem::new();
+        let mut engine = super::LayoutEngine::new();
+        engine.font_system = Some(&mut fs);
+        let url = "https://example.test/invalid.woff2".to_string();
+        engine.scheduled_font_faces.insert(url.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(super::PendingFontResult {
+            faces: vec![crate::css::FontFaceDecl {
+                family: "Invalid Face".into(),
+                ..Default::default()
+            }],
+            url: url.clone(),
+            bytes: Some(std::sync::Arc::new(b"not a font".to_vec())),
+            requested_at: std::time::Instant::now(),
+            completed_at: std::time::Instant::now(),
+        })
+        .unwrap();
+        engine.pending_fonts.push(rx);
+        assert!(engine.poll_pending_fonts_budgeted(1, std::time::Duration::ZERO));
+        assert!(engine.failed_font_sources.contains(&url));
+        assert!(!engine.scheduled_font_faces.contains(&url));
     }
 
     #[test]
@@ -691,6 +1016,86 @@ mod font_data_tests {
                     .is_some()
             );
         }
+    }
+
+    #[test]
+    fn later_stylesheet_alias_reuses_loaded_remote_font() {
+        let url = "https://example.test/streamed-font-alias-test.woff2";
+        let bytes = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        super::REMOTE_FONT_BYTES_CACHE
+            .lock()
+            .unwrap()
+            .insert(url.into(), std::sync::Arc::new(bytes.to_vec()));
+
+        let mut fs = cosmic_text::FontSystem::new();
+        let mut engine = super::LayoutEngine::new();
+        engine.font_system = Some(&mut fs);
+        let face = |family: &str| crate::css::FontFaceDecl {
+            family: family.into(),
+            src: format!("url('{url}')"),
+            ..Default::default()
+        };
+        let first = face("First CSS Family");
+        engine.load_font_faces(std::slice::from_ref(&first), "https://example.test/page", "");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !engine.poll_pending_fonts_budgeted(1, std::time::Duration::ZERO) {
+            assert!(std::time::Instant::now() < deadline, "font task did not complete");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let after_first = fs.db().len();
+
+        let faces = [first, face("Later CSS Family")];
+        engine.load_font_faces(&faces, "https://example.test/page", "");
+        assert!(fs
+            .db()
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::Name("Later CSS Family")],
+                ..fontdb::Query::default()
+            })
+            .is_some());
+        assert_eq!(fs.db().len(), after_first + 1);
+        engine.load_font_faces(&faces, "https://example.test/page", "");
+        assert_eq!(fs.db().len(), after_first + 1);
+        super::REMOTE_FONT_BYTES_CACHE.lock().unwrap().remove(url);
+    }
+
+    #[test]
+    fn budgeted_font_poll_keeps_queued_results_after_workers_finish() {
+        let bytes = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let mut fs = cosmic_text::FontSystem::new();
+        let mut engine = super::LayoutEngine::new();
+        engine.font_system = Some(&mut fs);
+        let (tx, rx) = std::sync::mpsc::channel();
+        for family in ["First Queued Face", "Second Queued Face"] {
+            tx.send(super::PendingFontResult {
+                faces: vec![crate::css::FontFaceDecl {
+                    family: family.into(),
+                    ..Default::default()
+                }],
+                url: format!("https://example.test/{family}.woff2"),
+                bytes: Some(std::sync::Arc::new(bytes.to_vec())),
+                requested_at: std::time::Instant::now(),
+                completed_at: std::time::Instant::now(),
+            })
+            .unwrap();
+        }
+        drop(tx);
+        engine.pending_fonts.push(rx);
+
+        assert!(engine.poll_pending_fonts_budgeted(1, std::time::Duration::ZERO));
+        assert!(engine.has_pending_fonts());
+        assert!(engine.poll_pending_fonts_budgeted(1, std::time::Duration::ZERO));
+        for family in ["First Queued Face", "Second Queued Face"] {
+            assert!(fs
+                .db()
+                .query(&fontdb::Query {
+                    families: &[fontdb::Family::Name(family)],
+                    ..fontdb::Query::default()
+                })
+                .is_some());
+        }
+        assert!(!engine.poll_pending_fonts_budgeted(1, std::time::Duration::ZERO));
+        assert!(!engine.has_pending_fonts());
     }
 
     #[test]
@@ -1602,13 +2007,173 @@ fn inline_subtree_has_non_whitespace_text(node: &WebCore) -> bool {
         .any(inline_subtree_has_non_whitespace_text)
 }
 
-fn collect_font_face_text(node: &WebCore, out: &mut String) {
-    if node.tag != "#comment" && !node.text.is_empty() {
-        out.push_str(&node.text);
+fn collect_font_face_text_by_family(
+    node: &WebCore,
+    wanted: &HashSet<String>,
+    out: &mut HashMap<String, String>,
+    conservative: &mut HashSet<String>,
+    family_lists: &mut HashMap<String, Vec<String>>,
+) {
+    fn matching_families<'a>(
+        style: &ComputedStyle,
+        wanted: &HashSet<String>,
+        cache: &'a mut HashMap<String, Vec<String>>,
+    ) -> &'a [String] {
+        if !cache.contains_key(style.font_family.as_str()) {
+            let matching = crate::css::value_parse::split_top_level_commas(&style.font_family)
+                .into_iter()
+                .filter_map(css_font_family_name)
+                .map(|family| family.to_ascii_lowercase())
+                .filter(|family| wanted.contains(family))
+                .collect();
+            cache.insert(style.font_family.clone(), matching);
+        }
+        cache.get(style.font_family.as_str()).expect("font-family cached")
+    }
+
+    fn append(
+        text: &str,
+        style: &ComputedStyle,
+        wanted: &HashSet<String>,
+        out: &mut HashMap<String, String>,
+        family_lists: &mut HashMap<String, Vec<String>>,
+    ) {
+        if text.is_empty() || style.display == Display::None {
+            return;
+        }
+        let transformed = (style.text_transform != crate::types::TextTransform::None)
+            .then(|| crate::renderer::display_list_builder::apply_text_transform(text, style.text_transform));
+        for family in matching_families(style, wanted, family_lists) {
+            let entry = out.entry(family.clone()).or_default();
+            entry.push_str(text);
+            if let Some(transformed) = &transformed {
+                entry.push_str(transformed);
+            }
+        }
+    }
+
+    if node.style.display == Display::None {
+        return;
+    }
+    for pseudo in [
+        &node.style.first_line_style,
+        &node.style.first_letter_style,
+        &node.style.file_selector_button_style,
+        &node.style.details_content_style,
+    ] {
+        if let Some(style) = pseudo.as_deref() {
+            for family in matching_families(style, wanted, family_lists) {
+                conservative.insert(family.clone());
+            }
+        }
+    }
+    append(
+        &node.style.before_content,
+        node.style.before_style.as_deref().unwrap_or(&node.style),
+        wanted,
+        out,
+        family_lists,
+    );
+    if node.tag != "#comment" {
+        append(&node.text, &node.style, wanted, out, family_lists);
+    }
+    append(
+        &node.style.after_content,
+        node.style.after_style.as_deref().unwrap_or(&node.style),
+        wanted,
+        out,
+        family_lists,
+    );
+    append(
+        &node.style.marker_content,
+        node.style.marker_style.as_deref().unwrap_or(&node.style),
+        wanted,
+        out,
+        family_lists,
+    );
+    if node.tag == "li"
+        && node.style.marker_content.is_empty()
+        && node.style.list_style_image.is_empty()
+        && !matches!(
+            node.style.list_style_type,
+            crate::types::ListStyleType::None
+                | crate::types::ListStyleType::Disc
+                | crate::types::ListStyleType::Circle
+                | crate::types::ListStyleType::Square
+        )
+    {
+        let marker = node.style.marker_style.as_deref().unwrap_or(&node.style);
+        for family in matching_families(marker, wanted, family_lists) {
+            conservative.insert(family.clone());
+        }
+    }
+    if matches!(node.tag.as_str(), "input" | "textarea") {
+        if let Some(value) = node.value_state.as_ref().or_else(|| node.attributes.get("value")) {
+            append(value, &node.style, wanted, out, family_lists);
+        }
+        if let Some(placeholder) = node.attributes.get("placeholder") {
+            append(
+                placeholder,
+                node.style.placeholder_style.as_deref().unwrap_or(&node.style),
+                wanted,
+                out,
+                family_lists,
+            );
+        }
+    }
+    if let Some(shadow) = node.shadow_root.as_ref() {
+        for child in &shadow.children {
+            collect_font_face_text_by_family(child, wanted, out, conservative, family_lists);
+        }
     }
     for child in &node.children {
-        collect_font_face_text(child, out);
+        collect_font_face_text_by_family(child, wanted, out, conservative, family_lists);
     }
+}
+
+fn referenced_font_face_families(root: &WebCore) -> HashSet<String> {
+    fn collect(node: &WebCore, lists: &mut HashSet<String>) {
+        if node.style.display == Display::None {
+            return;
+        }
+        let mut add_style = |style: &ComputedStyle| {
+            if style.display != Display::None && !lists.contains(style.font_family.as_str()) {
+                lists.insert(style.font_family.clone());
+            }
+        };
+        add_style(&node.style);
+        for pseudo in [
+            &node.style.before_style,
+            &node.style.after_style,
+            &node.style.marker_style,
+            &node.style.placeholder_style,
+            &node.style.file_selector_button_style,
+            &node.style.details_content_style,
+            &node.style.first_line_style,
+            &node.style.first_letter_style,
+        ] {
+            if let Some(style) = pseudo.as_deref() {
+                add_style(style);
+            }
+        }
+        if let Some(shadow) = node.shadow_root.as_ref() {
+            for child in &shadow.children {
+                collect(child, lists);
+            }
+        }
+        for child in &node.children {
+            collect(child, lists);
+        }
+    }
+
+    let mut lists = HashSet::new();
+    collect(root, &mut lists);
+    lists
+        .iter()
+        .flat_map(|list| crate::css::value_parse::split_top_level_commas(list))
+        .filter_map(css_font_family_name)
+        .map(|family| family.to_ascii_lowercase())
+        .collect()
 }
 
 fn inline_items_max_content_advance(items: &[inline_layout::InlineItem]) -> f32 {
@@ -2217,6 +2782,9 @@ pub struct LayoutEngine {
     /// Font-face sources already scheduled/loaded. Stylesheets can arrive
     /// progressively, so this cannot be a single document-wide latch.
     scheduled_font_faces: HashSet<String>,
+    cached_font_families: Option<HashSet<String>>,
+    scheduled_remote_font_bindings: HashSet<(String, crate::css::FontFaceDecl)>,
+    loaded_remote_font_ids: HashMap<String, Vec<fontdb::ID>>,
     /// Remote URLs that failed fetch, decode, or font registration. Their
     /// authored successor is tried on the next layout pass.
     failed_font_sources: HashSet<String>,
@@ -2273,6 +2841,20 @@ impl LayoutEngine {
         }
     }
 
+    fn contained_intrinsic_width_for_node(
+        &self,
+        node: &WebCore,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> f32 {
+        if node.style.rare().contain_intrinsic_width_auto {
+            if let Some(size) = &node.layout.last_uncontained_content_size {
+                return size.0;
+            }
+        }
+        self.contained_intrinsic_width(&node.style, font_px, root_font_px)
+    }
+
     fn has_inline_size_containment(style: &ComputedStyle) -> bool {
         style.contain_size
             || style.container_type == ContainerType::Size
@@ -2293,6 +2875,19 @@ impl LayoutEngine {
                 .max(0.0)
         }
     }
+    pub(crate) fn contained_intrinsic_height_for_node(
+        &self,
+        node: &WebCore,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> f32 {
+        if node.style.rare().contain_intrinsic_height_auto {
+            if let Some(size) = &node.layout.last_uncontained_content_size {
+                return size.1;
+            }
+        }
+        self.contained_intrinsic_height(&node.style, font_px, root_font_px)
+    }
 
     fn enter_query_writing_mode(&self, style: &ComputedStyle) -> QueryContainerScope<'_> {
         let previous = self.query_container_sizes.get();
@@ -2307,7 +2902,7 @@ impl LayoutEngine {
 
     pub(crate) fn enter_query_container(
         &self,
-        style: &ComputedStyle,
+        node: &WebCore,
         width: f32,
         height: Option<f32>,
         font_px: f32,
@@ -2315,10 +2910,11 @@ impl LayoutEngine {
     ) -> QueryContainerScope<'_> {
         let previous = self.query_container_sizes.get();
         let mut current = previous;
-        let vertical = style.writing_mode != WritingMode::HorizontalTB;
-        let height =
-            height.unwrap_or_else(|| self.contained_intrinsic_height(style, font_px, root_font_px));
-        match style.container_type {
+        let vertical = node.style.writing_mode != WritingMode::HorizontalTB;
+        let height = height.unwrap_or_else(|| {
+            self.contained_intrinsic_height_for_node(node, font_px, root_font_px)
+        });
+        match node.style.container_type {
             ContainerType::Normal => {}
             ContainerType::InlineSize => {
                 if vertical {
@@ -2359,6 +2955,9 @@ impl LayoutEngine {
             progressive_cutoff: 0.0,
             initial_layout_done: false,
             scheduled_font_faces: HashSet::new(),
+            cached_font_families: None,
+            scheduled_remote_font_bindings: HashSet::new(),
+            loaded_remote_font_ids: HashMap::new(),
             failed_font_sources: HashSet::new(),
             text_width_cache: std::cell::RefCell::new(HashMap::new()),
             pending_fonts: Vec::new(),
@@ -2999,7 +3598,7 @@ impl LayoutEngine {
 
         if node.style.display == Display::Table {
             let content_min = if Self::has_inline_size_containment(&node.style) {
-                self.contained_intrinsic_width(&node.style, font_px, root_font_px)
+                self.contained_intrinsic_width_for_node(node, font_px, root_font_px)
             } else {
                 table::intrinsic_min_content_width(self, node, font_px, root_font_px)
             };
@@ -3070,7 +3669,7 @@ impl LayoutEngine {
         }
 
         if Self::has_inline_size_containment(&node.style) {
-            return self.contained_intrinsic_width(&node.style, font_px, root_font_px);
+            return self.contained_intrinsic_width_for_node(node, font_px, root_font_px);
         }
 
         // A cyclic percentage width cannot make its containing block's
@@ -3327,7 +3926,7 @@ impl LayoutEngine {
         }
 
         if Self::has_inline_size_containment(&node.style) {
-            return self.contained_intrinsic_width(&node.style, font_px, root_font_px);
+            return self.contained_intrinsic_width_for_node(node, font_px, root_font_px);
         }
 
         // Replaced elements: the size they are shown at, ratio included.
@@ -4024,20 +4623,20 @@ impl LayoutEngine {
                         continue;
                     }
                     let key = resolved.clone();
-                    if self.scheduled_font_faces.contains(&key) {
-                        if let Some(faces) = remote.get_mut(&resolved) {
-                            faces.push(face.clone());
+                    if resolved.starts_with("http://") || resolved.starts_with("https://") {
+                        if self
+                            .scheduled_remote_font_bindings
+                            .insert((resolved.clone(), face.clone()))
+                        {
+                            if let Some(ids) = self.loaded_remote_font_ids.get(&resolved) {
+                                register_css_font_face_alias(fs, face, ids);
+                            } else {
+                                remote.entry(resolved.clone()).or_default().push(face.clone());
+                            }
+                            self.scheduled_font_faces.insert(key);
                         }
                         found = true;
-                        continue;
-                    }
-
-                    if resolved.starts_with("http://") || resolved.starts_with("https://") {
-                        remote
-                            .entry(resolved.clone())
-                            .or_default()
-                            .push(face.clone());
-                        self.scheduled_font_faces.insert(key);
+                    } else if self.scheduled_font_faces.contains(&key) {
                         found = true;
                     } else if !resolved.is_empty() {
                         // Local file — load immediately.
@@ -4075,6 +4674,7 @@ impl LayoutEngine {
                     let counter = in_flight.clone();
                     let cache_dir = cache_dir.clone();
                     let page_url = base_url.to_string();
+                    let requested_at = std::time::Instant::now();
                     crate::spawn_font_resource_task(move || {
                         let result = cached_remote_font_bytes(&url, cache_dir.as_deref()).and_then(
                             |(bytes, blocks)| {
@@ -4092,6 +4692,8 @@ impl LayoutEngine {
                                 faces,
                                 url,
                                 bytes: Some(bytes),
+                                requested_at,
+                                completed_at: std::time::Instant::now(),
                             });
                         } else {
                             eprintln!("  Font fetch failed: {}", &url[..url.len().min(80)]);
@@ -4099,6 +4701,8 @@ impl LayoutEngine {
                                 faces,
                                 url,
                                 bytes: None,
+                                requested_at,
+                                completed_at: std::time::Instant::now(),
                             });
                         }
                         counter.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -4159,13 +4763,34 @@ impl LayoutEngine {
         let start = std::time::Instant::now();
         let time_limited = !max_time.is_zero();
         let mut processed = 0usize;
+        let mut stopped_early = false;
         for rx in &self.pending_fonts {
             while let Ok(result) = rx.try_recv() {
-                let loaded = result
-                    .bytes
-                    .is_some_and(|bytes| load_font_faces_bytes(fs, &result.faces, bytes));
-                if loaded {
-                    changed_any = true;
+                if let Some(bytes) = result.bytes {
+                    let elapsed = result
+                        .completed_at
+                        .saturating_duration_since(result.requested_at);
+                    let faces: Vec<_> = result
+                        .faces
+                        .into_iter()
+                        .filter(|face| font_face_can_swap(face, elapsed))
+                        .collect();
+                    if !faces.is_empty() {
+                        let ids = self
+                            .loaded_remote_font_ids
+                            .entry(result.url.clone())
+                            .or_insert_with(|| load_font_bytes(fs, bytes));
+                        if !ids.is_empty() {
+                            for face in &faces {
+                                register_css_font_face_alias(fs, face, ids);
+                            }
+                            changed_any = true;
+                        } else {
+                            self.scheduled_font_faces.remove(&result.url);
+                            self.failed_font_sources.insert(result.url);
+                            changed_any = true;
+                        }
+                    }
                 } else {
                     self.scheduled_font_faces.remove(&result.url);
                     self.failed_font_sources.insert(result.url);
@@ -4173,16 +4798,17 @@ impl LayoutEngine {
                 }
                 processed += 1;
                 if processed >= max_fonts || (time_limited && start.elapsed() >= max_time) {
+                    stopped_early = true;
                     break;
                 }
             }
-            if processed >= max_fonts || (time_limited && start.elapsed() >= max_time) {
+            if stopped_early {
                 break;
             }
         }
 
-        // If all fetches are done, drop receivers so idle detection settles.
-        if self
+        // A completed worker may still have an unread message in a channel.
+        if !stopped_early && self
             .fonts_in_flight
             .load(std::sync::atomic::Ordering::SeqCst)
             == 0
@@ -4259,19 +4885,6 @@ impl LayoutEngine {
         doc.stylesheet
             .set_layer_viewport(self.viewport_w, self.viewport_h);
         doc.stylesheet.rebuild_index();
-
-        // Load @font-face fonts (non-blocking — remote fonts arrive via poll_pending_fonts).
-        if !doc.stylesheet.font_faces.is_empty() {
-            let mut document_text = String::new();
-            if doc.stylesheet.font_faces.iter().any(|face| {
-                face.unicode_range
-                    .as_ref()
-                    .is_some_and(|range| !range.trim().is_empty())
-            }) {
-                collect_font_face_text(&doc.root, &mut document_text);
-            }
-            self.load_font_faces(&doc.stylesheet.font_faces, &doc.base_url, &document_text);
-        }
 
         // Cache @media / @container presence so we don't O(n)-scan rules every layout.
         self.cached_has_media_q = doc
@@ -4379,6 +4992,68 @@ impl LayoutEngine {
             _ => computed_root_font_px,
         };
         self.root_font_px = root_font_px;
+
+        // Match faces against computed families, after cascade but before text layout.
+        // Remote loads remain async; unused faces never enter the fetch queue.
+        if !doc.stylesheet.font_faces.is_empty()
+            && (did_cascade
+                || hover_changed
+                || self.cached_font_families.is_none()
+                || doc.has_dirty_layout())
+        {
+            self.cached_font_families = Some(referenced_font_face_families(&doc.root));
+            let families = self.cached_font_families.as_ref().expect("font families collected");
+            let candidates: Vec<_> = doc
+                .stylesheet
+                .font_faces
+                .iter()
+                .filter(|face| {
+                    css_font_family_name(&face.family)
+                        .is_some_and(|name| families.contains(&name.to_ascii_lowercase()))
+                })
+                .collect();
+            if !candidates.is_empty() {
+                let ranged_families: HashSet<String> = candidates
+                    .iter()
+                    .filter(|face| face.unicode_range.as_ref().is_some_and(|range| !range.trim().is_empty()))
+                    .filter_map(|face| css_font_family_name(&face.family))
+                    .map(|name| name.to_ascii_lowercase())
+                    .collect();
+                let mut text_by_family = HashMap::new();
+                let mut conservative_families = HashSet::new();
+                if !ranged_families.is_empty() {
+                    let mut family_lists = HashMap::new();
+                    collect_font_face_text_by_family(
+                        &doc.root,
+                        &ranged_families,
+                        &mut text_by_family,
+                        &mut conservative_families,
+                        &mut family_lists,
+                    );
+                }
+                let coverage_by_family: HashMap<_, _> = text_by_family
+                    .into_iter()
+                    .map(|(family, text)| {
+                        (family, crate::css::font_face::UnicodeTextCoverage::new(&text))
+                    })
+                    .collect();
+                let faces: Vec<_> = candidates
+                    .into_iter()
+                    .filter(|face| {
+                        let Some(name) = css_font_family_name(&face.family) else {
+                            return false;
+                        };
+                        let name = name.to_ascii_lowercase();
+                        conservative_families.contains(&name)
+                            || coverage_by_family.get(&name).is_none_or(|coverage| {
+                                coverage.intersects(face.unicode_range.as_deref())
+                            })
+                    })
+                    .cloned()
+                    .collect();
+                self.load_font_faces(&faces, &doc.base_url, "");
+            }
+        }
 
         let hover_reuses_geometry = hover_geometry
             .as_ref()
@@ -4517,6 +5192,7 @@ impl LayoutEngine {
     /// inline styles) so the skip-cascade optimisation does not hide the change.
     pub fn invalidate_cascade(&mut self) {
         self.last_cascade_vw = f32::NAN;
+        self.cached_font_families = None;
     }
 
     /// Layout without re-running the CSS cascade.
@@ -4566,7 +5242,7 @@ impl LayoutEngine {
 
         // Resolve shadow DOM slots before layout (only if any shadow roots exist)
         if has_shadow_roots(&doc.root) {
-            resolve_all_slots(&mut doc.root);
+            resolve_all_slots(&mut doc.root, viewport_width, self.viewport_h);
         }
 
         // Layout runs on the render tree in place. The structural corrections
@@ -4781,6 +5457,7 @@ impl LayoutEngine {
         }
 
         self.layout_depth.set(depth + 1);
+        let _profile_box = perf::node_span("layout-box", node.node_id);
         let _query_writing_mode_scope = self.enter_query_writing_mode(&node.style);
 
         perf::record_layout_call();
@@ -4977,30 +5654,29 @@ impl LayoutEngine {
         }
 
         if node.style.content_visibility == ContentVisibility::Hidden {
+            let remembered = node.layout.last_uncontained_content_size.as_deref();
             let content_w = rbox.content_width.unwrap_or_else(|| {
                 if matches!(
                     node.style.display,
                     Display::InlineBlock | Display::InlineFlex | Display::InlineGrid
                 ) {
-                    if node.style.contain_intrinsic_width.is_none()
-                        || node.style.contain_intrinsic_width.is_auto()
-                    {
-                        0.0
-                    } else {
-                        self.res_len(
-                            &node.style.contain_intrinsic_width,
-                            font_px,
-                            containing_w,
-                            root_font_px,
-                        )
-                        .max(0.0)
-                    }
+                    remembered
+                        .filter(|_| node.style.rare().contain_intrinsic_width_auto)
+                        .map(|size| size.0)
+                        .unwrap_or_else(|| {
+                            self.contained_intrinsic_width(&node.style, font_px, root_font_px)
+                        })
                 } else {
                     (containing_w - rbox.h_space()).max(0.0)
                 }
             });
             let content_h = rbox.content_height.unwrap_or_else(|| {
-                self.contained_intrinsic_height(&node.style, font_px, root_font_px)
+                remembered
+                    .filter(|_| node.style.rare().contain_intrinsic_height_auto)
+                    .map(|size| size.1)
+                    .unwrap_or_else(|| {
+                        self.contained_intrinsic_height(&node.style, font_px, root_font_px)
+                    })
             });
             node.layout.line_cache.clear();
             node.layout.inline_runs.clear();
@@ -5430,6 +6106,23 @@ impl LayoutEngine {
         node.has_dirty_layout_descendant = false;
         node.layout.last_containing_width = containing_w;
         node.layout.last_containing_height = c.available_height;
+        if (node.style.rare().contain_intrinsic_width_auto
+            || node.style.rare().contain_intrinsic_height_auto)
+            && !node.style.contain_size
+            && !node.style.contain_inline_size
+            && node.style.container_type == ContainerType::Normal
+            && node.style.content_visibility != ContentVisibility::Hidden
+        {
+            let size = (node.layout.content_rect.w, node.layout.content_rect.h);
+            match &mut node.layout.last_uncontained_content_size {
+                Some(remembered) => **remembered = size,
+                slot @ None => *slot = Some(Box::new(size)),
+            }
+        } else if !node.style.rare().contain_intrinsic_width_auto
+            && !node.style.rare().contain_intrinsic_height_auto
+        {
+            node.layout.last_uncontained_content_size = None;
+        }
         h
     }
 
@@ -5467,14 +6160,14 @@ fn has_shadow_roots(node: &WebCore) -> bool {
 }
 
 /// Walk the tree and resolve `<slot>` elements in all shadow roots.
-fn resolve_all_slots(node: &mut WebCore) {
-    node.resolve_slots();
+fn resolve_all_slots(node: &mut WebCore, viewport_w: f32, viewport_h: f32) {
+    node.resolve_slots(viewport_w, viewport_h);
     for child in &mut node.children {
-        resolve_all_slots(child);
+        resolve_all_slots(child, viewport_w, viewport_h);
     }
     if let Some(ref mut sr) = node.shadow_root {
         for child in &mut sr.children {
-            resolve_all_slots(child);
+            resolve_all_slots(child, viewport_w, viewport_h);
         }
     }
 }

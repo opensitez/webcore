@@ -1101,6 +1101,44 @@ fn sync_animations_dispatches_animationstart_when_animation_is_created() {
 }
 
 #[test]
+fn delayed_animation_dispatches_start_once_when_delay_expires() {
+    for final_tick_ms in [100, 1200] {
+        let mut doc = doc_with_animation("animation: fade 0.2s linear 0.1s 1;");
+        let id = doc.active_animations[0].element_id;
+        let start = doc.active_animations[0].start_time;
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        for name in ["animationstart", "animationend"] {
+            let events = std::sync::Arc::clone(&events);
+            doc.add_event_listener(
+                id,
+                name,
+                Box::new(move |event, _| {
+                    events.lock().unwrap().push(event.event_type.clone());
+                }),
+                Default::default(),
+            );
+        }
+        doc.tick_animations(start + Duration::from_millis(99));
+        assert!(events.lock().unwrap().is_empty());
+        doc.tick_animations(start + Duration::from_millis(final_tick_ms));
+        doc.tick_animations(start + Duration::from_millis(final_tick_ms + 1));
+        let names = events.lock().unwrap().clone();
+        assert_eq!(names.first().map(String::as_str), Some("animationstart"));
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| *name == "animationstart")
+                .count(),
+            1
+        );
+        assert_eq!(
+            names.contains(&"animationend".to_string()),
+            final_tick_ms > 300
+        );
+    }
+}
+
+#[test]
 fn sync_animations_does_not_duplicate() {
     let mut doc = doc_with_animation("animation: spin 2s linear infinite;");
     let count_before = doc.active_animations.len();
@@ -1497,6 +1535,7 @@ fn tick_animations_dispatches_transitionend_when_transition_finishes() {
             delay_ms: 0.0,
             timing_fn: EasingFn::Linear,
             allow_discrete: false,
+            start_event_fired: true,
         });
     let seen = std::sync::Arc::new(std::sync::Mutex::new(0usize));
     let counter = std::sync::Arc::clone(&seen);
@@ -2025,6 +2064,96 @@ fn sync_transitions_dispatches_transitionrun_and_transitionstart_when_created() 
 }
 
 #[test]
+fn delayed_transition_dispatches_start_once_after_run() {
+    let mut doc = parse_html("<div id='box'></div>");
+    let id = doc.get_element_by_id("box").unwrap();
+    {
+        let node = doc.get_box_by_id_mut(id).unwrap();
+        let style = std::sync::Arc::make_mut(&mut node.style);
+        style.opacity = 1.0;
+        style.rare_mut().transitions.push(ParsedTransition {
+            property: "opacity".into(),
+            duration_ms: 200.0,
+            delay_ms: 100.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: false,
+        });
+    }
+    doc.prev_styles.insert(
+        id,
+        std::collections::HashMap::from([("opacity".to_string(), "0".to_string())]),
+    );
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    for name in ["transitionrun", "transitionstart", "transitionend"] {
+        let events = std::sync::Arc::clone(&events);
+        doc.add_event_listener(
+            id,
+            name,
+            Box::new(move |event, _| {
+                events.lock().unwrap().push(event.event_type.clone());
+            }),
+            Default::default(),
+        );
+    }
+    let start = Instant::now();
+    doc.sync_transitions(start);
+    assert_eq!(*events.lock().unwrap(), ["transitionrun"]);
+    doc.tick_animations(start + Duration::from_millis(99));
+    assert_eq!(*events.lock().unwrap(), ["transitionrun"]);
+    doc.tick_animations(start + Duration::from_millis(100));
+    doc.tick_animations(start + Duration::from_millis(101));
+    assert_eq!(
+        *events.lock().unwrap(),
+        ["transitionrun", "transitionstart"]
+    );
+    doc.tick_animations(start + Duration::from_millis(301));
+    assert_eq!(
+        *events.lock().unwrap(),
+        ["transitionrun", "transitionstart", "transitionend"]
+    );
+}
+
+#[test]
+fn delayed_transition_jump_past_end_still_dispatches_start_before_end() {
+    let mut doc = parse_html("<div id='box'></div>");
+    let id = doc.get_element_by_id("box").unwrap();
+    let start = Instant::now();
+    doc.transition_states.insert(
+        id,
+        vec![TransitionState {
+            property: "opacity".into(),
+            from_value: "0".into(),
+            to_value: "1".into(),
+            reversing_adjusted_start_value: "0".into(),
+            reversing_shortening_factor: 1.0,
+            start_time: start,
+            duration_ms: 100.0,
+            delay_ms: 100.0,
+            timing_fn: EasingFn::Linear,
+            allow_discrete: false,
+            start_event_fired: false,
+        }],
+    );
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    for name in ["transitionstart", "transitionend"] {
+        let events = std::sync::Arc::clone(&events);
+        doc.add_event_listener(
+            id,
+            name,
+            Box::new(move |event, _| {
+                events.lock().unwrap().push(event.event_type.clone());
+            }),
+            Default::default(),
+        );
+    }
+    doc.tick_animations(start + Duration::from_millis(500));
+    assert_eq!(
+        *events.lock().unwrap(),
+        ["transitionstart", "transitionend"]
+    );
+}
+
+#[test]
 fn unchanged_transition_style_skips_extraction_but_mutation_and_removal_update_state() {
     let mut doc = parse_html("<div id='box'></div>");
     let id = doc.get_element_by_id("box").unwrap();
@@ -2104,6 +2233,7 @@ fn sync_transitions_dispatches_transitioncancel_when_replacing_running_transitio
             delay_ms: 0.0,
             timing_fn: EasingFn::Linear,
             allow_discrete: false,
+            start_event_fired: true,
         });
     let mut prev = std::collections::HashMap::new();
     prev.insert("opacity".to_string(), "0".to_string());
@@ -2161,6 +2291,7 @@ fn transition_reversal_uses_eased_progress_and_scaled_negative_delay() {
                 delay_ms: 100.0,
                 timing_fn: EasingFn::CubicBezier(1.0 / 3.0, 0.0, 2.0 / 3.0, 0.0),
                 allow_discrete: false,
+                start_event_fired: false,
             }],
         );
         doc.animation_overrides
@@ -2203,6 +2334,7 @@ fn transition_repeated_reversal_keeps_logical_endpoints() {
             delay_ms: 0.0,
             timing_fn: EasingFn::Linear,
             allow_discrete: false,
+            start_event_fired: true,
         }],
     );
     doc.animation_overrides
@@ -2243,6 +2375,7 @@ fn transition_reversal_samples_value_at_style_change_between_frames() {
             delay_ms: 0.0,
             timing_fn: EasingFn::Linear,
             allow_discrete: false,
+            start_event_fired: true,
         }],
     );
     doc.animation_overrides
@@ -2283,6 +2416,7 @@ fn reverting_during_transition_delay_cancels_without_starting_a_replacement() {
             delay_ms: 400.0,
             timing_fn: EasingFn::Linear,
             allow_discrete: false,
+            start_event_fired: false,
         }],
     );
     doc.prev_styles
@@ -2327,6 +2461,7 @@ fn removing_transition_property_cancels_a_running_transition() {
             delay_ms: 0.0,
             timing_fn: EasingFn::Linear,
             allow_discrete: false,
+            start_event_fired: true,
         }],
     );
     let cancelled = std::sync::Arc::new(std::sync::Mutex::new(0));
@@ -2376,6 +2511,7 @@ fn reversing_transition_uses_shortened_duration() {
             delay_ms: 0.0,
             timing_fn: EasingFn::Linear,
             allow_discrete: false,
+            start_event_fired: true,
         });
     doc.animation_overrides
         .entry(id)
@@ -2423,6 +2559,7 @@ fn transition_interpolates_between_values() {
             delay_ms: 0.0,
             timing_fn: EasingFn::Linear,
             allow_discrete: false,
+            start_event_fired: true,
         }],
     );
 
@@ -2458,6 +2595,7 @@ fn allow_discrete_display_transition_keeps_box_visible_until_end() {
             delay_ms: 0.0,
             timing_fn: EasingFn::Linear,
             allow_discrete: true,
+            start_event_fired: true,
         }],
     );
 
@@ -2497,6 +2635,7 @@ fn allow_discrete_pointer_events_transition_flips_at_halfway() {
             delay_ms: 0.0,
             timing_fn: EasingFn::Linear,
             allow_discrete: true,
+            start_event_fired: true,
         }],
     );
 
@@ -2536,6 +2675,7 @@ fn allow_discrete_cursor_transition_flips_at_halfway() {
             delay_ms: 0.0,
             timing_fn: EasingFn::Linear,
             allow_discrete: true,
+            start_event_fired: true,
         }],
     );
 
@@ -2576,6 +2716,7 @@ fn allow_discrete_basic_ui_keywords_flip_at_halfway() {
                 delay_ms: 0.0,
                 timing_fn: EasingFn::Linear,
                 allow_discrete: true,
+                start_event_fired: true,
             },
             TransitionState {
                 property: "resize".to_string(),
@@ -2588,6 +2729,7 @@ fn allow_discrete_basic_ui_keywords_flip_at_halfway() {
                 delay_ms: 0.0,
                 timing_fn: EasingFn::Linear,
                 allow_discrete: true,
+                start_event_fired: true,
             },
             TransitionState {
                 property: "outline-style".to_string(),
@@ -2600,6 +2742,7 @@ fn allow_discrete_basic_ui_keywords_flip_at_halfway() {
                 delay_ms: 0.0,
                 timing_fn: EasingFn::Linear,
                 allow_discrete: true,
+                start_event_fired: true,
             },
             TransitionState {
                 property: "text-decoration-style".to_string(),
@@ -2612,6 +2755,7 @@ fn allow_discrete_basic_ui_keywords_flip_at_halfway() {
                 delay_ms: 0.0,
                 timing_fn: EasingFn::Linear,
                 allow_discrete: true,
+                start_event_fired: true,
             },
             TransitionState {
                 property: "column-rule-style".to_string(),
@@ -2624,6 +2768,7 @@ fn allow_discrete_basic_ui_keywords_flip_at_halfway() {
                 delay_ms: 0.0,
                 timing_fn: EasingFn::Linear,
                 allow_discrete: true,
+                start_event_fired: true,
             },
         ],
     );
@@ -2724,6 +2869,7 @@ fn transition_completes_and_is_removed() {
             delay_ms: 0.0,
             timing_fn: EasingFn::Linear,
             allow_discrete: false,
+            start_event_fired: true,
         }],
     );
 
@@ -2759,6 +2905,7 @@ fn transition_delay_applies_from_value() {
             delay_ms: 300.0, // 300ms delay
             timing_fn: EasingFn::Linear,
             allow_discrete: false,
+            start_event_fired: false,
         }],
     );
 

@@ -3,7 +3,7 @@
 //! Uses EXACT positions from the layout engine. Never approximates.
 //! Faithfully ports the render_box logic from mod.rs into PaintCmd recording.
 
-use super::display_list::{DisplayList, ImageRef, PaintCmd, PlaceholderTypography, TextDecoration};
+use super::display_list::{DisplayList, ImageRef, MaskPaintLayer, PaintCmd, PlaceholderTypography, TextDecoration};
 use crate::types::{
     BackgroundClip, BackgroundRepeat, BackgroundSize, BorderStyle, ClipPathKind, Color,
     ComputedStyle, ContentVisibility, CssLength, Direction, Display, FontStyle,
@@ -13,6 +13,14 @@ use crate::types::{
 };
 use crate::types::{Rect, WebCore};
 use unicode_segmentation::UnicodeSegmentation;
+
+fn mask_list_value<'a>(values: &'a [&'a str], index: usize, fallback: &'a str) -> &'a str {
+    values
+        .get(index % values.len().max(1))
+        .copied()
+        .unwrap_or(fallback)
+        .trim()
+}
 
 struct BackgroundImagePaint<'a> {
     data: std::sync::Arc<Vec<u8>>,
@@ -146,6 +154,19 @@ fn root_font_size_px(root: &WebCore) -> f32 {
     root.style.font_size_px(initial, initial)
 }
 
+fn canvas_body_color(root: &WebCore) -> Option<(u32, Color)> {
+    if root.tag != "html"
+        || root.style.background_color.a != 0
+        || !root.style.background_image_url.is_empty()
+    {
+        return None;
+    }
+    let body = root.children.iter().find(|child| child.tag == "body")?;
+    let color = body.style.background_color;
+    (color.a > 0 && body.style.background_image_url.is_empty())
+        .then_some((body.node_id, color))
+}
+
 /// Build a display list from a laid-out box tree.
 pub fn build_display_list(root: &WebCore, viewport_w: f32, viewport_h: f32) -> DisplayList {
     let svg_ids = crate::svg::document_svg_ids(root);
@@ -154,6 +175,7 @@ pub fn build_display_list(root: &WebCore, viewport_w: f32, viewport_h: f32) -> D
     // Use full document extent as clip — viewport culling is done at replay time.
     // Building with viewport clip causes scrolled-to content to be missing.
     let doc_h = crate::types::Document::scroll_height(root).max(viewport_h);
+    let canvas_body = canvas_body_color(root);
     let ctx = BuildContext {
         scroll_x: 0.0,
         scroll_y: 0.0,
@@ -170,8 +192,10 @@ pub fn build_display_list(root: &WebCore, viewport_w: f32, viewport_h: f32) -> D
         base_url: "",
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         paint_clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
+        descendant_paint_may_escape: false,
         suppress_deferred_z_descendants: false,
         viewport_overflow_body: crate::types::Document::viewport_overflow_body(root),
+        canvas_background_body: canvas_body.map(|(id, _)| id),
         font_system: None,
         transform_ctx: crate::types::TransformCtx {
             // The root box's font size IS the root font size — `rem`.
@@ -182,6 +206,14 @@ pub fn build_display_list(root: &WebCore, viewport_w: f32, viewport_h: f32) -> D
         },
     };
     let mut list = DisplayList::new();
+    if let Some((_, color)) = canvas_body {
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(0.0, 0.0, viewport_w, doc_h),
+            color,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+    }
     build_for_box(root, &mut list, &ctx);
     list
 }
@@ -225,6 +257,7 @@ pub fn build_display_list_full_with_font_system(
     font_system: Option<*mut cosmic_text::FontSystem>,
 ) -> DisplayList {
     let doc_h = crate::types::Document::scroll_height(root).max(viewport_h);
+    let canvas_body = canvas_body_color(root);
     let svg_ids = crate::svg::document_svg_ids(root);
     let svg_ids_fingerprint = super::svg_raster_cache::document_ids_fingerprint(&svg_ids);
     let ctx = BuildContext {
@@ -246,8 +279,10 @@ pub fn build_display_list_full_with_font_system(
         base_url,
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         paint_clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
+        descendant_paint_may_escape: false,
         suppress_deferred_z_descendants: false,
         viewport_overflow_body: crate::types::Document::viewport_overflow_body(root),
+        canvas_background_body: canvas_body.map(|(id, _)| id),
         font_system,
         transform_ctx: crate::types::TransformCtx {
             // The root box's font size IS the root font size — `rem`.
@@ -258,6 +293,14 @@ pub fn build_display_list_full_with_font_system(
         },
     };
     let mut list = DisplayList::new();
+    if let Some((_, color)) = canvas_body {
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(0.0, 0.0, viewport_w, doc_h),
+            color,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+    }
     build_for_box(root, &mut list, &ctx);
 
     list
@@ -353,6 +396,7 @@ pub fn build_display_list_viewport_with_font_system(
     font_system: Option<*mut cosmic_text::FontSystem>,
 ) -> DisplayList {
     let doc_h = crate::types::Document::scroll_height(root).max(viewport_h);
+    let canvas_body = canvas_body_color(root);
     let svg_ids = crate::svg::document_svg_ids(root);
     let svg_ids_fingerprint = super::svg_raster_cache::document_ids_fingerprint(&svg_ids);
     let mut subtree_bounds = std::collections::HashMap::new();
@@ -381,8 +425,10 @@ pub fn build_display_list_viewport_with_font_system(
         base_url,
         clip: Rect::new(0.0, 0.0, viewport_w, doc_h),
         paint_clip,
+        descendant_paint_may_escape: false,
         suppress_deferred_z_descendants: false,
         viewport_overflow_body: crate::types::Document::viewport_overflow_body(root),
+        canvas_background_body: canvas_body.map(|(id, _)| id),
         font_system,
         transform_ctx: crate::types::TransformCtx {
             font_px: root_font_size_px(root),
@@ -392,6 +438,14 @@ pub fn build_display_list_viewport_with_font_system(
         },
     };
     let mut list = DisplayList::new();
+    if let Some((_, color)) = canvas_body {
+        list.push(PaintCmd::FillRect {
+            rect: Rect::new(0.0, paint_top, viewport_w, paint_bottom - paint_top),
+            color,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        });
+    }
     build_for_box(root, &mut list, &ctx);
 
     list
@@ -438,8 +492,10 @@ struct BuildContext<'a> {
     base_url: &'a str,
     clip: Rect,
     paint_clip: Rect,
+    descendant_paint_may_escape: bool,
     suppress_deferred_z_descendants: bool,
     viewport_overflow_body: Option<u32>,
+    canvas_background_body: Option<u32>,
     font_system: Option<*mut cosmic_text::FontSystem>,
     /// What a `transform` needs to resolve `vw`/`vh` and `rem`. Carried on the
     /// context because the element's own box is not enough: a transform length
@@ -707,6 +763,7 @@ fn sticky_subtree_has_paint(commands: &[PaintCmd]) -> bool {
                 | PaintCmd::PushFilter { .. }
                 | PaintCmd::PopFilter
                 | PaintCmd::PushMask { .. }
+                | PaintCmd::PushMaskGroup { .. }
                 | PaintCmd::PopMask
                 | PaintCmd::PushBlendMode { .. }
                 | PaintCmd::PopBlendMode
@@ -1005,10 +1062,23 @@ fn build_for_box_inner(
         }
     }
 
-    let mask_image_requested = !eff_style.rare().mask_image_url.trim().is_empty();
-    let has_mask_layer = node.mask_image_data.is_some()
-        && node.mask_image_width > 0
-        && node.mask_image_height > 0
+    let mask_sources = eff_style.rare();
+    let mask_image_requested = !mask_sources.mask_image_url.trim().is_empty()
+        || mask_sources
+            .additional_mask_images
+            .iter()
+            .any(|layer| !layer.url.trim().is_empty());
+    let has_mask_layer = mask_image_requested && (0..=mask_sources.additional_mask_images.len()).any(|index| {
+        let requested = if index == 0 {
+            !mask_sources.mask_image_url.is_empty()
+        } else {
+            !mask_sources.additional_mask_images[index - 1].url.is_empty()
+        };
+        requested && node.mask_images.as_ref().and_then(|images| {
+            images.get_for_source(index, eff_style.mask_source_key(index)?)
+        })
+            .is_some_and(|image| image.width > 0 && image.height > 0)
+    })
         && pw > 0.0
         && ph > 0.0;
     if paint_self && mask_image_requested && !has_mask_layer {
@@ -1052,6 +1122,11 @@ fn build_for_box_inner(
     // separately by the replay's global transform. This prevents transforms from
     // shifting when the user scrolls.
     let has_transform = eff_style.has_transform() || eff_style.will_change_transform;
+    let svg_paint_may_move = has_transform
+        || (!eff_style.transform.is_empty() && eff_style.transform != "none")
+        || !eff_style.css_filter.ops.is_empty()
+        || !eff_style.rare().filter.is_empty()
+        || matches!(eff_style.position, Position::Fixed | Position::Sticky);
     if has_transform {
         let source_rect = match eff_style.transform_box.as_str() {
             "content-box" => node.layout.content_rect,
@@ -1095,7 +1170,9 @@ fn build_for_box_inner(
     if !backdrop_filters.ops.is_empty() {
         if paint_self {
             list.push(PaintCmd::BackdropFilter {
-                rect: Rect::new(px, py, pw, ph),
+                rect: Rect::new(br.x - eff_sx, br.y - eff_sy, br.w, br.h),
+                radii: radii_arr,
+                radii_y: radii_y_arr,
                 filters: encode_filter_ops(&backdrop_filters),
             });
         }
@@ -1172,15 +1249,128 @@ fn build_for_box_inner(
     }
 
     if has_mask_layer {
-        if let Some(mask_data) = node.mask_image_data.as_ref() {
-            list.push(PaintCmd::PushMask {
-                rect: Rect::new(px, py, pw, ph),
-                data: ImageRef::Shared(
-                    mask_data.clone(),
-                    node.mask_image_width,
-                    node.mask_image_height,
-                ),
+        let rare = eff_style.rare();
+        let border_box = Rect::new(br.x - eff_sx, br.y - eff_sy, br.w, br.h);
+        let padding_box = Rect::new(px, py, pw, ph);
+        let content = node.layout.content_rect;
+        let content_box = Rect::new(content.x - eff_sx, content.y - eff_sy, content.w, content.h);
+        let mask_box = |value: &str, is_origin: bool| match value {
+            "content-box" => content_box,
+            "fill-box" if !is_origin => content_box,
+            "padding-box" => padding_box,
+            _ => border_box,
+        };
+        let origins = crate::css::value_parse::split_top_level_commas(&rare.mask_origin);
+        let clips = crate::css::value_parse::split_top_level_commas(&rare.mask_clip);
+        let sizes = crate::css::value_parse::split_top_level_commas(&rare.mask_size);
+        let positions = crate::css::value_parse::split_top_level_commas(&rare.mask_position);
+        let repeats = crate::css::value_parse::split_top_level_commas(&rare.mask_repeat);
+        let modes = crate::css::value_parse::split_top_level_commas(&rare.mask_mode);
+        let composites = crate::css::value_parse::split_top_level_commas(&rare.mask_composite);
+        let mut layers = Vec::with_capacity(rare.additional_mask_images.len() + 1);
+        for index in 0..=rare.additional_mask_images.len() {
+            let requested = if index == 0 {
+                !rare.mask_image_url.is_empty()
+            } else {
+                !rare.additional_mask_images[index - 1].url.is_empty()
+            };
+            let image = requested.then(|| {
+                node.mask_images.as_ref().and_then(|images| {
+                    images.get_for_source(index, eff_style.mask_source_key(index)?)
+                })
+            }).flatten();
+            let origin = mask_box(mask_list_value(&origins, index, "border-box"), true);
+            let clip_name = mask_list_value(&clips, index, "border-box");
+            let clip = mask_box(clip_name, false);
+            let (size, size_w, size_h) = crate::css::property_defs::parse_background_size_layer(
+                mask_list_value(&sizes, index, "auto"),
+            )
+            .unwrap_or((BackgroundSize::Auto, CssLength::Auto, CssLength::Auto));
+            let (draw_w, draw_h) = if let Some(image) = image {
+                let resolution = image.resolution.max(f32::MIN_POSITIVE);
+                let iw = image.width as f32 / resolution;
+                let ih = image.height as f32 / resolution;
+                match size {
+                    BackgroundSize::Cover => {
+                        let scale = (origin.w / iw).max(origin.h / ih);
+                        (iw * scale, ih * scale)
+                    }
+                    BackgroundSize::Contain => {
+                        let scale = (origin.w / iw).min(origin.h / ih);
+                        (iw * scale, ih * scale)
+                    }
+                    BackgroundSize::Explicit => {
+                        let w = (!size_w.is_auto()).then(|| {
+                            size_w.resolve(font_px, origin.w, ctx.transform_ctx.root_font_px)
+                        });
+                        let h = (!size_h.is_auto()).then(|| {
+                            size_h.resolve(font_px, origin.h, ctx.transform_ctx.root_font_px)
+                        });
+                        match (w, h) {
+                            (Some(w), Some(h)) => (w, h),
+                            (Some(w), None) => (w, w * ih / iw),
+                            (None, Some(h)) => (h * iw / ih, h),
+                            (None, None) => (iw, ih),
+                        }
+                    }
+                    BackgroundSize::Auto => (iw, ih),
+                }
+            } else {
+                (0.0, 0.0)
+            };
+            let (position_x, position_y) =
+                crate::css::property_defs::parse_background_position_pair(
+                    mask_list_value(&positions, index, "0% 0%"),
+                )
+                .unwrap_or((CssLength::Percent(0.0), CssLength::Percent(0.0)));
+            let tile = Rect::new(
+                origin.x + position_x.resolve(font_px, origin.w - draw_w, ctx.transform_ctx.root_font_px),
+                origin.y + position_y.resolve(font_px, origin.h - draw_h, ctx.transform_ctx.root_font_px),
+                draw_w,
+                draw_h,
+            );
+            let repeat = crate::css::property_defs::parse_background_repeat_value(
+                mask_list_value(&repeats, index, "repeat"),
+            )
+            .unwrap_or(BackgroundRepeat::Repeat);
+            let (repeat_x_mode, repeat_y_mode) = repeat.axis_modes();
+            let composite = match mask_list_value(&composites, index, "add") {
+                "subtract" => 1,
+                "intersect" => 2,
+                "exclude" => 3,
+                _ => 0,
+            };
+            layers.push(MaskPaintLayer {
+                rect: clip,
+                no_clip: clip_name == "no-clip",
+                origin,
+                tile,
+                data: image.map(|image| {
+                    ImageRef::Shared(image.data.clone(), image.width, image.height)
+                }),
+                luminance: mask_list_value(&modes, index, "match-source")
+                    .eq_ignore_ascii_case("luminance"),
+                repeat_x_mode,
+                repeat_y_mode,
+                composite,
             });
+        }
+        if layers.len() == 1 {
+            let mask = layers.pop().unwrap();
+            if let Some(data) = mask.data {
+                list.push(PaintCmd::PushMask {
+                    rect: mask.rect,
+                    no_clip: mask.no_clip,
+                    origin: mask.origin,
+                    tile: mask.tile,
+                    data,
+                    luminance: mask.luminance,
+                    repeat_x_mode: mask.repeat_x_mode,
+                    repeat_y_mode: mask.repeat_y_mode,
+                });
+            }
+        } else {
+            list.push(PaintCmd::PushMaskGroup { layers });
         }
     }
 
@@ -1215,7 +1405,11 @@ fn build_for_box_inner(
     let bg_clip_rect = background_box(eff_style.background_clip);
     let (bg_clip_radii, bg_clip_radii_y) = background_radii(eff_style.background_clip);
     let bg_origin_rect = background_box(eff_style.background_origin);
-    let raw_bg = eff_style.background_color;
+    let raw_bg = if ctx.canvas_background_body == Some(node.node_id) {
+        Color::TRANSPARENT
+    } else {
+        eff_style.background_color
+    };
     let clipped_background_color = raw_bg;
     // `background-repeat` decides, per axis, whether the image (or gradient)
     // tiles out of the positioning area to cover the painting area.
@@ -1833,8 +2027,10 @@ fn build_for_box_inner(
         base_url: ctx.base_url,
         clip: child_clip,
         paint_clip: ctx.paint_clip,
+        descendant_paint_may_escape: ctx.descendant_paint_may_escape || svg_paint_may_move,
         suppress_deferred_z_descendants: suppress_z,
         viewport_overflow_body: ctx.viewport_overflow_body,
+        canvas_background_body: ctx.canvas_background_body,
         font_system: ctx.font_system,
         transform_ctx: ctx.transform_ctx,
     };
@@ -2029,7 +2225,13 @@ fn build_for_box_inner(
                 // layout-determined size.
                 if node.svg_document.is_some() {
                     let cr = node.layout.content_rect;
-                    if cr.w > 0.0 && cr.h > 0.0 {
+                    let raster_visible = ctx.descendant_paint_may_escape
+                        || svg_paint_may_move
+                        || rect_intersects(
+                            Rect::new(cr.x - eff_sx, cr.y - eff_sy, cr.w, cr.h),
+                            ctx.paint_clip,
+                        );
+                    if cr.w > 0.0 && cr.h > 0.0 && raster_visible {
                         let raster_w = cr.w.round() as u32;
                         let raster_h = cr.h.round() as u32;
                         if raster_w > 0 && raster_h > 0 {
@@ -3554,6 +3756,7 @@ fn build_list_marker(
         }
         ListStyleType::Decimal
         | ListStyleType::DecimalLeadingZero
+        | ListStyleType::Numeric(_)
         | ListStyleType::LowerAlpha
         | ListStyleType::UpperAlpha
         | ListStyleType::LowerLatin
@@ -3562,6 +3765,8 @@ fn build_list_marker(
         | ListStyleType::UpperRoman
         | ListStyleType::LowerGreek
         | ListStyleType::Armenian
+        | ListStyleType::UpperArmenian
+        | ListStyleType::LowerArmenian
         | ListStyleType::Georgian
         | ListStyleType::Hebrew
         | ListStyleType::Hiragana
@@ -3719,6 +3924,7 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32, 
         placeholder_typography: node.style.placeholder_style.as_ref().map(|style| {
             let size = style.font_size_px(font_px, root_font_px).max(1.0);
             PlaceholderTypography {
+                opacity: style.opacity,
                 font_size: size,
                 font_weight: style.font_weight.value(),
                 font_style: match style.font_style {
@@ -4893,6 +5099,7 @@ fn format_list_marker(lst: ListStyleType, index: i32) -> String {
     let style = match lst {
         ListStyleType::Decimal => "decimal",
         ListStyleType::DecimalLeadingZero => "decimal-leading-zero",
+        ListStyleType::Numeric(name) => name,
         ListStyleType::LowerAlpha | ListStyleType::LowerLatin => "lower-alpha",
         ListStyleType::UpperAlpha | ListStyleType::UpperLatin => "upper-alpha",
         ListStyleType::LowerRoman => "lower-roman",
@@ -4900,6 +5107,8 @@ fn format_list_marker(lst: ListStyleType, index: i32) -> String {
         ListStyleType::LowerGreek => "lower-greek",
         ListStyleType::CjkDecimal => "cjk-decimal",
         ListStyleType::Armenian => "armenian",
+        ListStyleType::UpperArmenian => "upper-armenian",
+        ListStyleType::LowerArmenian => "lower-armenian",
         ListStyleType::Georgian => "georgian",
         ListStyleType::Hebrew => "hebrew",
         ListStyleType::Hiragana => "hiragana",
@@ -4908,7 +5117,12 @@ fn format_list_marker(lst: ListStyleType, index: i32) -> String {
         ListStyleType::KatakanaIroha => "katakana-iroha",
         _ => return String::new(),
     };
-    format!("{}.", crate::css::format_counter_value(index, style))
+    let suffix = if lst == ListStyleType::CjkDecimal {
+        "、"
+    } else {
+        "."
+    };
+    format!("{}{suffix}", crate::css::format_counter_value(index, style))
 }
 
 fn build_positioned_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildContext<'_>) {
@@ -4930,9 +5144,14 @@ fn build_positioned_box(node: &WebCore, list: &mut DisplayList, ctx: &BuildConte
         suppress_deferred_z_descendants: ctx.suppress_deferred_z_descendants,
         ..*ctx
     };
+    let start = list.commands.len();
     list.push(PaintCmd::BeginFixedPosition);
     build_for_box_inner(node, list, &fixed_ctx, true);
-    list.push(PaintCmd::EndFixedPosition);
+    if sticky_subtree_has_paint(&list.commands[start + 1..]) {
+        list.push(PaintCmd::EndFixedPosition);
+    } else {
+        list.commands.truncate(start);
+    }
 }
 
 fn creates_stacking_context(node: &WebCore) -> bool {
@@ -5218,5 +5437,74 @@ mod sticky_geometry_tests {
         assert_eq!(clamp_sticky_axis(-1.0, start, start, start), start);
         assert_eq!(clamp_sticky_axis(50.0, 10.0, 100.0, 20.0), 50.0);
         assert_eq!(clamp_sticky_axis(90.0, 10.0, 100.0, 20.0), 80.0);
+    }
+}
+
+#[cfg(test)]
+mod svg_paint_band_tests {
+    use super::*;
+
+    #[test]
+    fn offscreen_static_svg_is_rasterized_when_its_band_becomes_visible() {
+        let html = r#"<body style="margin:0">
+            <svg width="40" height="40" viewBox="0 0 40 40"><rect width="40" height="40" fill="red"/></svg>
+            <div style="height:400px"></div>
+            <svg width="40" height="40" viewBox="0 0 40 40"><rect width="40" height="40" fill="blue"/></svg>
+        </body>"#;
+        let mut renderer = crate::renderer::Renderer::new();
+        let doc = renderer.load_html_vp(html, 300.0, 200.0);
+        let list_for = |top, bottom| {
+            build_display_list_viewport(
+                &doc.root,
+                300.0,
+                200.0,
+                0.0,
+                top,
+                top,
+                bottom,
+                0,
+                0,
+                &std::collections::HashSet::new(),
+                "",
+            )
+        };
+        let image_count = |list: DisplayList| {
+            list.commands
+                .iter()
+                .filter(|cmd| matches!(cmd, PaintCmd::Image { .. }))
+                .count()
+        };
+        assert_eq!(image_count(list_for(0.0, 200.0)), 1);
+        assert_eq!(image_count(list_for(400.0, 650.0)), 1);
+    }
+
+    #[test]
+    fn transformed_ancestor_keeps_offscreen_svg_in_the_display_list() {
+        let html = r#"<body style="margin:0">
+            <div style="height:400px"></div>
+            <div style="transform:translateY(-400px)">
+                <svg width="40" height="40" viewBox="0 0 40 40"><rect width="40" height="40" fill="red"/></svg>
+            </div>
+        </body>"#;
+        let mut renderer = crate::renderer::Renderer::new();
+        let doc = renderer.load_html_vp(html, 300.0, 200.0);
+        let list = build_display_list_viewport(
+            &doc.root,
+            300.0,
+            200.0,
+            0.0,
+            0.0,
+            0.0,
+            200.0,
+            0,
+            0,
+            &std::collections::HashSet::new(),
+            "",
+        );
+        assert!(
+            list.commands
+                .iter()
+                .any(|cmd| matches!(cmd, PaintCmd::Image { .. }))
+        );
     }
 }

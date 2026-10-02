@@ -50,6 +50,7 @@ fn can_play_type_for_kind(kind: MediaKind, media_type: &str) -> &'static str {
                 !lower.contains("codecs=") || lower.contains("avc1") || lower.contains("avc3")
             }
             "video/x-yuv4mpeg2" => true,
+            "video/webm" => !lower.contains("codecs=") || lower.contains("vp8"),
             _ => false,
         },
         MediaKind::Audio => matches!(
@@ -73,19 +74,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_selection_skips_hevc_and_webm() {
+    fn source_selection_skips_hevc_and_accepts_vp8() {
         let doc = crate::html::parse_html(
             "<video id=v><source src=a.mp4 type='video/mp4; codecs=&quot;hvc1&quot;'><source src=b.webm type=video/webm>Video not supported.</video>",
         );
         let node = doc
             .find_webcore(doc.get_element_by_id("v").unwrap())
             .unwrap();
-        assert_eq!(current_src(node, "http://localhost/"), Some(String::new()));
+        assert_eq!(current_src(node, "http://localhost/"), Some("http://localhost/b.webm".into()));
         assert_eq!(
             can_play_type("video", "video/mp4; codecs=\"hvc1\""),
             Some("")
         );
-        assert_eq!(can_play_type("video", "video/webm"), Some(""));
+        assert_eq!(can_play_type("video", "video/webm"), Some("maybe"));
+        assert_eq!(can_play_type("video", "video/webm; codecs=\"vp8\""), Some("maybe"));
+        assert_eq!(can_play_type("video", "video/webm; codecs=\"vp9\""), Some(""));
         assert_eq!(
             can_play_type("video", "video/mp4; codecs=\"avc1.640028\""),
             Some("maybe")

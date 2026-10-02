@@ -45,7 +45,6 @@ pub use registry::{
 };
 
 use crate::css::apply_property;
-use crate::layout::hit_test::point_to_hit;
 use crate::types::{
     Color, CssLength, Display, Document, FontStyle, FontWeight, Position, UserSelect, WebCore,
 };
@@ -1023,11 +1022,24 @@ impl Editor {
         doc_pt: (f32, f32),
         button: u8,
     ) -> bool {
+        self.handle_mouse_event_scrolled(root, etype, doc_pt, (0.0, 0.0), button)
+    }
+
+    pub fn handle_mouse_event_scrolled(
+        &mut self,
+        root: &WebCore,
+        etype: HtmlEventType,
+        doc_pt: (f32, f32),
+        scroll: (f32, f32),
+        button: u8,
+    ) -> bool {
         match etype {
             HtmlEventType::MouseDown => {
                 self.mouse_down = true;
                 self.has_focus = true;
-                if let Some(hit) = point_to_hit(root, doc_pt, button) {
+                if let Some(hit) =
+                    crate::layout::hit_test::point_to_hit_scrolled(root, doc_pt, scroll, button)
+                {
                     if !user_select_allows_selection(root, hit.node_id) {
                         self.mouse_down = false;
                         return false;
@@ -1045,7 +1057,9 @@ impl Editor {
             }
             HtmlEventType::MouseMove => {
                 if self.mouse_down {
-                    if let Some(hit) = point_to_hit(root, doc_pt, button) {
+                    if let Some(hit) =
+                        crate::layout::hit_test::point_to_hit_scrolled(root, doc_pt, scroll, button)
+                    {
                         if !user_select_allows_selection(root, hit.node_id) {
                             return false;
                         }

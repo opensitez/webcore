@@ -1324,6 +1324,8 @@ fn nth_matches(expr: &str, pos: usize) -> bool {
 }
 
 fn parse_nth_ab(expr: &str) -> (i32, i32) {
+    let compact: String = expr.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+    let expr = compact.as_str();
     if let Some(n_pos) = expr.find('n') {
         let a_str = expr[..n_pos].trim();
         let b_str = expr[n_pos + 1..].trim();

@@ -489,6 +489,65 @@ fn slotted_selector_styles_projected_light_dom() {
 }
 
 #[test]
+fn slotted_media_rules_use_layout_viewport_and_update_after_resize() {
+    let html = r#"
+        <div id="host">
+            <template shadowrootmode="open">
+                <style>
+                    @media (max-width: 599px) {
+                        slot::slotted(.panel) { color: rgb(7, 8, 9); }
+                    }
+                    @media (min-width: 600px) {
+                        slot::slotted(.panel) { color: rgb(11, 12, 13); }
+                    }
+                </style>
+                <slot></slot>
+            </template>
+            <div id="panel" class="panel">Panel</div>
+        </div>
+    "#;
+    let mut doc = layout_html(html, 400.0);
+    let panel = find_composed_by_id(&doc.root, "panel").unwrap();
+    assert_eq!(panel.style.color, Color { r: 7, g: 8, b: 9, a: 255 });
+
+    let mut eng = LayoutEngine::new();
+    eng.viewport_h = 900.0;
+    eng.layout(&mut doc, 800.0);
+    let panel = find_composed_by_id(&doc.root, "panel").unwrap();
+    assert_eq!(panel.style.color, Color { r: 11, g: 12, b: 13, a: 255 });
+}
+
+#[test]
+fn host_projected_media_rules_use_layout_viewport() {
+    let html = r#"
+        <x-menu id="host">
+            <template shadowrootmode="open">
+                <style>
+                    @media (max-width: 599px) {
+                        x-menu [slot=dropdown] { display: none; }
+                    }
+                    @media (min-width: 600px) {
+                        x-menu [slot=dropdown] { color: rgb(11, 12, 13); }
+                    }
+                </style>
+                <slot name="dropdown"></slot>
+            </template>
+            <div id="panel" slot="dropdown">Panel</div>
+        </x-menu>
+    "#;
+    let mut doc = layout_html(html, 400.0);
+    let panel = find_composed_by_id(&doc.root, "panel").unwrap();
+    assert_eq!(panel.style.display, Display::None);
+
+    let mut eng = LayoutEngine::new();
+    eng.viewport_h = 900.0;
+    eng.layout(&mut doc, 800.0);
+    let panel = find_composed_by_id(&doc.root, "panel").unwrap();
+    assert_ne!(panel.style.display, Display::None);
+    assert_eq!(panel.style.color, Color { r: 11, g: 12, b: 13, a: 255 });
+}
+
+#[test]
 fn host_context_slot_rules_style_projected_light_dom() {
     {
         use crate::css::{AncestorInfo, MatchContext, parse_selector};

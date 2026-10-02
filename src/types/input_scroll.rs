@@ -11,7 +11,12 @@ use std::collections::{HashMap, HashSet};
 impl Document {
     pub(crate) fn resize_grip_at(&self, screen_x: f32, screen_y: f32) -> Option<ResizeDrag> {
         let doc_pt = (screen_x, screen_y + self.scroll_y);
-        let mut node_id = crate::layout::hit_test::hit_test_box_at(&self.root, doc_pt, 0);
+        let mut node_id = crate::layout::hit_test::hit_test_box_at_scrolled(
+            &self.root,
+            doc_pt,
+            (self.scroll_x, self.scroll_y),
+            0,
+        );
         while node_id != 0 {
             let node = self.get_node(node_id)?;
             let rect = node.layout.border_rect;

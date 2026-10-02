@@ -67,6 +67,8 @@ pub struct LayoutBox {
     pub paint_dirty: bool,
     pub last_containing_width: f32,
     pub last_containing_height: Option<f32>,
+    /// Last content-box size measured without size containment, for `contain-intrinsic-size: auto`.
+    pub last_uncontained_content_size: Option<Box<(f32, f32)>>,
     /// Floats contributed to an ancestor formatting context by this block.
     pub escaping_float_count: usize,
 
@@ -120,6 +122,7 @@ impl Default for LayoutBox {
             paint_dirty: false,
             last_containing_width: 0.0,
             last_containing_height: None,
+            last_uncontained_content_size: None,
             escaping_float_count: 0,
             resolved_margin_top: 0.0,
             resolved_margin_right: 0.0,

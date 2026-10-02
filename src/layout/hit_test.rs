@@ -358,7 +358,27 @@ pub(crate) fn to_local(node: &WebCore, pt: (f32, f32)) -> (f32, f32) {
     ((m[3] * x - m[2] * y) / det, (-m[1] * x + m[0] * y) / det)
 }
 
-fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitResult> {
+fn child_hit_point(
+    child: &WebCore,
+    parent_pt: (f32, f32),
+    viewport_pt: (f32, f32),
+) -> (f32, f32) {
+    to_local(
+        child,
+        if child.style.position == Position::Fixed {
+            viewport_pt
+        } else {
+            parent_pt
+        },
+    )
+}
+
+fn hit_test_impl(
+    node: &WebCore,
+    doc_pt: (f32, f32),
+    viewport_pt: (f32, f32),
+    _button: u8,
+) -> Option<HitResult> {
     if !subtree_visible_for_hit(node) {
         return None;
     }
@@ -385,8 +405,13 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
     if !children_are_clipped {
         let mut z_descendants = Vec::new();
         for child in node.effective_children() {
-            let child_pt = to_local(child, (px, py));
-            collect_deferred_z_descendants_for_hit(child, child_pt, &mut z_descendants);
+            let child_pt = child_hit_point(child, (px, py), viewport_pt);
+            collect_deferred_z_descendants_for_hit(
+                child,
+                child_pt,
+                viewport_pt,
+                &mut z_descendants,
+            );
         }
         z_descendants.retain(|(child, _)| {
             is_hit_renderable(child) && (child.style.z_index_is_auto || child.style.z_index >= 0)
@@ -401,7 +426,7 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
                 && child_pt.0 < b.x + b.w
                 && child_pt.1 >= b.y
                 && child_pt.1 < b.y + b.h;
-            if let Some(r) = hit_test_impl(child, child_pt, _button) {
+            if let Some(r) = hit_test_impl(child, child_pt, viewport_pt, _button) {
                 return Some(r);
             }
             if in_border
@@ -433,7 +458,7 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
             }
             // display:contents elements are transparent — recurse into their children directly
             if matches!(child.style.display, crate::types::Display::Contents) {
-                if let Some(r) = hit_test_impl(child, (px, py), _button) {
+                if let Some(r) = hit_test_impl(child, (px, py), viewport_pt, _button) {
                     return Some(r);
                 }
                 continue;
@@ -451,11 +476,11 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
             if child.tag == "::before" || child.tag == "::after" {
                 continue;
             }
-            let (cx, cy) = to_local(child, (px, py));
+            let (cx, cy) = child_hit_point(child, (px, py), viewport_pt);
             let b = &child.layout.border_rect;
             let in_border = cx >= b.x && cx < b.x + b.w && cy >= b.y && cy < b.y + b.h;
             if in_border || point_in_children_clip_area(child, cx, cy) {
-                if let Some(r) = hit_test_impl(child, (cx, cy), _button) {
+                if let Some(r) = hit_test_impl(child, (cx, cy), viewport_pt, _button) {
                     return Some(r);
                 }
                 if in_border
@@ -484,7 +509,7 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
             if is_non_atomic_inline_box(child) {
                 continue;
             }
-            let (cx, cy) = to_local(child, (px, py));
+            let (cx, cy) = child_hit_point(child, (px, py), viewport_pt);
             let b = &child.layout.border_rect;
             let in_border = cx >= b.x && cx < b.x + b.w && cy >= b.y && cy < b.y + b.h;
             if in_border {
@@ -492,7 +517,7 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
             }
             let m = &child.layout.margin_rect;
             if cx >= m.x && cx < m.x + m.w && cy >= m.y && cy < m.y + m.h {
-                if let Some(r) = hit_test_impl(child, (cx, cy), _button) {
+                if let Some(r) = hit_test_impl(child, (cx, cy), viewport_pt, _button) {
                     return Some(r);
                 }
             }
@@ -512,7 +537,7 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
             if is_non_atomic_inline_box(child) {
                 continue;
             }
-            let (cx, cy) = to_local(child, (px, py));
+            let (cx, cy) = child_hit_point(child, (px, py), viewport_pt);
             let m = &child.layout.margin_rect;
             let in_margin = cx >= m.x && cx < m.x + m.w && cy >= m.y && cy < m.y + m.h;
             if in_margin {
@@ -520,7 +545,7 @@ fn hit_test_impl(node: &WebCore, doc_pt: (f32, f32), _button: u8) -> Option<HitR
             }
             let b = &child.layout.border_rect;
             if cx >= b.x && cx < b.x + b.w {
-                if let Some(r) = hit_test_impl(child, (cx, cy), _button) {
+                if let Some(r) = hit_test_impl(child, (cx, cy), viewport_pt, _button) {
                     return Some(r);
                 }
             }
@@ -620,7 +645,6 @@ fn inline_element_id_for_path(root: &WebCore, path: &[usize]) -> Option<u32> {
 fn is_hit_renderable(node: &WebCore) -> bool {
     subtree_visible_for_hit(node)
         && !node.attributes.contains_key("inert")
-        && node.style.position != Position::Fixed
         && node.tag != "::before"
         && node.tag != "::after"
         && !(node.layout.border_rect.h <= 0.0
@@ -649,14 +673,14 @@ fn creates_hit_stacking_context(node: &WebCore) -> bool {
 }
 
 fn is_explicit_z_positioned(node: &WebCore) -> bool {
-    node.style.position != Position::Fixed
-        && (node.style.position == Position::Absolute
-            || (node.style.is_positioned() && !node.style.z_index_is_auto))
+    matches!(node.style.position, Position::Absolute | Position::Fixed)
+        || (node.style.is_positioned() && !node.style.z_index_is_auto)
 }
 
 fn collect_deferred_z_descendants_for_hit<'a>(
     node: &'a WebCore,
     pt: (f32, f32),
+    viewport_pt: (f32, f32),
     out: &mut Vec<(&'a WebCore, (f32, f32))>,
 ) {
     if !is_hit_renderable(node) || !point_inside_clip_path(node, pt.0, pt.1) {
@@ -683,8 +707,8 @@ fn collect_deferred_z_descendants_for_hit<'a>(
         return;
     }
     for child in node.effective_children() {
-        let child_pt = to_local(child, (px, py));
-        collect_deferred_z_descendants_for_hit(child, child_pt, out);
+        let child_pt = child_hit_point(child, (px, py), viewport_pt);
+        collect_deferred_z_descendants_for_hit(child, child_pt, viewport_pt, out);
     }
 }
 
@@ -941,9 +965,19 @@ fn snap_to_line(lines: &[LayoutLine], y: f32) -> &LayoutLine {
 /// The point is relative to the document origin (top-left of viewport content),
 /// before any scroll offset is applied — i.e. `(mouse_x + scroll_x, mouse_y + scroll_y)`.
 pub fn point_to_hit(root: &WebCore, doc_pt: (f32, f32), button: u8) -> Option<HitResult> {
+    point_to_hit_scrolled(root, doc_pt, (0.0, 0.0), button)
+}
+
+pub fn point_to_hit_scrolled(
+    root: &WebCore,
+    doc_pt: (f32, f32),
+    scroll: (f32, f32),
+    button: u8,
+) -> Option<HitResult> {
     // Coordinates are absolute — pass directly (root.layout.content_rect is always 0,0).
     // The root's OWN transform has no parent to undo it, so it is undone here.
-    hit_test_impl(root, to_local(root, doc_pt), button)
+    let viewport_pt = (doc_pt.0 - scroll.0, doc_pt.1 - scroll.1);
+    hit_test_impl(root, to_local(root, doc_pt), viewport_pt, button)
 }
 
 /// Map a (node_id, local_byte_offset) back to a document-space (x, y) point
@@ -1063,10 +1097,25 @@ fn caret_point_in_box(
 
 /// Find the deepest box at a document-space point. Returns node_id.
 pub fn hit_test_box_at(root: &WebCore, doc_pt: (f32, f32), button: u8) -> u32 {
-    deepest_box_at(root, to_local(root, doc_pt), button).unwrap_or(root.node_id)
+    hit_test_box_at_scrolled(root, doc_pt, (0.0, 0.0), button)
 }
 
-fn deepest_box_at(node: &WebCore, pt: (f32, f32), _button: u8) -> Option<u32> {
+pub fn hit_test_box_at_scrolled(
+    root: &WebCore,
+    doc_pt: (f32, f32),
+    scroll: (f32, f32),
+    button: u8,
+) -> u32 {
+    let viewport_pt = (doc_pt.0 - scroll.0, doc_pt.1 - scroll.1);
+    deepest_box_at(root, to_local(root, doc_pt), viewport_pt, button).unwrap_or(root.node_id)
+}
+
+fn deepest_box_at(
+    node: &WebCore,
+    pt: (f32, f32),
+    viewport_pt: (f32, f32),
+    _button: u8,
+) -> Option<u32> {
     if !subtree_visible_for_hit(node) {
         return None;
     }
@@ -1090,8 +1139,8 @@ fn deepest_box_at(node: &WebCore, pt: (f32, f32), _button: u8) -> Option<u32> {
     }
     let mut z_descendants = Vec::new();
     for child in node.effective_children() {
-        let child_pt = to_local(child, (px, py));
-        collect_deferred_z_descendants_for_hit(child, child_pt, &mut z_descendants);
+        let child_pt = child_hit_point(child, (px, py), viewport_pt);
+        collect_deferred_z_descendants_for_hit(child, child_pt, viewport_pt, &mut z_descendants);
     }
     z_descendants.retain(|(child, _)| {
         is_hit_renderable(child) && (child.style.z_index_is_auto || child.style.z_index >= 0)
@@ -1106,7 +1155,7 @@ fn deepest_box_at(node: &WebCore, pt: (f32, f32), _button: u8) -> Option<u32> {
             && child_pt.0 < b.x + b.w
             && child_pt.1 >= b.y
             && child_pt.1 < b.y + b.h;
-        if let Some(r) = deepest_box_at(child, child_pt, _button) {
+        if let Some(r) = deepest_box_at(child, child_pt, viewport_pt, _button) {
             return Some(r);
         }
         if in_border
@@ -1130,11 +1179,11 @@ fn deepest_box_at(node: &WebCore, pt: (f32, f32), _button: u8) -> Option<u32> {
             continue;
         }
         // The second walker needs the same mapping — see `to_local`.
-        let (cx, cy) = to_local(child, (px, py));
+        let (cx, cy) = child_hit_point(child, (px, py), viewport_pt);
         let m = &child.layout.margin_rect;
         let in_margin = cx >= m.x && cx < m.x + m.w && cy >= m.y && cy < m.y + m.h;
         if in_margin || point_in_children_clip_area(child, cx, cy) {
-            if let Some(r) = deepest_box_at(child, (cx, cy), _button) {
+            if let Some(r) = deepest_box_at(child, (cx, cy), viewport_pt, _button) {
                 return Some(r);
             }
             if in_margin && accepts_pointer_events(child) && point_inside_clip_path(child, cx, cy) {
@@ -1159,9 +1208,17 @@ fn deepest_box_at(node: &WebCore, pt: (f32, f32), _button: u8) -> Option<u32> {
 
 /// Find a link URL at a document-space point, if any.
 pub fn hit_test_link(root: &WebCore, doc_pt: (f32, f32), button: u8) -> Option<String> {
-    let doc_pt = to_local(root, doc_pt);
+    hit_test_link_scrolled(root, doc_pt, (0.0, 0.0), button)
+}
+
+pub fn hit_test_link_scrolled(
+    root: &WebCore,
+    doc_pt: (f32, f32),
+    scroll: (f32, f32),
+    button: u8,
+) -> Option<String> {
     // 1. Try hitting text content (inline runs)
-    if let Some(hit) = hit_test_impl(root, doc_pt, button) {
+    if let Some(hit) = point_to_hit_scrolled(root, doc_pt, scroll, button) {
         fn find_node(node: &WebCore, id: u32) -> Option<&WebCore> {
             if node.node_id == id {
                 return Some(node);
@@ -1187,7 +1244,7 @@ pub fn hit_test_link(root: &WebCore, doc_pt: (f32, f32), button: u8) -> Option<S
     }
 
     // 2. Fallback: find the deepest box and search up for 'href' attribute
-    let target_id = hit_test_box_at(root, doc_pt, button);
+    let target_id = hit_test_box_at_scrolled(root, doc_pt, scroll, button);
     if target_id == 0 {
         return None;
     }

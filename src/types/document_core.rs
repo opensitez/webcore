@@ -844,19 +844,52 @@ impl Document {
                     PendingImageTarget::Mask => {
                         let selected = node.style.mask_image_url_for_dpr(device_pixel_ratio);
                         let expected = crate::html::resolve_url(&selected, &base_url);
+                        let belongs_to_image_set = node.style.rare().mask_image_set_source.as_deref()
+                            .and_then(|source| crate::css::property_defs::image_set_resolution_for_url(source, &url, &base_url))
+                            .is_some();
                         if selected.is_empty()
                             || (url != expected
-                                && (node.mask_image_data.is_some()
-                                    || node.style.rare().mask_image_set_source.is_none()))
+                                && (!belongs_to_image_set
+                                    || node.mask_images.as_ref().and_then(|images| {
+                                        images.get_for_source(0, node.style.mask_source_key(0)?)
+                                    }).is_some()))
                         {
                             return;
                         }
-                        if let Some((data, w, h)) =
-                            crate::html::decoded_image_pixels_arc(decoded.clone())
+                        if crate::html::set_decoded_mask_image_for_url_on_node(
+                            node,
+                            decoded.clone(),
+                            &url,
+                            &base_url,
+                        ) {
+                            loaded_target = true;
+                        }
+                    }
+                    PendingImageTarget::MaskLayer(layer_index) => {
+                        let Some(layer) = node.style.rare().additional_mask_images.get(layer_index) else {
+                            return;
+                        };
+                        let selected = layer.url_for_dpr(device_pixel_ratio);
+                        let expected = crate::html::resolve_url(&selected, &base_url);
+                        let belongs_to_image_set = layer.image_set_source.as_deref()
+                            .and_then(|source| crate::css::property_defs::image_set_resolution_for_url(source, &url, &base_url))
+                            .is_some();
+                        if selected.is_empty()
+                            || (url != expected
+                                && (!belongs_to_image_set
+                                    || node.mask_images.as_ref().and_then(|images| {
+                                        images.get_for_source(layer_index + 1, node.style.mask_source_key(layer_index + 1)?)
+                                    }).is_some()))
                         {
-                            node.mask_image_data = Some(data);
-                            node.mask_image_width = w;
-                            node.mask_image_height = h;
+                            return;
+                        }
+                        if crate::html::set_decoded_mask_image_layer_for_url_on_node(
+                            node,
+                            layer_index + 1,
+                            decoded.clone(),
+                            &url,
+                            &base_url,
+                        ) {
                             loaded_target = true;
                         }
                     }

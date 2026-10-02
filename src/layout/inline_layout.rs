@@ -135,7 +135,7 @@ pub fn layout_inline_block(
     };
     let content_w = raw_w.max(min_w).min(max_w);
     let _query_container_scope = engine.enter_query_container(
-        &node.style,
+        node,
         content_w,
         rbox.content_height,
         font_px,

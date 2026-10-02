@@ -26,6 +26,17 @@ static IMAGE_RESOURCE_POOL: std::sync::LazyLock<rayon::ThreadPool> =
             .expect("webcore image resource pool")
     });
 
+const MAX_CONCURRENT_ANIMATION_DECODES: usize = 2;
+
+static ANIMATION_DECODE_POOL: std::sync::LazyLock<rayon::ThreadPool> =
+    std::sync::LazyLock::new(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(resource_pool_threads(1, MAX_CONCURRENT_ANIMATION_DECODES))
+            .thread_name(|i| format!("webcore-animation-decode-{i}"))
+            .build()
+            .expect("webcore animation decode pool")
+    });
+
 static FONT_RESOURCE_POOL: std::sync::LazyLock<rayon::ThreadPool> =
     std::sync::LazyLock::new(|| {
         rayon::ThreadPoolBuilder::new()
@@ -225,6 +236,10 @@ pub(crate) fn spawn_css_resource_task(task: impl FnOnce() + Send + 'static) {
 
 pub(crate) fn spawn_image_resource_task(task: impl FnOnce() + Send + 'static) {
     IMAGE_RESOURCE_POOL.spawn(task);
+}
+
+pub(crate) fn spawn_animation_decode_task(task: impl FnOnce() + Send + 'static) {
+    ANIMATION_DECODE_POOL.spawn(task);
 }
 
 pub(crate) fn spawn_font_resource_task(task: impl FnOnce() + Send + 'static) {
@@ -987,7 +1002,6 @@ pub(crate) fn load_stylesheet_cached<F>(
 where
     F: FnMut(css::Stylesheet),
 {
-    let progressive_stream = streaming_loader.is_some();
     if cache_parsed
         && let Some(sheet) = PARSED_CSS_CACHE
             .lock()
@@ -1006,7 +1020,7 @@ where
 
     let media = css::MediaConditions::default().with_query(&media);
 
-    let parse_state = if cache_parsed && !progressive_stream {
+    let parse_state = if cache_parsed {
         let existing = CSS_PARSE_IN_FLIGHT
             .lock()
             .expect("CSS parse in-flight cache poisoned")
@@ -1291,6 +1305,59 @@ mod stylesheet_loader_tests {
             panic!("expected cached raster images")
         };
         assert!(Arc::ptr_eq(&first_pixels, &second_pixels));
+    }
+
+    #[test]
+    fn concurrent_streamed_stylesheet_is_parsed_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let key = "concurrent-streamed-stylesheet".to_string();
+        let url = "https://example.test/shared.css".to_string();
+        let fallback: StylesheetLoader = Arc::new(|_| panic!("unexpected fallback fetch"));
+        let stream: StreamingStylesheetLoader = {
+            let calls = calls.clone();
+            let started = started.clone();
+            let release = release.clone();
+            Arc::new(move |_, emit| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                started.wait();
+                release.wait();
+                emit(".shared { color: red }");
+                Ok(())
+            })
+        };
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                load_stylesheet_cached(
+                    key.clone(),
+                    url.clone(),
+                    String::new(),
+                    fallback.clone(),
+                    Some(stream.clone()),
+                    true,
+                    |_| {},
+                )
+            });
+            started.wait();
+            let second = scope.spawn(|| {
+                load_stylesheet_cached(
+                    key.clone(),
+                    url.clone(),
+                    String::new(),
+                    fallback.clone(),
+                    Some(stream.clone()),
+                    true,
+                    |_| {},
+                )
+            });
+            release.wait();
+            assert_eq!(first.join().unwrap().sheet.rules.len(), 1);
+            assert_eq!(second.join().unwrap().sheet.rules.len(), 1);
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -2873,6 +2940,7 @@ fn start_async_image_fetches_with_loader(
                 types::PendingImageTarget::Background
                     | types::PendingImageTarget::BackgroundLayer(_)
                     | types::PendingImageTarget::Mask
+                    | types::PendingImageTarget::MaskLayer(_)
             )
         {
             match cached_decoded_image_result_from_option_loader(url_trimmed, loader.as_deref()) {
@@ -2900,11 +2968,14 @@ fn start_async_image_fetches_with_loader(
                             );
                         }
                         types::PendingImageTarget::Mask => {
-                            if let Some((data, w, h)) = html::decoded_image_pixels_arc(decoded) {
-                                node.mask_image_data = Some(data);
-                                node.mask_image_width = w;
-                                node.mask_image_height = h;
-                            }
+                            let _ = html::set_decoded_mask_image_for_url_on_node(
+                                node, decoded, &url, &base_url,
+                            );
+                        }
+                        types::PendingImageTarget::MaskLayer(layer_index) => {
+                            let _ = html::set_decoded_mask_image_layer_for_url_on_node(
+                                node, layer_index + 1, decoded, &url, &base_url,
+                            );
                         }
                         _ => {}
                     }
@@ -2996,11 +3067,14 @@ fn apply_ready_cached_images(doc: &mut types::Document) {
                     );
                 }
                 types::PendingImageTarget::Mask => {
-                    if let Some((data, w, h)) = html::decoded_image_pixels_arc(decoded) {
-                        node.mask_image_data = Some(data);
-                        node.mask_image_width = w;
-                        node.mask_image_height = h;
-                    }
+                    let _ = html::set_decoded_mask_image_for_url_on_node(
+                        node, decoded, &url, &base_url,
+                    );
+                }
+                types::PendingImageTarget::MaskLayer(layer_index) => {
+                    let _ = html::set_decoded_mask_image_layer_for_url_on_node(
+                        node, layer_index + 1, decoded, &url, &base_url,
+                    );
                 }
             }
         }
@@ -3067,6 +3141,27 @@ fn collect_remote_images(
             ));
         }
     }
+    for (layer_index, layer) in node.style.rare().additional_mask_images.iter().enumerate() {
+        if !can_paint_resource || layer.url.is_empty() {
+            continue;
+        }
+        let loaded = node.mask_images.as_ref().and_then(|images| {
+            images.get_for_source(layer_index + 1, node.style.mask_source_key(layer_index + 1)?)
+        }).is_some();
+        if loaded && layer.image_set_source.is_none() {
+            continue;
+        }
+        let selected = layer.url_for_dpr(device_pixel_ratio);
+        let resolved = html::resolve_url(&selected, base_url);
+        if is_async_image_url(&resolved) {
+            pending.push((
+                node.node_id,
+                path.clone(),
+                types::PendingImageTarget::MaskLayer(layer_index),
+                resolved,
+            ));
+        }
+    }
     if can_paint_resource
         && (node.bg_image_data.is_none() || node.style.rare().background_image_set_source.is_some())
         && !node.style.background_image_url.is_empty()
@@ -3114,7 +3209,10 @@ fn collect_remote_images(
         }
     }
     if can_paint_resource
-        && (node.mask_image_data.is_none() || node.style.rare().mask_image_set_source.is_some())
+        && (node.mask_images.as_ref().and_then(|images| {
+            images.get_for_source(0, node.style.mask_source_key(0)?)
+        }).is_none()
+            || node.style.rare().mask_image_set_source.is_some())
         && !node.style.rare().mask_image_url.is_empty()
     {
         let selected = node.style.mask_image_url_for_dpr(device_pixel_ratio);
