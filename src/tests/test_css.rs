@@ -51,8 +51,66 @@ fn changed_custom_properties_resolve_without_recomputing_inherited_values() {
     assert_eq!(child["--inherited"], "red");
     assert_eq!(child["--local"], "blue");
     assert_eq!(child["--chain"], "blue");
-    assert_eq!(child["--cycle-a"], "");
-    assert_eq!(child["--cycle-b"], "");
+    assert!(!child.contains_key("--cycle-a"));
+    assert!(!child.contains_key("--cycle-b"));
+}
+
+#[test]
+fn empty_custom_property_is_valid_and_does_not_use_var_fallback() {
+    let (normal, important) = crate::css::parse_declarations_important(
+        "--empty: ; --other: green; --priority: !important; color: ;",
+    );
+    assert_eq!(normal.get("--empty").map(String::as_str), Some(""));
+    assert_eq!(important.get("--priority").map(String::as_str), Some(""));
+    assert!(!normal.contains_key("color"));
+
+    let mut vars = std::collections::HashMap::from([
+        ("--empty".to_string(), String::new()),
+        ("--invalid".to_string(), "var(--missing)".to_string()),
+    ]);
+    crate::css::pre_resolve_variables(&mut vars);
+    assert!(vars.contains_key("--empty"));
+    assert!(!vars.contains_key("--invalid"));
+    assert_eq!(
+        crate::css::resolve_var_references("var(--empty, blue)", &vars),
+        ""
+    );
+    assert_eq!(
+        crate::css::resolve_var_references("var(--invalid, blue)", &vars),
+        "blue"
+    );
+
+    let doc = parse_and_layout(
+        "<style>:root { --empty: red; --empty: !important; } \
+         p { color: var(--empty, blue) }</style><p id=target>x</p>",
+        800.0,
+    );
+    let p = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "target")
+    })
+    .expect("paragraph");
+    assert_eq!(p.style.custom_props.get("--empty").map(String::as_str), Some(""));
+    assert_ne!(p.style.color, Color::rgb(0, 0, 255));
+}
+
+#[test]
+fn custom_property_fallback_uses_invalid_dependency_but_not_empty_one() {
+    let mut vars = std::collections::HashMap::from([
+        ("--invalid".to_string(), "var(--missing)".to_string()),
+        (
+            "--using-invalid".to_string(),
+            "var(--invalid, green)".to_string(),
+        ),
+        ("--empty".to_string(), String::new()),
+        (
+            "--using-empty".to_string(),
+            "var(--empty, blue)".to_string(),
+        ),
+    ]);
+    crate::css::pre_resolve_variables(&mut vars);
+    assert!(!vars.contains_key("--invalid"));
+    assert_eq!(vars.get("--using-invalid").map(String::as_str), Some("green"));
+    assert_eq!(vars.get("--using-empty").map(String::as_str), Some(""));
 }
 
 #[test]
@@ -3225,7 +3283,7 @@ fn font_shorthand_resolves_nested_custom_property_token() {
     );
     assert_eq!(
         crate::css::resolve_var_references("var(--headline)", &doc.stylesheet.variables),
-        "700  20px/24px  \"GT America\", sans-serif"
+        "700 20px/24px \"GT America\", sans-serif"
     );
 
     assert_eq!(h.style.font_weight, FontWeight::Value(700));
@@ -5713,6 +5771,51 @@ fn var_substitution_ignores_quoted_text_but_resolves_function_tokens() {
     sheet.parse_and_add(r#"p::before { content: "var(--word)" }"#);
     sheet.rebuild_index();
     assert!(!sheet.rules[0].has_var_refs);
+}
+
+#[test]
+fn var_function_resolves_a_variable_supplied_property_name() {
+    let vars = std::collections::HashMap::from([
+        ("--name".to_string(), "--color".to_string()),
+        ("--color".to_string(), "green".to_string()),
+    ]);
+    assert_eq!(
+        crate::css::resolve_var_references("var(var(--name))", &vars),
+        "green"
+    );
+    assert_eq!(
+        crate::css::resolve_var_references("var(var(--missing), red)", &vars),
+        "red"
+    );
+    assert_eq!(
+        crate::css::resolve_var_references("var(var(--name), red)", &vars),
+        "green"
+    );
+
+    let texts = build_display_texts(
+        r#"<style>:root { --name: --word; --word: "green"; }
+           p::before { content: var(var(--name)); }</style><p>middle</p>"#,
+    );
+    assert!(
+        texts.iter().any(|text| text.contains("green")),
+        "nested variable name should reach generated content: {texts:?}"
+    );
+}
+
+#[test]
+fn var_function_name_is_case_insensitive_but_custom_property_name_is_not() {
+    let vars = std::collections::HashMap::from([
+        ("--color".to_string(), "green".to_string()),
+        ("--COLOR".to_string(), "blue".to_string()),
+    ]);
+    assert_eq!(
+        crate::css::resolve_var_references("VAR(--color) VaR(--COLOR)", &vars),
+        "green blue"
+    );
+    let texts = build_display_texts(
+        r#"<style>:root { --color: "green"; } p::before { content: VaR(--color); }</style><p>x</p>"#,
+    );
+    assert!(texts.iter().any(|text| text.contains("green")), "{texts:?}");
 }
 
 #[test]

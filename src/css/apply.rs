@@ -1185,7 +1185,7 @@ fn take_function_args(s: &str) -> Option<(&str, usize)> {
     None
 }
 
-fn split_top_level_comma(s: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_top_level_comma(s: &str) -> Option<(&str, &str)> {
     let mut depth = 0usize;
     let mut quote: Option<u8> = None;
     let bytes = s.as_bytes();
@@ -1215,6 +1215,14 @@ fn split_top_level_comma(s: &str) -> Option<(&str, &str)> {
 }
 
 pub(crate) fn resolve_var_pass(val: &str, variables: &HashMap<String, String>) -> String {
+    resolve_var_pass_with_depth(val, variables, 0)
+}
+
+fn resolve_var_pass_with_depth(
+    val: &str,
+    variables: &HashMap<String, String>,
+    depth: usize,
+) -> String {
     if !contains_var_function(val) {
         return val.to_string();
     }
@@ -1232,19 +1240,23 @@ pub(crate) fn resolve_var_pass(val: &str, variables: &HashMap<String, String>) -
             } else {
                 (inner.trim(), None)
             };
-            if let Some(resolved) = variables.get(name) {
-                if resolved.is_empty() {
-                    if let Some(fb) = fallback {
-                        out.push_str(fb);
-                        if needs_var_substitution_separator(fb, rest) {
-                            out.push(' ');
-                        }
+            let mut resolved_name = name.to_string();
+            if depth < 32 {
+                for _ in 0..10 {
+                    if !contains_var_function(&resolved_name) {
+                        break;
                     }
-                } else {
-                    out.push_str(resolved);
-                    if needs_var_substitution_separator(resolved, rest) {
-                        out.push(' ');
+                    let next = resolve_var_pass_with_depth(&resolved_name, variables, depth + 1);
+                    if next == resolved_name {
+                        break;
                     }
+                    resolved_name = next;
+                }
+            }
+            if let Some(resolved) = variables.get(resolved_name.trim()) {
+                out.push_str(resolved);
+                if needs_var_substitution_separator(resolved, rest) {
+                    out.push(' ');
                 }
             } else if let Some(fb) = fallback {
                 out.push_str(fb);
@@ -1263,7 +1275,11 @@ pub(crate) fn resolve_var_pass(val: &str, variables: &HashMap<String, String>) -
 }
 
 pub(crate) fn contains_var_function(value: &str) -> bool {
-    value.contains("var(") && find_var_function(value).is_some()
+    value
+        .as_bytes()
+        .windows(4)
+        .any(|part| part.eq_ignore_ascii_case(b"var("))
+        && find_var_function(value).is_some()
 }
 
 pub(crate) fn find_var_function(value: &str) -> Option<(usize, usize)> {
@@ -1286,7 +1302,9 @@ pub(crate) fn find_var_function(value: &str) -> Option<(usize, usize)> {
                 continue;
             }
             None if matches!(bytes[i], b'\'' | b'"') => quote = Some(bytes[i]),
-            None if bytes[i..].starts_with(b"var(")
+            None if bytes
+                .get(i..i + 4)
+                .is_some_and(|part| part.eq_ignore_ascii_case(b"var("))
                 && (i == 0
                     || !matches!(bytes[i - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | 0x80..=0xff)) =>
             {
@@ -1329,7 +1347,10 @@ pub(crate) fn find_var_function(value: &str) -> Option<(usize, usize)> {
     None
 }
 
-fn needs_var_substitution_separator(inserted: &str, rest: &str) -> bool {
+pub(crate) fn needs_var_substitution_separator(inserted: &str, rest: &str) -> bool {
+    if inserted.ends_with(char::is_whitespace) || rest.starts_with(char::is_whitespace) {
+        return false;
+    }
     let Some(last) = inserted.chars().rev().find(|c| !c.is_ascii_whitespace()) else {
         return false;
     };

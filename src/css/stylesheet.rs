@@ -398,9 +398,7 @@ impl Stylesheet {
                     &rule.declarations
                 };
                 for (name, value) in declarations {
-                    if name.starts_with("--")
-                        && (!value.is_empty() || !self.variables.contains_key(name))
-                    {
+                    if name.starts_with("--") {
                         self.variables.insert(name.clone(), value.clone());
                     }
                 }

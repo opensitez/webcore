@@ -8,6 +8,7 @@ use std::io::{Read, Seek};
 use std::sync::{Arc, Mutex};
 
 const RAW_RESOURCE_CACHE_MAX_BYTES: usize = 128 * 1024 * 1024;
+const MAX_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
 
 struct RawResourceCache {
     entries: std::collections::HashMap<String, (Arc<Vec<u8>>, u64)>,
@@ -624,10 +625,16 @@ where
     let mut next_preview_at = options.preview_after_bytes.max(1024);
     let preview_interval = options.preview_interval_bytes.max(32 * 1024);
     let mut buf = [0u8; 16 * 1024];
+    let mut bytes_read = 0usize;
     loop {
         let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
+        }
+        bytes_read = bytes_read.saturating_add(n);
+        if bytes_read > MAX_DOCUMENT_BYTES || is_binary_document_chunk(&buf[..n], bytes_read == n)
+        {
+            return Err("refusing binary or oversized document input".to_string());
         }
         let text = decode_streaming_text(&mut decoder, &buf[..n], false);
         if !text.is_empty() {
@@ -660,6 +667,28 @@ where
         on_chunk(final_url.clone(), pending_emit);
     }
     Ok((html, final_url))
+}
+
+fn is_binary_document_chunk(bytes: &[u8], first_chunk: bool) -> bool {
+    if first_chunk
+        && (bytes.starts_with(b"ID3")
+            || bytes.starts_with(b"OggS")
+            || bytes.starts_with(b"fLaC")
+            || bytes.starts_with(b"RIFF")
+            || bytes.starts_with(b"\x1a\x45\xdf\xa3")
+            || bytes.starts_with(b"\x89PNG")
+            || bytes.starts_with(b"\xff\xd8\xff")
+            || bytes.starts_with(b"%PDF-")
+            || bytes.get(4..8) == Some(b"ftyp")
+            || bytes
+                .get(..2)
+                .is_some_and(|head| head[0] == 0xff && head[1] & 0xe0 == 0xe0))
+    {
+        return true;
+    }
+    bytes
+        .iter()
+        .any(|&byte| byte == 0 || (byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\x0c' | b'\r')))
 }
 
 fn stream_document_bytes<F>(
@@ -1598,6 +1627,42 @@ fn read_css_cache_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_reader_rejects_binary_even_when_caller_expects_html() {
+        let options = PageLoadOptions::default();
+        for bytes in [
+            b"ID3\x04\x00\x00audio".as_slice(),
+            b"<!doctype html>\0garbage".as_slice(),
+            b"<html>\x01</html>".as_slice(),
+            b"\x00\x00\x00\x18ftypisom".as_slice(),
+            b"\x1a\x45\xdf\xa3\x00".as_slice(),
+        ] {
+            let mut chunks = Vec::new();
+            let result = stream_document_reader(
+                std::io::Cursor::new(bytes),
+                "file:///bad.html".to_string(),
+                &options,
+                |_, chunk| chunks.push(chunk),
+            );
+            assert!(result.is_err(), "binary input was accepted: {bytes:?}");
+            assert!(chunks.is_empty());
+        }
+    }
+
+    #[test]
+    fn document_reader_rejects_binary_after_valid_html_prefix() {
+        let mut bytes = b"<html><body>safe".to_vec();
+        bytes.extend_from_slice(&vec![b' '; 16 * 1024]);
+        bytes.extend_from_slice(b"\x00binary");
+        let result = stream_document_reader(
+            std::io::Cursor::new(bytes),
+            "file:///bad.html".to_string(),
+            &PageLoadOptions::default(),
+            |_, _| {},
+        );
+        assert!(result.is_err());
+    }
 
     #[test]
     fn direct_media_url_opens_paused_player_without_reading_binary() {

@@ -1399,7 +1399,7 @@ pub fn parse_declarations(block: &str) -> HashMap<String, String> {
                 raw_prop.to_ascii_lowercase()
             };
             let value = strip_important(decl[colon + 1..].trim());
-            if !prop.is_empty() && !value.is_empty() {
+            if !prop.is_empty() && (!value.is_empty() || prop.starts_with("--")) {
                 map.insert(prop, value);
             }
         }
@@ -1428,7 +1428,7 @@ pub fn parse_declarations_important(block: &str) -> (Declarations, Declarations)
             let raw_value = decl[colon + 1..].trim();
             let is_important = has_important(raw_value);
             let value = strip_important(raw_value);
-            if !prop.is_empty() && !value.is_empty() {
+            if !prop.is_empty() && (!value.is_empty() || prop.starts_with("--")) {
                 if is_important {
                     important.append_source(prop, value);
                 } else {

@@ -501,11 +501,7 @@ pub(crate) fn extract_root_variables_vp(
                         let prop = decl[..colon].trim();
                         if prop.starts_with("--") {
                             let val = decl[colon + 1..].trim().to_string();
-                            // Don't overwrite a non-empty value with an empty one
-                            // (prevents dark-mode selectors from clobbering light-mode defaults)
-                            if !val.is_empty() || !vars.contains_key(prop) {
-                                vars.insert(prop.to_string(), val);
-                            }
+                            vars.insert(prop.to_string(), val);
                         }
                     }
                 }
@@ -517,8 +513,7 @@ pub(crate) fn extract_root_variables_vp(
     }
 }
 
-/// Expand `var()` references within the variable map itself so all values are concrete.
-/// Handles chains (--a: var(--b), --b: 1rem) and circular refs (invalid/empty).
+/// Compute custom properties once per dependency, preserving valid empty values.
 pub(crate) fn pre_resolve_variables(vars: &mut HashMap<String, String>) {
     // Handle csstools light-dark() polyfill: in light mode (our default),
     // the toggle variables should be empty so fallback (light) values are used.
@@ -534,40 +529,16 @@ pub(crate) fn pre_resolve_variables(vars: &mut HashMap<String, String>) {
         vars.remove(key);
     }
 
-    let keys: Vec<String> = vars.keys().cloned().collect();
-    let max_passes = keys.len().min(50);
-    for _ in 0..max_passes {
-        let mut changed = false;
-        let snapshot = vars.clone();
-        for key in &keys {
-            if let Some(val) = vars.get(key) {
-                if super::apply::contains_var_function(val) {
-                    let resolved = resolve_var_pass(val, &snapshot);
-                    if resolved != *val {
-                        vars.insert(key.clone(), resolved);
-                        changed = true;
-                    }
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
+    let source = std::mem::take(vars);
+    let mut memo = HashMap::with_capacity(source.len());
+    let mut stack = Vec::new();
+    let mut cyclic = HashSet::new();
+    for key in source.keys() {
+        resolve_custom_property(key, &source, None, &mut memo, &mut stack, &mut cyclic);
     }
-    // Final pass: any still-unresolved custom property is cyclic/invalid.
-    // The fallback inside the custom property's own `var()` is not taken; a
-    // consuming declaration can still use its own fallback when it sees the
-    // variable is invalid.
-    let keys: Vec<String> = vars.keys().cloned().collect();
-    for key in &keys {
-        if let Some(val) = vars.get(key) {
-            let mut resolved = val.clone();
-            if super::apply::contains_var_function(&resolved) {
-                resolved.clear();
-            }
-            if resolved != *val {
-                vars.insert(key.clone(), resolved);
-            }
+    for (key, value) in memo {
+        if let Some(value) = value {
+            vars.insert(key, value);
         }
     }
 }
@@ -579,43 +550,111 @@ pub(crate) fn pre_resolve_changed_variables(
     vars: &mut HashMap<String, String>,
     changed: &HashSet<&str>,
 ) {
+    let mut source = std::mem::take(vars);
     for &key in changed {
         if key.starts_with("--csstools-light-dark-toggle-") {
-            vars.remove(key);
+            source.remove(key);
         }
     }
-    let keys: Vec<&str> = changed
-        .iter()
-        .copied()
-        .filter(|key| vars.contains_key(*key))
-        .collect();
-    for _ in 0..keys.len().min(50) {
-        let mut updates = Vec::new();
-        for &key in &keys {
-            if let Some(val) = vars.get(key) {
-                if super::apply::contains_var_function(val) {
-                    let resolved = resolve_var_pass(val, vars);
-                    if resolved != *val {
-                        updates.push((key, resolved));
-                    }
-                }
+    let mut memo = HashMap::with_capacity(changed.len());
+    let mut stack = Vec::new();
+    let mut cyclic = HashSet::new();
+    for &key in changed {
+        resolve_custom_property(
+            key,
+            &source,
+            Some(changed),
+            &mut memo,
+            &mut stack,
+            &mut cyclic,
+        );
+    }
+    *vars = source;
+    for &key in changed {
+        match memo.remove(key).flatten() {
+            Some(value) => {
+                vars.insert(key.to_string(), value);
+            }
+            None => {
+                vars.remove(key);
             }
         }
-        if updates.is_empty() {
-            break;
-        }
-        for (key, value) in updates {
-            vars.insert(key.to_string(), value);
+    }
+}
+
+fn resolve_custom_property(
+    name: &str,
+    source: &HashMap<String, String>,
+    changed: Option<&HashSet<&str>>,
+    memo: &mut HashMap<String, Option<String>>,
+    stack: &mut Vec<String>,
+    cyclic: &mut HashSet<String>,
+) -> Option<String> {
+    if let Some(value) = memo.get(name) {
+        return value.clone();
+    }
+    let raw = source.get(name)?;
+    if changed.is_some_and(|keys| !keys.contains(name)) {
+        return Some(raw.clone());
+    }
+    if let Some(first) = stack.iter().position(|entry| entry == name) {
+        cyclic.extend(stack[first..].iter().cloned());
+        return None;
+    }
+    if stack.len() >= 128 {
+        return None;
+    }
+    stack.push(name.to_string());
+    let value = substitute_custom_value(raw, source, changed, memo, stack, cyclic, 0);
+    stack.pop();
+    let value = if cyclic.contains(name) { None } else { value };
+    memo.insert(name.to_string(), value.clone());
+    value
+}
+
+fn substitute_custom_value(
+    raw: &str,
+    source: &HashMap<String, String>,
+    changed: Option<&HashSet<&str>>,
+    memo: &mut HashMap<String, Option<String>>,
+    stack: &mut Vec<String>,
+    cyclic: &mut HashSet<String>,
+    depth: usize,
+) -> Option<String> {
+    if depth >= 128 {
+        return None;
+    }
+    let mut out = String::new();
+    let mut rest = raw;
+    while let Some((start, end)) = super::apply::find_var_function(rest) {
+        out.push_str(&rest[..start]);
+        let args = &rest[start + 4..end - 1];
+        let (name, fallback) = super::apply::split_top_level_comma(args)
+            .map_or((args, None), |(name, fallback)| (name, Some(fallback)));
+        let resolved_name = substitute_custom_value(
+            name, source, changed, memo, stack, cyclic, depth + 1,
+        );
+        let value = resolved_name
+            .as_deref()
+            .filter(|name| name.trim().starts_with("--"))
+            .and_then(|name| {
+                resolve_custom_property(name.trim(), source, changed, memo, stack, cyclic)
+            })
+            .or_else(|| {
+                fallback.and_then(|fallback| {
+                    substitute_custom_value(
+                        fallback, source, changed, memo, stack, cyclic, depth + 1,
+                    )
+                })
+            })?;
+        rest = &rest[end..];
+        out.push_str(&value);
+        if super::apply::needs_var_substitution_separator(&value, rest) {
+            out.push(' ');
         }
     }
-    for key in keys {
-        if vars
-            .get(key)
-            .is_some_and(|value| super::apply::contains_var_function(value))
-        {
-            vars.insert(key.to_string(), String::new());
-        }
-    }
+    out.push_str(rest);
+    Some(out)
 }
 
 /// Extract @font-face declarations from a CSS string.
