@@ -35,7 +35,7 @@ pub fn replay(list: &DisplayList, pixmap: &mut Pixmap, scale: f32) {
 }
 
 #[inline]
-fn rgba_is_opaque(rgba: &[u8]) -> bool {
+pub(super) fn rgba_is_opaque(rgba: &[u8]) -> bool {
     #[cfg(target_arch = "aarch64")]
     {
         return unsafe { rgba_is_opaque_neon(rgba) };
@@ -151,7 +151,7 @@ fn opaque_rounded_band_fill_matches_tiny_skia() {
     }
 }
 
-fn blit_opaque_unscaled_image(
+pub(super) fn blit_opaque_unscaled_image(
     target: &mut Pixmap,
     rgba: &[u8],
     width: u32,

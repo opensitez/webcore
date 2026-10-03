@@ -177,12 +177,18 @@ impl TileManager {
             {
                 continue;
             }
+            let transform = tiny_skia::Transform::from_translate(x.round(), y.round());
+            if super::display_list_replay::blit_opaque_unscaled_image(
+                output, tile.pixmap.data(), tile.pixmap.width(), tile.pixmap.height(), transform,
+            ) {
+                continue;
+            }
             output.draw_pixmap(
                 0,
                 0,
                 tile.pixmap.as_ref(),
                 &tiny_skia::PixmapPaint::default(),
-                tiny_skia::Transform::from_translate(x.round(), y.round()),
+                transform,
                 None,
             );
         }

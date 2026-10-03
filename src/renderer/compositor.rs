@@ -51,13 +51,13 @@ impl FixedSurface {
         let mut top = viewport_height;
         let mut right = 0;
         let mut bottom = 0;
-        let mut occupied_rows = vec![false; viewport_height as usize];
+        let mut occupied_rows = vec![0; viewport_height as usize];
         for (y, row) in surface.data().chunks_exact(viewport_width as usize * 4).enumerate() {
             let Some(first) = row.chunks_exact(4).position(|pixel| pixel[3] != 0) else {
                 continue;
             };
             let last = row.chunks_exact(4).rposition(|pixel| pixel[3] != 0).unwrap();
-            occupied_rows[y] = true;
+            occupied_rows[y] = if super::display_list_replay::rgba_is_opaque(row) { 2 } else { 1 };
             left = left.min(first as u32);
             top = top.min(y as u32);
             right = right.max(last as u32 + 1);
@@ -115,8 +115,15 @@ impl FixedSurface {
     pub fn composite(&self, target: &mut tiny_skia::Pixmap) {
         let stride = self.image.width() as usize * 4;
         for &(top, bottom) in &self.row_bands {
+            let pixels = &self.image.data()[top as usize * stride..bottom as usize * stride];
+            if super::display_list_replay::blit_opaque_unscaled_image(
+                target, pixels, self.image.width(), bottom - top,
+                tiny_skia::Transform::from_translate(self.x as f32, (self.y + top as i32) as f32),
+            ) {
+                continue;
+            }
             let image = tiny_skia::PixmapRef::from_bytes(
-                &self.image.data()[top as usize * stride..bottom as usize * stride],
+                pixels,
                 self.image.width(), bottom - top,
             ).expect("bounded fixed surface band");
             target.draw_pixmap(
@@ -131,13 +138,16 @@ impl FixedSurface {
     }
 }
 
-fn occupied_row_bands(rows: &[bool]) -> Vec<(u32, u32)> {
+fn occupied_row_bands(rows: &[u8]) -> Vec<(u32, u32)> {
     let mut bands = Vec::new();
     let mut start = None;
     for (row, &occupied) in rows.iter().enumerate() {
-        if occupied && start.is_none() {
+        if row > 0 && occupied != rows[row - 1] && let Some(top) = start.take() {
+            bands.push((top, row as u32));
+        }
+        if occupied != 0 && start.is_none() {
             start = Some(row as u32);
-        } else if !occupied && let Some(top) = start.take() {
+        } else if occupied == 0 && let Some(top) = start.take() {
             bands.push((top, row as u32));
         }
     }
@@ -154,13 +164,13 @@ fn occupied_row_bands(rows: &[bool]) -> Vec<(u32, u32)> {
 
 #[test]
 fn fixed_surface_row_bands_match_full_blits() {
-    for fragmented in [false, true] {
+    for (fragmented, alpha) in [(false, 140), (true, 140), (false, 255)] {
         let mut source = tiny_skia::Pixmap::new(64, 80).unwrap();
         for y in 0..80 {
             if (fragmented && y % 2 == 0) || (!fragmented && (y < 8 || y >= 72)) {
                 for x in 3..61 {
                     source.pixels_mut()[(y * 64 + x) as usize] =
-                        tiny_skia::PremultipliedColorU8::from_rgba(35, 70, 100, 140).unwrap();
+                        tiny_skia::PremultipliedColorU8::from_rgba(35, 70, 100, alpha).unwrap();
                 }
             }
         }
