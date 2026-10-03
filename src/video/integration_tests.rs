@@ -110,14 +110,14 @@ fn video_shows_center_play_affordance_only_when_paused() {
         crate::renderer::display_list_builder::build_display_list(&engine.doc.root, 200.0, 150.0);
     assert!(paused.commands.iter().any(|command| matches!(
         command,
-        crate::renderer::display_list::PaintCmd::PushClipPath { points } if points.len() == 3
+        crate::renderer::display_list::PaintCmd::PushClipPath { points, .. } if points.len() == 3
     )));
     assert!(engine.doc.media_play(id));
     let playing =
         crate::renderer::display_list_builder::build_display_list(&engine.doc.root, 200.0, 150.0);
     assert!(!playing.commands.iter().any(|command| matches!(
         command,
-        crate::renderer::display_list::PaintCmd::PushClipPath { points } if points.len() == 3
+        crate::renderer::display_list::PaintCmd::PushClipPath { points, .. } if points.len() == 3
     )));
 }
 

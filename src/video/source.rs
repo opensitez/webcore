@@ -48,9 +48,11 @@ fn can_play_type_for_kind(kind: MediaKind, media_type: &str) -> &'static str {
         MediaKind::Video => match mime {
             "video/mp4" => {
                 !lower.contains("codecs=") || lower.contains("avc1") || lower.contains("avc3")
+                    || lower.contains("vp08") || lower.contains("vp09")
             }
             "video/x-yuv4mpeg2" => true,
-            "video/webm" => !lower.contains("codecs=") || lower.contains("vp8"),
+            "video/webm" => !lower.contains("codecs=") || lower.contains("vp8")
+                || lower.contains("vp9") || lower.contains("vp09"),
             _ => false,
         },
         MediaKind::Audio => matches!(
@@ -88,10 +90,25 @@ mod tests {
         );
         assert_eq!(can_play_type("video", "video/webm"), Some("maybe"));
         assert_eq!(can_play_type("video", "video/webm; codecs=\"vp8\""), Some("maybe"));
-        assert_eq!(can_play_type("video", "video/webm; codecs=\"vp9\""), Some(""));
+        assert_eq!(can_play_type("video", "video/webm; codecs=\"vp9\""), Some("maybe"));
         assert_eq!(
             can_play_type("video", "video/mp4; codecs=\"avc1.640028\""),
             Some("maybe")
         );
+    }
+
+    #[test]
+    fn selects_typed_vp9_source_and_recognizes_vp_sample_entries() {
+        let doc = crate::html::parse_html(
+            "<video id=v><source src=movie.webm type='video/webm; codecs=&quot;vp9&quot;'></video>",
+        );
+        let node = doc.find_webcore(doc.get_element_by_id("v").unwrap()).unwrap();
+        assert_eq!(current_src(node, "http://localhost/websites/video/video_vp9.html"),
+            Some("http://localhost/websites/video/movie.webm".into()));
+        for media_type in ["video/webm; codecs=\"vp09.00.10.08\"",
+            "video/mp4; codecs=\"vp09.00.10.08\"", "video/mp4; codecs=\"vp08\""] {
+            assert_eq!(can_play_type("video", media_type), Some("maybe"));
+        }
+        assert_eq!(can_play_type("video", "video/webm; codecs=\"av01\""), Some(""));
     }
 }

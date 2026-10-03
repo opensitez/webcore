@@ -119,6 +119,7 @@ pub(crate) fn build_media_element(node: &WebCore, list: &mut DisplayList, sx: f3
                 (cx + half, cy),
                 (cx - half * 0.65, cy + half),
             ],
+            even_odd: false,
         });
         list.push(PaintCmd::FillRect {
             rect: Rect::new(cx - half, cy - half, half * 2.0, half * 2.0),
