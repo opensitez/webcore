@@ -24,6 +24,9 @@ use crate::types::{
     find_parent_form_action, form_owner_id, submitter_form_method,
 };
 
+const ANIMATION_FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
+const BACKGROUND_MEDIA_INTERVAL: Duration = Duration::from_millis(250);
+
 enum BrowserViewLoadResult {
     HtmlChunk {
         load_id: usize,
@@ -41,8 +44,11 @@ fn next_frame_deadline(previous: Option<Instant>, now: Instant, interval: Durati
     let Some(previous) = previous else {
         return now + interval;
     };
-    if previous > now {
+    if previous > now && previous <= now + interval {
         return previous;
+    }
+    if previous > now {
+        return now + interval;
     }
     let missed = now.duration_since(previous).as_nanos() / interval.as_nanos();
     previous + interval * (missed.min((u32::MAX - 1) as u128) as u32 + 1)
@@ -1301,7 +1307,7 @@ impl BrowserView {
                 let deadline = next_frame_deadline(
                     self.next_frame_deadline,
                     Instant::now(),
-                    Duration::from_nanos(16_666_667),
+                    self.stream_frame_interval(),
                 );
                 self.next_frame_deadline = Some(deadline);
                 event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
@@ -1377,8 +1383,24 @@ impl BrowserView {
             || self.interaction_layout_pending
             || frame.needs_immediate_update()
             || self.last_stream_frame_update.is_none_or(|last| {
-                Instant::now().saturating_duration_since(last) >= Duration::from_nanos(16_666_667)
+                Instant::now().saturating_duration_since(last) >= self.stream_frame_interval()
             })
+    }
+
+    fn stream_frame_interval(&self) -> Duration {
+        let Some(frame) = self.stream_frame.as_ref() else {
+            return ANIMATION_FRAME_INTERVAL;
+        };
+        if self.loading
+            || frame.doc.pending_images.is_some()
+            || frame.doc.pending_stylesheets.is_some()
+            || frame.engine.has_pending_fonts()
+            || !frame.media_only_idle()
+        {
+            ANIMATION_FRAME_INTERVAL
+        } else {
+            BACKGROUND_MEDIA_INTERVAL
+        }
     }
 
     fn defer_queued_html_layout(&self) -> bool {
@@ -1995,6 +2017,44 @@ mod tests {
             next_frame_deadline(Some(first), first + Duration::from_millis(40), interval),
             start + interval * 4,
         );
+        assert_eq!(
+            next_frame_deadline(
+                Some(start + BACKGROUND_MEDIA_INTERVAL),
+                start,
+                ANIMATION_FRAME_INTERVAL,
+            ),
+            start + ANIMATION_FRAME_INTERVAL,
+            "a visible animation must not inherit a distant background-media deadline"
+        );
+    }
+
+    #[test]
+    fn decoded_media_arrival_bypasses_background_deadline() {
+        let mut view = BrowserView::new(320.0, 180.0, PageLoadOptions::default());
+        let doc = crate::html::parse_html("<video id='clip' src='clip.mp4'></video>");
+        let mut frame = EngineFrame::new(doc, 320.0, 180.0);
+        let id = frame.doc.get_element_by_id("clip").unwrap();
+        assert!(frame.doc.media_play(id));
+        assert!(frame.update_frame());
+        frame.doc.get_box_by_id_mut(id).unwrap().layout.border_rect =
+            crate::types::Rect::new(0.0, 3000.0, 80.0, 60.0);
+        view.stream_frame = Some(frame);
+        view.last_stream_frame_update = Some(Instant::now());
+        assert_eq!(view.stream_frame_interval(), BACKGROUND_MEDIA_INTERVAL);
+        assert!(!view.stream_frame_update_due());
+
+        view.stream_frame.as_ref().unwrap().signal_video_update_for_test();
+        assert!(
+            !view.stream_frame_update_due(),
+            "offscreen decoded frames should wait for the background media tick"
+        );
+        view.stream_frame.as_mut().unwrap().doc.get_box_by_id_mut(id).unwrap().layout.border_rect =
+            crate::types::Rect::new(0.0, 0.0, 80.0, 60.0);
+        assert!(view.stream_frame_update_due(), "a visible decoded frame is urgent");
+        view.stream_frame.as_mut().unwrap().doc.get_box_by_id_mut(id).unwrap().layout.border_rect =
+            crate::types::Rect::new(0.0, 3000.0, 80.0, 60.0);
+        view.stream_frame.as_ref().unwrap().signal_urgent_video_update_for_test();
+        assert!(view.stream_frame_update_due());
     }
 
     #[test]

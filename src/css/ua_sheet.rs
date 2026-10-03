@@ -23,6 +23,10 @@ pub fn ua_stylesheet() -> Stylesheet {
     PARSED_UA.clone()
 }
 
+pub(crate) fn ua_rule_count() -> usize {
+    PARSED_UA.rules.len()
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

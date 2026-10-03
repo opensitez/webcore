@@ -411,6 +411,8 @@ pub struct ClipPath {
     pub center_y: CssLength,
     // polygon points
     pub points: Vec<(CssLength, CssLength)>,
+    pub polygon_even_odd: bool,
+    pub polygon_round: Option<CssLength>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -433,6 +435,91 @@ pub enum ClipPathBox {
 }
 
 impl ClipPath {
+    pub fn polygon_outline(
+        &self,
+        reference: Rect,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> Vec<(f32, f32)> {
+        let vertices: Vec<_> = self
+            .points
+            .iter()
+            .map(|(x, y)| {
+                (
+                    reference.x + x.resolve(font_px, reference.w, root_font_px),
+                    reference.y + y.resolve(font_px, reference.h, root_font_px),
+                )
+            })
+            .collect();
+        let Some(radius) = self.polygon_round.as_ref() else {
+            return vertices;
+        };
+        let radius = radius.resolve(font_px, reference.w, root_font_px);
+        if vertices.len() < 3 || !radius.is_finite() || radius <= 0.0 {
+            return vertices;
+        }
+
+        // A bounded chord error keeps the same contour in paint and hit testing.
+        const MAX_CHORD_ERROR_PX: f32 = 0.25;
+        const MAX_ARC_STEPS: usize = 64;
+        let mut outline = Vec::with_capacity(vertices.len() * 8);
+        for index in 0..vertices.len() {
+            let previous = vertices[(index + vertices.len() - 1) % vertices.len()];
+            let vertex = vertices[index];
+            let next = vertices[(index + 1) % vertices.len()];
+            let incoming = (previous.0 - vertex.0, previous.1 - vertex.1);
+            let outgoing = (next.0 - vertex.0, next.1 - vertex.1);
+            let incoming_len = incoming.0.hypot(incoming.1);
+            let outgoing_len = outgoing.0.hypot(outgoing.1);
+            if incoming_len <= f32::EPSILON || outgoing_len <= f32::EPSILON {
+                outline.push(vertex);
+                continue;
+            }
+            let a = (incoming.0 / incoming_len, incoming.1 / incoming_len);
+            let b = (outgoing.0 / outgoing_len, outgoing.1 / outgoing_len);
+            let angle = (a.0 * b.0 + a.1 * b.1).clamp(-1.0, 1.0).acos();
+            if angle <= 1e-4 || std::f32::consts::PI - angle <= 1e-4 {
+                outline.push(vertex);
+                continue;
+            }
+            let half_tangent = (angle * 0.5).tan();
+            let distance = (radius / half_tangent).min(incoming_len.min(outgoing_len) * 0.5);
+            let effective_radius = distance * half_tangent;
+            let turn = std::f32::consts::PI - angle;
+            let handle = (4.0 / 3.0) * effective_radius * (turn * 0.25).tan();
+            let start = (vertex.0 + a.0 * distance, vertex.1 + a.1 * distance);
+            let end = (vertex.0 + b.0 * distance, vertex.1 + b.1 * distance);
+            let control_a = (start.0 - a.0 * handle, start.1 - a.1 * handle);
+            let control_b = (end.0 - b.0 * handle, end.1 - b.1 * handle);
+            let step_angle = 2.0
+                * (1.0 - MAX_CHORD_ERROR_PX / effective_radius)
+                    .clamp(-1.0, 1.0)
+                    .acos();
+            let steps = if step_angle > 0.0 {
+                (turn / step_angle).ceil() as usize
+            } else {
+                MAX_ARC_STEPS
+            }
+            .clamp(1, MAX_ARC_STEPS);
+            outline.push(start);
+            for step in 1..=steps {
+                let t = step as f32 / steps as f32;
+                let inv = 1.0 - t;
+                outline.push((
+                    inv.powi(3) * start.0
+                        + 3.0 * inv.powi(2) * t * control_a.0
+                        + 3.0 * inv * t * t * control_b.0
+                        + t.powi(3) * end.0,
+                    inv.powi(3) * start.1
+                        + 3.0 * inv.powi(2) * t * control_a.1
+                        + 3.0 * inv * t * t * control_b.1
+                        + t.powi(3) * end.1,
+                ));
+            }
+        }
+        outline
+    }
+
     pub fn circle_rect(&self, reference: Rect, font_px: f32, root_font_px: f32) -> Rect {
         let cx = self.center_x.resolve(font_px, reference.w, root_font_px);
         let cy = self.center_y.resolve(font_px, reference.h, root_font_px);
@@ -560,55 +647,46 @@ impl ClipPath {
         layout: &LayoutBox,
         root_font_px: f32,
     ) -> ([f32; 4], [f32; 4]) {
-        let border = layout.border_rect;
-        let target = self.reference_rect(layout);
-        let font_px = style.font_size_px(root_font_px, root_font_px);
-        let mut rx = [
-            style
-                .border_top_left_radius
-                .resolve(font_px, border.w, root_font_px),
-            style
-                .border_top_right_radius
-                .resolve(font_px, border.w, root_font_px),
-            style
-                .border_bottom_right_radius
-                .resolve(font_px, border.w, root_font_px),
-            style
-                .border_bottom_left_radius
-                .resolve(font_px, border.w, root_font_px),
-        ];
-        let mut ry = [
-            style
-                .border_top_left_radius_y
-                .resolve(font_px, border.h, root_font_px),
-            style
-                .border_top_right_radius_y
-                .resolve(font_px, border.h, root_font_px),
-            style
-                .border_bottom_right_radius_y
-                .resolve(font_px, border.h, root_font_px),
-            style
-                .border_bottom_left_radius_y
-                .resolve(font_px, border.h, root_font_px),
-        ];
-        (rx, ry) = reduce_shape_box_radii(border.w, border.h, rx, ry);
-        let left = border.x - target.x;
-        let right = target.x + target.w - border.x - border.w;
-        let top = border.y - target.y;
-        let bottom = target.y + target.h - border.y - border.h;
-        for (corner, dx, dy) in [
-            (0, left, top),
-            (1, right, top),
-            (2, right, bottom),
-            (3, left, bottom),
-        ] {
-            let coverage =
-                2.0 * (rx[corner] / border.w.max(1.0)).min(ry[corner] / border.h.max(1.0));
-            rx[corner] = adjusted_shape_box_radius(rx[corner], dx, coverage);
-            ry[corner] = adjusted_shape_box_radius(ry[corner], dy, coverage);
-        }
-        reduce_shape_box_radii(target.w, target.h, rx, ry)
+        shape_box_radii(style, layout, self.reference_rect(layout), root_font_px)
     }
+}
+
+pub(crate) fn shape_box_radii(
+    style: &ComputedStyle,
+    layout: &LayoutBox,
+    target: Rect,
+    root_font_px: f32,
+) -> ([f32; 4], [f32; 4]) {
+    let border = layout.border_rect;
+    let font_px = style.font_size_px(root_font_px, root_font_px);
+    let mut rx = [
+        style.border_top_left_radius.resolve(font_px, border.w, root_font_px),
+        style.border_top_right_radius.resolve(font_px, border.w, root_font_px),
+        style.border_bottom_right_radius.resolve(font_px, border.w, root_font_px),
+        style.border_bottom_left_radius.resolve(font_px, border.w, root_font_px),
+    ];
+    let mut ry = [
+        style.border_top_left_radius_y.resolve(font_px, border.h, root_font_px),
+        style.border_top_right_radius_y.resolve(font_px, border.h, root_font_px),
+        style.border_bottom_right_radius_y.resolve(font_px, border.h, root_font_px),
+        style.border_bottom_left_radius_y.resolve(font_px, border.h, root_font_px),
+    ];
+    (rx, ry) = reduce_shape_box_radii(border.w, border.h, rx, ry);
+    let left = border.x - target.x;
+    let right = target.x + target.w - border.x - border.w;
+    let top = border.y - target.y;
+    let bottom = target.y + target.h - border.y - border.h;
+    for (corner, dx, dy) in [
+        (0, left, top),
+        (1, right, top),
+        (2, right, bottom),
+        (3, left, bottom),
+    ] {
+        let coverage = 2.0 * (rx[corner] / border.w.max(1.0)).min(ry[corner] / border.h.max(1.0));
+        rx[corner] = adjusted_shape_box_radius(rx[corner], dx, coverage);
+        ry[corner] = adjusted_shape_box_radius(ry[corner], dy, coverage);
+    }
+    reduce_shape_box_radii(target.w, target.h, rx, ry)
 }
 
 fn adjusted_shape_box_radius(radius: f32, outset: f32, coverage: f32) -> f32 {

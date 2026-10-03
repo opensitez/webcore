@@ -3,7 +3,9 @@
 //! Uses EXACT positions from the layout engine. Never approximates.
 //! Faithfully ports the render_box logic from mod.rs into PaintCmd recording.
 
-use super::display_list::{DisplayList, ImageRef, MaskPaintLayer, PaintCmd, PlaceholderTypography, TextDecoration};
+use super::display_list::{
+    DisplayList, ImageRef, MaskPaintLayer, PaintCmd, PlaceholderTypography, TextDecoration,
+};
 use crate::types::{
     BackgroundClip, BackgroundRepeat, BackgroundSize, BorderStyle, ClipPathKind, Color,
     ComputedStyle, ContentVisibility, CssLength, Direction, Display, FontStyle,
@@ -163,8 +165,7 @@ fn canvas_body_color(root: &WebCore) -> Option<(u32, Color)> {
     }
     let body = root.children.iter().find(|child| child.tag == "body")?;
     let color = body.style.background_color;
-    (color.a > 0 && body.style.background_image_url.is_empty())
-        .then_some((body.node_id, color))
+    (color.a > 0 && body.style.background_image_url.is_empty()).then_some((body.node_id, color))
 }
 
 /// Build a display list from a laid-out box tree.
@@ -1068,17 +1069,24 @@ fn build_for_box_inner(
             .additional_mask_images
             .iter()
             .any(|layer| !layer.url.trim().is_empty());
-    let has_mask_layer = mask_image_requested && (0..=mask_sources.additional_mask_images.len()).any(|index| {
-        let requested = if index == 0 {
-            !mask_sources.mask_image_url.is_empty()
-        } else {
-            !mask_sources.additional_mask_images[index - 1].url.is_empty()
-        };
-        requested && node.mask_images.as_ref().and_then(|images| {
-            images.get_for_source(index, eff_style.mask_source_key(index)?)
+    let has_mask_layer = mask_image_requested
+        && (0..=mask_sources.additional_mask_images.len()).any(|index| {
+            let requested = if index == 0 {
+                !mask_sources.mask_image_url.is_empty()
+            } else {
+                !mask_sources.additional_mask_images[index - 1]
+                    .url
+                    .is_empty()
+            };
+            requested
+                && node
+                    .mask_images
+                    .as_ref()
+                    .and_then(|images| {
+                        images.get_for_source(index, eff_style.mask_source_key(index)?)
+                    })
+                    .is_some_and(|image| image.width > 0 && image.height > 0)
         })
-            .is_some_and(|image| image.width > 0 && image.height > 0)
-    })
         && pw > 0.0
         && ph > 0.0;
     if paint_self && mask_image_requested && !has_mask_layer {
@@ -1222,6 +1230,7 @@ fn build_for_box_inner(
     } else if let Some(points) = clip_path_polygon.as_ref() {
         list.push(PaintCmd::PushClipPath {
             points: points.clone(),
+            even_odd: eff_style.clip_path.polygon_even_odd,
         });
     } else if let Some((path, fill_rule, origin)) = clip_path_svg.as_ref() {
         list.push(PaintCmd::PushClipSvgPath {
@@ -1274,11 +1283,13 @@ fn build_for_box_inner(
             } else {
                 !rare.additional_mask_images[index - 1].url.is_empty()
             };
-            let image = requested.then(|| {
-                node.mask_images.as_ref().and_then(|images| {
-                    images.get_for_source(index, eff_style.mask_source_key(index)?)
+            let image = requested
+                .then(|| {
+                    node.mask_images.as_ref().and_then(|images| {
+                        images.get_for_source(index, eff_style.mask_source_key(index)?)
+                    })
                 })
-            }).flatten();
+                .flatten();
             let origin = mask_box(mask_list_value(&origins, index, "border-box"), true);
             let clip_name = mask_list_value(&clips, index, "border-box");
             let clip = mask_box(clip_name, false);
@@ -1319,19 +1330,29 @@ fn build_for_box_inner(
                 (0.0, 0.0)
             };
             let (position_x, position_y) =
-                crate::css::property_defs::parse_background_position_pair(
-                    mask_list_value(&positions, index, "0% 0%"),
-                )
+                crate::css::property_defs::parse_background_position_pair(mask_list_value(
+                    &positions, index, "0% 0%",
+                ))
                 .unwrap_or((CssLength::Percent(0.0), CssLength::Percent(0.0)));
             let tile = Rect::new(
-                origin.x + position_x.resolve(font_px, origin.w - draw_w, ctx.transform_ctx.root_font_px),
-                origin.y + position_y.resolve(font_px, origin.h - draw_h, ctx.transform_ctx.root_font_px),
+                origin.x
+                    + position_x.resolve(
+                        font_px,
+                        origin.w - draw_w,
+                        ctx.transform_ctx.root_font_px,
+                    ),
+                origin.y
+                    + position_y.resolve(
+                        font_px,
+                        origin.h - draw_h,
+                        ctx.transform_ctx.root_font_px,
+                    ),
                 draw_w,
                 draw_h,
             );
-            let repeat = crate::css::property_defs::parse_background_repeat_value(
-                mask_list_value(&repeats, index, "repeat"),
-            )
+            let repeat = crate::css::property_defs::parse_background_repeat_value(mask_list_value(
+                &repeats, index, "repeat",
+            ))
             .unwrap_or(BackgroundRepeat::Repeat);
             let (repeat_x_mode, repeat_y_mode) = repeat.axis_modes();
             let composite = match mask_list_value(&composites, index, "add") {
@@ -1345,9 +1366,8 @@ fn build_for_box_inner(
                 no_clip: clip_name == "no-clip",
                 origin,
                 tile,
-                data: image.map(|image| {
-                    ImageRef::Shared(image.data.clone(), image.width, image.height)
-                }),
+                data: image
+                    .map(|image| ImageRef::Shared(image.data.clone(), image.width, image.height)),
                 luminance: mask_list_value(&modes, index, "match-source")
                     .eq_ignore_ascii_case("luminance"),
                 repeat_x_mode,
@@ -1414,6 +1434,31 @@ fn build_for_box_inner(
     // `background-repeat` decides, per axis, whether the image (or gradient)
     // tiles out of the positioning area to cover the painting area.
     let (bg_repeat_x_mode, bg_repeat_y_mode) = node.style.background_repeat.axis_modes();
+
+    // CSS Compositing 1 isolates the background stack from the page backdrop.
+    // Reuse the pooled source-over group; borders and descendants stay outside.
+    let isolate_background = paint_self
+        && ((background_blend_mode_to_u8(&eff_style.background_blend_mode) != 0
+            && ((eff_style.gradient_type != GradientType::None
+                && eff_style.rare().gradient_stops.len() >= 2)
+                || node.bg_image_data.is_some()))
+            || eff_style
+                .rare()
+                .additional_background_layers
+                .iter()
+                .enumerate()
+                .any(|(index, layer)| {
+                    background_blend_mode_to_u8(&layer.blend_mode) != 0
+                        && ((layer.gradient_type != GradientType::None
+                            && layer.gradient_stops.len() >= 2)
+                            || node
+                                .additional_bg_images
+                                .get(index)
+                                .is_some_and(Option::is_some))
+                }));
+    if isolate_background {
+        list.push(PaintCmd::PushOpacity { alpha: 1.0 });
+    }
 
     // ── (b) Background color ────────────────────────────────────────────────
     {
@@ -1687,6 +1732,10 @@ fn build_for_box_inner(
             bg_clip_radii_y,
             background_blend_mode_to_u8(&eff_style.background_blend_mode),
         );
+    }
+
+    if isolate_background {
+        list.push(PaintCmd::PopOpacity);
     }
 
     // ── (e) Inset box-shadow ─────────────────────────────────────────────────
@@ -1963,23 +2012,25 @@ fn build_for_box_inner(
                 node.style.overflow_y,
                 Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
             ));
-    let overflow_clip_margin = resolve_overflow_clip_margin(
+    let overflow_clip_rect = crate::css::overflow_clip_rect(
         eff_style,
+        &node.layout,
+        sx,
+        sy,
         font_px,
-        node.layout.padding_rect.w,
         ctx.transform_ctx.root_font_px,
     );
-    let overflow_clip_rect = Rect::new(
-        px - overflow_clip_margin,
-        py - overflow_clip_margin,
-        pw + 2.0 * overflow_clip_margin,
-        ph + 2.0 * overflow_clip_margin,
-    );
     if overflow_clips {
+        let (clip_radii, clip_radii_y) = crate::css::overflow_clip_radii(
+            eff_style,
+            &node.layout,
+            font_px,
+            ctx.transform_ctx.root_font_px,
+        );
         list.push(PaintCmd::PushClip {
             rect: overflow_clip_rect,
-            radius: radii_arr,
-            radius_y: radii_y_arr,
+            radius: clip_radii,
+            radius_y: clip_radii_y,
         });
     }
 
@@ -4195,20 +4246,6 @@ fn emit_text(
     });
 }
 
-fn resolve_overflow_clip_margin(
-    style: &ComputedStyle,
-    font_px: f32,
-    reference: f32,
-    root_font_px: f32,
-) -> f32 {
-    style
-        .overflow_clip_margin
-        .split_whitespace()
-        .find_map(crate::css::parse_length_checked)
-        .map(|length| length.resolve(font_px, reference, root_font_px).max(0.0))
-        .unwrap_or(0.0)
-}
-
 fn clip_path_rect(
     style: &ComputedStyle,
     border_rect: Rect,
@@ -4305,14 +4342,9 @@ fn clip_path_polygon_points(
     Some(
         style
             .clip_path
-            .points
-            .iter()
-            .map(|(x, y)| {
-                (
-                    border_rect.x + x.resolve(font_px, border_rect.w, root_font_px) - scroll_x,
-                    border_rect.y + y.resolve(font_px, border_rect.h, root_font_px) - scroll_y,
-                )
-            })
+            .polygon_outline(border_rect, font_px, root_font_px)
+            .into_iter()
+            .map(|(x, y)| (x - scroll_x, y - scroll_y))
             .collect(),
     )
 }
@@ -5258,7 +5290,10 @@ fn build_deferred_positioned_box(
                     font_px,
                     ctx.transform_ctx.root_font_px,
                 ) {
-                    list.push(PaintCmd::PushClipPath { points });
+                    list.push(PaintCmd::PushClipPath {
+                        points,
+                        even_odd: style.clip_path.polygon_even_odd,
+                    });
                     clips += 1;
                 } else if let Some((path, fill_rule, origin)) =
                     clip_path_svg(style, reference, scroll_x, scroll_y)
@@ -5303,16 +5338,20 @@ fn build_deferred_positioned_box(
                 local.transform_ctx.root_font_px,
                 local.transform_ctx.root_font_px,
             );
-            let margin =
-                resolve_overflow_clip_margin(style, font, pr.w, local.transform_ctx.root_font_px);
-            let rect = Rect::new(
-                scrollport.x - margin,
-                scrollport.y - margin,
-                scrollport.w + margin * 2.0,
-                scrollport.h + margin * 2.0,
+            let rect = crate::css::overflow_clip_rect(
+                style,
+                &ancestor.layout,
+                local.scroll_x,
+                local.scroll_y,
+                font,
+                local.transform_ctx.root_font_px,
             );
-            let (radius, radius_y) =
-                resolved_border_radii_for_node(ancestor, local.transform_ctx.root_font_px);
+            let (radius, radius_y) = crate::css::overflow_clip_radii(
+                style,
+                &ancestor.layout,
+                font,
+                local.transform_ctx.root_font_px,
+            );
             list.push(PaintCmd::PushClip {
                 rect,
                 radius,

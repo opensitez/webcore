@@ -1,5 +1,3 @@
-mod platform;
-
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -7,7 +5,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::Window;
 
-use platform::Platform;
+use webcore::platform::Platform;
 use webcore::{Document, HtmlEventType, Renderer, load_html_with_base};
 
 const DEMO_HTML: &str = r##"<!DOCTYPE html>

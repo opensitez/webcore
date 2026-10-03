@@ -104,6 +104,7 @@ impl Document {
     pub fn new() -> Self {
         Self {
             root: WebCore::new("html"),
+            custom_elements: super::CustomElementRegistry::default(),
             stylesheet: Stylesheet::default(),
             title: String::new(),
             arena: DomArena::new(),
@@ -166,6 +167,7 @@ impl Document {
             on_dom_mutation: None,
             on_visibility_change: None,
             active_animations: Vec::new(),
+            finished_animations: Vec::new(),
             transition_states: HashMap::new(),
             prev_styles: HashMap::new(),
             transition_style_refs: HashMap::new(),
@@ -355,6 +357,12 @@ impl Document {
                     && self.can_append_linked_stylesheet_fragment(idx, &css_url);
                 if append_in_order {
                     self.stylesheet.append_fragment(sheet.clone());
+                } else if !replace
+                    && !rebuild_needed
+                    && let Some(at) = self.plain_fragment_insert_index(idx, &css_url, &sheet)
+                {
+                    self.stylesheet
+                        .insert_plain_rules_fragment(at, sheet.clone());
                 } else {
                     rebuild_needed = true;
                 }
@@ -488,6 +496,65 @@ impl Document {
             }
         }
         true
+    }
+
+    fn plain_fragment_insert_index(
+        &self,
+        idx: usize,
+        css_url: &str,
+        fragment: &crate::css::Stylesheet,
+    ) -> Option<usize> {
+        if !fragment.is_plain_rules_fragment() {
+            return None;
+        }
+        let Some(DocumentStylesheet::Linked { href, media }) = self.document_stylesheets.get(idx)
+        else {
+            return None;
+        };
+        if !crate::css::evaluate_media(media, self.viewport_w, self.viewport_h)
+            || crate::html::resolve_url(href, &self.base_url) != css_url
+        {
+            return None;
+        }
+
+        let mut active_rules = crate::css::ua_sheet::ua_rule_count();
+        let mut later_rules = 0usize;
+        for (slot, entry) in self.document_stylesheets.iter().enumerate() {
+            let sheet = match entry {
+                DocumentStylesheet::Inline { css, media }
+                    if crate::css::evaluate_media(media, self.viewport_w, self.viewport_h) =>
+                {
+                    let cached = self.inline_stylesheet_cache.get(&slot)?;
+                    if cached.base_url != self.base_url
+                        || !(std::sync::Arc::ptr_eq(&cached.source, css)
+                            || cached.source.as_ref() == css.as_ref())
+                    {
+                        return None;
+                    }
+                    Some(cached.sheet.as_ref())
+                }
+                DocumentStylesheet::Linked { href, media }
+                    if crate::css::evaluate_media(media, self.viewport_w, self.viewport_h) =>
+                {
+                    let url = crate::html::resolve_url(href, &self.base_url);
+                    if slot != idx && url == css_url {
+                        return None;
+                    }
+                    self.loaded_stylesheet_slots
+                        .get(&slot)
+                        .or_else(|| self.loaded_linked_stylesheets.get(&url))
+                }
+                _ => None,
+            };
+            if let Some(sheet) = sheet {
+                active_rules += sheet.rules.len();
+                if slot > idx {
+                    later_rules += sheet.rules.len();
+                }
+            }
+        }
+        (active_rules == self.stylesheet.rules.len())
+            .then_some(self.stylesheet.rules.len() - later_rules)
     }
 
     fn rebuild_author_stylesheet_from_document_order(&mut self) {
@@ -844,15 +911,27 @@ impl Document {
                     PendingImageTarget::Mask => {
                         let selected = node.style.mask_image_url_for_dpr(device_pixel_ratio);
                         let expected = crate::html::resolve_url(&selected, &base_url);
-                        let belongs_to_image_set = node.style.rare().mask_image_set_source.as_deref()
-                            .and_then(|source| crate::css::property_defs::image_set_resolution_for_url(source, &url, &base_url))
+                        let belongs_to_image_set = node
+                            .style
+                            .rare()
+                            .mask_image_set_source
+                            .as_deref()
+                            .and_then(|source| {
+                                crate::css::property_defs::image_set_resolution_for_url(
+                                    source, &url, &base_url,
+                                )
+                            })
                             .is_some();
                         if selected.is_empty()
                             || (url != expected
                                 && (!belongs_to_image_set
-                                    || node.mask_images.as_ref().and_then(|images| {
-                                        images.get_for_source(0, node.style.mask_source_key(0)?)
-                                    }).is_some()))
+                                    || node
+                                        .mask_images
+                                        .as_ref()
+                                        .and_then(|images| {
+                                            images.get_for_source(0, node.style.mask_source_key(0)?)
+                                        })
+                                        .is_some()))
                         {
                             return;
                         }
@@ -866,20 +945,34 @@ impl Document {
                         }
                     }
                     PendingImageTarget::MaskLayer(layer_index) => {
-                        let Some(layer) = node.style.rare().additional_mask_images.get(layer_index) else {
+                        let Some(layer) = node.style.rare().additional_mask_images.get(layer_index)
+                        else {
                             return;
                         };
                         let selected = layer.url_for_dpr(device_pixel_ratio);
                         let expected = crate::html::resolve_url(&selected, &base_url);
-                        let belongs_to_image_set = layer.image_set_source.as_deref()
-                            .and_then(|source| crate::css::property_defs::image_set_resolution_for_url(source, &url, &base_url))
+                        let belongs_to_image_set = layer
+                            .image_set_source
+                            .as_deref()
+                            .and_then(|source| {
+                                crate::css::property_defs::image_set_resolution_for_url(
+                                    source, &url, &base_url,
+                                )
+                            })
                             .is_some();
                         if selected.is_empty()
                             || (url != expected
                                 && (!belongs_to_image_set
-                                    || node.mask_images.as_ref().and_then(|images| {
-                                        images.get_for_source(layer_index + 1, node.style.mask_source_key(layer_index + 1)?)
-                                    }).is_some()))
+                                    || node
+                                        .mask_images
+                                        .as_ref()
+                                        .and_then(|images| {
+                                            images.get_for_source(
+                                                layer_index + 1,
+                                                node.style.mask_source_key(layer_index + 1)?,
+                                            )
+                                        })
+                                        .is_some()))
                         {
                             return;
                         }
@@ -2027,6 +2120,170 @@ mod tests {
             ],
             "parallel stylesheet completion must fill source-order slots"
         );
+    }
+
+    #[test]
+    fn plain_out_of_order_fragment_inserts_without_rebuilding_later_rules() {
+        let mut doc = Document::new();
+        doc.preserve_stylesheet_document_order = true;
+        doc.stylesheet = crate::css::ua_stylesheet();
+        doc.base_url = "https://example.test/".to_string();
+        doc.document_stylesheets = vec![
+            DocumentStylesheet::Inline {
+                css: ".target { color: rgb(10, 0, 0) }".into(),
+                media: String::new(),
+            },
+            DocumentStylesheet::Linked {
+                href: "slow.css".to_string(),
+                media: String::new(),
+            },
+            DocumentStylesheet::Inline {
+                css: ".target { color: rgb(20, 0, 0) }".into(),
+                media: String::new(),
+            },
+            DocumentStylesheet::Linked {
+                href: "fast.css".to_string(),
+                media: String::new(),
+            },
+        ];
+        doc.rebuild_author_stylesheet_from_document_order();
+        let (tx, rx) = std::sync::mpsc::channel();
+        doc.pending_stylesheets = Some(rx);
+        tx.send(PendingStylesheetResult::fragment(
+            3,
+            "https://example.test/fast.css".to_string(),
+            stylesheet_with_color(".target", "rgb(40, 0, 0)"),
+            String::new(),
+        ))
+        .unwrap();
+        assert!(doc.poll_pending_stylesheets_budgeted(1, std::time::Duration::ZERO));
+        let later_rule = doc
+            .stylesheet
+            .rules
+            .iter()
+            .rfind(|rule| rule.original_selector == ".target")
+            .unwrap();
+        let later_selector_ptr = later_rule.original_selector.as_ptr();
+
+        let slow = stylesheet_with_color(".target", "rgb(30, 0, 0)");
+        assert!(
+            doc.plain_fragment_insert_index(1, "https://example.test/slow.css", &slow)
+                .is_some()
+        );
+        tx.send(PendingStylesheetResult::fragment(
+            1,
+            "https://example.test/slow.css".to_string(),
+            slow,
+            String::new(),
+        ))
+        .unwrap();
+        assert!(doc.poll_pending_stylesheets_budgeted(1, std::time::Duration::ZERO));
+        let target_rules: Vec<_> = doc
+            .stylesheet
+            .rules
+            .iter()
+            .filter(|rule| rule.original_selector == ".target")
+            .collect();
+        let colors: Vec<_> = target_rules
+            .iter()
+            .map(|rule| rule.declarations.get("color").unwrap().as_str())
+            .collect();
+        assert_eq!(
+            colors,
+            [
+                "rgb(10, 0, 0)",
+                "rgb(30, 0, 0)",
+                "rgb(20, 0, 0)",
+                "rgb(40, 0, 0)",
+            ]
+        );
+        assert_eq!(
+            target_rules[3].original_selector.as_ptr(),
+            later_selector_ptr
+        );
+
+        tx.send(PendingStylesheetResult::fragment(
+            1,
+            "https://example.test/slow.css".to_string(),
+            stylesheet_with_color(".target", "rgb(35, 0, 0)"),
+            String::new(),
+        ))
+        .unwrap();
+        assert!(doc.poll_pending_stylesheets_budgeted(1, std::time::Duration::ZERO));
+        let target_rules: Vec<_> = doc
+            .stylesheet
+            .rules
+            .iter()
+            .filter(|rule| rule.original_selector == ".target")
+            .collect();
+        let colors: Vec<_> = target_rules
+            .iter()
+            .map(|rule| rule.declarations.get("color").unwrap().as_str())
+            .collect();
+        assert_eq!(
+            colors,
+            [
+                "rgb(10, 0, 0)",
+                "rgb(30, 0, 0)",
+                "rgb(35, 0, 0)",
+                "rgb(20, 0, 0)",
+                "rgb(40, 0, 0)",
+            ]
+        );
+        assert_eq!(
+            target_rules[4].original_selector.as_ptr(),
+            later_selector_ptr
+        );
+        let mut candidates = Vec::new();
+        doc.stylesheet
+            .candidate_rules("div", None, ["target"], &mut candidates);
+        let indexed_colors: Vec<_> = candidates
+            .iter()
+            .filter_map(|&i| {
+                let rule = &doc.stylesheet.rules[i];
+                (rule.original_selector == ".target")
+                    .then(|| rule.declarations.get("color"))
+                    .flatten()
+            })
+            .map(String::as_str)
+            .collect();
+        assert_eq!(indexed_colors, colors);
+
+        tx.send(PendingStylesheetResult::replace(
+            1,
+            "https://example.test/slow.css".to_string(),
+            stylesheet_with_color(".target", "rgb(31, 0, 0)"),
+            String::new(),
+        ))
+        .unwrap();
+        assert!(doc.poll_pending_stylesheets_budgeted(1, std::time::Duration::ZERO));
+        let replacement_colors: Vec<_> = doc
+            .stylesheet
+            .rules
+            .iter()
+            .filter(|rule| rule.original_selector == ".target")
+            .map(|rule| rule.declarations.get("color").unwrap().as_str())
+            .collect();
+        assert_eq!(
+            replacement_colors,
+            [
+                "rgb(10, 0, 0)",
+                "rgb(31, 0, 0)",
+                "rgb(20, 0, 0)",
+                "rgb(40, 0, 0)",
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_fragment_fast_path_rejects_cascade_metadata() {
+        let mut sheet = crate::css::Stylesheet::default();
+        sheet.parse_and_add_author("@layer theme { .item { color: red } }");
+        assert!(!sheet.is_plain_rules_fragment());
+
+        let mut sheet = crate::css::Stylesheet::default();
+        sheet.parse_and_add_author("@font-face { font-family: Demo; src: url(demo.woff2) }");
+        assert!(!sheet.is_plain_rules_fragment());
     }
 
     #[test]

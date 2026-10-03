@@ -369,9 +369,7 @@ pub(super) fn declaration_value(id: PropertyId, value: &str) -> bool {
         PaddingBlock | PaddingInline => values(v, 1, 2, |p| length(p, true, false)),
         ScrollMargin => values(v, 1, 4, |p| length(p, false, true)),
         Overflow => list("visible hidden clip scroll auto", 2),
-        OverflowClipMargin => values(v, 1, 2, |p| {
-            keyword_list(p, "content-box padding-box border-box", 1) || length(p, false, false)
-        }),
+        OverflowClipMargin => super::parse_overflow_clip_margin(v).is_some(),
         BorderTopLeftRadius
         | BorderTopRightRadius
         | BorderBottomLeftRadius
@@ -393,7 +391,8 @@ pub(super) fn declaration_value(id: PropertyId, value: &str) -> bool {
         | BorderInlineEndWidth
         | OutlineWidth
         | ColumnRuleWidth => keywords("thin medium thick") || length(v, false, false),
-        OutlineOffset | ShapeMargin => length(v, false, true),
+        OutlineOffset => length(v, false, true),
+        ShapeMargin => super::shape::valid_shape_margin(value),
         BorderWidth => values(v, 1, 4, |p| declaration_value(OutlineWidth, p)),
         BorderStyle => values(v, 1, 4, |p| {
             value_parse::try_parse_border_style(p).is_some()
@@ -470,13 +469,8 @@ pub(super) fn declaration_value(id: PropertyId, value: &str) -> bool {
                         .any(|id| declaration_value(*id, t))
                 })
         }),
-        ClipPath => v == "none" || shape(v),
-        ShapeOutside => {
-            v == "none"
-                || shape(v)
-                || image(value)
-                || keywords("margin-box border-box padding-box content-box")
-        }
+        ClipPath => super::property_defs::valid_clip_path(value),
+        ShapeOutside => super::shape::valid_shape_outside_non_image(value) || image(value),
         Clip => {
             v == "auto"
                 || v.strip_prefix("rect(")
@@ -684,7 +678,7 @@ fn font_shorthand(v: &str) -> bool {
         })
 }
 
-fn image(v: &str) -> bool {
+pub(crate) fn image(v: &str) -> bool {
     if v == "none"
         || super::extract_url(v).is_some()
         || super::property_defs::extract_image_set_url_for_device_pixel_ratio(v, 1.0).is_some()
@@ -715,50 +709,6 @@ fn shadow(v: &str, box_shadow: bool) -> bool {
             }
             (2..=if box_shadow { 4 } else { 3 }).contains(&lengths) && colors <= 1 && inset <= 1
         })
-}
-
-fn shape(v: &str) -> bool {
-    let Some((name, inner)) = v.split_once('(') else {
-        return false;
-    };
-    let Some(inner) = inner.strip_suffix(')') else {
-        return false;
-    };
-    match name {
-        "polygon" => {
-            let parts = value_parse::split_top_level_commas(inner);
-            let start = usize::from(
-                parts
-                    .first()
-                    .is_some_and(|p| matches!(p.trim(), "evenodd" | "nonzero")),
-            );
-            parts.len() > start
-                && parts[start..]
-                    .iter()
-                    .all(|p| values(p, 2, 2, |n| length(n, true, true)))
-        }
-        "inset" => {
-            let (edges, radii) = inner
-                .split_once(" round ")
-                .map_or((inner, None), |(e, r)| (e, Some(r)));
-            values(edges, 1, 4, |n| length(n, true, true))
-                && radii.is_none_or(|r| declaration_value(PropertyId::BorderRadius, r))
-        }
-        "circle" | "ellipse" => {
-            let (radii, pos) = inner
-                .split_once(" at ")
-                .map_or((inner, None), |(r, p)| (r, Some(p)));
-            (radii.trim().is_empty()
-                || values(
-                    radii,
-                    if name == "circle" { 1 } else { 2 },
-                    if name == "circle" { 1 } else { 2 },
-                    |n| matches!(n, "closest-side" | "farthest-side") || length(n, true, false),
-                ))
-                && pos.is_none_or(position)
-        }
-        _ => false,
-    }
 }
 
 fn grid_areas(v: &str) -> bool {

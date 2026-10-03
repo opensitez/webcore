@@ -581,34 +581,67 @@ pub(crate) fn tick_svg_animations_with_damage(
     root: &mut WebCore,
     now: std::time::Instant,
 ) -> (bool, Vec<crate::types::Rect>) {
+    let (running, _, damage) = tick_svg_animations_in_band(root, now, None);
+    (running, damage)
+}
+
+pub(crate) fn tick_svg_animations_in_band(
+    root: &mut WebCore,
+    now: std::time::Instant,
+    paint_band: Option<crate::types::Rect>,
+) -> (bool, bool, Vec<crate::types::Rect>) {
     let mut still_running = false;
+    let mut visible_running = false;
     let mut damage = Vec::new();
-    tick_svg_animations_in_node(root, now, &mut still_running, &mut damage);
-    (still_running, damage)
+    tick_svg_animations_in_node(
+        root,
+        now,
+        paint_band,
+        &mut still_running,
+        &mut visible_running,
+        &mut damage,
+    );
+    (still_running, visible_running, damage)
 }
 
 fn tick_svg_animations_in_node(
     node: &mut WebCore,
     now: std::time::Instant,
+    paint_band: Option<crate::types::Rect>,
     still_running: &mut bool,
+    visible_running: &mut bool,
     damage: &mut Vec<crate::types::Rect>,
 ) {
+    let visible = paint_band.is_none_or(|band| {
+        let rect = node.layout.border_rect;
+        rect.w > 0.0
+            && rect.h > 0.0
+            && rect.x < band.x + band.w
+            && rect.x + rect.w > band.x
+            && rect.y < band.y + band.h
+            && rect.y + rect.h > band.y
+    });
     if let Some(doc) = node.svg_document.as_ref() {
         if document_has_svg_animations(&doc) {
             let start = *node.svg_animation_start_time.get_or_insert(now);
             let elapsed = now.duration_since(start).as_secs_f32();
+            let mut node_running = false;
             let sampled = sample_svg_animation_overrides_with_controls(
                 doc,
                 elapsed,
                 &node.svg_animation_controls,
-                still_running,
+                &mut node_running,
             );
+            *still_running |= node_running;
+            *visible_running |= visible && node_running;
             if node.svg_animation_overrides != sampled {
-                damage.push(node.layout.border_rect);
+                if visible {
+                    damage.push(node.layout.border_rect);
+                }
                 node.svg_animation_overrides = sampled;
             }
         } else {
-            if !node.svg_animation_overrides.is_empty() {
+            if visible && !node.svg_animation_overrides.is_empty() {
                 damage.push(node.layout.border_rect);
             }
             node.svg_animation_overrides.clear();
@@ -616,7 +649,14 @@ fn tick_svg_animations_in_node(
         }
     }
     for child in &mut node.children {
-        tick_svg_animations_in_node(child, now, still_running, damage);
+        tick_svg_animations_in_node(
+            child,
+            now,
+            paint_band,
+            still_running,
+            visible_running,
+            damage,
+        );
     }
 }
 

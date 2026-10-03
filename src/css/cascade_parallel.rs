@@ -112,6 +112,7 @@ fn flatten_tree_for_cascade<'a>(
     ancestors.push(AncestorInfo {
         tag: node.tag.clone(),
         attributes: std::sync::Arc::new(node.attributes.clone()),
+        auto_direction: super::matching::auto_direction(node),
         child_index,
         sibling_count,
         type_child_index,

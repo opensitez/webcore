@@ -323,7 +323,7 @@ pub(crate) fn animation_override_rects_with_ids(
                 }
                 return;
             }
-            if let Some((_, value)) = props.iter().find(|(prop, _)| prop == "transform") {
+            if let Some((_, value)) = props.iter().rev().find(|(prop, _)| prop == "transform") {
                 let mut style = node.style.as_ref().clone();
                 crate::css::apply_property(&mut style, "transform", value);
                 let local_ctx = crate::types::TransformCtx {
@@ -440,7 +440,7 @@ fn animation_transform_matrices(
         viewport_h: f32,
     ) {
         if let Some(props) = overrides.get(&node.node_id)
-            && let Some((_, transform)) = props.iter().find(|(prop, _)| prop == "transform")
+            && let Some((_, transform)) = props.iter().rev().find(|(prop, _)| prop == "transform")
         {
             let mut style = node.style.as_ref().clone();
             crate::css::apply_property(&mut style, "transform", transform);
@@ -761,7 +761,7 @@ impl Renderer {
                 viewport_w,
                 viewport_h,
             );
-            doc.tick_animations(now);
+            let overrides_changed = doc.tick_animations(now);
             let finished_rects = previous_rects.into_iter().filter_map(|(id, rect)| {
                 (!doc.animation_overrides.contains_key(&id)).then_some(rect)
             });
@@ -780,7 +780,7 @@ impl Renderer {
             if svg_animations_running {
                 doc.needs_animation_frame = true;
             }
-            if svg_animations_running || media_running {
+            if media_running {
                 needs_redraw = true;
             }
             let layout_values =
@@ -793,7 +793,7 @@ impl Renderer {
                 if trace_idle {
                     trace_reasons.push("css-animation-layout");
                 }
-            } else if !doc.animation_overrides.is_empty() {
+            } else if overrides_changed && !doc.animation_overrides.is_empty() {
                 // Paint-only animations do not affect geometry, but they still
                 // must present a new frame. Skeleton loaders commonly animate
                 // `background-position` over a gradient. Rebuild the viewport
@@ -1164,8 +1164,8 @@ impl Renderer {
                         (doc.scroll_x, doc.scroll_y),
                         0,
                     )
-                        .map(|h| h.node_id)
-                        .unwrap_or(0);
+                    .map(|h| h.node_id)
+                    .unwrap_or(0);
                     evt.target = hit_id;
                     doc.dispatch_input_event(evt);
                     return doc.process_wheel_event_xy(doc_pt, -dx, -dy);
@@ -2055,7 +2055,7 @@ impl Renderer {
                                 crate::profile::is_enabled().then(std::time::Instant::now);
                             // Backdrop effects need the real destination; other fixed
                             // segments can be composited from a retained viewport layer.
-                            if !animation_transform_overrides.is_empty()
+                            if segment.has_animated_transform(&animation_transform_overrides)
                                 || segment.backdrop_dependent
                             {
                                 segment.fixed_surface = None;

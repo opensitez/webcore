@@ -91,7 +91,31 @@ pub struct AncestorInfo {
     pub type_child_index: usize,   // 0-based among same-tag siblings
     pub type_sibling_count: usize, // count of same-tag siblings
     pub node_id: u32,              // stable node id for hover chain check
+    pub auto_direction: Option<crate::types::Direction>,
     pub prev_siblings: std::sync::Arc<Vec<SiblingInfo>>,
+}
+
+pub(crate) fn auto_direction(node: &crate::types::WebCore) -> Option<crate::types::Direction> {
+    let dir = node.attributes.get("dir").map(String::as_str);
+    let is_auto = dir.is_some_and(|dir| dir.eq_ignore_ascii_case("auto"))
+        || (node.tag == "bdi"
+            && !dir.is_some_and(|dir| {
+                dir.eq_ignore_ascii_case("ltr") || dir.eq_ignore_ascii_case("rtl")
+            }));
+    is_auto.then(|| crate::layout::text::html_auto_direction(node))
+}
+
+pub(crate) fn default_ltr_telephone(
+    tag: &str,
+    attrs: &crate::dom::attrs::AttrMap,
+) -> bool {
+    tag == "input"
+        && attrs.get("type").is_some_and(|kind| kind.eq_ignore_ascii_case("tel"))
+        && !attrs.get("dir").is_some_and(|dir| {
+            dir.eq_ignore_ascii_case("ltr")
+                || dir.eq_ignore_ascii_case("rtl")
+                || dir.eq_ignore_ascii_case("auto")
+        })
 }
 
 /// Previous/following element sibling state used by sibling combinators.
@@ -789,11 +813,7 @@ pub(crate) fn matches_part_with_context(
                         return nth_matches(inner, from_end);
                     }
                     // Shadow DOM pseudo-classes: never match in non-shadow context
-                    // ⛔ ANSWERED, not assumed false. `:lang()` and `:dir()`
-                    // parsed as valid pseudo-classes and then always lost, so
-                    // every language- and direction-conditional rule was dead.
-                    // Both read an ATTRIBUTE that inherits down the tree, so the
-                    // nearest one on the element or an ancestor wins.
+                    // Language and directionality come from HTML semantics, not CSS `direction`.
                     if let Some(want) = pc.strip_prefix("lang(").and_then(|s| s.strip_suffix(')')) {
                         let want = want
                             .trim()
@@ -820,19 +840,59 @@ pub(crate) fn matches_part_with_context(
                         };
                     }
                     if let Some(want) = pc.strip_prefix("dir(").and_then(|s| s.strip_suffix(')')) {
-                        let want = want.trim().to_ascii_lowercase();
-                        let found = attrs.get("dir").cloned().or_else(|| {
-                            ancestors
-                                .iter()
-                                .rev()
-                                .find_map(|a| a.attributes.get("dir").cloned())
-                        });
-                        // The default directionality is ltr.
-                        let dir = found
-                            .map(|d| d.trim().to_ascii_lowercase())
-                            .filter(|d| d == "rtl" || d == "ltr")
-                            .unwrap_or_else(|| "ltr".to_string());
-                        return dir == want;
+                        let want = want.trim();
+                        if !want.eq_ignore_ascii_case("ltr") && !want.eq_ignore_ascii_case("rtl") {
+                            return false;
+                        }
+                        let resolve = |dir: &str, node: Option<&crate::types::WebCore>| {
+                            if dir.eq_ignore_ascii_case("rtl") {
+                                Some(crate::types::Direction::RTL)
+                            } else if dir.eq_ignore_ascii_case("ltr") {
+                                Some(crate::types::Direction::LTR)
+                            } else if dir.eq_ignore_ascii_case("auto") {
+                                Some(node.map(crate::layout::text::html_auto_direction)
+                                    .unwrap_or(crate::types::Direction::LTR))
+                            } else {
+                                None
+                            }
+                        };
+                        let direction = attrs
+                            .get("dir")
+                            .and_then(|dir| resolve(dir, ctx.html_box))
+                            .or_else(|| {
+                                (tag == "bdi").then(|| {
+                                    ctx.html_box.map(crate::layout::text::html_auto_direction)
+                                        .unwrap_or(crate::types::Direction::LTR)
+                                })
+                            })
+                            .or_else(|| {
+                                default_ltr_telephone(tag, attrs)
+                                    .then_some(crate::types::Direction::LTR)
+                            })
+                            .or_else(|| {
+                                ancestors.iter().enumerate().rev().find_map(|(i, ancestor)| {
+                                    ancestor.attributes.get("dir").and_then(|dir| {
+                                        if dir.eq_ignore_ascii_case("auto") {
+                                            Some(ancestor.auto_direction.unwrap_or_else(|| {
+                                                ctx.ancestor_nodes
+                                                    .get(i)
+                                                    .map(|node| crate::layout::text::html_auto_direction(node))
+                                                    .unwrap_or(crate::types::Direction::LTR)
+                                            }))
+                                        } else {
+                                            resolve(dir, ctx.ancestor_nodes.get(i).copied())
+                                        }
+                                    })
+                                    .or_else(|| (ancestor.tag == "bdi").then_some(
+                                        ancestor.auto_direction.unwrap_or(crate::types::Direction::LTR)
+                                    ))
+                                })
+                            })
+                            .unwrap_or(crate::types::Direction::LTR);
+                        return match direction {
+                            crate::types::Direction::LTR => want.eq_ignore_ascii_case("ltr"),
+                            crate::types::Direction::RTL => want.eq_ignore_ascii_case("rtl"),
+                        };
                     }
                     if pc == "host" {
                         return ctx.html_box.is_none();
@@ -1190,6 +1250,7 @@ fn has_descendant_matching(
     let mut ancestors = vec![AncestorInfo {
         tag: node.tag.clone(),
         attributes: std::sync::Arc::new(node.attributes.clone()),
+        auto_direction: auto_direction(node),
         child_index: 0,
         sibling_count: 1,
         type_child_index: ctx.type_child_index,
@@ -1244,6 +1305,7 @@ fn matches_element_or_descendant(
     ancestors.push(AncestorInfo {
         tag: elem.tag.clone(),
         attributes: std::sync::Arc::new(elem.attributes.clone()),
+        auto_direction: auto_direction(elem),
         child_index: 0,
         sibling_count: 1,
         type_child_index: 0,

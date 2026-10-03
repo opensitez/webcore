@@ -111,7 +111,15 @@ pub struct ParsedTransition {
     pub allow_discrete: bool,
 }
 
-/// Runtime state for one active CSS animation on one element.
+/// The phase observed at the previous animation sample.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AnimationPhase {
+    Before,
+    Active,
+    After,
+}
+
+/// Playback identity and the last sampled event phase of a CSS animation.
 #[derive(Clone, Debug)]
 pub struct AnimState {
     /// The WebCore raw pointer, stored as `usize` for Hash/Eq.
@@ -121,6 +129,9 @@ pub struct AnimState {
     pub paused_at: Option<std::time::Instant>,
     pub start_event_fired: bool,
     pub last_iteration_event: u32,
+    pub(crate) list_order: usize,
+    pub(crate) end_event_fired: bool,
+    pub(crate) phase: AnimationPhase,
 }
 
 /// Runtime state for one active CSS transition on one property of one element.

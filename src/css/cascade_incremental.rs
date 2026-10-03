@@ -81,6 +81,7 @@ pub fn mark_hover_dirty(
         let anc = AncestorInfo {
             tag: node.tag.clone(),
             attributes: std::sync::Arc::new(node.attributes.clone()),
+            auto_direction: super::matching::auto_direction(node),
             child_index,
             sibling_count,
             type_child_index,
@@ -209,6 +210,7 @@ pub fn hover_change_requires_style(
         let anc = AncestorInfo {
             tag: node.tag.clone(),
             attributes: std::sync::Arc::new(node.attributes.clone()),
+            auto_direction: super::matching::auto_direction(node),
             child_index,
             sibling_count,
             type_child_index,
@@ -528,6 +530,7 @@ fn apply_cascade_incremental_walk(
     let anc = AncestorInfo {
         tag: node.tag.clone(),
         attributes: std::sync::Arc::new(node.attributes.clone()),
+        auto_direction: super::matching::auto_direction(node),
         child_index,
         sibling_count,
         type_child_index,

@@ -1705,7 +1705,68 @@ pub enum FloatShape {
         bottom: f32,
         left: f32,
     },
+    RoundedBox {
+        rect: Rect,
+        rx: [f32; 4],
+        ry: [f32; 4],
+    },
     Polygon(Vec<(f32, f32)>),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FloatShapeReference {
+    rect: Rect,
+    rx: [f32; 4],
+    ry: [f32; 4],
+}
+
+pub fn float_shape_reference(
+    style: &ComputedStyle,
+    layout: &LayoutBox,
+    root_font_px: f32,
+) -> Option<FloatShapeReference> {
+    use crate::css::shape::ShapeBox;
+
+    if style.shape_outside.trim().eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let tokens = crate::css::value_parse::split_css_values(&style.shape_outside);
+    let box_only = tokens.len() == 1
+        && crate::css::shape::shape_box_kind(&tokens[0]).is_some();
+    let shape_box = tokens
+        .iter()
+        .find_map(|token| crate::css::shape::shape_box_kind(token))
+        .unwrap_or(ShapeBox::Margin);
+    let reference = match shape_box {
+        ShapeBox::Margin => layout.margin_rect,
+        ShapeBox::Border => layout.border_rect,
+        ShapeBox::HalfBorder => {
+            let border = layout.border_rect;
+            let padding = layout.padding_rect;
+            let left = (border.x + padding.x) * 0.5;
+            let top = (border.y + padding.y) * 0.5;
+            let right = (border.x + border.w + padding.x + padding.w) * 0.5;
+            let bottom = (border.y + border.h + padding.y + padding.h) * 0.5;
+            Rect::new(left, top, (right - left).max(0.0), (bottom - top).max(0.0))
+        }
+        ShapeBox::Padding => layout.padding_rect,
+        ShapeBox::Content => layout.content_rect,
+    };
+    let (rx, ry) = if box_only {
+        crate::types::shape_box_radii(style, layout, reference, root_font_px)
+    } else {
+        ([0.0; 4], [0.0; 4])
+    };
+    Some(FloatShapeReference {
+        rect: Rect::new(
+            reference.x - layout.margin_rect.x,
+            reference.y - layout.margin_rect.y,
+            reference.w,
+            reference.h,
+        ),
+        rx,
+        ry,
+    })
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1728,15 +1789,17 @@ impl FloatContext {
         *out_right = containing_w;
         for f in &self.floats {
             if f.rect.y < y + line_h && f.clear > y {
+                let (left, right) = f.exclusion_at(y, line_h);
+                if left > right {
+                    continue;
+                }
                 if f.side == FloatSide::Left {
-                    let r = f.right_exclusion_at(y, line_h);
-                    if r > *out_left {
-                        *out_left = r;
+                    if right > *out_left {
+                        *out_left = right;
                     }
                 } else {
-                    let l = f.left_exclusion_at(y, line_h);
-                    if l < *out_right {
-                        *out_right = l;
+                    if left < *out_right {
+                        *out_right = left;
                     }
                 }
             }
@@ -1756,9 +1819,8 @@ impl FloatContext {
         *out_right = containing_w;
         for f in &self.floats {
             if f.rect.y < y + line_h && f.clear > y {
-                let f_left = f.left_exclusion_at(y, line_h);
-                let f_right = f.right_exclusion_at(y, line_h);
-                if f_right <= x || f_left >= x + containing_w {
+                let (f_left, f_right) = f.exclusion_at(y, line_h);
+                if f_left > f_right || f_right <= x || f_left >= x + containing_w {
                     continue;
                 }
                 if f.side == FloatSide::Left {
@@ -1817,6 +1879,8 @@ impl FloatContext {
 
     pub fn place_float(
         &mut self,
+        engine: &LayoutEngine,
+        shape_font_px: f32,
         current_y: f32,
         float_w: f32,
         float_h: f32,
@@ -1826,6 +1890,8 @@ impl FloatContext {
         shape_margin: f32,
     ) -> Rect {
         self.place_float_in(
+            engine,
+            shape_font_px,
             0.0,
             current_y,
             float_w,
@@ -1834,11 +1900,14 @@ impl FloatContext {
             side,
             shape_outside,
             shape_margin,
+            None,
         )
     }
 
     pub fn place_float_in(
         &mut self,
+        engine: &LayoutEngine,
+        shape_font_px: f32,
         x: f32,
         current_y: f32,
         float_w: f32,
@@ -1847,6 +1916,7 @@ impl FloatContext {
         side: FloatSide,
         shape_outside: &str,
         shape_margin: f32,
+        reference: Option<FloatShapeReference>,
     ) -> Rect {
         // Find the lowest Y position where the float fits horizontally.
         let mut y = current_y;
@@ -1889,7 +1959,7 @@ impl FloatContext {
             rect,
             side,
             clear: y + float_h,
-            shape: parse_float_shape(shape_outside, float_w, float_h),
+            shape: parse_float_shape(engine, shape_font_px, shape_outside, float_w, float_h, reference),
             shape_margin: shape_margin.max(0.0),
         });
         Rect::new(local_x, y, float_w, float_h)
@@ -1897,23 +1967,10 @@ impl FloatContext {
 }
 
 impl FloatItem {
-    fn right_exclusion_at(&self, y: f32, line_h: f32) -> f32 {
+    fn exclusion_at(&self, y: f32, line_h: f32) -> (f32, f32) {
         match self.shape.as_ref() {
-            Some(shape) => {
-                let (_, right) = shape_exclusion_x(shape, self.rect, self.shape_margin, y, line_h);
-                right
-            }
-            None => self.rect.x + self.rect.w,
-        }
-    }
-
-    fn left_exclusion_at(&self, y: f32, line_h: f32) -> f32 {
-        match self.shape.as_ref() {
-            Some(shape) => {
-                let (left, _) = shape_exclusion_x(shape, self.rect, self.shape_margin, y, line_h);
-                left
-            }
-            None => self.rect.x,
+            Some(shape) => shape_exclusion_x(shape, self.rect, self.shape_margin, y, line_h),
+            None => (self.rect.x, self.rect.x + self.rect.w),
         }
     }
 }
@@ -2247,13 +2304,18 @@ fn shape_exclusion_x(
     y: f32,
     line_h: f32,
 ) -> (f32, f32) {
-    let sample_y = (y + line_h * 0.5 - rect.y).clamp(0.0, rect.h.max(0.0));
+    let line_top = (y - rect.y).max(0.0);
+    let line_bottom = (y + line_h - rect.y).min(rect.h);
+    let empty = (rect.x + rect.w, rect.x);
+    if line_bottom <= line_top {
+        return empty;
+    }
     match *shape {
         FloatShape::Circle { cx, cy, r } => {
-            ellipse_exclusion_x(rect, cx, cy, r, r, margin, sample_y)
+            ellipse_exclusion_x(rect, cx, cy, r, r, margin, cy.clamp(line_top, line_bottom))
         }
         FloatShape::Ellipse { cx, cy, rx, ry } => {
-            ellipse_exclusion_x(rect, cx, cy, rx, ry, margin, sample_y)
+            ellipse_exclusion_x(rect, cx, cy, rx, ry, margin, cy.clamp(line_top, line_bottom))
         }
         FloatShape::Inset {
             top,
@@ -2261,10 +2323,10 @@ fn shape_exclusion_x(
             bottom,
             left,
         } => {
-            let top = (top - margin).max(0.0);
-            let bottom_limit = (rect.h - bottom + margin).min(rect.h);
-            if sample_y < top || sample_y > bottom_limit {
-                (rect.x, rect.x)
+            let shape_top = top - margin;
+            let shape_bottom = rect.h - bottom + margin;
+            if line_bottom <= shape_top || line_top >= shape_bottom {
+                empty
             } else {
                 (
                     rect.x + (left - margin).max(0.0),
@@ -2272,8 +2334,69 @@ fn shape_exclusion_x(
                 )
             }
         }
-        FloatShape::Polygon(ref points) => polygon_exclusion_x(rect, margin, points, sample_y),
+        FloatShape::RoundedBox { rect: box_rect, rx, ry } => {
+            rounded_box_exclusion_x(rect, box_rect, rx, ry, margin, line_top, line_bottom)
+        }
+        FloatShape::Polygon(ref points) => {
+            polygon_exclusion_x(rect, margin, points, line_top, line_bottom)
+        }
     }
+}
+
+fn rounded_box_exclusion_x(
+    float_rect: Rect,
+    box_rect: Rect,
+    rx: [f32; 4],
+    ry: [f32; 4],
+    margin: f32,
+    line_top: f32,
+    line_bottom: f32,
+) -> (f32, f32) {
+    let shape = Rect::new(
+        box_rect.x - margin,
+        box_rect.y - margin,
+        box_rect.w + 2.0 * margin,
+        box_rect.h + 2.0 * margin,
+    );
+    let top = line_top.max(shape.y);
+    let bottom = line_bottom.min(shape.y + shape.h);
+    if top >= bottom || shape.w <= 0.0 {
+        return (float_rect.x + float_rect.w, float_rect.x);
+    }
+    let rx = rx.map(|radius| radius + margin);
+    let ry = ry.map(|radius| radius + margin);
+    let (rx, ry) = crate::types::reduce_shape_box_radii(shape.w, shape.h, rx, ry);
+    let mut left = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+    for y in [
+        top,
+        bottom,
+        shape.y + ry[0],
+        shape.y + ry[1],
+        shape.y + shape.h - ry[2],
+        shape.y + shape.h - ry[3],
+    ] {
+        if y < top || y > bottom {
+            continue;
+        }
+        let edge_inset = |top_radius: f32, top_height: f32, bottom_radius: f32, bottom_height: f32| {
+            if top_height > 0.0 && y < shape.y + top_height {
+                let unit = ((shape.y + top_height - y) / top_height).clamp(0.0, 1.0);
+                top_radius * (1.0 - (1.0 - unit * unit).sqrt())
+            } else if bottom_height > 0.0 && y > shape.y + shape.h - bottom_height {
+                let unit = ((y - (shape.y + shape.h - bottom_height)) / bottom_height).clamp(0.0, 1.0);
+                bottom_radius * (1.0 - (1.0 - unit * unit).sqrt())
+            } else {
+                0.0
+            }
+        };
+        left = left.min(shape.x + edge_inset(rx[0], ry[0], rx[3], ry[3]));
+        right = right.max(shape.x + shape.w - edge_inset(rx[1], ry[1], rx[2], ry[2]));
+    }
+    (
+        float_rect.x + left.clamp(0.0, float_rect.w),
+        float_rect.x + right.clamp(0.0, float_rect.w),
+    )
 }
 
 fn ellipse_exclusion_x(
@@ -2292,106 +2415,263 @@ fn ellipse_exclusion_x(
     }
     let dy = (sample_y - cy).abs();
     if dy >= ry {
-        return (rect.x + cx, rect.x + cx);
+        return (rect.x + rect.w, rect.x);
     }
     let half = rx * (1.0 - (dy / ry).powi(2)).sqrt();
     (rect.x + cx - half, rect.x + cx + half)
 }
 
-fn parse_float_shape(value: &str, width: f32, height: f32) -> Option<FloatShape> {
+fn parse_float_shape(
+    engine: &LayoutEngine,
+    font_px: f32,
+    value: &str,
+    width: f32,
+    height: f32,
+    reference: Option<FloatShapeReference>,
+) -> Option<FloatShape> {
     let value = value.trim();
     if value.eq_ignore_ascii_case("none") || value.is_empty() {
         return None;
     }
+    let tokens = crate::css::value_parse::split_css_values(value);
+    let shape = tokens
+        .iter()
+        .find(|token| crate::css::shape::shape_box_kind(token).is_none())
+        .map(String::as_str);
+    let reference = reference.unwrap_or(FloatShapeReference {
+        rect: Rect::new(0.0, 0.0, width, height),
+        rx: [0.0; 4],
+        ry: [0.0; 4],
+    });
+    let Some(value) = shape else {
+        return Some(FloatShape::RoundedBox {
+            rect: reference.rect,
+            rx: reference.rx,
+            ry: reference.ry,
+        });
+    };
+    let box_rect = reference.rect;
     let lower = value.to_ascii_lowercase();
-    if lower.starts_with("circle(") && value.ends_with(')') {
-        parse_circle_shape(&value["circle(".len()..value.len() - 1], width, height)
+    let parsed = if lower.starts_with("circle(") && value.ends_with(')') {
+        parse_circle_shape(
+            engine,
+            font_px,
+            &value["circle(".len()..value.len() - 1],
+            box_rect.w,
+            box_rect.h,
+        )
     } else if lower.starts_with("ellipse(") && value.ends_with(')') {
-        parse_ellipse_shape(&value["ellipse(".len()..value.len() - 1], width, height)
+        parse_ellipse_shape(
+            engine,
+            font_px,
+            &value["ellipse(".len()..value.len() - 1],
+            box_rect.w,
+            box_rect.h,
+        )
     } else if lower.starts_with("inset(") && value.ends_with(')') {
-        parse_inset_shape(&value["inset(".len()..value.len() - 1], width, height)
+        parse_inset_shape(
+            engine,
+            font_px,
+            &value["inset(".len()..value.len() - 1],
+            box_rect.w,
+            box_rect.h,
+        )
     } else if lower.starts_with("polygon(") && value.ends_with(')') {
-        parse_polygon_shape(&value["polygon(".len()..value.len() - 1], width, height)
+        parse_polygon_shape(
+            engine,
+            font_px,
+            &value["polygon(".len()..value.len() - 1],
+            box_rect.w,
+            box_rect.h,
+        )
     } else {
         None
-    }
-}
-
-fn parse_circle_shape(inner: &str, width: f32, height: f32) -> Option<FloatShape> {
-    let (radius_part, position_part) = split_shape_at(inner);
-    let default_r = width.min(height) * 0.5;
-    let r = radius_part
-        .and_then(|r| resolve_shape_len(r, width.min(height)))
-        .unwrap_or(default_r);
-    let (cx, cy) = parse_shape_position(position_part, width, height);
-    Some(FloatShape::Circle { cx, cy, r })
-}
-
-fn parse_ellipse_shape(inner: &str, width: f32, height: f32) -> Option<FloatShape> {
-    let (radii_part, position_part) = split_shape_at(inner);
-    let mut radii = radii_part.unwrap_or("").split_whitespace();
-    let rx = radii
-        .next()
-        .and_then(|v| resolve_shape_len(v, width))
-        .unwrap_or(width * 0.5);
-    let ry = radii
-        .next()
-        .and_then(|v| resolve_shape_len(v, height))
-        .unwrap_or(height * 0.5);
-    let (cx, cy) = parse_shape_position(position_part, width, height);
-    Some(FloatShape::Ellipse { cx, cy, rx, ry })
-}
-
-fn parse_inset_shape(inner: &str, width: f32, height: f32) -> Option<FloatShape> {
-    let before_round = inner.split("round").next().unwrap_or(inner);
-    let tokens: Vec<&str> = before_round.split_whitespace().collect();
-    if tokens.is_empty() {
-        return None;
-    }
-    let top_token = tokens[0];
-    let right_token = *tokens.get(1).unwrap_or(&top_token);
-    let bottom_token = *tokens.get(2).unwrap_or(&top_token);
-    let left_token = *tokens.get(3).unwrap_or(&right_token);
-    let top = resolve_shape_len(top_token, height).unwrap_or(0.0);
-    let right = resolve_shape_len(right_token, width).unwrap_or(0.0);
-    let bottom = resolve_shape_len(bottom_token, height).unwrap_or(0.0);
-    let left = resolve_shape_len(left_token, width).unwrap_or(0.0);
-    Some(FloatShape::Inset {
-        top,
-        right,
-        bottom,
-        left,
+    }?;
+    Some(match parsed {
+        FloatShape::Circle { cx, cy, r } => FloatShape::Circle {
+            cx: cx + box_rect.x,
+            cy: cy + box_rect.y,
+            r,
+        },
+        FloatShape::Ellipse { cx, cy, rx, ry } => FloatShape::Ellipse {
+            cx: cx + box_rect.x,
+            cy: cy + box_rect.y,
+            rx,
+            ry,
+        },
+        FloatShape::Inset { top, right, bottom, left } => FloatShape::Inset {
+            top: top + box_rect.y,
+            right: right + width - box_rect.x - box_rect.w,
+            bottom: bottom + height - box_rect.y - box_rect.h,
+            left: left + box_rect.x,
+        },
+        FloatShape::Polygon(points) => FloatShape::Polygon(
+            points
+                .into_iter()
+                .map(|(x, y)| (x + box_rect.x, y + box_rect.y))
+                .collect(),
+        ),
+        FloatShape::RoundedBox { rect, rx, ry } => FloatShape::RoundedBox {
+            rect: Rect::new(rect.x + box_rect.x, rect.y + box_rect.y, rect.w, rect.h),
+            rx,
+            ry,
+        },
     })
 }
 
-fn parse_polygon_shape(inner: &str, width: f32, height: f32) -> Option<FloatShape> {
+fn parse_circle_shape(
+    engine: &LayoutEngine,
+    font_px: f32,
+    inner: &str,
+    width: f32,
+    height: f32,
+) -> Option<FloatShape> {
+    let (radius_part, position_part) = crate::css::shape::split_shape_at(inner);
+    let (cx, cy) = parse_shape_position(engine, font_px, position_part, width, height)?;
+    let nearest_x = cx.abs().min((width - cx).abs());
+    let nearest_y = cy.abs().min((height - cy).abs());
+    let farthest_x = cx.abs().max((width - cx).abs());
+    let farthest_y = cy.abs().max((height - cy).abs());
+    let nearest_side = nearest_x.min(nearest_y);
+    let farthest_side = farthest_x.max(farthest_y);
+    let nearest_corner = nearest_x.hypot(nearest_y);
+    let farthest_corner = farthest_x.hypot(farthest_y);
+    let radius = radius_part.map(|value| value.trim().to_ascii_lowercase());
+    let r = match radius.as_deref() {
+        None | Some("closest-side") => nearest_side,
+        Some("farthest-side") => farthest_side,
+        Some("closest-corner") => nearest_corner,
+        Some("farthest-corner") => farthest_corner,
+        Some(value) => resolve_shape_len(
+            engine,
+            font_px,
+            value,
+            width.hypot(height) / std::f32::consts::SQRT_2,
+        )?,
+    };
+    (r >= 0.0).then_some(FloatShape::Circle { cx, cy, r })
+}
+
+fn parse_ellipse_shape(
+    engine: &LayoutEngine,
+    font_px: f32,
+    inner: &str,
+    width: f32,
+    height: f32,
+) -> Option<FloatShape> {
+    let (radii_part, position_part) = crate::css::shape::split_shape_at(inner);
+    let (cx, cy) = parse_shape_position(engine, font_px, position_part, width, height)?;
+    let nearest_x = cx.abs().min((width - cx).abs());
+    let nearest_y = cy.abs().min((height - cy).abs());
+    let farthest_x = cx.abs().max((width - cx).abs());
+    let farthest_y = cy.abs().max((height - cy).abs());
+    let radii = crate::css::split_css_shorthand_values(radii_part.unwrap_or(""));
+    if radii.len() > 2 {
+        return None;
+    }
+    let lower_radii: Vec<String> = radii
+        .iter()
+        .map(|value| value.to_ascii_lowercase())
+        .collect();
+    let first = lower_radii.first().map(String::as_str);
+    let second = lower_radii.get(1).map(String::as_str);
+    let (rx, ry) = match (first, second) {
+        (None | Some("closest-side"), None) => (nearest_x, nearest_y),
+        (Some("farthest-side"), None) => (farthest_x, farthest_y),
+        (Some("closest-corner"), None) | (Some("farthest-corner"), None) => {
+            let farthest = first == Some("farthest-corner");
+            let base_rx = if farthest { farthest_x } else { nearest_x };
+            let base_ry = if farthest { farthest_y } else { nearest_y };
+            (
+                base_rx * std::f32::consts::SQRT_2,
+                base_ry * std::f32::consts::SQRT_2,
+            )
+        }
+        (Some(x), Some(y)) => (
+            resolve_shape_len(engine, font_px, x, width)?,
+            resolve_shape_len(engine, font_px, y, height)?,
+        ),
+        _ => return None,
+    };
+    (rx >= 0.0 && ry >= 0.0).then_some(FloatShape::Ellipse { cx, cy, rx, ry })
+}
+
+fn parse_inset_shape(
+    engine: &LayoutEngine,
+    font_px: f32,
+    inner: &str,
+    width: f32,
+    height: f32,
+) -> Option<FloatShape> {
+    let tokens = crate::css::split_css_shorthand_values(inner);
+    let inset_count = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("round"))
+        .unwrap_or(tokens.len());
+    if inset_count == 0 || inset_count > 4 {
+        return None;
+    }
+    let inset_tokens = &tokens[..inset_count];
+    let top_token = inset_tokens[0].as_str();
+    let right_token = inset_tokens.get(1).map(String::as_str).unwrap_or(top_token);
+    let bottom_token = inset_tokens.get(2).map(String::as_str).unwrap_or(top_token);
+    let left_token = inset_tokens.get(3).map(String::as_str).unwrap_or(right_token);
+    let top = resolve_shape_len(engine, font_px, top_token, height)?;
+    let right = resolve_shape_len(engine, font_px, right_token, width)?;
+    let bottom = resolve_shape_len(engine, font_px, bottom_token, height)?;
+    let left = resolve_shape_len(engine, font_px, left_token, width)?;
+    if inset_count == tokens.len() {
+        return Some(FloatShape::Inset { top, right, bottom, left });
+    }
+    let radii = tokens.get(inset_count + 1..)?.join(" ");
+    let (horizontal, vertical) = crate::css::property_defs::parse_shape_round_radii(&radii)?;
+    let rect = Rect::new(
+        left,
+        top,
+        (width - left - right).max(0.0),
+        (height - top - bottom).max(0.0),
+    );
+    let rx = horizontal.map(|radius| engine.res_len(&radius, font_px, rect.w, engine.root_font_px));
+    let ry = vertical.map(|radius| engine.res_len(&radius, font_px, rect.h, engine.root_font_px));
+    let (rx, ry) = crate::types::reduce_shape_box_radii(rect.w, rect.h, rx, ry);
+    Some(FloatShape::RoundedBox { rect, rx, ry })
+}
+
+fn parse_polygon_shape(
+    engine: &LayoutEngine,
+    font_px: f32,
+    inner: &str,
+    width: f32,
+    height: f32,
+) -> Option<FloatShape> {
     let mut points = Vec::new();
-    for raw in inner.split(',') {
+    for (index, raw) in crate::css::value_parse::split_top_level_commas(inner)
+        .into_iter()
+        .enumerate()
+    {
         let part = raw.trim();
         if part.is_empty() {
-            continue;
+            return None;
         }
-        let coords: Vec<&str> = part.split_whitespace().collect();
-        let start = if coords
-            .first()
-            .is_some_and(|v| v.eq_ignore_ascii_case("evenodd") || v.eq_ignore_ascii_case("nonzero"))
+        let coords = crate::css::split_css_shorthand_values(part);
+        let start = if index == 0
+            && coords
+                .first()
+                .is_some_and(|v| v.eq_ignore_ascii_case("evenodd") || v.eq_ignore_ascii_case("nonzero"))
         {
             1
         } else {
             0
         };
-        let Some(x_token) = coords.get(start) else {
+        if index == 0 && coords.len() == 1 && start == 1 {
             continue;
-        };
-        let Some(y_token) = coords.get(start + 1) else {
-            continue;
-        };
-        if let (Some(x), Some(y)) = (
-            resolve_shape_len(x_token, width),
-            resolve_shape_len(y_token, height),
-        ) {
-            points.push((x, y));
         }
+        if coords.len() != start + 2 {
+            return None;
+        }
+        let x = resolve_shape_len(engine, font_px, &coords[start], width)?;
+        let y = resolve_shape_len(engine, font_px, &coords[start + 1], height)?;
+        points.push((x, y));
     }
     if points.len() >= 3 {
         Some(FloatShape::Polygon(points))
@@ -2404,82 +2684,133 @@ fn polygon_exclusion_x(
     rect: Rect,
     margin: f32,
     points: &[(f32, f32)],
-    sample_y: f32,
+    line_top: f32,
+    line_bottom: f32,
 ) -> (f32, f32) {
-    let mut xs = Vec::new();
+    if margin > 0.0 {
+        return polygon_margin_exclusion_x(rect, margin, points, line_top, line_bottom);
+    }
+    let mut left = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
     for i in 0..points.len() {
         let (x1, y1) = points[i];
         let (x2, y2) = points[(i + 1) % points.len()];
-        if (y1 <= sample_y && sample_y < y2) || (y2 <= sample_y && sample_y < y1) {
-            let t = (sample_y - y1) / (y2 - y1);
-            xs.push(x1 + (x2 - x1) * t);
-        } else if (sample_y - y1).abs() < f32::EPSILON && (y1 - y2).abs() < f32::EPSILON {
-            xs.push(x1);
-            xs.push(x2);
+        let top = line_top.max(y1.min(y2));
+        let bottom = line_bottom.min(y1.max(y2));
+        if top > bottom {
+            continue;
+        }
+        let (edge_left, edge_right) = if y1 == y2 {
+            (x1.min(x2), x1.max(x2))
+        } else {
+            let at_top = x1 + (x2 - x1) * (top - y1) / (y2 - y1);
+            let at_bottom = x1 + (x2 - x1) * (bottom - y1) / (y2 - y1);
+            (at_top.min(at_bottom), at_top.max(at_bottom))
+        };
+        left = left.min(edge_left);
+        right = right.max(edge_right);
+    }
+    if !left.is_finite() {
+        return (rect.x + rect.w, rect.x);
+    }
+    (
+        rect.x + (left - margin).clamp(0.0, rect.w),
+        rect.x + (right + margin).clamp(0.0, rect.w),
+    )
+}
+
+fn polygon_margin_exclusion_x(
+    rect: Rect,
+    margin: f32,
+    points: &[(f32, f32)],
+    line_top: f32,
+    line_bottom: f32,
+) -> (f32, f32) {
+    let mut left = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+    let margin_squared = margin * margin;
+    for i in 0..points.len() {
+        let (x1, y1) = points[i];
+        let (x2, y2) = points[(i + 1) % points.len()];
+        if y1.min(y2) > line_bottom + margin || y1.max(y2) < line_top - margin {
+            continue;
+        }
+        let dx = x2 - x1;
+        let dy = y2 - y1;
+        let mut consider = |t: f32| {
+            if !(0.0..=1.0).contains(&t) {
+                return;
+            }
+            let x = x1 + dx * t;
+            let y = y1 + dy * t;
+            let distance = if y < line_top {
+                line_top - y
+            } else {
+                (y - line_bottom).max(0.0)
+            };
+            if distance > margin {
+                return;
+            }
+            let reach = (margin_squared - distance * distance).max(0.0).sqrt();
+            left = left.min(x - reach);
+            right = right.max(x + reach);
+        };
+        consider(0.0);
+        consider(1.0);
+        if dy != 0.0 {
+            for y in [line_top - margin, line_top, line_bottom, line_bottom + margin] {
+                consider((y - y1) / dy);
+            }
+            let length = dx.hypot(dy);
+            if length > 0.0 {
+                let offset = margin * dx.abs() / length;
+                for y in [
+                    line_top - offset,
+                    line_top + offset,
+                    line_bottom - offset,
+                    line_bottom + offset,
+                ] {
+                    consider((y - y1) / dy);
+                }
+            }
         }
     }
-    if xs.len() < 2 {
-        return (rect.x, rect.x);
+    if !left.is_finite() {
+        return (rect.x + rect.w, rect.x);
     }
-    xs.sort_by(|a, b| a.total_cmp(b));
-    let left = xs.first().copied().unwrap_or(0.0) - margin;
-    let right = xs.last().copied().unwrap_or(0.0) + margin;
     (
         rect.x + left.clamp(0.0, rect.w),
         rect.x + right.clamp(0.0, rect.w),
     )
 }
 
-fn split_shape_at(inner: &str) -> (Option<&str>, Option<&str>) {
-    if let Some(idx) = inner.to_ascii_lowercase().find(" at ") {
-        let before = inner[..idx].trim();
-        let after = inner[idx + 4..].trim();
-        (
-            if before.is_empty() {
-                None
-            } else {
-                Some(before)
-            },
-            if after.is_empty() { None } else { Some(after) },
-        )
-    } else {
-        let trimmed = inner.trim();
-        (
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            },
-            None,
-        )
-    }
-}
-
-fn parse_shape_position(position: Option<&str>, width: f32, height: f32) -> (f32, f32) {
+fn parse_shape_position(
+    engine: &LayoutEngine,
+    font_px: f32,
+    position: Option<&str>,
+    width: f32,
+    height: f32,
+) -> Option<(f32, f32)> {
     let Some(position) = position else {
-        return (width * 0.5, height * 0.5);
+        return Some((width * 0.5, height * 0.5));
     };
-    let mut parts = position.split_whitespace();
-    let x = parts
-        .next()
-        .and_then(|v| resolve_shape_len(v, width))
-        .unwrap_or(width * 0.5);
-    let y = parts
-        .next()
-        .and_then(|v| resolve_shape_len(v, height))
-        .unwrap_or(height * 0.5);
-    (x, y)
+    let (x, y) = crate::css::property_defs::parse_background_position_pair(position)?;
+    Some((
+        engine.res_len(&x, font_px, width, engine.root_font_px),
+        engine.res_len(&y, font_px, height, engine.root_font_px),
+    ))
 }
 
-fn resolve_shape_len(token: &str, basis: f32) -> Option<f32> {
+fn resolve_shape_len(engine: &LayoutEngine, font_px: f32, token: &str, basis: f32) -> Option<f32> {
     let token = token.trim();
-    if let Some(percent) = token.strip_suffix('%') {
-        percent.parse::<f32>().ok().map(|v| basis * v / 100.0)
-    } else if let Some(px) = token.strip_suffix("px") {
-        px.parse::<f32>().ok()
-    } else {
-        token.parse::<f32>().ok()
+    if token.parse::<f32>().is_ok_and(|value| value != 0.0) {
+        return None;
     }
+    let length = crate::css::parse_length_checked(token)?;
+    if length.is_auto() || length.is_none() || length.intrinsic().is_some() {
+        return None;
+    }
+    Some(engine.res_len(&length, font_px, basis, engine.root_font_px))
 }
 
 /// Collect node_ids of elements that have hover-dependent styles.

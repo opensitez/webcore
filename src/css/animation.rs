@@ -513,112 +513,9 @@ pub(crate) fn extract_root_variables_vp(
     }
 }
 
-/// Compute custom properties once per dependency, preserving valid empty values.
-pub(crate) fn pre_resolve_variables(vars: &mut HashMap<String, String>) {
-    // Handle csstools light-dark() polyfill: in light mode (our default),
-    // the toggle variables should be empty so fallback (light) values are used.
-    // The polyfill sets --csstools-color-scheme--light: initial in light mode,
-    // which makes --csstools-light-dark-toggle--N invalid → fallback kicks in.
-    // We simulate this by removing the toggle variables entirely.
-    let toggle_keys: Vec<String> = vars
-        .keys()
-        .filter(|k| k.starts_with("--csstools-light-dark-toggle-"))
-        .cloned()
-        .collect();
-    for key in &toggle_keys {
-        vars.remove(key);
-    }
-
-    let source = std::mem::take(vars);
-    let mut memo = HashMap::with_capacity(source.len());
-    let mut stack = Vec::new();
-    let mut cyclic = HashSet::new();
-    for key in source.keys() {
-        resolve_custom_property(key, &source, None, &mut memo, &mut stack, &mut cyclic);
-    }
-    for (key, value) in memo {
-        if let Some(value) = value {
-            vars.insert(key, value);
-        }
-    }
-}
-
-/// Resolve declarations added on this element against already-computed inherited values.
-/// Inherited custom properties are computed values, so a child override must not
-/// cause the parent's variables to be evaluated again.
-pub(crate) fn pre_resolve_changed_variables(
-    vars: &mut HashMap<String, String>,
-    changed: &HashSet<&str>,
-) {
-    let mut source = std::mem::take(vars);
-    for &key in changed {
-        if key.starts_with("--csstools-light-dark-toggle-") {
-            source.remove(key);
-        }
-    }
-    let mut memo = HashMap::with_capacity(changed.len());
-    let mut stack = Vec::new();
-    let mut cyclic = HashSet::new();
-    for &key in changed {
-        resolve_custom_property(
-            key,
-            &source,
-            Some(changed),
-            &mut memo,
-            &mut stack,
-            &mut cyclic,
-        );
-    }
-    *vars = source;
-    for &key in changed {
-        match memo.remove(key).flatten() {
-            Some(value) => {
-                vars.insert(key.to_string(), value);
-            }
-            None => {
-                vars.remove(key);
-            }
-        }
-    }
-}
-
-fn resolve_custom_property(
-    name: &str,
-    source: &HashMap<String, String>,
-    changed: Option<&HashSet<&str>>,
-    memo: &mut HashMap<String, Option<String>>,
-    stack: &mut Vec<String>,
-    cyclic: &mut HashSet<String>,
-) -> Option<String> {
-    if let Some(value) = memo.get(name) {
-        return value.clone();
-    }
-    let raw = source.get(name)?;
-    if changed.is_some_and(|keys| !keys.contains(name)) {
-        return Some(raw.clone());
-    }
-    if let Some(first) = stack.iter().position(|entry| entry == name) {
-        cyclic.extend(stack[first..].iter().cloned());
-        return None;
-    }
-    if stack.len() >= 128 {
-        return None;
-    }
-    stack.push(name.to_string());
-    let value = substitute_custom_value(raw, source, changed, memo, stack, cyclic, 0);
-    stack.pop();
-    let value = if cyclic.contains(name) { None } else { value };
-    memo.insert(name.to_string(), value.clone());
-    value
-}
-
-fn substitute_custom_value(
+pub(super) fn substitute_custom_value_with_lookup(
     raw: &str,
-    source: &HashMap<String, String>,
-    changed: Option<&HashSet<&str>>,
-    memo: &mut HashMap<String, Option<String>>,
-    stack: &mut Vec<String>,
-    cyclic: &mut HashSet<String>,
+    lookup: &mut impl FnMut(&str) -> Option<String>,
     depth: usize,
 ) -> Option<String> {
     if depth >= 128 {
@@ -631,20 +528,14 @@ fn substitute_custom_value(
         let args = &rest[start + 4..end - 1];
         let (name, fallback) = super::apply::split_top_level_comma(args)
             .map_or((args, None), |(name, fallback)| (name, Some(fallback)));
-        let resolved_name = substitute_custom_value(
-            name, source, changed, memo, stack, cyclic, depth + 1,
-        );
+        let resolved_name = substitute_custom_value_with_lookup(name, lookup, depth + 1);
         let value = resolved_name
             .as_deref()
             .filter(|name| name.trim().starts_with("--"))
-            .and_then(|name| {
-                resolve_custom_property(name.trim(), source, changed, memo, stack, cyclic)
-            })
+            .and_then(|name| lookup(name.trim()))
             .or_else(|| {
                 fallback.and_then(|fallback| {
-                    substitute_custom_value(
-                        fallback, source, changed, memo, stack, cyclic, depth + 1,
-                    )
+                    substitute_custom_value_with_lookup(fallback, lookup, depth + 1)
                 })
             })?;
         rest = &rest[end..];

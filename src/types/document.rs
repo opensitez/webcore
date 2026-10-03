@@ -137,6 +137,7 @@ pub(crate) struct CachedInlineStylesheet {
 
 pub struct Document {
     pub root: WebCore,
+    pub custom_elements: super::CustomElementRegistry,
     pub stylesheet: Stylesheet,
     pub title: String,
     pub base_url: String,
@@ -339,6 +340,8 @@ pub struct Document {
     // ── CSS animation / transition runtime ────────────────────────────────────
     /// All currently running CSS animations (one entry per animation per element).
     pub active_animations: Vec<AnimState>,
+    /// Finished CSS animations retain identity and fill effects, but do not request frames.
+    pub(crate) finished_animations: Vec<AnimState>,
     /// Per-element active transitions, keyed by WebCore pointer (as usize).
     pub(crate) transition_states: HashMap<u32, Vec<TransitionState>>,
     /// Previous transitionable style values per element, for change detection.
@@ -829,6 +832,7 @@ impl Clone for Document {
     fn clone(&self) -> Self {
         Self {
             root: self.root.clone(),
+            custom_elements: self.custom_elements.clone(),
             stylesheet: self.stylesheet.clone(),
             title: self.title.clone(),
             base_url: self.base_url.clone(),
@@ -895,6 +899,7 @@ impl Clone for Document {
             dragging_range: 0,
             range_drag_origin: String::new(),
             active_animations: self.active_animations.clone(),
+            finished_animations: self.finished_animations.clone(),
             transition_states: self.transition_states.clone(),
             prev_styles: self.prev_styles.clone(),
             transition_style_refs: self.transition_style_refs.clone(),

@@ -240,6 +240,27 @@ impl Stylesheet {
         }
     }
 
+    pub(crate) fn is_plain_rules_fragment(&self) -> bool {
+        self.variables.is_empty()
+            && self.font_faces.is_empty()
+            && self.page_rules.is_empty()
+            && self.counter_styles.is_empty()
+            && self.keyframes.is_empty()
+            && self.layer_order.is_empty()
+            && self.layer_declarations.is_empty()
+            && self.rules.iter().all(|rule| rule.layer.is_empty())
+    }
+
+    pub(crate) fn insert_plain_rules_fragment(&mut self, at: usize, mut fragment: Stylesheet) {
+        debug_assert!(fragment.is_plain_rules_fragment());
+        self.source_count += fragment.source_count;
+        if !fragment.rules.is_empty() {
+            self.rules.splice(at..at, fragment.rules.drain(..));
+            self.idx_dirty = true;
+            self.idx_rule_flags.clear();
+        }
+    }
+
     /// Parse an EXTERNAL stylesheet — a `<link rel=stylesheet>`.
     ///
     /// ⛔ Author origin, like every other author sheet. This routed to
@@ -375,36 +396,59 @@ impl Stylesheet {
         }
     }
 
-    /// Resolve root custom properties from parsed rules in source order. The
-    /// stylesheet parser has already evaluated @supports and retained media
-    /// conditions, so arriving fragments do not need to rescan all prior CSS.
+    /// Resolve root custom properties from the parsed cascade. The stylesheet
+    /// parser has already evaluated @supports and retained media conditions.
     pub fn resolve_variables_for_viewport(&mut self, vw: f32, vh: f32) {
         self.counter_style_viewport = (vw, vh);
         self.layer_viewport = (vw, vh);
+        self.rebuild_index();
         self.variables.clear();
-        for important in [false, true] {
-            for rule in &self.rules {
-                if !matches!(rule.pseudo_element, super::rule::PseudoElement::None)
-                    || !rule.container_condition.is_empty()
-                    || !rule.scopes.is_empty()
-                    || !is_root_variable_selector(&rule.original_selector)
-                    || (vw > 0.0 && !rule.media_condition.matches(vw, vh))
-                {
+        let mut matched: Vec<_> = self
+            .rules
+            .iter()
+            .enumerate()
+            .filter(|(_, rule)| {
+                matches!(rule.pseudo_element, super::rule::PseudoElement::None)
+                    && rule.container_condition.is_empty()
+                    && rule.scopes.is_empty()
+                    && is_root_variable_selector(&rule.original_selector)
+                    && (vw <= 0.0 || rule.media_condition.matches(vw, vh))
+            })
+            .map(|(index, rule)| (rule.specificity, index, None))
+            .collect();
+        matched.sort_by(|&a, &b| super::cascade::normal_cascade_cmp(&self.rules, a, b));
+        let mut declarations = Vec::new();
+        for &(specificity, index, _) in &matched {
+            let rule = &self.rules[index];
+            for (name, value) in &rule.declarations {
+                if name.starts_with("--") {
+                    declarations.push(super::cascade::CustomDeclaration::rule(
+                        name, value, rule, specificity, false,
+                    ));
+                }
+            }
+        }
+        matched.sort_by(|&a, &b| super::cascade::important_cascade_cmp(&self.rules, a, b));
+        for author_pass in [true, false] {
+            for &(specificity, index, _) in &matched {
+                if is_author_origin(specificity) != author_pass {
                     continue;
                 }
-                let declarations = if important {
-                    &rule.important_declarations
-                } else {
-                    &rule.declarations
-                };
-                for (name, value) in declarations {
+                let rule = &self.rules[index];
+                for (name, value) in &rule.important_declarations {
                     if name.starts_with("--") {
-                        self.variables.insert(name.clone(), value.clone());
+                        declarations.push(super::cascade::CustomDeclaration::rule(
+                            name, value, rule, specificity, true,
+                        ));
                     }
                 }
             }
         }
-        pre_resolve_variables(&mut self.variables);
+        super::cascade::resolve_cascaded_custom_properties(
+            &declarations,
+            &HashMap::new(),
+            &mut self.variables,
+        );
     }
 
     pub(crate) fn may_change_root_variables(&self) -> bool {

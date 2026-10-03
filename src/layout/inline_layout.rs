@@ -718,6 +718,8 @@ pub fn layout_inline_block(
                     };
                     let local_x = content_x - fc.origin_x;
                     let placed = fc.place_float_in(
+                        engine,
+                        child.style.font_size_px(font_px, root_font_px),
                         local_x,
                         cursor_y - fc.origin_y,
                         float_w,
@@ -730,6 +732,7 @@ pub fn layout_inline_block(
                             content_w,
                             root_font_px,
                         ),
+                        crate::layout::float_shape_reference(&child.style, &child.layout, root_font_px),
                     );
                     let dx = content_x + placed.x - child.layout.margin_rect.x;
                     let dy = fc.origin_y + placed.y - child.layout.margin_rect.y;
@@ -851,6 +854,8 @@ pub fn layout_inline_block(
                     };
                     let local_x = content_x - fc.origin_x;
                     let placed = fc.place_float_in(
+                        engine,
+                        child.style.font_size_px(font_px, root_font_px),
                         local_x,
                         cursor_y - fc.origin_y,
                         float_w,
@@ -863,6 +868,7 @@ pub fn layout_inline_block(
                             content_w,
                             root_font_px,
                         ),
+                        crate::layout::float_shape_reference(&child.style, &child.layout, root_font_px),
                     );
                     let dx = content_x + placed.x - child.layout.margin_rect.x;
                     let dy = fc.origin_y + placed.y - child.layout.margin_rect.y;

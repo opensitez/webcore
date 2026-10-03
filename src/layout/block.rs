@@ -1064,6 +1064,8 @@ fn layout_block_pass(
             };
             let local_x = content_x - fc.origin_x;
             let placed = fc.place_float_in(
+                engine,
+                ch.style.font_size_px(font_px, root_font_px),
                 local_x,
                 content_y + float_child_y - fc.origin_y,
                 float_w,
@@ -1076,6 +1078,7 @@ fn layout_block_pass(
                     child_content_w,
                     root_font_px,
                 ),
+                crate::layout::float_shape_reference(&ch.style, &ch.layout, root_font_px),
             );
             let ch = grid_child_ref(node, path);
             // ⛔ Back into document space through the CONTEXT's origin, which is

@@ -243,44 +243,37 @@ pub(crate) fn apply_presentational_attrs(node: &mut WebCore) {
                 "ltr",
             ),
             "auto" => {
-                let text = collect_text_for_dir_auto(node);
-                if let Some(dir) = crate::layout::text::first_strong_direction(&text) {
-                    match dir {
-                        Direction::RTL => apply_property(
-                            std::sync::Arc::make_mut(&mut node.style),
-                            "direction",
-                            "rtl",
-                        ),
-                        Direction::LTR => apply_property(
-                            std::sync::Arc::make_mut(&mut node.style),
-                            "direction",
-                            "ltr",
-                        ),
-                    }
+                match crate::layout::text::html_auto_direction(node) {
+                    Direction::RTL => apply_property(
+                        std::sync::Arc::make_mut(&mut node.style),
+                        "direction",
+                        "rtl",
+                    ),
+                    Direction::LTR => apply_property(
+                        std::sync::Arc::make_mut(&mut node.style),
+                        "direction",
+                        "ltr",
+                    ),
                 }
             }
             _ => {}
         }
     }
+    if tag == "bdi" && !attrs.get("dir").is_some_and(|dir| {
+        dir.eq_ignore_ascii_case("ltr") || dir.eq_ignore_ascii_case("rtl") || dir.eq_ignore_ascii_case("auto")
+    }) {
+        let dir = crate::layout::text::html_auto_direction(node);
+        apply_property(
+            std::sync::Arc::make_mut(&mut node.style),
+            "direction",
+            if dir == Direction::RTL { "rtl" } else { "ltr" },
+        );
+    }
+    if crate::css::matching::default_ltr_telephone(&tag, &attrs) {
+        apply_property(std::sync::Arc::make_mut(&mut node.style), "direction", "ltr");
+    }
 }
 
-fn collect_text_for_dir_auto(node: &WebCore) -> String {
-    let mut out = String::new();
-    collect_text_for_dir_auto_inner(node, &mut out);
-    out
-}
-
-fn collect_text_for_dir_auto_inner(node: &WebCore, out: &mut String) {
-    if matches!(node.tag.as_str(), "script" | "style") {
-        return;
-    }
-    if node.tag != "#comment" && !node.text.is_empty() {
-        out.push_str(&node.text);
-    }
-    for child in &node.children {
-        collect_text_for_dir_auto_inner(child, out);
-    }
-}
 
 fn apply_inline_style(node: &mut WebCore, css: &str) {
     for decl in css.split(';') {

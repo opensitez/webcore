@@ -313,8 +313,8 @@ mod tests {
         Arc::make_mut(&mut root.children[0].style).opacity = 0.5;
         assert_ne!(dom_fingerprint(Some(&root)), recolored);
         let faded = dom_fingerprint(Some(&root));
-        Arc::make_mut(&mut root.children[0].style)
-            .custom_props = Arc::new(HashMap::from([("--accent".into(), "red".into())]));
+        Arc::make_mut(&mut root.children[0].style).custom_props =
+            Arc::new(HashMap::from([("--accent".into(), "red".into())]));
         assert_ne!(dom_fingerprint(Some(&root)), faded);
     }
 

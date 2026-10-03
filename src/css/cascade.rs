@@ -13,7 +13,205 @@ use std::collections::{HashMap, HashSet};
 
 // ─── CSS Cascade ─────────────────────────────────────────────────────────────
 
-fn normal_cascade_cmp(
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub(super) struct CustomDeclaration<'a> {
+    name: &'a str,
+    value: &'a str,
+    author_origin: bool,
+    layer_rank: u32,
+    inline: bool,
+    important: bool,
+}
+
+impl<'a> CustomDeclaration<'a> {
+    pub(super) fn rule(name: &'a str, value: &'a str, rule: &CssRule, specificity: u32, important: bool) -> Self {
+        Self {
+            name,
+            value,
+            author_origin: is_author_origin(specificity),
+            layer_rank: rule.layer_rank,
+            inline: false,
+            important,
+        }
+    }
+
+    fn inline(name: &'a str, value: &'a str, important: bool) -> Self {
+        Self {
+            name,
+            value,
+            author_origin: true,
+            layer_rank: u32::MAX,
+            inline: true,
+            important,
+        }
+    }
+
+    fn same_layer(self, other: Self) -> bool {
+        self.author_origin == other.author_origin
+            && self.inline == other.inline
+            && (self.inline || self.layer_rank == other.layer_rank)
+    }
+}
+
+#[cfg(test)]
+fn custom_declaration_value<'a>(
+    declarations: &'a [CustomDeclaration<'a>],
+    index: usize,
+) -> Option<&'a str> {
+    let mut index = index;
+    loop {
+        let current = declarations[index];
+        let keyword = current.value.trim();
+        let layer_only = if keyword.eq_ignore_ascii_case("revert") {
+            false
+        } else if keyword.eq_ignore_ascii_case("revert-layer") {
+            true
+        } else {
+            return Some(current.value);
+        };
+        index = previous_custom_declaration(declarations, index, layer_only)?;
+    }
+}
+
+fn previous_custom_declaration(
+    declarations: &[CustomDeclaration<'_>],
+    index: usize,
+    layer_only: bool,
+) -> Option<usize> {
+    let current = declarations[index];
+    (0..index).rev().find(|&candidate_index| {
+        let candidate = declarations[candidate_index];
+        candidate.name == current.name
+            && if layer_only {
+                !candidate.same_layer(current)
+            } else {
+                candidate.author_origin != current.author_origin
+            }
+    })
+}
+
+struct CascadedCustomProperties<'a> {
+    declarations: &'a [CustomDeclaration<'a>],
+    inherited: &'a HashMap<String, String>,
+    winners: HashMap<&'a str, usize>,
+    memo: HashMap<String, Option<String>>,
+    stack: Vec<String>,
+    cyclic: HashSet<String>,
+}
+
+impl CascadedCustomProperties<'_> {
+    fn resolve(&mut self, name: &str) -> Option<String> {
+        if let Some(value) = self.memo.get(name) {
+            return value.clone();
+        }
+        let Some(&index) = self.winners.get(name) else {
+            return self.inherited.get(name).cloned();
+        };
+        if let Some(first) = self.stack.iter().position(|entry| entry == name) {
+            self.cyclic.extend(self.stack[first..].iter().cloned());
+            return None;
+        }
+        if self.stack.len() >= 128 {
+            return None;
+        }
+        self.stack.push(name.to_string());
+        let value = self.resolve_candidate(index);
+        self.stack.pop();
+        let value = if self.cyclic.contains(name) {
+            None
+        } else {
+            value
+        };
+        self.memo.insert(name.to_string(), value.clone());
+        value
+    }
+
+    fn resolve_candidate(&mut self, mut index: usize) -> Option<String> {
+        loop {
+            let declaration = self.declarations[index];
+            let value = if contains_var_function(declaration.value) {
+                super::animation::substitute_custom_value_with_lookup(
+                    declaration.value,
+                    &mut |name| self.resolve(name),
+                    0,
+                )?
+            } else {
+                declaration.value.to_string()
+            };
+            let keyword = value.trim();
+            if keyword.eq_ignore_ascii_case("initial") {
+                return None;
+            }
+            if keyword.eq_ignore_ascii_case("inherit") || keyword.eq_ignore_ascii_case("unset") {
+                return self.inherited.get(declaration.name).cloned();
+            }
+            if keyword.eq_ignore_ascii_case("revert") {
+                let Some(previous) = previous_custom_declaration(self.declarations, index, false) else {
+                    return self.inherited.get(declaration.name).cloned();
+                };
+                index = previous;
+            } else if keyword.eq_ignore_ascii_case("revert-layer") {
+                let Some(previous) = previous_custom_declaration(self.declarations, index, true) else {
+                    return self.inherited.get(declaration.name).cloned();
+                };
+                index = previous;
+            } else {
+                return Some(value);
+            }
+        }
+    }
+}
+
+pub(super) fn resolve_cascaded_custom_properties(
+    declarations: &[CustomDeclaration<'_>],
+    inherited: &HashMap<String, String>,
+    vars: &mut HashMap<String, String>,
+) {
+    let mut winners = HashMap::new();
+    for (index, declaration) in declarations.iter().enumerate() {
+        winners.insert(declaration.name, index);
+    }
+    let names: Vec<_> = winners.keys().copied().collect();
+    let mut resolver = CascadedCustomProperties {
+        declarations,
+        inherited,
+        winners,
+        memo: HashMap::new(),
+        stack: Vec::new(),
+        cyclic: HashSet::new(),
+    };
+    for name in names {
+        if let Some(value) = resolver.resolve(name) {
+            vars.insert(name.to_string(), value);
+        } else {
+            vars.remove(name);
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn custom_property_rollback_crosses_many_layers_without_recursion() {
+    let mut declarations = vec![CustomDeclaration {
+        name: "--ink",
+        value: "red",
+        author_origin: true,
+        layer_rank: 0,
+        inline: false,
+        important: false,
+    }];
+    declarations.extend((1..=2048).map(|layer_rank| CustomDeclaration {
+        name: "--ink",
+        value: "revert-layer",
+        author_origin: true,
+        layer_rank,
+        inline: false,
+        important: false,
+    }));
+    assert_eq!(custom_declaration_value(&declarations, 2048), Some("red"));
+}
+
+pub(super) fn normal_cascade_cmp(
     rules: &[CssRule],
     a: (u32, usize, Option<u32>),
     b: (u32, usize, Option<u32>),
@@ -53,7 +251,7 @@ fn normal_cascade_cmp(
     idx_a.cmp(&idx_b)
 }
 
-fn important_cascade_cmp(
+pub(super) fn important_cascade_cmp(
     rules: &[CssRule],
     a: (u32, usize, Option<u32>),
     b: (u32, usize, Option<u32>),
@@ -148,6 +346,15 @@ fn apply_css_value_with_cascade_context(
             let resolved =
                 resolve_var_references_for_color_scheme(s, local_vars, &style.color_scheme);
             if contains_var_function(s) && (resolved.trim().is_empty() || contains_var_function(&resolved)) {
+                if properties::is_inherited(id) {
+                    if let Some(parent) = parent_style {
+                        copy_property_from_style(style, parent, name);
+                    } else {
+                        apply_css_value(style, id, &CssValue::Initial);
+                    }
+                } else {
+                    apply_css_value(style, id, &CssValue::Initial);
+                }
                 return;
             }
             apply_resolved_property_with_cascade_context(
@@ -276,10 +483,12 @@ fn apply_state_matched_rules(
         .any(|(_, ri, _)| stylesheet.rules[*ri].has_custom_properties);
     let mut state_vars_owned = has_state_vars.then(|| local_vars.clone());
     if let Some(vars) = state_vars_owned.as_mut() {
-        for &(_, ri, _) in matched.iter() {
-            for (prop, value) in &stylesheet.rules[ri].declarations {
+        let mut declarations = Vec::new();
+        for &(sp, ri, _) in matched.iter() {
+            let rule = &stylesheet.rules[ri];
+            for (prop, value) in &rule.declarations {
                 if prop.starts_with("--") {
-                    vars.insert(prop.clone(), value.clone());
+                    declarations.push(CustomDeclaration::rule(prop, value, rule, sp, false));
                 }
             }
         }
@@ -289,14 +498,15 @@ fn apply_state_matched_rules(
                 if is_author_origin(sp) != author_pass {
                     continue;
                 }
-                for (prop, value) in &stylesheet.rules[ri].important_declarations {
+                let rule = &stylesheet.rules[ri];
+                for (prop, value) in &rule.important_declarations {
                     if prop.starts_with("--") {
-                        vars.insert(prop.clone(), value.clone());
+                        declarations.push(CustomDeclaration::rule(prop, value, rule, sp, true));
                     }
                 }
             }
         }
-        pre_resolve_variables(vars);
+        resolve_cascaded_custom_properties(&declarations, local_vars, vars);
         matched.sort_by(|&a, &b| normal_cascade_cmp(&stylesheet.rules, a, b));
     }
     let local_vars = state_vars_owned.as_ref().unwrap_or(local_vars);
@@ -388,6 +598,7 @@ pub(crate) fn projected_ancestor_info(node: &WebCore) -> AncestorInfo {
     AncestorInfo {
         tag: node.tag.clone(),
         attributes: std::sync::Arc::new(node.attributes.clone()),
+        auto_direction: super::matching::auto_direction(node),
         child_index: 0,
         sibling_count: 1,
         type_child_index: 0,
@@ -2376,9 +2587,41 @@ pub(crate) struct ShareCache {
 }
 
 struct VariableScopeEntry {
-    declarations: Vec<(String, String)>,
+    declarations: Vec<OwnedCustomDeclaration>,
     _parent_scope: std::sync::Arc<HashMap<String, String>>,
     scope: std::sync::Arc<HashMap<String, String>>,
+}
+
+#[derive(PartialEq, Eq)]
+struct OwnedCustomDeclaration {
+    name: String,
+    value: String,
+    author_origin: bool,
+    layer_rank: u32,
+    inline: bool,
+    important: bool,
+}
+
+impl OwnedCustomDeclaration {
+    fn from_borrowed(declaration: &CustomDeclaration<'_>) -> Self {
+        Self {
+            name: declaration.name.to_owned(),
+            value: declaration.value.to_owned(),
+            author_origin: declaration.author_origin,
+            layer_rank: declaration.layer_rank,
+            inline: declaration.inline,
+            important: declaration.important,
+        }
+    }
+
+    fn matches(&self, declaration: &CustomDeclaration<'_>) -> bool {
+        self.name == declaration.name
+            && self.value == declaration.value
+            && self.author_origin == declaration.author_origin
+            && self.layer_rank == declaration.layer_rank
+            && self.inline == declaration.inline
+            && self.important == declaration.important
+    }
 }
 
 impl ShareCache {
@@ -2404,7 +2647,7 @@ impl ShareCache {
 
     fn variable_scope_key(
         inherited: &HashMap<String, String>,
-        declarations: &[(&str, &str)],
+        declarations: &[CustomDeclaration<'_>],
     ) -> (usize, u64) {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2415,15 +2658,15 @@ impl ShareCache {
     fn find_variable_scope(
         &self,
         key: (usize, u64),
-        declarations: &[(&str, &str)],
+        declarations: &[CustomDeclaration<'_>],
     ) -> Option<std::sync::Arc<HashMap<String, String>>> {
         self.variable_scopes.get(&key)?.iter().find_map(|entry| {
             (entry.declarations.len() == declarations.len()
-                && entry.declarations.iter().zip(declarations).all(
-                    |((name, value), (other_name, other_value))| {
-                        name == other_name && value == other_value
-                    },
-                ))
+                && entry
+                    .declarations
+                    .iter()
+                    .zip(declarations)
+                    .all(|(owned, borrowed)| owned.matches(borrowed)))
             .then(|| entry.scope.clone())
         })
     }
@@ -2431,7 +2674,7 @@ impl ShareCache {
     fn insert_variable_scope(
         &mut self,
         key: (usize, u64),
-        declarations: &[(&str, &str)],
+        declarations: &[CustomDeclaration<'_>],
         parent_scope: std::sync::Arc<HashMap<String, String>>,
         scope: std::sync::Arc<HashMap<String, String>>,
     ) {
@@ -2445,7 +2688,7 @@ impl ShareCache {
             .push(VariableScopeEntry {
                 declarations: declarations
                     .iter()
-                    .map(|&(name, value)| (name.to_owned(), value.to_owned()))
+                    .map(OwnedCustomDeclaration::from_borrowed)
                     .collect(),
                 _parent_scope: parent_scope,
                 scope,
@@ -2606,6 +2849,7 @@ pub fn debug_match_report_for_node(
         ancestors.push(AncestorInfo {
             tag: node.tag.clone(),
             attributes: std::sync::Arc::new(node.attributes.clone()),
+            auto_direction: super::matching::auto_direction(node),
             child_index,
             sibling_count,
             type_child_index,
@@ -3684,17 +3928,18 @@ fn apply_cascade_node(
 
     let local_vars_owned = if has_new_vars || has_inline_vars {
         let mut declarations = Vec::new();
-        for &(_, ri, _) in &matched {
-            for (prop, val) in &stylesheet.rules[ri].declarations {
+        for &(sp, ri, _) in &matched {
+            let rule = &stylesheet.rules[ri];
+            for (prop, val) in &rule.declarations {
                 if prop.starts_with("--") {
-                    declarations.push((prop.as_str(), val.as_str()));
+                    declarations.push(CustomDeclaration::rule(prop, val, rule, sp, false));
                 }
             }
         }
         if let Some((normal, _)) = &inline_decls {
             for (prop, val) in normal {
                 if prop.starts_with("--") {
-                    declarations.push((prop.as_str(), val.as_str()));
+                    declarations.push(CustomDeclaration::inline(prop, val, false));
                 }
             }
         }
@@ -3715,14 +3960,20 @@ fn apply_cascade_node(
             }
             for (prop, val) in &stylesheet.rules[ri].important_declarations {
                 if prop.starts_with("--") {
-                    declarations.push((prop.as_str(), val.as_str()));
+                    declarations.push(CustomDeclaration::rule(
+                        prop,
+                        val,
+                        &stylesheet.rules[ri],
+                        sp,
+                        true,
+                    ));
                 }
             }
         }
         if let Some((_, important)) = &inline_decls {
             for (prop, val) in important {
                 if prop.starts_with("--") {
-                    declarations.push((prop.as_str(), val.as_str()));
+                    declarations.push(CustomDeclaration::inline(prop, val, true));
                 }
             }
         }
@@ -3732,7 +3983,13 @@ fn apply_cascade_node(
             }
             for (prop, val) in &stylesheet.rules[ri].important_declarations {
                 if prop.starts_with("--") {
-                    declarations.push((prop.as_str(), val.as_str()));
+                    declarations.push(CustomDeclaration::rule(
+                        prop,
+                        val,
+                        &stylesheet.rules[ri],
+                        sp,
+                        true,
+                    ));
                 }
             }
         }
@@ -3741,11 +3998,11 @@ fn apply_cascade_node(
             .filter(|scope| std::ptr::eq(std::sync::Arc::as_ref(*scope), inherited_vars));
         let scope_key =
             inherited_scope.map(|_| ShareCache::variable_scope_key(inherited_vars, &declarations));
-        if declarations.iter().all(|&(prop, val)| {
-            !val.contains('(')
+        if declarations.iter().all(|declaration| {
+            !declaration.value.contains('(')
                 && inherited_vars
-                    .get(prop)
-                    .is_some_and(|inherited| inherited == val)
+                    .get(declaration.name)
+                    .is_some_and(|inherited| inherited == declaration.value)
         }) {
             None
         } else if let Some(scope) =
@@ -3762,14 +4019,9 @@ fn apply_cascade_node(
                     started.elapsed(),
                 );
             }
-            let mut changed_vars = HashSet::new();
-            for &(prop, val) in &declarations {
-                changed_vars.insert(prop);
-                vars.insert(prop.to_string(), val.to_string());
-            }
             let profile_var_resolve_started =
                 crate::profile::is_enabled().then(std::time::Instant::now);
-            pre_resolve_changed_variables(&mut vars, &changed_vars);
+            resolve_cascaded_custom_properties(&declarations, inherited_vars, &mut vars);
             if let Some(started) = profile_var_resolve_started {
                 crate::profile::record(
                     crate::profile::Phase::CascadeApplyVarResolve,
@@ -4741,6 +4993,7 @@ pub(crate) fn apply_cascade_inner(
         ancestors.push(AncestorInfo {
             tag: root.tag.clone(),
             attributes: std::sync::Arc::new(root.attributes.clone()),
+            auto_direction: super::matching::auto_direction(root),
             child_index,
             sibling_count,
             type_child_index,
@@ -5370,18 +5623,27 @@ fn apply_presentational_hints(
                 "rtl" => apply_property(style, "direction", "rtl"),
                 "ltr" => apply_property(style, "direction", "ltr"),
                 "auto" => {
-                    let text = collect_text_for_dir_auto(root);
-                    if let Some(dir) = crate::layout::text::first_strong_direction(&text) {
-                        match dir {
-                            Direction::RTL => apply_property(style, "direction", "rtl"),
-                            Direction::LTR => apply_property(style, "direction", "ltr"),
-                        }
+                    match crate::layout::text::html_auto_direction(root) {
+                        Direction::RTL => apply_property(style, "direction", "rtl"),
+                        Direction::LTR => apply_property(style, "direction", "ltr"),
                     }
                 }
                 _ => {}
             },
             _ => {}
         }
+    }
+
+    if root.tag == "bdi" && !root.attributes.get("dir").is_some_and(|dir| {
+        dir.eq_ignore_ascii_case("ltr") || dir.eq_ignore_ascii_case("rtl") || dir.eq_ignore_ascii_case("auto")
+    }) {
+        match super::matching::auto_direction(root).unwrap_or(Direction::LTR) {
+            Direction::RTL => apply_property(style, "direction", "rtl"),
+            Direction::LTR => apply_property(style, "direction", "ltr"),
+        }
+    }
+    if super::matching::default_ltr_telephone(&root.tag, &root.attributes) {
+        apply_property(style, "direction", "ltr");
     }
 
     if matches!(root.tag.as_str(), "td" | "th") {
@@ -5395,23 +5657,5 @@ fn apply_presentational_hints(
         if has_table_border {
             apply_property(style, "border", "1px solid");
         }
-    }
-}
-
-fn collect_text_for_dir_auto(node: &WebCore) -> String {
-    let mut out = String::new();
-    collect_text_for_dir_auto_inner(node, &mut out);
-    out
-}
-
-fn collect_text_for_dir_auto_inner(node: &WebCore, out: &mut String) {
-    if matches!(node.tag.as_str(), "script" | "style") {
-        return;
-    }
-    if node.tag != "#comment" && !node.text.is_empty() {
-        out.push_str(&node.text);
-    }
-    for child in &node.children {
-        collect_text_for_dir_auto_inner(child, out);
     }
 }

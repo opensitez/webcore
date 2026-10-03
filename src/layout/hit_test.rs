@@ -716,16 +716,59 @@ fn children_clipped_at(node: &WebCore, px: f32, py: f32) -> bool {
     if node.style.content_visibility == crate::types::ContentVisibility::Hidden {
         return true;
     }
-    let Some((left, right, top, bottom)) = children_clip_bounds(node) else {
+    let Some(bounds) = children_clip_bounds(node) else {
         return false;
     };
-    px < left || px >= right || py < top || py >= bottom
+    !point_in_children_clip_bounds(node, bounds, px, py)
 }
 
 fn point_in_children_clip_area(node: &WebCore, px: f32, py: f32) -> bool {
     children_clip_bounds(node)
-        .map(|(left, right, top, bottom)| px >= left && px < right && py >= top && py < bottom)
+        .map(|bounds| point_in_children_clip_bounds(node, bounds, px, py))
         .unwrap_or(false)
+}
+
+fn point_in_children_clip_bounds(
+    node: &WebCore,
+    (left, right, top, bottom): (f32, f32, f32, f32),
+    px: f32,
+    py: f32,
+) -> bool {
+    if px < left || px >= right || py < top || py >= bottom {
+        return false;
+    }
+    if !matches!(node.style.overflow_x, Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto)
+        || !matches!(node.style.overflow_y, Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto)
+    {
+        return true;
+    }
+    if [
+        &node.style.border_top_left_radius,
+        &node.style.border_top_right_radius,
+        &node.style.border_bottom_right_radius,
+        &node.style.border_bottom_left_radius,
+        &node.style.border_top_left_radius_y,
+        &node.style.border_top_right_radius_y,
+        &node.style.border_bottom_right_radius_y,
+        &node.style.border_bottom_left_radius_y,
+    ]
+    .iter()
+    .all(|radius| matches!(radius, CssLength::Zero))
+    {
+        return true;
+    }
+    let root_font_px = crate::types::ComputedStyle::INITIAL_FONT_SIZE_PX;
+    let font_px = node.style.font_size_px(root_font_px, root_font_px);
+    let (rx, ry) = crate::css::overflow_clip_radii(
+        &node.style,
+        &node.layout,
+        font_px,
+        root_font_px,
+    );
+    if rx.iter().all(|radius| *radius == 0.0) && ry.iter().all(|radius| *radius == 0.0) {
+        return true;
+    }
+    point_inside_rounded_clip_box(Rect::new(left, top, right - left, bottom - top), rx, ry, px, py)
 }
 
 fn children_clip_bounds(node: &WebCore) -> Option<(f32, f32, f32, f32)> {
@@ -740,58 +783,37 @@ fn children_clip_bounds(node: &WebCore) -> Option<(f32, f32, f32, f32)> {
     if !clip_x && !clip_y {
         return None;
     }
-    let clip_margin = overflow_clip_margin_px(node);
-    let margin_x = if matches!(node.style.overflow_x, Overflow::Clip) {
-        clip_margin
-    } else {
-        0.0
-    };
-    let margin_y = if matches!(node.style.overflow_y, Overflow::Clip) {
-        clip_margin
-    } else {
-        0.0
-    };
-    let p = &node.layout.padding_rect;
+    let root_font_px = crate::types::ComputedStyle::INITIAL_FONT_SIZE_PX;
+    let font_px = node.style.font_size_px(root_font_px, root_font_px);
+    let p = crate::css::overflow_clip_rect(
+        &node.style,
+        &node.layout,
+        0.0,
+        0.0,
+        font_px,
+        root_font_px,
+    );
     let left = if clip_x {
-        p.x - margin_x
+        p.x
     } else {
         f32::NEG_INFINITY
     };
     let right = if clip_x {
-        p.x + p.w + margin_x
+        p.x + p.w
     } else {
         f32::INFINITY
     };
     let top = if clip_y {
-        p.y - margin_y
+        p.y
     } else {
         f32::NEG_INFINITY
     };
     let bottom = if clip_y {
-        p.y + p.h + margin_y
+        p.y + p.h
     } else {
         f32::INFINITY
     };
     Some((left, right, top, bottom))
-}
-
-fn overflow_clip_margin_px(node: &WebCore) -> f32 {
-    if !matches!(node.style.overflow_x, Overflow::Clip)
-        && !matches!(node.style.overflow_y, Overflow::Clip)
-    {
-        return 0.0;
-    }
-    let font_px = node.style.font_size_px(16.0, 16.0);
-    node.style
-        .overflow_clip_margin
-        .split_whitespace()
-        .find_map(crate::css::parse_length_checked)
-        .map(|length| {
-            length
-                .resolve(font_px, node.layout.padding_rect.w, 16.0)
-                .max(0.0)
-        })
-        .unwrap_or(0.0)
 }
 
 fn point_inside_clip_path(node: &WebCore, x: f32, y: f32) -> bool {
@@ -903,28 +925,42 @@ fn point_inside_clip_polygon(node: &WebCore, x: f32, y: f32, font_px: f32) -> bo
         return false;
     }
 
+    let root_font_px = crate::types::ComputedStyle::INITIAL_FONT_SIZE_PX;
+    let rounded = node.style.clip_path.polygon_round.as_ref().map(|_| {
+        node.style.clip_path.polygon_outline(b, font_px, root_font_px)
+    });
+    let count = rounded.as_ref().map_or(points.len(), Vec::len);
+    let coordinate = |index: usize| {
+        if let Some(outline) = rounded.as_ref() {
+            (outline[index].0 - b.x, outline[index].1 - b.y)
+        } else {
+            (
+                points[index].0.resolve(font_px, b.w, root_font_px),
+                points[index].1.resolve(font_px, b.h, root_font_px),
+            )
+        }
+    };
+
     let px = x - b.x;
     let py = y - b.y;
-    let mut inside = false;
-    let mut prev = points.len() - 1;
-    for i in 0..points.len() {
-        let (xi, yi) = (
-            points[i].0.resolve(font_px, b.w, 16.0),
-            points[i].1.resolve(font_px, b.h, 16.0),
-        );
-        let (xj, yj) = (
-            points[prev].0.resolve(font_px, b.w, 16.0),
-            points[prev].1.resolve(font_px, b.h, 16.0),
-        );
+    let mut winding = 0i32;
+    let mut prev = count - 1;
+    for i in 0..count {
+        let (xi, yi) = coordinate(i);
+        let (xj, yj) = coordinate(prev);
         if (yi > py) != (yj > py) && (yj - yi).abs() > f32::EPSILON {
             let edge_x = (xj - xi) * (py - yi) / (yj - yi) + xi;
             if px < edge_x {
-                inside = !inside;
+                winding += if yi > yj { 1 } else { -1 };
             }
         }
         prev = i;
     }
-    inside
+    if node.style.clip_path.polygon_even_odd {
+        winding % 2 != 0
+    } else {
+        winding != 0
+    }
 }
 
 fn snap_to_line(lines: &[LayoutLine], y: f32) -> &LayoutLine {
@@ -1291,4 +1327,27 @@ fn find_href_up_by_id(root: &WebCore, target_id: u32) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod overflow_clip_tests {
+    use super::*;
+
+    #[test]
+    fn rounded_overflow_clip_margin_excludes_corner_hits() {
+        let mut node = WebCore::new("div");
+        node.layout.border_rect = Rect::new(0.0, 0.0, 140.0, 140.0);
+        node.layout.padding_rect = Rect::new(10.0, 10.0, 120.0, 120.0);
+        node.layout.content_rect = Rect::new(20.0, 20.0, 100.0, 100.0);
+        let style = std::sync::Arc::make_mut(&mut node.style);
+        style.overflow_x = Overflow::Clip;
+        style.overflow_y = Overflow::Clip;
+        style.overflow_clip_margin = "content-box 5px".into();
+        style.border_top_left_radius = CssLength::Px(20.0);
+        style.border_top_left_radius_y = CssLength::Px(20.0);
+
+        assert!(children_clipped_at(&node, 15.1, 15.1));
+        assert!(!children_clipped_at(&node, 20.0, 16.0));
+        assert!(!children_clipped_at(&node, 50.0, 50.0));
+    }
 }

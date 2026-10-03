@@ -128,7 +128,8 @@ fn opaque_rounded_band_fill_matches_tiny_skia() {
         false,
         Transform::identity(),
     );
-    let path = rounded_rect_path_corners_xy(rect.x, rect.y, rect.w, rect.h, radius, radius).unwrap();
+    let path =
+        rounded_rect_path_corners_xy(rect.x, rect.y, rect.w, rect.h, radius, radius).unwrap();
     for clip in [None, Some(&mask)] {
         let mut expected = Pixmap::new(48, 40).unwrap();
         let mut actual = Pixmap::new(48, 40).unwrap();
@@ -138,7 +139,13 @@ fn opaque_rounded_band_fill_matches_tiny_skia() {
         paint.set_color(to_sk_color(&color));
         expected.fill_path(&path, &paint, FillRule::Winding, transform, clip);
         assert!(fill_opaque_rounded_rect_bands(
-            &mut actual, rect, color, radius, radius, transform, clip,
+            &mut actual,
+            rect,
+            color,
+            radius,
+            radius,
+            transform,
+            clip,
         ));
         assert_eq!(actual.data(), expected.data());
     }
@@ -313,9 +320,8 @@ fn fill_opaque_rounded_rect_bands(
         (center_bottom - center_top) as f32 / transform.sy,
     );
     // The fast interior path requires a binary clip; keep antialiased clips on tiny-skia.
-    let Some(path) = rounded_rect_path_corners_xy(
-        rect.x, rect.y, rect.w, rect.h, radius, radius_y,
-    ) else {
+    let Some(path) = rounded_rect_path_corners_xy(rect.x, rect.y, rect.w, rect.h, radius, radius_y)
+    else {
         return false;
     };
     let tw = target.width() as usize;
@@ -347,7 +353,9 @@ fn fill_opaque_rounded_rect_bands(
         };
         let band_mask = mask.and_then(|clip| {
             let mut cropped = tiny_skia::Mask::new(tw as u32, (end - start) as u32)?;
-            cropped.data_mut().copy_from_slice(&clip.data()[start * tw..end * tw]);
+            cropped
+                .data_mut()
+                .copy_from_slice(&clip.data()[start * tw..end * tw]);
             Some(cropped)
         });
         let mut local = transform;
@@ -3105,7 +3113,7 @@ fn replay_commands_on_surface(
                 };
                 clip_mask_stack.push(mask);
             }
-            PaintCmd::PushClipPath { points } => {
+            PaintCmd::PushClipPath { points, even_odd } => {
                 let bounds = polygon_bounds(points).unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0));
                 if transform_depth == 0 {
                     if bounds.right() < vis_left
@@ -3124,9 +3132,17 @@ fn replay_commands_on_surface(
                 }
                 clip_stack.push(bounds);
                 let mut mask = if transform_depth > 0 {
-                    build_polygon_clip_mask_with_transform(points, pw, ph, ts)
+                    build_polygon_clip_mask_with_transform(points, *even_odd, pw, ph, ts)
                 } else {
-                    build_polygon_clip_mask(points, pw, ph, scale, active_scroll_x, active_scroll_y)
+                    build_polygon_clip_mask(
+                        points,
+                        *even_odd,
+                        pw,
+                        ph,
+                        scale,
+                        active_scroll_x,
+                        active_scroll_y,
+                    )
                 };
                 if let (Some(m), Some(prev)) =
                     (&mut mask, clip_mask_stack.last().and_then(|x| x.as_ref()))
@@ -3321,36 +3337,35 @@ fn replay_commands_on_surface(
                     );
                 }
             }
-            PaintCmd::BackdropFilter { rect, radii, radii_y, filters } => {
+            PaintCmd::BackdropFilter {
+                rect,
+                radii,
+                radii_y,
+                filters,
+            } => {
                 let target = layer_stack
                     .last_mut()
                     .map(|l| &mut l.pixmap)
                     .unwrap_or(pixmap);
-                let margin = filters.iter().fold(0.0_f32, |margin, (kind, value, dx, dy, _)| {
-                    if *kind == 0 {
-                        margin + value.max(0.0) * 4.0
-                    } else if *kind == 9 {
-                        margin + dx.abs().max(dy.abs()) + value.max(0.0) * 4.0
-                    } else {
-                        margin
-                    }
-                });
+                let margin = filters
+                    .iter()
+                    .fold(0.0_f32, |margin, (kind, value, dx, dy, _)| {
+                        if *kind == 0 {
+                            margin + value.max(0.0) * 4.0
+                        } else if *kind == 9 {
+                            margin + dx.abs().max(dy.abs()) + value.max(0.0) * 4.0
+                        } else {
+                            margin
+                        }
+                    });
                 let Some(bounds) = transformed_bounds_to_viewport(ts, *rect, 1.0) else {
                     continue;
                 };
                 let margin = margin * scale;
-                let left = (bounds.x - margin)
-                    .floor()
-                    .clamp(0.0, pw as f32) as i32;
-                let top = (bounds.y - margin)
-                    .floor()
-                    .clamp(0.0, ph as f32) as i32;
-                let right = (bounds.right() + margin)
-                    .ceil()
-                    .clamp(0.0, pw as f32) as i32;
-                let bottom = (bounds.bottom() + margin)
-                    .ceil()
-                    .clamp(0.0, ph as f32) as i32;
+                let left = (bounds.x - margin).floor().clamp(0.0, pw as f32) as i32;
+                let top = (bounds.y - margin).floor().clamp(0.0, ph as f32) as i32;
+                let right = (bounds.right() + margin).ceil().clamp(0.0, pw as f32) as i32;
+                let bottom = (bounds.bottom() + margin).ceil().clamp(0.0, ph as f32) as i32;
                 let Some(region) = tiny_skia::IntRect::from_ltrb(left, top, right, bottom) else {
                     continue;
                 };
@@ -3414,17 +3429,22 @@ fn replay_commands_on_surface(
             }
             PaintCmd::PushMaskGroup { layers } => {
                 if let Some(layer_pixmap) = Pixmap::new(pw, ph) {
-                    mask_stack.push(layers.iter().map(|mask| MaskLayer {
-                        clip: mask.rect,
-                        no_clip: mask.no_clip,
-                        origin: mask.origin,
-                        tile: mask.tile,
-                        data: mask.data.clone(),
-                        luminance: mask.luminance,
-                        repeat_x_mode: mask.repeat_x_mode,
-                        repeat_y_mode: mask.repeat_y_mode,
-                        composite: mask.composite,
-                    }).collect());
+                    mask_stack.push(
+                        layers
+                            .iter()
+                            .map(|mask| MaskLayer {
+                                clip: mask.rect,
+                                no_clip: mask.no_clip,
+                                origin: mask.origin,
+                                tile: mask.tile,
+                                data: mask.data.clone(),
+                                luminance: mask.luminance,
+                                repeat_x_mode: mask.repeat_x_mode,
+                                repeat_y_mode: mask.repeat_y_mode,
+                                composite: mask.composite,
+                            })
+                            .collect(),
+                    );
                     layer_stack.push(Layer {
                         pixmap: layer_pixmap,
                         blend_mode: 253,
@@ -4775,10 +4795,8 @@ fn replay_commands_on_surface(
                                 let decoration = if placeholder_alpha < 1.0 {
                                     faded_decoration = {
                                         let mut decoration = decoration.clone();
-                                        decoration.color = apply_opacity(
-                                            &decoration.color,
-                                            placeholder_alpha,
-                                        );
+                                        decoration.color =
+                                            apply_opacity(&decoration.color, placeholder_alpha);
                                         decoration
                                     };
                                     &faded_decoration
@@ -5236,8 +5254,8 @@ fn composite_masked_layer(
             .map(|(start, end)| {
                 let lo = (((start - scroll) * effective_scale).floor() - 1.0)
                     .clamp(0.0, extent as f32) as i32;
-                let hi = (((end - scroll) * effective_scale).ceil() + 1.0)
-                    .clamp(0.0, extent as f32) as i32;
+                let hi = (((end - scroll) * effective_scale).ceil() + 1.0).clamp(0.0, extent as f32)
+                    as i32;
                 (lo, hi)
             })
             .unwrap_or((0, extent as i32))
@@ -5345,15 +5363,17 @@ fn composite_masked_layers(
             .map(|(start, end)| {
                 let lo = (((start - scroll) * effective_scale).floor() - 1.0)
                     .clamp(0.0, extent as f32) as i32;
-                let hi = (((end - scroll) * effective_scale).ceil() + 1.0)
-                    .clamp(0.0, extent as f32) as i32;
+                let hi = (((end - scroll) * effective_scale).ceil() + 1.0).clamp(0.0, extent as f32)
+                    as i32;
                 (lo, hi)
             })
             .unwrap_or((0, extent as i32))
     };
     let mut bounds = (layer.width() as i32, 0, layer.height() as i32, 0);
     for mask in masks {
-        let Some(data) = mask.data.as_ref() else { continue };
+        let Some(data) = mask.data.as_ref() else {
+            continue;
+        };
         let (_, mw, mh) = match data {
             ImageRef::Owned(bytes, w, h) => (bytes.as_slice(), *w, *h),
             ImageRef::Shared(bytes, w, h) => (bytes.as_slice(), *w, *h),
@@ -5362,12 +5382,24 @@ fn composite_masked_layers(
             continue;
         }
         let x_bounds = if mask.no_clip {
-            mask_axis_paint_bounds(mask.origin.x, mask.origin.w, mask.tile.x, mask.tile.w, mask.repeat_x_mode)
+            mask_axis_paint_bounds(
+                mask.origin.x,
+                mask.origin.w,
+                mask.tile.x,
+                mask.tile.w,
+                mask.repeat_x_mode,
+            )
         } else {
             Some((mask.clip.x, mask.clip.right()))
         };
         let y_bounds = if mask.no_clip {
-            mask_axis_paint_bounds(mask.origin.y, mask.origin.h, mask.tile.y, mask.tile.h, mask.repeat_y_mode)
+            mask_axis_paint_bounds(
+                mask.origin.y,
+                mask.origin.h,
+                mask.tile.y,
+                mask.tile.h,
+                mask.repeat_y_mode,
+            )
         } else {
             Some((mask.clip.y, mask.clip.bottom()))
         };
@@ -5381,7 +5413,9 @@ fn composite_masked_layers(
     let Some(region) = tiny_skia::IntRect::from_ltrb(bounds.0, bounds.2, bounds.1, bounds.3) else {
         return;
     };
-    let Some(mut masked) = layer.clone_rect(region) else { return };
+    let Some(mut masked) = layer.clone_rect(region) else {
+        return;
+    };
     let width = masked.width() as usize;
     let inv_scale = 1.0 / effective_scale;
 
@@ -5392,51 +5426,83 @@ fn composite_masked_layers(
         x: Vec<Option<usize>>,
         y: Vec<Option<usize>>,
     }
-    let prepared: Vec<Option<PreparedMask<'_>>> = masks.iter().map(|mask| {
-        let data = mask.data.as_ref()?;
-        let (rgba, mw, mh) = match data {
-            ImageRef::Owned(bytes, w, h) => (bytes.as_slice(), *w, *h),
-            ImageRef::Shared(bytes, w, h) => (bytes.as_slice(), *w, *h),
-        };
-        if mw == 0 || mh == 0 || mask.tile.w <= 0.0 || mask.tile.h <= 0.0 {
-            return None;
-        }
-        let x = (0..width).map(|x| {
-            let doc_x = (region.x() as usize + x) as f32 * inv_scale + scroll_x;
-            if !mask.no_clip && (doc_x < mask.clip.x || doc_x >= mask.clip.right()) {
+    let prepared: Vec<Option<PreparedMask<'_>>> = masks
+        .iter()
+        .map(|mask| {
+            let data = mask.data.as_ref()?;
+            let (rgba, mw, mh) = match data {
+                ImageRef::Owned(bytes, w, h) => (bytes.as_slice(), *w, *h),
+                ImageRef::Shared(bytes, w, h) => (bytes.as_slice(), *w, *h),
+            };
+            if mw == 0 || mh == 0 || mask.tile.w <= 0.0 || mask.tile.h <= 0.0 {
                 return None;
             }
-            mask_axis_sample(doc_x, mask.origin.x, mask.origin.w, mask.tile.x, mask.tile.w, mask.repeat_x_mode)
-                .map(|sample| (sample * mw as f32).floor().clamp(0.0, (mw - 1) as f32) as usize)
-        }).collect();
-        let y = (0..masked.height() as usize).map(|y| {
-            let doc_y = (region.y() as usize + y) as f32 * inv_scale + scroll_y;
-            if !mask.no_clip && (doc_y < mask.clip.y || doc_y >= mask.clip.bottom()) {
-                return None;
-            }
-            mask_axis_sample(doc_y, mask.origin.y, mask.origin.h, mask.tile.y, mask.tile.h, mask.repeat_y_mode)
-                .map(|sample| (sample * mh as f32).floor().clamp(0.0, (mh - 1) as f32) as usize)
-        }).collect();
-        Some(PreparedMask { rgba, width: mw as usize, luminance: mask.luminance, x, y })
-    }).collect();
+            let x = (0..width)
+                .map(|x| {
+                    let doc_x = (region.x() as usize + x) as f32 * inv_scale + scroll_x;
+                    if !mask.no_clip && (doc_x < mask.clip.x || doc_x >= mask.clip.right()) {
+                        return None;
+                    }
+                    mask_axis_sample(
+                        doc_x,
+                        mask.origin.x,
+                        mask.origin.w,
+                        mask.tile.x,
+                        mask.tile.w,
+                        mask.repeat_x_mode,
+                    )
+                    .map(|sample| (sample * mw as f32).floor().clamp(0.0, (mw - 1) as f32) as usize)
+                })
+                .collect();
+            let y = (0..masked.height() as usize)
+                .map(|y| {
+                    let doc_y = (region.y() as usize + y) as f32 * inv_scale + scroll_y;
+                    if !mask.no_clip && (doc_y < mask.clip.y || doc_y >= mask.clip.bottom()) {
+                        return None;
+                    }
+                    mask_axis_sample(
+                        doc_y,
+                        mask.origin.y,
+                        mask.origin.h,
+                        mask.tile.y,
+                        mask.tile.h,
+                        mask.repeat_y_mode,
+                    )
+                    .map(|sample| (sample * mh as f32).floor().clamp(0.0, (mh - 1) as f32) as usize)
+                })
+                .collect();
+            Some(PreparedMask {
+                rgba,
+                width: mw as usize,
+                luminance: mask.luminance,
+                x,
+                y,
+            })
+        })
+        .collect();
 
     for (i, px) in masked.data_mut().chunks_exact_mut(4).enumerate() {
-        if px[3] == 0 { continue; }
+        if px[3] == 0 {
+            continue;
+        }
         let mut alpha = 0_u32;
         for (index, mask) in masks.iter().enumerate().rev() {
-            let source = prepared[index].as_ref().and_then(|sample| {
-                let u = sample.x[i % width]?;
-                let v = sample.y[i / width]?;
-                let base = (v * sample.width + u) * 4;
-                Some(if sample.luminance {
-                    let r = sample.rgba.get(base).copied().unwrap_or(0) as u32;
-                    let g = sample.rgba.get(base + 1).copied().unwrap_or(0) as u32;
-                    let b = sample.rgba.get(base + 2).copied().unwrap_or(0) as u32;
-                    (r * 2126 + g * 7152 + b * 722 + 5000) / 10_000
-                } else {
-                    sample.rgba.get(base + 3).copied().unwrap_or(0) as u32
+            let source = prepared[index]
+                .as_ref()
+                .and_then(|sample| {
+                    let u = sample.x[i % width]?;
+                    let v = sample.y[i / width]?;
+                    let base = (v * sample.width + u) * 4;
+                    Some(if sample.luminance {
+                        let r = sample.rgba.get(base).copied().unwrap_or(0) as u32;
+                        let g = sample.rgba.get(base + 1).copied().unwrap_or(0) as u32;
+                        let b = sample.rgba.get(base + 2).copied().unwrap_or(0) as u32;
+                        (r * 2126 + g * 7152 + b * 722 + 5000) / 10_000
+                    } else {
+                        sample.rgba.get(base + 3).copied().unwrap_or(0) as u32
+                    })
                 })
-            }).unwrap_or(0);
+                .unwrap_or(0);
             alpha = if index == masks.len() - 1 {
                 source
             } else {
@@ -5453,7 +5519,14 @@ fn composite_masked_layers(
         px[2] = ((px[2] as u32 * alpha) / 255) as u8;
         px[3] = ((px[3] as u32 * alpha) / 255) as u8;
     }
-    target.draw_pixmap(region.x(), region.y(), masked.as_ref(), &tiny_skia::PixmapPaint::default(), Transform::identity(), None);
+    target.draw_pixmap(
+        region.x(),
+        region.y(),
+        masked.as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        Transform::identity(),
+        None,
+    );
 }
 
 #[test]
@@ -7827,134 +7900,35 @@ fn blend_composite(dst: &mut Pixmap, src: &Pixmap, mode: u8) {
         blend_common_multiply(dst, src);
         return;
     }
-    let dst_pixels = dst.pixels_mut();
-    let src_pixels = src.pixels();
-    for (d, s) in dst_pixels.iter_mut().zip(src_pixels.iter()) {
-        if s.alpha() == 0 {
-            continue;
-        }
-        let (sr, sg, sb, sa) = (
-            s.red() as u32,
-            s.green() as u32,
-            s.blue() as u32,
-            s.alpha() as u32,
-        );
-        let (dr, dg, db, _da) = (
-            d.red() as u32,
-            d.green() as u32,
-            d.blue() as u32,
-            d.alpha() as u32,
-        );
-
-        // Unpremultiply for blending
-        let (sr_n, sg_n, sb_n) = if sa > 0 {
-            (sr * 255 / sa, sg * 255 / sa, sb * 255 / sa)
-        } else {
-            (0, 0, 0)
-        };
-        let (dr_n, dg_n, db_n) = (dr.min(255), dg.min(255), db.min(255));
-
-        let (br, bg, bb) = match mode {
-            1 => {
-                // multiply
-                (dr_n * sr_n / 255, dg_n * sg_n / 255, db_n * sb_n / 255)
-            }
-            2 => {
-                // screen
-                (
-                    dr_n + sr_n - dr_n * sr_n / 255,
-                    dg_n + sg_n - dg_n * sg_n / 255,
-                    db_n + sb_n - db_n * sb_n / 255,
-                )
-            }
-            3 => {
-                // overlay
-                let blend = |d: u32, s: u32| -> u32 {
-                    if d < 128 {
-                        2 * d * s / 255
-                    } else {
-                        255 - 2 * (255 - d) * (255 - s) / 255
-                    }
-                };
-                (blend(dr_n, sr_n), blend(dg_n, sg_n), blend(db_n, sb_n))
-            }
-            4 => (dr_n.min(sr_n), dg_n.min(sg_n), db_n.min(sb_n)), // darken
-            5 => (dr_n.max(sr_n), dg_n.max(sg_n), db_n.max(sb_n)), // lighten
-            6 => {
-                // color-dodge
-                let dodge = |d: u32, s: u32| -> u32 {
-                    if s >= 255 {
-                        255
-                    } else {
-                        (d * 255 / (255 - s)).min(255)
-                    }
-                };
-                (dodge(dr_n, sr_n), dodge(dg_n, sg_n), dodge(db_n, sb_n))
-            }
-            7 => {
-                // color-burn
-                let burn = |d: u32, s: u32| -> u32 {
-                    if s == 0 {
-                        0
-                    } else {
-                        255 - ((255 - d) * 255 / s).min(255)
-                    }
-                };
-                (burn(dr_n, sr_n), burn(dg_n, sg_n), burn(db_n, sb_n))
-            }
-            8 => {
-                // hard-light (like overlay but src/dst swapped)
-                let blend = |d: u32, s: u32| -> u32 {
-                    if s < 128 {
-                        2 * d * s / 255
-                    } else {
-                        255 - 2 * (255 - d) * (255 - s) / 255
-                    }
-                };
-                (blend(dr_n, sr_n), blend(dg_n, sg_n), blend(db_n, sb_n))
-            }
-            9 => {
-                // soft-light
-                let soft = |d: u32, s: u32| -> u32 {
-                    let df = d as f32 / 255.0;
-                    let sf = s as f32 / 255.0;
-                    let r = if sf <= 0.5 {
-                        df - (1.0 - 2.0 * sf) * df * (1.0 - df)
-                    } else {
-                        let g = if df <= 0.25 {
-                            ((16.0 * df - 12.0) * df + 4.0) * df
-                        } else {
-                            df.sqrt()
-                        };
-                        df + (2.0 * sf - 1.0) * (g - df)
-                    };
-                    (r * 255.0).round().clamp(0.0, 255.0) as u32
-                };
-                (soft(dr_n, sr_n), soft(dg_n, sg_n), soft(db_n, sb_n))
-            }
-            10 => {
-                // difference
-                let diff = |a: u32, b: u32| -> u32 { if a > b { a - b } else { b - a } };
-                (diff(dr_n, sr_n), diff(dg_n, sg_n), diff(db_n, sb_n))
-            }
-            11 => {
-                // exclusion
-                let excl = |a: u32, b: u32| -> u32 { a + b - 2 * a * b / 255 };
-                (excl(dr_n, sr_n), excl(dg_n, sg_n), excl(db_n, sb_n))
-            }
-            _ => (sr_n, sg_n, sb_n), // normal / hue / saturation / color / luminosity fallback
-        };
-
-        // Premultiply result and composite with source alpha
-        let ia = 255 - sa;
-        let fr = (br * sa / 255 + dr * ia / 255).min(255) as u8;
-        let fg = (bg * sa / 255 + dg * ia / 255).min(255) as u8;
-        let fb = (bb * sa / 255 + db * ia / 255).min(255) as u8;
-        let fa = (sa + _da * ia / 255).min(255) as u8;
-        if let Some(p) = tiny_skia::PremultipliedColorU8::from_rgba(fr, fg, fb, fa) {
-            *d = p;
-        }
-    }
+    use tiny_skia::BlendMode;
+    let blend_mode = match mode {
+        2 => BlendMode::Screen,
+        3 => BlendMode::Overlay,
+        4 => BlendMode::Darken,
+        5 => BlendMode::Lighten,
+        6 => BlendMode::ColorDodge,
+        7 => BlendMode::ColorBurn,
+        8 => BlendMode::HardLight,
+        9 => BlendMode::SoftLight,
+        10 => BlendMode::Difference,
+        11 => BlendMode::Exclusion,
+        12 => BlendMode::Hue,
+        13 => BlendMode::Saturation,
+        14 => BlendMode::Color,
+        15 => BlendMode::Luminosity,
+        _ => BlendMode::SourceOver,
+    };
+    dst.draw_pixmap(
+        0,
+        0,
+        src.as_ref(),
+        &tiny_skia::PixmapPaint {
+            blend_mode,
+            ..Default::default()
+        },
+        Transform::identity(),
+        None,
+    );
 }
 
 fn blend_common_multiply(dst: &mut Pixmap, src: &Pixmap) {
@@ -8000,6 +7974,11 @@ fn blend_common_multiply(dst: &mut Pixmap, src: &Pixmap) {
             let blend = |s: u8, d: u8| {
                 let s = s as u32;
                 let d = d as u32;
+                // Premultiplied source-over with multiply:
+                // Cs*(1-Ab) + Cb*(1-As) + Cs*Cb.
+                if da != 255 {
+                    return ((s * (255 - da) + d * (255 - sa) + s * d + 127) / 255).min(255) as u8;
+                }
                 let straight_source = s * 255 / sa;
                 let straight_dest = d.min(255);
                 let multiplied = straight_dest * straight_source / 255;
@@ -8108,6 +8087,41 @@ fn solid_multiply_matches_general_blend_for_opaque_backdrop() {
         assert_eq!(actual.green(), expected(before.green(), overlay.green()));
         assert_eq!(actual.blue(), expected(before.blue(), overlay.blue()));
         assert_eq!(actual.alpha(), 255);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn multiply_preserves_source_over_on_transparent_and_translucent_backdrops() {
+    let alphas = [0, 1, 64, 128, 254, 255];
+    let mut destination = Pixmap::new(36, 1).unwrap();
+    let mut source = Pixmap::new(36, 1).unwrap();
+    for (i, &da) in alphas.iter().enumerate() {
+        for (j, &sa) in alphas.iter().enumerate() {
+            destination.pixels_mut()[i * 6 + j] =
+                tiny_skia::ColorU8::from_rgba(199, 73, 41, da).premultiply();
+            source.pixels_mut()[i * 6 + j] =
+                tiny_skia::ColorU8::from_rgba(39, 147, 221, sa).premultiply();
+        }
+    }
+    let mut expected = destination.clone();
+    expected.draw_pixmap(
+        0,
+        0,
+        source.as_ref(),
+        &tiny_skia::PixmapPaint {
+            blend_mode: tiny_skia::BlendMode::Multiply,
+            ..Default::default()
+        },
+        Transform::identity(),
+        None,
+    );
+    blend_common_multiply(&mut destination, &source);
+    for (i, (actual, expected)) in destination.data().iter().zip(expected.data()).enumerate() {
+        assert!(
+            (i32::from(*actual) - i32::from(*expected)).abs() <= 2,
+            "byte {i}: {actual} vs {expected}"
+        );
     }
 }
 
@@ -8372,6 +8386,7 @@ fn simple_clip_contains_viewport(
 
 fn build_polygon_clip_mask(
     points: &[(f32, f32)],
+    even_odd: bool,
     pw: u32,
     ph: u32,
     scale: f32,
@@ -8379,11 +8394,12 @@ fn build_polygon_clip_mask(
     scroll_y: f32,
 ) -> Option<tiny_skia::Mask> {
     let ts = Transform::from_scale(scale, scale).pre_translate(-scroll_x, -scroll_y);
-    build_polygon_clip_mask_with_transform(points, pw, ph, ts)
+    build_polygon_clip_mask_with_transform(points, even_odd, pw, ph, ts)
 }
 
 fn build_polygon_clip_mask_with_transform(
     points: &[(f32, f32)],
+    even_odd: bool,
     pw: u32,
     ph: u32,
     ts: Transform,
@@ -8401,7 +8417,12 @@ fn build_polygon_clip_mask_with_transform(
     }
     pb.close();
     if let Some(path) = pb.finish() {
-        mask.fill_path(&path, FillRule::Winding, true, ts);
+        let fill_rule = if even_odd {
+            FillRule::EvenOdd
+        } else {
+            FillRule::Winding
+        };
+        mask.fill_path(&path, fill_rule, true, ts);
     }
     Some(mask)
 }

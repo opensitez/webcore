@@ -126,6 +126,7 @@ pub enum PaintCmd {
     /// Push an arbitrary polygon clip in document coordinates.
     PushClipPath {
         points: Vec<(f32, f32)>,
+        even_odd: bool,
     },
 
     /// Push a parsed CSS path clip at the reference-box origin.
@@ -556,7 +557,7 @@ impl DisplayListMemoryEstimate {
                     self.add_image(image, seen_shared_images);
                 }
             }
-            PaintCmd::PushClipPath { points } => {
+            PaintCmd::PushClipPath { points, .. } => {
                 self.add_vec_bytes(
                     points
                         .capacity()

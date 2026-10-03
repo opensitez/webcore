@@ -81,10 +81,16 @@ pub enum Phase {
     RasterOpacityPop,
     RasterClip,
     RasterClipMaskBuild,
+    FramePaintResource,
+    FramePaintAnimatedImage,
+    FramePaintCssAnimation,
+    FramePaintSvgAnimation,
+    FramePaintVideo,
+    FramePaintOther,
 }
 
 impl Phase {
-    pub const ALL: [Self; 70] = [
+    pub const ALL: [Self; 76] = [
         Self::HtmlFetch,
         Self::HtmlParse,
         Self::CssFetch,
@@ -155,6 +161,12 @@ impl Phase {
         Self::RasterOpacityPop,
         Self::RasterClip,
         Self::RasterClipMaskBuild,
+        Self::FramePaintResource,
+        Self::FramePaintAnimatedImage,
+        Self::FramePaintCssAnimation,
+        Self::FramePaintSvgAnimation,
+        Self::FramePaintVideo,
+        Self::FramePaintOther,
     ];
 
     pub fn name(self) -> &'static str {
@@ -229,6 +241,12 @@ impl Phase {
             Self::RasterOpacityPop => "raster_opacity_pop",
             Self::RasterClip => "raster_clip",
             Self::RasterClipMaskBuild => "raster_clip_mask_build",
+            Self::FramePaintResource => "frame_paint_resource",
+            Self::FramePaintAnimatedImage => "frame_paint_animated_image",
+            Self::FramePaintCssAnimation => "frame_paint_css_animation",
+            Self::FramePaintSvgAnimation => "frame_paint_svg_animation",
+            Self::FramePaintVideo => "frame_paint_video",
+            Self::FramePaintOther => "frame_paint_other",
         }
     }
 }

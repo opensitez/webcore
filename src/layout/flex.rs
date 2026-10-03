@@ -94,33 +94,13 @@ fn single_replaced_width_at_height(
     single_replaced_width_at_height(engine, child, height, font_px, root_font_px)
 }
 
-fn has_rendered_flex_sibling(
-    node: &WebCore,
-    child_paths: &[Vec<usize>],
-    from: usize,
-    forward: bool,
-) -> bool {
-    if forward {
-        child_paths
-            .iter()
-            .skip(from + 1)
-            .map(|path| child_ref(node, path))
-            .any(flex_item_participates)
-    } else {
-        child_paths
-            .iter()
-            .take(from)
-            .rev()
-            .map(|path| child_ref(node, path))
-            .any(flex_item_participates)
-    }
-}
-
 fn collapsed_boundary_space_main_size(
     engine: &LayoutEngine,
     node: &WebCore,
     child_paths: &[Vec<usize>],
     index: usize,
+    has_previous_item: bool,
+    has_next_item: bool,
     font_px: f32,
     root_font_px: f32,
 ) -> f32 {
@@ -145,10 +125,8 @@ fn collapsed_boundary_space_main_size(
         .chars()
         .next_back()
         .is_some_and(|ch| ch.is_ascii_whitespace());
-    let needs_leading =
-        starts_with_space && has_rendered_flex_sibling(node, child_paths, index, false);
-    let needs_trailing =
-        ends_with_space && has_rendered_flex_sibling(node, child_paths, index, true);
+    let needs_leading = starts_with_space && has_previous_item;
+    let needs_trailing = ends_with_space && has_next_item;
     if !needs_leading && !needs_trailing {
         return 0.0;
     }
@@ -469,6 +447,12 @@ pub fn layout_flex(
 
     let mut items: Vec<FlexItem> = Vec::new();
     let child_paths = collect_flex_children(node);
+    let mut rendered_after = vec![false; child_paths.len() + 1];
+    for i in (0..child_paths.len()).rev() {
+        rendered_after[i] = rendered_after[i + 1]
+            || flex_item_participates(child_ref(node, &child_paths[i]));
+    }
+    let mut rendered_before = false;
 
     for (path_idx, path) in child_paths.iter().enumerate() {
         let boundary_space_main = collapsed_boundary_space_main_size(
@@ -476,9 +460,12 @@ pub fn layout_flex(
             node,
             &child_paths,
             path_idx,
+            rendered_before,
+            rendered_after[path_idx + 1],
             font_px,
             root_font_px,
         );
+        rendered_before |= flex_item_participates(child_ref(node, path));
         let child = child_mut(node, path);
         if matches!(child.style.display, Display::None) {
             clear_layout_subtree(child);

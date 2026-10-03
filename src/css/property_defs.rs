@@ -8289,8 +8289,16 @@ fn apply_clip(s: &mut ComputedStyle, v: &str) {
     }
 }
 fn apply_clip_path(s: &mut ComputedStyle, v: &str) {
+    apply_clip_path_checked(s, v);
+}
+
+pub(crate) fn valid_clip_path(v: &str) -> bool {
+    apply_clip_path_checked(&mut ComputedStyle::default(), v)
+}
+
+fn apply_clip_path_checked(s: &mut ComputedStyle, v: &str) -> bool {
     if v.trim().is_empty() {
-        return;
+        return false;
     }
     let mut reference_box = None;
     let mut shape = None;
@@ -8304,23 +8312,23 @@ fn apply_clip_path(s: &mut ComputedStyle, v: &str) {
         };
         if let Some(geometry_box) = geometry_box {
             if reference_box.replace(geometry_box).is_some() {
-                return;
+                return false;
             }
         } else if shape.replace(token).is_some() {
-            return;
+            return false;
         }
     }
     let box_only = shape.is_none();
     let shape = shape.unwrap_or("inset(0)");
     if shape.eq_ignore_ascii_case("none") && reference_box.is_some() {
-        return;
+        return false;
     }
     let parsed_path = if shape
         .get(..5)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("path("))
     {
         let Some(parsed) = parse_css_clip_path_data(shape) else {
-            return;
+            return false;
         };
         Some(parsed)
     } else {
@@ -8335,17 +8343,17 @@ fn apply_clip_path(s: &mut ComputedStyle, v: &str) {
             .iter()
             .any(|prefix| clip_path_function(shape, prefix)))
     {
-        return;
+        return false;
     }
     let parsed_inset = if !box_only && clip_path_function(shape, "inset(") {
         let inner = shape[6..shape.len() - 1].trim();
         let Some(parsed) = parse_clip_path_inset(inner) else {
-            return;
+            return false;
         };
         Some(parsed)
     } else if clip_path_function(shape, "xywh(") || clip_path_function(shape, "rect(") {
         let Some(parsed) = parse_clip_path_rectangle(shape) else {
-            return;
+            return false;
         };
         Some(parsed)
     } else {
@@ -8354,12 +8362,20 @@ fn apply_clip_path(s: &mut ComputedStyle, v: &str) {
     let parsed_radial =
         if clip_path_function(shape, "circle(") || clip_path_function(shape, "ellipse(") {
             let Some(parsed) = parse_clip_path_radial(shape) else {
-                return;
+                return false;
             };
             Some(parsed)
         } else {
             None
         };
+    let parsed_polygon = if clip_path_function(shape, "polygon(") {
+        let Some(parsed) = parse_clip_path_polygon(shape) else {
+            return false;
+        };
+        Some(parsed)
+    } else {
+        None
+    };
     if let Some(rare) = s.rare.as_mut() {
         rare.clip_path_inset_round = None;
         if parsed_path.is_none() {
@@ -8385,12 +8401,15 @@ fn apply_clip_path(s: &mut ComputedStyle, v: &str) {
         }
     } else if let Some(radial) = parsed_radial {
         s.clip_path = radial;
+    } else if let Some(polygon) = parsed_polygon {
+        s.clip_path = polygon;
     } else {
-        apply_clip_path_shape(s, shape);
+        s.clip_path = ClipPath::default();
     }
     if let Some(reference_box) = reference_box {
         s.clip_path.reference_box = reference_box;
     }
+    true
 }
 
 fn parse_clip_path_radial(shape: &str) -> Option<ClipPath> {
@@ -8548,13 +8567,7 @@ fn parse_clip_path_inset(
     ];
     let round = if let Some(index) = round_at {
         let radii = tokens.get(index + 1..)?.join(" ");
-        let (horizontal, vertical) = find_top_level_char(&radii, '/')
-            .map(|slash| (&radii[..slash], &radii[slash + 1..]))
-            .unwrap_or((&radii, &radii));
-        Some((
-            parse_clip_round_set(horizontal)?,
-            parse_clip_round_set(vertical)?,
-        ))
+        Some(parse_shape_round_radii(&radii)?)
     } else {
         None
     };
@@ -8589,13 +8602,7 @@ fn parse_clip_path_rectangle(
     }
     let round = if let Some(index) = round_at {
         let radii = tokens.get(index + 1..)?.join(" ");
-        let (horizontal, vertical) = find_top_level_char(&radii, '/')
-            .map(|slash| (&radii[..slash], &radii[slash + 1..]))
-            .unwrap_or((&radii, &radii));
-        Some((
-            parse_clip_round_set(horizontal)?,
-            parse_clip_round_set(vertical)?,
-        ))
+        Some(parse_shape_round_radii(&radii)?)
     } else {
         None
     };
@@ -8643,6 +8650,13 @@ fn parse_clip_path_rectangle(
             round,
         ))
     }
+}
+
+pub(crate) fn parse_shape_round_radii(input: &str) -> Option<([CssLength; 4], [CssLength; 4])> {
+    let (horizontal, vertical) = find_top_level_char(input, '/')
+        .map(|slash| (&input[..slash], &input[slash + 1..]))
+        .unwrap_or((input, input));
+    Some((parse_clip_round_set(horizontal)?, parse_clip_round_set(vertical)?))
 }
 
 fn parse_clip_round_set(input: &str) -> Option<[CssLength; 4]> {
@@ -8707,22 +8721,51 @@ fn parse_css_clip_path_data(
     (path.len() > 0).then(|| (std::sync::Arc::new(path), rule))
 }
 
-fn apply_clip_path_shape(s: &mut ComputedStyle, v: &str) {
-    if v.eq_ignore_ascii_case("none") {
-        s.clip_path = ClipPath::default();
-    } else if clip_path_function(v, "polygon(") {
-        let inner = v[8..v.len().saturating_sub(1)].trim();
-        s.clip_path = ClipPath::default();
-        s.clip_path.kind = ClipPathKind::Polygon;
-        for pair in crate::css::value_parse::split_top_level_commas(inner) {
-            let pts = split_top_level_whitespace(pair.trim());
-            if pts.len() >= 2 {
-                s.clip_path
-                    .points
-                    .push((parse_length(pts[0]), parse_length(pts[1])));
-            }
-        }
+fn parse_clip_path_polygon(value: &str) -> Option<ClipPath> {
+    let inner = value.get(8..value.len().checked_sub(1)?)?.trim();
+    let pairs = crate::css::value_parse::split_top_level_commas(inner);
+    if pairs.is_empty() {
+        return None;
     }
+    let mut clip = ClipPath::default();
+    clip.kind = ClipPathKind::Polygon;
+    let first = split_top_level_whitespace(pairs[0].trim());
+    let mut header_index = 0;
+    if first.first().is_some_and(|token| token.eq_ignore_ascii_case("evenodd")) {
+        clip.polygon_even_odd = true;
+        header_index += 1;
+    } else if first.first().is_some_and(|token| token.eq_ignore_ascii_case("nonzero")) {
+        header_index += 1;
+    }
+    if first.get(header_index).is_some_and(|token| token.eq_ignore_ascii_case("round")) {
+        let value = *first.get(header_index + 1)?;
+        if value.contains('%') {
+            return None;
+        }
+        clip.polygon_round = Some(parse_clip_nonnegative_length(value)?);
+        header_index += 2;
+    }
+    let coordinate_start = if header_index == 0 {
+        0
+    } else if header_index == first.len() {
+        1
+    } else {
+        return None;
+    };
+    if coordinate_start == pairs.len() {
+        return None;
+    }
+    for pair in &pairs[coordinate_start..] {
+        let coordinates = split_top_level_whitespace(pair.trim());
+        if coordinates.len() != 2 {
+            return None;
+        }
+        clip.points.push((
+            parse_clip_path_length(coordinates[0])?,
+            parse_clip_path_length(coordinates[1])?,
+        ));
+    }
+    Some(clip)
 }
 
 fn copy_clip(d: &mut ComputedStyle, s: &ComputedStyle) {
@@ -8749,7 +8792,7 @@ fn copy_clip_path(d: &mut ComputedStyle, s: &ComputedStyle) {
 
 fn apply_shape_outside(s: &mut ComputedStyle, v: &str) {
     let value = v.trim();
-    if !value.is_empty() {
+    if super::shape::valid_shape_outside_non_image(value) || super::supports::image(value) {
         s.shape_outside = value.to_string();
     }
 }
@@ -8759,7 +8802,9 @@ fn copy_shape_outside(d: &mut ComputedStyle, s: &ComputedStyle) {
 }
 
 fn apply_shape_margin(s: &mut ComputedStyle, v: &str) {
-    s.shape_margin = parse_length(v);
+    if super::shape::valid_shape_margin(v) {
+        s.shape_margin = parse_length(v);
+    }
 }
 
 fn copy_shape_margin(d: &mut ComputedStyle, s: &ComputedStyle) {
@@ -8949,24 +8994,7 @@ fn apply_overflow_anchor(s: &mut ComputedStyle, v: &str) {
 }
 fn apply_overflow_clip_margin(s: &mut ComputedStyle, v: &str) {
     let value = v.trim();
-    if value == "content-box" || value == "padding-box" || value == "border-box" {
-        s.overflow_clip_margin = value.to_string();
-        return;
-    }
-
-    let parts: Vec<&str> = value.split_whitespace().collect();
-    if parts.len() <= 2
-        && !parts.is_empty()
-        && parts.iter().all(|part| {
-            *part == "content-box"
-                || *part == "padding-box"
-                || *part == "border-box"
-                || parse_length_checked(part).is_some()
-        })
-        && parts
-            .iter()
-            .any(|part| parse_length_checked(part).is_some())
-    {
+    if super::parse_overflow_clip_margin(value).is_some() {
         s.overflow_clip_margin = value.to_string();
     }
 }

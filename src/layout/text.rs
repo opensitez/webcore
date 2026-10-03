@@ -33,6 +33,56 @@ pub fn first_strong_direction(text: &str) -> Option<Direction> {
     None
 }
 
+/// HTML `dir=auto` uses the first strong character outside independently
+/// directed descendants. Stop as soon as that character is found.
+pub fn first_strong_direction_in_subtree(root: &WebCore) -> Option<Direction> {
+    let mut pending = vec![root];
+    while let Some(node) = pending.pop() {
+        if matches!(node.tag.as_str(), "script" | "style" | "#comment")
+            || (!std::ptr::eq(node, root) && matches!(node.tag.as_str(), "bdi" | "textarea"))
+        {
+            continue;
+        }
+        if !std::ptr::eq(node, root)
+            && node.attributes.get("dir").is_some_and(|dir| {
+                dir.eq_ignore_ascii_case("ltr")
+                    || dir.eq_ignore_ascii_case("rtl")
+                    || dir.eq_ignore_ascii_case("auto")
+            })
+        {
+            continue;
+        }
+        if let Some(direction) = first_strong_direction(&node.text) {
+            return Some(direction);
+        }
+        pending.extend(node.children.iter().rev());
+    }
+    None
+}
+
+pub fn html_auto_direction(node: &WebCore) -> Direction {
+    if node.tag == "input" {
+        let input_type = node.attributes.get("type").map(String::as_str).unwrap_or("text");
+        if ![
+            "hidden", "text", "search", "tel", "url", "email", "password", "submit", "reset",
+            "button",
+        ]
+        .iter()
+        .any(|kind| input_type.eq_ignore_ascii_case(kind))
+        {
+            return Direction::LTR;
+        }
+        let value = node.value_state.as_deref().or_else(|| node.attributes.get("value").map(String::as_str));
+        return value.and_then(first_strong_direction).unwrap_or(Direction::LTR);
+    }
+    if node.tag == "textarea" {
+        if let Some(value) = node.value_state.as_deref() {
+            return first_strong_direction(value).unwrap_or(Direction::LTR);
+        }
+    }
+    first_strong_direction_in_subtree(node).unwrap_or(Direction::LTR)
+}
+
 /// Detect direction for a slice of text by byte range.
 pub fn detect_direction_in_range(text: &str, start: usize, length: usize) -> Direction {
     let end = (start + length).min(text.len());

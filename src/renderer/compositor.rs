@@ -21,6 +21,17 @@ pub struct PaintSegment {
     pub fixed_surface: Option<FixedSurface>,
 }
 
+impl PaintSegment {
+    pub fn has_animated_transform(
+        &self,
+        overrides: &std::collections::HashMap<u32, [f32; 6]>,
+    ) -> bool {
+        self.list.commands.iter().any(|cmd| {
+            matches!(cmd, PaintCmd::PushTransform { node_id, .. } if overrides.contains_key(node_id))
+        })
+    }
+}
+
 /// A viewport layer cropped to the pixels that can affect compositing.
 pub struct FixedSurface {
     pub image: tiny_skia::Pixmap,
@@ -832,6 +843,28 @@ fn length(text: &str, reference: f32) -> Option<f32> {
 mod tests {
     use super::*;
     use crate::load_html;
+
+    #[test]
+    fn fixed_segment_ignores_unrelated_transform_animation() {
+        let mut segment = PaintSegment {
+            list: DisplayList::new(),
+            fixed: true,
+            backdrop_dependent: false,
+            tiles: TileManager::new(),
+            fixed_surface: None,
+        };
+        segment.list.push(PaintCmd::PushTransform {
+            node_id: 7,
+            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        });
+        segment.list.push(PaintCmd::PopTransform);
+
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(8, [1.0, 0.0, 0.0, 1.0, 10.0, 0.0]);
+        assert!(!segment.has_animated_transform(&overrides));
+        overrides.insert(7, [1.0, 0.0, 0.0, 1.0, 20.0, 0.0]);
+        assert!(segment.has_animated_transform(&overrides));
+    }
 
     #[test]
     fn cropped_fixed_surface_composites_identically_to_full_viewport() {

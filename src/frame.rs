@@ -135,6 +135,8 @@ pub struct EngineFrame {
     scheduled_images: std::collections::HashSet<String>,
     video_tx: Option<std::sync::mpsc::SyncSender<PendingVideoUpdate>>,
     video_rx: Option<std::sync::mpsc::Receiver<PendingVideoUpdate>>,
+    video_update_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    video_urgent_update_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     scheduled_videos: std::collections::HashSet<(u32, String)>,
     pending_density_reselection: bool,
     cache_dir: Option<String>,
@@ -146,6 +148,8 @@ pub struct EngineFrame {
     pending_resource_restyle: bool,
     last_resource_relayout: Option<std::time::Instant>,
     last_animation_layout_values: std::collections::HashMap<u32, Vec<(String, String)>>,
+    suspended_svg_scroll: Option<(f32, f32)>,
+    visible_svg_animation_running: bool,
     last_color_scheme_preference: crate::css::ColorSchemePreference,
     /// Host callbacks (boxed trait object).
     callbacks: Box<dyn EngineCallbacks>,
@@ -180,6 +184,9 @@ impl EngineFrame {
             scheduled_images: std::collections::HashSet::new(),
             video_tx: None,
             video_rx: None,
+            video_update_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            video_urgent_update_pending:
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             scheduled_videos: std::collections::HashSet::new(),
             pending_density_reselection: false,
             cache_dir: None,
@@ -188,6 +195,8 @@ impl EngineFrame {
             pending_resource_restyle: false,
             last_resource_relayout: None,
             last_animation_layout_values: std::collections::HashMap::new(),
+            suspended_svg_scroll: None,
+            visible_svg_animation_running: false,
             last_color_scheme_preference: crate::css::color_scheme_preference(),
             callbacks: Box::new(NoopCallbacks),
         }
@@ -246,8 +255,13 @@ impl EngineFrame {
             std::time::Duration::ZERO,
         );
         self.last_animation_layout_values.clear();
+        self.suspended_svg_scroll = None;
+        self.visible_svg_animation_running = false;
         self.video_tx = None;
         self.video_rx = None;
+        self.video_update_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.video_urgent_update_pending =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.scheduled_videos.clear();
         self.first_paint_done = false;
         self.needs_style = true;
@@ -299,6 +313,7 @@ impl EngineFrame {
     ) -> FrameUpdate {
         let _profile_frame = crate::profile::span(crate::profile::Phase::FrameUpdate);
         let mut update = FrameUpdate::default();
+        let mut paint_reason_recorded = false;
         let color_scheme_preference = crate::css::color_scheme_preference();
         if self.last_color_scheme_preference != color_scheme_preference {
             self.last_color_scheme_preference = color_scheme_preference;
@@ -350,12 +365,21 @@ impl EngineFrame {
                         rect_intersects(*rect, retained_paint_band(&self.doc, self.viewport_h))
                     }) {
                         self.needs_paint = true;
+                        paint_reason_recorded = true;
+                        crate::profile::record(
+                            crate::profile::Phase::FramePaintResource,
+                            std::time::Duration::ZERO,
+                        );
                         update.paint_only_display_list_rebuild = true;
                         update.paint_rects.extend(image_poll.paint_rects);
                     }
                 }
             }
             if let Some(rx) = &self.video_rx {
+                self.video_update_pending
+                    .store(false, std::sync::atomic::Ordering::Release);
+                self.video_urgent_update_pending
+                    .store(false, std::sync::atomic::Ordering::Release);
                 for _ in 0..32 {
                     if self
                         .doc
@@ -422,6 +446,11 @@ impl EngineFrame {
                 self.needs_style |= self.pending_resource_restyle;
                 self.needs_layout = true;
                 self.needs_paint = true;
+                paint_reason_recorded = true;
+                crate::profile::record(
+                    crate::profile::Phase::FramePaintResource,
+                    std::time::Duration::ZERO,
+                );
                 update.rebuild_display_list = true;
                 self.pending_resource_relayout = false;
                 self.pending_resource_restyle = false;
@@ -433,9 +462,19 @@ impl EngineFrame {
             self.needs_style = true;
             self.needs_layout = true;
             self.needs_paint = true;
+            paint_reason_recorded = true;
+            crate::profile::record(
+                crate::profile::Phase::FramePaintResource,
+                std::time::Duration::ZERO,
+            );
         } else if dirty_layout_before {
             self.needs_layout = true;
             self.needs_paint = true;
+            paint_reason_recorded = true;
+            crate::profile::record(
+                crate::profile::Phase::FramePaintResource,
+                std::time::Duration::ZERO,
+            );
         }
 
         if !scroll_priority {
@@ -446,6 +485,11 @@ impl EngineFrame {
             );
             if image_tick.changed_any {
                 self.needs_paint = true;
+                paint_reason_recorded = true;
+                crate::profile::record(
+                    crate::profile::Phase::FramePaintAnimatedImage,
+                    std::time::Duration::ZERO,
+                );
                 if image_tick.paint_rects.is_empty() {
                     update.rebuild_display_list = true;
                 } else {
@@ -463,6 +507,12 @@ impl EngineFrame {
             update.rebuild_display_list = true;
         }
 
+        if self.suspended_svg_scroll.is_some_and(|(x, y)| {
+            x != self.doc.scroll_x || y != self.doc.scroll_y
+        }) {
+            self.doc.needs_animation_frame = true;
+        }
+
         // 3. Check for running animations
         let mut animation_needs_layout = false;
         if self.doc.needs_animation_frame {
@@ -472,7 +522,7 @@ impl EngineFrame {
                 self.viewport_w,
                 self.viewport_h,
             );
-            self.doc.tick_animations(now);
+            let overrides_changed = self.doc.tick_animations(now);
             // A removed override still needs one paint to restore the base
             // style. Current animation targets alone omit this final frame.
             let finished_rects = previous_rects
@@ -485,13 +535,31 @@ impl EngineFrame {
                 update.paint_rects.extend(finished_rects);
                 update.paint_only_display_list_rebuild = true;
                 self.needs_paint = true;
+                paint_reason_recorded = true;
+                crate::profile::record(
+                    crate::profile::Phase::FramePaintCssAnimation,
+                    std::time::Duration::ZERO,
+                );
             }
             let css_animations_running = self.doc.needs_animation_frame;
-            let (svg_animations_running, svg_damage) =
-                crate::svg::animation::tick_svg_animations_with_damage(&mut self.doc.root, now);
+            let paint_band = retained_paint_band(&self.doc, self.viewport_h);
+            let (svg_animations_running, visible_svg_animations_running, svg_damage) =
+                crate::svg::animation::tick_svg_animations_in_band(
+                    &mut self.doc.root,
+                    now,
+                    Some(paint_band),
+                );
+            self.suspended_svg_scroll = (svg_animations_running && !visible_svg_animations_running)
+                .then_some((self.doc.scroll_x, self.doc.scroll_y));
+            self.visible_svg_animation_running = visible_svg_animations_running;
             let svg_changed = !svg_damage.is_empty();
             if svg_changed {
                 update.paint_rects.extend(svg_damage);
+                paint_reason_recorded = true;
+                crate::profile::record(
+                    crate::profile::Phase::FramePaintSvgAnimation,
+                    std::time::Duration::ZERO,
+                );
             }
             let (media_running, presented_video_ids) = self.doc.tick_media_with_frames(now);
             let video_damage: Vec<_> = presented_video_ids
@@ -502,7 +570,14 @@ impl EngineFrame {
                 .filter_map(|id| video_paint_rect(&self.doc, id, self.viewport_h))
                 .collect();
             update.paint_rects.extend(video_damage.iter().copied());
-            if svg_animations_running {
+            if !video_damage.is_empty() {
+                paint_reason_recorded = true;
+                crate::profile::record(
+                    crate::profile::Phase::FramePaintVideo,
+                    std::time::Duration::ZERO,
+                );
+            }
+            if visible_svg_animations_running {
                 self.doc.needs_animation_frame = true;
             }
             let layout_values = crate::types::animation_runtime::layout_animation_values(
@@ -515,11 +590,23 @@ impl EngineFrame {
                 self.needs_layout = true;
                 self.needs_paint = true;
                 update.rebuild_display_list = true;
-            } else if !self.doc.animation_overrides.is_empty()
+                paint_reason_recorded = true;
+                crate::profile::record(
+                    crate::profile::Phase::FramePaintCssAnimation,
+                    std::time::Duration::ZERO,
+                );
+            } else if (overrides_changed && !self.doc.animation_overrides.is_empty())
                 || svg_changed
                 || !video_damage.is_empty()
             {
                 self.needs_paint = true;
+                if overrides_changed {
+                    paint_reason_recorded = true;
+                    crate::profile::record(
+                        crate::profile::Phase::FramePaintCssAnimation,
+                        std::time::Duration::ZERO,
+                    );
+                }
                 if svg_changed
                     || !video_damage.is_empty()
                     || !animation_overrides_are_transform_only(&self.doc.animation_overrides)
@@ -528,7 +615,7 @@ impl EngineFrame {
                 }
             }
             self.doc.needs_animation_frame =
-                css_animations_running || svg_animations_running || media_running;
+                css_animations_running || visible_svg_animations_running || media_running;
         }
 
         // 4. Style + Layout (batched — all mutations since last frame processed at once)
@@ -548,6 +635,9 @@ impl EngineFrame {
             self.needs_style = false;
             self.needs_layout = false;
             self.needs_paint = true;
+            if self.suspended_svg_scroll.is_some() {
+                self.doc.needs_animation_frame = true;
+            }
             if trace_frame {
                 eprintln!(
                     "[webcore frame] layout={}ms resource_poll={}ms style={} dirty_style={} dirty_layout={} resource={} animation_layout={} dirty_after={}",
@@ -587,6 +677,12 @@ impl EngineFrame {
 
         // 5. Paint flag
         if self.needs_paint {
+            if !paint_reason_recorded {
+                crate::profile::record(
+                    crate::profile::Phase::FramePaintOther,
+                    std::time::Duration::ZERO,
+                );
+            }
             self.needs_paint = false;
             update.changed = true;
             return update;
@@ -617,7 +713,73 @@ impl EngineFrame {
     }
 
     pub(crate) fn needs_immediate_update(&self) -> bool {
-        self.needs_style || self.needs_layout || self.doc.hover_changed
+        self.needs_style
+            || self.needs_layout
+            || self.doc.hover_changed
+            || self
+                .video_urgent_update_pending
+                .load(std::sync::atomic::Ordering::Acquire)
+            || (self
+                .video_update_pending
+                .load(std::sync::atomic::Ordering::Acquire)
+                && self.has_visible_playing_video())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn signal_video_update_for_test(&self) {
+        self.video_update_pending
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn signal_urgent_video_update_for_test(&self) {
+        self.video_urgent_update_pending
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    fn has_visible_playing_video(&self) -> bool {
+        let paint_band = retained_paint_band(&self.doc, self.viewport_h);
+        self.doc.media_states.iter().any(|(&id, state)| {
+            !state.paused && !state.ended && self.media_visible_in_band(id, paint_band)
+        })
+    }
+
+    fn media_visible_in_band(&self, id: u32, paint_band: Rect) -> bool {
+        self.doc.find_webcore(id).is_some_and(|node| {
+            let rect = node.layout.border_rect;
+            rect.w > 0.0 && rect.h > 0.0 && rect_intersects(rect, paint_band)
+        })
+    }
+
+    pub(crate) fn media_only_idle(&self) -> bool {
+        if !self.doc.needs_animation_frame
+            || self.visible_svg_animation_running
+            || self
+                .doc
+                .active_animations
+                .iter()
+                .any(|state| !state.animation.play_state_paused)
+            || !self.doc.transition_states.is_empty()
+            || self
+                .doc
+                .has_visible_animated_images(self.doc.scroll_y, self.viewport_h)
+        {
+            return false;
+        }
+        let paint_band = retained_paint_band(&self.doc, self.viewport_h);
+        let mut playing = false;
+        for (&id, state) in &self.doc.media_states {
+            if state.paused || state.ended {
+                continue;
+            }
+            playing = true;
+            if !state.pending_video_frames.is_empty()
+                && self.media_visible_in_band(id, paint_band)
+            {
+                return false;
+            }
+        }
+        playing
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1139,7 +1301,11 @@ impl EngineFrame {
     /// Check if any animations are currently running.
     pub fn has_animations(&self) -> bool {
         self.doc.needs_animation_frame
-            || !self.doc.active_animations.is_empty()
+            || self
+                .doc
+                .active_animations
+                .iter()
+                .any(|state| !state.animation.play_state_paused)
             || !self.doc.transition_states.is_empty()
             || self
                 .doc
@@ -1157,6 +1323,11 @@ impl EngineFrame {
         self.doc.viewport_w = self.viewport_w;
         self.doc.viewport_h = self.viewport_h;
         self.last_animation_layout_values.clear();
+        self.suspended_svg_scroll = None;
+        self.visible_svg_animation_running = false;
+        self.video_update_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.video_urgent_update_pending =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.doc.root.children.clear();
         self.doc.rebuild_node_index();
         self.doc.base_url = base_url.to_string();
@@ -1522,6 +1693,8 @@ impl EngineFrame {
                 })
                 .clone();
             let wake = self.resource_wake.clone();
+            let pending = self.video_update_pending.clone();
+            let urgent = self.video_urgent_update_pending.clone();
             let should_loop = self.doc.media_loop(node_id) == Some(true);
             std::thread::spawn(move || {
                 use std::io::Read;
@@ -1540,15 +1713,16 @@ impl EngineFrame {
                     }
                 };
                 let mut metadata_sent = false;
+                let mut first_frame_sent = false;
                 let mut bytes = [0u8; 16 * 1024];
                 let mut loop_start = 0.0_f32;
                 loop {
                     let Some(mut reader) = open() else { return };
                     let mut decoder: Box<dyn crate::video::backend::StreamingVideoDecoder> =
                         if is_mp4 {
-                            Box::new(crate::video::mp4_avc::Mp4AvcStream::new())
+                            Box::new(crate::video::mp4_video::Mp4VideoDecoder::new())
                         } else if is_webm {
-                            Box::new(crate::video::webm::WebmVp8Decoder::new())
+                            Box::new(crate::video::webm::WebmVideoDecoder::new())
                         } else {
                             Box::new(crate::video::y4m::Y4mStream::new())
                         };
@@ -1574,6 +1748,8 @@ impl EngineFrame {
                                         return;
                                     }
                                     metadata_sent = true;
+                                    pending.store(true, std::sync::atomic::Ordering::Release);
+                                    urgent.store(true, std::sync::atomic::Ordering::Release);
                                     if let Some(wake) = &wake {
                                         wake();
                                     }
@@ -1591,8 +1767,15 @@ impl EngineFrame {
                                 {
                                     return;
                                 }
+                                if !first_frame_sent {
+                                    first_frame_sent = true;
+                                    urgent.store(true, std::sync::atomic::Ordering::Release);
+                                }
                                 if let Some(wake) = &wake {
+                                    pending.store(true, std::sync::atomic::Ordering::Release);
                                     wake();
+                                } else {
+                                    pending.store(true, std::sync::atomic::Ordering::Release);
                                 }
                             }
                             if !decoder.has_buffered_samples() {
@@ -2129,6 +2312,28 @@ fn post_process_streamed_tree(node: &mut crate::types::WebCore, base_url: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_vp9_source_paints_a_first_frame() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"),
+            "/../webmedia/tests/fixtures/vp9-lossless.webm");
+        let mut frame = EngineFrame::empty(640.0, 480.0);
+        frame.load_html(&format!(
+            "<video id=movie autoplay muted><source src='{path}' type='video/webm; codecs=\"vp9\"'></video>"));
+        let id = frame.doc.get_element_by_id("movie").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            frame.update_frame();
+            let node = frame.doc.find_webcore(id).unwrap();
+            if node.image_data.is_some() {
+                assert_eq!((node.image_width, node.image_height), (160, 96));
+                assert!(frame.doc.media_duration(id).unwrap() > 0.0);
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "typed VP9 source did not paint");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
 
     #[test]
     fn local_webm_vp8_video_paints_a_frame() {
@@ -3553,6 +3758,20 @@ mod tests {
     }
 
     #[test]
+    fn paused_css_override_does_not_repaint_on_another_clock_tick() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.load_html("<style>@keyframes fade {from {opacity:0} to {opacity:1}} #hero {width:80px;height:40px;animation:fade 1s linear both paused}</style><div id='hero'>Hello</div>");
+        assert!(frame.update_frame());
+        assert!(!frame.doc.animation_overrides.is_empty());
+
+        frame.doc.needs_animation_frame = true;
+        let update = frame.update_frame_detailed();
+        assert!(!update.changed, "an unchanged paused override is not paint damage");
+        assert!(!update.rebuild_display_list);
+        assert!(!frame.has_animations(), "paused CSS must not keep the frame clock awake");
+    }
+
+    #[test]
     fn streamed_visible_fixed_size_image_rebuilds_current_paint_band() {
         let mut frame = EngineFrame::empty(320.0, 240.0);
         frame.start_streaming("https://example.test/");
@@ -3620,6 +3839,48 @@ mod tests {
     }
 
     #[test]
+    fn offscreen_svg_animation_keeps_time_without_repainting_viewport() {
+        let mut frame = EngineFrame::empty(120.0, 80.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(
+            br#"<html><body><div style="height:3000px"></div><svg width="20" height="20" viewBox="0 0 20 20"><rect width="20" height="20" fill="red"><animate attributeName="fill" from="red" to="blue" dur="2s" repeatCount="indefinite"/></rect></svg></body></html>"#,
+        );
+        frame.finish_loading();
+        assert!(frame.update_frame());
+        frame.doc.needs_animation_frame = true;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let update = frame.update_frame_detailed();
+        assert!(!update.changed, "offscreen SVG samples are not visible damage");
+        assert!(
+            !frame.has_animations(),
+            "an offscreen-only SVG must not keep the frame clock awake"
+        );
+        assert!(!frame.needs_render(), "offscreen SVG has no pending frame work");
+
+        let svg_id = frame.doc.query_selector("svg").unwrap();
+        frame
+            .doc
+            .get_box_by_id_mut(svg_id)
+            .unwrap()
+            .svg_animation_start_time =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        frame.scroll_to(0.0, 3000.0);
+        assert!(frame.update_frame());
+        let fill = &frame.doc.find_webcore(svg_id).unwrap().svg_animation_overrides[0].2;
+        let red = fill
+            .strip_prefix("rgba(")
+            .and_then(|value| value.split(',').next())
+            .and_then(|value| value.parse::<u8>().ok())
+            .expect("sampled SVG fill color");
+        assert!((110..=145).contains(&red), "SVG should resume near its midpoint: {fill}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let update = frame.update_frame_detailed();
+        assert!(update.changed, "the SVG must repaint after entering the viewport");
+        assert!(!update.paint_rects.is_empty());
+    }
+
+    #[test]
     fn streaming_frame_ticks_media_playback() {
         let mut frame = EngineFrame::empty(320.0, 180.0);
         frame.start_streaming("https://example.test/");
@@ -3652,6 +3913,27 @@ mod tests {
             frame.doc.needs_animation_frame,
             "playing media should keep the browser frame clock alive"
         );
+    }
+
+    #[test]
+    fn offscreen_media_uses_background_clock_until_a_visible_frame_is_ready() {
+        let doc = crate::html::parse_html("<video id='clip' src='clip.mp4'></video>");
+        let mut frame = EngineFrame::new(doc, 320.0, 180.0);
+        let id = frame.doc.get_element_by_id("clip").unwrap();
+        assert!(frame.doc.media_play(id));
+        assert!(frame.media_only_idle());
+
+        frame.doc.get_box_by_id_mut(id).unwrap().layout.border_rect =
+            Rect::new(0.0, 0.0, 80.0, 60.0);
+        frame.doc.media_states.get_mut(&id).unwrap().pending_video_frames.push_back(
+            crate::video::backend::VideoFrame {
+                width: 1,
+                height: 1,
+                rgba: std::sync::Arc::new(vec![255, 0, 0, 255]),
+                timestamp: 0.0,
+            },
+        );
+        assert!(!frame.media_only_idle());
     }
 
     #[test]
