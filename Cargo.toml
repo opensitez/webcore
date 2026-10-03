@@ -7,7 +7,7 @@ license = "GPL-3.0-or-later OR LicenseRef-Commercial"
 repository = "https://github.com/opensitez/webcore" 
 readme = "README.md" 
 keywords = ["html", "css", "web", "rendering"]
-categories = ["gui", "browser", "rendering", "web-programming"]
+categories = ["gui", "rendering", "web-programming"]
 
 [lib]
 name = "webcore"
