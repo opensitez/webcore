@@ -558,6 +558,7 @@ fn host_context_slot_rules_style_projected_light_dom() {
         let host = AncestorInfo {
             tag: "x-menu".to_string(),
             attributes: Default::default(),
+            auto_direction: None,
             child_index: 0,
             sibling_count: 1,
             type_child_index: 0,
@@ -785,6 +786,7 @@ fn host_not_selector_matches_shadow_slot_descendant() {
         AncestorInfo {
             tag: "x-theme".to_string(),
             attributes: Default::default(),
+            auto_direction: None,
             child_index: 0,
             sibling_count: 1,
             type_child_index: 0,
@@ -795,6 +797,7 @@ fn host_not_selector_matches_shadow_slot_descendant() {
         AncestorInfo {
             tag: host.tag.clone(),
             attributes: host.attributes.clone().into(),
+            auto_direction: None,
             child_index: 0,
             sibling_count: 1,
             type_child_index: 0,

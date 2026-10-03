@@ -472,9 +472,12 @@ fn predefined_numeric_list_markers_paint_local_digits() {
         let (_, list) = build(&format!(
             "<ol style='list-style-type:{style}' start='12'><li>Item</li></ol>"
         ));
-        assert!(list.commands.iter().any(|cmd| matches!(cmd,
-            PaintCmd::ListMarker { text, .. } if text == marker
-        )), "{style} should paint {marker}");
+        assert!(
+            list.commands.iter().any(|cmd| matches!(cmd,
+                PaintCmd::ListMarker { text, .. } if text == marker
+            )),
+            "{style} should paint {marker}"
+        );
     }
 }
 
@@ -2380,7 +2383,7 @@ fn clip_path_inset_and_circle_emit_display_list_clips() {
         polygon
             .commands
             .iter()
-            .any(|cmd| matches!(cmd, PaintCmd::PushClipPath { points } if points.len() == 3)),
+            .any(|cmd| matches!(cmd, PaintCmd::PushClipPath { points, .. } if points.len() == 3)),
         "polygon clip should emit a polygon display-list clip"
     );
 
@@ -2419,6 +2422,65 @@ fn degenerate_polygon_clip_hides_paint() {
         assert!(
             pixmap.data().chunks_exact(4).all(|pixel| pixel[3] == 0),
             "{shape} must have no visible fill area"
+        );
+    }
+}
+
+#[test]
+fn polygon_clip_fill_rule_agrees_between_paint_and_hit_testing() {
+    let contour = "0 0, 100% 0, 100% 100%, 0 100%, 0 0, 100% 0, 100% 100%, 0 100%";
+    for (rule, visible) in [("nonzero", true), ("evenodd", false)] {
+        let mut renderer = Renderer::new();
+        let doc = renderer.load_html(
+            &format!(
+                "<style>body{{margin:0}}#shape{{width:100px;height:100px;background:red;clip-path:polygon({rule}, {contour})}}</style><div id=shape></div>"
+            ),
+            800.0,
+        );
+        let id = doc.get_element_by_id("shape").unwrap();
+        let list = build_display_list(&doc.root, 800.0, 600.0);
+        assert!(list.commands.iter().any(|cmd| matches!(
+            cmd,
+            PaintCmd::PushClipPath { even_odd, .. } if *even_odd == (rule == "evenodd")
+        )));
+        let mut pixmap = tiny_skia::Pixmap::new(120, 120).unwrap();
+        replay(&list, &mut pixmap, 1.0);
+        let pixel = pixmap.pixel(50, 50).unwrap();
+        assert_eq!(
+            pixel.red() > 200 && pixel.green() < 30,
+            visible,
+            "{rule} paint"
+        );
+        assert_eq!(
+            doc.element_from_point(50.0, 50.0) == Some(id),
+            visible,
+            "{rule} hit"
+        );
+    }
+}
+
+#[test]
+fn rounded_polygon_clips_corners_in_paint_and_hit_testing() {
+    let mut renderer = Renderer::new();
+    let doc = renderer.load_html(
+        "<style>body{margin:0}#shape{width:100px;height:100px;background:red;clip-path:polygon(round 20px, 0 0, 100% 0, 100% 100%, 0 100%)}</style><div id=shape></div>",
+        800.0,
+    );
+    let id = doc.get_element_by_id("shape").unwrap();
+    let list = build_display_list(&doc.root, 800.0, 600.0);
+    let mut pixmap = tiny_skia::Pixmap::new(120, 120).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    for (x, y, visible) in [(1, 1, false), (20, 5, true), (50, 50, true)] {
+        let pixel = pixmap.pixel(x, y).unwrap();
+        assert_eq!(
+            pixel.red() > 200 && pixel.green() < 30,
+            visible,
+            "paint ({x},{y})"
+        );
+        assert_eq!(
+            doc.element_from_point(x as f32, y as f32) == Some(id),
+            visible,
+            "hit ({x},{y})"
         );
     }
 }
@@ -2881,10 +2943,14 @@ fn backdrop_filter_uses_rounded_border_box() {
     let (_, list) = build(
         r#"<style>body{margin:0}</style><div style="width:20px;height:20px;padding:4px;border:2px solid red;border-radius:8px;backdrop-filter:invert(1)"></div>"#,
     );
-    let (rect, radii) = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::BackdropFilter { rect, radii, .. } => Some((rect, radii)),
-        _ => None,
-    }).unwrap();
+    let (rect, radii) = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::BackdropFilter { rect, radii, .. } => Some((rect, radii)),
+            _ => None,
+        })
+        .unwrap();
     assert_eq!((rect.x, rect.y, rect.w, rect.h), (0.0, 0.0, 32.0, 32.0));
     assert!(radii[0] >= 7.5);
 
@@ -4308,7 +4374,10 @@ fn body_canvas_color_precedes_negative_z_descendant() {
     let red = list.commands.iter().position(|command| {
         matches!(command, PaintCmd::FillRect { color, .. } if *color == Color::rgb(255, 0, 0))
     }).unwrap();
-    assert!(white < red, "body canvas color must be behind negative-z content");
+    assert!(
+        white < red,
+        "body canvas color must be behind negative-z content"
+    );
 }
 
 #[test]
@@ -6167,6 +6236,62 @@ fn background_image_blend_mode_multiplies_with_existing_backdrop() {
 }
 
 #[test]
+fn background_blend_isolation_waits_for_paintable_layers() {
+    use crate::renderer::display_list_builder::build_display_list_full;
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"<style>body{margin:0}#box{width:40px;height:40px;background:red;
+            background-image:none,url('pending.png');background-blend-mode:normal,multiply}</style>
+            <div id='box'></div>"#,
+        100.0,
+    );
+    let build = |doc: &crate::Document| {
+        build_display_list_full(
+            &doc.root,
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            0,
+            0,
+            &std::collections::HashSet::new(),
+            "",
+        )
+    };
+    let list = build(&doc);
+    assert!(
+        !list
+            .commands
+            .iter()
+            .any(|command| matches!(command, PaintCmd::PushOpacity { .. }))
+    );
+    let id = doc.get_element_by_id("box").unwrap();
+    doc.get_box_by_id_mut(id).unwrap().additional_bg_images =
+        vec![Some(crate::types::DecodedBackgroundImage {
+            data: std::sync::Arc::new(vec![0, 0, 255, 255]),
+            width: 1,
+            height: 1,
+            ratio_only: false,
+            resolution: 1.0,
+        })];
+    let list = build(&doc);
+    assert_eq!(
+        list.commands
+            .iter()
+            .filter(|command| matches!(command, PaintCmd::PushOpacity { alpha } if *alpha == 1.0))
+            .count(),
+        1
+    );
+    assert_eq!(
+        list.commands
+            .iter()
+            .filter(|command| matches!(command, PaintCmd::PopOpacity))
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn appearance_none_checkbox_does_not_paint_native_chrome() {
     let mut list = DisplayList::new();
     list.push(PaintCmd::FormElement {
@@ -6351,6 +6476,81 @@ fn overflow_clip_margin_expands_the_paint_clip_rect() {
     assert_eq!(clip.y, -8.0);
     assert_eq!(clip.w, 116.0);
     assert_eq!(clip.h, 66.0);
+}
+
+#[test]
+fn overflow_clip_margin_paint_uses_selected_visual_box() {
+    for (value, expected) in [
+        ("content-box 5px", "content"),
+        ("padding-box 5px", "padding"),
+        ("border-box -5px", "border"),
+    ] {
+        let (frame, list) = build(&format!(
+            "<style>html,body{{margin:0}}</style><div id=clip style='width:100px;height:100px;padding:10px;border:10px solid black;overflow:clip;overflow-clip-margin:{value}'></div>"
+        ));
+        let node = crate::dom::query_selector(&frame.doc.root, "#clip").unwrap();
+        let base = match expected {
+            "content" => node.layout.content_rect,
+            "padding" => node.layout.padding_rect,
+            _ => node.layout.border_rect,
+        };
+        let offset = if value.ends_with("-5px") { -5.0 } else { 5.0 };
+        let clip = list
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                PaintCmd::PushClip { rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .expect("overflow clip");
+        assert_eq!(
+            clip,
+            Rect::new(
+                base.x - offset,
+                base.y - offset,
+                base.w + 2.0 * offset,
+                base.h + 2.0 * offset
+            ),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn overflow_clip_margin_adjusts_rounded_clip_radii() {
+    for (value, expected_radius) in [
+        ("border-box 5px", 25.0),
+        ("padding-box 5px", 15.0),
+        ("content-box 5px", 5.0),
+    ] {
+        let (_, list) = build(&format!(
+            "<style>html,body{{margin:0}}</style><div style='width:100px;height:100px;padding:10px;border:10px solid black;border-radius:20px;overflow:clip;overflow-clip-margin:{value}'></div>"
+        ));
+        let (rx, ry) = list
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                PaintCmd::PushClip {
+                    radius, radius_y, ..
+                } => Some((*radius, *radius_y)),
+                _ => None,
+            })
+            .expect("rounded overflow clip");
+        assert_eq!(rx, [expected_radius; 4], "{value}");
+        assert_eq!(ry, [expected_radius; 4], "{value}");
+    }
+}
+
+#[test]
+fn overflow_clip_margin_rounded_edge_clips_child_pixels() {
+    let (_, list) = build(
+        "<style>html,body{margin:0}</style><div style='width:100px;height:100px;padding:10px;border:10px solid transparent;border-radius:20px;overflow:clip;overflow-clip-margin:content-box 5px'><div style='position:relative;left:-30px;top:-30px;width:150px;height:150px;background:blue'></div></div>",
+    );
+    let mut pixels = tiny_skia::Pixmap::new(160, 160).unwrap();
+    replay(&list, &mut pixels, 1.0);
+    assert_eq!(pixels.pixel(15, 15).unwrap().alpha(), 0);
+    assert!(pixels.pixel(20, 16).unwrap().alpha() > 0);
+    assert!(pixels.pixel(50, 50).unwrap().alpha() > 0);
 }
 
 // ── border-radius per corner (css-borders-4) ────────────────────────────────
@@ -7909,12 +8109,15 @@ fn mask_mode_luminance_reaches_display_list() {
     let mut frame = EngineFrame::new(doc, 100.0, 50.0);
     frame.update_frame();
     let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
-    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(0, crate::types::DecodedMaskImage {
-        data: std::sync::Arc::new(vec![255, 255, 255, 255]),
-        width: 1,
-        height: 1,
-        resolution: 1.0,
-    });
+    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(
+        0,
+        crate::types::DecodedMaskImage {
+            data: std::sync::Arc::new(vec![255, 255, 255, 255]),
+            width: 1,
+            height: 1,
+            resolution: 1.0,
+        },
+    );
     let list = build_display_list(&frame.doc.root, 100.0, 50.0);
     assert!(list.commands.iter().any(|cmd| matches!(
         cmd,
@@ -8040,12 +8243,15 @@ fn mask_geometry_uses_css_boxes_and_authored_image_size() {
     let mut frame = EngineFrame::new(doc, 100.0, 60.0);
     frame.update_frame();
     let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
-    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(0, crate::types::DecodedMaskImage {
-        data: std::sync::Arc::new(vec![255, 255, 255, 255]),
-        width: 1,
-        height: 1,
-        resolution: 1.0,
-    });
+    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(
+        0,
+        crate::types::DecodedMaskImage {
+            data: std::sync::Arc::new(vec![255, 255, 255, 255]),
+            width: 1,
+            height: 1,
+            resolution: 1.0,
+        },
+    );
     let list = build_display_list(&frame.doc.root, 100.0, 60.0);
     let PaintCmd::PushMask {
         rect,
@@ -8054,7 +8260,12 @@ fn mask_geometry_uses_css_boxes_and_authored_image_size() {
         repeat_x_mode,
         repeat_y_mode,
         ..
-    } = list.commands.iter().find(|cmd| matches!(cmd, PaintCmd::PushMask { .. })).unwrap() else {
+    } = list
+        .commands
+        .iter()
+        .find(|cmd| matches!(cmd, PaintCmd::PushMask { .. }))
+        .unwrap()
+    else {
         unreachable!()
     };
     assert!((origin.w - 40.0).abs() < 0.01);
@@ -8076,12 +8287,15 @@ fn mask_fill_box_maps_differently_for_origin_and_clip_on_html() {
     let mut frame = EngineFrame::new(doc, 100.0, 60.0);
     frame.update_frame();
     let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
-    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(0, crate::types::DecodedMaskImage {
-        data: std::sync::Arc::new(vec![255, 255, 255, 255]),
-        width: 1,
-        height: 1,
-        resolution: 1.0,
-    });
+    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(
+        0,
+        crate::types::DecodedMaskImage {
+            data: std::sync::Arc::new(vec![255, 255, 255, 255]),
+            width: 1,
+            height: 1,
+            resolution: 1.0,
+        },
+    );
     let list = build_display_list(&frame.doc.root, 100.0, 60.0);
     let PaintCmd::PushMask { origin, rect, .. } = list
         .commands
@@ -8105,12 +8319,15 @@ fn mask_shorthand_no_clip_reaches_display_list() {
     let mut frame = EngineFrame::new(doc, 60.0, 40.0);
     frame.update_frame();
     let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
-    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(0, crate::types::DecodedMaskImage {
-        data: std::sync::Arc::new(vec![255, 255, 255, 255]),
-        width: 1,
-        height: 1,
-        resolution: 1.0,
-    });
+    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(
+        0,
+        crate::types::DecodedMaskImage {
+            data: std::sync::Arc::new(vec![255, 255, 255, 255]),
+            width: 1,
+            height: 1,
+            resolution: 1.0,
+        },
+    );
     let list = build_display_list(&frame.doc.root, 60.0, 40.0);
     assert!(list.commands.iter().any(|cmd| matches!(
         cmd,
@@ -8134,7 +8351,16 @@ fn image_set_mask_uses_selected_candidate_resolution_for_auto_size() {
         "https://example.test/two.png",
         "https://example.test/page",
     ));
-    assert_eq!(node.mask_images.as_ref().unwrap().first.as_ref().unwrap().resolution, 2.0);
+    assert_eq!(
+        node.mask_images
+            .as_ref()
+            .unwrap()
+            .first
+            .as_ref()
+            .unwrap()
+            .resolution,
+        2.0
+    );
     let list = build_display_list(&frame.doc.root, 300.0, 150.0);
     let tile = list
         .commands
@@ -8156,22 +8382,33 @@ fn mask_image_none_does_not_paint_retained_decoded_pixels() {
     let mut frame = EngineFrame::new(doc, 60.0, 40.0);
     frame.update_frame();
     let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
-    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(0, crate::types::DecodedMaskImage {
-        data: std::sync::Arc::new(vec![255, 255, 255, 255]),
-        width: 1,
-        height: 1,
-        resolution: 1.0,
-    });
-    assert!(build_display_list(&frame.doc.root, 60.0, 40.0)
-        .commands
-        .iter()
-        .any(|cmd| matches!(cmd, PaintCmd::PushMask { .. })));
+    std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default)).set(
+        0,
+        crate::types::DecodedMaskImage {
+            data: std::sync::Arc::new(vec![255, 255, 255, 255]),
+            width: 1,
+            height: 1,
+            resolution: 1.0,
+        },
+    );
+    assert!(
+        build_display_list(&frame.doc.root, 60.0, 40.0)
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::PushMask { .. }))
+    );
     let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
-    crate::css::apply_property(std::sync::Arc::make_mut(&mut node.style), "mask-image", "none");
-    assert!(build_display_list(&frame.doc.root, 60.0, 40.0)
-        .commands
-        .iter()
-        .all(|cmd| !matches!(cmd, PaintCmd::PushMask { .. })));
+    crate::css::apply_property(
+        std::sync::Arc::make_mut(&mut node.style),
+        "mask-image",
+        "none",
+    );
+    assert!(
+        build_display_list(&frame.doc.root, 60.0, 40.0)
+            .commands
+            .iter()
+            .all(|cmd| !matches!(cmd, PaintCmd::PushMask { .. }))
+    );
 }
 
 #[test]
@@ -8184,18 +8421,25 @@ fn mask_images_keep_none_layers_and_repeat_geometry_values() {
     let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
     let images = std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default));
     for index in 1..=2 {
-        images.set(index, crate::types::DecodedMaskImage {
-            data: std::sync::Arc::new(vec![255, 255, 255, 255]),
-            width: 1,
-            height: 1,
-            resolution: 1.0,
-        });
+        images.set(
+            index,
+            crate::types::DecodedMaskImage {
+                data: std::sync::Arc::new(vec![255, 255, 255, 255]),
+                width: 1,
+                height: 1,
+                resolution: 1.0,
+            },
+        );
     }
     let list = build_display_list(&frame.doc.root, 60.0, 40.0);
-    let layers = list.commands.iter().find_map(|cmd| match cmd {
-        PaintCmd::PushMaskGroup { layers } => Some(layers),
-        _ => None,
-    }).unwrap();
+    let layers = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::PushMaskGroup { layers } => Some(layers),
+            _ => None,
+        })
+        .unwrap();
     assert_eq!(layers.len(), 3);
     assert!(layers[0].data.is_none());
     assert_eq!((layers[1].tile.w, layers[1].tile.h), (6.0, 7.0));
@@ -8205,10 +8449,13 @@ fn mask_images_keep_none_layers_and_repeat_geometry_values() {
 
 #[test]
 fn all_none_mask_layers_leave_content_visible() {
-    let (_, list) = build(
-        r#"<div style="width:20px;height:10px;background:red;mask-image:none,none"></div>"#,
+    let (_, list) =
+        build(r#"<div style="width:20px;height:10px;background:red;mask-image:none,none"></div>"#);
+    assert!(
+        list.commands
+            .iter()
+            .all(|cmd| !matches!(cmd, PaintCmd::PushMaskGroup { .. }))
     );
-    assert!(list.commands.iter().all(|cmd| !matches!(cmd, PaintCmd::PushMaskGroup { .. })));
     assert!(list.commands.iter().any(|cmd| matches!(cmd,
         PaintCmd::FillRect { color, .. } if color.r == 255 && color.g == 0 && color.b == 0
     )));
@@ -8230,17 +8477,33 @@ fn changed_mask_source_does_not_paint_old_decoded_pixels() {
     };
     std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default))
         .set_with_source(0, image.clone(), "old.png".to_string());
-    assert!(build_display_list(&frame.doc.root, 60.0, 40.0).commands.iter()
-        .any(|cmd| matches!(cmd, PaintCmd::PushMask { .. })));
+    assert!(
+        build_display_list(&frame.doc.root, 60.0, 40.0)
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::PushMask { .. }))
+    );
     let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
-    crate::css::apply_property(std::sync::Arc::make_mut(&mut node.style), "mask-image", "url(new.png)");
-    assert!(build_display_list(&frame.doc.root, 60.0, 40.0).commands.iter()
-        .all(|cmd| !matches!(cmd, PaintCmd::PushMask { .. })));
+    crate::css::apply_property(
+        std::sync::Arc::make_mut(&mut node.style),
+        "mask-image",
+        "url(new.png)",
+    );
+    assert!(
+        build_display_list(&frame.doc.root, 60.0, 40.0)
+            .commands
+            .iter()
+            .all(|cmd| !matches!(cmd, PaintCmd::PushMask { .. }))
+    );
     let node = crate::dom::query_selector_mut(&mut frame.doc.root, "#masked").unwrap();
     std::sync::Arc::make_mut(node.mask_images.get_or_insert_with(Default::default))
         .set_with_source(0, image, "new.png".to_string());
-    assert!(build_display_list(&frame.doc.root, 60.0, 40.0).commands.iter()
-        .any(|cmd| matches!(cmd, PaintCmd::PushMask { .. })));
+    assert!(
+        build_display_list(&frame.doc.root, 60.0, 40.0)
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, PaintCmd::PushMask { .. }))
+    );
 }
 
 #[test]
@@ -8261,7 +8524,9 @@ fn mask_composite_uses_front_layer_operator() {
     for (operator, expected) in [(0, 208), (1, 144), (2, 48), (3, 160)] {
         let list = DisplayList {
             commands: vec![
-                PaintCmd::PushMaskGroup { layers: vec![layer(192, operator), layer(64, 1)] },
+                PaintCmd::PushMaskGroup {
+                    layers: vec![layer(192, operator), layer(64, 1)],
+                },
                 PaintCmd::FillRect {
                     rect: Rect::new(0.0, 0.0, 1.0, 1.0),
                     color: Color::rgba(255, 0, 0, 255),
@@ -8275,7 +8540,10 @@ fn mask_composite_uses_front_layer_operator() {
         };
         let mut pixmap = tiny_skia::Pixmap::new(1, 1).unwrap();
         replay(&list, &mut pixmap, 1.0);
-        assert!((pixmap.data()[3] as i32 - expected).abs() <= 1, "operator {operator}");
+        assert!(
+            (pixmap.data()[3] as i32 - expected).abs() <= 1,
+            "operator {operator}"
+        );
     }
 }
 

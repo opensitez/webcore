@@ -11,6 +11,13 @@ use crate::renderer::display_list::PaintCmd;
 use crate::renderer::display_list_builder::build_display_list;
 use crate::types::*;
 
+fn resolved_root_variables(css: &str) -> std::collections::HashMap<String, String> {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add(css);
+    sheet.resolve_variables_for_viewport(800.0, 600.0);
+    sheet.variables
+}
+
 #[test]
 fn compiled_rule_custom_property_flag_follows_both_declaration_tiers() {
     let mut sheet = Stylesheet::default();
@@ -34,25 +41,22 @@ fn compiled_rule_custom_property_flag_follows_both_declaration_tiers() {
 
 #[test]
 fn changed_custom_properties_resolve_without_recomputing_inherited_values() {
-    let mut parent = std::collections::HashMap::from([
-        ("--base".to_string(), "red".to_string()),
-        ("--inherited".to_string(), "var(--base)".to_string()),
-    ]);
-    crate::css::pre_resolve_variables(&mut parent);
-    let mut child = parent.clone();
-    child.insert("--base".to_string(), "blue".to_string());
-    child.insert("--local".to_string(), "var(--base)".to_string());
-    child.insert("--chain".to_string(), "var(--local)".to_string());
-    child.insert("--cycle-a".to_string(), "var(--cycle-b)".to_string());
-    child.insert("--cycle-b".to_string(), "var(--cycle-a)".to_string());
-    let changed =
-        std::collections::HashSet::from(["--base", "--local", "--chain", "--cycle-a", "--cycle-b"]);
-    crate::css::pre_resolve_changed_variables(&mut child, &changed);
-    assert_eq!(child["--inherited"], "red");
-    assert_eq!(child["--local"], "blue");
-    assert_eq!(child["--chain"], "blue");
-    assert!(!child.contains_key("--cycle-a"));
-    assert!(!child.contains_key("--cycle-b"));
+    let doc = parse_and_layout(
+        "<div id=parent style='--base:red; --inherited:var(--base)'>\
+         <div id=child style='--base:blue; --local:var(--base); --chain:var(--local);\
+         --cycle-a:var(--cycle-b); --cycle-b:var(--cycle-a)'>x</div></div>",
+        800.0,
+    );
+    let child = find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "child")
+    })
+    .expect("child");
+    let vars = &child.style.custom_props;
+    assert_eq!(vars.get("--inherited").map(String::as_str), Some("red"));
+    assert_eq!(vars.get("--local").map(String::as_str), Some("blue"));
+    assert_eq!(vars.get("--chain").map(String::as_str), Some("blue"));
+    assert!(!vars.contains_key("--cycle-a"));
+    assert!(!vars.contains_key("--cycle-b"));
 }
 
 #[test]
@@ -64,11 +68,7 @@ fn empty_custom_property_is_valid_and_does_not_use_var_fallback() {
     assert_eq!(important.get("--priority").map(String::as_str), Some(""));
     assert!(!normal.contains_key("color"));
 
-    let mut vars = std::collections::HashMap::from([
-        ("--empty".to_string(), String::new()),
-        ("--invalid".to_string(), "var(--missing)".to_string()),
-    ]);
-    crate::css::pre_resolve_variables(&mut vars);
+    let vars = resolved_root_variables(":root { --empty:; --invalid: var(--missing); }");
     assert!(vars.contains_key("--empty"));
     assert!(!vars.contains_key("--invalid"));
     assert_eq!(
@@ -95,22 +95,70 @@ fn empty_custom_property_is_valid_and_does_not_use_var_fallback() {
 
 #[test]
 fn custom_property_fallback_uses_invalid_dependency_but_not_empty_one() {
-    let mut vars = std::collections::HashMap::from([
-        ("--invalid".to_string(), "var(--missing)".to_string()),
-        (
-            "--using-invalid".to_string(),
-            "var(--invalid, green)".to_string(),
-        ),
-        ("--empty".to_string(), String::new()),
-        (
-            "--using-empty".to_string(),
-            "var(--empty, blue)".to_string(),
-        ),
-    ]);
-    crate::css::pre_resolve_variables(&mut vars);
+    let vars = resolved_root_variables(
+        ":root { --invalid: var(--missing); --using-invalid: var(--invalid, green);\
+         --empty:; --using-empty: var(--empty, blue); }",
+    );
     assert!(!vars.contains_key("--invalid"));
-    assert_eq!(vars.get("--using-invalid").map(String::as_str), Some("green"));
+    assert_eq!(
+        vars.get("--using-invalid").map(|value| value.trim()),
+        Some("green")
+    );
     assert_eq!(vars.get("--using-empty").map(String::as_str), Some(""));
+
+    let cycle = resolved_root_variables(
+        ":root { --a: var(--b, red); --b: var(--a, blue);\
+         --consumer: var(--a, green); }",
+    );
+    assert!(!cycle.contains_key("--a"));
+    assert!(!cycle.contains_key("--b"));
+    assert_eq!(cycle.get("--consumer").map(|value| value.trim()), Some("green"));
+
+    let mut chain_css = String::from(":root { --v0: blue;");
+    for i in 1..80 {
+        chain_css.push_str(&format!("--v{i}: var(--v{});", i - 1));
+    }
+    chain_css.push('}');
+    let chain = resolved_root_variables(&chain_css);
+    assert_eq!(chain.get("--v79").map(String::as_str), Some("blue"));
+}
+
+#[test]
+fn css_wide_keywords_on_custom_properties_use_inheritance_or_invalid_value() {
+    let root = resolved_root_variables(
+        r#":root { --brand: green; --reset: InItIaL; --other: UNSET;
+         --literal: "initial"; --csstools-light-dark-toggle-1: green; }"#,
+    );
+    assert_eq!(root.get("--brand").map(String::as_str), Some("green"));
+    assert!(!root.contains_key("--reset"));
+    assert!(!root.contains_key("--other"));
+    assert_eq!(root.get("--literal").map(String::as_str), Some("\"initial\""));
+    assert_eq!(
+        root.get("--csstools-light-dark-toggle-1")
+            .map(String::as_str),
+        Some("green")
+    );
+
+    let doc = parse_and_layout(
+        "<style>:root { --brand: green; } \
+         #inherited { --brand: inherit; color: var(--brand, blue) } \
+         #unset { --brand: unset; color: var(--brand, blue) } \
+         #reset { --brand: initial; color: var(--brand, blue) }</style>\
+         <div><p id=inherited>x</p><p id=unset>x</p><p id=reset>x</p></div>",
+        800.0,
+    );
+    for id in ["inherited", "unset"] {
+        let node = find_box(&doc.root, &|b| {
+            b.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .expect("paragraph");
+        assert_eq!(node.style.color, Color::rgb(0, 128, 0), "{id}");
+    }
+    let reset = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|value| value == "reset")
+    })
+    .expect("reset paragraph");
+    assert_eq!(reset.style.color, Color::rgb(0, 0, 255));
 }
 
 #[test]
@@ -1969,6 +2017,43 @@ fn supports_rejects_invalid_deferred_values() {
             !crate::css::parser::supports_condition_matches(condition),
             "{condition}"
         );
+    }
+}
+
+#[test]
+fn supports_clip_path_matches_applied_forms() {
+    use crate::css::parser::supports_condition_matches;
+
+    for value in [
+        "none",
+        "content-box",
+        "inset(10px round 4px) border-box",
+        "padding-box circle(25% at 50% 50%)",
+        "xywh(0 0 20px 30px)",
+        "rect(0 20px 30px 0)",
+        "path('M0 0 L20 0 L20 20 Z')",
+        "polygon(0 0, 100% 0, 100% 100%)",
+        "polygon(evenodd, 0 0, 100% 0, 100% 100%)",
+        "polygon(nonzero, 0 0, 100% 0, 100% 100%)",
+        "polygon(round 10px, 0 0, 100% 0, 100% 100%)",
+        "polygon(evenodd round 10px, 0 0, 100% 0, 100% 100%)",
+    ] {
+        assert!(supports_condition_matches(&format!("(clip-path: {value})")), "{value}");
+    }
+    for value in [
+        "none border-box",
+        "border-box padding-box",
+        "circle(10px) ellipse(5px 5px)",
+        "path('not a path')",
+        "polygon(nonsense)",
+        "polygon(0 0, 50% 50% extra)",
+        "polygon(evenodd)",
+        "polygon(unknown, 0 0, 100% 0, 100% 100%)",
+        "polygon(round, 0 0, 100% 0, 100% 100%)",
+        "polygon(round -10px, 0 0, 100% 0, 100% 100%)",
+        "polygon(round 10%, 0 0, 100% 0, 100% 100%)",
+    ] {
+        assert!(!supports_condition_matches(&format!("(clip-path: {value})")), "{value}");
     }
 }
 
@@ -4900,7 +4985,7 @@ fn dir_auto_uses_first_strong_text_direction() {
 }
 
 #[test]
-fn dir_auto_without_strong_text_preserves_inherited_direction() {
+fn dir_auto_without_strong_text_defaults_to_ltr() {
     let mut frame = EngineFrame::new(
         parse_html(r#"<div dir="rtl"><p id="t" dir="auto">123 !!!</p></div>"#),
         800.0,
@@ -4916,7 +5001,7 @@ fn dir_auto_without_strong_text_preserves_inherited_direction() {
     })
     .unwrap();
 
-    assert_eq!(p.style.direction, Direction::RTL);
+    assert_eq!(p.style.direction, Direction::LTR);
 }
 
 #[test]
@@ -5760,11 +5845,7 @@ fn var_substitution_ignores_quoted_text_but_resolves_function_tokens() {
         crate::css::resolve_var_references(r#"var(--missing, "a,b")"#, &vars),
         "\"a,b\""
     );
-    let mut literal = std::collections::HashMap::from([(
-        "--literal".to_string(),
-        "\"var(--missing)\"".to_string(),
-    )]);
-    crate::css::pre_resolve_variables(&mut literal);
+    let literal = resolved_root_variables(r#":root { --literal: "var(--missing)"; }"#);
     assert_eq!(literal["--literal"], "\"var(--missing)\"");
 
     let mut sheet = Stylesheet::default();
@@ -9685,9 +9766,9 @@ fn state_revert_layer_uses_state_layer_context() {
 }
 
 #[test]
-fn state_variable_revert_layer_keeps_layer_snapshot() {
+fn state_variable_revert_layer_without_prior_value_inherits_color() {
     let doc = parse_and_layout(
-        "<style>@layer base, theme;\
+        "<style>:root { color: rgb(0, 128, 0); } @layer base, theme;\
          @layer base { #t:hover { color: rgb(200, 0, 0); } }\
          @layer theme { #t:hover { color: rgb(0, 0, 200); --choice: revert-layer; color: var(--choice); } }</style>\
          <div id=t>x</div>",
@@ -9698,7 +9779,7 @@ fn state_variable_revert_layer_keeps_layer_snapshot() {
     })
     .expect("target");
     let hover = div.style.hover_style.as_ref().expect("hover style");
-    assert_eq!(hover.color, Color::rgb(200, 0, 0));
+    assert_eq!(hover.color, Color::rgb(0, 128, 0));
 }
 
 #[test]
@@ -9720,6 +9801,158 @@ fn state_important_custom_property_overrides_normal_value() {
         hover.custom_props.get("--ink").map(String::as_str),
         Some("blue")
     );
+}
+
+#[test]
+fn custom_property_revert_and_revert_layer_follow_cascade_precedence() {
+    let doc = parse_and_layout(
+        "<style>@layer base, theme; :root { --ink: green; }\
+         @layer base { #layered { --ink: red; } }\
+         @layer theme { #layered { --ink: blue; --ink: revert-layer; } }\
+         #layered { color: var(--ink); }\
+         #origin { --ink: red; --ink: revert; color: var(--ink); }\
+         @layer base { #important { --ink: revert-layer !important; } }\
+         @layer theme { #important { --ink: blue !important; } }\
+         #important { color: var(--ink); }\
+         #inline { --ink: red; color: var(--ink); }</style>\
+         <p id=layered>x</p><p id=origin>x</p><p id=important>x</p>\
+         <p id=inline style='--ink: revert-layer'>x</p>",
+        800.0,
+    );
+    for (id, color) in [
+        ("layered", Color::rgb(255, 0, 0)),
+        ("origin", Color::rgb(0, 128, 0)),
+        ("important", Color::rgb(0, 0, 255)),
+        ("inline", Color::rgb(255, 0, 0)),
+    ] {
+        let node = find_box(&doc.root, &|b| {
+            b.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .expect("paragraph");
+        assert_eq!(node.style.color, color, "{id}");
+    }
+}
+
+#[test]
+fn state_custom_property_revert_layer_uses_prior_state_layer() {
+    let doc = parse_and_layout(
+        "<style>@layer base, theme;\
+         @layer base { #t:hover { --ink: red; color: var(--ink); } }\
+         @layer theme { #t:hover { --ink: blue; --ink: revert-layer; } }</style>\
+         <div id=t>x</div>",
+        900.0,
+    );
+    let div = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "t")
+    })
+    .expect("target");
+    let hover = div.style.hover_style.as_ref().expect("hover style");
+    assert_eq!(hover.custom_props.get("--ink").map(String::as_str), Some("red"));
+    assert_eq!(hover.color, Color::rgb(255, 0, 0));
+}
+
+#[test]
+fn variable_fallback_css_wide_keywords_apply_to_ordinary_properties() {
+    let doc = parse_and_layout(
+        "<style>:root { color: rgb(0, 128, 0); }\
+         #initial { color: var(--missing, initial); }\
+         #inherit { color: var(--missing, inherit); }\
+         #unset { color: var(--missing, unset); }\
+         #noninherited { margin-left: 12px; margin-left: var(--missing, unset); }</style>\
+         <p id=initial>x</p><p id=inherit>x</p><p id=unset>x</p>\
+         <p id=noninherited>x</p>",
+        800.0,
+    );
+    for (id, color) in [
+        ("initial", Color::rgb(0, 0, 0)),
+        ("inherit", Color::rgb(0, 128, 0)),
+        ("unset", Color::rgb(0, 128, 0)),
+    ] {
+        let node = find_box(&doc.root, &|b| {
+            b.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .expect("paragraph");
+        assert_eq!(node.style.color, color, "{id}");
+    }
+    let noninherited = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|value| value == "noninherited")
+    })
+    .expect("paragraph");
+    assert!(matches!(
+        noninherited.style.margin_left,
+        CssLength::Zero | CssLength::Px(0.0)
+    ));
+}
+
+#[test]
+fn custom_property_css_wide_keywords_after_substitution_follow_cascade() {
+    let doc = parse_and_layout(
+        "<style>:root { --x: green; --empty:; } @layer base, theme;\
+         #initial { --x: var(--empty) initial; --y: var(--x, blue); }\
+         #inherit { --x: var(--empty) inherit; }\
+         #unset { --x: var(--empty) unset; }\
+         #revert { --x: var(--unknown, revert); }\
+         @layer base { #layer { --x: red; } #fallback { --x: red; } }\
+         @layer theme { #layer { --x: var(--empty) revert-layer; --y: var(--x); }\
+                        #fallback { --x: var(--unknown, revert-layer); } }</style>\
+         <p id=initial>x</p><p id=inherit>x</p><p id=unset>x</p>\
+         <p id=revert>x</p><p id=layer>x</p><p id=fallback>x</p>",
+        800.0,
+    );
+    for (id, value) in [
+        ("initial", None),
+        ("inherit", Some("green")),
+        ("unset", Some("green")),
+        ("revert", Some("green")),
+        ("layer", Some("red")),
+        ("fallback", Some("red")),
+    ] {
+        let node = find_box(&doc.root, &|b| {
+            b.attributes.get("id").is_some_and(|actual| actual == id)
+        })
+        .expect("paragraph");
+        assert_eq!(node.style.custom_props.get("--x").map(String::as_str), value, "{id}");
+        if id == "initial" {
+            assert_eq!(node.style.custom_props.get("--y").map(|value| value.trim()), Some("blue"));
+        } else if id == "layer" {
+            assert_eq!(node.style.custom_props.get("--y").map(String::as_str), Some("red"));
+        }
+    }
+}
+
+#[test]
+fn stylesheet_root_variable_snapshot_respects_layer_rollback() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add(
+        "@layer base, theme; :root { --tone: red; } html { --tone: blue; }\
+         @layer base { :root { --ink: red; } }\
+         @layer theme { :root { --ink: blue; --ink: var(--missing, revert-layer); } }\
+         @layer base { :root { --important: red !important; } }\
+         @layer theme { :root { --important: blue !important; } }",
+    );
+    sheet.rebuild_index();
+    sheet.resolve_variables_for_viewport(800.0, 600.0);
+    assert_eq!(sheet.variables.get("--ink").map(String::as_str), Some("red"));
+    assert_eq!(sheet.variables.get("--tone").map(String::as_str), Some("red"));
+    assert_eq!(sheet.variables.get("--important").map(String::as_str), Some("red"));
+}
+
+#[test]
+fn state_custom_property_keyword_after_substitution_rolls_back_layer() {
+    let doc = parse_and_layout(
+        "<style>@layer base, theme;\
+         @layer base { #t:hover { --ink: red; color: var(--ink); } }\
+         @layer theme { #t:hover { --ink: var(--unknown, revert-layer); } }</style>\
+         <div id=t>x</div>",
+        800.0,
+    );
+    let node = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|id| id == "t")
+    })
+    .expect("target");
+    let hover = node.style.hover_style.as_ref().expect("hover style");
+    assert_eq!(hover.custom_props.get("--ink").map(String::as_str), Some("red"));
+    assert_eq!(hover.color, Color::rgb(255, 0, 0));
 }
 
 #[test]
@@ -10580,6 +10813,425 @@ fn shape_outside_circle_narrows_float_exclusion_per_line() {
         text_x > 50.0 && text_x < 100.0,
         "circle shape-outside should exclude less than the float rectangle on the first line, got x={text_x}"
     );
+}
+
+#[test]
+fn shape_outside_uses_the_full_line_interval_for_exclusion() {
+    use crate::layout::{FloatContext, FloatItem, FloatShape, FloatSide, LayoutEngine};
+
+    let engine = LayoutEngine::new();
+    let font_px = ComputedStyle::INITIAL_FONT_SIZE_PX;
+    let mut left_float = FloatContext::default();
+    left_float.place_float(
+        &engine,
+        font_px,
+        0.0,
+        100.0,
+        100.0,
+        200.0,
+        FloatSide::Left,
+        "circle(25px at 50px 50px)",
+        0.0,
+    );
+    let (mut left, mut right) = (0.0, 0.0);
+    left_float.available_width(0.0, 20.0, 200.0, &mut left, &mut right);
+    assert_eq!(left, 0.0, "a line above the circle needs no exclusion");
+    left_float.available_width(20.0, 30.0, 200.0, &mut left, &mut right);
+    assert!((left - 75.0).abs() < 0.01, "the line reaches the circle's widest point: {left}");
+
+    let mut right_float = FloatContext::default();
+    right_float.place_float(
+        &engine,
+        font_px,
+        0.0,
+        100.0,
+        100.0,
+        200.0,
+        FloatSide::Right,
+        "inset(40px 20px 40px 20px)",
+        0.0,
+    );
+    right_float.available_width(25.0, 16.0, 200.0, &mut left, &mut right);
+    assert!((right - 120.0).abs() < 0.01, "the line intersects the inset at its bottom edge: {right}");
+    right_float.available_width(0.0, 20.0, 200.0, &mut left, &mut right);
+    assert_eq!(right, 200.0, "a line above the inset needs no exclusion");
+
+    let displaced_right = FloatContext {
+        floats: vec![FloatItem {
+            rect: Rect::new(40.0, 0.0, 50.0, 100.0),
+            side: FloatSide::Right,
+            clear: 100.0,
+            shape: Some(FloatShape::Circle {
+                cx: 25.0,
+                cy: 50.0,
+                r: 10.0,
+            }),
+            shape_margin: 0.0,
+        }],
+        ..FloatContext::default()
+    };
+    displaced_right.available_width(0.0, 20.0, 200.0, &mut left, &mut right);
+    assert_eq!(right, 200.0, "a non-intersecting internal right float must not narrow the line");
+
+    let mut polygon_float = FloatContext::default();
+    polygon_float.place_float(
+        &engine,
+        font_px,
+        0.0,
+        100.0,
+        100.0,
+        200.0,
+        FloatSide::Left,
+        "polygon(0 0, 50px 50px, 0 100px)",
+        0.0,
+    );
+    polygon_float.available_width(20.0, 30.0, 200.0, &mut left, &mut right);
+    assert!((left - 50.0).abs() < 0.01, "the line reaches the polygon's widest vertex: {left}");
+}
+
+#[test]
+fn shape_outside_radial_sizes_use_the_reference_box_and_center() {
+    use crate::layout::{FloatContext, FloatShape, FloatSide, LayoutEngine};
+
+    let engine = LayoutEngine::new();
+    let mut context = FloatContext::default();
+    for value in [
+        "circle(50%)",
+        "circle(at 10% 50%)",
+        "ellipse(at 10% 50%)",
+        "ellipse(FARTHEST-SIDE at 10% 50%)",
+        "ellipse(closest-corner at 10% 50%)",
+        "circle(at -20px 50%)",
+        "circle(2em at right top)",
+        "circle(10px at bottom 5px right 10px)",
+        "ellipse(10px 20px at left 15px top 5px)",
+        "inset(2em 0)",
+        "circle(at bogus)",
+        "circle(calc(2em + 3px) at right top)",
+        "ellipse(calc(1em + 4px) 25% at left 15px top 5px)",
+        "inset(calc(1em + 4px) 10%)",
+        "polygon(calc(10px + 5px) 0, 50px 50px, 0 100px)",
+    ] {
+        context.place_float(
+            &engine,
+            ComputedStyle::INITIAL_FONT_SIZE_PX,
+            0.0,
+            200.0,
+            100.0,
+            1000.0,
+            FloatSide::Left,
+            value,
+            0.0,
+        );
+    }
+    let circle = &context.floats[0].shape;
+    let expected = 200.0_f32.hypot(100.0) / std::f32::consts::SQRT_2 * 0.5;
+    assert!(matches!(circle, Some(FloatShape::Circle { r, .. }) if (*r - expected).abs() < 0.01));
+    assert!(matches!(&context.floats[1].shape,
+        Some(FloatShape::Circle { cx, cy, r })
+            if (*cx - 20.0).abs() < 0.01 && (*cy - 50.0).abs() < 0.01 && (*r - 20.0).abs() < 0.01));
+    assert!(matches!(&context.floats[2].shape,
+        Some(FloatShape::Ellipse { rx, ry, .. })
+            if (*rx - 20.0).abs() < 0.01 && (*ry - 50.0).abs() < 0.01));
+    assert!(matches!(&context.floats[3].shape,
+        Some(FloatShape::Ellipse { rx, ry, .. })
+            if (*rx - 180.0).abs() < 0.01 && (*ry - 50.0).abs() < 0.01));
+    assert!(matches!(&context.floats[4].shape,
+        Some(FloatShape::Ellipse { rx, ry, .. })
+            if (*rx - 20.0 * std::f32::consts::SQRT_2).abs() < 0.01
+                && (*ry - 50.0 * std::f32::consts::SQRT_2).abs() < 0.01));
+    assert!(matches!(&context.floats[5].shape,
+        Some(FloatShape::Circle { cx, r, .. })
+            if (*cx + 20.0).abs() < 0.01 && (*r - 20.0).abs() < 0.01));
+    assert!(matches!(&context.floats[6].shape,
+        Some(FloatShape::Circle { cx, cy, r })
+            if (*cx - 200.0).abs() < 0.01 && *cy == 0.0 && (*r - 32.0).abs() < 0.01));
+    assert!(matches!(&context.floats[7].shape,
+        Some(FloatShape::Circle { cx, cy, r })
+            if (*cx - 190.0).abs() < 0.01 && (*cy - 95.0).abs() < 0.01 && (*r - 10.0).abs() < 0.01));
+    assert!(matches!(&context.floats[8].shape,
+        Some(FloatShape::Ellipse { cx, cy, rx, ry })
+            if (*cx - 15.0).abs() < 0.01 && (*cy - 5.0).abs() < 0.01
+                && (*rx - 10.0).abs() < 0.01 && (*ry - 20.0).abs() < 0.01));
+    assert!(matches!(&context.floats[9].shape,
+        Some(FloatShape::Inset { top, right, bottom, left })
+            if (*top - 32.0).abs() < 0.01 && *right == 0.0
+                && (*bottom - 32.0).abs() < 0.01 && *left == 0.0));
+    assert!(
+        context.floats[10].shape.is_none(),
+        "invalid position must not become a centered circle"
+    );
+    assert!(matches!(&context.floats[11].shape,
+        Some(FloatShape::Circle { r, .. }) if (*r - 35.0).abs() < 0.01));
+    assert!(matches!(&context.floats[12].shape,
+        Some(FloatShape::Ellipse { rx, ry, .. })
+            if (*rx - 20.0).abs() < 0.01 && (*ry - 25.0).abs() < 0.01));
+    assert!(matches!(&context.floats[13].shape,
+        Some(FloatShape::Inset { top, right, bottom, left })
+            if (*top - 20.0).abs() < 0.01 && (*right - 20.0).abs() < 0.01
+                && (*bottom - 20.0).abs() < 0.01 && (*left - 20.0).abs() < 0.01));
+    assert!(matches!(&context.floats[14].shape,
+        Some(FloatShape::Polygon(points)) if (points[0].0 - 15.0).abs() < 0.01));
+}
+
+#[test]
+fn shape_outside_validation_agrees_between_cascade_and_supports() {
+    use crate::css::parser::supports_condition_matches;
+
+    for value in [
+        "circle(at right top)",
+        "circle(closest-corner at bottom 5px right 10px)",
+        "ellipse(farthest-side at center)",
+        "ellipse(calc(1em + 4px) 25% at left 15px top 5px)",
+        "polygon(0 0, calc(50% - 2px) 50%, 0 100%) border-box",
+        "content-box inset(10px 20px)",
+        "circle(25% at center) half-border-box",
+        "half-border-box",
+    ] {
+        assert!(
+            supports_condition_matches(&format!("(shape-outside: {value})")),
+            "valid shape should be supported: {value}"
+        );
+    }
+    for value in [
+        "circle(at bogus)",
+        "circle(10px 20px)",
+        "ellipse(10px)",
+        "circle(min-content)",
+        "circle(fit-content(10px))",
+        "inset(content)",
+        "inset(10px 20px 30px 40px 50px)",
+        "polygon(0 0, bogus 20px, 0 100%)",
+        "border-box content-box",
+        "circle(10px) border-box content-box",
+    ] {
+        assert!(
+            !supports_condition_matches(&format!("(shape-outside: {value})")),
+            "invalid shape should fail @supports: {value}"
+        );
+        let mut style = ComputedStyle::default();
+        apply_property(&mut style, "shape-outside", "circle(20px)");
+        apply_property(&mut style, "shape-outside", value);
+        assert_eq!(style.shape_outside, "circle(20px)", "invalid shape replaced the prior declaration: {value}");
+    }
+}
+
+#[test]
+fn shape_margin_validates_lengths_and_percentages_without_resetting() {
+    use crate::css::parser::supports_condition_matches;
+
+    for value in ["0", "12px", "10%", "calc(1em + 2px)"] {
+        assert!(supports_condition_matches(&format!("(shape-margin: {value})")));
+        let mut style = ComputedStyle::default();
+        apply_property(&mut style, "shape-margin", value);
+        assert_ne!(style.shape_margin, crate::types::CssLength::Auto);
+    }
+    for value in ["-1px", "auto", "content", "fit-content(10px)", "12"] {
+        assert!(!supports_condition_matches(&format!("(shape-margin: {value})")));
+        let mut style = ComputedStyle::default();
+        apply_property(&mut style, "shape-margin", "8px");
+        apply_property(&mut style, "shape-margin", value);
+        assert_eq!(style.shape_margin, crate::types::CssLength::Px(8.0));
+    }
+}
+
+#[test]
+fn invalid_shape_declarations_preserve_earlier_cascade_values() {
+    let doc = parse_and_layout(
+        "<style>#float { float:left; shape-outside:circle(20px); shape-outside:circle(at bogus); shape-margin:8px; shape-margin:-2px }</style><div id=float>x</div>",
+        300.0,
+    );
+    let node = find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "float")
+    })
+    .expect("float");
+    assert_eq!(node.style.shape_outside, "circle(20px)");
+    assert_eq!(node.style.shape_margin, CssLength::Px(8.0));
+}
+
+#[test]
+fn shape_outside_uses_selected_reference_box_for_basic_shapes() {
+    use crate::layout::{FloatContext, FloatShape, FloatSide, LayoutEngine, float_shape_reference};
+
+    let doc = parse_and_layout(
+        "<style>body{margin:0}#float{float:left;width:100px;height:80px;margin:12px;border:8px solid;padding:6px;shape-outside:circle(25% at center) content-box}</style><div id=float></div>",
+        400.0,
+    );
+    let node = find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "float")
+    })
+    .expect("float");
+    let mut context = FloatContext::default();
+    context.place_float_in(
+        &LayoutEngine::new(),
+        16.0,
+        0.0,
+        0.0,
+        node.layout.margin_rect.w,
+        node.layout.margin_rect.h,
+        400.0,
+        FloatSide::Left,
+        &node.style.shape_outside,
+        0.0,
+        float_shape_reference(&node.style, &node.layout, 16.0),
+    );
+    let reference = node.layout.content_rect;
+    let margin = node.layout.margin_rect;
+    let expected_x = reference.x - margin.x + reference.w / 2.0;
+    let expected_y = reference.y - margin.y + reference.h / 2.0;
+    assert!(matches!(&context.floats[0].shape,
+        Some(FloatShape::Circle { cx, cy, r })
+        if (*cx - expected_x).abs() < 0.1 && (*cy - expected_y).abs() < 0.1
+            && (*r - reference.w.hypot(reference.h) * 0.25 / std::f32::consts::SQRT_2).abs() < 0.1));
+}
+
+#[test]
+fn shape_outside_bare_box_uses_adjusted_corner_radii() {
+    use crate::layout::{FloatContext, FloatShape, FloatSide, LayoutEngine, float_shape_reference};
+
+    let doc = parse_and_layout(
+        "<style>body{margin:0}#float{float:left;width:100px;height:80px;margin:10px;border:8px solid;padding:6px;border-radius:30px;shape-outside:border-box}</style><div id=float></div>",
+        400.0,
+    );
+    let node = find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "float")
+    })
+    .expect("float");
+    let mut context = FloatContext::default();
+    context.place_float_in(
+        &LayoutEngine::new(), 16.0, 0.0, 0.0,
+        node.layout.margin_rect.w, node.layout.margin_rect.h, 400.0,
+        FloatSide::Left, &node.style.shape_outside, 0.0,
+        float_shape_reference(&node.style, &node.layout, 16.0),
+    );
+    let Some(FloatShape::RoundedBox { rect, rx, ry }) = &context.floats[0].shape else {
+        panic!("bare border-box must retain rounded reference geometry");
+    };
+    assert!((rect.x - (node.layout.border_rect.x - node.layout.margin_rect.x)).abs() < 0.1);
+    assert!(rx[0] > 0.0 && ry[0] > 0.0);
+    let mut left = 0.0;
+    let mut right = 400.0;
+    context.available_width(rect.y, 2.0, 400.0, &mut left, &mut right);
+    assert!(left < node.layout.margin_rect.w - 1.0, "rounded corner should narrow exclusion: {left}");
+    context.available_width(rect.y + 40.0, 2.0, 400.0, &mut left, &mut right);
+    assert!(left > 0.0, "the middle of the border box must still exclude text");
+}
+
+#[test]
+fn shape_outside_half_border_box_uses_midpoint_edges_and_radii() {
+    use crate::layout::{FloatContext, FloatShape, FloatSide, LayoutEngine, float_shape_reference};
+
+    let doc = parse_and_layout(
+        "<style>body{margin:0}#float{float:left;width:100px;height:80px;margin:10px;border:12px solid;padding:6px;border-radius:30px;shape-outside:half-border-box}</style><div id=float></div>",
+        400.0,
+    );
+    let node = find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "float")
+    })
+    .expect("float");
+    let mut context = FloatContext::default();
+    context.place_float_in(
+        &LayoutEngine::new(), 16.0, 0.0, 0.0,
+        node.layout.margin_rect.w, node.layout.margin_rect.h, 400.0,
+        FloatSide::Left, &node.style.shape_outside, 0.0,
+        float_shape_reference(&node.style, &node.layout, 16.0),
+    );
+    let Some(FloatShape::RoundedBox { rect, rx, ry }) = &context.floats[0].shape else {
+        panic!("half-border-box must retain rounded geometry");
+    };
+    let border = node.layout.border_rect;
+    let padding = node.layout.padding_rect;
+    let margin = node.layout.margin_rect;
+    assert!((rect.x - (border.x + padding.x) * 0.5 + margin.x).abs() < 0.1);
+    assert!((rect.w - (border.w + padding.w) * 0.5).abs() < 0.1);
+    assert!((rect.h - (border.h + padding.h) * 0.5).abs() < 0.1);
+    assert!(rx[0] > 0.0 && ry[0] > 0.0);
+
+    let mut style = (*node.style).clone();
+    apply_property(&mut style, "shape-outside", "circle(25% at center) half-border-box");
+    let mut basic = FloatContext::default();
+    basic.place_float_in(
+        &LayoutEngine::new(), 16.0, 0.0, 0.0,
+        margin.w, margin.h, 400.0, FloatSide::Left,
+        &style.shape_outside, 0.0,
+        float_shape_reference(&style, &node.layout, 16.0),
+    );
+    assert!(matches!(&basic.floats[0].shape,
+        Some(FloatShape::Circle { cx, cy, r })
+        if (*cx - (rect.x + rect.w * 0.5)).abs() < 0.1
+            && (*cy - (rect.y + rect.h * 0.5)).abs() < 0.1
+            && (*r - rect.w.hypot(rect.h) * 0.25 / std::f32::consts::SQRT_2).abs() < 0.1));
+}
+
+#[test]
+fn shape_outside_rounded_inset_narrows_lines_at_curved_corners() {
+    use crate::layout::{FloatContext, FloatShape, FloatSide, LayoutEngine};
+
+    let mut context = FloatContext::default();
+    context.place_float(
+        &LayoutEngine::new(), 16.0, 0.0, 100.0, 100.0, 200.0,
+        FloatSide::Left, "inset(0 round 40px / 20px)", 0.0,
+    );
+    assert!(matches!(&context.floats[0].shape,
+        Some(FloatShape::RoundedBox { rx, ry, .. })
+        if (rx[0] - 40.0).abs() < 0.1 && (ry[0] - 20.0).abs() < 0.1));
+
+    let mut left = 0.0;
+    let mut right = 200.0;
+    context.available_width(0.0, 2.0, 200.0, &mut left, &mut right);
+    assert!(left > 60.0 && left < 100.0, "rounded top corner exclusion: {left}");
+    context.available_width(30.0, 2.0, 200.0, &mut left, &mut right);
+    assert!((left - 100.0).abs() < 0.1, "straight middle edge: {left}");
+}
+
+#[test]
+fn shape_outside_rounded_inset_changes_laid_out_text_position() {
+    let text_x = |shape: &str| {
+        let mut renderer = crate::Renderer::new();
+        let doc = renderer.load_html(
+            &format!(
+                "<style>body{{margin:0;font:16px/20px sans-serif}}#wrap{{width:200px}}#float{{float:left;width:100px;height:100px;shape-outside:{shape}}}</style><div id=wrap><div id=float></div><span>hello</span></div>"
+            ),
+            300.0,
+        );
+        build_display_list(&doc.root, 300.0, 200.0)
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                PaintCmd::Text { text, x, .. } if text.contains("hello") => Some(*x),
+                _ => None,
+            })
+            .expect("text run")
+    };
+    let square = text_x("inset(0)");
+    let rounded = text_x("inset(0 round 40px)");
+    assert!(square - rounded > 3.0, "rounded={rounded}, square={square}");
+}
+
+#[test]
+fn polygon_shape_margin_reaches_lines_above_shape_and_diagonal_tangents() {
+    use crate::layout::{FloatContext, FloatSide, LayoutEngine};
+
+    let engine = LayoutEngine::new();
+    let mut triangle = FloatContext::default();
+    triangle.place_float(
+        &engine, 16.0, 0.0, 100.0, 100.0, 200.0,
+        FloatSide::Left, "polygon(50px 20px, 80px 80px, 20px 80px)", 10.0,
+    );
+    let mut left = 0.0;
+    let mut right = 200.0;
+    triangle.available_width(12.0, 2.0, 200.0, &mut left, &mut right);
+    assert!(left > 55.0 && left < 65.0, "margin must reach above polygon: {left}");
+    triangle.available_width(0.0, 2.0, 200.0, &mut left, &mut right);
+    assert_eq!(left, 0.0, "a distant line must remain unobstructed");
+
+    let mut diagonal = FloatContext::default();
+    diagonal.place_float(
+        &engine, 16.0, 0.0, 100.0, 100.0, 200.0,
+        FloatSide::Left, "polygon(0 0, 100px 100px, 0 100px)", 10.0,
+    );
+    diagonal.available_width(50.0, 0.01, 200.0, &mut left, &mut right);
+    assert!(left > 64.0 && left < 64.5, "diagonal margin tangent should reach sqrt(2) farther: {left}");
 }
 
 #[test]
@@ -13789,6 +14441,46 @@ fn overflow_clip_margin_expands_hit_testing_clip_edge() {
 }
 
 #[test]
+fn overflow_clip_margin_rejects_two_lengths_without_resetting_previous_value() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<div id=clip style='overflow:clip;overflow-clip-margin:content-box 5px;overflow-clip-margin:10px 20px'></div>",
+        800.0,
+    );
+    let clip = doc.get_element_by_id("clip").unwrap();
+    assert_eq!(doc.computed_style_property(clip, "overflow-clip-margin"), "content-box 5px");
+    assert!(crate::css::parser::supports_condition_matches(
+        "(overflow-clip-margin: border-box -5px)"
+    ));
+    assert!(!crate::css::parser::supports_condition_matches(
+        "(overflow-clip-margin: 10px 20px)"
+    ));
+}
+
+#[test]
+fn overflow_clip_margin_computed_value_canonicalizes_box_and_offset() {
+    for (specified, expected) in [
+        ("0px", "0px"),
+        ("padding-box", "0px"),
+        ("padding-box 10px", "10px"),
+        ("10px padding-box", "10px"),
+        ("content-box 0px", "content-box"),
+        ("10px content-box", "content-box 10px"),
+        ("border-box -10px", "border-box -10px"),
+        ("calc(100px - 50px)", "50px"),
+        ("border-box calc(0.5em + 100px)", "border-box 108px"),
+    ] {
+        let mut renderer = crate::Renderer::new();
+        let mut doc = renderer.load_html(
+            &format!("<div id=clip style='overflow-clip-margin:{specified}'></div>"),
+            800.0,
+        );
+        let id = doc.get_element_by_id("clip").unwrap();
+        assert_eq!(doc.computed_style_property(id, "overflow-clip-margin"), expected, "{specified}");
+    }
+}
+
+#[test]
 fn clip_path_inset_and_circle_affect_hit_testing() {
     let mut r = crate::Renderer::new();
     let d = r.load_html(
@@ -13899,10 +14591,31 @@ fn clip_path_geometry_box_parsing_preserves_valid_value_on_invalid_input() {
         "none padding-box",
         "inset(0) margin-box padding-box",
         "inset(0) nonsense",
+        "polygon(0 0, bogus bogus, 100% 100%)",
+        "polygon(0 0, 50% 50% extra)",
+        "polygon(round -5px, 0 0, 100% 0, 0 100%)",
+        "polygon(round 5%, 0 0, 100% 0, 0 100%)",
     ] {
         apply_property(&mut style, "clip-path", invalid);
         assert_eq!(style.clip_path, previous, "{invalid}");
     }
+}
+
+#[test]
+fn polygon_round_radius_clamps_to_half_adjacent_edges() {
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "clip-path",
+        "polygon(round 100px, 0 0, 100px 0, 100px 100px, 0 100px)",
+    );
+    let outline = style
+        .clip_path
+        .polygon_outline(Rect::new(0.0, 0.0, 100.0, 100.0), 16.0, 16.0);
+    assert!(!outline.is_empty());
+    assert!((outline[0].0 - 0.0).abs() < 0.01);
+    assert!((outline[0].1 - 50.0).abs() < 0.01);
+    assert!(outline.iter().all(|(x, y)| x.is_finite() && y.is_finite()));
 }
 
 #[test]

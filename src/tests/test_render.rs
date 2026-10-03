@@ -1,5 +1,39 @@
 // Pixel-level render tests for blend modes, gradients, and layout.
 #[test]
+fn stacked_animation_samples_reach_retained_transform_and_opacity_paint() {
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html_vp(
+        r#"<html><head><style>
+        body { margin:0; background:white; }
+        @keyframes move-x { from { transform:translateX(0px); } to { transform:translateX(80px); } }
+        @keyframes move-y { from { transform:translateY(0px); } to { transform:translateY(20px); } }
+        @keyframes fade-a { from { opacity:0; } to { opacity:.4; } }
+        @keyframes fade-b { from { opacity:0; } to { opacity:.2; } }
+        .box { position:absolute; left:20px; width:40px; height:20px; transform-origin:0 0; }
+        #added, #replaced { transform:translateX(10px); animation:move-x 1s linear -.5s paused,
+            move-y 1s linear -.5s paused; }
+        #added { top:20px; background:green; animation-composition:add; }
+        #replaced { top:80px; background:red; animation-composition:add, replace; }
+        #alpha { top:140px; background:blue; opacity:.25; animation:fade-a 1s linear -.5s paused,
+            fade-b 1s linear -.5s paused; animation-composition:add; }
+        #reference { top:140px; left:80px; background:blue; opacity:.55; }
+        </style></head><body><div id='added' class='box'></div><div id='replaced' class='box'></div>
+        <div id='alpha' class='box'></div><div id='reference' class='box'></div></body></html>"#,
+        200.0,
+        180.0,
+    );
+    let mut pixels = tiny_skia::Pixmap::new(200, 180).unwrap();
+    for _ in 0..2 {
+        renderer.render(&mut doc, &mut pixels, 1.0);
+        assert_eq!(pixel(&pixels, 90, 40), (0, 128, 0, 255));
+        assert_eq!(pixel(&pixels, 30, 40), (255, 255, 255, 255));
+        assert_eq!(pixel(&pixels, 40, 100), (255, 0, 0, 255));
+        assert_eq!(pixel(&pixels, 90, 90), (255, 255, 255, 255));
+        assert_eq!(pixel(&pixels, 40, 150), pixel(&pixels, 100, 150));
+    }
+}
+
+#[test]
 fn inline_link_becoming_flex_item_discards_old_border_fragments() {
     use crate::renderer::display_list::PaintCmd;
     use crate::renderer::display_list_builder::build_display_list_full;
@@ -1529,6 +1563,89 @@ fn background_blend_mode_multiplies_gradient_over_background_color() {
         mr < 40 && mg < 40 && mb < 40,
         "multiply should blend the blue gradient with the red background to black, got ({mr},{mg},{mb})"
     );
+}
+
+#[test]
+fn background_blend_stack_is_isolated_from_the_page_backdrop() {
+    for (background, image, mode, expected) in [
+        (
+            "transparent",
+            "linear-gradient(blue,blue)",
+            "multiply",
+            (0, 0, 255),
+        ),
+        (
+            "transparent",
+            "linear-gradient(rgb(0 0 255 / .5),rgb(0 0 255 / .5))",
+            "multiply",
+            (127, 0, 128),
+        ),
+        (
+            "rgb(0 255 0 / .5)",
+            "linear-gradient(rgb(0 0 255 / .5),rgb(0 0 255 / .5))",
+            "multiply",
+            (63, 64, 64),
+        ),
+        (
+            "transparent",
+            "linear-gradient(blue,blue)",
+            "hue",
+            (0, 0, 255),
+        ),
+    ] {
+        let html = format!(
+            r#"<style>
+            body {{ margin:0; background:red; }}
+            #box {{ width:60px; height:60px; background-color:{background};
+                background-image:{image}; background-blend-mode:{mode}; }}
+            </style><div id='box'></div>"#
+        );
+        let mut renderer = Renderer::new();
+        let mut doc = renderer.load_html_vp(&html, 100.0, 100.0);
+        let mut pixels = tiny_skia::Pixmap::new(100, 100).unwrap();
+        for _ in 0..2 {
+            renderer.render(&mut doc, &mut pixels, 1.0);
+            let actual = pixel(&pixels, 30, 30);
+            for (actual, expected) in [
+                (actual.0, expected.0),
+                (actual.1, expected.1),
+                (actual.2, expected.2),
+            ] {
+                assert!(
+                    (i32::from(actual) - expected).abs() <= 2,
+                    "{background}, {mode}: {actual} vs {expected}"
+                );
+            }
+            assert_eq!(actual.3, 255);
+            assert_eq!(pixel(&pixels, 90, 90), (255, 0, 0, 255));
+        }
+    }
+}
+
+#[test]
+fn background_blend_isolation_includes_images_but_not_borders_or_descendants() {
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html_vp(
+        r#"<style>body{margin:0;background:red}
+            #box{width:60px;height:60px;border:5px solid lime;
+                background-image:url('test.png');background-blend-mode:multiply}
+            #child{width:20px;height:20px;background:yellow}
+            </style><div id='box'><div id='child'></div></div>"#,
+        100.0,
+        100.0,
+    );
+    let id = doc.get_element_by_id("box").unwrap();
+    let node = doc.get_box_by_id_mut(id).unwrap();
+    node.bg_image_data = Some(std::sync::Arc::new(vec![0, 0, 255, 255]));
+    node.bg_image_width = 1;
+    node.bg_image_height = 1;
+    let mut pixels = tiny_skia::Pixmap::new(100, 100).unwrap();
+    for _ in 0..2 {
+        renderer.render(&mut doc, &mut pixels, 1.0);
+        assert_eq!(pixel(&pixels, 2, 30), (0, 255, 0, 255));
+        assert_eq!(pixel(&pixels, 10, 10), (255, 255, 0, 255));
+        assert_eq!(pixel(&pixels, 40, 40), (0, 0, 255, 255));
+    }
 }
 
 #[test]
@@ -3804,7 +3921,7 @@ fn flex_text_boundary_preserves_separator_space_before_icon() {
         h2 { display: flex; align-items: center; font: 700 18px/23px Arial, sans-serif; }
         .icon { display: inline-flex; width: 18px; height: 18px; }
         </style>
-        <h2 id="title">Top Stories  <span id="icon" class="icon"></span></h2>
+        <h2 id="title">Top Stories  <span style="display:none"></span><span style="position:absolute"></span><span id="icon" class="icon"></span></h2>
     "#,
         400.0,
     );

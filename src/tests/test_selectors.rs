@@ -894,6 +894,167 @@ fn dir_matches_the_directionality() {
 }
 
 #[test]
+fn dir_auto_matches_first_strong_text_and_inherits() {
+    let doc = crate::tests::harness::parse_and_layout(
+        "<style>:dir(rtl) { color: rgb(4,5,6); background-color: rgb(7,8,9) }</style>\
+         <div id=outer dir=auto><span id=child>123 مرحبا</span></div>\
+         <div dir=auto><span id=latin>123 hello</span></div>\
+         <div dir=auto><span id=neutral>123 !</span></div>\
+         <div id=excluded dir=auto><span dir=rtl>مرحبا</span><span>hello</span></div>\
+         <div dir=rtl><span id=neutral_auto dir=auto>123 !</span></div>",
+        400.0,
+    );
+    fn by_id<'a>(n: &'a crate::types::WebCore, id: &str) -> Option<&'a crate::types::WebCore> {
+        if n.attributes.get("id").map(String::as_str) == Some(id) {
+            return Some(n);
+        }
+        n.children.iter().find_map(|c| by_id(c, id))
+    }
+    let color = |id: &str| {
+        let c = by_id(&doc.root, id).unwrap().style.color;
+        (c.r, c.g, c.b)
+    };
+    assert_eq!(color("outer"), (4, 5, 6));
+    assert_eq!(color("child"), (4, 5, 6));
+    assert_ne!(color("latin"), (4, 5, 6));
+    assert_ne!(color("neutral"), (4, 5, 6));
+    assert_ne!(color("excluded"), (4, 5, 6));
+    let outer_bg = by_id(&doc.root, "outer").unwrap().style.background_color;
+    assert_eq!((outer_bg.r, outer_bg.g, outer_bg.b), (7, 8, 9));
+    let c = by_id(&doc.root, "child").unwrap().style.background_color;
+    assert_eq!((c.r, c.g, c.b), (7, 8, 9));
+    let c = by_id(&doc.root, "neutral_auto")
+        .unwrap()
+        .style
+        .background_color;
+    assert_ne!((c.r, c.g, c.b), (7, 8, 9));
+}
+
+#[test]
+fn bdi_without_valid_dir_uses_its_own_text_direction() {
+    let doc = crate::tests::harness::parse_and_layout(
+        "<style>:dir(rtl) { background-color: rgb(7,8,9) }</style>\
+         <div dir=ltr><bdi id=implicit>مرحبا</bdi><bdi id=invalid dir=foo>مرحبا</bdi>\
+         <bdi id=explicit dir=ltr>مرحبا</bdi></div>",
+        400.0,
+    );
+    fn by_id<'a>(n: &'a crate::types::WebCore, id: &str) -> Option<&'a crate::types::WebCore> {
+        if n.attributes.get("id").map(String::as_str) == Some(id) {
+            return Some(n);
+        }
+        n.children.iter().find_map(|c| by_id(c, id))
+    }
+    let color = |id: &str| {
+        let c = by_id(&doc.root, id).unwrap().style.background_color;
+        (c.r, c.g, c.b)
+    };
+    assert_eq!(color("implicit"), (7, 8, 9));
+    assert_eq!(color("invalid"), (7, 8, 9));
+    assert_ne!(color("explicit"), (7, 8, 9));
+}
+
+#[test]
+fn dir_auto_form_controls_use_value_direction() {
+    let doc = crate::tests::harness::parse_and_layout(
+        "<style>:dir(rtl) { background-color: rgb(7,8,9) }</style>\
+         <input id=text dir=auto value='مرحبا'>\
+         <textarea id=area dir=auto>مرحبا</textarea>\
+         <input id=radio type=radio dir=auto value='مرحبا'>",
+        400.0,
+    );
+    fn by_id<'a>(n: &'a crate::types::WebCore, id: &str) -> Option<&'a crate::types::WebCore> {
+        if n.attributes.get("id").map(String::as_str) == Some(id) {
+            return Some(n);
+        }
+        n.children.iter().find_map(|c| by_id(c, id))
+    }
+    let color = |id: &str| {
+        let c = by_id(&doc.root, id).unwrap().style.background_color;
+        (c.r, c.g, c.b)
+    };
+    assert_eq!(color("text"), (7, 8, 9));
+    assert_eq!(color("area"), (7, 8, 9));
+    assert_ne!(color("radio"), (7, 8, 9));
+}
+
+#[test]
+fn dir_auto_input_value_change_updates_selector_match() {
+    let mut frame = crate::frame::EngineFrame::new(
+        crate::html::parse_html(
+            "<style>input:dir(rtl) { background-color: rgb(7,8,9) }</style>\
+             <input id=field dir=auto value='hello'>",
+        ),
+        400.0,
+        300.0,
+    );
+    let id = frame.doc.get_element_by_id("field").unwrap();
+    let background = |frame: &crate::frame::EngineFrame| {
+        let c = frame.doc.find_webcore(id).unwrap().style.background_color;
+        (c.r, c.g, c.b)
+    };
+    frame.update_frame();
+    assert_ne!(background(&frame), (7, 8, 9));
+
+    frame.doc.set_value(id, "مرحبا");
+    frame.update_frame();
+    assert_eq!(background(&frame), (7, 8, 9));
+
+    frame.doc.set_value(id, "hello");
+    frame.update_frame();
+    assert_ne!(background(&frame), (7, 8, 9));
+}
+
+#[test]
+fn dir_auto_descendant_text_change_updates_ancestor_and_child() {
+    let mut frame = crate::frame::EngineFrame::new(
+        crate::html::parse_html(
+            "<style>:dir(rtl) { background-color: rgb(7,8,9) }</style>\
+             <div id=outer dir=auto><span id=child>hello</span></div>",
+        ),
+        400.0,
+        300.0,
+    );
+    let outer = frame.doc.get_element_by_id("outer").unwrap();
+    let child = frame.doc.get_element_by_id("child").unwrap();
+    let background = |frame: &crate::frame::EngineFrame, id| {
+        let c = frame.doc.find_webcore(id).unwrap().style.background_color;
+        (c.r, c.g, c.b)
+    };
+    frame.update_frame();
+    assert_ne!(background(&frame, outer), (7, 8, 9));
+    assert_ne!(background(&frame, child), (7, 8, 9));
+
+    frame.doc.set_text_content(child, "مرحبا");
+    frame.update_frame();
+    assert_eq!(background(&frame, outer), (7, 8, 9));
+    assert_eq!(background(&frame, child), (7, 8, 9));
+}
+
+#[test]
+fn telephone_input_defaults_to_ltr_in_rtl_parent() {
+    let doc = crate::tests::harness::parse_and_layout(
+        "<style>input:dir(ltr) { background-color: rgb(7,8,9) }</style>\
+         <div dir=rtl><input id=phone type=tel><input id=invalid type=tel dir=foo>\
+         <input id=text type=text></div>",
+        400.0,
+    );
+    fn by_id<'a>(n: &'a crate::types::WebCore, id: &str) -> Option<&'a crate::types::WebCore> {
+        if n.attributes.get("id").map(String::as_str) == Some(id) {
+            return Some(n);
+        }
+        n.children.iter().find_map(|c| by_id(c, id))
+    }
+    let background = |id: &str| {
+        let n = by_id(&doc.root, id).unwrap();
+        let c = n.style.background_color;
+        ((c.r, c.g, c.b), n.style.direction)
+    };
+    assert_eq!(background("phone"), ((7, 8, 9), Direction::LTR));
+    assert_eq!(background("invalid"), ((7, 8, 9), Direction::LTR));
+    assert_ne!(background("text").0, (7, 8, 9));
+}
+
+#[test]
 fn open_and_closed_match_details_state() {
     let doc = crate::tests::harness::parse_and_layout(
         "<style>details:open { color: rgb(1,2,3) } details:closed { background-color: rgb(4,5,6) }</style>\

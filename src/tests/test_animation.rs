@@ -1051,6 +1051,234 @@ fn doc_with_animation(anim_css: &str) -> Document {
     doc
 }
 
+type CssEventLog = std::sync::Arc<std::sync::Mutex<Vec<(String, String, String, f64)>>>;
+
+fn record_css_events(doc: &mut Document, id: u32, names: &[&str]) -> CssEventLog {
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    for name in names {
+        let events = std::sync::Arc::clone(&events);
+        doc.add_event_listener(
+            id,
+            *name,
+            Box::new(move |event, _| {
+                assert!(event.bubbles);
+                assert!(!event.cancelable);
+                assert!(!event.composed);
+                assert!(event.pseudo_element.is_empty());
+                event.prevent_default();
+                assert!(!event.default_prevented());
+                events.lock().unwrap().push((
+                    event.event_type.clone(),
+                    event.animation_name.clone(),
+                    event.property_name.clone(),
+                    event.elapsed_time,
+                ));
+            }),
+            Default::default(),
+        );
+    }
+    events
+}
+
+#[test]
+fn animation_events_report_active_seconds_and_skip_negative_delay_history() {
+    let mut doc = doc_with_animation("animation: fade 2s linear -3.5s 3;");
+    let id = doc.active_animations[0].element_id;
+    doc.active_animations.clear();
+    let events = record_css_events(
+        &mut doc,
+        id,
+        &["animationstart", "animationiteration", "animationend"],
+    );
+    let start = Instant::now();
+    doc.sync_animations(start);
+    doc.tick_animations(start + Duration::from_millis(500));
+    doc.tick_animations(start + Duration::from_secs(3));
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            ("animationstart".into(), "fade".into(), String::new(), 3.5),
+            (
+                "animationiteration".into(),
+                "fade".into(),
+                String::new(),
+                4.0
+            ),
+            ("animationend".into(), "fade".into(), String::new(), 6.0),
+        ]
+    );
+}
+
+#[test]
+fn animation_cancel_excludes_delay_and_paused_time() {
+    for (delay, expected) in [(1000.0, 0.0), (-250.0, 0.65)] {
+        let mut doc = doc_with_animation(&format!("animation: fade 2s linear {delay}ms;"));
+        let id = doc.active_animations[0].element_id;
+        let start = doc.active_animations[0].start_time;
+        let events = record_css_events(&mut doc, id, &["animationcancel", "animationend"]);
+        std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style)
+            .rare_mut()
+            .animations[0]
+            .play_state_paused = true;
+        doc.sync_animations(start + Duration::from_millis(400));
+        std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style)
+            .rare_mut()
+            .animations
+            .clear();
+        doc.sync_animations(start + Duration::from_secs(10));
+        doc.sync_animations(start + Duration::from_secs(11));
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "animationcancel");
+        assert_eq!(events[0].1, "fade");
+        assert!((events[0].3 - expected).abs() < 0.00001);
+    }
+}
+
+#[test]
+fn zero_duration_animation_reports_start_and_end_after_its_delay() {
+    let mut doc = doc_with_animation("animation: fade 0s linear 100ms;");
+    let id = doc.active_animations[0].element_id;
+    let start = doc.active_animations[0].start_time;
+    let events = record_css_events(&mut doc, id, &["animationstart", "animationend"]);
+    doc.tick_animations(start + Duration::from_millis(99));
+    assert!(events.lock().unwrap().is_empty());
+    doc.tick_animations(start + Duration::from_millis(100));
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            ("animationstart".into(), "fade".into(), String::new(), 0.0),
+            ("animationend".into(), "fade".into(), String::new(), 0.0),
+        ]
+    );
+}
+
+#[test]
+fn transition_events_identify_each_property_and_exclude_delays() {
+    let mut doc = parse_html(
+        "<div id='box' style='opacity:0; margin-left:0; transition:opacity 1s linear -250ms, margin-left 2s linear 100ms'></div>",
+    );
+    let id = doc.get_element_by_id("box").unwrap();
+    LayoutEngine::new().layout(&mut doc, 800.0);
+    let events = record_css_events(
+        &mut doc,
+        id,
+        &["transitionrun", "transitionstart", "transitioncancel"],
+    );
+    {
+        let style = std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style);
+        crate::css::apply_property(style, "opacity", "1");
+        crate::css::apply_property(style, "margin-left", "10px");
+    }
+    let start = Instant::now();
+    doc.sync_transitions(start);
+    doc.tick_animations(start + Duration::from_millis(150));
+    std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style)
+        .rare_mut()
+        .transitions
+        .clear();
+    doc.sync_transitions(start + Duration::from_millis(200));
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 6);
+    for (event, name, property, elapsed) in events.iter() {
+        assert!(name.is_empty());
+        let expected = match (event.as_str(), property.as_str()) {
+            ("transitionrun" | "transitionstart", "opacity") => 0.25,
+            ("transitionrun" | "transitionstart", "margin-left") => 0.0,
+            ("transitioncancel", "opacity") => 0.45,
+            ("transitioncancel", "margin-left") => 0.1,
+            _ => panic!("unexpected event: {event} {property}"),
+        };
+        assert!(
+            (elapsed - expected).abs() < 0.00001,
+            "{event} {property}: {elapsed}"
+        );
+    }
+}
+
+#[test]
+fn transition_with_exhausted_negative_delay_does_not_start() {
+    let mut doc =
+        parse_html("<div id='box' style='opacity:0; transition:opacity 1s linear -2s'></div>");
+    let id = doc.get_element_by_id("box").unwrap();
+    LayoutEngine::new().layout(&mut doc, 800.0);
+    let events = record_css_events(
+        &mut doc,
+        id,
+        &["transitionrun", "transitionstart", "transitionend"],
+    );
+    crate::css::apply_property(
+        std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style),
+        "opacity",
+        "1",
+    );
+    let start = Instant::now();
+    doc.sync_transitions(start);
+    doc.tick_animations(start);
+    assert!(events.lock().unwrap().is_empty());
+    assert!(doc.transition_states.is_empty());
+}
+
+#[test]
+fn animation_negative_delay_start_payload_is_capped_to_active_duration() {
+    let mut doc = doc_with_animation("animation: fade 1s linear 1.5;");
+    let id = doc.active_animations[0].element_id;
+    std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style)
+        .rare_mut()
+        .animations[0]
+        .delay_ms = -3000.0;
+    doc.active_animations.clear();
+    let events = record_css_events(&mut doc, id, &["animationstart", "animationend"]);
+    let start = Instant::now();
+    doc.sync_animations(start);
+    doc.tick_animations(start);
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            ("animationstart".into(), "fade".into(), String::new(), 1.5),
+            ("animationend".into(), "fade".into(), String::new(), 1.5),
+        ]
+    );
+}
+
+#[test]
+fn zero_duration_transition_waits_for_positive_delay_and_reports_zero_seconds() {
+    let mut doc =
+        parse_html("<div id='box' style='opacity:0; transition:opacity 0s linear 100ms'></div>");
+    let id = doc.get_element_by_id("box").unwrap();
+    LayoutEngine::new().layout(&mut doc, 800.0);
+    let events = record_css_events(
+        &mut doc,
+        id,
+        &["transitionrun", "transitionstart", "transitionend"],
+    );
+    crate::css::apply_property(
+        std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style),
+        "opacity",
+        "1",
+    );
+    let start = Instant::now();
+    doc.sync_transitions(start);
+    doc.tick_animations(start + Duration::from_millis(99));
+    assert_eq!(events.lock().unwrap().len(), 1);
+    assert_eq!(doc.animation_overrides[&id][0].1, "0");
+    doc.tick_animations(start + Duration::from_millis(100));
+    assert_eq!(doc.animation_overrides[&id][0].1, "1");
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            ("transitionrun".into(), String::new(), "opacity".into(), 0.0),
+            (
+                "transitionstart".into(),
+                String::new(),
+                "opacity".into(),
+                0.0
+            ),
+            ("transitionend".into(), String::new(), "opacity".into(), 0.0),
+        ]
+    );
+}
+
 #[test]
 fn sync_animations_starts_state() {
     let doc = doc_with_animation("animation: spin 1s linear infinite;");
@@ -1146,6 +1374,76 @@ fn sync_animations_does_not_duplicate() {
     let mut engine = LayoutEngine::new();
     engine.layout(&mut doc, 800.0);
     assert_eq!(doc.active_animations.len(), count_before);
+}
+
+#[test]
+fn repeated_animation_names_match_from_the_end_without_merging_instances() {
+    let mut doc = doc_with_animation("animation: spin 1s linear;");
+    let id = doc.active_animations[0].element_id;
+    let original_start = doc.active_animations[0].start_time;
+    let events = record_css_events(&mut doc, id, &["animationstart", "animationcancel"]);
+    crate::css::apply_property(
+        std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style),
+        "animation",
+        "spin 2s linear, spin 3s linear",
+    );
+    let update_time = original_start + Duration::from_millis(400);
+    doc.sync_animations(update_time);
+    assert_eq!(doc.active_animations.len(), 2);
+    assert_eq!(doc.active_animations[0].start_time, update_time);
+    assert_eq!(doc.active_animations[1].start_time, original_start);
+    assert_eq!(doc.active_animations[0].animation.duration_ms, 2000.0);
+    assert_eq!(doc.active_animations[1].animation.duration_ms, 3000.0);
+    doc.sync_animations(original_start + Duration::from_millis(500));
+    assert_eq!(doc.active_animations.len(), 2);
+    crate::css::apply_property(
+        std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style),
+        "animation",
+        "spin 4s linear",
+    );
+    doc.sync_animations(original_start + Duration::from_millis(600));
+    assert_eq!(doc.active_animations.len(), 1);
+    assert_eq!(doc.active_animations[0].start_time, original_start);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].0, "animationstart");
+    assert_eq!(events[1].0, "animationcancel");
+    assert!((events[1].3 - 0.2).abs() < 0.00001);
+}
+
+#[test]
+fn reordered_animation_list_preserves_clocks_and_updates_effect_order() {
+    let mut doc = parse_html(
+        r#"<style>
+        @keyframes first { from { transform:translateX(0px); } to { transform:translateX(100px); } }
+        @keyframes second { from { transform:translateX(0px); } to { transform:translateX(200px); } }
+        #box { animation:first 1s linear -.5s paused, second 1s linear -.5s paused; }
+        </style><div id='box'></div>"#,
+    );
+    LayoutEngine::new().layout(&mut doc, 800.0);
+    let id = doc.get_element_by_id("box").unwrap();
+    let first_start = doc.active_animations[0].start_time;
+    let second_start = doc.active_animations[1].start_time;
+    doc.tick_animations(first_start);
+    assert_eq!(
+        doc.animation_overrides[&id],
+        [("transform".into(), "translateX(100px)".into())]
+    );
+    crate::css::apply_property(
+        std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style),
+        "animation",
+        "second 1s linear -.5s paused, first 1s linear -.5s paused",
+    );
+    doc.sync_animations(first_start + Duration::from_millis(100));
+    assert_eq!(doc.active_animations[0].animation.name, "second");
+    assert_eq!(doc.active_animations[0].start_time, second_start);
+    assert_eq!(doc.active_animations[1].animation.name, "first");
+    assert_eq!(doc.active_animations[1].start_time, first_start);
+    doc.tick_animations(first_start + Duration::from_millis(100));
+    assert_eq!(
+        doc.animation_overrides[&id],
+        [("transform".into(), "translateX(50px)".into())]
+    );
 }
 
 #[test]
@@ -1341,6 +1639,69 @@ fn animation_composition_add_composes_opacity_with_underlying_style() {
 }
 
 #[test]
+fn additive_animations_stack_transforms_and_opacity_in_css_list_order() {
+    let mut doc = parse_html(
+        r#"<style>
+        @keyframes move-x { from { transform:translateX(0%); } to { transform:translateX(100%); } }
+        @keyframes move-y { from { transform:translateY(0px); } to { transform:translateY(10px); } }
+        @keyframes fade-a { from { opacity:0; } to { opacity:.4; } }
+        @keyframes fade-b { from { opacity:0; } to { opacity:.2; } }
+        #box { width:80px; height:40px; transform:rotate(90deg); opacity:.25;
+            animation:move-x 1s linear -.5s paused, move-y 1s linear -.5s paused,
+                fade-a 1s linear -.5s paused, fade-b 1s linear -.5s paused;
+            animation-composition:add; }
+        </style><div id='box'></div>"#,
+    );
+    LayoutEngine::new().layout(&mut doc, 800.0);
+    let id = doc.get_element_by_id("box").unwrap();
+    doc.tick_animations(Instant::now());
+    let restore =
+        crate::css::apply_animation_overrides_scoped(&mut doc.root, &doc.animation_overrides);
+    let node = doc.get_box_by_id(id).unwrap();
+    assert!((node.style.opacity - 0.55).abs() < 0.0001);
+    let matrix = crate::renderer::display_list_builder::compute_transform_matrix_raw(
+        &node.style,
+        80.0,
+        40.0,
+        &TransformCtx::default(),
+    );
+    // The base rotation acts on both added translations; swapping list order
+    // would incorrectly translate in unrotated viewport coordinates.
+    for (actual, expected) in matrix.iter().zip([0.0, 1.0, -1.0, 0.0, -5.0, 40.0]) {
+        assert!((actual - expected).abs() < 0.0001, "{matrix:?}");
+    }
+    crate::css::restore_animation_overrides(&mut doc.root, restore);
+    assert!((doc.get_box_by_id(id).unwrap().style.opacity - 0.25).abs() < 0.0001);
+    assert!(!doc.needs_animation_frame);
+}
+
+#[test]
+fn replacing_transform_animation_discards_preceding_additive_effects() {
+    let mut doc = parse_html(
+        r#"<style>
+        @keyframes first { from { transform:translateX(0px); } to { transform:translateX(100px); } }
+        @keyframes second { from { transform:translateY(0px); } to { transform:translateY(20px); } }
+        #box { transform:translateX(25px); animation:first 1s linear -.5s paused,
+            second 1s linear -.5s paused; animation-composition:add, replace; }
+        </style><div id='box'></div>"#,
+    );
+    LayoutEngine::new().layout(&mut doc, 800.0);
+    let id = doc.get_element_by_id("box").unwrap();
+    doc.tick_animations(Instant::now());
+    let restore =
+        crate::css::apply_animation_overrides_scoped(&mut doc.root, &doc.animation_overrides);
+    let matrix = crate::renderer::display_list_builder::compute_transform_matrix_raw(
+        &doc.get_box_by_id(id).unwrap().style,
+        80.0,
+        40.0,
+        &TransformCtx::default(),
+    );
+    assert!(matrix[4].abs() < 0.0001, "{matrix:?}");
+    assert!((matrix[5] - 10.0).abs() < 0.0001, "{matrix:?}");
+    crate::css::restore_animation_overrides(&mut doc.root, restore);
+}
+
+#[test]
 fn svg_fill_keyframes_synthesize_underlying_style() {
     let mut doc = parse_html(
         r#"<html><head><style>
@@ -1494,6 +1855,117 @@ fn tick_animations_dispatches_animationend_when_animation_finishes() {
 }
 
 #[test]
+fn finished_animation_survives_recascade_without_restarting_or_requesting_frames() {
+    for fill in ["none", "forwards", "both"] {
+        let mut doc = doc_with_animation(&format!("animation: spin .1s linear 1 {fill};"));
+        let id = doc.active_animations[0].element_id;
+        let start = doc.active_animations[0].start_time;
+        let events = record_css_events(
+            &mut doc,
+            id,
+            &["animationstart", "animationend", "animationcancel"],
+        );
+        let end = start + Duration::from_millis(500);
+        doc.tick_animations(end);
+        let final_sample = doc.animation_overrides.clone();
+        for delta in [600, 700, 800] {
+            let now = start + Duration::from_millis(delta);
+            doc.sync_animations(now);
+            doc.tick_animations(now);
+            assert!(doc.active_animations.is_empty());
+            assert!(!doc.needs_animation_frame);
+            assert_eq!(doc.finished_animations.len(), 1);
+            assert_eq!(doc.finished_animations[0].start_time, start);
+            assert_eq!(doc.animation_overrides, final_sample);
+        }
+        crate::css::apply_property(
+            std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style),
+            "animation",
+            "none",
+        );
+        doc.sync_animations(end + Duration::from_millis(400));
+        doc.tick_animations(end + Duration::from_millis(400));
+        assert!(doc.finished_animations.is_empty());
+        assert!(doc.animation_overrides.is_empty());
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|event| event.0.as_str())
+                .collect::<Vec<_>>(),
+            ["animationend"]
+        );
+        crate::css::apply_property(
+            std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style),
+            "animation",
+            "spin .1s linear",
+        );
+        doc.sync_animations(end + Duration::from_millis(500));
+        assert_eq!(doc.active_animations.len(), 1);
+        assert_eq!(events.lock().unwrap().last().unwrap().0, "animationstart");
+    }
+}
+
+#[test]
+fn finished_animation_duration_update_preserves_playback_time() {
+    let mut doc = doc_with_animation("animation: spin .1s linear forwards;");
+    let id = doc.active_animations[0].element_id;
+    let start = doc.active_animations[0].start_time;
+    doc.tick_animations(start + Duration::from_millis(200));
+    crate::css::apply_property(
+        std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style),
+        "animation",
+        "spin 1s linear forwards",
+    );
+    doc.sync_animations(start + Duration::from_millis(300));
+    doc.tick_animations(start + Duration::from_millis(300));
+    assert_eq!(doc.active_animations.len(), 1);
+    assert_eq!(doc.active_animations[0].start_time, start);
+    assert!(doc.needs_animation_frame);
+    assert_eq!(
+        doc.animation_overrides[&id],
+        [("transform".into(), "rotate(108deg)".into())]
+    );
+}
+
+#[test]
+fn zero_duration_animation_retains_its_forward_fill() {
+    for iterations in ["1", "infinite"] {
+        let mut doc =
+            doc_with_animation(&format!("animation: spin 0s linear {iterations} forwards;"));
+        let id = doc.finished_animations[0].element_id;
+        let now = std::time::Instant::now();
+        doc.sync_animations(now);
+        doc.tick_animations(now);
+        assert_eq!(
+            doc.animation_overrides[&id],
+            [("transform".into(), "rotate(360deg)".into())]
+        );
+        assert!(doc.active_animations.is_empty());
+        assert!(!doc.needs_animation_frame);
+    }
+}
+
+#[test]
+fn finished_animation_fill_keeps_order_among_running_effects() {
+    let mut doc = doc_with_animation("animation: spin 2s linear, spin .1s linear forwards;");
+    let id = doc.active_animations[0].element_id;
+    let start = doc.active_animations[0].start_time;
+    for delta in [200, 400, 600] {
+        let now = start + Duration::from_millis(delta);
+        doc.sync_animations(now);
+        doc.tick_animations(now);
+        assert_eq!(doc.active_animations.len(), 1);
+        assert_eq!(doc.finished_animations.len(), 1);
+        assert_eq!(
+            doc.animation_overrides[&id],
+            [("transform".into(), "rotate(360deg)".into())]
+        );
+    }
+}
+
+#[test]
 fn tick_animations_dispatches_animationiteration_on_completed_non_final_cycle() {
     let mut doc = doc_with_animation("animation: spin 0.1s linear 3;");
     let id = doc.active_animations[0].element_id;
@@ -1643,6 +2115,12 @@ fn paused_animation_does_not_advance_or_request_frames() {
         opacity < 0.05,
         "paused animation should hold at the start, got {opacity}"
     );
+    let held = doc.animation_overrides.clone();
+    assert!(
+        !doc.tick_animations(now + Duration::from_millis(100)),
+        "sampling a paused animation again must not report changed overrides"
+    );
+    assert_eq!(doc.animation_overrides, held);
 }
 
 #[test]
