@@ -82,6 +82,20 @@ impl Document {
     }
 }
 
+#[cfg(test)]
+mod scoped_query_tests {
+    #[test]
+    fn detached_element_queries_only_its_descendants() {
+        let mut doc = crate::html::parse_html("<html><body><span id='outside'></span></body></html>");
+        let root = doc.create_element("section");
+        let child = doc.create_element("span");
+        doc.append_child(root, child);
+        assert_eq!(doc.query_selector_within(root, ":scope > span"), Some(child));
+        assert_eq!(doc.query_selector_all_within(root, "span"), vec![child]);
+        assert!(doc.query_selector_all_within(root, "section").is_empty());
+    }
+}
+
 /// Ids of the elements in `root`'s tree (including `root`) that match
 /// `selector`, in document order.
 ///
