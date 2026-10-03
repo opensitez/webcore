@@ -3992,8 +3992,6 @@ dependencies = [
 [[package]]
 name = "webcanvas"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c967d5dd8d219f54a5df224b962b6ffee495059e5f0322af519d5603533acf23"
 dependencies = [
  "base64 0.21.7",
  "cosmic-text",
@@ -4041,8 +4039,6 @@ dependencies = [
 [[package]]
 name = "webmedia"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e93d518395cca9139400cb341eb96e11a0aa782463e7dcaed35e83a6341195c4"
 dependencies = [
  "brotli",
  "flate2",
