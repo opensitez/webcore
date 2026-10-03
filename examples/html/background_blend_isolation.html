@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Background Blend Isolation</title>
+<style>
+body { margin: 24px; font-family: sans-serif; background: white; color: #222; }
+.row { display: flex; gap: 24px; padding: 16px; background: red; margin-bottom: 20px; }
+.box { width: 100px; height: 80px; }
+.multiply { background-image: linear-gradient(blue, blue); background-blend-mode: multiply; }
+.blue-reference { background: blue; }
+.alpha { background-image: linear-gradient(rgb(0 0 255 / .5), rgb(0 0 255 / .5));
+  background-blend-mode: multiply; }
+.alpha-reference { background: rgb(0 0 255 / .5); }
+.both { background-color: rgb(0 255 0 / .5);
+  background-image: linear-gradient(rgb(0 0 255 / .5), rgb(0 0 255 / .5));
+  background-blend-mode: multiply; }
+.both-reference { background: rgb(63 64 64); }
+.screen { background-image: linear-gradient(rgb(255 0 0 / .5), rgb(255 0 0 / .5)),
+  linear-gradient(rgb(0 0 255 / .5), rgb(0 0 255 / .5)); background-blend-mode: screen; }
+.screen-reference { background: rgb(191 0 128); }
+</style>
+</head>
+<body>
+<h1>Background Blend Isolation</h1>
+<p>The left background in each pair should match the right static reference.</p>
+<h2>Transparent Background Color</h2>
+<div class="row"><div class="box multiply"></div><div class="box blue-reference"></div></div>
+<h2>Translucent Image</h2>
+<div class="row"><div class="box alpha"></div><div class="box alpha-reference"></div></div>
+<h2>Translucent Color And Image</h2>
+<div class="row"><div class="box both"></div><div class="box both-reference"></div></div>
+<h2>Two Screen-Blended Layers</h2>
+<div class="row"><div class="box screen"></div><div class="box screen-reference"></div></div>
+</body>
+</html>

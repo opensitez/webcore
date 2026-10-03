@@ -5,9 +5,9 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
 
-use webcore::dom::{self, HtmlEventType};
+use webcore::dom::HtmlEventType;
 use webcore::platform::Platform;
-use webcore::{Document, LayoutEngine, Renderer, WebCore, load_html};
+use webcore::{Document, LayoutEngine, Renderer, load_html};
 
 const HTML: &str = include_str!("html/dom.html");
 
@@ -66,6 +66,7 @@ struct App {
     width: f32,
     state: Arc<RwLock<State>>,
     mouse_pos: (f32, f32),
+    pending_mouse_move: Option<(f32, f32)>,
     next_tick: Instant,
 }
 
@@ -94,6 +95,7 @@ impl App {
             width: 1000.0,
             state: Arc::new(RwLock::new(st)),
             mouse_pos: (0.0, 0.0),
+            pending_mouse_move: None,
             next_tick: Instant::now(),
         }
     }
@@ -184,19 +186,19 @@ impl App {
         } else {
             "#10b981"
         };
-        if let Some(b) = dom::query_selector_mut(&mut doc.root, "#mem-bar") {
-            dom::set_style_property(b, "width", &format!("{}%", mem_pct));
-            dom::set_style_property(b, "background", mem_color);
+        if let Some(b) = doc.query_selector("#mem-bar") {
+            doc.set_style_property(b, "width", &format!("{}%", mem_pct));
+            doc.set_style_property(b, "background", mem_color);
         }
         set_text(doc, "#mem-big", &format!("{} / 8192 MB", st.mem));
         set_text(doc, "#mem-label", &format!("{}% used", mem_pct));
         set_text(doc, "#disk-val", &format!("{} MB/s", st.disk));
-        if let Some(b) = dom::query_selector_mut(&mut doc.root, "#disk-bar") {
-            dom::set_style_property(b, "width", &format!("{}%", (st.disk * 100) / 500));
+        if let Some(b) = doc.query_selector("#disk-bar") {
+            doc.set_style_property(b, "width", &format!("{}%", (st.disk * 100) / 500));
         }
         set_text(doc, "#net-val", &format!("{} Mbps", st.net));
-        if let Some(b) = dom::query_selector_mut(&mut doc.root, "#net-bar") {
-            dom::set_style_property(b, "width", &format!("{}%", (st.net * 100) / 1000));
+        if let Some(b) = doc.query_selector("#net-bar") {
+            doc.set_style_property(b, "width", &format!("{}%", (st.net * 100) / 1000));
         }
 
         let svc_ids = ["api", "db", "cache", "queue"];
@@ -217,22 +219,12 @@ impl App {
                 ("OK", true, false, false, latency)
             };
 
-            if let Some(b) = dom::query_selector_mut(&mut doc.root, &bid) {
-                dom::set_text_content(b, badge_text);
-                if badge_ok {
-                    dom::add_class(b, "badge-ok");
-                    dom::remove_class(b, "badge-warn");
-                    dom::remove_class(b, "badge-err");
-                }
-                if badge_warn {
-                    dom::add_class(b, "badge-warn");
-                    dom::remove_class(b, "badge-ok");
-                    dom::remove_class(b, "badge-err");
-                }
-                if badge_err {
-                    dom::add_class(b, "badge-err");
-                    dom::remove_class(b, "badge-ok");
-                    dom::remove_class(b, "badge-warn");
+            if let Some(b) = doc.query_selector(&bid) {
+                doc.set_text_content(b, badge_text);
+                let class = if badge_ok { "badge-ok" } else if badge_warn { "badge-warn" } else { "badge-err" };
+                for candidate in ["badge-ok", "badge-warn", "badge-err"] {
+                    if candidate == class { doc.class_list_add(b, candidate); }
+                    else { doc.class_list_remove(b, candidate); }
                 }
             }
             set_text(doc, &lid, &format!("{}ms", final_lat));
@@ -262,26 +254,21 @@ impl App {
             let ts_str = time_str(st.tick);
             let ev = EVENTS[(st.tick as usize / 3) % EVENTS.len()];
             let msg = format!("{}  {}", ts_str, ev);
-            if let Some(feed) = dom::query_selector_mut(&mut doc.root, "#activity-feed") {
-                while feed.children.len() >= 10 {
-                    if let Some(first_id) = dom::get_first_child(feed).map(|c| c.node_id) {
-                        dom::remove_child(feed, first_id);
-                    } else {
-                        break;
-                    }
+            if let Some(feed) = doc.query_selector("#activity-feed") {
+                while doc.children(feed).len() >= 10 {
+                    if let Some(first_id) = doc.first_child(feed) { doc.remove_child(first_id); }
+                    else { break; }
                 }
-                let mut item = dom::create_element("div");
-                dom::add_class(&mut item, "feed-item");
-                dom::set_text_content(&mut item, &msg);
-                dom::append_child(feed, item);
+                let item = doc.create_element("div");
+                doc.class_list_add(item, "feed-item");
+                doc.set_text_content(item, &msg);
+                doc.append_child(feed, item);
             }
         }
 
-        if let Some(alerts) = dom::query_selector_mut(&mut doc.root, "#alerts") {
-            if alerts.children.len() > 5 {
-                if let Some(first_id) = dom::get_first_child(alerts).map(|c| c.node_id) {
-                    dom::remove_child(alerts, first_id);
-                }
+        if let Some(alerts) = doc.query_selector("#alerts") {
+            if doc.children(alerts).len() > 5 {
+                if let Some(first_id) = doc.first_child(alerts) { doc.remove_child(first_id); }
             }
         }
         if st.err_rate > 3.0 && st.tick % 5 == 0 {
@@ -311,96 +298,75 @@ impl App {
             // Delegation, the way a page writes it: one listener, then
             // `closest()` to find which matching element was hit.
             let Some(__cur) = __d.closest(evt.target, ".tb-btn") else { return };
-            let root = &mut __d.root;
-            let _ = &root;
             // left-click only
             if evt.button != 0 { return; }
             // Prevent default editor behavior for toolbar actions
             evt.prevent_default();
-            // Debug: log hit/test info
-            let doc_pos = (evt.page_x(), evt.page_y());
-            let btn_ptr = evt.target;
-            let cur_ptr = __cur;
-            fn find_node_ref(node: &WebCore, id: u32) -> Option<&WebCore> {
-                if node.node_id == id { return Some(node); }
-                for c in &node.children { if let Some(f) = find_node_ref(c, id) { return Some(f); } }
-                None
-            }
-            let (btn_text, id, cls) = find_node_ref(root, cur_ptr)
-                .map(|cur_node| (
-                    dom::get_text_content(cur_node).trim().to_string(),
-                    cur_node.attributes.get("id").cloned().unwrap_or_default(),
-                    cur_node.attributes.get("class").cloned().unwrap_or_default(),
-                ))
-                .unwrap_or_default();
-            eprintln!("[DOM_DBG] click button target={} current_target={} id='{}' class='{}' btn_text='{}' doc_pos={:?} button={}", btn_ptr, cur_ptr, id, cls, btn_text, doc_pos, evt.button);
+            let action = __d.get_attribute(__cur, "data-dom-action").unwrap_or_default();
             let mut st = state.write().unwrap();
 
-            if btn_text.contains("Dark") {
+            if action == "dark" {
                 st.dark_mode = !st.dark_mode;
-                // Mutation of DOM from event handler is allowed via unsafe for now
-                if st.dark_mode { dom::add_class(root, "dark"); eprintln!("[DOM_DBG] dark ON"); }
-                else { dom::remove_class(root, "dark"); eprintln!("[DOM_DBG] dark OFF"); }
-                // layout will be done by caller after event processing
-            } else if btn_text.contains("Compact") {
+                if let Some(root) = __d.document_element() {
+                    if st.dark_mode { __d.class_list_add(root, "dark"); }
+                    else { __d.class_list_remove(root, "dark"); }
+                }
+            } else if action == "compact" {
                 st.compact = !st.compact;
-                if st.compact { dom::add_class(root, "compact"); eprintln!("[DOM_DBG] compact ON"); }
-                else { dom::remove_class(root, "compact"); eprintln!("[DOM_DBG] compact OFF"); }
-                // layout will be done by caller after event processing
-            } else if btn_text.contains("Pause") {
+                if let Some(root) = __d.document_element() {
+                    if st.compact { __d.class_list_add(root, "compact"); }
+                    else { __d.class_list_remove(root, "compact"); }
+                }
+            } else if action == "pause" {
                 st.paused = !st.paused;
-            } else if btn_text.contains("Chaos") {
+            } else if action == "chaos" {
                 st.chaos_mode = !st.chaos_mode;
                 if st.chaos_mode {
                     let ts_str = time_str(st.tick);
                     let msg = format!("🔥 [{}] CHAOS MODE ENGAGED — brace yourself", ts_str);
-                    if let Some(alerts) = dom::query_selector_mut(root, "#alerts") {
-                        let mut a = dom::create_element("div");
-                        dom::add_class(&mut a, "alert"); dom::add_class(&mut a, "alert-warn");
-                        dom::set_text_content(&mut a, &msg);
-                        dom::append_child(alerts, a);
-                    }
-                    // layout will be done by caller after event processing
-                    eprintln!("[DOM_DBG] chaos ON - alert appended");
+                    add_alert(__d, "alert-warn", &msg);
                 }
-            } else if btn_text.contains("Service") {
+            } else if action == "service" {
                 st.svc_count += 1;
                 let svc_count = st.svc_count;
-                    if let Some(tbody) = dom::query_selector_mut(root, "#svc-tbody") {
+                    if let Some(tbody) = __d.query_selector("#svc-tbody") {
                     const NAMES: &[&str] = &["🔴 Redis", "📦 Kafka", "🌐 Nginx", "🔍 Elastic", "📊 Prometheus", "🔐 Vault", "🗺 Consul", "📉 Grafana", "🔭 Jaeger", "📁 MinIO"];
                     let idx = ((svc_count - 5) % 10) as usize;
-                    let mut row = dom::create_element("tr");
-                    dom::set_attribute(&mut row, "id", &format!("svc-x{}", svc_count));
-                    let mut td1 = dom::create_element("td"); dom::set_text_content(&mut td1, NAMES[idx]);
-                    let mut td2 = dom::create_element("td");
-                    let mut badge = dom::create_element("span"); dom::add_class(&mut badge, "badge"); dom::add_class(&mut badge, "badge-ok");
-                    dom::set_attribute(&mut badge, "id", &format!("svc-x{}-badge", svc_count)); dom::set_text_content(&mut badge, "HEALTHY");
-                    dom::append_child(&mut td2, badge);
-                    let mut td3 = dom::create_element("td"); dom::set_attribute(&mut td3, "id", &format!("svc-x{}-lat", svc_count));
-                    dom::set_text_content(&mut td3, &format!("{}ms", 2 + rand_range(0, 19)));
-                    dom::append_child(&mut row, td1); dom::append_child(&mut row, td2); dom::append_child(&mut row, td3);
-                    dom::append_child(tbody, row);
-                    eprintln!("[DOM_DBG] service row added id=svc-x{}", svc_count);
-                    // layout will be done by caller after event processing
+                    let row = __d.create_element("tr");
+                    __d.set_attribute(row, "id", &format!("svc-x{}", svc_count));
+                    let td1 = __d.create_element("td"); __d.set_text_content(td1, NAMES[idx]);
+                    let td2 = __d.create_element("td");
+                    let badge = __d.create_element("span"); __d.class_list_add(badge, "badge"); __d.class_list_add(badge, "badge-ok");
+                    __d.set_attribute(badge, "id", &format!("svc-x{}-badge", svc_count)); __d.set_text_content(badge, "HEALTHY");
+                    __d.append_child(td2, badge);
+                    let td3 = __d.create_element("td"); __d.set_attribute(td3, "id", &format!("svc-x{}-lat", svc_count));
+                    __d.set_text_content(td3, &format!("{}ms", 2 + rand_range(0, 19)));
+                    __d.append_child(row, td1); __d.append_child(row, td2); __d.append_child(row, td3);
+                    __d.append_child(tbody, row);
                 }
-            } else if btn_text.contains("Alerts") {
-                 if let Some(alerts) = dom::query_selector_mut(root, "#alerts") {
-                     while !alerts.children.is_empty() {
-                         let fid = dom::get_first_child(alerts).map(|c| c.node_id).unwrap();
-                         dom::remove_child(alerts, fid);
-                     }
-                     eprintln!("[DOM_DBG] alerts cleared");
-                    // layout will be done by caller after event processing
+            } else if action == "alerts" {
+                 if let Some(alerts) = __d.query_selector("#alerts") {
+                     while let Some(first) = __d.first_child(alerts) { __d.remove_child(first); }
                  }
-            } else if btn_text.contains("Feed") {
-                 if let Some(feed) = dom::query_selector_mut(root, "#activity-feed") {
-                     while !feed.children.is_empty() {
-                         let fid = dom::get_first_child(feed).map(|c| c.node_id).unwrap();
-                         dom::remove_child(feed, fid);
-                     }
-                     eprintln!("[DOM_DBG] feed cleared");
-                     // layout will be done by caller after event processing
+            } else if action == "feed" {
+                 if let Some(feed) = __d.query_selector("#activity-feed") {
+                     while let Some(first) = __d.first_child(feed) { __d.remove_child(first); }
                  }
+            }
+            let pressed = match action.as_str() {
+                "dark" => Some(st.dark_mode),
+                "compact" => Some(st.compact),
+                "pause" => Some(st.paused),
+                "chaos" => Some(st.chaos_mode),
+                _ => None,
+            };
+            if let Some(pressed) = pressed {
+                __d.set_attribute(__cur, "aria-pressed", if pressed { "true" } else { "false" });
+                if pressed {
+                    __d.class_list_add(__cur, "tb-active");
+                } else {
+                    __d.class_list_remove(__cur, "tb-active");
+                }
             }
         }), webcore::dom::events::ListenerOptions::default());
     }
@@ -409,8 +375,8 @@ impl App {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn set_text(doc: &mut Document, selector: &str, text: &str) {
-    if let Some(b) = dom::query_selector_mut(&mut doc.root, selector) {
-        dom::set_text_content(b, text);
+    if let Some(b) = doc.query_selector(selector) {
+        doc.set_text_content(b, text);
     }
 }
 
@@ -439,12 +405,12 @@ fn set_change_f(doc: &mut Document, selector: &str, cur: f32, prev: f32) {
 }
 
 fn add_alert(doc: &mut Document, cls: &str, text: &str) {
-    if let Some(alerts) = dom::query_selector_mut(&mut doc.root, "#alerts") {
-        let mut a = dom::create_element("div");
-        dom::add_class(&mut a, "alert");
-        dom::add_class(&mut a, cls);
-        dom::set_text_content(&mut a, text);
-        dom::append_child(alerts, a);
+    if let Some(alerts) = doc.query_selector("#alerts") {
+        let a = doc.create_element("div");
+        doc.class_list_add(a, "alert");
+        doc.class_list_add(a, cls);
+        doc.set_text_content(a, text);
+        doc.append_child(alerts, a);
     }
 }
 
@@ -464,6 +430,49 @@ fn rand_range(lo: i32, hi: i32) -> i32 {
     s ^= s << 17;
     RAND_STATE.store(s, Ordering::Relaxed);
     lo + ((s as i32).unsigned_abs() as i32 % (hi - lo + 1).max(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use webcore::dom::events::DomEvent;
+    use webcore::types::Color;
+
+    #[test]
+    fn toolbar_clicks_mutate_the_document() {
+        let mut app = App::new();
+        app.doc = Some(load_html(HTML, app.width));
+        app.setup_events();
+        let doc = app.doc.as_mut().unwrap();
+        let buttons = doc.query_selector_all(".tb-btn");
+        let root = doc.document_element().unwrap();
+
+        doc.dispatch_dom_event(&mut DomEvent::new("click", buttons[0]));
+        assert!(doc.class_list_contains(root, "dark"));
+
+        let tbody = doc.query_selector("#svc-tbody").unwrap();
+        let before = doc.child_nodes(tbody).len();
+        doc.dispatch_dom_event(&mut DomEvent::new("click", buttons[4]));
+        assert_eq!(doc.child_nodes(tbody).len(), before + 1);
+    }
+
+    #[test]
+    fn active_toolbar_hover_keeps_readable_colors() {
+        let mut doc = load_html(HTML, 1000.0);
+        let button = doc.query_selector(".tb-btn").unwrap();
+        doc.class_list_add(button, "tb-active");
+        LayoutEngine::new().layout(&mut doc, 1000.0);
+        let rect = doc.get_node(button).unwrap().layout.border_rect;
+        doc.process_mouse_event(
+            HtmlEventType::MouseMove,
+            (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0),
+            0,
+        );
+        LayoutEngine::new().layout(&mut doc, 1000.0);
+        let style = &doc.get_node(button).unwrap().style;
+        assert_eq!(style.background_color, Color::rgb(55, 48, 163));
+        assert_eq!(style.color, Color::rgb(255, 255, 255));
+    }
 }
 
 // ── winit ApplicationHandler ─────────────────────────────────────────────────
@@ -490,6 +499,16 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        if let (Some(point), Some(doc)) = (self.pending_mouse_move.take(), self.doc.as_mut()) {
+            let point = (point.0, point.1 + doc.scroll_y);
+            let changed = doc.process_mouse_event(HtmlEventType::MouseMove, point, 0)
+                | doc.process_mouse_event(HtmlEventType::PointerMove, point, 0);
+            if changed {
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+        }
         let now = Instant::now();
         if now >= self.next_tick {
             self.do_tick();
@@ -525,24 +544,31 @@ impl ApplicationHandler for App {
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = platform.scale_factor();
                 self.mouse_pos = (position.x as f32 / scale, position.y as f32 / scale);
+                self.pending_mouse_move = Some(self.mouse_pos);
             }
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
+                state,
                 button,
                 ..
             } => {
                 let b_idx = match button {
                     MouseButton::Left => 0,
-                    MouseButton::Right => 1,
-                    MouseButton::Middle => 2,
-                    _ => 3,
+                    MouseButton::Middle => 1,
+                    MouseButton::Right => 2,
+                    _ => return,
                 };
                 if let Some(doc) = self.doc.as_mut() {
-                    if doc.process_mouse_event(
-                        HtmlEventType::Click,
-                        (self.mouse_pos.0, self.mouse_pos.1 + doc.scroll_y),
-                        b_idx,
-                    ) {
+                    let kind = if state == ElementState::Pressed {
+                        HtmlEventType::MouseDown
+                    } else {
+                        HtmlEventType::MouseUp
+                    };
+                    let pt = (self.mouse_pos.0, self.mouse_pos.1 + doc.scroll_y);
+                    let mut changed = doc.process_mouse_event(kind, pt, b_idx);
+                    if b_idx == 2 && state == ElementState::Released {
+                        changed |= doc.process_mouse_event(HtmlEventType::ContextMenu, pt, b_idx);
+                    }
+                    if changed {
                         window.request_redraw();
                     }
                 }

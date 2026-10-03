@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Animation Composition</title>
+<style>
+  body { margin: 32px; font-family: sans-serif; color: #222; background: white; }
+  .row { display: flex; gap: 100px; margin: 48px 0; padding: 40px; }
+  .box { width: 80px; height: 40px; background: #18794e; transform-origin: 0 0; }
+  @keyframes move-x { from { transform: translateX(0%); } to { transform: translateX(100%); } }
+  @keyframes move-y { from { transform: translateY(0px); } to { transform: translateY(10px); } }
+  @keyframes fade-a { from { opacity: 0; } to { opacity: .4; } }
+  @keyframes fade-b { from { opacity: 0; } to { opacity: .2; } }
+  #added { transform: rotate(90deg); animation: move-x 1s linear -.5s paused,
+    move-y 1s linear -.5s paused; animation-composition: add; }
+  #added-reference { transform: matrix(0, 1, -1, 0, -5, 40); }
+  #alpha { opacity: .25; animation: fade-a 1s linear -.5s paused,
+    fade-b 1s linear -.5s paused; animation-composition: add; }
+  #alpha-reference { opacity: .55; }
+  #replaced { transform: translateX(25px); animation: move-x 1s linear -.5s paused,
+    move-y 1s linear -.5s paused; animation-composition: add, replace; }
+  #replaced-reference { transform: translateY(5px); }
+  #finished { animation: move-y .1s linear forwards; }
+  #finished-reference { transform: translateY(10px); }
+  #finished-row:hover { background: #eef6f0; }
+</style>
+</head>
+<body>
+<h1>Animation Composition</h1>
+<p>Each animated box on the left should match its static reference on the right.</p>
+<h2>Additive Transform</h2>
+<div class="row"><div id="added" class="box"></div><div id="added-reference" class="box"></div></div>
+<h2>Additive Opacity</h2>
+<div class="row"><div id="alpha" class="box"></div><div id="alpha-reference" class="box"></div></div>
+<h2>Replacement After Addition</h2>
+<div class="row"><div id="replaced" class="box"></div><div id="replaced-reference" class="box"></div></div>
+<h2>Completed Fill After Hover</h2>
+<div class="row" id="finished-row"><div id="finished" class="box"></div><div id="finished-reference" class="box"></div></div>
+</body>
+</html>

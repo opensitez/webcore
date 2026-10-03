@@ -71,7 +71,16 @@ cargo run --release --example browser -- [OPTIONS] [URL]
   --cache-dir <dir>  Custom cache directory
   --no-images        Skip image loading
   --profile          Collect phase/resource timings and print a summary every 5s
+  --chrome-srgb      Use sRGB for the GUI Chrome comparison (requires --chrome)
 ```
+
+GUI Chrome normally uses the display's color profile. On a wide-gamut monitor,
+its screenshots can carry a Display-P3 ICC profile and blend translucent layers
+in that space, while webcore currently paints sRGB surfaces. For sRGB blend/pixel
+reference tests, launch `--chrome --chrome-srgb`; this passes Chrome's
+`--force-color-profile=srgb` explicitly. Leave it off to inspect native-display
+behavior. Match viewport and device scale before comparing pixels; screenshots
+with different embedded ICC profiles cannot be compared as raw RGB bytes.
 
 ## Command Reference
 
@@ -82,9 +91,10 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 |---------|---------|
 | `screenshot` | `{"cmd":"screenshot","out":"/tmp/page.png"}` repaints the browser content; add `"scale":2` for HiDPI. In GUI mode, `"presented":true` saves the last presented full-window frame without repainting, useful for transient stale-surface bugs. |
 | `navigate` | `{"cmd":"navigate","url":"https://example.com"}` |
+| `back` / `forward` | `{"cmd":"back"}` / `{"cmd":"forward"}` — GUI history, including cached page-state restoration |
 | `tabs` | `{"cmd":"tabs"}` — list open demo-browser tabs |
 | `switch-tab` | `{"cmd":"switch-tab","index":0}` — switch the active demo-browser tab |
-| `scroll` | `{"cmd":"scroll","dy":200}` |
+| `scroll` | `{"cmd":"scroll","dy":200}` or `{"cmd":"scroll","dx":120}`; `hover` a nested scroller first to route the wheel there. |
 | `resize` | `{"cmd":"resize","width":800,"height":600}` |
 | `viewport` | `{"cmd":"viewport"}` — returns width, height, scroll, doc_height |
 | `quit` | `{"cmd":"quit"}` — stop the debugged browser process |
@@ -93,7 +103,9 @@ All commands are JSON: `{"cmd":"name", ...}`. Responses include `"cmd_ms"` timin
 `scroll.width` and `scroll.height` in CSS pixels. For an overflow container,
 use `hover` to place the pointer over its content, then `scroll` with `dy` to
 exercise wheel routing into that container; `viewport.scroll_y` can remain zero
-while the element's `scroll.top` changes. The `scroll_paint` profiler includes
+while the element's `scroll.top` changes. The `scroll` response reports `changed`,
+viewport offsets, and `element_scroll` (the node ID of a nested scroller whose
+offset changed, if any). The `scroll_paint` profiler includes
 these nested wheel updates.
 
 ### Finding & Querying
@@ -128,7 +140,7 @@ these nested wheel updates.
 | `keyframes` | `{"cmd":"keyframes","query":"ticker","limit":10}` — inspect parsed `@keyframes` stops and properties for animation debugging |
 | `lines` | `{"cmd":"lines","selector":"p"}` — line-cache geometry for matched elements, including bidi visual segments (`x`, `w`, `level`) for RTL/LTR paint debugging |
 | `paint-dump` | `{"cmd":"paint-dump","x":0,"y":0,"w":400,"h":200,"limit":80}` — display-list commands in a viewport rectangle; text entries include font metrics and decoration flags, fill rectangles include color/radius, borders include per-side widths/colors/styles, image entries include intrinsic size, byte count, nontransparent pixel count, content bounds, and average RGB, and CSS mask entries include mask image dimensions |
-| `display-list-stats` | `{"cmd":"display-list-stats"}` — command counts for the current viewport paint-band display list, including text, image, clip, transform, layer, and mask commands plus `paint_top`/`paint_bottom` |
+| `display-list-stats` | `{"cmd":"display-list-stats"}` — command counts for the current viewport paint-band display list, including text, image, clip, transform, opacity/filter/blend layer, and mask commands plus `paint_top`/`paint_bottom` |
 | `image-states` | `{"cmd":"image-states","limit":80}` — DOM image/background/mask state, including source URLs, `srcset`, node IDs, element/background/mask decoded state, natural sizes, byte counts, layout rects, pending-channel/in-flight status, and load errors |
 | `resource-states` | `{"cmd":"resource-states"}` — loading flag plus pending CSS/image/font resource state, stylesheet counts, and document height |
 | `font-faces` | `{"cmd":"font-faces"}` — parsed `@font-face` families and sources, with exact-family availability in the renderer's font database |
@@ -173,6 +185,7 @@ these nested wheel updates.
 | `bench` | `{"cmd":"bench","n":5}` — cascade/layout benchmark |
 | `bench-progressive` | `{"cmd":"bench-progressive"}` — above-fold vs full |
 | `bench-render` | `{"cmd":"bench-render","dy":500}` — live BrowserView paint/scroll/cached-paint benchmark in the GUI path |
+| `display-list-stats` | Paint command counts, including `fixed_boundaries` and whether fixed content can be `segmented` into retained compositor layers |
 | `network` | `{"cmd":"network"}` — resource count |
 | `measure` | `{"cmd":"measure","from":"#a","to":"#b"}` — distance |
 | `step` / `tick` | `{"cmd":"tick","ms":100}` — advance debug timing/state in scripted sessions |
@@ -188,13 +201,58 @@ WEBCORE_TRACE_RENDER=1 cargo run --release --example browser -- --cached https:/
 
 `--profile` is disabled by default. It records timing across loader and rendering threads, prints a cumulative console summary every five seconds while the GUI draws, and enables the `profile` debug command:
 
+When the GUI demo starts with a URL, it now begins `BrowserView` navigation before
+creating the native window. Its webcore loader can fetch while the window and
+toolbar are initialized. Navigation also starts the loader before rebuilding
+the demo toolbar. This does not bypass the normal streaming loader or change
+navigation on an already open tab.
+
 ```bash
 cargo run --release --example browser -- --cached --profile --debug-port 9222 http://localhost/websites/foxnews.html
 python3 examples/debugclient.py send 9222 '{"cmd":"profile","limit":10}'
 python3 examples/debugclient.py send 9222 '{"cmd":"profile","reset":true}'
 ```
 
-The profile reports HTML load and streamed parse, CSS load and parse, image load and decode, resource polling, cascade, geometry, frame updates, display-list recording, tile raster/composite, direct replay, full render, demo-browser draw, and `scroll_paint`. Each phase has `count`, cumulative `total_ms`, and slowest `max_ms`. `scroll_paint` measures from the first wheel, scrollbar, or programmatic scroll change awaiting a frame through completion of the next viewport paint; it includes scheduling delay but not OS compositor presentation. Divide `total_ms` by `count` for the mean scroll latency, and use `max_ms` to spot freezes. Resource entries are the 128 slowest observed document, stylesheet, and image loads, with URL, bytes where known, source, and elapsed time. `network` means an actual HTTP request; `load` includes cache/local/document delivery; `network+consume` includes streaming CSS callbacks and parsing. Phase timers are inclusive and can overlap, so do not add their totals to infer page wall time. The profiler resets on navigation; `"reset":true` also clears the current window without navigating. Use a release GUI run for realistic scroll timings.
+`layout_grid`, `layout_flex`, and `layout_intrinsic` split out grid/flex layout
+and paired intrinsic-size queries within `geometry_boxes`. They are inclusive
+and can overlap through nested layout calls.
+The `frame_paint_resource`, `frame_paint_animated_image`,
+`frame_paint_css_animation`, `frame_paint_svg_animation`, and
+`frame_paint_video` profile counts identify why streamed frames requested
+paint; `frame_paint_other` counts paint requests without one of those sampled
+causes (for example a host event). These are event counts, not elapsed time,
+and multiple causes can be recorded for one frame.
+The slowest per-node grid/flex totals appear as `layout-grid` and `layout-flex`
+resources with node ID, call count, slowest call, and cumulative inclusive time.
+`layout-box` reports the slowest general box layout calls, including block and
+inline work, after the clean-layout skip check.
+Locate the node ID in `dom-tree`, then inspect its selector with `computed`.
+
+The profile reports HTML load and streamed parse, CSS load and parse, image load and decode, resource polling, cascade, geometry, frame updates, display-list recording, tile raster/composite, direct replay, full render, demo-browser draw, and `scroll_paint`. `css_math_parse` measures parsing math expressions, not context-dependent layout evaluation. `display_list_record`, `display_list_segments`, and `display_list_retain` break down the inclusive `display_list` phase. Parallel cascades similarly report `cascade_flatten`, `cascade_match`, and `cascade_apply` within `cascade`. `cascade_apply_style` measures per-element matching, inheritance, and computed-style work; `cascade_apply_counters` measures subsequent counter and pseudo-element work. The style phase is split into `cascade_apply_setup` (including `cascade_apply_init`, `cascade_apply_matches`, and `cascade_apply_variables`), `cascade_apply_color_scheme`, `cascade_apply_rules`, and `cascade_apply_finalize`. Variable work is split into `cascade_apply_var_scope`, `cascade_apply_var_resolve`, and `cascade_apply_var_checks`; `cascade_apply_inline_parse` measures inline declarations and `cascade_apply_var_clone` measures inherited-map copies within the scope phase. `cascade_apply_var_resolve` runs only for elements with local custom-property declarations; inherited computed values need no second resolution. These phases exclude child traversal and are recorded per element only when profiling is enabled, so their counts are element visits rather than cascade passes. Each phase has `count`, cumulative `total_ms`, and slowest `max_ms`. `scroll_paint` measures from the first wheel, scrollbar, or programmatic scroll change awaiting a frame through completion of the next viewport paint; it includes scheduling delay but not OS compositor presentation. Divide `total_ms` by `count` for the mean scroll latency, and use `max_ms` to spot freezes. Resource entries are the 128 slowest observed document, stylesheet, and image loads, with URL, bytes where known, source, and elapsed time. `network` means an actual HTTP request; `load` includes cache/local/document delivery; `network+consume` includes streaming CSS callbacks and parsing. Phase timers are inclusive and can overlap, so do not add their totals to infer page wall time. The profiler resets on navigation; `"reset":true` also clears the current window without navigating. Use a release GUI run for realistic scroll timings.
+
+`svg_raster` is nested in `display_list_record`. `svg_raster_key` measures
+SVG raster-cache lookup key construction; `svg_raster_tree_key` and
+`svg_raster_dom_key` separate SVG source hashing from computed DOM style hashing.
+`svg_raster_paint` measures actual native SVG
+painting (including text and `foreignObject`), and `svg_raster_hit` /
+`svg_raster_bypass` count retained hits and dynamic content that skips caching.
+The profile's slowest-resource list also includes `svg-raster` entries labeled
+with node ID and raster dimensions; `source` distinguishes cache misses from
+dynamic paints.
+
+Incremental hover cascades now report `cascade_apply` too, so its subtree walk
+can be separated from selector matching and generated-content work.
+`cascade_mark_dirty`, `animation_sync`, and `transition_sync` separate hover
+invalidation from animation/transition processing inside the cascade interval.
+
+`geometry_boxes` times the recursive box layout, while `geometry_finalize`
+times the subsequent scroll-extent calculation, dirty-flag cleanup, and node
+index rebuild. These also appear for layout passes that skip cascade, so their
+counts can exceed the encompassing `geometry` phase count.
+`geometry_container_queries` times the post-layout container-query cascade
+within `geometry`, including any additional layout passes it triggers.
+`cascade_generated_content` measures counter/generated-content replay after
+the normal cascade; it is separate from `cascade_apply` on the parallel path.
 
 `image_decode` also includes background expansion of animated GIF/WebP frames,
 not just the initial preview. That work runs on image workers; its elapsed time
@@ -209,6 +267,11 @@ The `fixed_replay` and `content_cache` phases break out fixed-position layer pai
 executed paint commands inside tile/direct replay. Culled commands are excluded;
 `raster_layer` measures opacity/filter/blend/mask allocation and compositing;
 `raster_clip` measures clip-mask construction, intersection and stack cleanup.
+`raster_clip_mask_build` counts clip-cache misses and measures mask construction,
+including parent-mask intersection and bounded cache insertion.
+`raster_opacity_push` and `raster_opacity_pop` separate opacity surface setup
+and compositing from the inclusive `raster_layer` total; the remainder includes
+CSS image-mask, filter, and blend work.
 These nested timings must not be added to their enclosing raster/render totals.
 Command timing is disabled unless `--profile` is enabled.
 When comparing performance runs, also record `viewport`: its `scale` is page

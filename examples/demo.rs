@@ -4,10 +4,13 @@
 //! form/input handling on the same `BrowserView` path as the full browser while
 //! giving the local demos a small persistent navigation shell.
 
+#[path = "demo/demo_live.rs"]
 mod demo_live;
+#[path = "graph_demo/graph_element.rs"]
+mod graph_element;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tiny_skia::{Pixmap, PixmapPaint, Transform};
@@ -17,11 +20,11 @@ use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Cursor, CursorIcon, Window};
 
-use webcore::dom::{self, HtmlEventType};
+use webcore::dom::{HtmlEventType, events::ListenerOptions};
 use webcore::platform::Platform;
 use webcore::{BrowserView, CSSCursor, Document, PageLoadOptions, Renderer, parse_html};
 
-use demo_live::{DemoLive, GraphComponent};
+use demo_live::DemoLive;
 
 const CHROME_BAR_H: f32 = 42.0;
 const CHROME_MENU_COLS: usize = 4;
@@ -173,7 +176,7 @@ fn menu_demo_rows() -> usize {
     entries.div_ceil(CHROME_MENU_COLS).max(1)
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChromeHit {
     None,
     Menu,
@@ -192,6 +195,7 @@ struct DemoApp {
     chrome_doc: Option<Document>,
     chrome_pixmap: Option<Pixmap>,
     chrome_dirty: bool,
+    chrome_action: Arc<Mutex<Option<ChromeHit>>>,
     view: BrowserView,
     mouse_pos: (f32, f32),
     pending_hover_pos: Option<(f32, f32)>,
@@ -225,7 +229,6 @@ impl DemoApp {
         view.set_wake_callback(move || {
             let _ = wake_proxy.send_event(());
         });
-        view.register_trait_component("graph", GraphComponent);
         Self {
             window: None,
             platform: None,
@@ -233,6 +236,7 @@ impl DemoApp {
             chrome_doc: None,
             chrome_pixmap: None,
             chrome_dirty: true,
+            chrome_action: Arc::new(Mutex::new(None)),
             view,
             mouse_pos: (0.0, 0.0),
             pending_hover_pos: None,
@@ -355,18 +359,74 @@ impl DemoApp {
 
     fn resize_view(&mut self) {
         self.view.resize(self.width, self.content_height());
-        self.rebuild_chrome();
+        let chrome_height = self.chrome_height();
+        if let Some(doc) = self.chrome_doc.as_mut() {
+            if let Some(body) = doc.query_selector("body") {
+                doc.set_style_property(body, "height", &format!("{chrome_height}px"));
+            }
+            let engine = self.chrome_renderer.layout_engine();
+            engine.viewport_h = chrome_height;
+            engine.layout(doc, self.width);
+            self.chrome_dirty = true;
+        }
+    }
+
+    fn set_menu_open(&mut self, open: bool) {
+        self.menu_open = open;
+        if let Some(doc) = self.chrome_doc.as_mut() {
+            if let Some(menu) = doc.query_selector("#demo-menu") {
+                doc.set_style_property(menu, "display", if open { "block" } else { "none" });
+            }
+            if let Some(button) = doc.query_selector("#menu-btn") {
+                doc.set_text_content(button, if open { "Demos ▴" } else { "Demos ▾" });
+                doc.set_attribute(button, "aria-expanded", if open { "true" } else { "false" });
+            }
+        }
+        self.resize_view();
     }
 
     fn rebuild_chrome(&mut self) {
         let html = self.chrome_html();
         let chrome_height = self.chrome_height();
         let mut doc = parse_html(&html);
+        Self::install_chrome_listener(&mut doc, self.chrome_action.clone());
         let engine = self.chrome_renderer.layout_engine();
         engine.viewport_h = chrome_height;
         engine.layout(&mut doc, self.width);
         self.chrome_doc = Some(doc);
         self.chrome_dirty = true;
+    }
+
+    fn install_chrome_listener(doc: &mut Document, action: Arc<Mutex<Option<ChromeHit>>>) {
+        doc.add_event_listener(
+            doc.root.node_id,
+            "click",
+            Box::new(move |event, doc| {
+                let target = event.target;
+                let selected = if doc.closest(target, "#menu-btn").is_some() {
+                    ChromeHit::Menu
+                } else if let Some(row) = doc.closest(target, ".demo-row") {
+                    doc.get_attribute(row, "data-demo-index")
+                        .and_then(|index| index.parse().ok())
+                        .map(ChromeHit::Demo)
+                        .unwrap_or(ChromeHit::None)
+                } else if doc.closest(target, "#back").is_some() {
+                    ChromeHit::Back
+                } else if doc.closest(target, "#forward").is_some() {
+                    ChromeHit::Forward
+                } else if doc.closest(target, "#reload").is_some() {
+                    ChromeHit::Reload
+                } else if doc.closest(target, "#home").is_some() {
+                    ChromeHit::Home
+                } else if doc.closest(target, "#print").is_some() {
+                    ChromeHit::Print
+                } else {
+                    ChromeHit::None
+                };
+                *action.lock().unwrap() = Some(selected);
+            }),
+            ListenerOptions::default(),
+        );
     }
 
     fn chrome_html(&self) -> String {
@@ -378,9 +438,10 @@ impl DemoApp {
         } else {
             "Demos ▾"
         };
-        let mut menu = String::new();
-        if self.menu_open {
-            menu.push_str(r#"<div class="menu"><div class="menu-head">Jump directly to any local demo</div><div class="demo-grid">"#);
+        let mut menu = String::from(&format!(
+            r#"<div id="demo-menu" class="menu" style="display:{}"><div class="menu-head">Jump directly to any local demo</div><div class="demo-grid">"#,
+            if self.menu_open { "block" } else { "none" }
+        ));
             for (index, demo) in DEMOS
                 .iter()
                 .enumerate()
@@ -394,14 +455,13 @@ impl DemoApp {
                     "demo-row"
                 };
                 menu.push_str(&format!(
-                    r#"<div id="demo-{index}" class="{class}"><b>{}</b><span>{}</span><em>{}</em></div>"#,
+                    r#"<div data-demo-index="{index}" class="{class}"><b>{}</b><span>{}</span><em>{}</em></div>"#,
                     escape_html(demo.title),
                     escape_html(demo.category),
                     escape_html(demo.file)
                 ));
             }
             menu.push_str("</div></div>");
-        }
         let raw_title = self
             .view
             .title()
@@ -470,7 +530,7 @@ display:flex;align-items:center;gap:6px;padding:0 7px;font-size:12px;cursor:poin
 .demo-row em{{margin-left:auto;color:#94a3b8;font-style:normal;font-size:10px;overflow:hidden;text-overflow:ellipsis;max-width:86px}}
 </style></head><body>
 <div class="bar">
-  <div id="menu-btn" class="btn primary">{demos_label}</div>
+  <button id="menu-btn" class="btn primary" aria-expanded="{}">{demos_label}</button>
   <div id="back" class="{back_class}">←</div>
   <div id="forward" class="{forward_class}">→</div>
   <div id="reload" class="btn">↻</div>
@@ -479,59 +539,12 @@ display:flex;align-items:center;gap:6px;padding:0 7px;font-size:12px;cursor:poin
   <div class="loc"><span class="title">{title}</span><span class="sub">{location}{loading}</span></div>
 </div>
 {menu}
-</body></html>"#
+</body></html>"#,
+            if self.menu_open { "true" } else { "false" }
         )
     }
 
-    fn chrome_hit(&self, x: f32, y: f32) -> ChromeHit {
-        let Some(doc) = self.chrome_doc.as_ref() else {
-            return ChromeHit::None;
-        };
-        let hit_id = |id: &str| -> bool {
-            dom::query_selector(&doc.root, &format!("#{id}")).is_some_and(|node| {
-                let rect = node.layout.border_rect;
-                x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h
-            })
-        };
-        if hit_id("menu-btn") {
-            ChromeHit::Menu
-        } else if self.menu_open {
-            DEMOS
-                .iter()
-                .enumerate()
-                .filter(|(_, demo)| demo.file != "demo.html")
-                .find_map(|(index, _)| {
-                    hit_id(&format!("demo-{index}")).then_some(ChromeHit::Demo(index))
-                })
-                .unwrap_or_else(|| {
-                    if hit_id("back") {
-                        ChromeHit::Back
-                    } else if hit_id("forward") {
-                        ChromeHit::Forward
-                    } else if hit_id("reload") {
-                        ChromeHit::Reload
-                    } else if hit_id("home") {
-                        ChromeHit::Home
-                    } else if hit_id("print") {
-                        ChromeHit::Print
-                    } else {
-                        ChromeHit::None
-                    }
-                })
-        } else if hit_id("back") {
-            ChromeHit::Back
-        } else if hit_id("forward") {
-            ChromeHit::Forward
-        } else if hit_id("reload") {
-            ChromeHit::Reload
-        } else if hit_id("home") {
-            ChromeHit::Home
-        } else if hit_id("print") {
-            ChromeHit::Print
-        } else {
-            ChromeHit::None
-        }
-    }
+
 
     fn draw(&mut self) {
         let chrome_height = self.chrome_height();
@@ -681,11 +694,24 @@ impl ApplicationHandler<()> for DemoApp {
                 };
                 let (x, y) = self.mouse_pos;
                 let chrome_h = self.chrome_height();
-                if y < chrome_h && state == ElementState::Pressed {
-                    match self.chrome_hit(x, y) {
+                if y < chrome_h {
+                    let event_type = if state == ElementState::Pressed {
+                        HtmlEventType::MouseDown
+                    } else {
+                        HtmlEventType::MouseUp
+                    };
+                    if let Some(doc) = self.chrome_doc.as_mut() {
+                        doc.process_mouse_event(event_type, (x, y), button_num);
+                    }
+                    let action = if state == ElementState::Released && button_num == 0 {
+                        self.chrome_action.lock().unwrap().take()
+                    } else {
+                        None
+                    };
+                    if let Some(action) = action {
+                    match action {
                         ChromeHit::Menu => {
-                            self.menu_open = !self.menu_open;
-                            self.resize_view();
+                            self.set_menu_open(!self.menu_open);
                         }
                         ChromeHit::Demo(index) => {
                             if let Some(demo) = DEMOS.get(index) {
@@ -704,11 +730,11 @@ impl ApplicationHandler<()> for DemoApp {
                         }
                         ChromeHit::None => {}
                     }
+                    }
                     redraw = true;
                 } else if y >= chrome_h {
                     if self.menu_open && state == ElementState::Pressed {
-                        self.menu_open = false;
-                        self.resize_view();
+                        self.set_menu_open(false);
                     }
                     let event_type = if state == ElementState::Pressed {
                         HtmlEventType::MouseDown
@@ -1069,5 +1095,31 @@ mod tests {
             rows as f32 * CHROME_MENU_ROW_H + rows.saturating_sub(1) as f32 * CHROME_MENU_GAP;
         let panel_height = CHROME_MENU_VERTICAL_CHROME + grid_height;
         assert!(panel_height > 184.0);
+    }
+
+    #[test]
+    fn chrome_clicks_use_dom_event_targets() {
+        let mut doc = parse_html(
+            "<button id='menu-btn' style='display:block;width:100px;height:30px'>Demos</button>\
+             <div class='demo-row' data-demo-index='2' style='width:100px;height:30px'>\
+             <b>Graph</b></div>",
+        );
+        let action = Arc::new(Mutex::new(None));
+        DemoApp::install_chrome_listener(&mut doc, action.clone());
+        let mut renderer = Renderer::new();
+        let engine = renderer.layout_engine();
+        engine.layout(&mut doc, 300.0);
+
+        for (selector, expected) in [
+            ("#menu-btn", ChromeHit::Menu),
+            (".demo-row b", ChromeHit::Demo(2)),
+        ] {
+            let id = doc.query_selector(selector).unwrap();
+            let rect = doc.get_node(id).unwrap().layout.border_rect;
+            let point = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+            doc.process_mouse_event(HtmlEventType::MouseDown, point, 0);
+            doc.process_mouse_event(HtmlEventType::MouseUp, point, 0);
+            assert_eq!(action.lock().unwrap().take(), Some(expected));
+        }
     }
 }

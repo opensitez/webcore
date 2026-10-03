@@ -7,9 +7,9 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
 
 use rand::Rng;
-use webcore::dom::{self, HtmlEventType};
+use webcore::dom::HtmlEventType;
 use webcore::platform::Platform;
-use webcore::{Document, LayoutEngine, Renderer, WebCore, load_html};
+use webcore::{Document, LayoutEngine, Renderer, load_html};
 
 const HTML: &str = include_str!("html/minesweeper.html");
 
@@ -52,7 +52,7 @@ fn parse_id_to_idx(id: &str) -> Option<usize> {
     Some(rc_to_idx(r, c))
 }
 
-fn new_game(state: &mut AppState, root: &mut WebCore) {
+fn new_game(state: &mut AppState, doc: &mut Document) {
     // reset
     state.mine_grid = [false; 81];
     state.revealed = [false; 81];
@@ -98,41 +98,41 @@ fn new_game(state: &mut AppState, root: &mut WebCore) {
     for r in 0..state.rows {
         for c in 0..state.cols {
             let id = format!("r{}c{}", r, c);
-            if let Some(cell) = dom::query_selector_mut(root, &format!("#{}", id)) {
-                dom::set_text_content(cell, "");
-                dom::remove_class(cell, "cell-revealed");
-                dom::remove_class(cell, "cell-mine");
-                dom::remove_class(cell, "cell-flag");
+            if let Some(cell) = doc.query_selector(&format!("#{}", id)) {
+                doc.set_text_content(cell, "");
+                doc.class_list_remove(cell, "cell-revealed");
+                doc.class_list_remove(cell, "cell-mine");
+                doc.class_list_remove(cell, "cell-flag");
                 for n in 1..=8 {
-                    dom::remove_class(cell, &format!("cell-{}", n));
+                    doc.class_list_remove(cell, &format!("cell-{}", n));
                 }
             }
         }
     }
-    if let Some(mc) = dom::query_selector_mut(root, "#mine-count") {
-        dom::set_text_content(mc, &state.mines.to_string());
+    if let Some(mc) = doc.query_selector("#mine-count") {
+        doc.set_text_content(mc, &state.mines.to_string());
     }
-    if let Some(st) = dom::query_selector_mut(root, "#status") {
-        dom::set_text_content(st, "Click to start");
+    if let Some(st) = doc.query_selector("#status") {
+        doc.set_text_content(st, "Click to start");
     }
 }
 
-fn reveal_recursive(state: &mut AppState, root: &mut WebCore, idx: usize) {
+fn reveal_recursive(state: &mut AppState, doc: &mut Document, idx: usize) {
     if state.revealed[idx] || state.flagged[idx] {
         return;
     }
     state.revealed[idx] = true;
-    if let Some(cell) = dom::query_selector_mut(root, &format!("#r{}c{}", idx / 9, idx % 9)) {
-        dom::add_class(cell, "cell-revealed");
+    if let Some(cell) = doc.query_selector(&format!("#r{}c{}", idx / 9, idx % 9)) {
+        doc.class_list_add(cell, "cell-revealed");
         if state.mine_grid[idx] {
-            dom::add_class(cell, "cell-mine");
-            dom::set_text_content(cell, "*");
+            doc.class_list_add(cell, "cell-mine");
+            doc.set_text_content(cell, "*");
             return;
         }
         let a = state.adj[idx];
         if a > 0 {
-            dom::set_text_content(cell, &a.to_string());
-            dom::add_class(cell, &format!("cell-{}", a));
+            doc.set_text_content(cell, &a.to_string());
+            doc.class_list_add(cell, &format!("cell-{}", a));
         }
     }
     if state.adj[idx] == 0 {
@@ -148,7 +148,7 @@ fn reveal_recursive(state: &mut AppState, root: &mut WebCore, idx: usize) {
                 if nr >= 0 && nr < state.rows as i32 && nc >= 0 && nc < state.cols as i32 {
                     let ni = rc_to_idx(nr as usize, nc as usize);
                     if !state.revealed[ni] {
-                        reveal_recursive(state, root, ni);
+                        reveal_recursive(state, doc, ni);
                     }
                 }
             }
@@ -156,12 +156,12 @@ fn reveal_recursive(state: &mut AppState, root: &mut WebCore, idx: usize) {
     }
 }
 
-fn reveal_all_mines(state: &AppState, root: &mut WebCore) {
+fn reveal_all_mines(state: &AppState, doc: &mut Document) {
     for i in 0..(state.rows * state.cols) {
         if state.mine_grid[i] {
-            if let Some(c) = dom::query_selector_mut(root, &format!("#r{}c{}", i / 9, i % 9)) {
-                dom::add_class(c, "cell-mine");
-                dom::set_text_content(c, "*");
+            if let Some(c) = doc.query_selector(&format!("#r{}c{}", i / 9, i % 9)) {
+                doc.class_list_add(c, "cell-mine");
+                doc.set_text_content(c, "*");
             }
         }
     }
@@ -193,17 +193,15 @@ impl ApplicationHandler for App {
                 Box::new(move |evt, __d: &mut webcore::Document| {
                     // Delegation, the way a page writes it: one listener, then
                     // `closest()` to find which matching element was hit.
-                    let Some(__cur) = __d.closest(evt.target, "#new-game") else {
+                    let Some(_) = __d.closest(evt.target, "#new-game") else {
                         return;
                     };
-                    let root = &mut __d.root;
-                    let _ = &root;
 
                     if evt.button != 0 {
                         return;
                     }
                     let mut st = state2.lock().unwrap();
-                    new_game(&mut st, root);
+                    new_game(&mut st, __d);
                 }),
                 webcore::dom::events::ListenerOptions::default(),
             );
@@ -217,22 +215,20 @@ impl ApplicationHandler for App {
                 Box::new(move |evt, __d: &mut webcore::Document| {
                     // Delegation, the way a page writes it: one listener, then
                     // `closest()` to find which matching element was hit.
-                    let Some(__cur) = __d.closest(evt.target, "#flag-mode") else {
+                    let Some(_) = __d.closest(evt.target, "#flag-mode") else {
                         return;
                     };
-                    let root = &mut __d.root;
-                    let _ = &root;
 
                     if evt.button != 0 {
                         return;
                     }
                     let mut st = state3.lock().unwrap();
                     st.flag_mode = !st.flag_mode;
-                    if let Some(btn) = dom::query_selector_mut(root, "#flag-mode") {
+                    if let Some(btn) = __d.query_selector("#flag-mode") {
                         if st.flag_mode {
-                            dom::add_class(btn, "btn-flag-active");
+                            __d.class_list_add(btn, "btn-flag-active");
                         } else {
-                            dom::remove_class(btn, "btn-flag-active");
+                            __d.class_list_remove(btn, "btn-flag-active");
                         }
                     }
                 }),
@@ -251,27 +247,22 @@ impl ApplicationHandler for App {
                     let Some(__cur) = __d.closest(evt.target, ".cell") else {
                         return;
                     };
-                    let root = &mut __d.root;
-                    let _ = &root;
 
                     if evt.button != 0 {
                         return;
                     }
-                    let cur_id = __cur;
-                    let id = dom::find_box_mut(root, cur_id)
-                        .and_then(|t| dom::get_attribute(t, "id").map(|s| s.to_string()))
-                        .unwrap_or_default();
+                    let id = __d.get_attribute(__cur, "id").unwrap_or_default();
                     if let Some(idx) = parse_id_to_idx(&id) {
                         let mut st = state4.lock().unwrap();
                         if st.flag_mode {
                             st.flagged[idx] = !st.flagged[idx];
-                            if let Some(c) = dom::query_selector_mut(root, &format!("#{}", id)) {
+                            if let Some(c) = __d.query_selector(&format!("#{}", id)) {
                                 if st.flagged[idx] {
-                                    dom::add_class(c, "cell-flag");
-                                    dom::set_text_content(c, "F");
+                                    __d.class_list_add(c, "cell-flag");
+                                    __d.set_text_content(c, "F");
                                 } else {
-                                    dom::remove_class(c, "cell-flag");
-                                    dom::set_text_content(c, "");
+                                    __d.class_list_remove(c, "cell-flag");
+                                    __d.set_text_content(c, "");
                                 }
                             }
                             return;
@@ -282,13 +273,13 @@ impl ApplicationHandler for App {
                         }
                         if st.mine_grid[idx] {
                             // reveal mine -> game over
-                            reveal_all_mines(&st, root);
-                            if let Some(s) = dom::query_selector_mut(root, "#status") {
-                                dom::set_text_content(s, "Game Over");
+                            reveal_all_mines(&st, __d);
+                            if let Some(s) = __d.query_selector("#status") {
+                                __d.set_text_content(s, "Game Over");
                             }
                             return;
                         }
-                        reveal_recursive(&mut st, root, idx);
+                        reveal_recursive(&mut st, __d, idx);
                         // check win
                         let mut revealed_count = 0;
                         for i in 0..(st.rows * st.cols) {
@@ -297,8 +288,8 @@ impl ApplicationHandler for App {
                             }
                         }
                         if revealed_count >= (st.rows * st.cols - st.mines) {
-                            if let Some(s) = dom::query_selector_mut(root, "#status") {
-                                dom::set_text_content(s, "You Win!");
+                            if let Some(s) = __d.query_selector("#status") {
+                                __d.set_text_content(s, "You Win!");
                             }
                         }
                     }
@@ -318,23 +309,17 @@ impl ApplicationHandler for App {
                     let Some(__cur) = __d.closest(evt.target, ".cell") else {
                         return;
                     };
-                    let root = &mut __d.root;
-                    let _ = &root;
-
-                    let cur_id = __cur;
-                    let id = dom::find_box_mut(root, cur_id)
-                        .and_then(|t| dom::get_attribute(t, "id").map(|s| s.to_string()))
-                        .unwrap_or_default();
+                    let id = __d.get_attribute(__cur, "id").unwrap_or_default();
                     if let Some(idx) = parse_id_to_idx(&id) {
                         let mut st = state5.lock().unwrap();
                         st.flagged[idx] = !st.flagged[idx];
-                        if let Some(c) = dom::query_selector_mut(root, &format!("#{}", id)) {
+                        if let Some(c) = __d.query_selector(&format!("#{}", id)) {
                             if st.flagged[idx] {
-                                dom::add_class(c, "cell-flag");
-                                dom::set_text_content(c, "F");
+                                __d.class_list_add(c, "cell-flag");
+                                __d.set_text_content(c, "F");
                             } else {
-                                dom::remove_class(c, "cell-flag");
-                                dom::set_text_content(c, "");
+                                __d.class_list_remove(c, "cell-flag");
+                                __d.set_text_content(c, "");
                             }
                         }
                     }
@@ -346,7 +331,7 @@ impl ApplicationHandler for App {
         if let Some(doc) = self.doc.as_mut() {
             LayoutEngine::new().layout(doc, self.width);
             let mut st = self.state.lock().unwrap();
-            new_game(&mut st, &mut doc.root);
+            new_game(&mut st, doc);
         }
         self.window = Some(window);
         self.platform = Some(platform);
@@ -389,29 +374,37 @@ impl ApplicationHandler for App {
                     position.x as f32 / platform.scale_factor(),
                     position.y as f32 / platform.scale_factor(),
                 );
+                if let Some(doc) = self.doc.as_mut() {
+                    let pt = (self.mouse_pos.0, self.mouse_pos.1 + doc.scroll_y);
+                    if doc.process_mouse_event(HtmlEventType::MouseMove, pt, 0) {
+                        window.request_redraw();
+                    }
+                }
             }
 
             WindowEvent::MouseInput {
-                state: winit::event::ElementState::Pressed,
+                state,
                 button,
                 ..
             } => {
                 if let Some(doc) = self.doc.as_mut() {
-                    // On some macOS setups a control-click is sent as left-button + ctrl modifier.
-                    let mut mapped_button = button;
-                    // No modifier handling here; map left to left only.
-                    let (etype, btn) = match mapped_button {
-                        winit::event::MouseButton::Left => (HtmlEventType::Click, 0u8),
-                        winit::event::MouseButton::Middle => (HtmlEventType::MouseDown, 1u8),
-                        winit::event::MouseButton::Right => (HtmlEventType::ContextMenu, 2u8),
-                        _ => (HtmlEventType::Click, 0u8),
+                    let btn = match button {
+                        winit::event::MouseButton::Left => 0,
+                        winit::event::MouseButton::Middle => 1,
+                        winit::event::MouseButton::Right => 2,
+                        _ => return,
                     };
-
-                    if doc.process_mouse_event(
-                        etype,
-                        (self.mouse_pos.0, self.mouse_pos.1 + doc.scroll_y),
-                        btn,
-                    ) {
+                    let kind = if state == winit::event::ElementState::Pressed {
+                        HtmlEventType::MouseDown
+                    } else {
+                        HtmlEventType::MouseUp
+                    };
+                    let pt = (self.mouse_pos.0, self.mouse_pos.1 + doc.scroll_y);
+                    let mut changed = doc.process_mouse_event(kind, pt, btn);
+                    if btn == 2 && state == winit::event::ElementState::Released {
+                        changed |= doc.process_mouse_event(HtmlEventType::ContextMenu, pt, btn);
+                    }
+                    if changed {
                         LayoutEngine::new().layout(doc, self.width);
                         window.request_redraw();
                     }

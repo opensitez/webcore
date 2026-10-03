@@ -3,22 +3,21 @@
 //! Uses the same event system as graph_demo and event_playground:
 //! - `renderer.handle_window_event()` for all input routing
 //! - `doc.add_event_listener()` for click handlers
-//! - `dom::set_text_content()` / `dom::set_attribute()` to update DOM
+//! - `Document` DOM methods to read live form state and update the page
 //!
 //! Usage:
 //!   cargo run --example forms_demo
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::EventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
 
-use webcore::WebCore;
-use webcore::dom::{self, HtmlEventType};
+use webcore::dom::HtmlEventType;
 use webcore::platform::Platform;
-use webcore::{LayoutEngine, Renderer, load_html};
+use webcore::{Document, LayoutEngine, Renderer, load_html};
 
 const HTML: &str = include_str!("html/forms_demo.html");
 
@@ -31,21 +30,18 @@ struct App {
     width: f32,
 }
 
-fn update_summary(root: &mut WebCore) {
+fn update_summary(doc: &mut Document) {
     // Read form values and update the summary section
-    let name = dom::query_selector(root, "#name")
-        .and_then(|n| n.attributes.get("value").cloned())
-        .unwrap_or_default();
-    let phone = dom::query_selector(root, "#phone")
-        .and_then(|n| n.attributes.get("value").cloned())
+    let name = doc.query_selector("#name")
+        .map(|id| doc.value(id))
         .unwrap_or_default();
 
     // Size from radio
     let size = ["small", "medium", "large"]
         .iter()
         .find(|s| {
-            dom::query_selector(root, &format!("input[value={}]", s))
-                .map(|n| n.attributes.contains_key("checked"))
+            doc.query_selector(&format!("input[value={}]", s))
+                .map(|id| doc.checked(id))
                 .unwrap_or(false)
         })
         .unwrap_or(&"medium");
@@ -62,12 +58,12 @@ fn update_summary(root: &mut WebCore) {
         "pep", "mush", "onion", "saus", "pepper", "olive", "cheese", "jala",
     ] {
         let sel = format!("#{}", id);
-        if let Some(n) = dom::query_selector(root, &sel) {
-            if n.attributes.contains_key("checked") {
-                if let Some(label) = n.attributes.get("data-label") {
-                    toppings.push(label.clone());
+        if let Some(n) = doc.query_selector(&sel) {
+            if doc.checked(n) {
+                if let Some(label) = doc.get_attribute(n, "data-label") {
+                    toppings.push(label);
                 }
-                if let Some(p) = n.attributes.get("data-price") {
+                if let Some(p) = doc.get_attribute(n, "data-price") {
                     topping_price += p.parse::<f32>().unwrap_or(0.0);
                 }
             }
@@ -81,20 +77,20 @@ fn update_summary(root: &mut WebCore) {
         toppings.join(", ")
     };
 
-    if let Some(el) = dom::query_selector_mut(root, "#sum-name") {
-        dom::set_text_content(el, if name.is_empty() { "—" } else { &name });
+    if let Some(el) = doc.query_selector("#sum-name") {
+        doc.set_text_content(el, if name.is_empty() { "—" } else { &name });
     }
-    if let Some(el) = dom::query_selector_mut(root, "#sum-size") {
-        dom::set_text_content(el, &format!("{} (${:.2})", size, price));
+    if let Some(el) = doc.query_selector("#sum-size") {
+        doc.set_text_content(el, &format!("{} (${:.2})", size, price));
     }
-    if let Some(el) = dom::query_selector_mut(root, "#sum-toppings") {
-        dom::set_text_content(el, &topping_str);
+    if let Some(el) = doc.query_selector("#sum-toppings") {
+        doc.set_text_content(el, &topping_str);
     }
-    if let Some(el) = dom::query_selector_mut(root, "#sum-total") {
-        dom::set_text_content(el, &format!("${:.2}", total));
+    if let Some(el) = doc.query_selector("#sum-total") {
+        doc.set_text_content(el, &format!("${:.2}", total));
     }
-    if let Some(el) = dom::query_selector_mut(root, "#order-btn") {
-        dom::set_attribute(el, "value", &format!("Place Order — ${:.2}", total));
+    if let Some(el) = doc.query_selector("#order-btn") {
+        doc.set_value(el, &format!("Place Order — ${:.2}", total));
     }
 }
 
@@ -140,13 +136,11 @@ impl ApplicationHandler<()> for App {
                 Box::new(move |evt, __d: &mut webcore::Document| {
                     // Delegation, the way a page writes it: one listener, then
                     // `closest()` to find which matching element was hit.
-                    let Some(__cur) = __d.closest(evt.target, sel.as_str()) else {
+                    let Some(_) = __d.closest(evt.target, sel.as_str()) else {
                         return;
                     };
-                    let root = &mut __d.root;
-                    let _ = &root;
                     // Toggle is already handled by process_mouse_event
-                    update_summary(root);
+                    update_summary(__d);
                 }),
                 webcore::dom::events::ListenerOptions::default(),
             );
@@ -162,12 +156,10 @@ impl ApplicationHandler<()> for App {
                 Box::new(move |evt, __d: &mut webcore::Document| {
                     // Delegation, the way a page writes it: one listener, then
                     // `closest()` to find which matching element was hit.
-                    let Some(__cur) = __d.closest(evt.target, sel.as_str()) else {
+                    let Some(_) = __d.closest(evt.target, sel.as_str()) else {
                         return;
                     };
-                    let root = &mut __d.root;
-                    let _ = &root;
-                    update_summary(root);
+                    update_summary(__d);
                 }),
                 webcore::dom::events::ListenerOptions::default(),
             );
@@ -181,16 +173,14 @@ impl ApplicationHandler<()> for App {
             Box::new(move |evt, __d: &mut webcore::Document| {
                 // Delegation, the way a page writes it: one listener, then
                 // `closest()` to find which matching element was hit.
-                let Some(__cur) = __d.closest(evt.target, "#order-btn") else {
+                let Some(_) = __d.closest(evt.target, "#order-btn") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                if let Some(el) = dom::query_selector_mut(root, "#status") {
-                    dom::set_text_content(el, "Order placed! Thank you!");
+                if let Some(el) = __d.query_selector("#status") {
+                    __d.set_text_content(el, "Order placed! Thank you!");
                 }
-                if let Some(el) = dom::query_selector_mut(root, "#progress") {
-                    dom::set_attribute(el, "value", "1");
+                if let Some(el) = __d.query_selector("#progress") {
+                    __d.set_attribute(el, "value", "1");
                 }
                 eprintln!("🍕 ORDER PLACED!");
             }),
@@ -205,39 +195,37 @@ impl ApplicationHandler<()> for App {
             Box::new(move |evt, __d: &mut webcore::Document| {
                 // Delegation, the way a page writes it: one listener, then
                 // `closest()` to find which matching element was hit.
-                let Some(__cur) = __d.closest(evt.target, "#reset-btn") else {
+                let Some(_) = __d.closest(evt.target, "#reset-btn") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
                 // Clear text inputs
                 for id in &["name", "phone"] {
-                    if let Some(el) = dom::query_selector_mut(root, &format!("#{}", id)) {
-                        dom::set_attribute(el, "value", "");
+                    if let Some(el) = __d.query_selector(&format!("#{}", id)) {
+                        __d.set_value(el, "");
                     }
                 }
                 // Uncheck all toppings
                 for id in &[
                     "pep", "mush", "onion", "saus", "pepper", "olive", "cheese", "jala",
                 ] {
-                    if let Some(el) = dom::query_selector_mut(root, &format!("#{}", id)) {
-                        el.attributes.remove("checked");
+                    if let Some(el) = __d.query_selector(&format!("#{}", id)) {
+                        __d.set_checked(el, false);
                     }
                 }
-                if let Some(el) = dom::query_selector_mut(root, "#status") {
-                    dom::set_text_content(el, "Order reset. Start fresh!");
+                if let Some(el) = __d.query_selector("#status") {
+                    __d.set_text_content(el, "Order reset. Start fresh!");
                 }
-                if let Some(el) = dom::query_selector_mut(root, "#progress") {
-                    dom::set_attribute(el, "value", "0");
+                if let Some(el) = __d.query_selector("#progress") {
+                    __d.set_attribute(el, "value", "0");
                 }
-                update_summary(root);
+                update_summary(__d);
                 eprintln!("🔄 Order reset");
             }),
             webcore::dom::events::ListenerOptions::default(),
         );
 
         // Initial summary
-        update_summary(&mut doc.root);
+        update_summary(&mut doc);
 
         self.doc = Some(doc);
         self.window = Some(window);
@@ -396,4 +384,24 @@ fn main() {
     let event_loop = EventLoop::new().expect("event loop");
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("run");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summary_reads_live_form_values() {
+        let mut doc = load_html(HTML, 860.0);
+        let name = doc.query_selector("#name").unwrap();
+        let topping = doc.query_selector("#pep").unwrap();
+        doc.set_value(name, "Youness");
+        doc.set_checked(topping, true);
+        update_summary(&mut doc);
+
+        let name_summary = doc.query_selector("#sum-name").unwrap();
+        let topping_summary = doc.query_selector("#sum-toppings").unwrap();
+        assert_eq!(doc.text_content(name_summary), "Youness");
+        assert!(doc.text_content(topping_summary).contains("Pepperoni"));
+    }
 }

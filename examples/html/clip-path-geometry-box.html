@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Clip-path geometry boxes</title>
+<style>
+  body { margin: 24px; font: 16px sans-serif; }
+  main { display: flex; gap: 24px; align-items: start; }
+  section { width: 140px; }
+  .shape {
+    position: relative;
+    width: 80px;
+    height: 80px;
+    padding: 10px;
+    border: 5px solid transparent;
+    border-radius: 30px;
+  }
+  .shape > div { position: absolute; inset: 0; background: #e52838; }
+  .rounded { clip-path: border-box; }
+  .square { clip-path: inset(0) border-box; }
+  .padding { clip-path: padding-box; }
+  .content { clip-path: content-box; }
+</style>
+<main>
+  <section><div class="shape rounded"><div></div></div><p>border-box</p></section>
+  <section><div class="shape square"><div></div></div><p>inset(0) border-box</p></section>
+  <section><div class="shape padding"><div></div></div><p>padding-box</p></section>
+  <section><div class="shape content"><div></div></div><p>content-box</p></section>
+</main>

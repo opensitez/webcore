@@ -89,13 +89,14 @@ body {
 .card:hover { border-color: #58a6ff; background: #0d1824; }
 .card .cap { font-size: 7pt; color: #8b949e; margin-top: 4px; padding: 0 4px; }
 
-/* ---- SVG chart containers ---- */
-.chart-svg {
+/* ---- Custom graph elements render into standard canvas children ---- */
+vybe-graph {
   display: block;
   width: 340px; height: 190px;
   background: #161b22;
   border-radius: 6px;
 }
+vybe-graph canvas { display: block; width: 100%; height: 100%; }
 
 /* ---- Buttons ---- */
 .btn-row { display: flex; gap: 8px; padding: 0 16px 12px 16px; flex-wrap: wrap; }
@@ -152,8 +153,7 @@ svg text { font-family: -apple-system, Helvetica, Arial, sans-serif; }
 <!-- Header -->
 <div class="hdr">
   <h1>Custom Components + Events Demo</h1>
-  <p class="sub">Showcases <code>RegisterComponent()</code> for the &lt;graph&gt; tag
-     and <code>AddEventListener()</code> for interactivity</p>
+  <p class="sub">Custom graph elements draw through Canvas 2D and respond to DOM events.</p>
   <p class="hint">
     <span class="key">Click</span> chart to cycle type &nbsp;
     <span class="key">Hover</span> chart for glow &nbsp;
@@ -256,46 +256,46 @@ svg text { font-family: -apple-system, Helvetica, Arial, sans-serif; }
 
         <!-- 1: BAR – Weekly Revenue -->
         <div class="card" id="card1">
-          <graph
+          <vybe-graph
             data-type="bar"
             data-title="Weekly Revenue ($K)"
             data-values="42,58,35,67,49,73,61"
             data-labels="Mon,Tue,Wed,Thu,Fri,Sat,Sun"
             data-colors="#4e79a7,#4e79a7,#4e79a7,#4e79a7,#4e79a7,#58a6ff,#58a6ff"
             data-width="340" data-height="190">
-          </graph>
+          </vybe-graph>
           <div class="cap">Revenue by day</div>
         </div>
 
         <!-- 2: AREA – Active Users -->
         <div class="card" id="card2">
-          <graph
+          <vybe-graph
             data-type="area"
             data-title="Active Users (7d)"
             data-values="820,934,901,1034,1290,1330,1280"
             data-labels="Mon,Tue,Wed,Thu,Fri,Sat,Sun"
             data-colors="#3fb950"
             data-width="340" data-height="190">
-          </graph>
+          </vybe-graph>
           <div class="cap">User engagement trend</div>
         </div>
 
         <!-- 3: DONUT – Traffic Sources -->
         <div class="card" id="card3">
-          <graph
+          <vybe-graph
             data-type="donut"
             data-title="Traffic Sources"
             data-values="48,27,15,10"
             data-labels="Organic,Direct,Referral,Social"
             data-colors="#4e79a7,#f28e2b,#59a14f,#e15759"
             data-width="340" data-height="190">
-          </graph>
+          </vybe-graph>
           <div class="cap">Source breakdown</div>
         </div>
 
         <!-- 4: LINE – Response Time -->
         <div class="card" id="card4">
-          <graph
+          <vybe-graph
             data-type="line"
             data-title="Response Time (ms)"
             data-values="234,198,256,187,201,178,165,190,210,175,155,148"
@@ -303,33 +303,33 @@ svg text { font-family: -apple-system, Helvetica, Arial, sans-serif; }
             data-colors="#d29922"
             data-min="100" data-max="300"
             data-width="340" data-height="190">
-          </graph>
+          </vybe-graph>
           <div class="cap">P95 latency over 12 months</div>
         </div>
 
         <!-- 5: HBAR – Feature Usage -->
         <div class="card" id="card5">
-          <graph
+          <vybe-graph
             data-type="hbar"
             data-title="Feature Usage"
             data-values="89,72,65,51,43,28"
             data-labels="Search,Upload,Export,Share,Filter,API"
             data-colors="#b07aa1"
             data-width="340" data-height="190">
-          </graph>
+          </vybe-graph>
           <div class="cap">Most-used features this quarter</div>
         </div>
 
         <!-- 6: GAUGE – Server Uptime -->
         <div class="card" id="card6">
-          <graph
+          <vybe-graph
             data-type="gauge"
             data-values="99.7"
             data-labels="SLA: 99.5%"
             data-colors="#3fb950"
             data-min="95" data-max="100"
             data-width="340" data-height="190">
-          </graph>
+          </vybe-graph>
           <div class="cap">30-day rolling availability</div>
         </div>
 
@@ -345,25 +345,25 @@ svg text { font-family: -apple-system, Helvetica, Arial, sans-serif; }
 
         <!-- PIE – Traffic Sources (same data, no hole) -->
         <div class="card" id="bonus1">
-          <graph
+          <vybe-graph
             data-type="pie"
             data-title="Traffic Sources"
             data-values="48,27,15,10"
             data-labels="Organic,Direct,Referral,Social"
             data-colors="#4e79a7,#f28e2b,#59a14f,#e15759"
             data-width="340" data-height="190">
-          </graph>
+          </vybe-graph>
           <div class="cap">Solid pie — same data as donut</div>
         </div>
 
         <!-- SCATTER – Response time as scatter plot -->
         <div class="card" id="bonus2">
-          <graph
+          <vybe-graph
             data-type="scatter"
             data-title="Response Time Scatter (ms)"
             data-values="234,198,256,187,201,178,165,190,210,175,155,148"
             data-width="340" data-height="190">
-          </graph>
+          </vybe-graph>
           <div class="cap">Same latency data as scatter points</div>
         </div>
 
@@ -386,10 +386,8 @@ svg text { font-family: -apple-system, Helvetica, Arial, sans-serif; }
 </div><!-- .main -->
 
 <div class="ftr">
-  <code>RegisterComponent("graph", measure, paint)</code> binds the custom drawing.
-  <code>AddEventListener(selector, type, callback)</code> binds all interactivity.
-  Components are C++ app-side only; HTML cannot activate them.
-  This page is a static HTML+CSS+SVG reconstruction of the graph_demo output.
+  <code>vybe-graph</code> upgrades into a canvas-backed element.
+  Its observed attributes redraw the chart, and DOM listeners handle interaction.
 </div>
 
 </body>

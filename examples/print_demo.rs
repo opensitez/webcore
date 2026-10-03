@@ -12,7 +12,6 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::Window;
 
-use webcore::dom;
 use webcore::dom::events::ListenerOptions;
 use webcore::platform::Platform;
 use webcore::{Document, LayoutEngine, Renderer, load_html};
@@ -304,25 +303,18 @@ fn apply_print_demo_state(doc: &mut Document) {
 
 fn selector_checked(doc: &Document, selector: &str) -> bool {
     doc.query_selector(selector)
-        .and_then(|id| doc.get_attribute(id, "checked"))
-        .is_some()
+        .is_some_and(|id| doc.checked(id))
 }
 
 fn toggle_checked(doc: &mut Document, selector: &str) {
     if let Some(id) = doc.query_selector(selector) {
-        if doc.get_attribute(id, "checked").is_some() {
-            doc.remove_attribute(id, "checked");
-        } else {
-            doc.set_attribute(id, "checked", "");
-        }
+        doc.set_checked(id, !doc.checked(id));
     }
 }
 
 fn set_notice(doc: &mut Document, text: &str) {
     if let Some(id) = doc.query_selector("#notice") {
-        if let Some(node) = dom::find_box_mut(&mut doc.root, id) {
-            dom::set_text_content(node, text);
-        }
+        doc.set_text_content(id, text);
     }
 }
 

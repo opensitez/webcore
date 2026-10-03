@@ -35,8 +35,8 @@
       color: #334155;
     }
     .tb-btn:hover { background: #e2e8f0; }
-    .tb-toggle { background: #e0e7ff; color: #4338ca; border-color: #a5b4fc; }
     .tb-active { background: #4338ca; color: #ffffff; border-color: #312e81; }
+    .tb-btn.tb-active:hover { background: #3730a3; color: #ffffff; border-color: #312e81; }
     .tb-label  { font-size: 12px; color: #64748b; }
     .tb-slider { width: 90px; }
 
@@ -188,14 +188,14 @@
      TOOLBAR  (mirrors wxWidgets native toolbar)
      ══════════════════════════════════════════ -->
 <div id="toolbar">
-  <button class="tb-btn tb-toggle">&#127769; Dark</button>
-  <button class="tb-btn">&#128207; Compact</button>
-  <button class="tb-btn">&#9997; Pause</button>
-  <button class="tb-btn">&#128293; Chaos</button>
+  <button class="tb-btn" data-dom-action="dark" aria-pressed="false">&#127769; Dark</button>
+  <button class="tb-btn" data-dom-action="compact" aria-pressed="false">&#128207; Compact</button>
+  <button class="tb-btn" data-dom-action="pause" aria-pressed="false">&#9997; Pause</button>
+  <button class="tb-btn" data-dom-action="chaos" aria-pressed="false">&#128293; Chaos</button>
   &nbsp;
-  <button class="tb-btn">&#43; Service</button>
-  <button class="tb-btn">&#128465; Alerts</button>
-  <button class="tb-btn">&#128465; Feed</button>
+  <button class="tb-btn" data-dom-action="service">&#43; Service</button>
+  <button class="tb-btn" data-dom-action="alerts">&#128465; Alerts</button>
+  <button class="tb-btn" data-dom-action="feed">&#128465; Feed</button>
   <span style="flex: 1;"></span>
   <span class="tb-label">Speed:</span>
   <input id="speed-slider" type="range" class="tb-slider" min="200" max="3000" value="1000" title="Update interval (ms)">

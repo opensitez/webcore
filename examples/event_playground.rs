@@ -6,24 +6,11 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::Window;
 
-use webcore::WebCore;
-use webcore::dom::{self, HtmlEventType};
+use webcore::dom::HtmlEventType;
 use webcore::platform::Platform;
 use webcore::{Document, LayoutEngine, Renderer, load_html};
 
 const HTML: &str = include_str!("html/event_playground.html");
-
-fn find_node(node: &WebCore, id: u32) -> Option<&WebCore> {
-    if node.node_id == id {
-        return Some(node);
-    }
-    for child in &node.children {
-        if let Some(found) = find_node(child, id) {
-            return Some(found);
-        }
-    }
-    None
-}
 
 // ── Shared event log buffer ────────────────────────────────────────────────────
 
@@ -160,17 +147,10 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, ".hover-box") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                let cur_id = __cur;
-                let id = dom::find_box_mut(root, cur_id)
-                    .map(|t| {
-                        dom::add_class(t, "hover-box-active");
-                        t.attributes.get("id").cloned().unwrap_or_default()
-                    })
-                    .unwrap_or_default();
-                if let Some(el) = dom::query_selector_mut(root, "#hover-status") {
-                    dom::set_text_content(el, &format!("MouseOver: #{}", id));
+                let id = __d.get_attribute(__cur, "id").unwrap_or_default();
+                __d.class_list_add(__cur, "hover-box-active");
+                if let Some(el) = __d.query_selector("#hover-status") {
+                    __d.set_text_content(el, &format!("MouseOver: #{}", id));
                 }
                 s.lock().unwrap().push(
                     EvCat::Mouse,
@@ -198,17 +178,10 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, ".hover-box") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                let cur_id = __cur;
-                let id = dom::find_box_mut(root, cur_id)
-                    .map(|t| {
-                        dom::remove_class(t, "hover-box-active");
-                        t.attributes.get("id").cloned().unwrap_or_default()
-                    })
-                    .unwrap_or_default();
-                if let Some(el) = dom::query_selector_mut(root, "#hover-status") {
-                    dom::set_text_content(el, &format!("MouseOut: #{}", id));
+                let id = __d.get_attribute(__cur, "id").unwrap_or_default();
+                __d.class_list_remove(__cur, "hover-box-active");
+                if let Some(el) = __d.query_selector("#hover-status") {
+                    __d.set_text_content(el, &format!("MouseOut: #{}", id));
                 }
                 s.lock()
                     .unwrap()
@@ -229,12 +202,7 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, ".hover-box") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                let cur_id = __cur;
-                let id = find_node(root, cur_id)
-                    .and_then(|t| t.attributes.get("id").cloned())
-                    .unwrap_or_default();
+                let id = __d.get_attribute(__cur, "id").unwrap_or_default();
                 s.lock()
                     .unwrap()
                     .push(EvCat::Mouse, "MouseEnter", &format!("#{}", id));
@@ -254,12 +222,7 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, ".hover-box") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                let cur_id = __cur;
-                let id = find_node(root, cur_id)
-                    .and_then(|t| t.attributes.get("id").cloned())
-                    .unwrap_or_default();
+                let id = __d.get_attribute(__cur, "id").unwrap_or_default();
                 s.lock()
                     .unwrap()
                     .push(EvCat::Mouse, "MouseLeave", &format!("#{}", id));
@@ -279,8 +242,6 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, "#zone-hover") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
                 s.lock().unwrap().push(
                     EvCat::Mouse,
                     "MouseMove",
@@ -306,13 +267,10 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, "#btn-click") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                if let Some(el) = dom::query_selector_mut(root, "#click-status") {
-                    dom::set_text_content(el, "Click fired!");
+                if let Some(el) = __d.query_selector("#click-status") {
+                    __d.set_text_content(el, "Click fired!");
                 }
                 s.lock().unwrap().push(EvCat::Mouse, "Click", "#btn-click");
-                let _ = root;
             }),
             webcore::dom::events::ListenerOptions::default(),
         );
@@ -329,15 +287,12 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, "#btn-dblclick") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                if let Some(el) = dom::query_selector_mut(root, "#click-status") {
-                    dom::set_text_content(el, "DblClick fired!");
+                if let Some(el) = __d.query_selector("#click-status") {
+                    __d.set_text_content(el, "DblClick fired!");
                 }
                 s.lock()
                     .unwrap()
                     .push(EvCat::Mouse, "DblClick", "#btn-dblclick");
-                let _ = root;
             }),
             webcore::dom::events::ListenerOptions::default(),
         );
@@ -354,10 +309,8 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, "#btn-ctx") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                if let Some(el) = dom::query_selector_mut(root, "#click-status") {
-                    dom::set_text_content(el, "ContextMenu fired!");
+                if let Some(el) = __d.query_selector("#click-status") {
+                    __d.set_text_content(el, "ContextMenu fired!");
                 }
                 s.lock().unwrap().push(
                     EvCat::Mouse,
@@ -368,7 +321,6 @@ impl ApplicationHandler for App {
                         (evt.client_x, evt.client_y).1
                     ),
                 );
-                let _ = root;
             }),
             webcore::dom::events::ListenerOptions::default(),
         );
@@ -385,17 +337,10 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, ".drag-card") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                let cur_id = __cur;
-                let id = dom::find_box_mut(root, cur_id)
-                    .map(|t| {
-                        dom::add_class(t, "drag-card-active");
-                        t.attributes.get("id").cloned().unwrap_or_default()
-                    })
-                    .unwrap_or_default();
-                if let Some(el) = dom::query_selector_mut(root, "#drag-status") {
-                    dom::set_text_content(el, &format!("Dragging #{}", id));
+                let id = __d.get_attribute(__cur, "id").unwrap_or_default();
+                __d.class_list_add(__cur, "drag-card-active");
+                if let Some(el) = __d.query_selector("#drag-status") {
+                    __d.set_text_content(el, &format!("Dragging #{}", id));
                 }
                 s.lock()
                     .unwrap()
@@ -416,12 +361,7 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, ".drag-card") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                let cur_id = __cur;
-                let id = find_node(root, cur_id)
-                    .and_then(|t| t.attributes.get("id").cloned())
-                    .unwrap_or_default();
+                let id = __d.get_attribute(__cur, "id").unwrap_or_default();
                 s.lock().unwrap().push(
                     EvCat::Drag,
                     "Drag",
@@ -448,17 +388,10 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, ".drag-card") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                let cur_id = __cur;
-                let id = dom::find_box_mut(root, cur_id)
-                    .map(|t| {
-                        dom::remove_class(t, "drag-card-active");
-                        t.attributes.get("id").cloned().unwrap_or_default()
-                    })
-                    .unwrap_or_default();
-                if let Some(el) = dom::query_selector_mut(root, "#drag-status") {
-                    dom::set_text_content(el, &format!("DragEnd #{}", id));
+                let id = __d.get_attribute(__cur, "id").unwrap_or_default();
+                __d.class_list_remove(__cur, "drag-card-active");
+                if let Some(el) = __d.query_selector("#drag-status") {
+                    __d.set_text_content(el, &format!("DragEnd #{}", id));
                 }
                 s.lock()
                     .unwrap()
@@ -479,21 +412,18 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, "body") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
                 let kc = evt.key_code;
                 let key_name = key_code_name(kc);
-                if let Some(el) = dom::query_selector_mut(root, "#key-display") {
-                    dom::set_text_content(el, &format!("Key: {} (code {})", key_name, kc));
-                    dom::add_class(el, "key-display-active");
+                if let Some(el) = __d.query_selector("#key-display") {
+                    __d.set_text_content(el, &format!("Key: {} (code {})", key_name, kc));
+                    __d.class_list_add(el, "key-display-active");
                 }
-                if let Some(el) = dom::query_selector_mut(root, "#key-status") {
-                    dom::set_text_content(el, &format!("KeyDown: {}", key_name));
+                if let Some(el) = __d.query_selector("#key-status") {
+                    __d.set_text_content(el, &format!("KeyDown: {}", key_name));
                 }
                 s.lock()
                     .unwrap()
                     .push(EvCat::Key, "KeyDown", &format!("{} ({})", key_name, kc));
-                let _ = root;
             }),
             webcore::dom::events::ListenerOptions::default(),
         );
@@ -510,17 +440,14 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, "body") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
                 let kc = evt.key_code;
                 let key_name = key_code_name(kc);
-                if let Some(el) = dom::query_selector_mut(root, "#key-display") {
-                    dom::remove_class(el, "key-display-active");
+                if let Some(el) = __d.query_selector("#key-display") {
+                    __d.class_list_remove(el, "key-display-active");
                 }
                 s.lock()
                     .unwrap()
                     .push(EvCat::Key, "KeyUp", &format!("{} ({})", key_name, kc));
-                let _ = root;
             }),
             webcore::dom::events::ListenerOptions::default(),
         );
@@ -537,8 +464,6 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, "#zone-wheel") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
                 let dx = evt.delta_x;
                 let dy = evt.delta_y;
                 let mut st = s.lock().unwrap();
@@ -550,19 +475,18 @@ impl ApplicationHandler for App {
                 let pos = st.wheel_pos;
                 st.push(EvCat::Wheel, "Wheel", &format!("dx={:.1} dy={:.1}", dx, dy));
                 drop(st);
-                if let Some(el) = dom::query_selector_mut(root, "#wheel-count") {
-                    dom::set_text_content(el, &count.to_string());
+                if let Some(el) = __d.query_selector("#wheel-count") {
+                    __d.set_text_content(el, &count.to_string());
                 }
-                if let Some(el) = dom::query_selector_mut(root, "#wheel-delta-label") {
-                    dom::set_text_content(el, &format!("dx={:.1}  dy={:.1}", dx, dy));
+                if let Some(el) = __d.query_selector("#wheel-delta-label") {
+                    __d.set_text_content(el, &format!("dx={:.1}  dy={:.1}", dx, dy));
                 }
                 // Bar centred at 50%: scroll down → right, scroll up → left.
                 // Decays back to centre when scrolling stops.
                 let bar_pct = (50.0 + pos.clamp(-50.0, 50.0)).clamp(0.0, 100.0) as u32;
-                if let Some(el) = dom::query_selector_mut(root, "#wheel-bar") {
-                    dom::set_style_property(el, "width", &format!("{}%", bar_pct));
+                if let Some(el) = __d.query_selector("#wheel-bar") {
+                    __d.set_style_property(el, "width", &format!("{}%", bar_pct));
                 }
-                let _ = root;
             }),
             webcore::dom::events::ListenerOptions::default(),
         );
@@ -579,21 +503,14 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, ".focus-item") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                let cur_id = __cur;
-                let id = dom::find_box_mut(root, cur_id)
-                    .map(|t| {
-                        dom::add_class(t, "focus-item-focused");
-                        t.attributes.get("id").cloned().unwrap_or_default()
-                    })
-                    .unwrap_or_default();
+                let id = __d.get_attribute(__cur, "id").unwrap_or_default();
+                __d.class_list_add(__cur, "focus-item-focused");
                 let dot_id = format!("#{}", id.replace("focus-item", "focus-dot"));
-                if let Some(dot) = dom::query_selector_mut(root, &dot_id) {
-                    dom::add_class(dot, "focus-dot-on");
+                if let Some(dot) = __d.query_selector(&dot_id) {
+                    __d.class_list_add(dot, "focus-dot-on");
                 }
-                if let Some(el) = dom::query_selector_mut(root, "#focus-status") {
-                    dom::set_text_content(el, &format!("Focus: #{}", id));
+                if let Some(el) = __d.query_selector("#focus-status") {
+                    __d.set_text_content(el, &format!("Focus: #{}", id));
                 }
                 s.lock()
                     .unwrap()
@@ -614,21 +531,14 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, ".focus-item") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                let cur_id = __cur;
-                let id = dom::find_box_mut(root, cur_id)
-                    .map(|t| {
-                        dom::remove_class(t, "focus-item-focused");
-                        t.attributes.get("id").cloned().unwrap_or_default()
-                    })
-                    .unwrap_or_default();
+                let id = __d.get_attribute(__cur, "id").unwrap_or_default();
+                __d.class_list_remove(__cur, "focus-item-focused");
                 let dot_id = format!("#{}", id.replace("focus-item", "focus-dot"));
-                if let Some(dot) = dom::query_selector_mut(root, &dot_id) {
-                    dom::remove_class(dot, "focus-dot-on");
+                if let Some(dot) = __d.query_selector(&dot_id) {
+                    __d.class_list_remove(dot, "focus-dot-on");
                 }
-                if let Some(el) = dom::query_selector_mut(root, "#focus-status") {
-                    dom::set_text_content(el, &format!("Blur: #{}", id));
+                if let Some(el) = __d.query_selector("#focus-status") {
+                    __d.set_text_content(el, &format!("Blur: #{}", id));
                 }
                 s.lock()
                     .unwrap()
@@ -649,12 +559,7 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, ".focus-item") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                let cur_id = __cur;
-                let id = find_node(root, cur_id)
-                    .and_then(|t| t.attributes.get("id").cloned())
-                    .unwrap_or_default();
+                let id = __d.get_attribute(__cur, "id").unwrap_or_default();
                 s.lock()
                     .unwrap()
                     .push(EvCat::Focus, "FocusIn", &format!("#{}", id));
@@ -674,12 +579,7 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, ".focus-item") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                let cur_id = __cur;
-                let id = find_node(root, cur_id)
-                    .and_then(|t| t.attributes.get("id").cloned())
-                    .unwrap_or_default();
+                let id = __d.get_attribute(__cur, "id").unwrap_or_default();
                 s.lock()
                     .unwrap()
                     .push(EvCat::Focus, "FocusOut", &format!("#{}", id));
@@ -699,10 +599,8 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, "#pointer-canvas") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                if let Some(el) = dom::query_selector_mut(root, "#pointer-status") {
-                    dom::set_text_content(
+                if let Some(el) = __d.query_selector("#pointer-status") {
+                    __d.set_text_content(
                         el,
                         &format!(
                             "PointerDown at ({:.0},{:.0})",
@@ -720,7 +618,6 @@ impl ApplicationHandler for App {
                         (evt.client_x, evt.client_y).1
                     ),
                 );
-                let _ = root;
             }),
             webcore::dom::events::ListenerOptions::default(),
         );
@@ -737,10 +634,8 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, "#pointer-canvas") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
-                if let Some(el) = dom::query_selector_mut(root, "#pointer-status") {
-                    dom::set_text_content(
+                if let Some(el) = __d.query_selector("#pointer-status") {
+                    __d.set_text_content(
                         el,
                         &format!(
                             "PointerUp at ({:.0},{:.0})",
@@ -758,7 +653,6 @@ impl ApplicationHandler for App {
                         (evt.client_x, evt.client_y).1
                     ),
                 );
-                let _ = root;
             }),
             webcore::dom::events::ListenerOptions::default(),
         );
@@ -775,32 +669,26 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, "#pointer-canvas") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
                 let cx = (evt.client_x, evt.client_y).0;
                 let cy = (evt.client_x, evt.client_y).1;
-                // Find canvas rect first, then update dot
-                let (canvas_x, canvas_y) = {
-                    let canvas = dom::query_selector_mut(root, "#pointer-canvas");
-                    canvas
-                        .map(|c| (c.layout.border_rect.x, c.layout.border_rect.y))
-                        .unwrap_or((0.0, 0.0))
-                };
+                let (canvas_x, canvas_y) = __d.query_selector("#pointer-canvas")
+                    .and_then(|id| __d.get_bounding_client_rect(id))
+                    .map(|rect| (rect.x, rect.y))
+                    .unwrap_or((0.0, 0.0));
                 let rel_x = (cx - canvas_x - 7.0).max(0.0);
                 let rel_y = (cy - canvas_y - 7.0).max(0.0);
-                if let Some(dot) = dom::query_selector_mut(root, "#pointer-dot") {
-                    dom::set_style_property(dot, "left", &format!("{}px", rel_x as u32));
-                    dom::set_style_property(dot, "top", &format!("{}px", rel_y as u32));
+                if let Some(dot) = __d.query_selector("#pointer-dot") {
+                    __d.set_style_property(dot, "left", &format!("{}px", rel_x as u32));
+                    __d.set_style_property(dot, "top", &format!("{}px", rel_y as u32));
                 }
-                if let Some(el) = dom::query_selector_mut(root, "#pointer-status") {
-                    dom::set_text_content(el, &format!("PointerMove ({:.0},{:.0})", cx, cy));
+                if let Some(el) = __d.query_selector("#pointer-status") {
+                    __d.set_text_content(el, &format!("PointerMove ({:.0},{:.0})", cx, cy));
                 }
                 s.lock().unwrap().push(
                     EvCat::Pointer,
                     "PointerMove",
                     &format!("({:.0},{:.0})", cx, cy),
                 );
-                let _ = root;
             }),
             webcore::dom::events::ListenerOptions::default(),
         );
@@ -817,8 +705,6 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, "#zone-pointer") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
                 s.lock().unwrap().push(
                     EvCat::Pointer,
                     "PointerOver",
@@ -844,8 +730,6 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, "#zone-pointer") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
                 s.lock().unwrap().push(
                     EvCat::Pointer,
                     "PointerOut",
@@ -871,17 +755,14 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, "body") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
                 let w = (evt.client_x, evt.client_y).0 as u32;
                 let h = (evt.client_x, evt.client_y).1 as u32;
-                if let Some(el) = dom::query_selector_mut(root, "#viewport-size") {
-                    dom::set_text_content(el, &format!("{}x{}", w, h));
+                if let Some(el) = __d.query_selector("#viewport-size") {
+                    __d.set_text_content(el, &format!("{}x{}", w, h));
                 }
                 s.lock()
                     .unwrap()
                     .push(EvCat::Life, "Resize", &format!("{}x{}", w, h));
-                let _ = root;
             }),
             webcore::dom::events::ListenerOptions::default(),
         );
@@ -930,8 +811,8 @@ impl ApplicationHandler for App {
                     // Update viewport display
                     let w = size.width;
                     let h = size.height;
-                    if let Some(el) = dom::query_selector_mut(&mut doc.root, "#viewport-size") {
-                        dom::set_text_content(el, &format!("{}x{}", w, h));
+                    if let Some(el) = doc.query_selector("#viewport-size") {
+                        doc.set_text_content(el, &format!("{}x{}", w, h));
                     }
                     self.shared.lock().unwrap().push(
                         EvCat::Life,
@@ -1106,25 +987,20 @@ impl ApplicationHandler for App {
                             let counts = st.counts;
                             drop(st);
 
-                            let root = &mut doc.root;
                             for (i, (cat, tag, body)) in entries.iter().enumerate() {
                                 let sel = format!("#log-{}", i);
-                                if let Some(el) = dom::query_selector_mut(root, &sel) {
-                                    dom::set_text_content(el, &format!("[{}] {}", tag, body));
-                                    dom::remove_class(el, "log-tag-mouse");
-                                    dom::remove_class(el, "log-tag-pointer");
-                                    dom::remove_class(el, "log-tag-focus");
-                                    dom::remove_class(el, "log-tag-key");
-                                    dom::remove_class(el, "log-tag-wheel");
-                                    dom::remove_class(el, "log-tag-drag");
-                                    dom::remove_class(el, "log-tag-life");
-                                    dom::add_class(el, cat.css_class());
+                                if let Some(el) = doc.query_selector(&sel) {
+                                    doc.set_text_content(el, &format!("[{}] {}", tag, body));
+                                    for class in ["log-tag-mouse", "log-tag-pointer", "log-tag-focus", "log-tag-key", "log-tag-wheel", "log-tag-drag", "log-tag-life"] {
+                                        doc.class_list_remove(el, class);
+                                    }
+                                    doc.class_list_add(el, cat.css_class());
                                 }
                             }
                             for i in entries.len()..20 {
                                 let sel = format!("#log-{}", i);
-                                if let Some(el) = dom::query_selector_mut(root, &sel) {
-                                    dom::set_text_content(el, "...");
+                                if let Some(el) = doc.query_selector(&sel) {
+                                    doc.set_text_content(el, "...");
                                 }
                             }
                             let stat_ids = [
@@ -1138,13 +1014,13 @@ impl ApplicationHandler for App {
                             ];
                             for (id, idx) in &stat_ids {
                                 let sel = format!("#{}", id);
-                                if let Some(el) = dom::query_selector_mut(root, &sel) {
-                                    dom::set_text_content(el, &counts[*idx].to_string());
+                                if let Some(el) = doc.query_selector(&sel) {
+                                    doc.set_text_content(el, &counts[*idx].to_string());
                                 }
                             }
                             let total: u32 = counts.iter().sum();
-                            if let Some(el) = dom::query_selector_mut(root, "#stat-total") {
-                                dom::set_text_content(el, &total.to_string());
+                            if let Some(el) = doc.query_selector("#stat-total") {
+                                doc.set_text_content(el, &total.to_string());
                             }
                             LayoutEngine::new().layout(doc, width);
                         }

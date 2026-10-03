@@ -21,13 +21,13 @@ use winit::window::Window;
 use tiny_skia::{Pixmap, PixmapPaint, Transform};
 
 use webcore::dom::{self, HtmlEventType};
-use webcore::platform::Platform;
-use webcore::renderer::display_list::{ImageRef, PaintCmd};
+use webcore::platform::{Platform, VideoForeground, VideoLayerFrame};
+use webcore::renderer::display_list::{DisplayList, ImageRef, PaintCmd};
 use webcore::renderer::display_list_builder::{
     build_display_list_full_with_font_system, build_display_list_viewport,
 };
-use webcore::types::{Display, Overflow, Position};
-use webcore::{Document, Renderer, parse_html_with_hooks, point_to_hit};
+use webcore::types::{CssLength, Display, ObjectFit, Overflow, Position, Rect, WebCore};
+use webcore::{Document, Renderer, parse_html_with_hooks};
 
 // ─── Layout constants ─────────────────────────────────────────────────────────
 
@@ -39,12 +39,216 @@ const TAB_MIN_W: f32 = 80.0;
 
 const NEW_TAB_URL: &str = "about:newtab";
 
+fn intersects(a: Rect, b: Rect) -> bool {
+    a.w > 0.0 && a.h > 0.0 && b.w > 0.0 && b.h > 0.0
+        && a.x < b.right() && a.right() > b.x
+        && a.y < b.bottom() && a.bottom() > b.y
+}
+
+fn video_is_unobstructed(node: &WebCore, video_id: u32, video_rect: Rect) -> bool {
+    if node.node_id == video_id {
+        return true;
+    }
+    let Some(target_child) = node.children.iter().find(|child| contains_node(child, video_id)) else {
+        return false;
+    };
+    if node.style.has_transform() || node.style.opacity < 1.0 {
+        return false;
+    }
+    node.children.iter().all(|child| {
+        std::ptr::eq(child, target_child)
+            || !intersects(child.layout.border_rect, video_rect)
+    }) && video_is_unobstructed(target_child, video_id, video_rect)
+}
+
+fn contains_node(node: &WebCore, id: u32) -> bool {
+    node.node_id == id || node.children.iter().any(|child| contains_node(child, id))
+}
+
+fn find_node(node: &WebCore, id: u32) -> Option<&WebCore> {
+    if node.node_id == id {
+        return Some(node);
+    }
+    node.children.iter().find_map(|child| find_node(child, id))
+}
+
+fn find_node_mut(node: &mut WebCore, id: u32) -> Option<&mut WebCore> {
+    if node.node_id == id {
+        return Some(node);
+    }
+    node.children.iter_mut().find_map(|child| find_node_mut(child, id))
+}
+
+fn collect_videos<'a>(node: &'a WebCore, videos: &mut Vec<&'a WebCore>) {
+    if node.tag == "video" {
+        videos.push(node);
+    }
+    for child in &node.children {
+        collect_videos(child, videos);
+    }
+}
+
+fn composited_video_candidate(doc: &Document, page_w: f32, page_h: f32) -> Option<(u32, VideoLayerFrame)> {
+    if doc.scroll_y != 0.0 {
+        return None;
+    }
+    let mut videos = Vec::new();
+    collect_videos(&doc.root, &mut videos);
+    let [video] = videos.as_slice() else {
+        return None;
+    };
+    let rect = video.layout.content_rect;
+    let visible = Rect::new(0.0, 0.0, page_w, page_h);
+    if !intersects(rect, visible)
+        || rect.x < 0.0
+        || rect.y < 0.0
+        || rect.right() > page_w
+        || rect.bottom() > page_h
+        || video.media_paused
+        || video.attributes.contains_key("controls")
+        || video.style.has_transform()
+        || video.style.opacity < 1.0
+        || !matches!(video.style.object_fit, ObjectFit::Fill | ObjectFit::Cover)
+        || video.style.object_position_x != CssLength::Percent(50.0)
+        || video.style.object_position_y != CssLength::Percent(50.0)
+    {
+        return None;
+    }
+    let pixels = video.image_data.as_ref()?;
+    if video.image_width == 0
+        || video.image_height == 0
+        || u64::from(video.image_width) * u64::from(video.image_height) * 4 != pixels.len() as u64
+    {
+        return None;
+    }
+    Some((video.node_id, VideoLayerFrame {
+        rgba: pixels.clone(),
+        source_width: video.image_width,
+        source_height: video.image_height,
+        x: rect.x,
+        y: rect.y + CHROME_H,
+        width: rect.w,
+        height: rect.h,
+        cover: video.style.object_fit == ObjectFit::Cover,
+        corner_radius: 4.0,
+        tint: None,
+        foreground: None,
+    }))
+}
+
+struct NativeVideoComposition {
+    tab: usize,
+    video_id: u32,
+    page_w: f32,
+    page_h: f32,
+    scale: f32,
+    tint: [u8; 4],
+    foreground: VideoForeground,
+}
+
+fn build_native_video_composition(
+    view: &mut webcore::BrowserView,
+    tab: usize,
+    video_id: u32,
+    video_rect: Rect,
+    page_w: f32,
+    page_h: f32,
+    scale: f32,
+) -> Option<NativeVideoComposition> {
+    let (doc, renderer) = view.document_and_renderer_current_mut()?;
+    let pixels = find_node(&doc.root, video_id)?.image_data.clone()?;
+    let was_external = find_node(&doc.root, video_id)?.external_video_overlay;
+    if was_external {
+        find_node_mut(&mut doc.root, video_id)?.external_video_overlay = false;
+    }
+    let font_system = Some(&mut renderer.font_system as *mut _);
+    let list = build_display_list_full_with_font_system(
+        &doc.root,
+        page_w,
+        page_h,
+        doc.scroll_x,
+        doc.scroll_y,
+        0,
+        0,
+        &std::collections::HashSet::new(),
+        &doc.base_url,
+        font_system,
+    );
+    if was_external {
+        find_node_mut(&mut doc.root, video_id)?.external_video_overlay = true;
+    }
+    let video_index = list.commands.iter().position(|command| {
+        matches!(command, PaintCmd::Image { data: ImageRef::Shared(data, ..), .. } if Arc::ptr_eq(data, &pixels))
+    })?;
+    let mut clips = Vec::new();
+    for command in &list.commands[..video_index] {
+        match command {
+            PaintCmd::PushClip { .. } => clips.push(command.clone()),
+            PaintCmd::PopClip => { clips.pop()?; }
+            PaintCmd::PushTransform { .. }
+            | PaintCmd::PushBlendMode { .. }
+            | PaintCmd::PushFilter { .. }
+            | PaintCmd::PushMask { .. } => return None,
+            _ => {}
+        }
+    }
+    let tint_index = list.commands[video_index + 1..]
+        .iter()
+        .take(6)
+        .position(|command| matches!(command, PaintCmd::PushBlendMode { mode: 1 }))?
+        + video_index + 1;
+    let PaintCmd::FillRect { rect: tint_rect, color, .. } = list.commands.get(tint_index + 1)? else {
+        return None;
+    };
+    if !matches!(list.commands.get(tint_index + 2), Some(PaintCmd::PopBlendMode))
+        || color.a == 0
+        || tint_rect.x > video_rect.x
+        || tint_rect.y > video_rect.y
+        || tint_rect.right() < video_rect.right()
+        || tint_rect.bottom() < video_rect.bottom()
+    {
+        return None;
+    }
+    let mut overlay = DisplayList::new();
+    overlay.commands.extend(clips);
+    overlay.commands.extend_from_slice(&list.commands[tint_index + 3..]);
+    let width = ((page_w * scale).ceil() as u32).max(1);
+    let height = ((page_h * scale).ceil() as u32).max(1);
+    let mut image = Pixmap::new(width, height)?;
+    webcore::renderer::display_list_replay::replay_with_text(
+        &overlay,
+        &mut image,
+        scale,
+        &mut renderer.font_system,
+        &mut renderer.swash_cache,
+    );
+    Some(NativeVideoComposition {
+        tab,
+        video_id,
+        page_w,
+        page_h,
+        scale,
+        tint: [color.r, color.g, color.b, color.a],
+        foreground: VideoForeground {
+            rgba: Arc::new(image.data().to_vec()),
+            source_width: width,
+            source_height: height,
+            x: 0.0,
+            y: CHROME_H,
+            width: page_w,
+            height: page_h,
+        },
+    })
+}
+
 // ─── Tab ──────────────────────────────────────────────────────────────────────
 
 struct Tab {
     url: String,
     title: String,
     history: Vec<String>,
+    history_ids: Vec<u64>,
+    next_history_id: u64,
     hist_i: usize,
     view: webcore::BrowserView,
     loading: bool,
@@ -60,6 +264,8 @@ impl Tab {
             url: String::new(),
             title: "New Tab".into(),
             history: vec![],
+            history_ids: vec![],
+            next_history_id: 1,
             hist_i: 0,
             view,
             loading: false,
@@ -141,6 +347,8 @@ struct BrowserApp {
     chrome_process: Option<std::process::Child>,
     last_memory_trace: Option<std::time::Instant>,
     last_profile_trace: Option<std::time::Instant>,
+    native_video_composition: Option<NativeVideoComposition>,
+    native_video_opacity: Option<(Arc<Vec<u8>>, bool)>,
 }
 
 impl BrowserApp {
@@ -177,6 +385,8 @@ impl BrowserApp {
             chrome_process: None,
             last_memory_trace: None,
             last_profile_trace: None,
+            native_video_composition: None,
+            native_video_opacity: None,
         }
     }
 
@@ -191,7 +401,7 @@ impl BrowserApp {
         }
     }
 
-    fn start_view_navigation(&mut self, index: usize, url: String) {
+    fn start_view_navigation(&mut self, index: usize, url: String, entry_id: u64, restore: bool) {
         webcore::profile::reset();
         self.last_profile_trace = None;
         let page_w = self.page_width();
@@ -205,7 +415,7 @@ impl BrowserApp {
             load_images,
             ..Default::default()
         });
-        tab.view.navigate(url);
+        tab.view.navigate_history(url, entry_id, restore);
     }
 
     // ── Navigation ────────────────────────────────────────────────────────────
@@ -215,16 +425,20 @@ impl BrowserApp {
         let tab = &mut self.tabs[self.active];
         if !tab.history.is_empty() {
             tab.history.truncate(tab.hist_i + 1);
+            tab.history_ids.truncate(tab.hist_i + 1);
         }
         tab.history.push(url.clone());
+        let entry_id = tab.next_history_id;
+        tab.next_history_id = tab.next_history_id.wrapping_add(1);
+        tab.history_ids.push(entry_id);
         tab.hist_i = tab.history.len() - 1;
         tab.url = url.clone();
         tab.title = "Loading…".into();
         tab.loading = true;
         self.url_text = url.clone();
         self.url_focused = false;
+        self.start_view_navigation(self.active, url, entry_id, false);
         self.rebuild_chrome();
-        self.start_view_navigation(self.active, url);
     }
 
     fn go_back(&mut self) {
@@ -234,11 +448,12 @@ impl BrowserApp {
         }
         tab.hist_i -= 1;
         let url = tab.history[tab.hist_i].clone();
+        let entry_id = tab.history_ids[tab.hist_i];
         tab.url = url.clone();
         tab.loading = true;
         self.url_text = url.clone();
         self.rebuild_chrome();
-        self.start_view_navigation(self.active, url);
+        self.start_view_navigation(self.active, url, entry_id, true);
     }
 
     fn go_forward(&mut self) {
@@ -248,11 +463,12 @@ impl BrowserApp {
         }
         tab.hist_i += 1;
         let url = tab.history[tab.hist_i].clone();
+        let entry_id = tab.history_ids[tab.hist_i];
         tab.url = url.clone();
         tab.loading = true;
         self.url_text = url.clone();
         self.rebuild_chrome();
-        self.start_view_navigation(self.active, url);
+        self.start_view_navigation(self.active, url, entry_id, true);
     }
 
     fn reload(&mut self) {
@@ -260,9 +476,16 @@ impl BrowserApp {
         if url.is_empty() {
             return;
         }
+        let Some(&entry_id) = self.tabs[self.active]
+            .history_ids
+            .get(self.tabs[self.active].hist_i)
+        else {
+            self.navigate(url);
+            return;
+        };
         self.tabs[self.active].loading = true;
         self.rebuild_chrome();
-        self.start_view_navigation(self.active, url);
+        self.start_view_navigation(self.active, url, entry_id, false);
     }
 
     fn new_tab(&mut self) {
@@ -675,11 +898,20 @@ impl ApplicationHandler<()> for BrowserApp {
         self.height = platform.logical_height();
         self.window = Some(win);
         self.platform = Some(platform);
-        let start_url = self
-            .initial_url
-            .take()
-            .unwrap_or_else(|| NEW_TAB_URL.to_string());
-        self.navigate(start_url);
+        if self.tabs[self.active].history.is_empty() {
+            let start_url = self
+                .initial_url
+                .take()
+                .unwrap_or_else(|| NEW_TAB_URL.to_string());
+            self.navigate(start_url);
+        } else {
+            let page_width = self.page_width();
+            let content_height = self.content_h();
+            self.tabs[self.active]
+                .view
+                .resize(page_width, content_height);
+            self.rebuild_chrome();
+        }
     }
 
     fn user_event(&mut self, _el: &winit::event_loop::ActiveEventLoop, _: ()) {
@@ -696,6 +928,87 @@ impl ApplicationHandler<()> for BrowserApp {
         let content_h = self.content_h();
         self.tabs[self.active].view.resize(page_w, content_h);
         let needs_redraw = self.tabs[self.active].view.drive_idle(el);
+        let mut candidate = self.platform.as_ref().filter(|p| p.supports_video_layer()).and_then(|_| {
+            self.tabs[self.active].view.document()
+                .and_then(|doc| composited_video_candidate(doc, page_w, content_h))
+        });
+        if let Some((_, frame)) = &candidate {
+            let opaque = if let Some((last, opaque)) = &self.native_video_opacity {
+                if Arc::ptr_eq(last, &frame.rgba) {
+                    *opaque
+                } else {
+                    frame.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255)
+                }
+            } else {
+                frame.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255)
+            };
+            self.native_video_opacity = Some((frame.rgba.clone(), opaque));
+            if !opaque {
+                candidate = None;
+            }
+        } else {
+            self.native_video_opacity = None;
+        }
+        if let Some((id, frame)) = candidate.as_mut() {
+            let unobstructed = self.tabs[self.active].view.document()
+                .and_then(|doc| find_node(&doc.root, *id).map(|video| {
+                    video_is_unobstructed(&doc.root, *id, video.layout.content_rect)
+                }))
+                .unwrap_or(false);
+            if unobstructed {
+                self.native_video_composition = None;
+            } else {
+                let scale = self.platform.as_ref().unwrap().scale_factor();
+                let valid = self.native_video_composition.as_ref().is_some_and(|cached| {
+                    cached.tab == self.active
+                        && cached.video_id == *id
+                        && cached.page_w == page_w
+                        && cached.page_h == content_h
+                        && cached.scale == scale
+                });
+                if needs_redraw || !valid {
+                    self.native_video_composition = build_native_video_composition(
+                        &mut self.tabs[self.active].view,
+                        self.active,
+                        *id,
+                        Rect::new(frame.x, frame.y - CHROME_H, frame.width, frame.height),
+                        page_w,
+                        content_h,
+                        scale,
+                    );
+                }
+                if let Some(composition) = &self.native_video_composition {
+                    frame.tint = Some(composition.tint);
+                    frame.foreground = Some(composition.foreground.clone());
+                } else {
+                    candidate = None;
+                }
+            }
+        } else {
+            self.native_video_composition = None;
+        }
+        let candidate_id = candidate.as_ref().map(|(id, _)| *id);
+        let mut active_videos = Vec::new();
+        if let Some(doc) = self.tabs[self.active].view.document() {
+            collect_videos(&doc.root, &mut active_videos);
+        }
+        let old_overlay_ids: Vec<u32> = active_videos.iter()
+            .filter(|node| node.external_video_overlay)
+            .map(|node| node.node_id)
+            .collect();
+        let candidate_already_overlaid = candidate_id.is_some_and(|id| old_overlay_ids.contains(&id));
+        let mut overlay_changed = false;
+        for id in old_overlay_ids {
+            if Some(id) != candidate_id {
+                overlay_changed |= self.tabs[self.active].view.set_external_video_overlay(id, false);
+            }
+        }
+        if let Some(id) = candidate_id.filter(|_| !candidate_already_overlaid) {
+            overlay_changed |= self.tabs[self.active].view.set_external_video_overlay(id, true);
+        }
+        if let Some(platform) = self.platform.as_mut() {
+            platform.present_video_layer(candidate.as_ref().map(|(_, frame)| frame));
+        }
         self.tabs[self.active].loading = self.tabs[self.active].view.is_loading();
         if !self.tabs[self.active].view.title().is_empty() {
             self.tabs[self.active].title = self.tabs[self.active].view.title().to_string();
@@ -706,8 +1019,13 @@ impl ApplicationHandler<()> for BrowserApp {
                 let tab = &mut self.tabs[self.active];
                 if tab.history.last() != Some(&url) {
                     tab.history.truncate(tab.hist_i + 1);
+                    tab.history_ids.truncate(tab.hist_i + 1);
                     tab.history.push(url.clone());
+                    let entry_id = tab.next_history_id;
+                    tab.next_history_id = tab.next_history_id.wrapping_add(1);
+                    tab.history_ids.push(entry_id);
                     tab.hist_i = tab.history.len() - 1;
+                    tab.view.set_history_entry(entry_id);
                 }
                 tab.url = url;
                 tab.title = tab.view.title().to_string();
@@ -716,7 +1034,7 @@ impl ApplicationHandler<()> for BrowserApp {
             self.url_text = self.tabs[self.active].url.clone();
             self.rebuild_chrome();
         }
-        if needs_redraw {
+        if needs_redraw || overlay_changed {
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
@@ -937,7 +1255,12 @@ impl BrowserApp {
                             let hit_nid = {
                                 if let Some(doc) = self.tabs[self.active].view.document() {
                                     let doc_pt = (sx + doc.scroll_x, csy + doc.scroll_y);
-                                    point_to_hit(&doc.root, doc_pt, 2)
+                                    webcore::layout::hit_test::point_to_hit_scrolled(
+                                        &doc.root,
+                                        doc_pt,
+                                        (doc.scroll_x, doc.scroll_y),
+                                        2,
+                                    )
                                         .map(|h| h.node_id)
                                         .filter(|&id| id != 0 && doc.get_box_by_id(id).is_some())
                                 } else {
@@ -982,11 +1305,13 @@ impl BrowserApp {
                         .as_ref()
                         .map(|p| p.scale_factor())
                         .unwrap_or(1.0);
-                    let dy = match delta {
-                        winit::event::MouseScrollDelta::LineDelta(_, y) => -y * 40.0,
-                        winit::event::MouseScrollDelta::PixelDelta(p) => -(p.y as f32) / sf,
+                    let (dx, dy) = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(x, y) => (-x * 40.0, -y * 40.0),
+                        winit::event::MouseScrollDelta::PixelDelta(p) => {
+                            (-(p.x as f32) / sf, -(p.y as f32) / sf)
+                        }
                     };
-                    self.tabs[self.active].view.handle_wheel(0.0, dy);
+                    self.tabs[self.active].view.handle_wheel(dx, dy);
                     return true;
                 }
                 false
@@ -2231,9 +2556,9 @@ fn dbg_inspect_json(node: &webcore::WebCore) -> String {
         node.svg_document.is_some(),
         svg_child_count,
         dbg_json_escape(mask_image),
-        node.mask_image_data.is_some(),
-        node.mask_image_width,
-        node.mask_image_height,
+        node.mask_images.as_ref().and_then(|images| images.first.as_ref()).is_some(),
+        node.mask_images.as_ref().and_then(|images| images.first.as_ref()).map_or(0, |image| image.width),
+        node.mask_images.as_ref().and_then(|images| images.first.as_ref()).map_or(0, |image| image.height),
     )
 }
 
@@ -2346,16 +2671,15 @@ fn dbg_computed_json(node: &webcore::WebCore) -> String {
     let _ = write!(
         buf,
         r#","grid_placement":{{"column":[{},{}],"row":[{},{}],"order":{}}}"#,
-        s.grid_column_start,
-        s.grid_column_end,
-        s.grid_row_start,
-        s.grid_row_end,
-        s.order
+        s.grid_column_start, s.grid_column_end, s.grid_row_start, s.grid_row_end, s.order
     );
     let _ = write!(
         buf,
         r#","font_size":{:.1},"font_weight":{},"font_family":{}"#,
-        s.font_size_px(webcore::ComputedStyle::INITIAL_FONT_SIZE_PX, webcore::ComputedStyle::INITIAL_FONT_SIZE_PX),
+        s.font_size_px(
+            webcore::ComputedStyle::INITIAL_FONT_SIZE_PX,
+            webcore::ComputedStyle::INITIAL_FONT_SIZE_PX
+        ),
         dbg_json_escape(&format!("{:?}", s.font_weight)),
         dbg_json_escape(&s.font_family)
     );
@@ -2432,10 +2756,14 @@ fn dbg_computed_json(node: &webcore::WebCore) -> String {
         r#","checked":{},"selected":{},"dirty_checked":{},"dirty_selected":{}"#,
         node.checkedness, node.selectedness, node.dirty_checked, node.dirty_selectedness
     );
-    let _ = write!(buf,
+    let _ = write!(
+        buf,
         r#", "scroll":{{"left":{:.2},"top":{:.2},"width":{:.2},"height":{:.2}}}"#,
-        node.layout.scroll_left, node.layout.scroll_top,
-        node.layout.scroll_width, node.layout.scroll_height);
+        node.layout.scroll_left,
+        node.layout.scroll_top,
+        node.layout.scroll_width,
+        node.layout.scroll_height
+    );
     let _ = write!(
         buf,
         r#","border_collapse":{},"matched_rules":{},"line_count":{}}}"#,
@@ -2673,6 +3001,19 @@ fn dbg_selector_center(doc: &Document, selector: &str) -> Option<(f32, f32)> {
         })
 }
 
+fn dbg_element_scroll_offsets(doc: &Document) -> std::collections::HashMap<u32, (f32, f32)> {
+    let mut offsets = std::collections::HashMap::new();
+    dbg_walk_composed(&doc.root, &mut |node| {
+        if node.node_id != 0 && (node.layout.scroll_left != 0.0 || node.layout.scroll_top != 0.0) {
+            offsets.insert(
+                node.node_id,
+                (node.layout.scroll_left, node.layout.scroll_top),
+            );
+        }
+    });
+    offsets
+}
+
 impl BrowserApp {
     /// Handle a single remote debug command line against the active tab.
     fn handle_debug_command(&mut self, line: &str) -> String {
@@ -2706,14 +3047,27 @@ impl BrowserApp {
                     return r#"{"ok":false,"error":"no document"}"#.into();
                 };
                 let selector = dbg_json_str(line, "selector");
-                let roots: std::collections::HashSet<u32> = selector.as_ref().map(|sel| {
-                    dbg_select_composed_with_pseudo(&doc.root, doc, sel).iter().map(|n| n.node_id).collect()
-                }).unwrap_or_default();
+                let roots: std::collections::HashSet<u32> = selector
+                    .as_ref()
+                    .map(|sel| {
+                        dbg_select_composed_with_pseudo(&doc.root, doc, sel)
+                            .iter()
+                            .map(|n| n.node_id)
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let mut id_counts = std::collections::HashMap::new();
                 let mut hidden_nodes = std::collections::HashMap::new();
                 Document::walk_all(&doc.root, &mut |n| {
                     if n.style.display == Display::None || n.style.opacity == 0.0 {
-                        hidden_nodes.insert(n.node_id, if n.style.display == Display::None { "display:none" } else { "opacity:0" });
+                        hidden_nodes.insert(
+                            n.node_id,
+                            if n.style.display == Display::None {
+                                "display:none"
+                            } else {
+                                "opacity:0"
+                            },
+                        );
                     }
                     if let Some(id) = n.attributes.get("id").filter(|id| !id.is_empty()) {
                         *id_counts.entry(id.clone()).or_insert(0usize) += 1;
@@ -2722,12 +3076,20 @@ impl BrowserApp {
                 let mut elements = Vec::new();
                 Document::walk_all(&doc.root, &mut |node| {
                     use webcore::dom::arena::{NodeId, NodeType};
-                    let Some(dom) = doc.arena.try_get(NodeId(node.node_id)) else { return; };
-                    if dom.node_type != NodeType::Element { return; }
+                    let Some(dom) = doc.arena.try_get(NodeId(node.node_id)) else {
+                        return;
+                    };
+                    if dom.node_type != NodeType::Element {
+                        return;
+                    }
                     let mut selected = selector.is_none();
                     let mut path = Vec::new();
                     let mut anchor = String::new();
-                    let mut hidden_by = if node.style.visibility { String::new() } else { "visibility:hidden".to_string() };
+                    let mut hidden_by = if node.style.visibility {
+                        String::new()
+                    } else {
+                        "visibility:hidden".to_string()
+                    };
                     let mut current = NodeId(node.node_id);
                     while let Some(n) = doc.arena.try_get(current) {
                         selected |= roots.contains(&current.0);
@@ -2737,8 +3099,13 @@ impl BrowserApp {
                             }
                         }
                         if anchor.is_empty() {
-                            if let Some(id) = n.attributes.get("id").filter(|id| id_counts.get(*id) == Some(&1)) {
-                                let suffix = path.iter().rev().cloned().collect::<Vec<_>>().join(" > ");
+                            if let Some(id) = n
+                                .attributes
+                                .get("id")
+                                .filter(|id| id_counts.get(*id) == Some(&1))
+                            {
+                                let suffix =
+                                    path.iter().rev().cloned().collect::<Vec<_>>().join(" > ");
                                 anchor = format!("{}|{}", id.len(), id);
                                 anchor.push_str(&suffix);
                             }
@@ -2747,32 +3114,58 @@ impl BrowserApp {
                             let mut index = 1;
                             let mut sibling = n.prev_sibling;
                             while let Some(s) = doc.arena.try_get(sibling) {
-                                if s.node_type == NodeType::Element && s.tag == n.tag { index += 1; }
+                                if s.node_type == NodeType::Element && s.tag == n.tag {
+                                    index += 1;
+                                }
                                 sibling = s.prev_sibling;
                             }
                             path.push(format!("{}:nth-of-type({index})", n.tag));
                         }
                         current = n.parent;
                     }
-                    if !selected { return; }
+                    if !selected {
+                        return;
+                    }
                     path.reverse();
                     let s = &node.style;
-                    let text = doc.arena.children(NodeId(node.node_id)).filter_map(|id| {
-                        let n = doc.arena.get(id);
-                        (n.node_type == NodeType::Text).then_some(n.text.as_str())
-                    }).collect::<Vec<_>>().join(" ");
-                    let text = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(160).collect::<String>();
-                    let attrs = ["href", "src", "alt", "aria-label", "role", "name", "type"].iter().filter_map(|key| {
-                        dom.attributes.get(*key).map(|value| format!("{}:{}", dbg_json_escape(key), dbg_json_escape(value)))
-                    }).collect::<Vec<_>>().join(",");
+                    let text = doc
+                        .arena
+                        .children(NodeId(node.node_id))
+                        .filter_map(|id| {
+                            let n = doc.arena.get(id);
+                            (n.node_type == NodeType::Text).then_some(n.text.as_str())
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let text = text
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .chars()
+                        .take(160)
+                        .collect::<String>();
+                    let attrs = ["href", "src", "alt", "aria-label", "role", "name", "type"]
+                        .iter()
+                        .filter_map(|key| {
+                            dom.attributes.get(*key).map(|value| {
+                                format!("{}:{}", dbg_json_escape(key), dbg_json_escape(value))
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",");
                     elements.push(format!(r#"{{"path":{},"anchor":{},"text":{},"hidden_by":{},"attrs":{{{}}},"computed":{},"colors":{{"color":[{},{},{},{}],"background":[{},{},{},{}]}},"image":{{"src":{},"width":{},"height":{},"decoded":{}}}}}"#,
                         dbg_json_escape(&path.join(" > ")), dbg_json_escape(&anchor), dbg_json_escape(&text), dbg_json_escape(&hidden_by), attrs, dbg_computed_json(node),
                         s.color.r,s.color.g,s.color.b,s.color.a,
                         s.background_color.r,s.background_color.g,s.background_color.b,s.background_color.a,
                         dbg_json_escape(&node.resolved_src),node.image_width,node.image_height,node.image_data.is_some()));
                 });
-                format!(r#"{{"ok":true,"url":{},"loading":{},"chrome_port":{},"elements":[{}]}}"#,
-                    dbg_json_escape(&self.tabs[self.active].url),self.tabs[self.active].loading,self.chrome_port,elements.join(","))
+                format!(
+                    r#"{{"ok":true,"url":{},"loading":{},"chrome_port":{},"elements":[{}]}}"#,
+                    dbg_json_escape(&self.tabs[self.active].url),
+                    self.tabs[self.active].loading,
+                    self.chrome_port,
+                    elements.join(",")
+                )
             }
             "chrome-eval" => {
                 if self.chrome_port == 0 {
@@ -2820,14 +3213,22 @@ impl BrowserApp {
                 }
                 let path = dbg_json_str(line, "out")
                     .unwrap_or_else(|| "chrome_screenshot.png".to_string());
-                match cdp_send(self.chrome_port, "Page.captureScreenshot", r#"{"format":"png"}"#) {
+                match cdp_send(
+                    self.chrome_port,
+                    "Page.captureScreenshot",
+                    r#"{"format":"png"}"#,
+                ) {
                     Ok(response) => {
                         if let Some(data) = dbg_json_str(&response, "data") {
-                            match base64_decode_std(&data)
-                                .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()))
-                            {
-                                Ok(()) => format!(r#"{{"ok":true,"path":{}}}"#, dbg_json_escape(&path)),
-                                Err(error) => format!(r#"{{"ok":false,"error":{}}}"#, dbg_json_escape(&error)),
+                            match base64_decode_std(&data).and_then(|bytes| {
+                                std::fs::write(&path, bytes).map_err(|e| e.to_string())
+                            }) {
+                                Ok(()) => {
+                                    format!(r#"{{"ok":true,"path":{}}}"#, dbg_json_escape(&path))
+                                }
+                                Err(error) => {
+                                    format!(r#"{{"ok":false,"error":{}}}"#, dbg_json_escape(&error))
+                                }
                             }
                         } else {
                             r#"{"ok":false,"error":"Chrome screenshot missing data"}"#.to_string()
@@ -2844,12 +3245,13 @@ impl BrowserApp {
                         Some(platform) => match platform.save_presented_png(&path) {
                             Ok((width, height)) => format!(
                                 r#"{{"ok":true,"path":{},"width":{},"height":{},"presented":true}}"#,
-                                dbg_json_escape(&path), width, height,
+                                dbg_json_escape(&path),
+                                width,
+                                height,
                             ),
-                            Err(error) => format!(
-                                r#"{{"ok":false,"error":{}}}"#,
-                                dbg_json_escape(&error),
-                            ),
+                            Err(error) => {
+                                format!(r#"{{"ok":false,"error":{}}}"#, dbg_json_escape(&error),)
+                            }
                         },
                         None => r#"{"ok":false,"error":"no GUI surface"}"#.to_string(),
                     };
@@ -2892,6 +3294,28 @@ impl BrowserApp {
                 }
                 None => r#"{"ok":false,"error":"navigate needs url"}"#.to_string(),
             },
+            "back" => {
+                if self.tabs[self.active].can_back() {
+                    self.go_back();
+                    format!(
+                        r#"{{"ok":true,"url":{}}}"#,
+                        dbg_json_escape(&self.tabs[self.active].url)
+                    )
+                } else {
+                    r#"{"ok":false,"error":"no back history"}"#.to_string()
+                }
+            }
+            "forward" => {
+                if self.tabs[self.active].can_forward() {
+                    self.go_forward();
+                    format!(
+                        r#"{{"ok":true,"url":{}}}"#,
+                        dbg_json_escape(&self.tabs[self.active].url)
+                    )
+                } else {
+                    r#"{"ok":false,"error":"no forward history"}"#.to_string()
+                }
+            }
             "profile" => {
                 if dbg_json_bool(line, "reset").unwrap_or(false) {
                     webcore::profile::reset();
@@ -2945,14 +3369,35 @@ impl BrowserApp {
                 if self.tabs[self.active].view.document().is_none() {
                     r#"{"ok":false,"error":"no document"}"#.to_string()
                 } else {
-                    if let Some(dy) = dbg_json_num(line, "dy") {
-                        self.tabs[self.active].view.scroll_by(0.0, dy);
+                    let before = self.tabs[self.active]
+                        .view
+                        .document()
+                        .map(dbg_element_scroll_offsets)
+                        .unwrap_or_default();
+                    let mut changed = false;
+                    if dbg_json_num(line, "dx").is_some() || dbg_json_num(line, "dy").is_some() {
+                        let dx = dbg_json_num(line, "dx").unwrap_or(0.0);
+                        let dy = dbg_json_num(line, "dy").unwrap_or(0.0);
+                        changed = self.tabs[self.active].view.scroll_by(dx, dy);
                     } else if let Some(y) = dbg_json_num(line, "y") {
-                        self.tabs[self.active].view.scroll_to(0.0, y);
+                        changed = self.tabs[self.active].view.scroll_to(0.0, y);
                     }
+                    let element_scroll = self.tabs[self.active].view.document().and_then(|doc| {
+                        let after = dbg_element_scroll_offsets(doc);
+                        after.iter().find_map(|(id, offset)| {
+                            (before.get(id).copied().unwrap_or((0.0, 0.0)) != *offset)
+                                .then_some(*id)
+                        })
+                    });
                     format!(
-                        r#"{{"ok":true,"scroll_y":{:.0}}}"#,
-                        self.tabs[self.active].view.scroll_y()
+                        r#"{{"ok":true,"changed":{},"scroll_x":{:.0},"scroll_y":{:.0},"element_scroll":{}}}"#,
+                        changed,
+                        self.tabs[self.active]
+                            .view
+                            .document()
+                            .map_or(0.0, |doc| doc.scroll_x),
+                        self.tabs[self.active].view.scroll_y(),
+                        element_scroll.map_or("null".to_string(), |id| id.to_string()),
                     )
                 }
             }
@@ -3224,13 +3669,19 @@ impl BrowserApp {
                                         line.text_start, line.text_length, line.text_x_offset
                                     )
                                 }).collect();
-                                parts.push(format!(r#"{{"node_id":{},"lines":[{}]}}"#,
-                                    node.node_id, lines.join(",")));
+                                parts.push(format!(
+                                    r#"{{"node_id":{},"lines":[{}]}}"#,
+                                    node.node_id,
+                                    lines.join(",")
+                                ));
                             }
                         });
                     }
-                    format!(r#"{{"ok":true,"count":{},"elements":[{}]}}"#,
-                        parts.len(), parts.join(","))
+                    format!(
+                        r#"{{"ok":true,"count":{},"elements":[{}]}}"#,
+                        parts.len(),
+                        parts.join(",")
+                    )
                 }
                 None => r#"{"ok":false,"error":"lines needs selector"}"#.to_string(),
             },
@@ -3264,9 +3715,10 @@ impl BrowserApp {
             "display-list-stats" => {
                 if let Some(doc) = self.tabs[self.active].view.document() {
                     let view_h = self.content_h();
-                    let overscan = (view_h * 1.5).max(1200.0);
-                    let paint_top = (doc.scroll_y - overscan).max(0.0);
-                    let paint_bottom = doc.scroll_y + view_h + overscan;
+                    let band =
+                        webcore::renderer::retained_paint_band_for_doc(doc, self.width, view_h);
+                    let paint_top = band.y;
+                    let paint_bottom = band.bottom();
                     let list = build_display_list_viewport(
                         &doc.root,
                         self.width,
@@ -3280,7 +3732,12 @@ impl BrowserApp {
                         &std::collections::HashSet::new(),
                         &doc.base_url,
                     );
-                    display_list_stats_json(&list, Some((paint_top, paint_bottom)))
+                    display_list_stats_json(
+                        &list,
+                        Some((paint_top, paint_bottom)),
+                        self.width,
+                        webcore::Document::scroll_height(&doc.root),
+                    )
                 } else {
                     r#"{"ok":false,"error":"no document"}"#.to_string()
                 }
@@ -3572,10 +4029,20 @@ impl BrowserApp {
                                     ));
                                 }
                             }
-                            PaintCmd::PushClipPath { points } => {
+                            PaintCmd::PushClipPath { points, even_odd } => {
                                 out.push(format!(
-                                    r#"{{"kind":"push-clip-path","points":{}}}"#,
-                                    points.len()
+                                    r#"{{"kind":"push-clip-path","points":{},"even_odd":{}}}"#,
+                                    points.len(), even_odd
+                                ));
+                            }
+                            PaintCmd::PushClipSvgPath {
+                                path,
+                                fill_rule,
+                                origin,
+                            } => {
+                                out.push(format!(
+                                    r#"{{"kind":"push-clip-svg-path","segments":{},"fill_rule":"{:?}","x":{:.1},"y":{:.1}}}"#,
+                                    path.len(), fill_rule, origin.0, origin.1
                                 ));
                             }
                             PaintCmd::PushTransform { node_id, transform } => {
@@ -3607,7 +4074,7 @@ impl BrowserApp {
                             PaintCmd::PopFilter => {
                                 out.push(r#"{"kind":"pop-filter"}"#.to_string());
                             }
-                            PaintCmd::BackdropFilter { rect, filters } => {
+                            PaintCmd::BackdropFilter { rect, filters, .. } => {
                                 if rect.x <= qx2
                                     && rect.right() >= x
                                     && rect.y <= qy2
@@ -3619,7 +4086,7 @@ impl BrowserApp {
                                     ));
                                 }
                             }
-                            PaintCmd::PushMask { rect, data } => {
+                            PaintCmd::PushMask { rect, data, .. } => {
                                 if rect.x <= qx2
                                     && rect.right() >= x
                                     && rect.y <= qy2
@@ -3693,7 +4160,7 @@ impl BrowserApp {
                                 rule.specificity,
                                 dbg_json_escape(&rule.layer),
                                 rule.layer_rank,
-                                dbg_json_escape(&rule.media_condition),
+                            dbg_json_escape(&rule.media_condition.label()),
                                 dbg_json_escape(&scope_selector),
                                 dbg_json_escape(&scope_limit_selector),
                                 dbg_json_escape(&scopes),
@@ -3930,22 +4397,11 @@ impl BrowserApp {
                     (Some(sel), Some(prop), Some(val)) => {
                         let mut count = 0usize;
                         if let Some(doc) = self.tabs[self.active].view.document_mut() {
-                            // Resolved against the PRE-mutation tree: a mutating
-                            // walk cannot hold the immutable borrow the engine's
-                            // matcher needs, and matching what the selector named
-                            // when the command arrived is the right semantics.
                             let hits = dbg_query_ids(doc, &sel);
-                            Document::walk_all_mut(&mut doc.root, &mut |node| {
-                                if hits.contains(&node.node_id) {
-                                    webcore::css::apply_property(
-                                        std::sync::Arc::make_mut(&mut node.style),
-                                        &prop,
-                                        &val,
-                                    );
-                                    node.layout.layout_dirty = true;
-                                    count += 1;
-                                }
-                            });
+                            for id in hits {
+                                doc.set_style_property(id, &prop, &val);
+                                count += 1;
+                            }
                         }
                         if count > 0 {
                             self.relayout_active();
@@ -3967,12 +4423,10 @@ impl BrowserApp {
                         let mut count = 0usize;
                         if let Some(doc) = self.tabs[self.active].view.document_mut() {
                             let hits = dbg_query_ids(doc, &sel);
-                            Document::walk_all_mut(&mut doc.root, &mut |node| {
-                                if hits.contains(&node.node_id) {
-                                    node.attributes.insert(name.clone(), val.clone());
-                                    count += 1;
-                                }
-                            });
+                            for id in hits {
+                                doc.set_attribute(id, &name, &val);
+                                count += 1;
+                            }
                         }
                         if count > 0 {
                             self.relayout_active();
@@ -4077,25 +4531,35 @@ impl BrowserApp {
                 )
             }
             "font-faces" => {
-                let Some((doc, renderer)) = self.tabs[self.active].view.document_and_renderer_mut() else {
+                let Some((doc, renderer)) = self.tabs[self.active].view.document_and_renderer_mut()
+                else {
                     return r#"{"ok":false,"error":"no document"}"#.to_string();
                 };
-                let faces: Vec<_> = doc.stylesheet.font_faces.iter().map(|face| {
-                    let family = face.family.trim().trim_matches(['\'', '"']);
-                    let query = fontdb::Query {
-                        families: &[fontdb::Family::Name(family)],
-                        weight: fontdb::Weight::NORMAL,
-                        stretch: fontdb::Stretch::Normal,
-                        style: fontdb::Style::Normal,
-                    };
-                    format!(
-                        r#"{{"family":{},"src":{},"available":{}}}"#,
-                        dbg_json_escape(family),
-                        dbg_json_escape(&face.src),
-                        renderer.font_system.db().query(&query).is_some(),
-                    )
-                }).collect();
-                format!(r#"{{"ok":true,"count":{},"faces":[{}]}}"#, faces.len(), faces.join(","))
+                let faces: Vec<_> = doc
+                    .stylesheet
+                    .font_faces
+                    .iter()
+                    .map(|face| {
+                        let family = face.family.trim().trim_matches(['\'', '"']);
+                        let query = fontdb::Query {
+                            families: &[fontdb::Family::Name(family)],
+                            weight: fontdb::Weight::NORMAL,
+                            stretch: fontdb::Stretch::Normal,
+                            style: fontdb::Style::Normal,
+                        };
+                        format!(
+                            r#"{{"family":{},"src":{},"available":{}}}"#,
+                            dbg_json_escape(family),
+                            dbg_json_escape(&face.src),
+                            renderer.font_system.db().query(&query).is_some(),
+                        )
+                    })
+                    .collect();
+                format!(
+                    r#"{{"ok":true,"count":{},"faces":[{}]}}"#,
+                    faces.len(),
+                    faces.join(",")
+                )
             }
             "stylesheet-slots" => {
                 let Some(doc) = self.tabs[self.active].view.document() else {
@@ -4267,9 +4731,11 @@ impl BrowserApp {
                 let stats = self.tabs[self.active].view.memory_stats();
                 let process = process_memory_stats();
                 format!(
-                    r#"{{"ok":true,"process_rss_bytes":{},"process_vsz_bytes":{},"viewport_surface_bytes":{},"renderer_cached_content_surface_bytes":{},"renderer_cached_surface_bytes":{},"tile_surface_bytes":{},"tile_count":{},"display_list_commands":{},"display_list_estimated_bytes":{},"display_list_inline_bytes":{},"display_list_heap_bytes":{},"display_list_text_bytes":{},"display_list_image_bytes":{},"display_list_vector_bytes":{},"raw_resource_cache_entries":{},"raw_resource_cache_bytes":{},"parsed_css_cache_entries":{},"parsed_css_cache_bytes":{},"decoded_image_cache_entries":{},"decoded_image_cache_bytes":{},"dom_nodes":{},"image_nodes":{},"unique_styles":{},"dom_estimated_bytes":{},"layout_estimated_bytes":{},"style_estimated_bytes":{},"line_cache_estimated_bytes":{},"matched_rules_estimated_bytes":{},"stylesheet_estimated_bytes":{},"decoded_dom_image_bytes":{}}}"#,
+                    r#"{{"ok":true,"process_rss_bytes":{},"process_vsz_bytes":{},"history_cache_entries":{},"history_cache_bytes":{},"viewport_surface_bytes":{},"renderer_cached_content_surface_bytes":{},"renderer_cached_surface_bytes":{},"tile_surface_bytes":{},"tile_count":{},"display_list_commands":{},"display_list_estimated_bytes":{},"display_list_inline_bytes":{},"display_list_heap_bytes":{},"display_list_text_bytes":{},"display_list_image_bytes":{},"display_list_vector_bytes":{},"raw_resource_cache_entries":{},"raw_resource_cache_bytes":{},"parsed_css_cache_entries":{},"parsed_css_cache_bytes":{},"decoded_image_cache_entries":{},"decoded_image_cache_bytes":{},"dom_nodes":{},"image_nodes":{},"unique_styles":{},"dom_estimated_bytes":{},"layout_estimated_bytes":{},"style_estimated_bytes":{},"line_cache_estimated_bytes":{},"matched_rules_estimated_bytes":{},"stylesheet_estimated_bytes":{},"decoded_dom_image_bytes":{}}}"#,
                     process.map(|p| p.rss_bytes).unwrap_or(0),
                     process.map(|p| p.vsz_bytes).unwrap_or(0),
+                    stats.history_cache_entries,
+                    stats.history_cache_bytes,
                     stats.viewport_surface_bytes,
                     stats.renderer_cached_content_surface_bytes,
                     stats.renderer_cached_surface_bytes,
@@ -4526,8 +4992,8 @@ impl BrowserApp {
                 };
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
                 let text = dbg_json_str(line, "text").unwrap_or_default();
-                if let Some(node) = webcore::dom::query_selector_mut(&mut doc.root, &selector) {
-                    webcore::dom::set_text_content(node, &text);
+                if let Some(node) = doc.query_selector(&selector) {
+                    doc.set_text_content(node, &text);
                 }
                 self.relayout_active();
                 r#"{"ok":true}"#.to_string()
@@ -4538,10 +5004,9 @@ impl BrowserApp {
                 };
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
                 let cls = dbg_json_str(line, "class").unwrap_or_default();
-                if let Some(node) = webcore::dom::query_selector_mut(&mut doc.root, &selector) {
-                    webcore::dom::add_class(node, &cls);
+                if let Some(node) = doc.query_selector(&selector) {
+                    doc.class_list_add(node, &cls);
                 }
-                doc.style_dirty = true;
                 self.relayout_active();
                 r#"{"ok":true}"#.to_string()
             }
@@ -4551,10 +5016,9 @@ impl BrowserApp {
                 };
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
                 let cls = dbg_json_str(line, "class").unwrap_or_default();
-                if let Some(node) = webcore::dom::query_selector_mut(&mut doc.root, &selector) {
-                    webcore::dom::remove_class(node, &cls);
+                if let Some(node) = doc.query_selector(&selector) {
+                    doc.class_list_remove(node, &cls);
                 }
-                doc.style_dirty = true;
                 self.relayout_active();
                 r#"{"ok":true}"#.to_string()
             }
@@ -4564,10 +5028,9 @@ impl BrowserApp {
                 };
                 let selector = dbg_json_str(line, "selector").unwrap_or_default();
                 let cls = dbg_json_str(line, "class").unwrap_or_default();
-                if let Some(node) = webcore::dom::query_selector_mut(&mut doc.root, &selector) {
-                    webcore::dom::toggle_class(node, &cls);
+                if let Some(node) = doc.query_selector(&selector) {
+                    doc.class_list_toggle(node, &cls);
                 }
-                doc.style_dirty = true;
                 self.relayout_active();
                 r#"{"ok":true}"#.to_string()
             }
@@ -4833,7 +5296,10 @@ impl BrowserApp {
                     scroll_y,
                     doc_h,
                     self.tabs[self.active].view.zoom(),
-                    self.platform.as_ref().map(|p| p.scale_factor()).unwrap_or(1.0)
+                    self.platform
+                        .as_ref()
+                        .map(|p| p.scale_factor())
+                        .unwrap_or(1.0)
                 )
             }
             // ── Accessibility tree ───────────────────────────────────────────
@@ -4956,7 +5422,7 @@ impl BrowserApp {
                     format!(
                         concat!(
                             r#"{{"ok":true,"tag":"{}","id":"{}","class":"{}","nid":{},"#,
-                            r#""display":"{:?}","position":"{:?}","#,
+                            r#""display":"{:?}","position":"{:?}","top":"{:?}","bottom":"{:?}","#,
                             r#""margin":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"#,
                             r#""border":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"#,
                             r#""padding":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"#,
@@ -4971,6 +5437,8 @@ impl BrowserApp {
                         nid,
                         node.style.display,
                         node.style.position,
+                        node.style.top,
+                        node.style.bottom,
                         l.resolved_margin_top,
                         l.resolved_margin_right,
                         l.resolved_margin_bottom,
@@ -5177,7 +5645,12 @@ impl BrowserApp {
                 };
                 let x = dbg_json_num(line, "x").unwrap_or(0.0) as f32;
                 let y = dbg_json_num(line, "y").unwrap_or(0.0) as f32;
-                if let Some(hit) = webcore::layout::hit_test::point_to_hit(&doc.root, (x, y), 0) {
+                if let Some(hit) = webcore::layout::hit_test::point_to_hit_scrolled(
+                    &doc.root,
+                    (x + doc.scroll_x, y + doc.scroll_y),
+                    (doc.scroll_x, doc.scroll_y),
+                    0,
+                ) {
                     if let Some(node) = doc.get_box_by_id(hit.node_id) {
                         let id = node.attributes.get("id").cloned().unwrap_or_default();
                         let cls = node.attributes.get("class").cloned().unwrap_or_default();
@@ -5800,6 +6273,7 @@ fn main() {
     let mut height: f32 = 900.0;
     let mut no_images = false;
     let mut chrome_port: u16 = 0;
+    let mut chrome_srgb = false;
     let mut profile_enabled = false;
     let mut i = 0;
     while i < args.len() {
@@ -5867,6 +6341,9 @@ fn main() {
             "--chrome" => {
                 chrome_port = 9223;
             }
+            "--chrome-srgb" => {
+                chrome_srgb = true;
+            }
             "--chrome-port" => {
                 i += 1;
                 if i < args.len() {
@@ -5906,12 +6383,22 @@ fn main() {
         app.no_images = no_images;
         app.initial_width = width;
         app.initial_height = height;
+        app.width = width;
+        app.height = height;
+        if let Some(url) = app.initial_url.take() {
+            app.navigate(url);
+        }
         if chrome_port > 0 {
             app.chrome_port = chrome_port;
             if let Some(path) = find_chrome() {
-                let url = normalize_url(app.initial_url.clone().unwrap_or_else(|| "about:blank".into()));
+                let url = normalize_url(
+                    app.initial_url
+                        .clone()
+                        .unwrap_or_else(|| "about:blank".into()),
+                );
                 match std::process::Command::new(path)
                     .arg(format!("--remote-debugging-port={chrome_port}"))
+                    .args(chrome_srgb.then_some("--force-color-profile=srgb"))
                     .arg(format!("--window-size={},{}", width as u32, height as u32))
                     .arg("--disable-extensions")
                     .arg("--blink-settings=scriptEnabled=false")
@@ -6301,7 +6788,7 @@ fn image_states_json(doc: &Document, limit: usize) -> String {
         }
         let has_element_image = node.image_data.is_some();
         let has_background = node.bg_image_data.is_some();
-        let has_mask = node.mask_image_data.is_some();
+        let has_mask = node.mask_images.as_ref().and_then(|images| images.first.as_ref()).is_some();
         let is_image_like = node.is_image_element()
             || node.tag == "video"
             || has_element_image
@@ -6354,8 +6841,8 @@ fn image_states_json(doc: &Document, limit: usize) -> String {
                 node.bg_image_height,
                 dbg_json_escape(&node.style.rare().mask_image_url),
                 has_mask,
-                node.mask_image_width,
-                node.mask_image_height,
+                node.mask_images.as_ref().and_then(|images| images.first.as_ref()).map_or(0, |image| image.width),
+                node.mask_images.as_ref().and_then(|images| images.first.as_ref()).map_or(0, |image| image.height),
                 fmt_px(r.x),
                 fmt_px(r.y),
                 fmt_px(r.w),
@@ -6474,6 +6961,8 @@ fn animations_json(doc: &Document, viewport_h: f32) -> String {
 fn display_list_stats_json(
     list: &webcore::renderer::display_list::DisplayList,
     paint_band: Option<(f32, f32)>,
+    viewport_w: f32,
+    doc_h: f32,
 ) -> String {
     let mut fills = 0usize;
     let mut borders = 0usize;
@@ -6484,6 +6973,10 @@ fn display_list_stats_json(
     let mut transforms = 0usize;
     let mut layers = 0usize;
     let mut masks = 0usize;
+    let mut opacity_layers = 0usize;
+    let mut filter_layers = 0usize;
+    let mut blend_layers = 0usize;
+    let mut fixed_boundaries = 0usize;
     for cmd in list.commands.iter().chain(list.fixed_commands.iter()) {
         match cmd {
             PaintCmd::FillRect { .. } => fills += 1,
@@ -6493,22 +6986,38 @@ fn display_list_stats_json(
             | PaintCmd::BackgroundImage { .. }
             | PaintCmd::ListMarker { image: Some(_), .. } => images += 1,
             PaintCmd::PushClip { .. } => clips += 1,
-            PaintCmd::PushClipPath { .. } => clip_paths += 1,
+            PaintCmd::PushClipPath { .. } | PaintCmd::PushClipSvgPath { .. } => clip_paths += 1,
             PaintCmd::PushTransform { .. } => transforms += 1,
-            PaintCmd::PushOpacity { .. }
-            | PaintCmd::PushFilter { .. }
-            | PaintCmd::PushBlendMode { .. } => layers += 1,
+            PaintCmd::PushOpacity { .. } => {
+                layers += 1;
+                opacity_layers += 1;
+            }
+            PaintCmd::PushFilter { .. } => {
+                layers += 1;
+                filter_layers += 1;
+            }
+            PaintCmd::PushBlendMode { .. } => {
+                layers += 1;
+                blend_layers += 1;
+            }
             PaintCmd::PushMask { .. } => masks += 1,
+            PaintCmd::BeginFixedPosition => fixed_boundaries += 1,
             _ => {}
         }
     }
+    let segmented = (fixed_boundaries > 0).then(|| {
+        webcore::renderer::compositor::PaintSegments::from_display_list(list, viewport_w, doc_h)
+            .is_some()
+    });
     let band_json = paint_band
         .map(|(top, bottom)| format!(r#","paint_top":{top:.1},"paint_bottom":{bottom:.1}"#))
         .unwrap_or_default();
     format!(
-        r#"{{"ok":true,"commands":{},"fixed_commands":{},"fills":{},"borders":{},"text":{},"images":{},"clips":{},"clip_paths":{},"transforms":{},"layers":{},"masks":{}{}}}"#,
+        r#"{{"ok":true,"commands":{},"fixed_commands":{},"fixed_boundaries":{},"segmented":{},"fills":{},"borders":{},"text":{},"images":{},"clips":{},"clip_paths":{},"transforms":{},"layers":{},"opacity_layers":{},"filter_layers":{},"blend_layers":{},"masks":{}{}}}"#,
         list.commands.len(),
         list.fixed_commands.len(),
+        fixed_boundaries,
+        segmented.map_or("null", |value| if value { "true" } else { "false" }),
         fills,
         borders,
         text,
@@ -6517,6 +7026,9 @@ fn display_list_stats_json(
         clip_paths,
         transforms,
         layers,
+        opacity_layers,
+        filter_layers,
+        blend_layers,
         masks,
         band_json
     )
@@ -6847,9 +7359,9 @@ fn dispatch_headless_cmd(
             dbg_height_dump_json(&doc.root, limit)
         }
         "display-list-stats" => {
-            let overscan = (height * 1.5).max(1200.0);
-            let paint_top = (doc.scroll_y - overscan).max(0.0);
-            let paint_bottom = doc.scroll_y + height + overscan;
+            let band = webcore::renderer::retained_paint_band_for_doc(doc, width, height);
+            let paint_top = band.y;
+            let paint_bottom = band.bottom();
             let list = build_display_list_viewport(
                 &doc.root,
                 width,
@@ -6863,7 +7375,12 @@ fn dispatch_headless_cmd(
                 &std::collections::HashSet::new(),
                 &doc.base_url,
             );
-            display_list_stats_json(&list, Some((paint_top, paint_bottom)))
+            display_list_stats_json(
+                &list,
+                Some((paint_top, paint_bottom)),
+                width,
+                Document::scroll_height(&doc.root),
+            )
         }
         "animated-images" => animated_images_json(doc, height),
         "image-states" => {
@@ -7111,10 +7628,20 @@ fn dispatch_headless_cmd(
                             ));
                         }
                     }
-                    PaintCmd::PushClipPath { points } => {
+                    PaintCmd::PushClipPath { points, even_odd } => {
                         out.push(format!(
-                            r#"{{"kind":"push-clip-path","points":{}}}"#,
-                            points.len()
+                            r#"{{"kind":"push-clip-path","points":{},"even_odd":{}}}"#,
+                            points.len(), even_odd
+                        ));
+                    }
+                    PaintCmd::PushClipSvgPath {
+                        path,
+                        fill_rule,
+                        origin,
+                    } => {
+                        out.push(format!(
+                            r#"{{"kind":"push-clip-svg-path","segments":{},"fill_rule":"{:?}","x":{:.1},"y":{:.1}}}"#,
+                            path.len(), fill_rule, origin.0, origin.1
                         ));
                     }
                     PaintCmd::PushTransform { node_id, transform } => {
@@ -7143,7 +7670,7 @@ fn dispatch_headless_cmd(
                     PaintCmd::PopFilter => {
                         out.push(r#"{"kind":"pop-filter"}"#.to_string());
                     }
-                    PaintCmd::BackdropFilter { rect, filters } => {
+                    PaintCmd::BackdropFilter { rect, filters, .. } => {
                         if rect.x <= qx2 && rect.right() >= x && rect.y <= qy2 && rect.bottom() >= y
                         {
                             out.push(format!(
@@ -7152,7 +7679,7 @@ fn dispatch_headless_cmd(
                             ));
                         }
                     }
-                    PaintCmd::PushMask { rect, data } => {
+                    PaintCmd::PushMask { rect, data, .. } => {
                         if rect.x <= qx2 && rect.right() >= x && rect.y <= qy2 && rect.bottom() >= y
                         {
                             let (mw, mh) = match data {
@@ -7278,13 +7805,15 @@ fn dispatch_headless_cmd(
             if let Some(n) = doc.get_box_by_id(nid) {
                 let l = &n.layout;
                 format!(
-                    r#"{{"ok":true,"tag":"{}","id":"{}","class":"{}","nid":{},"display":"{:?}","position":"{:?}","margin":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"border":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"padding":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"content":{{"x":{:.1},"y":{:.1},"width":{:.1},"height":{:.1}}},"font_size":{:.1},"color":"{:02x}{:02x}{:02x}","bg":"{:02x}{:02x}{:02x}{:02x}","image":{{"width":{},"height":{},"bytes":{},"src":"{}"}}}}"#,
+                    r#"{{"ok":true,"tag":"{}","id":"{}","class":"{}","nid":{},"display":"{:?}","position":"{:?}","top":"{:?}","bottom":"{:?}","margin":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"border":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"padding":{{"top":{:.1},"right":{:.1},"bottom":{:.1},"left":{:.1}}},"content":{{"x":{:.1},"y":{:.1},"width":{:.1},"height":{:.1}}},"font_size":{:.1},"color":"{:02x}{:02x}{:02x}","bg":"{:02x}{:02x}{:02x}{:02x}","image":{{"width":{},"height":{},"bytes":{},"src":"{}"}}}}"#,
                     n.tag,
                     n.attributes.get("id").unwrap_or(&String::new()),
                     n.attributes.get("class").unwrap_or(&String::new()),
                     nid,
                     n.style.display,
                     n.style.position,
+                    n.style.top,
+                    n.style.bottom,
                     l.resolved_margin_top,
                     l.resolved_margin_right,
                     l.resolved_margin_bottom,
@@ -7559,7 +8088,12 @@ fn dispatch_headless_cmd(
         "hit" => {
             let x = dbg_json_num(line, "x").unwrap_or(0.0) as f32;
             let y = dbg_json_num(line, "y").unwrap_or(0.0) as f32;
-            if let Some(hit) = webcore::layout::hit_test::point_to_hit(&doc.root, (x, y), 0) {
+            if let Some(hit) = webcore::layout::hit_test::point_to_hit_scrolled(
+                &doc.root,
+                (x + doc.scroll_x, y + doc.scroll_y),
+                (doc.scroll_x, doc.scroll_y),
+                0,
+            ) {
                 if let Some(n) = doc.get_box_by_id(hit.node_id) {
                     format!(
                         r#"{{"ok":true,"nid":{},"tag":"{}","class":"{}"}}"#,
@@ -7710,8 +8244,8 @@ fn dispatch_headless_cmd(
             let sel = dbg_json_str(line, "selector").unwrap_or_default();
             let prop = dbg_json_str(line, "prop").unwrap_or_default();
             let val = dbg_json_str(line, "value").unwrap_or_default();
-            if let Some(n) = webcore::dom::query_selector_mut(&mut doc.root, &sel) {
-                webcore::dom::set_style_property(n, &prop, &val);
+            if let Some(n) = doc.query_selector(&sel) {
+                doc.set_style_property(n, &prop, &val);
             }
             renderer.layout_engine().layout(doc, width);
             r#"{"ok":true}"#.to_string()
@@ -8001,7 +8535,7 @@ fn dispatch_headless_cmd(
                         rule.specificity,
                         dbg_json_escape(&rule.layer),
                         rule.layer_rank,
-                        dbg_json_escape(&rule.media_condition),
+                        dbg_json_escape(&rule.media_condition.label()),
                         dbg_json_escape(&scope_selector),
                         dbg_json_escape(&scope_limit_selector),
                         dbg_json_escape(&scopes),
@@ -8190,12 +8724,10 @@ fn dispatch_headless_cmd(
                 (Some(sel), Some(name), Some(val)) => {
                     let mut count = 0usize;
                     let hits = dbg_query_ids(doc, &sel);
-                    Document::walk_all_mut(&mut doc.root, &mut |node| {
-                        if hits.contains(&node.node_id) {
-                            node.attributes.insert(name.clone(), val.clone());
-                            count += 1;
-                        }
-                    });
+                    for id in hits {
+                        doc.set_attribute(id, &name, &val);
+                        count += 1;
+                    }
                     if count > 0 {
                         renderer.layout_engine().layout(doc, width);
                     }
@@ -8208,8 +8740,8 @@ fn dispatch_headless_cmd(
         "set-text" => {
             let selector = dbg_json_str(line, "selector").unwrap_or_default();
             let text = dbg_json_str(line, "text").unwrap_or_default();
-            if let Some(node) = webcore::dom::query_selector_mut(&mut doc.root, &selector) {
-                webcore::dom::set_text_content(node, &text);
+            if let Some(node) = doc.query_selector(&selector) {
+                doc.set_text_content(node, &text);
             }
             renderer.layout_engine().layout(doc, width);
             r#"{"ok":true}"#.to_string()
@@ -8218,30 +8750,27 @@ fn dispatch_headless_cmd(
         "add-class" => {
             let selector = dbg_json_str(line, "selector").unwrap_or_default();
             let cls = dbg_json_str(line, "class").unwrap_or_default();
-            if let Some(node) = webcore::dom::query_selector_mut(&mut doc.root, &selector) {
-                webcore::dom::add_class(node, &cls);
+            if let Some(node) = doc.query_selector(&selector) {
+                doc.class_list_add(node, &cls);
             }
-            doc.style_dirty = true;
             renderer.layout_engine().layout(doc, width);
             r#"{"ok":true}"#.to_string()
         }
         "remove-class" => {
             let selector = dbg_json_str(line, "selector").unwrap_or_default();
             let cls = dbg_json_str(line, "class").unwrap_or_default();
-            if let Some(node) = webcore::dom::query_selector_mut(&mut doc.root, &selector) {
-                webcore::dom::remove_class(node, &cls);
+            if let Some(node) = doc.query_selector(&selector) {
+                doc.class_list_remove(node, &cls);
             }
-            doc.style_dirty = true;
             renderer.layout_engine().layout(doc, width);
             r#"{"ok":true}"#.to_string()
         }
         "toggle-class" => {
             let selector = dbg_json_str(line, "selector").unwrap_or_default();
             let cls = dbg_json_str(line, "class").unwrap_or_default();
-            if let Some(node) = webcore::dom::query_selector_mut(&mut doc.root, &selector) {
-                webcore::dom::toggle_class(node, &cls);
+            if let Some(node) = doc.query_selector(&selector) {
+                doc.class_list_toggle(node, &cls);
             }
-            doc.style_dirty = true;
             renderer.layout_engine().layout(doc, width);
             r#"{"ok":true}"#.to_string()
         }

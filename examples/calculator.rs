@@ -4,12 +4,18 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
 
-use webcore::dom::{self, HtmlEventType};
+use webcore::dom::HtmlEventType;
 use webcore::platform::Platform;
 use webcore::types::ComponentRegistry;
 use webcore::{Document, LayoutEngine, Renderer, load_html_with_registry};
 
 const HTML: &str = include_str!("html/calculator.html");
+
+fn relayout(doc: &mut Document, width: f32, height: f32) {
+    let mut layout = LayoutEngine::new();
+    layout.viewport_h = height;
+    layout.layout(doc, width);
+}
 
 fn eval_expression(expr: &str) -> Result<f64, String> {
     // simple tokenizer + shunting-yard + RPN evaluation
@@ -162,7 +168,13 @@ impl ApplicationHandler for App {
         );
         let platform = Platform::new_windowed(window.clone());
         self.width = platform.logical_width();
-        let mut doc = load_html_with_registry(HTML, "", self.width, 420.0, self.registry.clone());
+        let mut doc = load_html_with_registry(
+            HTML,
+            "",
+            self.width,
+            platform.logical_height(),
+            self.registry.clone(),
+        );
 
         // buttons
         let __root = doc.root.node_id;
@@ -175,8 +187,6 @@ impl ApplicationHandler for App {
                 let Some(__cur) = __d.closest(evt.target, ".btn") else {
                     return;
                 };
-                let root = &mut __d.root;
-                let _ = &root;
                 // left click only
                 if evt.button != 0 {
                     return;
@@ -185,32 +195,25 @@ impl ApplicationHandler for App {
                 evt.prevent_default();
                 let cur_id = __cur;
                 // Read button value first
-                let val_opt = dom::find_box_mut(root, cur_id)
-                    .and_then(|t| dom::get_attribute(t, "data-value").map(|s| s.to_string()));
-                let id = dom::find_box_mut(root, cur_id)
-                    .and_then(|t| dom::get_attribute(t, "id").map(|s| s.to_string()))
-                    .unwrap_or_default();
+                let val_opt = __d.get_attribute(cur_id, "data-value");
+                let id = __d.get_attribute(cur_id, "id").unwrap_or_default();
                 let id = id.as_str();
                 // clear
                 if id == "clear" {
-                    if let Some(d) = dom::query_selector_mut(root, "#display") {
-                        dom::set_text_content(d, "0");
+                    if let Some(d) = __d.query_selector("#display") {
+                        __d.set_text_content(d, "0");
                     }
                     return;
                 }
                 if id == "equals" {
-                    if let Some(d) = dom::query_selector(root, "#display") {
-                        let cur = dom::get_text_content(d);
+                    if let Some(d) = __d.query_selector("#display") {
+                        let cur = __d.text_content(d);
                         match eval_expression(&cur) {
                             Ok(v) => {
-                                if let Some(dd) = dom::query_selector_mut(root, "#display") {
-                                    dom::set_text_content(dd, &format!("{}", v));
-                                }
+                                __d.set_text_content(d, &format!("{}", v));
                             }
                             Err(e) => {
-                                if let Some(dd) = dom::query_selector_mut(root, "#display") {
-                                    dom::set_text_content(dd, &format!("err: {}", e));
-                                }
+                                __d.set_text_content(d, &format!("err: {}", e));
                             }
                         }
                     }
@@ -218,21 +221,14 @@ impl ApplicationHandler for App {
                 }
                 // normal buttons with data-value
                 if let Some(val) = val_opt {
-                    if let Some(d) = dom::query_selector_mut(root, "#display") {
-                        let cur = dom::get_text_content(d).trim().to_string();
+                    if let Some(d) = __d.query_selector("#display") {
+                        let cur = __d.text_content(d).trim().to_string();
                         let next = if cur == "0" {
                             val.to_string()
                         } else {
                             format!("{}{}", cur, val)
                         };
-                        eprintln!(
-                            "[CALC_DBG] before set cur='{}' val='{}' next='{}'",
-                            cur, val, next
-                        );
-                        dom::set_text_content(d, &next);
-                        // Read back and log result
-                        let after = dom::get_text_content(d);
-                        eprintln!("[CALC_DBG] after set display='{}'", after);
+                        __d.set_text_content(d, &next);
                     }
                 }
             }),
@@ -260,23 +256,34 @@ impl ApplicationHandler for App {
                 platform.resize(size.width, size.height);
                 self.width = platform.logical_width();
                 if let Some(doc) = self.doc.as_mut() {
-                    LayoutEngine::new().layout(doc, self.width);
+                    relayout(doc, self.width, platform.logical_height());
                 }
                 window.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_x = position.x as f32 / platform.scale_factor();
                 self.mouse_y = position.y as f32 / platform.scale_factor();
+                if let Some(doc) = self.doc.as_mut() {
+                    let pt = (self.mouse_x, self.mouse_y + doc.scroll_y);
+                    if doc.process_mouse_event(HtmlEventType::MouseMove, pt, 0) {
+                        window.request_redraw();
+                    }
+                }
             }
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
+                state,
                 button: MouseButton::Left,
                 ..
             } => {
                 if let Some(doc) = self.doc.as_mut() {
                     let pt = (self.mouse_x, self.mouse_y + doc.scroll_y);
-                    if doc.process_mouse_event(HtmlEventType::Click, pt, 0) {
-                        LayoutEngine::new().layout(doc, self.width);
+                    let kind = if state == ElementState::Pressed {
+                        HtmlEventType::MouseDown
+                    } else {
+                        HtmlEventType::MouseUp
+                    };
+                    if doc.process_mouse_event(kind, pt, 0) {
+                        relayout(doc, self.width, platform.logical_height());
                         window.request_redraw();
                     }
                 }
@@ -309,4 +316,38 @@ fn main() {
         mouse_y: 0.0,
     };
     event_loop.run_app(&mut app).unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use webcore::dom;
+
+    #[test]
+    fn calculator_relayout_keeps_the_window_height() {
+        let mut doc = load_html_with_registry(HTML, "", 360.0, 420.0, ComponentRegistry::default());
+        relayout(&mut doc, 360.0, 420.0);
+
+        let calc = dom::query_selector(&doc.root, ".calc").unwrap();
+        assert_eq!(doc.viewport_h, 420.0);
+        assert!(
+            calc.layout.border_rect.y >= 0.0,
+            "{:?}",
+            calc.layout.border_rect
+        );
+        assert!(
+            calc.layout.border_rect.bottom() <= 420.0,
+            "{:?}",
+            calc.layout.border_rect
+        );
+    }
+
+    #[test]
+    fn display_updates_through_document_text_content() {
+        let mut doc = load_html_with_registry(HTML, "", 360.0, 420.0, ComponentRegistry::default());
+        let display = doc.query_selector("#display").unwrap();
+        doc.set_text_content(display, "42");
+        assert_eq!(doc.text_content(display), "42");
+        assert_eq!(doc.query_selector("#display"), Some(display));
+    }
 }

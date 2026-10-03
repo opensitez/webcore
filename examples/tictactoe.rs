@@ -85,9 +85,9 @@ fn best_ai_move(board: &mut [Option<char>; 9]) -> Option<usize> {
     }
     best_move
 }
-use webcore::dom::{self, HtmlEventType};
+use webcore::dom::HtmlEventType;
 use webcore::platform::Platform;
-use webcore::{Document, Renderer, WebCore};
+use webcore::{Document, Renderer};
 
 const HTML: &str = include_str!("html/tictactoe.html");
 
@@ -137,12 +137,7 @@ impl ApplicationHandler for App {
                     let Some(__cur) = __d.closest(evt.target, ".cell") else {
                         return;
                     };
-                    let root = &mut __d.root;
-                    let _ = &root;
-                    let cur_id = __cur;
-                    let id = dom::find_box_mut(root, cur_id)
-                        .and_then(|t| dom::get_attribute(t, "id").map(|s| s.to_string()))
-                        .unwrap_or_default();
+                    let id = __d.get_attribute(__cur, "id").unwrap_or_default();
                     let idx = id
                         .strip_prefix('c')
                         .and_then(|s| s.parse::<usize>().ok())
@@ -153,56 +148,52 @@ impl ApplicationHandler for App {
                     }
                     // Human move
                     st.board[idx] = Some('X');
-                    if let Some(cell) = dom::query_selector_mut(root, &format!("#{}", id)) {
-                        dom::set_text_content(cell, "X");
-                        dom::add_class(cell, "cell-x");
-                    }
+                    __d.set_text_content(__cur, "X");
+                    __d.class_list_add(__cur, "cell-x");
                     if let Some((w, line)) = check_winner(&st.board) {
                         for &i in &line {
-                            if let Some(c) = dom::query_selector_mut(root, &format!("#c{}", i)) {
-                                dom::add_class(c, "cell-win");
+                            if let Some(c) = __d.query_selector(&format!("#c{}", i)) {
+                                __d.class_list_add(c, "cell-win");
                             }
                         }
-                        if let Some(s) = dom::query_selector_mut(root, "#status") {
-                            dom::set_text_content(s, &format!("{} wins!", w));
+                        if let Some(s) = __d.query_selector("#status") {
+                            __d.set_text_content(s, &format!("{} wins!", w));
                         }
                         return;
                     }
                     if is_draw(&st.board) {
-                        if let Some(s) = dom::query_selector_mut(root, "#status") {
-                            dom::set_text_content(s, "Draw");
+                        if let Some(s) = __d.query_selector("#status") {
+                            __d.set_text_content(s, "Draw");
                         }
                         return;
                     }
                     // AI move
                     if let Some(ai_idx) = best_ai_move(&mut st.board) {
                         st.board[ai_idx] = Some('O');
-                        if let Some(cell) = dom::query_selector_mut(root, &format!("#c{}", ai_idx))
-                        {
-                            dom::set_text_content(cell, "O");
-                            dom::add_class(cell, "cell-o");
+                        if let Some(cell) = __d.query_selector(&format!("#c{}", ai_idx)) {
+                            __d.set_text_content(cell, "O");
+                            __d.class_list_add(cell, "cell-o");
                         }
                         if let Some((w2, line2)) = check_winner(&st.board) {
                             for &i in &line2 {
-                                if let Some(c) = dom::query_selector_mut(root, &format!("#c{}", i))
-                                {
-                                    dom::add_class(c, "cell-win");
+                                if let Some(c) = __d.query_selector(&format!("#c{}", i)) {
+                                    __d.class_list_add(c, "cell-win");
                                 }
                             }
-                            if let Some(s) = dom::query_selector_mut(root, "#status") {
-                                dom::set_text_content(s, &format!("{} wins!", w2));
+                            if let Some(s) = __d.query_selector("#status") {
+                                __d.set_text_content(s, &format!("{} wins!", w2));
                             }
                             return;
                         }
                         if is_draw(&st.board) {
-                            if let Some(s) = dom::query_selector_mut(root, "#status") {
-                                dom::set_text_content(s, "Draw");
+                            if let Some(s) = __d.query_selector("#status") {
+                                __d.set_text_content(s, "Draw");
                             }
                             return;
                         }
                     }
-                    if let Some(s) = dom::query_selector_mut(root, "#status") {
-                        dom::set_text_content(s, "Your turn");
+                    if let Some(s) = __d.query_selector("#status") {
+                        __d.set_text_content(s, "Your turn");
                     }
                 }),
                 webcore::dom::events::ListenerOptions::default(),
@@ -217,23 +208,21 @@ impl ApplicationHandler for App {
                 Box::new(move |evt, __d: &mut webcore::Document| {
                     // Delegation, the way a page writes it: one listener, then
                     // `closest()` to find which matching element was hit.
-                    let Some(__cur) = __d.closest(evt.target, "#reset") else {
+                    let Some(_) = __d.closest(evt.target, "#reset") else {
                         return;
                     };
-                    let root = &mut __d.root;
-                    let _ = &root;
                     let mut st = state.lock().unwrap();
                     for i in 0..9 {
-                        if let Some(c) = dom::query_selector_mut(root, &format!("#c{}", i)) {
-                            dom::set_text_content(c, "");
-                            dom::remove_class(c, "cell-x");
-                            dom::remove_class(c, "cell-o");
-                            dom::remove_class(c, "cell-win");
+                        if let Some(c) = __d.query_selector(&format!("#c{}", i)) {
+                            __d.set_text_content(c, "");
+                            __d.class_list_remove(c, "cell-x");
+                            __d.class_list_remove(c, "cell-o");
+                            __d.class_list_remove(c, "cell-win");
                         }
                     }
                     st.next_x = true;
-                    if let Some(s) = dom::query_selector_mut(root, "#status") {
-                        dom::set_text_content(s, "Your turn");
+                    if let Some(s) = __d.query_selector("#status") {
+                        __d.set_text_content(s, "Your turn");
                     }
                 }),
                 webcore::dom::events::ListenerOptions::default(),
@@ -247,16 +236,14 @@ impl ApplicationHandler for App {
                 Box::new(move |evt, __d: &mut webcore::Document| {
                     // Delegation, the way a page writes it: one listener, then
                     // `closest()` to find which matching element was hit.
-                    let Some(__cur) = __d.closest(evt.target, "#diff-easy") else {
+                    let Some(_) = __d.closest(evt.target, "#diff-easy") else {
                         return;
                     };
-                    let root = &mut __d.root;
-                    let _ = &root;
-                    if let Some(e) = dom::query_selector_mut(root, "#diff-easy") {
-                        dom::add_class(e, "btn-diff-active");
+                    if let Some(e) = __d.query_selector("#diff-easy") {
+                        __d.class_list_add(e, "btn-diff-active");
                     }
-                    if let Some(e) = dom::query_selector_mut(root, "#diff-hard") {
-                        dom::remove_class(e, "btn-diff-active");
+                    if let Some(e) = __d.query_selector("#diff-hard") {
+                        __d.class_list_remove(e, "btn-diff-active");
                     }
                 }),
                 webcore::dom::events::ListenerOptions::default(),
@@ -268,16 +255,14 @@ impl ApplicationHandler for App {
                 Box::new(move |evt, __d: &mut webcore::Document| {
                     // Delegation, the way a page writes it: one listener, then
                     // `closest()` to find which matching element was hit.
-                    let Some(__cur) = __d.closest(evt.target, "#diff-hard") else {
+                    let Some(_) = __d.closest(evt.target, "#diff-hard") else {
                         return;
                     };
-                    let root = &mut __d.root;
-                    let _ = &root;
-                    if let Some(e) = dom::query_selector_mut(root, "#diff-hard") {
-                        dom::add_class(e, "btn-diff-active");
+                    if let Some(e) = __d.query_selector("#diff-hard") {
+                        __d.class_list_add(e, "btn-diff-active");
                     }
-                    if let Some(e) = dom::query_selector_mut(root, "#diff-easy") {
-                        dom::remove_class(e, "btn-diff-active");
+                    if let Some(e) = __d.query_selector("#diff-easy") {
+                        __d.class_list_remove(e, "btn-diff-active");
                     }
                 }),
                 webcore::dom::events::ListenerOptions::default(),
@@ -324,15 +309,26 @@ impl ApplicationHandler for App {
                     position.x as f32 / platform.scale_factor(),
                     position.y as f32 / platform.scale_factor(),
                 );
+                if let Some(doc) = self.doc.as_mut() {
+                    let pt = (self.mouse_pos.0, self.mouse_pos.1 + doc.scroll_y);
+                    if doc.process_mouse_event(HtmlEventType::MouseMove, pt, 0) {
+                        window.request_redraw();
+                    }
+                }
             }
             WindowEvent::MouseInput {
-                state: winit::event::ElementState::Pressed,
+                state,
                 button: winit::event::MouseButton::Left,
                 ..
             } => {
                 if let Some(doc) = self.doc.as_mut() {
+                    let kind = if state == winit::event::ElementState::Pressed {
+                        HtmlEventType::MouseDown
+                    } else {
+                        HtmlEventType::MouseUp
+                    };
                     if doc.process_mouse_event(
-                        HtmlEventType::Click,
+                        kind,
                         (self.mouse_pos.0, self.mouse_pos.1 + doc.scroll_y),
                         0,
                     ) {

@@ -2,11 +2,12 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tiny_skia::{FillRule, Paint, PathBuilder, Rect, Stroke, Transform};
 use webcore::dom;
 use webcore::dom::events::ListenerOptions;
-use webcore::types::{Component, WebCore};
+use webcore::types::WebCore;
 use webcore::{BrowserView, Document, parse_markdown};
+
+use super::graph_element::GraphElement;
 
 pub struct DemoLive {
     installed_file: Option<String>,
@@ -129,217 +130,6 @@ impl DemoLive {
     }
 }
 
-pub struct GraphComponent;
-
-impl Component for GraphComponent {
-    fn measure(&self, node: &WebCore, _available_w: f32) -> (f32, f32) {
-        let w = attr(node, "data-width", "340").parse().unwrap_or(340.0);
-        let h = attr(node, "data-height", "190").parse().unwrap_or(190.0);
-        (w, h)
-    }
-
-    fn intrinsic_width(&self, node: &WebCore) -> (f32, f32) {
-        let w = attr(node, "data-width", "340").parse().unwrap_or(340.0);
-        (w, w)
-    }
-
-    fn paint(
-        &self,
-        node: &WebCore,
-        pixmap: &mut tiny_skia::Pixmap,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        scale: f32,
-    ) {
-        let ts = Transform::from_scale(scale, scale);
-        let mut bg = Paint::default();
-        bg.set_color_rgba8(22, 27, 34, 255);
-        if let Some(rect) = Rect::from_xywh(x, y, w, h) {
-            pixmap.fill_rect(rect, &bg, ts, None);
-        }
-
-        let values = parse_values(&attr(node, "data-values", ""));
-        if values.is_empty() {
-            return;
-        }
-        let chart_type = attr(node, "data-type", "bar");
-        let max = values.iter().copied().fold(0.0, f32::max).max(1.0);
-        let margin = 12.0;
-        let plot_w = (w - margin * 2.0).max(1.0);
-        let plot_h = (h - margin * 2.0).max(1.0);
-        match chart_type.as_str() {
-            "line" | "area" | "scatter" => {
-                let step = plot_w / (values.len().saturating_sub(1)).max(1) as f32;
-                if chart_type == "area" {
-                    let mut pb = PathBuilder::new();
-                    pb.move_to(x + margin, y + h - margin);
-                    for (i, value) in values.iter().enumerate() {
-                        pb.line_to(
-                            x + margin + i as f32 * step,
-                            y + h - margin - (value / max) * plot_h,
-                        );
-                    }
-                    pb.line_to(x + margin + plot_w, y + h - margin);
-                    pb.close();
-                    if let Some(path) = pb.finish() {
-                        let mut fill = Paint::default();
-                        fill.set_color_rgba8(89, 161, 79, 60);
-                        pixmap.fill_path(&path, &fill, FillRule::Winding, ts, None);
-                    }
-                }
-                let mut pb = PathBuilder::new();
-                for (i, value) in values.iter().enumerate() {
-                    let px = x + margin + i as f32 * step;
-                    let py = y + h - margin - (value / max) * plot_h;
-                    if chart_type == "scatter" {
-                        let mut dot = Paint::default();
-                        dot.set_color_rgba8(78, 121, 167, 220);
-                        if let Some(rect) = Rect::from_xywh(px - 3.0, py - 3.0, 6.0, 6.0) {
-                            pixmap.fill_rect(rect, &dot, ts, None);
-                        }
-                    } else if i == 0 {
-                        pb.move_to(px, py);
-                    } else {
-                        pb.line_to(px, py);
-                    }
-                }
-                if chart_type != "scatter" {
-                    if let Some(path) = pb.finish() {
-                        let mut line = Paint::default();
-                        line.set_color_rgba8(89, 161, 79, 255);
-                        let mut stroke = Stroke::default();
-                        stroke.width = 2.0;
-                        pixmap.stroke_path(&path, &line, &stroke, ts, None);
-                    }
-                }
-            }
-            "pie" | "donut" => {
-                let total = values.iter().sum::<f32>().max(1.0);
-                let cx = x + w / 2.0;
-                let cy = y + h / 2.0;
-                let radius = (w.min(h) / 2.0 - 22.0).max(20.0);
-                let inner = if chart_type == "donut" {
-                    radius * 0.55
-                } else {
-                    0.0
-                };
-                let mut start = -90.0f32;
-                let colors = [(78, 121, 167), (242, 142, 43), (89, 161, 79), (225, 87, 89)];
-                for (i, value) in values.iter().enumerate() {
-                    let sweep = value / total * 360.0;
-                    let mut pb = PathBuilder::new();
-                    let start_rad = start.to_radians();
-                    if inner == 0.0 {
-                        pb.move_to(cx, cy);
-                    } else {
-                        pb.move_to(cx + inner * start_rad.cos(), cy + inner * start_rad.sin());
-                    }
-                    pb.line_to(cx + radius * start_rad.cos(), cy + radius * start_rad.sin());
-                    let steps = (sweep / 5.0).max(4.0) as i32;
-                    for step in 1..=steps {
-                        let a = (start + sweep * step as f32 / steps as f32).to_radians();
-                        pb.line_to(cx + radius * a.cos(), cy + radius * a.sin());
-                    }
-                    if inner > 0.0 {
-                        for step in (0..=steps).rev() {
-                            let a = (start + sweep * step as f32 / steps as f32).to_radians();
-                            pb.line_to(cx + inner * a.cos(), cy + inner * a.sin());
-                        }
-                    }
-                    pb.close();
-                    if let Some(path) = pb.finish() {
-                        let (r, g, b) = colors[i % colors.len()];
-                        let mut paint = Paint::default();
-                        paint.set_color_rgba8(r, g, b, 255);
-                        pixmap.fill_path(&path, &paint, FillRule::Winding, ts, None);
-                    }
-                    start += sweep;
-                }
-            }
-            "gauge" => {
-                let pct = ((values[0] - 95.0) / 5.0).clamp(0.0, 1.0);
-                let mut track = Paint::default();
-                track.set_color_rgba8(48, 54, 61, 255);
-                let mut fill = Paint::default();
-                fill.set_color_rgba8(63, 185, 80, 255);
-                let mut stroke = Stroke::default();
-                stroke.width = 10.0;
-                let cx = x + w / 2.0;
-                let cy = y + h / 2.0 + 25.0;
-                let radius = (w.min(h) / 2.0 - 28.0).max(20.0);
-                stroke_arc(pixmap, ts, cx, cy, radius, 180.0, 360.0, &track, &stroke);
-                stroke_arc(
-                    pixmap,
-                    ts,
-                    cx,
-                    cy,
-                    radius,
-                    180.0,
-                    180.0 + 180.0 * pct,
-                    &fill,
-                    &stroke,
-                );
-            }
-            _ => {
-                let bar_w = plot_w / values.len() as f32;
-                let mut paint = Paint::default();
-                paint.set_color_rgba8(78, 121, 167, 255);
-                for (i, value) in values.iter().enumerate() {
-                    let bh = value / max * plot_h;
-                    let rect = if chart_type == "hbar" {
-                        Rect::from_xywh(
-                            x + margin,
-                            y + margin + i as f32 * (plot_h / values.len() as f32),
-                            value / max * plot_w,
-                            (plot_h / values.len() as f32 - 4.0).max(1.0),
-                        )
-                    } else {
-                        Rect::from_xywh(
-                            x + margin + i as f32 * bar_w + 2.0,
-                            y + h - margin - bh,
-                            (bar_w - 4.0).max(1.0),
-                            bh,
-                        )
-                    };
-                    if let Some(rect) = rect {
-                        pixmap.fill_rect(rect, &paint, ts, None);
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn stroke_arc(
-    pixmap: &mut tiny_skia::Pixmap,
-    ts: Transform,
-    cx: f32,
-    cy: f32,
-    r: f32,
-    start: f32,
-    end: f32,
-    paint: &Paint,
-    stroke: &Stroke,
-) {
-    let mut pb = PathBuilder::new();
-    let steps = ((end - start).abs() / 5.0).max(2.0) as i32;
-    for i in 0..=steps {
-        let a = (start + (end - start) * i as f32 / steps as f32).to_radians();
-        let x = cx + r * a.cos();
-        let y = cy + r * a.sin();
-        if i == 0 {
-            pb.move_to(x, y);
-        } else {
-            pb.line_to(x, y);
-        }
-    }
-    if let Some(path) = pb.finish() {
-        pixmap.stroke_path(&path, paint, stroke, ts, None);
-    }
-}
-
 fn install_calculator(doc: &mut Document) {
     let root = doc.root.node_id;
     doc.add_event_listener(
@@ -385,7 +175,7 @@ fn demo_document_ready(doc: &Document, file: &str) -> bool {
         "tictactoe.html" => "#c0",
         "minesweeper.html" => "#r0c0",
         "dom.html" => "#speed-slider",
-        "graph.html" => "graph",
+        "graph.html" => "vybe-graph",
         "markdown.html" => ".md-source",
         "email.html" => ".email-list",
         "eudora.html" => "#inbox-rows",
@@ -616,7 +406,6 @@ impl DomState {
 }
 
 fn install_dom(doc: &mut Document, state: Arc<Mutex<DomState>>) {
-    dom_annotate_toolbar(doc);
     {
         let mut st = state.lock().unwrap();
         st.paused = false;
@@ -685,32 +474,6 @@ fn install_dom(doc: &mut Document, state: Arc<Mutex<DomState>>) {
     );
 }
 
-fn dom_annotate_toolbar(doc: &mut Document) {
-    for button in doc.query_selector_all(".tb-btn") {
-        let label = doc.text_content(button);
-        let action = if label.contains("Dark") {
-            "dark"
-        } else if label.contains("Compact") {
-            "compact"
-        } else if label.contains("Pause") || label.contains("Resume") {
-            "pause"
-        } else if label.contains("Chaos") || label.contains("Calm") {
-            "chaos"
-        } else if label.contains("Service") {
-            "service"
-        } else if label.contains("Alerts") {
-            "alerts"
-        } else if label.contains("Feed") {
-            "feed"
-        } else {
-            ""
-        };
-        if !action.is_empty() {
-            doc.set_attribute(button, "data-dom-action", action);
-        }
-    }
-}
-
 fn render_dom_toolbar(doc: &mut Document, st: &DomState) {
     set_dom_toggle(doc, "dark", st.dark, "🌙 Dark", "☀ Light");
     set_dom_toggle(doc, "compact", st.compact, "📏 Compact", "📐 Roomy");
@@ -723,20 +486,32 @@ fn render_dom_toolbar(doc: &mut Document, st: &DomState) {
 fn set_dom_toggle(doc: &mut Document, action: &str, active: bool, off_text: &str, on_text: &str) {
     let selector = &format!("[data-dom-action={action}]");
     if let Some(button) = doc.query_selector(selector) {
-        doc.set_text_content(button, if active { on_text } else { off_text });
-        if active {
-            doc.class_list_add(button, "tb-active");
-        } else {
-            doc.class_list_remove(button, "tb-active");
+        let label = if active { on_text } else { off_text };
+        if doc.text_content(button) != label {
+            doc.set_text_content(button, label);
+        }
+        let pressed = if active { "true" } else { "false" };
+        if doc.get_attribute(button, "aria-pressed").as_deref() != Some(pressed) {
+            doc.set_attribute(button, "aria-pressed", pressed);
+        }
+        if doc.class_list_contains(button, "tb-active") != active {
+            if active {
+                doc.class_list_add(button, "tb-active");
+            } else {
+                doc.class_list_remove(button, "tb-active");
+            }
         }
     }
 }
 
 fn set_root_class(doc: &mut Document, class: &str, enabled: bool) {
-    if enabled {
-        doc.class_list_add(doc.root.node_id, class);
-    } else {
-        doc.class_list_remove(doc.root.node_id, class);
+    let root = doc.root.node_id;
+    if doc.class_list_contains(root, class) != enabled {
+        if enabled {
+            doc.class_list_add(root, class);
+        } else {
+            doc.class_list_remove(root, class);
+        }
     }
 }
 
@@ -747,7 +522,11 @@ struct GraphState {
     refreshes: u32,
 }
 
-fn install_graph(doc: &mut Document, state: Arc<Mutex<GraphState>>, seed: &mut u32) {
+fn install_graph(doc: &mut Document, state: Arc<Mutex<GraphState>>, _seed: &mut u32) {
+    if !doc.custom_elements.contains("vybe-graph") {
+        doc.define_custom_element("vybe-graph", GraphElement)
+            .expect("valid graph custom element");
+    }
     set_text(doc, "#status-text", "Central demo live handlers installed.");
     let root = doc.root.node_id;
     let state_graph = state.clone();
@@ -756,7 +535,7 @@ fn install_graph(doc: &mut Document, state: Arc<Mutex<GraphState>>, seed: &mut u
         "click",
         Box::new(move |evt, doc| {
             let mut st = state_graph.lock().unwrap();
-            if let Some(id) = doc.closest(evt.target, "graph") {
+            if let Some(id) = doc.closest(evt.target, "vybe-graph") {
                 let types = [
                     "bar", "line", "area", "pie", "donut", "hbar", "scatter", "gauge",
                 ];
@@ -814,7 +593,6 @@ fn install_graph(doc: &mut Document, state: Arc<Mutex<GraphState>>, seed: &mut u
         }),
         ListenerOptions::default(),
     );
-    apply_graph_button(doc, "btn-bar", seed);
 }
 
 fn install_markdown(doc: &mut Document, last_source: &mut String) {
@@ -2925,7 +2703,7 @@ fn best_ai(board: &[Option<char>; 9]) -> Option<usize> {
 }
 
 fn apply_graph_button(doc: &mut Document, button: &str, seed: &mut u32) {
-    let graph_ids = doc.query_selector_all("graph");
+    let graph_ids = doc.query_selector_all("vybe-graph");
     for id in graph_ids {
         match button {
             "btn-line" => doc.set_attribute(id, "data-type", "line"),
@@ -2958,7 +2736,7 @@ fn apply_graph_button(doc: &mut Document, button: &str, seed: &mut u32) {
 }
 
 fn scale_graph_values(doc: &mut Document, factor: f32) {
-    for id in doc.query_selector_all("graph") {
+    for id in doc.query_selector_all("vybe-graph") {
         let values = parse_values(&doc.get_attribute(id, "data-values").unwrap_or_default())
             .into_iter()
             .map(|v| format!("{:.0}", v * factor))
@@ -3594,13 +3372,6 @@ fn render_playground_state(doc: &mut Document, st: &PlaygroundState) {
     }
 }
 
-fn attr(node: &WebCore, key: &str, default: &str) -> String {
-    node.attributes
-        .get(key)
-        .cloned()
-        .unwrap_or_else(|| default.to_string())
-}
-
 fn parse_values(raw: &str) -> Vec<f32> {
     raw.split(',')
         .filter_map(|part| part.trim().parse::<f32>().ok())
@@ -3701,7 +3472,7 @@ mod tests {
 
     #[test]
     fn tictactoe_click_listener_marks_a_cell() {
-        let mut doc = parse_html(include_str!("html/tictactoe.html"));
+        let mut doc = parse_html(include_str!("../html/tictactoe.html"));
         assert!(demo_document_ready(&doc, "tictactoe.html"));
         install_tictactoe(&mut doc, Arc::new(Mutex::new(TicTacToeState::default())));
         let target = node_id(&doc, "#c0").unwrap();
@@ -3712,7 +3483,7 @@ mod tests {
 
     #[test]
     fn minesweeper_click_listener_reveals_or_flags_a_cell() {
-        let mut doc = parse_html(include_str!("html/minesweeper.html"));
+        let mut doc = parse_html(include_str!("../html/minesweeper.html"));
         assert!(demo_document_ready(&doc, "minesweeper.html"));
         let state = Arc::new(Mutex::new(MineState::new()));
         let mut seed = 1;
@@ -3728,7 +3499,7 @@ mod tests {
 
     #[test]
     fn delegated_root_listener_can_use_closest_with_hit_test_ids() {
-        let mut doc = parse_html(include_str!("html/tictactoe.html"));
+        let mut doc = parse_html(include_str!("../html/tictactoe.html"));
         let root = doc.root.node_id;
         doc.add_event_listener(
             root,
@@ -3748,7 +3519,7 @@ mod tests {
 
     #[test]
     fn dom_tick_marks_document_dirty_without_hover() {
-        let mut doc = parse_html(include_str!("html/dom.html"));
+        let mut doc = parse_html(include_str!("../html/dom.html"));
         let state = Arc::new(Mutex::new(DomState::new()));
         let mut seed = 1;
         doc.style_dirty = false;
@@ -3764,11 +3535,11 @@ mod tests {
 
     #[test]
     fn dom_dark_mode_uses_document_mutation_api() {
-        let mut doc = parse_html(include_str!("html/dom.html"));
+        let mut doc = parse_html(include_str!("../html/dom.html"));
         install_dom(&mut doc, Arc::new(Mutex::new(DomState::new())));
         doc.style_dirty = false;
 
-        let target = node_id(&doc, ".tb-toggle").unwrap();
+        let target = node_id(&doc, "[data-dom-action=dark]").unwrap();
         let mut event = DomEvent::new("click", target);
         doc.dispatch_dom_event(&mut event);
 
@@ -3781,7 +3552,7 @@ mod tests {
 
     #[test]
     fn dom_demo_install_starts_unpaused() {
-        let mut doc = parse_html(include_str!("html/dom.html"));
+        let mut doc = parse_html(include_str!("../html/dom.html"));
         let state = Arc::new(Mutex::new(DomState {
             paused: true,
             chaos: true,
@@ -3799,8 +3570,18 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_toolbar_render_does_not_invalidate_style() {
+        let mut doc = parse_html(include_str!("../html/dom.html"));
+        let state = Arc::new(Mutex::new(DomState::new()));
+        install_dom(&mut doc, state.clone());
+        doc.style_dirty = false;
+        render_dom_toolbar(&mut doc, &state.lock().unwrap());
+        assert!(!doc.style_dirty);
+    }
+
+    #[test]
     fn dom_toolbar_buttons_toggle_visible_state() {
-        let mut doc = parse_html(include_str!("html/dom.html"));
+        let mut doc = parse_html(include_str!("../html/dom.html"));
         let state = Arc::new(Mutex::new(DomState::new()));
         install_dom(&mut doc, state);
 
@@ -3851,33 +3632,82 @@ mod tests {
 
     #[test]
     fn graph_click_updates_event_status() {
-        let mut doc = parse_html(include_str!("html/graph.html"));
+        let mut doc = parse_html(include_str!("../html/graph.html"));
         let state = Arc::new(Mutex::new(GraphState::default()));
         let mut seed = 1;
         install_graph(&mut doc, state, &mut seed);
         doc.style_dirty = false;
 
-        let target = node_id(&doc, "graph").unwrap();
+        let target = node_id(&doc, "vybe-graph").unwrap();
+        let canvas = doc
+            .child_nodes(target)
+            .into_iter()
+            .find(|&id| doc.tag_name(id) == Some("canvas"))
+            .expect("graph custom element created a canvas");
+        let before = doc.get_node(canvas).unwrap().image_data.clone().unwrap();
+        assert!(before.chunks_exact(4).any(|pixel| pixel[3] != 0));
         let mut event = DomEvent::new("click", target);
         doc.dispatch_dom_event(&mut event);
 
         assert!(painted_text(&doc, "#status-text").contains("Chart cycled"));
         assert_eq!(painted_text(&doc, "#click-count"), "1");
+        let after = doc.get_node(canvas).unwrap().image_data.as_ref().unwrap();
+        assert_ne!(&before, after, "click did not redraw the graph canvas");
         assert!(doc.style_dirty);
     }
 
     #[test]
+    fn graph_demo_uses_declared_chart_colors() {
+        let mut doc = parse_html(include_str!("../html/graph.html"));
+        let state = Arc::new(Mutex::new(GraphState::default()));
+        let mut seed = 1;
+        install_graph(&mut doc, state, &mut seed);
+
+        assert_eq!(doc.get_attribute(node_id(&doc, "#card2 vybe-graph").unwrap(), "data-type"), Some("area".into()));
+        assert_eq!(doc.get_attribute(node_id(&doc, "#card4 vybe-graph").unwrap(), "data-type"), Some("line".into()));
+
+        let has_color = |selector: &str, rgb: [u8; 3]| {
+            let canvas = node_id(&doc, selector).unwrap();
+            doc.get_node(canvas)
+                .unwrap()
+                .image_data
+                .as_ref()
+                .unwrap()
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3] == rgb)
+        };
+        assert!(has_color("#card1 canvas", [78, 121, 167]));
+        assert!(has_color("#card1 canvas", [88, 166, 255]));
+        assert!(has_color("#card2 canvas", [63, 185, 80]));
+        assert!(has_color("#card4 canvas", [210, 153, 34]));
+    }
+
+    #[test]
     fn graph_sidebar_and_kpi_are_live() {
-        let mut doc = parse_html(include_str!("html/graph.html"));
+        let mut doc = parse_html(include_str!("../html/graph.html"));
         let state = Arc::new(Mutex::new(GraphState::default()));
         let mut seed = 1;
         install_graph(&mut doc, state, &mut seed);
 
         let sidebar = node_id(&doc, "#sb-products").unwrap();
-        let mut event = DomEvent::new("click", sidebar);
+        let previous = node_id(&doc, "#sb-home").unwrap();
+        let chart = node_id(&doc, "#card1 vybe-graph").unwrap();
+        let canvas = node_id(&doc, "#card1 canvas").unwrap();
+        let values_before = doc.get_attribute(chart, "data-values").unwrap();
+        let pixels_before = doc.get_node(canvas).unwrap().image_data.clone().unwrap();
+        let nested_label = node_id(&doc, "#sb-products .sstat").unwrap();
+        let mut event = DomEvent::new("click", nested_label);
         doc.dispatch_dom_event(&mut event);
         assert!(doc.class_list_contains(sidebar, "sb-item-active"));
+        assert!(!doc.class_list_contains(previous, "sb-item-active"));
         assert!(painted_text(&doc, "#status-text").contains("sb-products"));
+        assert_ne!(doc.get_attribute(chart, "data-values").unwrap(), values_before);
+        assert_ne!(doc.get_node(canvas).unwrap().image_data.as_ref().unwrap(), &pixels_before);
+
+        let pricing = node_id(&doc, "#sb-pricing").unwrap();
+        doc.dispatch_dom_event(&mut DomEvent::new("click", pricing));
+        assert!(doc.class_list_contains(pricing, "sb-item-active"));
+        assert!(!doc.class_list_contains(sidebar, "sb-item-active"));
 
         let kpi = node_id(&doc, "#kpi-users").unwrap();
         let mut event = DomEvent::new("click", kpi);
@@ -3887,7 +3717,7 @@ mod tests {
 
     #[test]
     fn markdown_demo_updates_preview_from_source() {
-        let mut doc = parse_html(include_str!("html/markdown.html"));
+        let mut doc = parse_html(include_str!("../html/markdown.html"));
         let mut last_source = String::new();
         install_markdown(&mut doc, &mut last_source);
 
@@ -3907,7 +3737,7 @@ mod tests {
 
     #[test]
     fn email_demo_selects_mailboxes_labels_and_messages() {
-        let mut doc = parse_html(include_str!("html/email.html"));
+        let mut doc = parse_html(include_str!("../html/email.html"));
         let state = Arc::new(Mutex::new(EmailState::default()));
         install_email(&mut doc, state);
 
@@ -3977,7 +3807,7 @@ mod tests {
 
     #[test]
     fn eudora_demo_renders_and_handles_core_actions() {
-        let mut doc = parse_html(include_str!("html/eudora.html"));
+        let mut doc = parse_html(include_str!("../html/eudora.html"));
         let state = Arc::new(Mutex::new(EudoraState::default()));
         install_eudora(&mut doc, state);
 
@@ -4015,7 +3845,7 @@ mod tests {
         doc.dispatch_dom_event(&mut event);
         assert!(doc.class_list_contains(doc.root.node_id, "dark"));
         assert!(doc.text_content(dark).contains("☀"));
-        let eudora_html = include_str!("html/eudora.html");
+        let eudora_html = include_str!("../html/eudora.html");
         assert!(eudora_html.contains(".dark #toolbar"));
         assert!(eudora_html.contains(".dark .tab:hover:not(.selected)"));
         assert!(eudora_html.contains(".dark table.msg-list td"));
