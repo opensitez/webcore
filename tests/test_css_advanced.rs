@@ -1,12 +1,13 @@
 // Ported from cpptests/test_css_advanced.cpp
 // Advanced CSS property parsing tests
 
-use webcore::css::apply_property;
+use webcore::css::{apply_property, finalize_logical};
 use webcore::types::*;
 
 fn style_with(prop: &str, val: &str) -> ComputedStyle {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, prop, val);
+    finalize_logical(&mut style);
     style
 }
 
@@ -107,7 +108,7 @@ fn css_adv_flex_shorthand_single_number() {
     let s = style_with("flex", "2");
     assert_eq!(s.flex_grow as i32, 2);
     assert_eq!(s.flex_shrink as i32, 1);
-    assert_eq!(s.flex_basis, CssLength::Px(0.0));
+    assert_eq!(s.flex_basis, CssLength::Zero);
 }
 
 #[test]
@@ -524,6 +525,7 @@ fn css_adv_inset_inline_start_ltr() {
     let mut s = ComputedStyle::default();
     s.direction = Direction::LTR;
     apply_property(&mut s, "inset-inline-start", "10px");
+    finalize_logical(&mut s);
     assert_eq!(s.left, CssLength::Px(10.0));
 }
 
@@ -532,6 +534,7 @@ fn css_adv_inset_inline_end_ltr() {
     let mut s = ComputedStyle::default();
     s.direction = Direction::LTR;
     apply_property(&mut s, "inset-inline-end", "20px");
+    finalize_logical(&mut s);
     assert_eq!(s.right, CssLength::Px(20.0));
 }
 
@@ -705,6 +708,7 @@ fn css_adv_margin_inline_start_ltr() {
     s.direction = Direction::LTR;
     apply_property(&mut s, "margin-inline-start", "10px");
     apply_property(&mut s, "margin-inline-end", "20px");
+    finalize_logical(&mut s);
     assert_eq!(s.margin_left, CssLength::Px(10.0));
     assert_eq!(s.margin_right, CssLength::Px(20.0));
 }
@@ -714,6 +718,7 @@ fn css_adv_padding_block_start_end() {
     let mut s = ComputedStyle::default();
     apply_property(&mut s, "padding-block-start", "5px");
     apply_property(&mut s, "padding-block-end", "15px");
+    finalize_logical(&mut s);
     assert_eq!(s.padding_top, CssLength::Px(5.0));
     assert_eq!(s.padding_bottom, CssLength::Px(15.0));
 }
@@ -723,6 +728,7 @@ fn css_adv_margin_block_start_end() {
     let mut s = ComputedStyle::default();
     apply_property(&mut s, "margin-block-start", "10px");
     apply_property(&mut s, "margin-block-end", "20px");
+    finalize_logical(&mut s);
     assert_eq!(s.margin_top, CssLength::Px(10.0));
     assert_eq!(s.margin_bottom, CssLength::Px(20.0));
 }

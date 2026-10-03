@@ -4,6 +4,47 @@
 use webcore::types::*;
 use webcore::{LayoutEngine, load_html};
 
+#[test]
+fn body_scroll_overflow_does_not_clip_zero_height_body_content() {
+    use webcore::renderer::display_list::PaintCmd;
+    use webcore::renderer::display_list_builder::build_display_list;
+
+    let doc = parse_and_layout(
+        r#"<html><body style="height:0;overflow-y:scroll;margin:0"><div style="position:relative;z-index:1">Visible content</div></body></html>"#,
+        400.0,
+    );
+    let body = find_box(&doc.root, &|node| node.tag == "body").expect("body");
+    assert_eq!(body.layout.border_rect.h, 0.0);
+    assert!(Document::scroll_height(&doc.root) > 0.0);
+
+    let list = build_display_list(&doc.root, 400.0, 300.0);
+    let mut clips = Vec::new();
+    let mut found_text = false;
+    for command in &list.commands {
+        match command {
+            PaintCmd::PushClip { rect, .. } => clips.push(*rect),
+            PaintCmd::PopClip => {
+                clips.pop();
+            }
+            PaintCmd::Text { text, .. } if text.contains("Visible content") => {
+                found_text = true;
+                assert!(clips.iter().all(|rect| rect.h > 0.0));
+            }
+            _ => {}
+        }
+    }
+    assert!(found_text);
+}
+
+#[test]
+fn positioned_page_content_sets_scroll_height_through_viewport_body() {
+    let doc = parse_and_layout(
+        r#"<html><body style="height:0;overflow-y:scroll;margin:0"><main style="position:absolute;top:0;height:2500px;width:400px">Page</main></body></html>"#,
+        400.0,
+    );
+    assert!(Document::scroll_height(&doc.root) >= 2500.0);
+}
+
 fn parse_and_layout(html: &str, vw: f32) -> Document {
     load_html(html, vw)
 }

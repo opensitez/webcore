@@ -271,34 +271,36 @@ fn multiple_pseudo_class_roundtrip() {
 
 #[test]
 fn unknown_pseudo_class_does_not_corrupt_selector() {
-    // Parsing a selector with an unknown pseudo-class must not panic
-    // and must still store the rule.
+    // An unknown pseudo-class invalidates the selector without affecting
+    // subsequent valid rules.
     let doc = parse_html(
-        "<html><head><style>div.myclass:custom-state { color: red; }</style></head>\
+        "<html><head><style>div.myclass:custom-state { color: red; } p { color: blue; }</style></head>\
          <body><div class=\"myclass\">Test</div></body></html>",
     );
-    // Must not panic. The rule should be stored.
-    let found = doc
+    let invalid = doc
         .stylesheet
         .rules
         .iter()
         .any(|r| r.original_selector.contains("custom-state"));
+    assert!(!invalid, "unknown pseudo-class rule must be discarded");
     assert!(
-        found,
-        "unknown pseudo-class rule should be stored in stylesheet"
+        doc.stylesheet
+            .rules
+            .iter()
+            .any(|r| r.original_selector == "p")
     );
 }
 
 #[test]
 fn unknown_pseudo_class_roundtrip() {
-    // An unknown pseudo-class in the original HTML must survive in original_selector
+    // Invalid selectors do not participate in the parsed stylesheet.
     assert!(
-        rule_original_selector_contains(
+        !rule_original_selector_contains(
             "<html><head><style>div:custom-state { color: red; }</style></head>\
          <body><div>Test</div></body></html>",
             ":custom-state"
         ),
-        "unknown pseudo-class must survive in original_selector for roundtrip"
+        "unknown pseudo-class must not become an active rule"
     );
 }
 

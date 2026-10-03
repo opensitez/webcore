@@ -655,7 +655,7 @@ fn enter_in_blockquote_inserts_br() {
 #[test]
 fn key_enter_splits_paragraph() {
     use webcore::dom::HtmlEventType;
-    let mut doc = parse_and_layout("<p>AB</p>");
+    let mut doc = parse_and_layout("<p contenteditable>AB</p>");
     {
         let p = query_selector_mut(&mut doc.root, "p").unwrap();
         set_caret(&mut doc.editor, p, 1); // after "A"
@@ -677,7 +677,7 @@ fn key_enter_splits_paragraph() {
 #[test]
 fn key_enter_does_not_insert_literal_newline() {
     use webcore::dom::HtmlEventType;
-    let mut doc = parse_and_layout("<p>Hello</p>");
+    let mut doc = parse_and_layout("<p contenteditable>Hello</p>");
     {
         let p = query_selector_mut(&mut doc.root, "p").unwrap();
         set_caret(&mut doc.editor, p, 5);
@@ -690,6 +690,7 @@ fn key_enter_does_not_insert_literal_newline() {
         .iter()
         .map(|p| get_text_content(p))
         .collect::<Vec<_>>();
+    assert_eq!(all_text.len(), 2);
     for t in &all_text {
         assert!(
             !t.contains('\n'),
@@ -779,7 +780,7 @@ fn space_then_letter_in_grid_div() {
 #[test]
 fn arrow_right_twice_then_enter_splits_at_correct_offset() {
     use webcore::dom::HtmlEventType;
-    let mut doc = parse_and_layout("<p>Hello world</p>");
+    let mut doc = parse_and_layout("<p contenteditable>Hello world</p>");
     {
         let p = query_selector_mut(&mut doc.root, "p").unwrap();
         set_caret(&mut doc.editor, p, 0); // start at beginning
@@ -827,7 +828,7 @@ fn arrow_right_twice_then_enter_splits_at_correct_offset() {
 fn arrow_right_into_inline_child_then_enter() {
     use webcore::dom::HtmlEventType;
     // flat text: "ABCDEF" (6 bytes)
-    let mut doc = parse_and_layout("<p>AB<b>CD</b>EF</p>");
+    let mut doc = parse_and_layout("<p contenteditable>AB<b>CD</b>EF</p>");
     {
         let p = query_selector_mut(&mut doc.root, "p").unwrap();
         set_caret(&mut doc.editor, p, 0);
@@ -853,7 +854,7 @@ fn arrow_right_into_inline_child_then_enter() {
 #[test]
 fn arrow_left_then_enter_splits_at_moved_position() {
     use webcore::dom::HtmlEventType;
-    let mut doc = parse_and_layout("<p>Hello world</p>");
+    let mut doc = parse_and_layout("<p contenteditable>Hello world</p>");
     {
         let p = query_selector_mut(&mut doc.root, "p").unwrap();
         set_caret(&mut doc.editor, p, 5); // after "Hello"

@@ -301,6 +301,24 @@ fn col_display_type() {
 }
 
 #[test]
+fn bare_cols_with_whitespace_share_implied_colgroup() {
+    let doc = parse_html(
+        "<table><col width='100'>\n  <col width='150'><tr><td>A</td><td>B</td></tr></table>",
+    );
+    let table = find_box(&doc.root, &|b| b.tag == "table").unwrap();
+    let groups: Vec<_> = table
+        .children
+        .iter()
+        .filter(|b| b.tag == "colgroup")
+        .collect();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(
+        groups[0].children.iter().filter(|b| b.tag == "col").count(),
+        2
+    );
+}
+
+#[test]
 fn colgroup_display_type() {
     let doc = parse_html("<table><colgroup><col></colgroup><tr><td>A</td></tr></table>");
     let cg = find_box(&doc.root, &|b| b.style.display == Display::TableColumnGroup);
@@ -810,12 +828,13 @@ fn border_collapse_adjacent_border_resolution() {
         CssLength::Px(3.0),
         "winning border (3px) should be kept"
     );
-    // The losing border is zeroed — it may be Px(0.0) or Zero
-    let left_w = cells[1].style.border_left_width.resolve(16.0, 0.0, 16.0);
-    assert_eq!(
-        left_w, 0.0,
-        "losing border (1px) should be zeroed, got {:?}",
-        cells[1].style.border_left_width
+    // Conflict resolution is layout data; it must not rewrite computed CSS.
+    assert!(
+        cells[0]
+            .layout
+            .collapsed_border_segments
+            .iter()
+            .any(|segment| segment.axis == 1 && segment.width == 3.0 && segment.color.r == 255)
     );
 }
 
@@ -832,11 +851,12 @@ fn border_collapse_vertical_resolution() {
     assert!(cells.len() >= 2);
     // Top cell's bottom border (4px) wins
     assert_eq!(cells[0].style.border_bottom_width, CssLength::Px(4.0));
-    let top_w = cells[1].style.border_top_width.resolve(16.0, 0.0, 16.0);
-    assert_eq!(
-        top_w, 0.0,
-        "losing top border should be zeroed, got {:?}",
-        cells[1].style.border_top_width
+    assert!(
+        cells[0]
+            .layout
+            .collapsed_border_segments
+            .iter()
+            .any(|segment| segment.axis == 0 && segment.width == 4.0 && segment.color.g > 0)
     );
 }
 
@@ -853,16 +873,80 @@ fn border_collapse_style_priority() {
     let cells = find_all_boxes(&doc.root, &|b| b.style.display == Display::TableCell);
     assert!(cells.len() >= 2);
     // Cell B's double border wins over Cell A's solid (same width)
-    let right_w = cells[0].style.border_right_width.resolve(16.0, 0.0, 16.0);
-    assert_eq!(
-        right_w, 0.0,
-        "solid loser should be zeroed, got {:?}",
-        cells[0].style.border_right_width
+    assert!(
+        cells[1]
+            .layout
+            .collapsed_border_segments
+            .iter()
+            .any(|segment| segment.axis == 1
+                && segment.width == 2.0
+                && segment.style == BorderStyle::Double)
     );
     assert_eq!(
         cells[1].style.border_left_width,
         CssLength::Px(2.0),
         "double winner should be kept"
+    );
+}
+
+#[test]
+fn collapsed_hidden_border_suppresses_a_wider_neighbor() {
+    let doc = load_html(
+        "<table style='border-collapse:collapse'><tr>\
+         <td style='border-right:1px hidden red'>A</td>\
+         <td style='border-left:8px solid blue'>B</td></tr></table>",
+        400.0,
+    );
+    let cells = find_all_boxes(&doc.root, &|b| b.style.display == Display::TableCell);
+    assert_eq!(cells.len(), 2);
+    assert!(
+        cells[0]
+            .layout
+            .collapsed_border_segments
+            .iter()
+            .all(|s| s.axis != 1)
+    );
+    assert!(
+        cells[1]
+            .layout
+            .collapsed_border_segments
+            .iter()
+            .all(|s| s.axis != 1)
+    );
+}
+
+#[test]
+fn collapsed_border_style_priority_follows_css_tables_order() {
+    let doc = load_html(
+        "<table style='border-collapse:collapse'><tr>\
+         <td style='border-right:3px ridge red'>A</td>\
+         <td style='border-left:3px dotted blue'>B</td></tr></table>",
+        400.0,
+    );
+    let cells = find_all_boxes(&doc.root, &|b| b.style.display == Display::TableCell);
+    assert!(
+        cells[1]
+            .layout
+            .collapsed_border_segments
+            .iter()
+            .any(|s| s.axis == 1 && s.style == BorderStyle::Dotted)
+    );
+}
+
+#[test]
+fn collapsed_cell_border_wins_equal_table_border() {
+    let doc = load_html(
+        "<table style='border-collapse:collapse;border-top:3px solid red'><tr>\
+         <td style='border-top:3px solid blue'>A</td></tr></table>",
+        400.0,
+    );
+    let cells = find_all_boxes(&doc.root, &|b| b.style.display == Display::TableCell);
+    assert!(
+        cells[0]
+            .layout
+            .collapsed_border_segments
+            .iter()
+            .any(|s| s.axis == 0 && s.color.b == 255)
     );
 }
 

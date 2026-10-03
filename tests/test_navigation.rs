@@ -44,7 +44,10 @@ fn nav_hit_test_distinct_offsets() {
 
 #[test]
 fn nav_caret_x_roundtrip() {
-    let doc = layout("<p>Hello World</p>", 800.0);
+    let doc = layout(
+        "<body style='margin:0'><p style='margin:0'>Hello World</p></body>",
+        800.0,
+    );
     // Hit roughly in the middle of "Hello"
     let hit = point_to_hit(&doc.root, (20.0, 5.0), 0).unwrap();
     let pt = offset_to_point(&doc.root, hit.node_id, hit.local_offset, 0.0, 0.0).unwrap();
@@ -83,17 +86,20 @@ fn nav_wrapped_text_multiple_lines() {
 
 #[test]
 fn nav_table_hit_test() {
-    let doc = layout("<table><tr><td>A</td><td>B</td></tr></table>", 800.0);
+    let doc = layout(
+        "<body style='margin:0'><table style='width:200px'><tr><td style='width:100px'>A</td><td style='width:100px'>B</td></tr></table></body>",
+        800.0,
+    );
 
     // A and B should be at different X
-    let hit_a = point_to_hit(&doc.root, (10.0, 10.0), 0).unwrap();
-    let hit_b = point_to_hit(&doc.root, (500.0, 10.0), 0).unwrap();
+    let hit_a = point_to_hit(&doc.root, (20.0, 10.0), 0).unwrap();
+    let hit_b = point_to_hit(&doc.root, (150.0, 10.0), 0).unwrap();
 
     let pt_a = offset_to_point(&doc.root, hit_a.node_id, hit_a.local_offset, 0.0, 0.0).unwrap();
     let pt_b = offset_to_point(&doc.root, hit_b.node_id, hit_b.local_offset, 0.0, 0.0).unwrap();
 
-    assert!((pt_a.1 - pt_b.1).abs() < 5.0);
-    assert!(pt_b.0 > pt_a.0);
+    assert!((pt_a.1 - pt_b.1).abs() < 5.0, "A={pt_a:?}, B={pt_b:?}");
+    assert!(pt_b.0 > pt_a.0, "A={pt_a:?}, B={pt_b:?}");
 }
 
 // ============================================================

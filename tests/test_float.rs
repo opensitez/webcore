@@ -12,6 +12,93 @@ fn parse_and_layout(html: &str, viewport_width: f32) -> Document {
     load_html(html, viewport_width)
 }
 
+#[test]
+fn clearing_a_float_does_not_move_following_normal_flow() {
+    let doc = parse_and_layout(
+        "<div style='width:700px'>\
+           <div id='first' style='float:left;width:200px;height:100px'></div>\
+           <div id='second' style='float:left;clear:left;width:200px;height:80px'></div>\
+           <p id='text'>Text beside the first float</p>\
+         </div>",
+        800.0,
+    );
+    let second = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|v| v == "second")
+    })
+    .unwrap();
+    let text = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|v| v == "text")
+    })
+    .unwrap();
+    assert!(second.layout.border_rect.y >= 100.0);
+    assert!(
+        text.layout.border_rect.y < second.layout.border_rect.y,
+        "following text should not be pushed down by the cleared float: {:?} vs {:?}",
+        text.layout.border_rect,
+        second.layout.border_rect
+    );
+}
+
+#[test]
+fn table_float_margin_excludes_following_text() {
+    let doc = parse_and_layout(
+        "<div style='width:500px'>\
+           <table id='table' style='float:left;width:100px;margin-right:25px'>\
+             <tr><td>cell</td></tr>\
+           </table>\
+           <p id='text'>Text beside a floated table.</p>\
+         </div>",
+        600.0,
+    );
+    let table = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|v| v == "table")
+    })
+    .unwrap();
+    let text = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|v| v == "text")
+    })
+    .unwrap();
+    let line = text.layout.line_cache.first().unwrap();
+    assert!(
+        line.x >= table.layout.border_rect.right() + 24.0,
+        "text line {:?} must remain outside table margin box {:?}",
+        line,
+        table.layout.margin_rect
+    );
+}
+
+#[test]
+fn overwide_rtl_table_moves_below_float_and_overflows_left() {
+    let doc = parse_and_layout(
+        "<div id='container' dir='rtl' style='width:500px'>\
+           <div id='float' style='float:left;width:300px;height:100px'></div>\
+           <table id='table' style='width:600px;border-spacing:0'>\
+             <tr><td>results</td></tr>\
+           </table>\
+         </div>",
+        700.0,
+    );
+    let container = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|v| v == "container")
+    })
+    .unwrap();
+    let floated = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|v| v == "float")
+    })
+    .unwrap();
+    let table = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|v| v == "table")
+    })
+    .unwrap();
+    assert!(table.layout.border_rect.y >= floated.layout.border_rect.bottom());
+    assert!(
+        (table.layout.border_rect.right() - container.layout.content_rect.right()).abs() < 2.0,
+        "overwide RTL table should align its right edge: {:?} vs {:?}",
+        table.layout.border_rect,
+        container.layout.content_rect
+    );
+}
+
 fn find_box<'a, F: Fn(&WebCore) -> bool>(root: &'a WebCore, pred: &F) -> Option<&'a WebCore> {
     if pred(root) {
         return Some(root);
@@ -572,4 +659,35 @@ fn float_wrapping_floats() {
     // D should be on a lower line
     let y3 = floats[3].layout.content_rect.y;
     assert!(y3 >= y0, "D must be at or below A (y0={y0} y3={y3})");
+}
+
+#[test]
+fn negative_margin_float_shares_line_with_full_width_float() {
+    let doc = parse_and_layout(
+        r#"<div style="width:600px">
+            <main id="main" style="float:left;width:600px;height:200px"></main>
+            <aside id="rail" style="float:left;width:150px;height:80px;margin-left:-150px"></aside>
+        </div>"#,
+        600.0,
+    );
+    let main = find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "main")
+    })
+    .unwrap();
+    let rail = find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "rail")
+    })
+    .unwrap();
+    assert!(
+        (rail.layout.border_rect.y - main.layout.border_rect.y).abs() < 1.0,
+        "rail y={} main y={}",
+        rail.layout.border_rect.y,
+        main.layout.border_rect.y
+    );
+    assert!(
+        (rail.layout.border_rect.x - main.layout.border_rect.x - 450.0).abs() < 1.0,
+        "rail x={} main x={}",
+        rail.layout.border_rect.x,
+        main.layout.border_rect.x
+    );
 }

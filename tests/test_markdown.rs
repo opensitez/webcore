@@ -1041,17 +1041,14 @@ fn html_pre_strips_only_leading_newline() {
 
 #[test]
 fn html_p_collapses_whitespace() {
-    // Outside <pre>, newlines in text must be collapsed to spaces (normal flow).
+    // Text content preserves source whitespace; normal-flow layout collapses it.
     let doc = parse_html("<p>hello\nworld</p>");
     let p = find_tag(&doc, "p").expect("p not found");
-    let text = p.text_content();
-    assert!(
-        !text.contains('\n'),
-        "newline should be collapsed in <p>, got: {:?}",
-        text
-    );
-    assert!(text.contains("hello"), "text: {:?}", text);
-    assert!(text.contains("world"), "text: {:?}", text);
+    assert_eq!(p.text_content(), "hello\nworld");
+
+    let laid_out = load_html("<p>hello\nworld</p>", 800.0);
+    let p = find_tag(&laid_out, "p").expect("laid-out p not found");
+    assert_eq!(p.layout.line_cache.len(), 1);
 }
 
 // ============================================================

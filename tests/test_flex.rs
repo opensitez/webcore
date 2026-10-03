@@ -716,7 +716,7 @@ fn flex_shorthand_two_values() {
 fn flex_basis_content() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "flex-basis", "content");
-    assert!(style.flex_basis.is_auto());
+    assert_eq!(style.flex_basis, CssLength::Content);
 }
 
 #[test]

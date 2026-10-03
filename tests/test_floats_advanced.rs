@@ -856,6 +856,20 @@ fn white_space_pre_preserves_newlines() {
         500.0,
     );
     let t = by_id(&d.root, "t").unwrap();
+    assert_eq!(t.style.white_space, WhiteSpace::Pre);
+    let text_nodes = find_all(t, &|child| child.is_text_node());
+    assert_eq!(
+        text_nodes
+            .iter()
+            .map(|child| child.text.as_str())
+            .collect::<String>(),
+        "Line 1\nLine 2\nLine 3"
+    );
+    assert!(
+        text_nodes
+            .iter()
+            .all(|child| child.style.white_space == WhiteSpace::Pre)
+    );
     assert!(
         t.layout.line_cache.len() >= 3,
         "pre preserves newlines, got {} lines",

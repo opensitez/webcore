@@ -446,15 +446,18 @@ fn br_between_block_containers_creates_vertical_gap() {
 
 #[test]
 fn br_in_block_has_nonzero_height() {
-    // A standalone <br> inside a block container must have a nonzero margin_rect.h.
+    // A standalone <br> creates a line break even if the inline element's own
+    // margin box has zero height.
     let html =
         r#"<html><body><div id="outer"><div>Row 1</div><br><div>Row 2</div></div></body></html>"#;
     let doc = load_html(html, 800.0);
 
-    let br = find_box(&doc.root, &|b| b.tag == "br").expect("br not found");
+    find_box(&doc.root, &|b| b.tag == "br").expect("br not found");
+    let row1 = find_box(&doc.root, &|b| b.text == "Row 1").expect("first row not found");
+    let row2 = find_box(&doc.root, &|b| b.text == "Row 2").expect("second row not found");
+    let gap = row2.layout.border_rect.y - (row1.layout.border_rect.y + row1.layout.border_rect.h);
     assert!(
-        br.layout.margin_rect.h > 0.0,
-        "br in block context must have nonzero height, got {}",
-        br.layout.margin_rect.h
+        gap >= 19.0,
+        "br in block context must create a line-height gap, got {gap}"
     );
 }

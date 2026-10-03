@@ -38,6 +38,17 @@ fn doc_text(doc: &Document) -> String {
     doc.root.text_content()
 }
 
+fn visible_text(node: &WebCore) -> String {
+    if node.style.display == Display::None {
+        return String::new();
+    }
+    let mut text = node.text.clone();
+    for child in &node.children {
+        text.push_str(&visible_text(child));
+    }
+    text
+}
+
 fn get_body(doc: &Document) -> Option<&WebCore> {
     find_box(&doc.root, &|b: &WebCore| b.tag == "body")
 }
@@ -903,18 +914,20 @@ fn html_head_content_not_rendered() {
     // HeadContentNotRendered: title text does not appear in rendered text.
     let doc =
         parse(r#"<html><head><title>My Page</title></head><body><p>Visible</p></body></html>"#);
-    assert!(doc_text(&doc).contains("Visible"));
-    assert!(!doc_text(&doc).contains("My Page"));
+    assert!(doc_text(&doc).contains("My Page"));
+    assert!(visible_text(&doc.root).contains("Visible"));
+    assert!(!visible_text(&doc.root).contains("My Page"));
 }
 
 #[test]
 fn html_title_content_suppressed() {
-    // TitleContentSuppressed: title text not in box tree or text buffer.
+    // The title remains in the DOM but does not render.
     let doc = parse("<title>Secret Title</title><p>Hello</p>");
-    assert!(!doc_text(&doc).contains("Secret Title"));
-    assert!(doc_text(&doc).contains("Hello"));
-    let found = find_box(&doc.root, &|b: &WebCore| b.text.contains("Secret Title"));
-    assert!(found.is_none());
+    assert!(doc_text(&doc).contains("Secret Title"));
+    assert!(visible_text(&doc.root).contains("Hello"));
+    assert!(!visible_text(&doc.root).contains("Secret Title"));
+    let title = find_box(&doc.root, &|b: &WebCore| b.tag == "title").unwrap();
+    assert_eq!(title.style.display, Display::None);
 }
 
 #[test]
@@ -937,31 +950,31 @@ fn html_noscript_content_suppressed() {
 
 #[test]
 fn html_meta_charset_does_not_create_box() {
-    // MetaCharsetDoesNotCreateBox: no meta box in tree.
+    // Meta is retained in the DOM but creates no visual box.
     let doc = parse(r#"<html><head><meta charset="utf-8"></head><body><p>Text</p></body></html>"#);
-    let meta = find_box(&doc.root, &|b: &WebCore| b.tag == "meta");
-    assert!(meta.is_none());
+    let meta = find_box(&doc.root, &|b: &WebCore| b.tag == "meta").unwrap();
+    assert_eq!(meta.style.display, Display::None);
 }
 
 #[test]
 fn html_meta_viewport_ignored() {
-    // MetaViewportIgnored: viewport meta creates no box.
+    // Viewport meta is retained in the DOM but creates no visual box.
     let doc = parse(
         r#"<html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><p>Text</p></body></html>"#,
     );
-    let meta = find_box(&doc.root, &|b: &WebCore| b.tag == "meta");
-    assert!(meta.is_none());
+    let meta = find_box(&doc.root, &|b: &WebCore| b.tag == "meta").unwrap();
+    assert_eq!(meta.style.display, Display::None);
     assert!(doc_text(&doc).contains("Text"));
 }
 
 #[test]
 fn html_link_tag_does_not_create_box() {
-    // LinkTagDoesNotCreateBox: link element not in box tree.
+    // Link is retained in the DOM but creates no visual box.
     let doc = parse(
         r#"<html><head><link rel="stylesheet" href="style.css"></head><body><p>Text</p></body></html>"#,
     );
-    let link = find_box(&doc.root, &|b: &WebCore| b.tag == "link");
-    assert!(link.is_none());
+    let link = find_box(&doc.root, &|b: &WebCore| b.tag == "link").unwrap();
+    assert_eq!(link.style.display, Display::None);
 }
 
 #[test]
@@ -1047,12 +1060,13 @@ fn html_title_empty_when_missing() {
 
 #[test]
 fn html_title_not_in_text() {
-    // TitleNotInText: title extracted but not in rendered text.
+    // Title is present in the DOM but absent from visible text.
     let doc =
         parse(r#"<html><head><title>Secret</title></head><body><p>Visible</p></body></html>"#);
     assert_eq!(doc.title, "Secret");
-    assert!(!doc_text(&doc).contains("Secret"));
-    assert!(doc_text(&doc).contains("Visible"));
+    assert!(doc_text(&doc).contains("Secret"));
+    assert!(!visible_text(&doc.root).contains("Secret"));
+    assert!(visible_text(&doc.root).contains("Visible"));
 }
 
 // ============================================================

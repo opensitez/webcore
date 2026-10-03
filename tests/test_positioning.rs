@@ -71,7 +71,7 @@ fn relative_offset() {
 #[test]
 fn relative_negative() {
     let d = load_html(
-        "<div style='padding-top:100px'><div id='t' style='position:relative;top:-30px;height:40px'>U</div></div>",
+        "<body style='margin:0'><div style='padding-top:100px'><div id='t' style='position:relative;top:-30px;height:40px'>U</div></div></body>",
         500.0,
     );
     assert!((by_id(&d.root, "t").unwrap().layout.content_rect.y - 70.0).abs() < 5.0);
@@ -343,7 +343,7 @@ fn card_overlay_no_inflate() {
 #[test]
 fn sticky_header_content() {
     let d = load_html(
-        "<div style='width:800px'><div style='position:sticky;top:0;height:60px'>H</div><div id='c' style='height:2000px'>C</div><div id='f' style='height:100px'>F</div></div>",
+        "<body style='margin:0'><div style='width:800px'><div style='position:sticky;top:0;height:60px'>H</div><div id='c' style='height:2000px'>C</div><div id='f' style='height:100px'>F</div></div></body>",
         900.0,
     );
     assert!((by_id(&d.root, "c").unwrap().layout.content_rect.y - 60.0).abs() < 5.0);

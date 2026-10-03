@@ -261,10 +261,11 @@ fn br_line_break_br_at_end() {
     let doc = parse_and_layout("<p>Text<br></p>", 800.0);
     let p = find_box(&doc.root, &|b: &WebCore| b.tag == "p");
     assert!(p.is_some());
-    assert!(
-        p.unwrap().layout.line_cache.len() >= 2,
-        "BR at end should produce at least 2 lines"
-    );
+    assert_eq!(p.unwrap().layout.line_cache.len(), 1);
+
+    let editable = parse_and_layout("<p contenteditable>Text<br></p>", 800.0);
+    let p = find_box(&editable.root, &|b: &WebCore| b.tag == "p").unwrap();
+    assert_eq!(p.layout.line_cache.len(), 2);
 }
 
 // ============================================================

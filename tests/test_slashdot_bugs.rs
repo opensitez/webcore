@@ -414,10 +414,12 @@ fn test_diagnose_slashdot() {
         "snapshot_cache/a14e8239af3e67f3_httpsa.fsdn.comsdcssapp.cssfc755fff64591",
         "snapshot_cache/8a470ececc8d09df_httpsa.fsdn.comconcsssfthemesandiegocmp.",
     ] {
-        if let Ok(content) = std::fs::read_to_string(css_file) {
-            css_all.push_str(&content);
-            css_all.push('\n');
-        }
+        let Ok(content) = std::fs::read_to_string(css_file) else {
+            eprintln!("required Slashdot CSS snapshot not found: {css_file}");
+            return;
+        };
+        css_all.push_str(&content);
+        css_all.push('\n');
     }
     html = html.replace("<head>", &format!("<head><style>{}</style>", css_all));
 

@@ -12,8 +12,8 @@
 //     load_html + matches_with_ancestors instead.
 
 use webcore::css::{AttrOp, Combinator, SelectorPart, parse_selector};
-use webcore::types::CssLength;
 use webcore::parse_html;
+use webcore::types::CssLength;
 
 // ─── Helper: find a box in the tree matching a predicate ─────────────────────
 
@@ -39,17 +39,18 @@ fn ancestor_info(
     child_index: usize,
     sibling_count: usize,
 ) -> webcore::css::AncestorInfo {
-	    webcore::css::AncestorInfo {
-	        tag: b.tag.clone(),
-	        attributes: b.attributes.clone(),
-	        child_index,
-	        sibling_count,
-	        type_child_index: child_index,
-	        type_sibling_count: sibling_count,
-	        node_id: b.node_id,
-	        prev_siblings: Vec::new(),
-	    }
-	}
+    webcore::css::AncestorInfo {
+        tag: b.tag.clone(),
+        attributes: b.attributes.clone().into(),
+        child_index,
+        sibling_count,
+        type_child_index: child_index,
+        type_sibling_count: sibling_count,
+        node_id: b.node_id,
+        auto_direction: None,
+        prev_siblings: Vec::new().into(),
+    }
+}
 
 // ============================================================
 // Basic Selector Matching  (TagMatch, ClassMatch, IdMatch, etc.)

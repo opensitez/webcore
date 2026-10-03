@@ -1,9 +1,11 @@
 // Shadow DOM tests — shadow tree rendering, scoped styles, slots, isolation.
 
-use webcore::dom;
 use webcore::html::parse_html;
 use webcore::load_html;
 use webcore::types::*;
+
+const TEST_VIEWPORT_W: f32 = 800.0;
+const TEST_VIEWPORT_H: f32 = 600.0;
 
 fn by_id<'a>(root: &'a WebCore, id: &str) -> Option<&'a WebCore> {
     if root.attributes.get("id").map(|v| v == id).unwrap_or(false) {
@@ -38,7 +40,7 @@ fn attach(root: &mut WebCore, host_id: &str, mode: ShadowMode, html: &str) {
     }
     if let Some(host) = find_mut(root, host_id) {
         host.attach_shadow(mode, html);
-        host.resolve_slots();
+        host.resolve_slots(TEST_VIEWPORT_W, TEST_VIEWPORT_H);
     }
 }
 

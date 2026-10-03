@@ -27,6 +27,26 @@ fn find<'a>(root: &'a WebCore, pred: &dyn Fn(&WebCore) -> bool) -> Option<&'a We
     None
 }
 
+#[test]
+fn image_with_percent_max_width_does_not_expand_flex_basis() {
+    let d = load_html(
+        "<div style='display:flex;width:500px'><figure id='figure' style='flex:0 1 50px;margin:0'><img id='image' width='1000' height='1046' style='max-width:100%;height:auto'></figure><p>Caption</p></div>",
+        600.0,
+    );
+    let figure = by_id(&d.root, "figure").unwrap();
+    let image = by_id(&d.root, "image").unwrap();
+    assert!(
+        (figure.layout.border_rect.w - 50.0).abs() < 1.0,
+        "figure width={}",
+        figure.layout.border_rect.w
+    );
+    assert!(
+        (image.layout.border_rect.w - 50.0).abs() < 1.0,
+        "image width={}",
+        image.layout.border_rect.w
+    );
+}
+
 // ╔══════════════════════════════════════════════════════════════╗
 // ║  FLEX: absolute children excluded from flex layout          ║
 // ╚══════════════════════════════════════════════════════════════╝

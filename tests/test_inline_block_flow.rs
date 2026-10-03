@@ -139,6 +139,34 @@ fn inline_block_shrink_to_fit_in_block_context() {
     );
 }
 
+#[test]
+fn inline_block_with_wide_content_moves_below_sibling_floats() {
+    let doc = load_html(
+        "<div style='width: 1000px'>\
+           <div style='float:left;width:220px;height:40px'></div>\
+           <div style='float:right;width:300px;height:40px'></div>\
+           <div id='holder'><div id='list' style='display:inline-block'>\
+             <div style='white-space:nowrap'>A long heading followed by a long sentence that should not be squeezed between the two floated boxes on this line.</div>\
+           </div></div>\
+         </div>",
+        1000.0,
+    );
+    let list = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|v| v == "list")
+    })
+    .unwrap();
+    assert!(
+        list.layout.border_rect.y >= 40.0,
+        "inline-block should move below floats, got {:?}",
+        list.layout.border_rect
+    );
+    assert!(
+        list.layout.border_rect.w > 480.0,
+        "inline-block should retain its intrinsic width, got {:?}",
+        list.layout.border_rect
+    );
+}
+
 // ============================================================
 // Anonymous inline formatting context (horizontal flow)
 // ============================================================

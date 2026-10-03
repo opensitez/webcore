@@ -38,6 +38,42 @@ fn find_all<'a>(root: &'a WebCore, pred: &dyn Fn(&WebCore) -> bool) -> Vec<&'a W
     r
 }
 
+#[test]
+fn specified_table_width_grows_to_fit_minimum_cell_widths() {
+    let doc = load_html(
+        "<table id='table' style='width:100px;table-layout:auto;border-spacing:0'>\
+           <tr><td><div style='width:120px'>first</div></td><td><div style='width:120px'>second</div></td></tr>\
+         </table>",
+        800.0,
+    );
+    let table = by_id(&doc.root, "table").unwrap();
+    assert!(
+        table.layout.border_rect.w >= 240.0,
+        "specified table width must not squeeze minimum-width cells: {:?}",
+        table.layout.border_rect
+    );
+}
+
+#[test]
+fn nested_table_columns_raise_outer_table_minimum_width() {
+    let doc = load_html(
+        "<table id='outer' style='width:100px;table-layout:auto;border-spacing:0'>\
+           <tr><td><table style='border-spacing:0'><tr>\
+             <td><div style='width:100px'>a</div></td>\
+             <td><div style='width:100px'>b</div></td>\
+             <td><div style='width:100px'>c</div></td>\
+           </tr></table></td></tr>\
+         </table>",
+        800.0,
+    );
+    let outer = by_id(&doc.root, "outer").unwrap();
+    assert!(
+        outer.layout.border_rect.w >= 300.0,
+        "nested table columns must contribute to outer min-content: {:?}",
+        outer.layout.border_rect
+    );
+}
+
 // ╔══════════════════════════════════════════════════════════════╗
 // ║  AUTO COLUMN WIDTH DISTRIBUTION                             ║
 // ╚══════════════════════════════════════════════════════════════╝
@@ -412,8 +448,16 @@ fn cell_vertical_align_top() {
     // Top-aligned cell content should be at the top of the row
     assert!(
         (top.layout.content_rect.y - tall.layout.content_rect.y).abs() < 5.0,
-        "top-aligned at same y as row start"
+        "top-aligned at same y as row start: top content={:?}, border={:?}; tall content={:?}, border={:?}",
+        top.layout.content_rect,
+        top.layout.border_rect,
+        tall.layout.content_rect,
+        tall.layout.border_rect,
     );
+    let top_line = top.layout.line_cache.first().expect("top cell line");
+    let tall_line = tall.layout.line_cache.first().expect("middle cell line");
+    assert!(top_line.y < tall_line.y);
+    assert!(tall_line.y + tall_line.height <= tall.layout.border_rect.bottom());
 }
 
 #[test]
@@ -601,11 +645,18 @@ fn table_inside_flex() {
         900.0,
     );
     let t = by_id(&d.root, "t").unwrap();
+    let side = find_all(&d.root, &|b| b.text == "Side")
+        .into_iter()
+        .next()
+        .map(|b| b.layout.border_rect.x);
     // Table as flex item gets flex:1 of remaining space
     assert!(
         t.layout.content_rect.w > 400.0,
-        "table flex:1 w={:.0} should fill space",
-        t.layout.content_rect.w
+        "table flex:1 w={:.0} should fill space; grow={}, shrink={}, basis={:?}, side_x={side:?}",
+        t.layout.content_rect.w,
+        t.style.flex_grow,
+        t.style.flex_shrink,
+        t.style.flex_basis,
     );
 }
 
@@ -715,14 +766,19 @@ fn email_table_layout() {
         "header full width w={:.0}",
         header.layout.content_rect.w
     );
-    // Main and side side by side
+    // Main and side share a row; their content starts at different y because
+    // they have different top padding.
     assert!(
         side.layout.content_rect.x > main.layout.content_rect.x + 100.0,
         "side right of main"
     );
     assert!(
-        (main.layout.content_rect.y - side.layout.content_rect.y).abs() < 5.0,
-        "same row"
+        (main.layout.border_rect.y - side.layout.border_rect.y).abs() < 5.0,
+        "same row: main content={:?}, border={:?}; side content={:?}, border={:?}",
+        main.layout.content_rect,
+        main.layout.border_rect,
+        side.layout.content_rect,
+        side.layout.border_rect,
     );
     // Footer below content
     assert!(
@@ -892,8 +948,12 @@ fn table_margin_auto_centers() {
     // Table should be centered: x ≈ (800-400)/2 = 200
     assert!(
         (t.layout.border_rect.x - 200.0).abs() < 30.0,
-        "centered table x={:.0} should be ~200",
-        t.layout.border_rect.x
+        "centered table x={:.0}, width={:.0} should be ~200; margins={:?}/{:?}, display={:?}",
+        t.layout.border_rect.x,
+        t.layout.border_rect.w,
+        t.style.margin_left,
+        t.style.margin_right,
+        t.style.display,
     );
 }
 

@@ -256,7 +256,10 @@ fn clip_path_circle_parsed() {
     let doc = parse_html("<div style='clip-path: circle(50% at 50% 50%);'>Test</div>");
     let div = find_box(&doc.root, &|b| b.tag == "div").unwrap();
     assert_eq!(div.style.clip_path.kind, ClipPathKind::Circle);
-    assert_eq!(div.style.clip_path.circle_radius, CssLength::Percent(50.0));
+    assert_eq!(
+        div.style.clip_path.circle_radius,
+        ShapeRadius::Length(CssLength::Percent(50.0))
+    );
     assert_eq!(div.style.clip_path.center_x, CssLength::Percent(50.0));
     assert_eq!(div.style.clip_path.center_y, CssLength::Percent(50.0));
 }
@@ -266,7 +269,10 @@ fn clip_path_circle_no_center() {
     let doc = parse_html("<div style='clip-path: circle(100px);'>Test</div>");
     let div = find_box(&doc.root, &|b| b.tag == "div").unwrap();
     assert_eq!(div.style.clip_path.kind, ClipPathKind::Circle);
-    assert_eq!(div.style.clip_path.circle_radius, CssLength::Px(100.0));
+    assert_eq!(
+        div.style.clip_path.circle_radius,
+        ShapeRadius::Length(CssLength::Px(100.0))
+    );
     // Default center is 50% 50%
     assert_eq!(div.style.clip_path.center_x, CssLength::Percent(50.0));
     assert_eq!(div.style.clip_path.center_y, CssLength::Percent(50.0));
@@ -277,8 +283,14 @@ fn clip_path_ellipse_parsed() {
     let doc = parse_html("<div style='clip-path: ellipse(40% 60% at 50% 50%);'>Test</div>");
     let div = find_box(&doc.root, &|b| b.tag == "div").unwrap();
     assert_eq!(div.style.clip_path.kind, ClipPathKind::Ellipse);
-    assert_eq!(div.style.clip_path.ellipse_rx, CssLength::Percent(40.0));
-    assert_eq!(div.style.clip_path.ellipse_ry, CssLength::Percent(60.0));
+    assert_eq!(
+        div.style.clip_path.ellipse_rx,
+        ShapeRadius::Length(CssLength::Percent(40.0))
+    );
+    assert_eq!(
+        div.style.clip_path.ellipse_ry,
+        ShapeRadius::Length(CssLength::Percent(60.0))
+    );
 }
 
 #[test]

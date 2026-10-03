@@ -423,18 +423,15 @@ fn writing_mode_vertical_lr() {
 // CSS Logical Properties — RTL direction
 // ============================================================
 
-// NOTE: The Rust apply_property implementation maps margin-inline-start
-// unconditionally to margin_left (does not flip for RTL at the apply_property
-// level; direction-aware resolution happens at layout time instead).
 #[test]
 fn margin_inline_start_rtl() {
     let mut style = ComputedStyle::default();
     style.direction = Direction::RTL;
     apply_property(&mut style, "margin-inline-start", "10px");
     apply_property(&mut style, "margin-inline-end", "20px");
-    // Rust maps inline-start → left and inline-end → right unconditionally
-    assert_eq!(style.margin_left, CssLength::Px(10.0));
-    assert_eq!(style.margin_right, CssLength::Px(20.0));
+    webcore::css::finalize_logical(&mut style);
+    assert_eq!(style.margin_right, CssLength::Px(10.0));
+    assert_eq!(style.margin_left, CssLength::Px(20.0));
 }
 
 #[test]
@@ -443,6 +440,7 @@ fn padding_inline_start_ltr() {
     style.direction = Direction::LTR;
     apply_property(&mut style, "padding-inline-start", "15px");
     apply_property(&mut style, "padding-inline-end", "25px");
+    webcore::css::finalize_logical(&mut style);
     assert_eq!(style.padding_left, CssLength::Px(15.0));
     assert_eq!(style.padding_right, CssLength::Px(25.0));
 }
@@ -452,6 +450,7 @@ fn padding_block_start_end() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "padding-block-start", "5px");
     apply_property(&mut style, "padding-block-end", "15px");
+    webcore::css::finalize_logical(&mut style);
     assert_eq!(style.padding_top, CssLength::Px(5.0));
     assert_eq!(style.padding_bottom, CssLength::Px(15.0));
 }
@@ -461,6 +460,7 @@ fn margin_block_start_end() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "margin-block-start", "10px");
     apply_property(&mut style, "margin-block-end", "20px");
+    webcore::css::finalize_logical(&mut style);
     assert_eq!(style.margin_top, CssLength::Px(10.0));
     assert_eq!(style.margin_bottom, CssLength::Px(20.0));
 }
@@ -476,6 +476,7 @@ fn margin_inline_start_ltr() {
     style.direction = Direction::LTR;
     apply_property(&mut style, "margin-inline-start", "10px");
     apply_property(&mut style, "margin-inline-end", "20px");
+    webcore::css::finalize_logical(&mut style);
     assert_eq!(style.margin_left, CssLength::Px(10.0));
     assert_eq!(style.margin_right, CssLength::Px(20.0));
 }

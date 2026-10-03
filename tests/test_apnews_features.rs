@@ -64,11 +64,12 @@ fn picture_simple_source_sets_img_src() {
     "#,
     );
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
-    assert_eq!(img.get_attr("src"), Some("better.jpg"));
+    assert_eq!(img.get_attr("src"), Some("fallback.jpg"));
+    assert!(img.resolved_src.ends_with("better.jpg"));
 }
 
 #[test]
-fn picture_skips_webp_source() {
+fn picture_uses_first_supported_source() {
     let doc = parse_html(
         r#"
         <picture>
@@ -79,7 +80,8 @@ fn picture_skips_webp_source() {
     "#,
     );
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
-    assert_eq!(img.get_attr("src"), Some("photo.jpg"));
+    assert_eq!(img.get_attr("src"), Some("fallback.jpg"));
+    assert!(img.resolved_src.ends_with("photo.webp"));
 }
 
 #[test]
@@ -87,18 +89,19 @@ fn picture_falls_back_to_img_src_when_no_source_matches() {
     let doc = parse_html(
         r#"
         <picture>
-            <source type="image/webp" srcset="photo.webp">
+            <source type="image/avif" srcset="photo.avif">
             <img src="fallback.jpg">
         </picture>
     "#,
     );
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
-    // Only webp source, which is skipped — img keeps its original src
+    // The unsupported source does not replace the fallback image.
     assert_eq!(img.get_attr("src"), Some("fallback.jpg"));
+    assert!(img.resolved_src.ends_with("fallback.jpg"));
 }
 
 #[test]
-fn picture_skips_source_with_media_when_viewport_unknown() {
+fn picture_default_viewport_skips_large_media_source() {
     let doc = parse_html(
         r#"
         <picture>
@@ -108,9 +111,10 @@ fn picture_skips_source_with_media_when_viewport_unknown() {
         </picture>
     "#,
     );
-    // At parse time, viewport is 0 — media sources are skipped, unconditional wins
+    // Standalone parsing uses a deterministic 800px viewport.
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
-    assert_eq!(img.get_attr("src"), Some("small.jpg"));
+    assert_eq!(img.get_attr("src"), Some("fallback.jpg"));
+    assert!(img.resolved_src.ends_with("small.jpg"));
 }
 
 #[test]
@@ -128,7 +132,8 @@ fn picture_with_viewport_selects_matching_media_source() {
         800.0,
     );
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
-    assert_eq!(img.get_attr("src"), Some("large.jpg"));
+    assert_eq!(img.get_attr("src"), Some("fallback.jpg"));
+    assert!(img.resolved_src.ends_with("large.jpg"));
 }
 
 #[test]
@@ -145,7 +150,8 @@ fn picture_with_small_viewport_skips_large_media() {
         600.0,
     );
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
-    assert_eq!(img.get_attr("src"), Some("small.jpg"));
+    assert_eq!(img.get_attr("src"), Some("fallback.jpg"));
+    assert!(img.resolved_src.ends_with("small.jpg"));
 }
 
 #[test]
@@ -159,7 +165,8 @@ fn picture_img_gets_resolved_src() {
     "#,
     );
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
-    assert!(img.get_attr("_resolved_src").is_some());
+    assert_eq!(img.get_attr("src"), Some("fallback.jpg"));
+    assert!(img.resolved_src.ends_with("photo.jpg"));
 }
 
 #[test]
@@ -173,8 +180,10 @@ fn picture_srcset_with_width_descriptor() {
     "#,
     );
     let img = find_box(&doc.root, &|b| b.tag == "img").unwrap();
-    // Should pick the first URL from srcset
-    assert_eq!(img.get_attr("src"), Some("photo-320.jpg"));
+    // A width descriptor is selected for the default viewport without
+    // rewriting the author-supplied fallback attribute.
+    assert_eq!(img.get_attr("src"), Some("fallback.jpg"));
+    assert!(img.resolved_src.ends_with("photo-640.jpg"));
 }
 
 #[test]
@@ -375,7 +384,7 @@ fn counter_reset_parsed() {
         style
             .counter_reset
             .iter()
-            .any(|(name, _)| name == "section")
+            .any(|reset| reset.name == "section")
     );
 }
 
@@ -383,12 +392,12 @@ fn counter_reset_parsed() {
 fn counter_reset_with_value() {
     let mut style = ComputedStyle::default();
     apply_property(&mut style, "counter-reset", "section 5");
-    let (_, val) = style
+    let reset = style
         .counter_reset
         .iter()
-        .find(|(n, _)| n == "section")
+        .find(|reset| reset.name == "section")
         .unwrap();
-    assert_eq!(*val, 5);
+    assert_eq!(reset.value, Some(5));
 }
 
 #[test]
