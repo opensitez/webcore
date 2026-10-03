@@ -1,0 +1,29 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CSS environment function tokens</title>
+<style>
+  body { margin: 0; font: 16px/24px sans-serif }
+  .case { width: 280px; margin: 12px; padding: 4px; border: 3px solid green; color: black }
+  #uppercase { padding: ENV(safe-area-inset-top, 12px) }
+  #escaped { padding: e\6e v(safe-area-inset-\74 op, 12px) }
+  #case-sensitive { padding: env(SAFE-AREA-INSET-TOP, 12px); color: ENV(SAFE-AREA-INSET-TOP, red) }
+  #indexed { padding: env(safe-area-inset-top 0, 12px) }
+  #segment { padding: env(viewport-segment-width 0 1, 12px) }
+  #fallback { padding: env(unknown, min(12px, 20px)) }
+  #nested { padding: calc(e\6e v(unknown, min(10px, 20px)) + 2px) }
+  #variable { --amount: e\6e v(unknown, 12px); padding: var(--amount) }
+  #invalid-fallback { padding: env(unknown, 10px, 20px) }
+  #invalid-color { color: env(unknown, red, blue) }
+  #split { padding: env(unknown,10)px }
+</style>
+<div class="case" id="uppercase">Function names ignore case</div>
+<div class="case" id="escaped">Escaped function and variable names</div>
+<div class="case" id="case-sensitive">Environment names preserve case</div>
+<div class="case" id="indexed">Indices on a scalar use fallback</div>
+<div class="case" id="segment">Unknown indexed variable</div>
+<div class="case" id="fallback">Nested fallback calculation</div>
+<div class="case" id="nested">Environment function in calculation</div>
+<div class="case" id="variable">Variable-supplied environment tokens</div>
+<div class="case" id="invalid-fallback">Complete fallback is invalid as a length</div>
+<div class="case" id="invalid-color">Complete fallback is invalid as a color</div>
+<div class="case" id="split">Substitution cannot form a new dimension</div>

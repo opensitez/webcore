@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CSS Declaration Grammar</title>
+<style>
+  body { margin: 2rem; font-family: sans-serif; }
+  .case { margin-block: 1rem; padding: 1rem; border: 1px solid #888; }
+  .escaped { color: red; \63 olor: green !\69mportant; color: red; }
+  .blocks { --data: { first: a; nested: { second: b; } }; color: green; }
+  .blocks span { color: inherit; }
+  .literal::after { content: " !important"; }
+  .supports { color: red; }
+  @supports (\63 olor: green !\69mportant) { .supports { color: green; } }
+  .comment-values { color: blue; width: 80px; color: re/**/d; width: 10/**/px; }
+  .comment-border { border: 2px/**/solid/**/green; }
+  .compound/**/.comment-border { color: green; }
+  .compound/**/span { color: red; }
+  .split-priority { color: green; color: red !im/**/portant; }
+</style>
+<h1>CSS Declaration Grammar</h1>
+<div class="case escaped">Escaped property and priority: green</div>
+<div class="case blocks"><span>Balanced custom-property block: green</span></div>
+<div class="case literal">Quoted priority text remains literal:</div>
+<div class="case supports">Escaped feature query: green</div>
+<div class="case" style="color: red; &#92;63 olor: green !&#92;69mportant; color: red">Inline declaration: green</div>
+<div class="case comment-values">Separate tokens: blue</div>
+<div class="case compound comment-border"><span>Comment-separated border and compound selector: green</span></div>
+<div class="case split-priority">Split priority identifier: green</div>

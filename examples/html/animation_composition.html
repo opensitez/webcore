@@ -23,6 +23,10 @@
   #finished { animation: move-y .1s linear forwards; }
   #finished-reference { transform: translateY(10px); }
   #finished-row:hover { background: #eef6f0; }
+  #phase { animation: move-y 1s linear -.5s paused forwards; }
+  #phase-reference { transform: translateY(5px); }
+  #phase-row:hover #phase { animation-duration: .25s; }
+  #phase-row:hover #phase-reference { transform: translateY(10px); }
 </style>
 </head>
 <body>
@@ -36,5 +40,7 @@
 <div class="row"><div id="replaced" class="box"></div><div id="replaced-reference" class="box"></div></div>
 <h2>Completed Fill After Hover</h2>
 <div class="row" id="finished-row"><div id="finished" class="box"></div><div id="finished-reference" class="box"></div></div>
+<h2>Paused Duration Change</h2>
+<div class="row" id="phase-row"><div id="phase" class="box"></div><div id="phase-reference" class="box"></div></div>
 </body>
 </html>

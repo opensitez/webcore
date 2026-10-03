@@ -39,7 +39,9 @@ fn the_data_model_sizes_are_what_the_plan_says() {
     // these numbers are a measured record, not a size budget.
     // This assertion is a measured record, not a threshold; update it with the
     // feature that intentionally moves the data model.
-    assert_eq!(sizes, (1496, 3576, 296), "sizes moved");
+    // Current inline measurements; deferred logical declarations live in the
+    // boxed RareStyle and are tested separately below.
+    assert_eq!(sizes, (1496, 3592, 296), "sizes moved");
 }
 
 #[test]
@@ -51,9 +53,26 @@ fn a_real_page_costs_what_the_plan_says() {
     // sizes above, so widening WebCore or ComputedStyle changes this record.
     assert_eq!(
         (nodes, node_bytes, distinct_styles, total),
-        (160, 239_360, 160, 811_520),
+        (160, 239_360, 160, 814_080),
         "demo.html: nodes, node bytes, DISTINCT styles, total"
     );
+}
+
+#[test]
+fn deferred_logical_writes_share_one_list_and_release_it_after_cascade() {
+    use crate::types::LogicalDeclaration;
+    let mut style = ComputedStyle::default();
+    crate::css::apply_property(&mut style, "margin-inline-start", "2px");
+    crate::css::apply_property(&mut style, "border-inline-start", "3px solid red");
+    crate::css::apply_property(&mut style, "border-start-start-radius", "4px 6px");
+    let declarations = &style.rare().logical_declarations;
+    assert_eq!(declarations.len(), 3);
+    assert!(matches!(declarations[0], LogicalDeclaration::Length(..)));
+    assert!(matches!(declarations[1], LogicalDeclaration::Border(..)));
+    assert!(matches!(declarations[2], LogicalDeclaration::Corner(..)));
+    crate::css::finalize_logical(&mut style);
+    assert!(style.rare().logical_declarations.is_empty());
+    assert_eq!(style.rare().logical_declarations.capacity(), 0);
 }
 
 /// ⛔ A LIVE RENDERING BUG, found while sizing `arenaplan.md` item 1.

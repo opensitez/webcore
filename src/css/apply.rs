@@ -1,6 +1,7 @@
 //! Applying a parsed declaration to a `ComputedStyle`.
 
 #![allow(unused_imports)]
+use super::value_parse::split_top_level_commas;
 use super::*;
 use crate::types::*;
 use rayon::prelude::*;
@@ -195,13 +196,33 @@ pub fn apply_css_value(
                 BSV::Outset => crate::types::BorderStyle::Outset,
             };
             use properties::PropertyId::*;
+            if let Some((slot, BorderAspect::Style)) = logical_border_property(id) {
+                style
+                    .rare_mut()
+                    .logical_declarations
+                    .push(LogicalDeclaration::Border(LogicalBorderValue {
+                        slot,
+                        width: None,
+                        style: Some(s),
+                        color: None,
+                        current_color: false,
+                    }));
+                return;
+            }
             match id {
                 BorderTopStyle => style.border_top_style = s,
                 BorderRightStyle => style.border_right_style = s,
                 BorderBottomStyle => style.border_bottom_style = s,
                 BorderLeftStyle => style.border_left_style = s,
+                BorderStyle => {
+                    style.border_top_style = s;
+                    style.border_right_style = s;
+                    style.border_bottom_style = s;
+                    style.border_left_style = s;
+                }
                 _ => {}
             }
+            record_physical_box_declaration(style, id);
             return;
         }
         CssValue::VerticalAlign(v) => {
@@ -265,9 +286,21 @@ pub(crate) fn note_current_color(
     // A shorthand carries the colour as one component among several, so every
     // top-level token is a candidate. A token that merely CONTAINS the keyword
     // (`linear-gradient(currentColor,red)`) is not one: only a whole token is.
-    let asks = value
-        .split_ascii_whitespace()
-        .any(|t| t.eq_ignore_ascii_case("currentcolor"));
+    let shorthand = matches!(
+        id,
+        P::Border | P::BorderTop | P::BorderRight | P::BorderBottom | P::BorderLeft
+    );
+    let asks = if shorthand {
+        let components = super::syntax::split_component_values(value);
+        components
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case("currentcolor"))
+            || !components.iter().any(|t| super::parse_color(t).is_some())
+    } else {
+        value
+            .split_ascii_whitespace()
+            .any(|t| t.eq_ignore_ascii_case("currentcolor"))
+    };
     if asks {
         style.rare_mut().current_color_props |= bit;
     } else if style.rare().current_color_props & bit != 0 {
@@ -285,13 +318,10 @@ pub(crate) fn note_current_color(
 pub fn finalize_logical(style: &mut ComputedStyle) {
     use crate::types::*;
     finalize_logical_float_clear(style);
-    if style.rare().logical_box.is_empty()
-        && style.rare().logical_borders.is_empty()
-        && style.rare().logical_corners.is_empty()
-    {
+    if style.rare().logical_declarations.is_empty() {
         return;
     }
-    let decls = std::mem::take(&mut style.rare_mut().logical_box);
+    let decls = std::mem::take(&mut style.rare_mut().logical_declarations);
     let wm = style.writing_mode;
     let dir = style.direction;
     let i_start = inline_start_side(wm, dir);
@@ -300,121 +330,216 @@ pub fn finalize_logical(style: &mut ComputedStyle) {
     let b_end = opposite(b_start);
     let horizontal_inline = inline_axis_is_horizontal(wm);
 
-    let corners = std::mem::take(&mut style.rare_mut().logical_corners);
-    for (slot, x, y) in corners {
-        let (block, inline) = match slot {
-            LogicalCornerSlot::StartStart => (b_start, i_start),
-            LogicalCornerSlot::StartEnd => (b_start, i_end),
-            LogicalCornerSlot::EndStart => (b_end, i_start),
-            LogicalCornerSlot::EndEnd => (b_end, i_end),
-        };
-        match (block, inline) {
-            (PhysicalSide::Top, PhysicalSide::Left) | (PhysicalSide::Left, PhysicalSide::Top) => {
-                style.border_top_left_radius = x;
-                style.border_top_left_radius_y = y;
-                style.border_radius = style.border_top_left_radius.clone();
+    for declaration in decls {
+        match declaration {
+            LogicalDeclaration::Corner(slot, x, y) => {
+                let (block, inline) = match slot {
+                    LogicalCornerSlot::TopLeft => (PhysicalSide::Top, PhysicalSide::Left),
+                    LogicalCornerSlot::TopRight => (PhysicalSide::Top, PhysicalSide::Right),
+                    LogicalCornerSlot::BottomLeft => (PhysicalSide::Bottom, PhysicalSide::Left),
+                    LogicalCornerSlot::BottomRight => (PhysicalSide::Bottom, PhysicalSide::Right),
+                    LogicalCornerSlot::StartStart => (b_start, i_start),
+                    LogicalCornerSlot::StartEnd => (b_start, i_end),
+                    LogicalCornerSlot::EndStart => (b_end, i_start),
+                    LogicalCornerSlot::EndEnd => (b_end, i_end),
+                };
+                match (block, inline) {
+                    (PhysicalSide::Top, PhysicalSide::Left)
+                    | (PhysicalSide::Left, PhysicalSide::Top) => {
+                        style.border_top_left_radius = x;
+                        style.border_top_left_radius_y = y;
+                        style.border_radius = style.border_top_left_radius.clone();
+                    }
+                    (PhysicalSide::Top, PhysicalSide::Right)
+                    | (PhysicalSide::Right, PhysicalSide::Top) => {
+                        style.border_top_right_radius = x;
+                        style.border_top_right_radius_y = y;
+                    }
+                    (PhysicalSide::Bottom, PhysicalSide::Left)
+                    | (PhysicalSide::Left, PhysicalSide::Bottom) => {
+                        style.border_bottom_left_radius = x;
+                        style.border_bottom_left_radius_y = y;
+                    }
+                    (PhysicalSide::Bottom, PhysicalSide::Right)
+                    | (PhysicalSide::Right, PhysicalSide::Bottom) => {
+                        style.border_bottom_right_radius = x;
+                        style.border_bottom_right_radius_y = y;
+                    }
+                    _ => {}
+                }
             }
-            (PhysicalSide::Top, PhysicalSide::Right) | (PhysicalSide::Right, PhysicalSide::Top) => {
-                style.border_top_right_radius = x;
-                style.border_top_right_radius_y = y;
+            LogicalDeclaration::Length(slot, len) => {
+                match slot {
+                    LogicalSlot::MarginPhysical(side) => set_margin(style, side, len),
+                    LogicalSlot::PaddingPhysical(side) => set_padding(style, side, len),
+                    LogicalSlot::InsetPhysical(side) => set_inset(style, side, len),
+                    LogicalSlot::WidthPhysical => style.width = len,
+                    LogicalSlot::HeightPhysical => style.height = len,
+                    LogicalSlot::MinWidthPhysical => style.min_width = len,
+                    LogicalSlot::MinHeightPhysical => style.min_height = len,
+                    LogicalSlot::MaxWidthPhysical => style.max_width = len,
+                    LogicalSlot::MaxHeightPhysical => style.max_height = len,
+                    LogicalSlot::MarginInlineStart => set_margin(style, i_start, len),
+                    LogicalSlot::MarginInlineEnd => set_margin(style, i_end, len),
+                    LogicalSlot::MarginBlockStart => set_margin(style, b_start, len),
+                    LogicalSlot::MarginBlockEnd => set_margin(style, b_end, len),
+                    LogicalSlot::PaddingInlineStart => set_padding(style, i_start, len),
+                    LogicalSlot::PaddingInlineEnd => set_padding(style, i_end, len),
+                    LogicalSlot::PaddingBlockStart => set_padding(style, b_start, len),
+                    LogicalSlot::PaddingBlockEnd => set_padding(style, b_end, len),
+                    LogicalSlot::InsetInlineStart => set_inset(style, i_start, len),
+                    LogicalSlot::InsetInlineEnd => set_inset(style, i_end, len),
+                    LogicalSlot::InsetBlockStart => set_inset(style, b_start, len),
+                    LogicalSlot::InsetBlockEnd => set_inset(style, b_end, len),
+                    LogicalSlot::BorderInlineStartWidth => set_border_width(style, i_start, len),
+                    LogicalSlot::BorderInlineEndWidth => set_border_width(style, i_end, len),
+                    LogicalSlot::BorderBlockStartWidth => set_border_width(style, b_start, len),
+                    LogicalSlot::BorderBlockEndWidth => set_border_width(style, b_end, len),
+                    // A size on the inline axis is the WIDTH only while that axis is
+                    // horizontal; in a vertical writing mode it is the height.
+                    LogicalSlot::InlineSize => {
+                        if horizontal_inline {
+                            style.width = len
+                        } else {
+                            style.height = len
+                        }
+                    }
+                    LogicalSlot::BlockSize => {
+                        if horizontal_inline {
+                            style.height = len
+                        } else {
+                            style.width = len
+                        }
+                    }
+                    LogicalSlot::MinInlineSize => {
+                        if horizontal_inline {
+                            style.min_width = len
+                        } else {
+                            style.min_height = len
+                        }
+                    }
+                    LogicalSlot::MinBlockSize => {
+                        if horizontal_inline {
+                            style.min_height = len
+                        } else {
+                            style.min_width = len
+                        }
+                    }
+                    LogicalSlot::MaxInlineSize => {
+                        if horizontal_inline {
+                            style.max_width = len
+                        } else {
+                            style.max_height = len
+                        }
+                    }
+                    LogicalSlot::MaxBlockSize => {
+                        if horizontal_inline {
+                            style.max_height = len
+                        } else {
+                            style.max_width = len
+                        }
+                    }
+                }
             }
-            (PhysicalSide::Bottom, PhysicalSide::Left)
-            | (PhysicalSide::Left, PhysicalSide::Bottom) => {
-                style.border_bottom_left_radius = x;
-                style.border_bottom_left_radius_y = y;
+            LogicalDeclaration::Border(decl) => {
+                let side = match decl.slot {
+                    LogicalBorderSlot::Physical(side) => side,
+                    LogicalBorderSlot::InlineStart => i_start,
+                    LogicalBorderSlot::InlineEnd => i_end,
+                    LogicalBorderSlot::BlockStart => b_start,
+                    LogicalBorderSlot::BlockEnd => b_end,
+                };
+                if let Some(width) = decl.width {
+                    set_border_width(style, side, width);
+                }
+                if let Some(border_style) = decl.style {
+                    set_border_style(style, side, border_style);
+                }
+                if decl.current_color {
+                    set_border_color(style, side, style.color);
+                } else if let Some(color) = decl.color {
+                    set_border_color(style, side, color);
+                }
             }
-            (PhysicalSide::Bottom, PhysicalSide::Right)
-            | (PhysicalSide::Right, PhysicalSide::Bottom) => {
-                style.border_bottom_right_radius = x;
-                style.border_bottom_right_radius_y = y;
-            }
-            _ => {}
         }
     }
+}
 
-    for (slot, len) in decls {
-        match slot {
-            LogicalSlot::MarginPhysical(side) => set_margin(style, side, len),
-            LogicalSlot::PaddingPhysical(side) => set_padding(style, side, len),
-            LogicalSlot::MarginInlineStart => set_margin(style, i_start, len),
-            LogicalSlot::MarginInlineEnd => set_margin(style, i_end, len),
-            LogicalSlot::MarginBlockStart => set_margin(style, b_start, len),
-            LogicalSlot::MarginBlockEnd => set_margin(style, b_end, len),
-            LogicalSlot::PaddingInlineStart => set_padding(style, i_start, len),
-            LogicalSlot::PaddingInlineEnd => set_padding(style, i_end, len),
-            LogicalSlot::PaddingBlockStart => set_padding(style, b_start, len),
-            LogicalSlot::PaddingBlockEnd => set_padding(style, b_end, len),
-            LogicalSlot::InsetInlineStart => set_inset(style, i_start, len),
-            LogicalSlot::InsetInlineEnd => set_inset(style, i_end, len),
-            LogicalSlot::InsetBlockStart => set_inset(style, b_start, len),
-            LogicalSlot::InsetBlockEnd => set_inset(style, b_end, len),
-            LogicalSlot::BorderInlineStartWidth => set_border_width(style, i_start, len),
-            LogicalSlot::BorderInlineEndWidth => set_border_width(style, i_end, len),
-            LogicalSlot::BorderBlockStartWidth => set_border_width(style, b_start, len),
-            LogicalSlot::BorderBlockEndWidth => set_border_width(style, b_end, len),
-            // A size on the inline axis is the WIDTH only while that axis is
-            // horizontal; in a vertical writing mode it is the height.
-            LogicalSlot::InlineSize => {
-                if horizontal_inline {
-                    style.width = len
-                } else {
-                    style.height = len
-                }
-            }
-            LogicalSlot::BlockSize => {
-                if horizontal_inline {
-                    style.height = len
-                } else {
-                    style.width = len
-                }
-            }
-            LogicalSlot::MinInlineSize => {
-                if horizontal_inline {
-                    style.min_width = len
-                } else {
-                    style.min_height = len
-                }
-            }
-            LogicalSlot::MinBlockSize => {
-                if horizontal_inline {
-                    style.min_height = len
-                } else {
-                    style.min_width = len
-                }
-            }
-            LogicalSlot::MaxInlineSize => {
-                if horizontal_inline {
-                    style.max_width = len
-                } else {
-                    style.max_height = len
-                }
-            }
-            LogicalSlot::MaxBlockSize => {
-                if horizontal_inline {
-                    style.max_height = len
-                } else {
-                    style.max_width = len
-                }
-            }
+pub(super) fn logical_border_property(
+    id: properties::PropertyId,
+) -> Option<(LogicalBorderSlot, BorderAspect)> {
+    use properties::PropertyId::*;
+    let slot = match id {
+        BorderInlineStartWidth | BorderInlineStartStyle | BorderInlineStartColor => {
+            LogicalBorderSlot::InlineStart
         }
-    }
-    let borders = std::mem::take(&mut style.rare_mut().logical_borders);
-    for decl in borders {
-        let side = match decl.slot {
-            LogicalBorderSlot::InlineStart => i_start,
-            LogicalBorderSlot::InlineEnd => i_end,
-            LogicalBorderSlot::BlockStart => b_start,
-            LogicalBorderSlot::BlockEnd => b_end,
-        };
-        if let Some(width) = decl.width {
-            set_border_width(style, side, width);
+        BorderInlineEndWidth | BorderInlineEndStyle | BorderInlineEndColor => {
+            LogicalBorderSlot::InlineEnd
         }
-        if let Some(border_style) = decl.style {
-            set_border_style(style, side, border_style);
+        BorderBlockStartWidth | BorderBlockStartStyle | BorderBlockStartColor => {
+            LogicalBorderSlot::BlockStart
         }
-        if let Some(color) = decl.color {
-            set_border_color(style, side, color);
+        BorderBlockEndWidth | BorderBlockEndStyle | BorderBlockEndColor => {
+            LogicalBorderSlot::BlockEnd
         }
+        _ => return None,
+    };
+    let aspect = match id {
+        BorderInlineStartWidth
+        | BorderInlineEndWidth
+        | BorderBlockStartWidth
+        | BorderBlockEndWidth => BorderAspect::Width,
+        BorderInlineStartStyle
+        | BorderInlineEndStyle
+        | BorderBlockStartStyle
+        | BorderBlockEndStyle => BorderAspect::Style,
+        _ => BorderAspect::Color,
+    };
+    Some((slot, aspect))
+}
+
+pub(super) fn logical_border_from_style(
+    style: &ComputedStyle,
+    slot: LogicalBorderSlot,
+    aspect: BorderAspect,
+) -> LogicalBorderValue {
+    let side = match slot {
+        LogicalBorderSlot::Physical(side) => side,
+        LogicalBorderSlot::InlineStart => inline_start_side(style.writing_mode, style.direction),
+        LogicalBorderSlot::InlineEnd => {
+            opposite(inline_start_side(style.writing_mode, style.direction))
+        }
+        LogicalBorderSlot::BlockStart => block_start_side(style.writing_mode),
+        LogicalBorderSlot::BlockEnd => opposite(block_start_side(style.writing_mode)),
+    };
+    let (width, border_style, color) = match side {
+        PhysicalSide::Top => (
+            &style.border_top_width,
+            style.border_top_style,
+            style.border_top_color,
+        ),
+        PhysicalSide::Right => (
+            &style.border_right_width,
+            style.border_right_style,
+            style.border_right_color,
+        ),
+        PhysicalSide::Bottom => (
+            &style.border_bottom_width,
+            style.border_bottom_style,
+            style.border_bottom_color,
+        ),
+        PhysicalSide::Left => (
+            &style.border_left_width,
+            style.border_left_style,
+            style.border_left_color,
+        ),
+    };
+    LogicalBorderValue {
+        slot,
+        width: matches!(aspect, BorderAspect::Width).then(|| width.clone()),
+        style: matches!(aspect, BorderAspect::Style).then_some(border_style),
+        color: matches!(aspect, BorderAspect::Color).then_some(color),
+        current_color: false,
     }
 }
 
@@ -574,37 +699,184 @@ pub fn apply_property_by_id_str(
     if v.eq_ignore_ascii_case("inherit") {
         return;
     }
+    let css_wide = ["initial", "unset", "revert", "revert-layer"]
+        .iter()
+        .any(|keyword| v.eq_ignore_ascii_case(keyword));
+    if !css_wide && let Some(limit) = super::value_parse::border_width_limit(id) {
+        if limit == 1 {
+            if let Some(width) = super::value_parse::parse_border_width(v) {
+                apply_length_value(style, id, &width);
+            }
+            return;
+        }
+        let parts = super::syntax::split_component_values(v);
+        if !(1..=limit).contains(&parts.len()) {
+            return;
+        }
+        let Some(values) = parts
+            .iter()
+            .map(|part| super::value_parse::parse_border_width(part))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return;
+        };
+        let indices = match values.len() {
+            1 => [0, 0, 0, 0],
+            2 => [0, 1, 0, 1],
+            3 => [0, 1, 2, 1],
+            _ => [0, 1, 2, 3],
+        };
+        for (side, &longhand) in property_defs::get(id).longhands.iter().enumerate() {
+            apply_length_value(style, longhand, &values[indices[side]]);
+        }
+        return;
+    }
+    if !css_wide && super::value_parse::border_declaration_valid(id, v) == Some(false) {
+        return;
+    }
     note_specified_svg_paint(style, id);
     note_current_color(style, id, v);
     // Same rule as the typed path above — see `apply_css_value`.
     if v.eq_ignore_ascii_case("unset") && properties::is_inherited(id) {
         return;
     }
-    if ["initial", "unset", "revert", "revert-layer"]
-        .iter()
-        .any(|keyword| v.eq_ignore_ascii_case(keyword))
-    {
+    if css_wide {
         reset_to_initial(style, id);
+        return;
+    }
+    if let Some(grammar) = super::value_parse::box_length_grammar(id) {
+        let longhands = property_defs::get(id).longhands;
+        if longhands.is_empty() {
+            if let Some(value) = super::value_parse::parse_box_length(v, grammar) {
+                apply_length_value(style, id, &value);
+            }
+        } else {
+            let Some(values) = super::value_parse::parse_box_declaration(id, v) else {
+                return;
+            };
+            let indices = match values.len() {
+                1 => [0, 0, 0, 0],
+                2 => [0, 1, 0, 1],
+                3 => [0, 1, 2, 1],
+                _ => [0, 1, 2, 3],
+            };
+            for (side, &longhand) in longhands.iter().enumerate() {
+                apply_length_value(style, longhand, &values[indices[side]]);
+            }
+        }
+        return;
+    }
+    if super::value_parse::is_radius_property(id)
+        && !super::value_parse::radius_declaration_valid(id, v)
+    {
         return;
     }
     (property_defs::get(id).apply)(style, v);
     record_physical_box_declaration(style, id);
 }
 
-/// Keep physical margin/padding writes ordered with deferred logical writes.
+/// Keep physical spacing/inset/size writes ordered with deferred logical writes.
 /// Mapping either family early would use a potentially unfinished direction.
 pub(crate) fn record_physical_box_declaration(
     style: &mut ComputedStyle,
     id: properties::PropertyId,
 ) {
     use properties::PropertyId::*;
-    if style.rare().logical_box.is_empty() {
+    if style.rare().logical_declarations.is_empty() {
         return;
     }
-    if matches!(id, Margin | Padding) {
-        for &longhand in property_defs::get(id).longhands {
+    let longhands = property_defs::get(id).longhands;
+    if !longhands.is_empty() {
+        for &longhand in longhands {
             record_physical_box_declaration(style, longhand);
         }
+        return;
+    }
+    let border_side = match id {
+        BorderTopWidth | BorderTopStyle | BorderTopColor => Some(PhysicalSide::Top),
+        BorderRightWidth | BorderRightStyle | BorderRightColor => Some(PhysicalSide::Right),
+        BorderBottomWidth | BorderBottomStyle | BorderBottomColor => Some(PhysicalSide::Bottom),
+        BorderLeftWidth | BorderLeftStyle | BorderLeftColor => Some(PhysicalSide::Left),
+        _ => None,
+    };
+    if let Some(side) = border_side {
+        let (width, border_style, color, color_bit) = match side {
+            PhysicalSide::Top => (
+                &style.border_top_width,
+                style.border_top_style,
+                style.border_top_color,
+                CURRENT_COLOR_BORDER_TOP,
+            ),
+            PhysicalSide::Right => (
+                &style.border_right_width,
+                style.border_right_style,
+                style.border_right_color,
+                CURRENT_COLOR_BORDER_RIGHT,
+            ),
+            PhysicalSide::Bottom => (
+                &style.border_bottom_width,
+                style.border_bottom_style,
+                style.border_bottom_color,
+                CURRENT_COLOR_BORDER_BOTTOM,
+            ),
+            PhysicalSide::Left => (
+                &style.border_left_width,
+                style.border_left_style,
+                style.border_left_color,
+                CURRENT_COLOR_BORDER_LEFT,
+            ),
+        };
+        let is_width = matches!(
+            id,
+            BorderTopWidth | BorderRightWidth | BorderBottomWidth | BorderLeftWidth
+        );
+        let is_style = matches!(
+            id,
+            BorderTopStyle | BorderRightStyle | BorderBottomStyle | BorderLeftStyle
+        );
+        let is_color = matches!(
+            id,
+            BorderTopColor | BorderRightColor | BorderBottomColor | BorderLeftColor
+        );
+        let declaration = LogicalBorderValue {
+            slot: LogicalBorderSlot::Physical(side),
+            width: is_width.then(|| width.clone()),
+            style: is_style.then_some(border_style),
+            color: is_color.then_some(color),
+            current_color: is_color && style.rare().current_color_props & color_bit != 0,
+        };
+        style
+            .rare_mut()
+            .logical_declarations
+            .push(LogicalDeclaration::Border(declaration));
+        return;
+    }
+    let corner = match id {
+        BorderTopLeftRadius => Some((
+            LogicalCornerSlot::TopLeft,
+            &style.border_top_left_radius,
+            &style.border_top_left_radius_y,
+        )),
+        BorderTopRightRadius => Some((
+            LogicalCornerSlot::TopRight,
+            &style.border_top_right_radius,
+            &style.border_top_right_radius_y,
+        )),
+        BorderBottomLeftRadius => Some((
+            LogicalCornerSlot::BottomLeft,
+            &style.border_bottom_left_radius,
+            &style.border_bottom_left_radius_y,
+        )),
+        BorderBottomRightRadius => Some((
+            LogicalCornerSlot::BottomRight,
+            &style.border_bottom_right_radius,
+            &style.border_bottom_right_radius_y,
+        )),
+        _ => None,
+    };
+    if let Some((slot, x, y)) = corner {
+        let declaration = LogicalDeclaration::Corner(slot, x.clone(), y.clone());
+        style.rare_mut().logical_declarations.push(declaration);
         return;
     }
     let (slot, value) = match id {
@@ -640,9 +912,42 @@ pub(crate) fn record_physical_box_declaration(
             LogicalSlot::PaddingPhysical(PhysicalSide::Left),
             style.padding_left.clone(),
         ),
+        Top => (
+            LogicalSlot::InsetPhysical(PhysicalSide::Top),
+            style.top.clone(),
+        ),
+        Right => (
+            LogicalSlot::InsetPhysical(PhysicalSide::Right),
+            style.right.clone(),
+        ),
+        Bottom => (
+            LogicalSlot::InsetPhysical(PhysicalSide::Bottom),
+            style.bottom.clone(),
+        ),
+        Left => (
+            LogicalSlot::InsetPhysical(PhysicalSide::Left),
+            style.left.clone(),
+        ),
+        Width => (LogicalSlot::WidthPhysical, style.width.clone()),
+        Height => (LogicalSlot::HeightPhysical, style.height.clone()),
+        MinWidth => (LogicalSlot::MinWidthPhysical, style.min_width.clone()),
+        MinHeight => (LogicalSlot::MinHeightPhysical, style.min_height.clone()),
+        MaxWidth => (LogicalSlot::MaxWidthPhysical, style.max_width.clone()),
+        MaxHeight => (LogicalSlot::MaxHeightPhysical, style.max_height.clone()),
         _ => return,
     };
-    style.rare_mut().logical_box.push((slot, value));
+    style
+        .rare_mut()
+        .logical_declarations
+        .push(LogicalDeclaration::Length(slot, value));
+}
+
+thread_local! {
+    static CSS_INITIAL_STYLE: ComputedStyle = ComputedStyle::default();
+}
+
+pub(super) fn initial_border_width() -> CssLength {
+    CSS_INITIAL_STYLE.with(|style| style.border_top_width.clone())
 }
 
 /// Reset a property to its initial value, descending into a SHORTHAND's
@@ -652,13 +957,51 @@ pub(crate) fn record_physical_box_declaration(
 /// through `copy` silently did NOTHING. `flex: initial` left the item's grow,
 /// shrink and basis exactly as they were instead of returning them to
 /// `0 1 auto`. Only the longhands hold the values, so only they can be reset.
-fn reset_to_initial(style: &mut ComputedStyle, id: properties::PropertyId) {
+pub(super) fn reset_to_initial(style: &mut ComputedStyle, id: properties::PropertyId) {
     use properties::PropertyId;
     let def = property_defs::get(id);
     if !def.longhands.is_empty() {
         for &lh in def.longhands {
             reset_to_initial(style, lh);
         }
+        return;
+    }
+    if let Some((slot, aspect)) = logical_border_property(id) {
+        CSS_INITIAL_STYLE.with(|initial| {
+            let mut value = logical_border_from_style(initial, slot, aspect);
+            value.current_color = matches!(aspect, BorderAspect::Color);
+            style
+                .rare_mut()
+                .logical_declarations
+                .push(LogicalDeclaration::Border(value));
+        });
+        return;
+    }
+    let size_slot = match id {
+        PropertyId::InlineSize => Some((LogicalSlot::InlineSize, PropertyId::Width)),
+        PropertyId::BlockSize => Some((LogicalSlot::BlockSize, PropertyId::Height)),
+        PropertyId::MinInlineSize => Some((LogicalSlot::MinInlineSize, PropertyId::MinWidth)),
+        PropertyId::MinBlockSize => Some((LogicalSlot::MinBlockSize, PropertyId::MinHeight)),
+        PropertyId::MaxInlineSize => Some((LogicalSlot::MaxInlineSize, PropertyId::MaxWidth)),
+        PropertyId::MaxBlockSize => Some((LogicalSlot::MaxBlockSize, PropertyId::MaxHeight)),
+        _ => None,
+    };
+    if let Some((slot, physical)) = size_slot {
+        CSS_INITIAL_STYLE.with(|initial| {
+            let value = match physical {
+                PropertyId::Width => &initial.width,
+                PropertyId::Height => &initial.height,
+                PropertyId::MinWidth => &initial.min_width,
+                PropertyId::MinHeight => &initial.min_height,
+                PropertyId::MaxWidth => &initial.max_width,
+                PropertyId::MaxHeight => &initial.max_height,
+                _ => unreachable!(),
+            };
+            style
+                .rare_mut()
+                .logical_declarations
+                .push(LogicalDeclaration::Length(slot, value.clone()));
+        });
         return;
     }
     if matches!(
@@ -681,8 +1024,26 @@ fn reset_to_initial(style: &mut ComputedStyle, id: properties::PropertyId) {
         (def.apply)(style, "0");
         return;
     }
-    let default_style = ComputedStyle::default();
-    (def.copy)(style, &default_style);
+    if matches!(
+        id,
+        PropertyId::InsetBlockStart
+            | PropertyId::InsetBlockEnd
+            | PropertyId::InsetInlineStart
+            | PropertyId::InsetInlineEnd
+    ) {
+        (def.apply)(style, "auto");
+        return;
+    }
+    CSS_INITIAL_STYLE.with(|initial| (def.copy)(style, initial));
+    if matches!(
+        id,
+        PropertyId::BorderTopColor
+            | PropertyId::BorderRightColor
+            | PropertyId::BorderBottomColor
+            | PropertyId::BorderLeftColor
+    ) {
+        note_current_color(style, id, "currentcolor");
+    }
     record_physical_box_declaration(style, id);
 }
 
@@ -709,7 +1070,53 @@ fn apply_length_value(
     l: &crate::types::CssLength,
 ) -> bool {
     use properties::PropertyId::*;
+    if let Some((slot, BorderAspect::Width)) = logical_border_property(id) {
+        style
+            .rare_mut()
+            .logical_declarations
+            .push(LogicalDeclaration::Border(LogicalBorderValue {
+                slot,
+                width: Some(l.clone()),
+                style: None,
+                color: None,
+                current_color: false,
+            }));
+        return true;
+    }
     match id {
+        BorderTopLeftRadius => {
+            style.border_top_left_radius = l.clone();
+            style.border_top_left_radius_y = l.clone();
+            style.border_radius = l.clone();
+        }
+        BorderTopRightRadius => {
+            style.border_top_right_radius = l.clone();
+            style.border_top_right_radius_y = l.clone();
+        }
+        BorderBottomLeftRadius => {
+            style.border_bottom_left_radius = l.clone();
+            style.border_bottom_left_radius_y = l.clone();
+        }
+        BorderBottomRightRadius => {
+            style.border_bottom_right_radius = l.clone();
+            style.border_bottom_right_radius_y = l.clone();
+        }
+        BorderStartStartRadius
+        | BorderStartEndRadius
+        | BorderEndStartRadius
+        | BorderEndEndRadius => {
+            let slot = match id {
+                BorderStartStartRadius => LogicalCornerSlot::StartStart,
+                BorderStartEndRadius => LogicalCornerSlot::StartEnd,
+                BorderEndStartRadius => LogicalCornerSlot::EndStart,
+                _ => LogicalCornerSlot::EndEnd,
+            };
+            style
+                .rare_mut()
+                .logical_declarations
+                .push(LogicalDeclaration::Corner(slot, l.clone(), l.clone()));
+            return true;
+        }
         Width => style.width = l.clone(),
         Height => style.height = l.clone(),
         MinWidth => style.min_width = l.clone(),
@@ -732,6 +1139,36 @@ fn apply_length_value(
         Right => style.right = l.clone(),
         Bottom => style.bottom = l.clone(),
         Left => style.left = l.clone(),
+        MarginBlockStart | MarginBlockEnd | MarginInlineStart | MarginInlineEnd
+        | PaddingBlockStart | PaddingBlockEnd | PaddingInlineStart | PaddingInlineEnd
+        | InsetBlockStart | InsetBlockEnd | InsetInlineStart | InsetInlineEnd | InlineSize
+        | BlockSize | MinInlineSize | MinBlockSize | MaxInlineSize | MaxBlockSize => {
+            let slot = match id {
+                MarginBlockStart => LogicalSlot::MarginBlockStart,
+                MarginBlockEnd => LogicalSlot::MarginBlockEnd,
+                MarginInlineStart => LogicalSlot::MarginInlineStart,
+                MarginInlineEnd => LogicalSlot::MarginInlineEnd,
+                PaddingBlockStart => LogicalSlot::PaddingBlockStart,
+                PaddingBlockEnd => LogicalSlot::PaddingBlockEnd,
+                PaddingInlineStart => LogicalSlot::PaddingInlineStart,
+                PaddingInlineEnd => LogicalSlot::PaddingInlineEnd,
+                InsetBlockStart => LogicalSlot::InsetBlockStart,
+                InsetBlockEnd => LogicalSlot::InsetBlockEnd,
+                InsetInlineStart => LogicalSlot::InsetInlineStart,
+                InsetInlineEnd => LogicalSlot::InsetInlineEnd,
+                InlineSize => LogicalSlot::InlineSize,
+                BlockSize => LogicalSlot::BlockSize,
+                MinInlineSize => LogicalSlot::MinInlineSize,
+                MinBlockSize => LogicalSlot::MinBlockSize,
+                MaxInlineSize => LogicalSlot::MaxInlineSize,
+                MaxBlockSize => LogicalSlot::MaxBlockSize,
+                _ => unreachable!(),
+            };
+            style
+                .rare_mut()
+                .logical_declarations
+                .push(LogicalDeclaration::Length(slot, l.clone()));
+        }
         FlexBasis => style.flex_basis = l.clone(),
         // FontSize is NOT handled here — it needs special em/rem resolution at cascade time
         LineHeight => style.line_height = l.clone(),
@@ -772,6 +1209,19 @@ fn apply_color_value(
     c: &crate::types::Color,
 ) -> bool {
     use properties::PropertyId::*;
+    if let Some((slot, BorderAspect::Color)) = logical_border_property(id) {
+        style
+            .rare_mut()
+            .logical_declarations
+            .push(LogicalDeclaration::Border(LogicalBorderValue {
+                slot,
+                width: None,
+                style: None,
+                color: Some(*c),
+                current_color: false,
+            }));
+        return true;
+    }
     match id {
         Color => style.color = *c,
         BackgroundColor => style.background_color = *c,
@@ -785,6 +1235,7 @@ fn apply_color_value(
         Stroke => style.svg_stroke = Some(*c),
         _ => return false,
     }
+    record_physical_box_declaration(style, id);
     true
 }
 
@@ -1031,15 +1482,36 @@ pub(crate) fn resolve_var_references_for_color_scheme(
     color_scheme: &str,
 ) -> String {
     let resolved = resolve_var_references(val, variables);
+    let resolved = if contains_env_function(&resolved) {
+        super::value_parse::resolve_environment_functions(&resolved).unwrap_or_default()
+    } else {
+        resolved
+    };
     resolve_light_dark_functions(&resolved, color_scheme)
+}
+
+pub(crate) fn contains_env_function(value: &str) -> bool {
+    (value
+        .as_bytes()
+        .windows(4)
+        .any(|part| part.eq_ignore_ascii_case(b"env("))
+        || value.contains('\\'))
+        && super::syntax::find_function(value, "env").is_some()
 }
 
 pub(crate) fn value_needs_substitution(value: &str) -> bool {
     contains_var_function(value)
-        || value
-            .as_bytes()
-            .windows(b"light-dark(".len())
-            .any(|part| part.eq_ignore_ascii_case(b"light-dark("))
+        || contains_env_function(value)
+        || contains_light_dark_function(value)
+}
+
+fn contains_light_dark_function(value: &str) -> bool {
+    (value
+        .as_bytes()
+        .windows(b"light-dark(".len())
+        .any(|part| part.eq_ignore_ascii_case(b"light-dark("))
+        || value.contains('\\'))
+        && super::syntax::find_function(value, "light-dark").is_some()
 }
 
 pub(crate) fn value_mentions_revert(value: &str) -> bool {
@@ -1062,7 +1534,7 @@ fn resolve_light_dark_functions_with_preference(
     color_scheme: &str,
     preference: crate::css::ColorSchemePreference,
 ) -> String {
-    if !val.to_ascii_lowercase().contains("light-dark(") {
+    if !contains_light_dark_function(val) {
         return val.to_string();
     }
     let supports_dark = color_scheme
@@ -1076,29 +1548,43 @@ fn resolve_light_dark_functions_with_preference(
         (true, true, crate::css::ColorSchemePreference::Dark) => true,
         _ => false,
     };
-    let mut out = String::new();
-    let mut rest = val;
-    while let Some(start) = rest.to_ascii_lowercase().find("light-dark(") {
-        out.push_str(&rest[..start]);
-        let args_start = start + "light-dark(".len();
-        let args = &rest[args_start..];
-        let Some((inner, consumed)) = take_function_args(args) else {
-            out.push_str(&rest[start..]);
-            return out;
-        };
-        if let Some((light, dark)) = split_top_level_comma(inner) {
-            out.push_str(if prefer_dark {
-                dark.trim()
-            } else {
-                light.trim()
-            });
-        } else {
-            out.push_str(&rest[start..args_start + consumed]);
-        }
-        rest = &args[consumed..];
+    resolve_light_dark_components(val, prefer_dark, 0)
+}
+
+const MAX_COLOR_SCHEME_SUBSTITUTION_DEPTH: usize = 128;
+
+fn resolve_light_dark_components(val: &str, prefer_dark: bool, depth: usize) -> String {
+    if depth >= MAX_COLOR_SCHEME_SUBSTITUTION_DEPTH {
+        return val.to_string();
     }
-    out.push_str(rest);
-    out
+    let mut out = super::syntax::ComponentWriter::default();
+    let mut rest = val;
+    while let Some((start, body_start)) = super::syntax::find_function(rest, "light-dark") {
+        out.push(&rest[..start]);
+        let Some((inner, end)) = super::syntax::function_body(rest, body_start) else {
+            out.push(&rest[start..]);
+            return out.finish();
+        };
+        let mut commas = super::syntax::top_level_delimiters(inner, b',');
+        if let Some(comma) = commas.next().filter(|_| commas.next().is_none()) {
+            let light =
+                resolve_light_dark_components(inner[..comma].trim(), prefer_dark, depth + 1);
+            let dark =
+                resolve_light_dark_components(inner[comma + 1..].trim(), prefer_dark, depth + 1);
+            let colors = parse_color(&light).is_some() && parse_color(&dark).is_some();
+            let images = !colors && super::supports::image(&light) && super::supports::image(&dark);
+            if colors || images {
+                out.push(if prefer_dark { &dark } else { &light });
+            } else {
+                out.push(&rest[start..end]);
+            }
+        } else {
+            out.push(&rest[start..end]);
+        }
+        rest = &rest[end..];
+    }
+    out.push(rest);
+    out.finish()
 }
 
 #[cfg(test)]
@@ -1153,65 +1639,40 @@ mod light_dark_tests {
             "black"
         );
     }
-}
 
-fn take_function_args(s: &str) -> Option<(&str, usize)> {
-    let mut depth = 1usize;
-    let mut quote: Option<u8> = None;
-    let bytes = s.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if let Some(q) = quote {
-            if b == b'\\' {
-                i += 2;
-                continue;
-            }
-            if b == q {
-                quote = None;
-            }
-        } else if b == b'"' || b == b'\'' {
-            quote = Some(b);
-        } else if b == b'(' {
-            depth += 1;
-        } else if b == b')' {
-            depth = depth.saturating_sub(1);
-            if depth == 0 {
-                return Some((&s[..i], i + 1));
-            }
+    #[test]
+    fn light_dark_substitution_uses_component_tokens() {
+        for (source, expected) in [
+            (r"light-\64 ark(white, black)", "black"),
+            (
+                "light-dark(red, light-dark(blue, rgb(1, 2, 3)))",
+                "rgb(1, 2, 3)",
+            ),
+            (
+                r#""light-dark(white, black)""#,
+                r#""light-dark(white, black)""#,
+            ),
+            (
+                "url(light-dark(white,black))",
+                "url(light-dark(white,black))",
+            ),
+            ("light-dark(red, nonsense)", "light-dark(red, nonsense)"),
+            (
+                "light-dark(red, blue, green)",
+                "light-dark(red, blue, green)",
+            ),
+        ] {
+            assert_eq!(
+                resolve_light_dark_functions_with_preference(source, "dark", Light),
+                expected
+            );
         }
-        i += 1;
     }
-    None
 }
 
 pub(crate) fn split_top_level_comma(s: &str) -> Option<(&str, &str)> {
-    let mut depth = 0usize;
-    let mut quote: Option<u8> = None;
-    let bytes = s.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if let Some(q) = quote {
-            if b == b'\\' {
-                i += 2;
-                continue;
-            }
-            if b == q {
-                quote = None;
-            }
-        } else if b == b'"' || b == b'\'' {
-            quote = Some(b);
-        } else if b == b'(' {
-            depth += 1;
-        } else if b == b')' {
-            depth = depth.saturating_sub(1);
-        } else if b == b',' && depth == 0 {
-            return Some((&s[..i], &s[i + 1..]));
-        }
-        i += 1;
-    }
-    None
+    let comma = super::syntax::top_level_delimiters(s, b',').next()?;
+    Some((&s[..comma], &s[comma + 1..]))
 }
 
 pub(crate) fn resolve_var_pass(val: &str, variables: &HashMap<String, String>) -> String {
@@ -1226,12 +1687,12 @@ fn resolve_var_pass_with_depth(
     if !contains_var_function(val) {
         return val.to_string();
     }
-    let mut out = String::new();
+    let mut out = super::syntax::ComponentWriter::default();
     let mut rest = val;
     while !rest.is_empty() {
-        if let Some((start, end)) = find_var_function(rest) {
-            out.push_str(&rest[..start]);
-            let inner = &rest[start + 4..end - 1];
+        if let Some((start, body_start, end)) = find_var_function(rest) {
+            out.push(&rest[..start]);
+            let inner = &rest[body_start..end - 1];
             let original = &rest[start..end];
             rest = &rest[end..];
             // inner = "--name" or "--name, fallback"
@@ -1253,117 +1714,45 @@ fn resolve_var_pass_with_depth(
                     resolved_name = next;
                 }
             }
-            if let Some(resolved) = variables.get(resolved_name.trim()) {
-                out.push_str(resolved);
-                if needs_var_substitution_separator(resolved, rest) {
-                    out.push(' ');
-                }
+            if let Some(resolved) =
+                variable_name(&resolved_name).and_then(|name| variables.get(name.as_ref()))
+            {
+                out.push(resolved);
             } else if let Some(fb) = fallback {
-                out.push_str(fb);
-                if needs_var_substitution_separator(fb, rest) {
-                    out.push(' ');
-                }
+                out.push(fb);
             } else {
-                out.push_str(original);
+                out.push(original);
             }
         } else {
-            out.push_str(rest);
+            out.push(rest);
             break;
         }
     }
-    out
+    out.finish()
 }
 
 pub(crate) fn contains_var_function(value: &str) -> bool {
-    value
+    (value
         .as_bytes()
         .windows(4)
         .any(|part| part.eq_ignore_ascii_case(b"var("))
+        || value.contains('\\'))
         && find_var_function(value).is_some()
 }
 
-pub(crate) fn find_var_function(value: &str) -> Option<(usize, usize)> {
-    let bytes = value.as_bytes();
-    let mut quote = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        match quote {
-            Some(q) => {
-                if bytes[i] == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if bytes[i] == q {
-                    quote = None;
-                }
-            }
-            None if bytes[i] == b'\\' => {
-                i += 2;
-                continue;
-            }
-            None if matches!(bytes[i], b'\'' | b'"') => quote = Some(bytes[i]),
-            None if bytes
-                .get(i..i + 4)
-                .is_some_and(|part| part.eq_ignore_ascii_case(b"var("))
-                && (i == 0
-                    || !matches!(bytes[i - 1], b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | 0x80..=0xff)) =>
-            {
-                let mut depth = 1usize;
-                let mut j = i + 4;
-                let mut inner_quote = None;
-                while j < bytes.len() {
-                    match inner_quote {
-                        Some(q) => {
-                            if bytes[j] == b'\\' {
-                                j += 2;
-                                continue;
-                            }
-                            if bytes[j] == q {
-                                inner_quote = None;
-                            }
-                        }
-                        None if bytes[j] == b'\\' => {
-                            j += 2;
-                            continue;
-                        }
-                        None if matches!(bytes[j], b'\'' | b'"') => inner_quote = Some(bytes[j]),
-                        None if bytes[j] == b'(' => depth += 1,
-                        None if bytes[j] == b')' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                return Some((i, j + 1));
-                            }
-                        }
-                        _ => {}
-                    }
-                    j += 1;
-                }
-                return None;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
+pub(crate) fn find_var_function(value: &str) -> Option<(usize, usize, usize)> {
+    let (start, body_start) = super::syntax::find_function(value, "var")?;
+    let (_, end) = super::syntax::function_body(value, body_start)?;
+    Some((start, body_start, end))
 }
 
-pub(crate) fn needs_var_substitution_separator(inserted: &str, rest: &str) -> bool {
-    if inserted.ends_with(char::is_whitespace) || rest.starts_with(char::is_whitespace) {
-        return false;
-    }
-    let Some(last) = inserted.chars().rev().find(|c| !c.is_ascii_whitespace()) else {
-        return false;
-    };
-    let Some(next) = rest.chars().find(|c| !c.is_ascii_whitespace()) else {
-        return false;
-    };
-    if next == ',' || next == '/' || next == ')' || next == ';' {
-        return false;
-    }
-    if last == '(' || last == ',' || last == '/' {
-        return false;
-    }
-    next.is_ascii_alphanumeric() || next == '-' || next == '_' || next == '.' || next == '#'
+pub(super) fn variable_name(source: &str) -> Option<std::borrow::Cow<'_, str>> {
+    let (leading, _) = super::syntax::trivia_prefix(source);
+    let source = &source[leading..];
+    let (name, end, function) = super::syntax::name_token(source)?;
+    let (trailing, _) = super::syntax::trivia_prefix(&source[end..]);
+    (!function && end + trailing == source.len() && name.starts_with("--") && name.len() > 2)
+        .then_some(name)
 }
 
 /// Resolve a CSS `content` property value string to a displayable string.
@@ -2350,7 +2739,7 @@ pub fn apply_border_shorthand(style: &mut ComputedStyle, v: &str) {
             style.border_bottom_color = c;
             style.border_left_color = c;
         } else {
-            let w = parse_length(part);
+            let w = super::value_parse::parse_border_width(part).unwrap_or(CssLength::Auto);
             // `parse_length` reports an unrecognised token as `auto`; the
             // intrinsic keywords are equally not border widths.
             if !w.is_auto() {
@@ -2376,7 +2765,7 @@ pub fn apply_border_side_shorthand(
         } else if let Some(c) = parse_color(part) {
             *color = c;
         } else {
-            let w = parse_length(part);
+            let w = super::value_parse::parse_border_width(part).unwrap_or(CssLength::Auto);
             // `parse_length` reports an unrecognised token as `auto`; the
             // intrinsic keywords are equally not border widths.
             if !w.is_auto() {
@@ -2604,29 +2993,6 @@ pub fn find_split_space(v: &str) -> Option<usize> {
 
 /// Split on the commas that separate a function's arguments, leaving the ones
 /// inside a nested function — `rgb(255, 0, 0)` — alone.
-fn split_top_level_commas(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
-            }
-            ',' if depth == 0 => {
-                out.push(s[start..i].to_string());
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    out.push(s[start..].to_string());
-    out
-}
-
 fn greek_counter(mut value: i32) -> String {
     if value <= 0 {
         return value.to_string();
@@ -2689,7 +3055,9 @@ fn parse_gradient_direction(dir: &str) -> Option<GradientDirection> {
         ("turn", 1.0),
     ] {
         if let Some(num) = dir.strip_suffix(unit) {
-            if let Ok(n) = num.trim().parse::<f32>() {
+            if let Ok(n) = num.trim().parse::<f32>()
+                && n.is_finite()
+            {
                 return Some(GradientDirection::Angle(n * 360.0 / per_turn));
             }
         }
@@ -2702,10 +3070,10 @@ fn parse_gradient_direction(dir: &str) -> Option<GradientDirection> {
     let mut right = false;
     for word in sides.split_whitespace() {
         match word {
-            "top" => top = true,
-            "bottom" => bottom = true,
-            "left" => left = true,
-            "right" => right = true,
+            "top" if !top => top = true,
+            "bottom" if !bottom => bottom = true,
+            "left" if !left => left = true,
+            "right" if !right => right = true,
             _ => return None,
         }
     }
@@ -2750,6 +3118,7 @@ struct RawStop {
     color: Color,
     current_color: bool,
     pos: Option<f32>,
+    authored_position: Option<CssLength>,
 }
 
 fn parse_gradient_stop_color(value: &str) -> Option<(Color, bool)> {
@@ -2779,17 +3148,17 @@ fn parse_stop_position(p: &str) -> Option<f32> {
 ///
 /// The two-position shorthand is the same colour twice: `red 10% 20%` is a
 /// solid red band from 10% to 20%.
-fn push_color_stop(component: &str, out: &mut Vec<RawStop>) {
+fn push_color_stop(component: &str, out: &mut Vec<RawStop>) -> bool {
     let c = component.trim();
     if c.is_empty() {
-        return;
+        return false;
     }
     // The colour may itself be a function, so its end is the first space
     // OUTSIDE any parentheses.
     let split = find_top_level_space(c).unwrap_or(c.len());
     let (color, current_color) = match parse_gradient_stop_color(&c[..split]) {
         Some(c) => c,
-        None => return,
+        None => return false,
     };
     let rest = c.get(split..).map(str::trim).unwrap_or("");
     if rest.is_empty() {
@@ -2797,16 +3166,29 @@ fn push_color_stop(component: &str, out: &mut Vec<RawStop>) {
             color,
             current_color,
             pos: None,
+            authored_position: None,
         });
-        return;
+        return true;
     }
-    for tok in rest.split_whitespace().take(2) {
+    let positions = super::property_defs::split_top_level_whitespace(rest);
+    if positions.len() > 2
+        || positions.iter().any(|p| {
+            !super::supports::length(p, true, true)
+                || p.strip_suffix('%')
+                    .is_some_and(|number| number.parse::<f32>().is_ok_and(|n| !n.is_finite()))
+        })
+    {
+        return false;
+    }
+    for tok in positions {
         out.push(RawStop {
             color,
             current_color,
             pos: parse_stop_position(tok),
+            authored_position: Some(parse_length(tok)),
         });
     }
+    true
 }
 
 /// Resolve every stop position, in the four ordered steps of css-images-3
@@ -2861,6 +3243,46 @@ fn fixup_color_stops(stops: &mut [RawStop]) {
     }
 }
 
+/// Resolve lengths only after the gradient's used size is known. Percentage-
+/// only gradients keep their already-fixed positions without another fixup.
+pub(crate) fn resolve_gradient_color_stops(
+    stops: &[GradientStop],
+    line_length: f32,
+    context: crate::types::TransformCtx,
+) -> Vec<(Color, f32)> {
+    if stops
+        .iter()
+        .all(|stop| matches!(stop.authored_position, None | Some(CssLength::Percent(_))))
+    {
+        return stops
+            .iter()
+            .map(|stop| (stop.color, stop.position))
+            .collect();
+    }
+    let basis = line_length.max(f32::MIN_POSITIVE);
+    let mut used: Vec<_> = stops
+        .iter()
+        .map(|stop| RawStop {
+            color: stop.color,
+            current_color: stop.current_color,
+            authored_position: None,
+            pos: stop.authored_position.as_ref().map(|position| {
+                position.resolve_vp(
+                    context.font_px,
+                    basis,
+                    context.root_font_px,
+                    context.viewport_w,
+                    context.viewport_h,
+                ) / basis
+            }),
+        })
+        .collect();
+    fixup_color_stops(&mut used);
+    used.iter()
+        .map(|stop| (stop.color, stop.pos.unwrap_or(0.0)))
+        .collect()
+}
+
 fn parse_legacy_webkit_gradient(style: &mut ComputedStyle, layer: &str, name_at: usize) {
     let Some(open_offset) = layer[name_at..].find('(') else {
         return;
@@ -2907,6 +3329,7 @@ fn parse_legacy_webkit_gradient(style: &mut ComputedStyle, layer: &str, name_at:
                     color,
                     position,
                     current_color,
+                    authored_position: Some(CssLength::Percent(position * 100.0)),
                 });
             }
             continue;
@@ -2920,6 +3343,7 @@ fn parse_legacy_webkit_gradient(style: &mut ComputedStyle, layer: &str, name_at:
                 color,
                 position,
                 current_color,
+                authored_position: Some(CssLength::Percent(position * 100.0)),
             });
         }
     }
@@ -2942,7 +3366,7 @@ pub fn apply_gradient(style: &mut ComputedStyle, v: &str) {
         .iter()
         .find(|l| l.to_ascii_lowercase().contains("gradient"))
     {
-        Some(l) => l.clone(),
+        Some(l) => *l,
         None => return,
     };
     // `to_ascii_lowercase` keeps byte offsets, so an index found in it indexes
@@ -2969,17 +3393,49 @@ pub fn apply_gradient(style: &mut ComputedStyle, v: &str) {
         return;
     }
 
-    style.gradient_type = kind;
+    let direction = (kind == GradientType::Linear)
+        .then(|| parse_gradient_direction(args[0].trim()))
+        .flatten();
+    let radial_descriptor = if kind == GradientType::Radial {
+        let first = args[0].trim();
+        let split = find_top_level_space(first).unwrap_or(first.len());
+        parse_gradient_stop_color(&first[..split])
+            .is_none()
+            .then(|| args.remove(0))
+    } else {
+        None
+    };
+    if direction.is_some() {
+        args.remove(0);
+    }
+    let mut raw = Vec::with_capacity(args.len());
+    let mut color_components = 0;
+    let mut previous_hint = false;
+    for (index, component) in args.iter().enumerate() {
+        if push_color_stop(component, &mut raw) {
+            color_components += 1;
+            previous_hint = false;
+        } else if index > 0
+            && index + 1 < args.len()
+            && !previous_hint
+            && super::supports::length(component.trim(), true, true)
+        {
+            // Hints are grammatical here; their nonlinear interpolation still
+            // needs to reach the gradient painter.
+            previous_hint = true;
+        } else {
+            return;
+        }
+    }
+    if color_components < 2 {
+        return;
+    }
     match kind {
         GradientType::Linear => {
             // **The direction is OPTIONAL** (css-images-3 §3.4.1). Only consume
             // the first component when it really is one; otherwise it is a
             // colour stop and belongs to the stop list.
-            let angle = parse_gradient_direction(args[0].trim());
-            if angle.is_some() {
-                args.remove(0);
-            }
-            style.gradient_direction = angle.unwrap_or_default();
+            style.gradient_direction = direction.unwrap_or_default();
             style.gradient_angle = match style.gradient_direction {
                 GradientDirection::Angle(angle) => angle,
                 GradientDirection::Corner { x, y } => match (x, y) {
@@ -2996,11 +3452,10 @@ pub fn apply_gradient(style: &mut ComputedStyle, v: &str) {
             // is not a colour stop. The test is on the component's COLOUR part,
             // since a positioned first stop (`red 10%`) is not a `<color>` on
             // its own and would otherwise be eaten as a descriptor.
-            let first = args[0].trim();
-            let split = find_top_level_space(first).unwrap_or(first.len());
-            if parse_gradient_stop_color(&first[..split]).is_none() {
-                apply_radial_gradient_descriptor(style, first);
-                args.remove(0);
+            if let Some(descriptor) = radial_descriptor {
+                if !apply_radial_gradient_descriptor(style, &descriptor) {
+                    return;
+                }
             } else {
                 reset_radial_gradient_descriptor(style);
             }
@@ -3008,10 +3463,7 @@ pub fn apply_gradient(style: &mut ComputedStyle, v: &str) {
         GradientType::None => {}
     }
 
-    let mut raw: Vec<RawStop> = Vec::with_capacity(args.len());
-    for component in &args {
-        push_color_stop(component, &mut raw);
-    }
+    style.gradient_type = kind;
     fixup_color_stops(&mut raw);
     let stops = &mut style.rare_mut().gradient_stops;
     stops.clear();
@@ -3019,6 +3471,7 @@ pub fn apply_gradient(style: &mut ComputedStyle, v: &str) {
         color: s.color,
         position: s.pos.unwrap_or(0.0),
         current_color: s.current_color,
+        authored_position: s.authored_position.clone(),
     }));
 }
 
@@ -3031,90 +3484,82 @@ fn reset_radial_gradient_descriptor(style: &mut ComputedStyle) {
     style.gradient_radial_position_y = CssLength::Percent(50.0);
 }
 
-fn apply_radial_gradient_descriptor(style: &mut ComputedStyle, descriptor: &str) {
-    reset_radial_gradient_descriptor(style);
-    let lower = descriptor.to_ascii_lowercase();
-    let (before_at, after_at) = match lower.find(" at ") {
-        Some(at) => (&descriptor[..at], Some(&descriptor[at + 4..])),
-        None => (descriptor, None),
+fn apply_radial_gradient_descriptor(style: &mut ComputedStyle, descriptor: &str) -> bool {
+    let tokens = super::property_defs::split_top_level_whitespace(descriptor);
+    let at = tokens.iter().position(|t| t.eq_ignore_ascii_case("at"));
+    let before = &tokens[..at.unwrap_or(tokens.len())];
+    let position = if let Some(at) = at {
+        let position = tokens[at + 1..].join(" ");
+        let Some(position) = super::property_defs::parse_background_position_pair(&position) else {
+            return false;
+        };
+        Some(position)
+    } else {
+        None
     };
-
+    let mut shape = None;
+    let mut size = None;
     let mut radii = Vec::new();
-    for token in before_at.split_whitespace() {
-        match token.to_ascii_lowercase().as_str() {
-            "circle" => style.gradient_radial_shape = GradientRadialShape::Circle,
-            "ellipse" => style.gradient_radial_shape = GradientRadialShape::Ellipse,
-            "closest-side" => style.gradient_radial_size = GradientRadialSize::ClosestSide,
-            "farthest-side" => style.gradient_radial_size = GradientRadialSize::FarthestSide,
-            "closest-corner" => style.gradient_radial_size = GradientRadialSize::ClosestCorner,
-            "farthest-corner" => style.gradient_radial_size = GradientRadialSize::FarthestCorner,
+    for token in before {
+        let lower = token.to_ascii_lowercase();
+        match lower.as_str() {
+            "circle" | "ellipse" if shape.is_none() => {
+                shape = Some(if lower == "circle" {
+                    GradientRadialShape::Circle
+                } else {
+                    GradientRadialShape::Ellipse
+                });
+            }
+            "closest-side" | "farthest-side" | "closest-corner" | "farthest-corner"
+                if size.is_none() =>
+            {
+                size = Some(match lower.as_str() {
+                    "closest-side" => GradientRadialSize::ClosestSide,
+                    "farthest-side" => GradientRadialSize::FarthestSide,
+                    "closest-corner" => GradientRadialSize::ClosestCorner,
+                    _ => GradientRadialSize::FarthestCorner,
+                });
+            }
             _ => {
-                let len = parse_length(token);
-                if !len.is_auto() {
-                    radii.push(len);
+                if !super::supports::length(token, true, false) {
+                    return false;
                 }
+                let Some(length) = super::value_parse::parse_length_checked(token) else {
+                    return false;
+                };
+                radii.push(length);
             }
         }
+    }
+    let shape = shape.unwrap_or(if radii.len() == 1 {
+        GradientRadialShape::Circle
+    } else {
+        GradientRadialShape::Ellipse
+    });
+    if radii.len() > 2
+        || (size.is_some() && !radii.is_empty())
+        || (shape == GradientRadialShape::Circle
+            && !radii.is_empty()
+            && (radii.len() != 1 || matches!(radii[0], CssLength::Percent(_))))
+        || (shape == GradientRadialShape::Ellipse && !radii.is_empty() && radii.len() != 2)
+    {
+        return false;
+    }
+    reset_radial_gradient_descriptor(style);
+    style.gradient_radial_shape = shape;
+    if let Some(size) = size {
+        style.gradient_radial_size = size;
     }
     if let Some(rx) = radii.first() {
         style.gradient_radial_radius_x = rx.clone();
         style.gradient_radial_radius_y = radii.get(1).cloned().unwrap_or_else(|| rx.clone());
     }
 
-    if let Some(position) = after_at {
-        let (x, y) = parse_radial_position(position);
+    if let Some((x, y)) = position {
         style.gradient_radial_position_x = x;
         style.gradient_radial_position_y = y;
     }
-}
-
-fn parse_radial_position(position: &str) -> (CssLength, CssLength) {
-    let mut x = CssLength::Percent(50.0);
-    let mut y = CssLength::Percent(50.0);
-    let mut x_set = false;
-    let mut y_set = false;
-
-    for token in position.split_whitespace() {
-        match token.to_ascii_lowercase().as_str() {
-            "left" => {
-                x = CssLength::Percent(0.0);
-                x_set = true;
-            }
-            "right" => {
-                x = CssLength::Percent(100.0);
-                x_set = true;
-            }
-            "top" => {
-                y = CssLength::Percent(0.0);
-                y_set = true;
-            }
-            "bottom" => {
-                y = CssLength::Percent(100.0);
-                y_set = true;
-            }
-            "center" => {
-                if !x_set {
-                    x = CssLength::Percent(50.0);
-                    x_set = true;
-                } else if !y_set {
-                    y = CssLength::Percent(50.0);
-                    y_set = true;
-                }
-            }
-            _ => {
-                if let Some(length) = parse_length_checked(token) {
-                    if !x_set {
-                        x = length;
-                        x_set = true;
-                    } else if !y_set {
-                        y = length;
-                        y_set = true;
-                    }
-                }
-            }
-        }
-    }
-    (x, y)
+    true
 }
 
 /// Return true if a token looks like a font-size value (keyword or length unit).

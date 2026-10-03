@@ -1,13 +1,13 @@
 [package]
 name = "webcore"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2024"
 description = "HTML/CSS editor and renderer in Rust using tiny-skia"
 license = "GPL-3.0-or-later OR LicenseRef-Commercial"
 repository = "https://github.com/opensitez/webcore" 
 readme = "README.md" 
-keywords = ["html", "css", "rendering"]
-categories = ["gui", "rendering", "web-programming"]
+keywords = ["html", "css", "web", "browser", "rendering"]
+categories = ["gui", "browser", "rendering", "web-programming"]
 
 [lib]
 name = "webcore"
@@ -59,16 +59,20 @@ path = "examples/demo.rs"
 
 [features]
 accessibility = ["dep:accesskit", "dep:accesskit_winit"]
-audio-symphonia = ["dep:symphonia"]
+audio-symphonia = ["webmedia/audio-symphonia"]
 
 [dependencies]
+webcanvas = { version = "0.1.0", path = "../webcanvas" }
+webmedia = { version = "0.1.0", features = ["font"] }
 accesskit        = { version = "0.17", optional = true }
 accesskit_winit  = { version = "0.22", optional = true, features = ["rwh_06"] }
 tiny-skia = "0.12"
 winit = "0.30"
 softbuffer = "0.4"
+rfd = "0.14"
 bytemuck = "1"
 raw-window-handle = "0.6"
+
 cosmic-text = "0.18.2"
 fontdb = "0.23.0"
 # Glyph OUTLINES, for `strokeText`. Already in the tree as cosmic-text's own
@@ -83,12 +87,19 @@ base64 = "0.21"
 unicode-bidi = "0.3"
 unicode-segmentation = "1.13.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+png = "0.18"
+zune-jpeg = "0.5"
 encoding_rs = "0.8"
+mime = "0.3"
 rand = "0.8"
-reqwest = { version = "0.12", features = ["blocking", "gzip", "brotli", "deflate"] }
-flate2 = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "gzip", "brotli", "deflate", "charset", "http2", "system-proxy", "rustls-tls-native-roots"] }
 # WOFF2 is Brotli-compressed. Already in the tree via reqwest's content
 # encoding, so this only makes the existing dependency direct.
-brotli = "8"
 rayon = "1.10"
-symphonia = { version = "0.5", optional = true, default-features = false, features = ["aac", "flac", "isomp4", "mkv", "mp3", "ogg", "pcm", "vorbis", "wav"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CGColorSpace", "CGDataProvider", "CGImage"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSObject"] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "CALayer", "CATransaction"] }

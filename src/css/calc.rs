@@ -113,7 +113,7 @@ impl Calculation {
 }
 
 pub(crate) fn is_math_function(value: &str) -> bool {
-    let Some((name, _)) = value.split_once('(') else {
+    let Some((name, _, true)) = super::syntax::name_token(value) else {
         return false;
     };
     matches!(
@@ -150,6 +150,11 @@ pub(crate) fn parse_math_length(value: &str) -> CssLength {
         return CssLength::Auto;
     }
     compact_length(result.node)
+}
+
+pub(crate) fn parse_math_length_without_percentage(value: &str) -> Option<CssLength> {
+    let result = MathParser::parse(value, false)?;
+    (result.dimension == LENGTH).then(|| compact_length(result.node))
 }
 
 pub(crate) fn parse_calc_number(value: &str) -> Option<f32> {
@@ -371,14 +376,9 @@ impl<'a> MathParser<'a> {
         self.input.as_bytes().get(self.pos).copied()
     }
     fn whitespace(&mut self) -> bool {
-        let start = self.pos;
-        while self
-            .peek()
-            .is_some_and(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 12))
-        {
-            self.pos += 1;
-        }
-        self.pos != start
+        let (consumed, spaced) = super::syntax::trivia_prefix(&self.input[self.pos..]);
+        self.pos += consumed;
+        spaced
     }
     fn take(&mut self, byte: u8) -> bool {
         if self.peek() == Some(byte) {
@@ -488,38 +488,18 @@ impl<'a> MathParser<'a> {
             return self.take(b')').then_some(result);
         }
         let start = self.pos;
-        if self.peek().is_some_and(|b| b.is_ascii_alphabetic())
-            || self.input[self.pos..]
-                .to_ascii_lowercase()
-                .starts_with("-infinity")
-        {
-            while self
-                .peek()
-                .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'-')
-            {
-                self.pos += 1;
-            }
-            let name = self.input[start..self.pos].to_ascii_lowercase();
-            if self.take(b'(') {
+        if let Some((name, consumed, function)) = super::syntax::name_token(&self.input[start..]) {
+            self.pos += consumed;
+            let name = name.to_ascii_lowercase();
+            if function {
                 if name == "env" {
-                    let mut nesting = 1;
-                    while let Some(b) = self.peek() {
-                        self.pos += 1;
-                        if b == b'(' {
-                            nesting += 1;
-                        }
-                        if b == b')' {
-                            nesting -= 1;
-                        }
-                        if nesting == 0 {
-                            let value = parse_length(&self.input[start..self.pos]);
-                            return (!matches!(value, CssLength::Auto)).then_some(Calculation {
-                                node: CalcNode::Value(value),
-                                dimension: LENGTH,
-                            });
-                        }
-                    }
-                    return None;
+                    let (_, end) = super::syntax::function_body(&self.input[start..], consumed)?;
+                    self.pos = start + end;
+                    let value = parse_length(&self.input[start..self.pos]);
+                    return (!matches!(value, CssLength::Auto)).then_some(Calculation {
+                        node: CalcNode::Value(value),
+                        dimension: LENGTH,
+                    });
                 }
                 return self.function(&name);
             }
@@ -532,52 +512,17 @@ impl<'a> MathParser<'a> {
                 _ => return None,
             }));
         }
-        if matches!(self.peek(), Some(b'+' | b'-')) {
-            self.pos += 1;
-        }
-        let digits = self.pos;
-        while self.peek().is_some_and(|b| b.is_ascii_digit()) {
-            self.pos += 1;
-        }
-        let mut has_digit = self.pos > digits;
-        if self.take(b'.') {
-            let fractional = self.pos;
-            while self.peek().is_some_and(|b| b.is_ascii_digit()) {
-                self.pos += 1;
-            }
-            if self.pos == fractional {
-                return None;
-            }
-            has_digit = true;
-        }
-        if !has_digit {
-            return None;
-        }
-        if matches!(self.peek(), Some(b'e' | b'E')) {
-            let exponent = self.pos;
-            self.pos += 1;
-            if matches!(self.peek(), Some(b'+' | b'-')) {
-                self.pos += 1;
-            }
-            let digits = self.pos;
-            while self.peek().is_some_and(|b| b.is_ascii_digit()) {
-                self.pos += 1;
-            }
-            if self.pos == digits {
-                self.pos = exponent;
-            }
-        }
-        let number: f32 = self.input[start..self.pos].parse().ok()?;
-        let unit_start = self.pos;
-        while self.peek().is_some_and(|b| b.is_ascii_alphabetic()) {
-            self.pos += 1;
-        }
-        self.take(b'%');
-        let unit = self.input[unit_start..self.pos].to_ascii_lowercase();
+        let (number, unit, consumed) = super::syntax::numeric_token(&self.input[start..])?;
+        self.pos += consumed;
+        let unit = if unit.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            std::borrow::Cow::Owned(unit.to_ascii_lowercase())
+        } else {
+            unit
+        };
         if unit.is_empty() {
             return Some(Calculation::number(number));
         }
-        let (dimension, scalar) = match unit.as_str() {
+        let (dimension, scalar) = match unit.as_ref() {
             "rad" => (ANGLE, Some(number)),
             "deg" => (ANGLE, Some(number.to_radians())),
             "grad" => (ANGLE, Some(number * std::f32::consts::PI / 200.0)),
@@ -617,22 +562,19 @@ impl<'a> MathParser<'a> {
         self.whitespace();
         if name == "round" {
             let start = self.pos;
-            while self
-                .peek()
-                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'-')
-            {
-                self.pos += 1;
-            }
-            strategy = match &self.input[start..self.pos].to_ascii_lowercase()[..] {
-                "nearest" => CssRoundingStrategy::Nearest,
-                "up" => CssRoundingStrategy::Up,
-                "down" => CssRoundingStrategy::Down,
-                "to-zero" => CssRoundingStrategy::ToZero,
-                _ => {
-                    self.pos = start;
-                    CssRoundingStrategy::Nearest
+            if let Some((word, consumed, false)) = super::syntax::name_token(&self.input[start..]) {
+                let parsed = match word.to_ascii_lowercase().as_str() {
+                    "nearest" => Some(CssRoundingStrategy::Nearest),
+                    "up" => Some(CssRoundingStrategy::Up),
+                    "down" => Some(CssRoundingStrategy::Down),
+                    "to-zero" => Some(CssRoundingStrategy::ToZero),
+                    _ => None,
+                };
+                if let Some(parsed) = parsed {
+                    strategy = parsed;
+                    self.pos += consumed;
                 }
-            };
+            }
             if self.pos != start {
                 self.whitespace();
                 if !self.take(b',') {
@@ -644,12 +586,17 @@ impl<'a> MathParser<'a> {
         let mut unbounded = Vec::new();
         loop {
             self.whitespace();
-            if name == "clamp"
-                && self.input[self.pos..]
-                    .get(..4)
-                    .is_some_and(|s| s.eq_ignore_ascii_case("none"))
-            {
-                self.pos += 4;
+            let none = if name == "clamp" {
+                super::syntax::name_token(&self.input[self.pos..]).and_then(
+                    |(word, consumed, function)| {
+                        (!function && word.eq_ignore_ascii_case("none")).then_some(consumed)
+                    },
+                )
+            } else {
+                None
+            };
+            if let Some(consumed) = none {
+                self.pos += consumed;
                 if !matches!(args.len(), 0 | 2) {
                     return None;
                 }

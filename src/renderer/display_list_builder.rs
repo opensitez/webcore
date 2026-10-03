@@ -116,6 +116,25 @@ fn push_background_image_paint(
     });
 }
 
+fn gradient_line_length(
+    kind: GradientType,
+    direction: crate::types::GradientDirection,
+    angle: f32,
+    rect: Rect,
+    radial_radius_x: f32,
+) -> f32 {
+    if kind == GradientType::Radial {
+        return radial_radius_x;
+    }
+    let angle = match direction {
+        crate::types::GradientDirection::Angle(_) => angle.to_radians(),
+        crate::types::GradientDirection::Corner { x, y } => {
+            (x as f32 * rect.w).atan2(-(y as f32 * rect.h))
+        }
+    };
+    (rect.w * angle.sin()).abs() + (rect.h * angle.cos()).abs()
+}
+
 fn background_gradient_rect(
     size: BackgroundSize,
     size_w: &CssLength,
@@ -1511,11 +1530,6 @@ fn build_for_box_inner(
                     GradientType::Radial => 2u8,
                     GradientType::None => 0u8,
                 };
-                let stops = layer
-                    .gradient_stops
-                    .iter()
-                    .map(|stop| (stop.color, stop.position))
-                    .collect();
                 let gradient_rect = background_gradient_rect(
                     layer.size,
                     &layer.size_w,
@@ -1551,6 +1565,20 @@ fn build_for_box_inner(
                     ctx.transform_ctx.root_font_px,
                 );
                 let (repeat_x_mode, repeat_y_mode) = layer.repeat.axis_modes();
+                let stops = crate::css::resolve_gradient_color_stops(
+                    &layer.gradient_stops,
+                    gradient_line_length(
+                        layer.gradient_type,
+                        layer.gradient_direction,
+                        layer.gradient_angle,
+                        gradient_rect,
+                        radial_radius_x,
+                    ),
+                    crate::types::TransformCtx {
+                        font_px,
+                        ..ctx.transform_ctx
+                    },
+                );
                 list.push(PaintCmd::Gradient {
                     rect: gradient_rect,
                     clip: layer_clip_rect,
@@ -1604,22 +1632,11 @@ fn build_for_box_inner(
         && node.style.gradient_type != GradientType::None
         && node.style.rare().gradient_stops.len() >= 2
     {
-        let opacity = 1.0;
         let grad_type_u8 = match node.style.gradient_type {
             GradientType::Linear => 1u8,
             GradientType::Radial => 2u8,
             GradientType::None => 0u8,
         };
-        let stops: Vec<(Color, f32)> = node
-            .style
-            .rare()
-            .gradient_stops
-            .iter()
-            .map(|s| {
-                let a = ((s.color.a as f32) * opacity) as u8;
-                (Color::rgba(s.color.r, s.color.g, s.color.b, a), s.position)
-            })
-            .collect();
         let gradient_rect = background_gradient_rect(
             node.style.background_size,
             &node.style.background_size_w,
@@ -1648,6 +1665,20 @@ fn build_for_box_inner(
             radial_center_y,
             font_px,
             ctx.transform_ctx.root_font_px,
+        );
+        let stops = crate::css::resolve_gradient_color_stops(
+            &node.style.rare().gradient_stops,
+            gradient_line_length(
+                node.style.gradient_type,
+                node.style.gradient_direction,
+                node.style.gradient_angle,
+                gradient_rect,
+                radial_radius_x,
+            ),
+            crate::types::TransformCtx {
+                font_px,
+                ..ctx.transform_ctx
+            },
         );
         if eff_style.background_clip == BackgroundClip::Text {
             has_text_gradient = true;
@@ -1679,7 +1710,7 @@ fn build_for_box_inner(
                 stops,
                 radii: bg_clip_radii,
                 radii_y: bg_clip_radii_y,
-                opacity,
+                opacity: 1.0,
                 blend_mode: background_blend_mode_to_u8(&eff_style.background_blend_mode),
             });
         }
@@ -5247,9 +5278,52 @@ fn build_deferred_positioned_box(
         let mut clips = 0;
         let mut scroll_x = ctx.scroll_x;
         let mut scroll_y = ctx.scroll_y;
-        for ancestor in ancestors {
+        let containing_block = ancestors.iter().rposition(|ancestor| {
+            ancestor.style.display != Display::Contents
+                && if node.style.position == Position::Fixed {
+                    crate::layout::establishes_fixed_positioned_containing_block(&ancestor.style)
+                } else {
+                    crate::layout::establishes_positioned_containing_block(&ancestor.style)
+                }
+        });
+        for (index, ancestor) in ancestors.iter().enumerate() {
             if ancestor.style.display == Display::Contents {
                 continue;
+            }
+            // Overflow on the containing block and its ancestors still clips
+            // deferred paint. Only ancestors between the box and that block
+            // are bypassed by absolute positioning (CSS 2.1 section 11.1).
+            let style = &ancestor.style;
+            if containing_block.is_some_and(|cb| index <= cb)
+                && ctx.viewport_overflow_body != Some(ancestor.node_id)
+                && (style.contain_paint
+                    || !matches!(style.overflow_x, Overflow::Visible)
+                    || !matches!(style.overflow_y, Overflow::Visible))
+            {
+                let font = style.font_size_px(
+                    ctx.transform_ctx.root_font_px,
+                    ctx.transform_ctx.root_font_px,
+                );
+                let rect = crate::css::overflow_clip_rect(
+                    style,
+                    &ancestor.layout,
+                    scroll_x,
+                    scroll_y,
+                    font,
+                    ctx.transform_ctx.root_font_px,
+                );
+                let (radius, radius_y) = crate::css::overflow_clip_radii(
+                    style,
+                    &ancestor.layout,
+                    font,
+                    ctx.transform_ctx.root_font_px,
+                );
+                list.push(PaintCmd::PushClip {
+                    rect,
+                    radius,
+                    radius_y,
+                });
+                clips += 1;
             }
             if ancestor.style.clip_path.kind != ClipPathKind::None {
                 let style = &ancestor.style;

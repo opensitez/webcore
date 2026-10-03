@@ -423,7 +423,11 @@ impl Stylesheet {
             for (name, value) in &rule.declarations {
                 if name.starts_with("--") {
                     declarations.push(super::cascade::CustomDeclaration::rule(
-                        name, value, rule, specificity, false,
+                        name,
+                        value,
+                        rule,
+                        specificity,
+                        false,
                     ));
                 }
             }
@@ -438,7 +442,11 @@ impl Stylesheet {
                 for (name, value) in &rule.important_declarations {
                     if name.starts_with("--") {
                         declarations.push(super::cascade::CustomDeclaration::rule(
-                            name, value, rule, specificity, true,
+                            name,
+                            value,
+                            rule,
+                            specificity,
+                            true,
                         ));
                     }
                 }

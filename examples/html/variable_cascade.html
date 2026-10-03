@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Variable Cascade</title>
+<style>
+body { font-family: sans-serif; color: green; margin: 32px; }
+.case { padding: 8px; margin-bottom: 8px; border: 1px solid currentColor; }
+.base { color: red; width: 80px; }
+.normal { --bad: 10/**/px; width: var(--bad); color: var(--absent); }
+.important { width: var(--absent) !important; color: var(--absent) !important; }
+.state:hover { width: var(--absent); color: var(--absent); }
+.pseudo::before { content: "before"; color: red; }
+.pseudo::before { color: var(--absent); }
+@layer base, top;
+@layer base { .literal, .variable, .fallback { color: red; } }
+@layer top {
+  .literal { color: revert-layer; }
+  .variable { --choice: revert-layer; color: var(--choice); }
+  .fallback { --choice: revert-layer; color: var(--choice, revert-layer); }
+}
+</style>
+<h1>Variable Cascade</h1>
+<div class="case base normal">Invalid substituted width and color: green, auto width</div>
+<div class="case base important">Missing important value: green, auto width</div>
+<div class="case base" style="width:var(--absent);color:var(--absent)">Missing inline value: green, auto width</div>
+<div class="case base state">Hover: green, auto width</div>
+<div class="case pseudo"> should inherit green</div>
+<div class="case literal">Literal revert-layer: red</div>
+<div class="case variable">Custom-property revert-layer without fallback: green</div>
+<div class="case fallback">Explicit revert-layer fallback: red</div>
+</html>

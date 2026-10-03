@@ -1,0 +1,15 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Logical box inheritance</title>
+<style>
+  * { margin: 0; padding: 0 }
+  body { font: 16px sans-serif }
+  .parent { margin: 11px 12px 13px 14px; padding: 21px 22px 23px 24px;
+    position: relative; inset: 31px 32px 33px 34px }
+  .case { width: 160px; height: 30px; background: lightblue; direction: rtl;
+    margin-inline: inherit; padding-inline: inherit; position: relative; inset-inline: inherit }
+  #vertical { writing-mode: vertical-rl }
+  #vertical .case { writing-mode: horizontal-tb; direction: ltr }
+</style>
+<div class="parent"><div class="case" id="rtl">LTR to RTL</div></div>
+<div class="parent" id="vertical"><div class="case" id="horizontal">Vertical to horizontal</div></div>

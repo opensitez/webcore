@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Radius declaration grammar</title>
+<style>
+  body { margin: 0; font: 16px sans-serif }
+  .case { width: 180px; height: 64px; margin: 12px; background: lightblue; border-radius: 12px }
+  #extra { border-radius: 1px 2px 3px 4px 5px; border-top-left-radius: -3px }
+  #ellipse { border-top-left-radius: 20% 8px }
+  #logical { direction: rtl; border-start-start-radius: 18px; border-start-start-radius: 2px 3px 4px }
+  #variable { --radius: auto; border-top-left-radius: var(--radius) }
+  #math { border-radius: calc(8px + 4px) / 24px }
+</style>
+<div class="case" id="extra">Invalid stylesheet</div>
+<div class="case" id="inline" style="border-radius: 2px /; border-top-left-radius: auto">Invalid inline</div>
+<div class="case" id="ellipse">Elliptical pair</div>
+<div class="case" id="logical">Logical corner</div>
+<div class="case" id="variable">Invalid variable</div>
+<div class="case" id="math">Math radius</div>

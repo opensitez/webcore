@@ -8,6 +8,13 @@ use super::*;
 pub enum LogicalSlot {
     MarginPhysical(PhysicalSide),
     PaddingPhysical(PhysicalSide),
+    InsetPhysical(PhysicalSide),
+    WidthPhysical,
+    HeightPhysical,
+    MinWidthPhysical,
+    MinHeightPhysical,
+    MaxWidthPhysical,
+    MaxHeightPhysical,
     MarginInlineStart,
     MarginInlineEnd,
     MarginBlockStart,
@@ -34,6 +41,7 @@ pub enum LogicalSlot {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogicalBorderSlot {
+    Physical(PhysicalSide),
     InlineStart,
     InlineEnd,
     BlockStart,
@@ -42,6 +50,10 @@ pub enum LogicalBorderSlot {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogicalCornerSlot {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
     StartStart,
     StartEnd,
     EndStart,
@@ -54,6 +66,22 @@ pub struct LogicalBorderValue {
     pub width: Option<CssLength>,
     pub style: Option<BorderStyle>,
     pub color: Option<Color>,
+    pub current_color: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum BorderAspect {
+    Width,
+    Style,
+    Color,
+}
+
+/// Deferred writes retain their shared cascade order across value families.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LogicalDeclaration {
+    Length(LogicalSlot, CssLength),
+    Border(LogicalBorderValue),
+    Corner(LogicalCornerSlot, CssLength, CssLength),
 }
 
 /// A physical side of the box.

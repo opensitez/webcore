@@ -1,0 +1,22 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Border declaration grammar</title>
+<style>
+  body { margin: 0; font: 16px sans-serif }
+  .case { width: 180px; height: 48px; margin: 12px; background: lightblue; color: purple; border: 4px solid currentColor }
+  #invalid { border: 2px dotted red blue; border-right-color: nonsense }
+  #keywords { border-width: thin medium thick 7px }
+  #logical { direction: rtl; border-inline-start-width: thick; border-inline-start-width: 20% }
+  #variable { --edge: 2px red blue; border: var(--edge) }
+  #math { border-top-width: calc(1em + 2px) }
+  #thin { border: thin dotted red }
+  #thick { border: THICK dashed blue }
+</style>
+<div class="case" id="invalid">Invalid stylesheet</div>
+<div class="case" id="inline" style="border: 2px solid dashed; border-top-width: -3px">Invalid inline</div>
+<div class="case" id="keywords">Width keywords</div>
+<div class="case" id="logical">Logical width</div>
+<div class="case" id="variable">Invalid variable</div>
+<div class="case" id="math">Math width</div>
+<div class="case" id="thin">Thin shorthand</div>
+<div class="case" id="thick">Thick shorthand</div>

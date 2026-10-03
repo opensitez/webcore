@@ -235,19 +235,12 @@ fn parse_and_eval_supports_in_parens(s: &str) -> Option<bool> {
         }
 
         // Check for declaration inside parens: (prop: value)
-        if let Some(colon) = find_char_outside_quotes_and_parens(inner, ':') {
-            let prop = inner[..colon].trim();
-            let raw_val = inner[colon + 1..].trim();
-            if is_valid_css_property_name(prop) {
-                if let Some((clean_val, _important)) = strip_important_flag(raw_val) {
-                    return Some(supports_declaration_matches(
-                        &prop.to_ascii_lowercase(),
-                        clean_val,
-                    ));
-                } else {
-                    // Invalid exclamation flag like !bad
-                    return Some(false);
-                }
+        if let Some((prop, raw_val)) = declaration_parts(inner) {
+            if let Some((clean_val, _important)) = strip_important_flag(raw_val) {
+                return Some(supports_declaration_matches(&prop, clean_val));
+            } else {
+                // Invalid exclamation flag like !bad
+                return Some(false);
             }
         }
 
@@ -289,35 +282,13 @@ fn eval_functional_token(ident: &str, args: &str) -> bool {
 }
 
 fn strip_important_flag(val: &str) -> Option<(&str, bool)> {
-    let bytes = val.as_bytes();
-    let mut last_excl = None;
-    let mut quote: Option<u8> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' {
-            i += 2;
-            continue;
-        }
-        match quote {
-            Some(q) => {
-                if bytes[i] == q {
-                    quote = None;
-                }
-            }
-            None => {
-                if bytes[i] == b'"' || bytes[i] == b'\'' {
-                    quote = Some(bytes[i]);
-                } else if bytes[i] == b'!' {
-                    last_excl = Some(i);
-                }
-            }
-        }
-        i += 1;
-    }
-
-    if let Some(idx) = last_excl {
+    if let Some(idx) = super::syntax::top_level_delimiters(val, b'!').last() {
         let flag = val[idx + 1..].trim();
-        if flag.eq_ignore_ascii_case("important") {
+        let mut chars = flag.chars().peekable();
+        if starts_css_ident(&chars)
+            && read_ident(&mut chars).eq_ignore_ascii_case("important")
+            && chars.next().is_none()
+        {
             Some((val[..idx].trim(), true))
         } else {
             None // invalid exclamation flag
@@ -456,43 +427,6 @@ fn is_valid_css_identifier(ident: &str) -> bool {
     true
 }
 
-fn is_valid_css_property_name(prop: &str) -> bool {
-    if prop.starts_with("--") {
-        return prop.len() > 2;
-    }
-    is_valid_css_identifier(prop)
-}
-
-fn find_char_outside_quotes_and_parens(s: &str, target: char) -> Option<usize> {
-    let target_byte = target as u8;
-    let bytes = s.as_bytes();
-    let mut depth = 0usize;
-    let mut quote: Option<u8> = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' {
-            i += 2;
-            continue;
-        }
-        match quote {
-            Some(q) => {
-                if bytes[i] == q {
-                    quote = None;
-                }
-            }
-            None => match bytes[i] {
-                b'"' | b'\'' => quote = Some(bytes[i]),
-                b'(' | b'[' | b'{' => depth += 1,
-                b')' | b']' | b'}' => depth = depth.saturating_sub(1),
-                b if b == target_byte && depth == 0 => return Some(i),
-                _ => {}
-            },
-        }
-        i += 1;
-    }
-    None
-}
-
 fn outer_parens_enclose(s: &str) -> bool {
     let bytes = s.as_bytes();
     if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
@@ -562,15 +496,10 @@ fn supports_declaration_matches(prop: &str, value: &str) -> bool {
 
 fn contains_valid_var_function(value: &str) -> bool {
     let mut rest = value;
-    while let Some((start, end)) = super::apply::find_var_function(rest) {
-        let args = &rest[start + 4..end - 1];
-        let name = args.split(',').next().unwrap_or("").trim();
-        if name.strip_prefix("--").is_some_and(|suffix| {
-            !suffix.is_empty()
-                && suffix.chars().all(|ch| {
-                    ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || !ch.is_ascii()
-                })
-        }) {
+    while let Some((_, body_start, end)) = super::apply::find_var_function(rest) {
+        let args = &rest[body_start..end - 1];
+        let name = super::apply::split_top_level_comma(args).map_or(args, |(name, _)| name);
+        if super::apply::variable_name(name).is_some() {
             return true;
         }
         rest = &rest[end..];
@@ -952,15 +881,18 @@ fn split_nested_style_rules(block: &str) -> (String, Vec<(String, String)>) {
     while let Some(relative_brace) = find_next_top_level_open_brace(&block[cursor..]) {
         let brace = cursor + relative_brace;
         let before = &block[cursor..brace];
-        let selector_start = before
-            .rfind(';')
-            .map(|idx| cursor + idx + 1)
-            .unwrap_or(cursor);
-        declarations.push_str(&block[cursor..selector_start]);
+        let last = split_declarations(before).last().copied().unwrap_or(before);
+        let selector_start = brace - last.len();
 
         let selector = block[selector_start..brace].trim();
         let (nested_block, after) = consume_block(&block[brace..]);
         let after_idx = block.len() - after.len();
+        if declaration_parts(selector).is_some_and(|(name, _)| name.starts_with("--")) {
+            declarations.push_str(&block[cursor..after_idx]);
+            cursor = after_idx;
+            continue;
+        }
+        declarations.push_str(&block[cursor..selector_start]);
         if !selector.is_empty() {
             nested.push((selector.to_string(), nested_block.to_string()));
         }
@@ -971,40 +903,7 @@ fn split_nested_style_rules(block: &str) -> (String, Vec<(String, String)>) {
 }
 
 fn find_next_top_level_open_brace(s: &str) -> Option<usize> {
-    let mut quote: Option<u8> = None;
-    let mut paren_depth = 0usize;
-    let mut bracket_depth = 0usize;
-    let bytes = s.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match quote {
-            Some(q) => {
-                if b == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if b == q {
-                    quote = None;
-                }
-            }
-            None => match b {
-                b'\\' => {
-                    i += 2;
-                    continue;
-                }
-                b'"' | b'\'' => quote = Some(b),
-                b'(' => paren_depth += 1,
-                b')' => paren_depth = paren_depth.saturating_sub(1),
-                b'[' => bracket_depth += 1,
-                b']' => bracket_depth = bracket_depth.saturating_sub(1),
-                b'{' if paren_depth == 0 && bracket_depth == 0 => return Some(i),
-                _ => {}
-            },
-        }
-        i += 1;
-    }
-    None
+    super::syntax::top_level_delimiters(s, b'{').next()
 }
 
 fn expand_nested_selectors(parent: &str, nested: &str) -> String {
@@ -1030,45 +929,7 @@ fn expand_nested_selectors(parent: &str, nested: &str) -> String {
 }
 
 pub(crate) fn strip_css_comments(css: &str) -> String {
-    let mut out = String::with_capacity(css.len());
-    let bytes = css.as_bytes();
-    let mut start = 0;
-    let mut i = 0;
-    let mut quote = None;
-    while i < bytes.len() {
-        if let Some(delimiter) = quote {
-            if bytes[i] == b'\\' {
-                i = (i + 2).min(bytes.len());
-                continue;
-            }
-            if bytes[i] == delimiter {
-                quote = None;
-            }
-            i += 1;
-            continue;
-        }
-        if bytes[i] == b'\'' || bytes[i] == b'"' {
-            quote = Some(bytes[i]);
-            i += 1;
-            continue;
-        }
-        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            out.push_str(&css[start..i]);
-            i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                i += 1;
-            }
-            if i + 1 >= bytes.len() {
-                return out;
-            }
-            i += 2;
-            start = i;
-            continue;
-        }
-        i += 1;
-    }
-    out.push_str(&css[start..]);
-    out
+    super::syntax::normalize_comments(css)
 }
 
 /// Case-insensitive substring search without allocating a lowercased copy.
@@ -1225,47 +1086,10 @@ fn find_unescaped(haystack: &str, needle: &str) -> Option<usize> {
 }
 
 pub(crate) fn consume_block(s: &str) -> (&str, &str) {
-    // s starts with '{'
-    //
-    // ⛔ STRINGS ARE OPAQUE. Block matching is defined over TOKENS
-    // (css-syntax-3 §5.4.7), so a brace inside a string is string content.
-    // Counting raw bytes let `content: "}"` close the rule early: the tail was
-    // reparsed as a selector, failed validation, and took the NEXT — entirely
-    // unrelated — rule down with it, repeating until braces happened to
-    // realign. A stylesheet could lose arbitrarily much of itself to one glyph.
-    let mut depth = 0usize;
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    let mut quote: Option<u8> = None;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match quote {
-            Some(q) => {
-                if b == b'\\' {
-                    i += 2;
-                    continue;
-                } // escape: skip the next byte
-                if b == q {
-                    quote = None;
-                }
-            }
-            None => match b {
-                b'\\' => {
-                    i += 2;
-                    continue;
-                }
-                b'"' | b'\'' => quote = Some(b),
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return (&s[1..i], &s[i + 1..]);
-                    }
-                }
-                _ => {}
-            },
+    if let Some(contents) = s.strip_prefix('{') {
+        if let Some(end) = super::syntax::top_level_delimiters(contents, b'}').next() {
+            return (&contents[..end], &contents[end + 1..]);
         }
-        i += 1;
     }
     (s, "")
 }
@@ -1347,60 +1171,59 @@ fn matching_paren(s: &str, open: usize) -> Option<usize> {
 /// `url(http://x/img;v=2.png)` in half.
 pub(crate) fn split_declarations(block: &str) -> Vec<&str> {
     let mut out = Vec::new();
-    let bytes = block.as_bytes();
-    let (mut start, mut depth, mut i) = (0usize, 0usize, 0usize);
-    let mut quote: Option<u8> = None;
-    while i < bytes.len() {
-        let b = bytes[i];
-        match quote {
-            Some(q) => {
-                if b == b'\\' {
-                    i += 2;
-                    continue;
-                }
-                if b == q {
-                    quote = None;
-                }
-            }
-            None => match b {
-                b'"' | b'\'' => quote = Some(b),
-                b'(' | b'[' => depth += 1,
-                b')' | b']' => {
-                    depth = depth.saturating_sub(1);
-                }
-                b';' if depth == 0 => {
-                    out.push(&block[start..i]);
-                    start = i + 1;
-                }
-                _ => {}
-            },
-        }
-        i += 1;
+    let mut start = 0;
+    for end in super::syntax::top_level_delimiters(block, b';') {
+        out.push(&block[start..end]);
+        start = end + 1;
     }
     out.push(&block[start..]);
     out
 }
 
+fn declaration_parts(declaration: &str) -> Option<(String, &str)> {
+    let mut escaped = false;
+    let colon = declaration.char_indices().find_map(|(index, ch)| {
+        if escaped {
+            escaped = false;
+            return None;
+        }
+        if ch == '\\' {
+            escaped = true;
+            return None;
+        }
+        (ch == ':').then_some(index)
+    })?;
+    let mut chars = declaration[..colon].trim().chars().peekable();
+    if !starts_css_ident(&chars) {
+        return None;
+    }
+    let mut name = read_ident(&mut chars);
+    if name == "--" || chars.next().is_some() {
+        return None;
+    }
+    if !name.starts_with("--") {
+        name.make_ascii_lowercase();
+    }
+    Some((name, declaration[colon + 1..].trim()))
+}
+
 /// Parse "prop: value; prop: value; ..." into a map.
 /// Strips `!important` from values.
 pub fn parse_declarations(block: &str) -> HashMap<String, String> {
+    let cleaned = block.contains("/*").then(|| strip_css_comments(block));
+    let block = cleaned.as_deref().unwrap_or(block);
     let mut map = HashMap::new();
     for decl in split_declarations(block) {
         let decl = decl.trim();
         if decl.is_empty() {
             continue;
         }
-        if let Some(colon) = decl.find(':') {
-            let raw_prop = decl[..colon].trim();
-            // CSS custom properties (--*) are case-sensitive; standard properties are not.
-            let prop = if raw_prop.starts_with("--") {
-                raw_prop.to_string()
-            } else {
-                raw_prop.to_ascii_lowercase()
+        if let Some((prop, raw_value)) = declaration_parts(decl) {
+            let Some((value, _)) = strip_important_flag(raw_value) else {
+                continue;
             };
-            let value = strip_important(decl[colon + 1..].trim());
             if !prop.is_empty() && (!value.is_empty() || prop.starts_with("--")) {
-                map.insert(prop, value);
+                map.insert(prop, value.to_string());
             }
         }
     }
@@ -1410,6 +1233,8 @@ pub fn parse_declarations(block: &str) -> HashMap<String, String> {
 /// Parse declarations, splitting into (normal, important) maps.
 /// Properties with `!important` go into the second map.
 pub fn parse_declarations_important(block: &str) -> (Declarations, Declarations) {
+    let cleaned = block.contains("/*").then(|| strip_css_comments(block));
+    let block = cleaned.as_deref().unwrap_or(block);
     let mut normal = Declarations::new();
     let mut important = Declarations::new();
     for decl in split_declarations(block) {
@@ -1417,37 +1242,20 @@ pub fn parse_declarations_important(block: &str) -> (Declarations, Declarations)
         if decl.is_empty() {
             continue;
         }
-        if let Some(colon) = decl.find(':') {
-            let raw_prop = decl[..colon].trim();
-            // CSS custom properties (--*) are case-sensitive; standard properties are not.
-            let prop = if raw_prop.starts_with("--") {
-                raw_prop.to_string()
-            } else {
-                raw_prop.to_ascii_lowercase()
+        if let Some((prop, raw_value)) = declaration_parts(decl) {
+            let Some((value, is_important)) = strip_important_flag(raw_value) else {
+                continue;
             };
-            let raw_value = decl[colon + 1..].trim();
-            let is_important = has_important(raw_value);
-            let value = strip_important(raw_value);
             if !prop.is_empty() && (!value.is_empty() || prop.starts_with("--")) {
                 if is_important {
-                    important.append_source(prop, value);
+                    important.append_source(prop, value.to_string());
                 } else {
-                    normal.append_source(prop, value);
+                    normal.append_source(prop, value.to_string());
                 }
             }
         }
     }
     (normal, important)
-}
-
-/// Check if a CSS value contains `!important` (with optional whitespace).
-fn has_important(val: &str) -> bool {
-    // Match !important, ! important, !  important etc.
-    if let Some(bang) = val.rfind('!') {
-        val[bang + 1..].trim().eq_ignore_ascii_case("important")
-    } else {
-        false
-    }
 }
 
 fn pseudo_function_len(value: &str, name: &str) -> Option<usize> {
@@ -1471,17 +1279,6 @@ fn pseudo_function_len(value: &str, name: &str) -> Option<usize> {
     None
 }
 
-/// Strip `!important` (with optional whitespace) from a CSS value.
-fn strip_important(val: &str) -> String {
-    if let Some(bang) = val.rfind('!') {
-        let after = val[bang + 1..].trim();
-        if after.eq_ignore_ascii_case("important") {
-            return val[..bang].trim().to_string();
-        }
-    }
-    val.to_string()
-}
-
 /// Parse a single CSS selector string into a CssSelector.
 pub fn parse_selector(s: &str) -> CssSelector {
     parse_selector_impl(s, false)
@@ -1492,6 +1289,8 @@ fn parse_selector_for_support(s: &str) -> CssSelector {
 }
 
 fn parse_selector_impl(s: &str, strict_support: bool) -> CssSelector {
+    let normalized = s.contains("/*").then(|| strip_css_comments(s));
+    let s = normalized.as_deref().unwrap_or(s);
     let mut parts = Vec::new();
     // Selectors §3.1 — an unrecognised simple selector makes the whole complex
     // selector invalid. Recorded rather than acted on here: whether that kills
@@ -1501,6 +1300,16 @@ fn parse_selector_impl(s: &str, strict_support: bool) -> CssSelector {
 
     while let Some(&ch) = chars.peek() {
         match ch {
+            '/' if chars.clone().nth(1) == Some('*') => {
+                chars.next();
+                chars.next();
+                while let Some(ch) = chars.next() {
+                    if ch == '*' && chars.peek() == Some(&'/') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
             ' ' | '\t' | '\n' => {
                 // Consume all leading whitespace
                 while matches!(chars.peek(), Some(' ') | Some('\t') | Some('\n')) {
@@ -1743,12 +1552,16 @@ fn parse_selector_impl(s: &str, strict_support: bool) -> CssSelector {
             }
             '*' => {
                 chars.next();
+                valid &=
+                    parts.is_empty() || matches!(parts.last(), Some(SelectorPart::Combinator(_)));
                 parts.push(SelectorPart::Universal);
             }
             _ => {
                 valid &= starts_css_ident(&chars);
                 let tag = read_ident(&mut chars);
                 if !tag.is_empty() {
+                    valid &= parts.is_empty()
+                        || matches!(parts.last(), Some(SelectorPart::Combinator(_)));
                     parts.push(SelectorPart::Tag(tag.to_ascii_lowercase()));
                 } else {
                     chars.next(); // skip unknown
@@ -1816,11 +1629,14 @@ pub(crate) fn read_css_ident_escape(
         }
 
         if matches!(chars.peek(), Some(' ' | '\t' | '\n' | '\r' | '\x0c')) {
-            chars.next();
+            if chars.next() == Some('\r') && chars.peek() == Some(&'\n') {
+                chars.next();
+            }
         }
 
         return u32::from_str_radix(&hex, 16)
             .ok()
+            .filter(|value| *value != 0)
             .and_then(char::from_u32)
             .or(Some('\u{fffd}'));
     }

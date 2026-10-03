@@ -521,31 +521,28 @@ pub(super) fn substitute_custom_value_with_lookup(
     if depth >= 128 {
         return None;
     }
-    let mut out = String::new();
+    let mut out = super::syntax::ComponentWriter::default();
     let mut rest = raw;
-    while let Some((start, end)) = super::apply::find_var_function(rest) {
-        out.push_str(&rest[..start]);
-        let args = &rest[start + 4..end - 1];
+    while let Some((start, body_start, end)) = super::apply::find_var_function(rest) {
+        out.push(&rest[..start]);
+        let args = &rest[body_start..end - 1];
         let (name, fallback) = super::apply::split_top_level_comma(args)
             .map_or((args, None), |(name, fallback)| (name, Some(fallback)));
         let resolved_name = substitute_custom_value_with_lookup(name, lookup, depth + 1);
         let value = resolved_name
             .as_deref()
-            .filter(|name| name.trim().starts_with("--"))
-            .and_then(|name| lookup(name.trim()))
+            .and_then(super::apply::variable_name)
+            .and_then(|name| lookup(name.as_ref()))
             .or_else(|| {
                 fallback.and_then(|fallback| {
                     substitute_custom_value_with_lookup(fallback, lookup, depth + 1)
                 })
             })?;
         rest = &rest[end..];
-        out.push_str(&value);
-        if super::apply::needs_var_substitution_separator(&value, rest) {
-            out.push(' ');
-        }
+        out.push(&value);
     }
-    out.push_str(rest);
-    Some(out)
+    out.push(rest);
+    Some(out.finish())
 }
 
 /// Extract @font-face declarations from a CSS string.

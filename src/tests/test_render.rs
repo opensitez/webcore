@@ -1,5 +1,39 @@
 // Pixel-level render tests for blend modes, gradients, and layout.
 #[test]
+fn retained_animated_gradient_respects_rounded_overflow_during_damage_replay() {
+    for scale in [1.0, 2.0] {
+        let mut renderer = Renderer::new();
+        let mut doc = renderer.load_html_vp(
+            "<style>body{margin:0;background:white}.box{position:relative;overflow:hidden;\
+             border-radius:16px;width:200px;height:80px;margin:40px;background:#e9eaf2}\
+             .shine{position:absolute;inset:0;transform:translateX(-40px)}\
+             .shine::before{content:'';display:block;width:40px;height:100%;\
+             background:linear-gradient(to right,transparent,red)}</style>\
+             <main><section><div class='box'><div id='shine' class='shine'></div></div></section></main>", 320.0, 160.0,
+        );
+        let id = doc.get_element_by_id("shine").unwrap();
+        let mut pixels =
+            tiny_skia::Pixmap::new((320.0 * scale) as u32, (160.0 * scale) as u32).unwrap();
+        renderer.render(&mut doc, &mut pixels, scale);
+        for translation in [-20.0, 80.0, 190.0, 200.0, -40.0, 0.0] {
+            doc.animation_overrides.insert(
+                id,
+                vec![("transform".into(), format!("translateX({translation}px)"))],
+            );
+            renderer.invalidate_paint_rects([crate::types::Rect::new(0.0, 30.0, 300.0, 100.0)]);
+            renderer.render(&mut doc, &mut pixels, scale);
+            for (x, y) in [(30.0, 70.0), (250.0, 70.0), (41.0, 41.0)] {
+                assert_eq!(
+                    pixel(&pixels, (x * scale) as u32, (y * scale) as u32),
+                    (255, 255, 255, 255),
+                    "scale={scale}, translation={translation}, at ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn stacked_animation_samples_reach_retained_transform_and_opacity_paint() {
     let mut renderer = Renderer::new();
     let mut doc = renderer.load_html_vp(

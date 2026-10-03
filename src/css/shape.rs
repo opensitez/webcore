@@ -23,9 +23,23 @@ pub(crate) fn split_shape_at(inner: &str) -> (Option<&str>, Option<&str>) {
     if let Some((before_end, after_start)) = split {
         let before = trimmed[..before_end].trim();
         let after = trimmed[after_start..].trim();
-        (if before.is_empty() { None } else { Some(before) }, Some(after))
+        (
+            if before.is_empty() {
+                None
+            } else {
+                Some(before)
+            },
+            Some(after),
+        )
     } else {
-        (if trimmed.is_empty() { None } else { Some(trimmed) }, None)
+        (
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            },
+            None,
+        )
     }
 }
 
@@ -53,7 +67,10 @@ fn shape_length(value: &str, negative: bool) -> bool {
     }
     value_parse::parse_length_checked(value).is_some_and(|length| {
         !length.is_auto()
-            && !matches!(length, CssLength::None | CssLength::Stretch | CssLength::Content)
+            && !matches!(
+                length,
+                CssLength::None | CssLength::Stretch | CssLength::Content
+            )
     })
 }
 
@@ -106,7 +123,9 @@ pub(crate) fn valid_basic_shape(value: &str) -> bool {
                 .position(|token| token.eq_ignore_ascii_case("round"))
                 .unwrap_or(tokens.len());
             (1..=4).contains(&round)
-                && tokens[..round].iter().all(|token| shape_length(token, true))
+                && tokens[..round]
+                    .iter()
+                    .all(|token| shape_length(token, true))
                 && (round == tokens.len()
                     || (round + 1 < tokens.len()
                         && super::supports::declaration_value(

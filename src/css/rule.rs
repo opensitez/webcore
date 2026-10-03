@@ -335,6 +335,26 @@ pub(crate) fn pre_parse_value(id: properties::PropertyId, val: &str) -> crate::t
         return CssValue::RevertLayer;
     }
 
+    if super::value_parse::border_width_limit(id).is_some() {
+        return super::value_parse::parse_border_width(v)
+            .map(CssValue::Length)
+            .unwrap_or_else(|| CssValue::Raw(val.to_string()));
+    }
+    if super::value_parse::is_radius_property(id) {
+        if let Some(length) =
+            super::value_parse::parse_box_length(v, super::value_parse::BoxLengthGrammar::Padding)
+        {
+            return CssValue::Length(length);
+        }
+        // Keep elliptical pairs together; application validates the whole value.
+        return CssValue::Raw(val.to_string());
+    }
+    if let Some(grammar) = super::value_parse::box_length_grammar(id) {
+        return super::value_parse::parse_box_length(v, grammar)
+            .map(CssValue::Length)
+            .unwrap_or_else(|| CssValue::Raw(val.to_string()));
+    }
+
     // Try to parse based on property type
     match id {
         // ── Length properties ──

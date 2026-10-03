@@ -3,8 +3,8 @@
 #![allow(unused_imports)]
 use super::*;
 use crate::css::*;
-use crate::dom::*;
 use crate::dom::events::DomEvent;
+use crate::dom::*;
 use crate::html::*;
 use crate::layout::LayoutEngine;
 use std::collections::{HashMap, HashSet};
@@ -66,7 +66,9 @@ fn sample_animation_events(state: &mut AnimState, delayed_ms: f32, events: &mut 
                 iteration
             };
             events.push(animation_event(
-                "animationiteration", state, boundary as f32 * state.animation.duration_ms,
+                "animationiteration",
+                state,
+                boundary as f32 * state.animation.duration_ms,
             ));
         }
         _ => {}
@@ -349,7 +351,7 @@ impl Document {
     /// currently has an `animation` property.  Call this after each cascade pass.
     pub fn sync_animations(&mut self, now: std::time::Instant) {
         let mut current: Vec<(u32, ParsedAnimation)> = Vec::new();
-        let mut started_events = Vec::new();
+        let mut started_events: Vec<Vec<DomEvent>> = Vec::new();
         let mut cancelled_events = Vec::new();
         fn collect(node: &WebCore, out: &mut Vec<(u32, ParsedAnimation)>) {
             if node.style.display == Display::None {
@@ -398,31 +400,21 @@ impl Document {
             let mut state = if let Some(state) = existing {
                 state
             } else {
-                let state = AnimState {
+                let mut state = AnimState {
                     element_id: *id,
                     animation: anim.clone(),
                     start_time: now,
                     paused_at: anim.play_state_paused.then_some(now),
-                    start_event_fired: anim.delay_ms <= 0.0,
-                    last_iteration_event: if anim.duration_ms > 0.0 {
-                        ((-anim.delay_ms).max(0.0) / anim.duration_ms).floor() as u32
-                    } else {
-                        0
-                    },
+                    start_event_fired: false,
+                    last_iteration_event: 0,
                     list_order,
                     end_event_fired: false,
-                    phase: if anim.delay_ms <= 0.0 {
-                        AnimationPhase::Active
-                    } else {
-                        AnimationPhase::Before
-                    },
+                    phase: AnimationPhase::Before,
                 };
-                if anim.delay_ms <= 0.0 {
-                    started_events.push(animation_event(
-                        "animationstart",
-                        &state,
-                        (-anim.delay_ms).min(animation_active_duration(anim)),
-                    ));
+                let mut initial_events = Vec::new();
+                sample_animation_events(&mut state, -anim.delay_ms, &mut initial_events);
+                if !initial_events.is_empty() {
+                    started_events.push(initial_events);
                 }
                 state
             };
@@ -469,7 +461,10 @@ impl Document {
             ));
         }
 
-        for mut event in cancelled_events.into_iter().chain(started_events) {
+        for mut event in cancelled_events
+            .into_iter()
+            .chain(started_events.into_iter().flatten())
+        {
             self.dispatch_dom_event(&mut event);
         }
     }

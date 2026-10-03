@@ -5,6 +5,15 @@ use super::{calc, properties::PropertyId, value_parse};
 
 pub(super) fn declaration_value(id: PropertyId, value: &str) -> bool {
     use PropertyId::*;
+    if let Some(valid) = value_parse::border_declaration_valid(id, value) {
+        return valid;
+    }
+    if value_parse::is_radius_property(id) {
+        return value_parse::radius_declaration_valid(id, value);
+    }
+    if value_parse::box_length_grammar(id).is_some() {
+        return value_parse::parse_box_declaration(id, value).is_some();
+    }
     let lower = value.to_ascii_lowercase();
     let v = lower.as_str();
     let keywords = |words: &str| words.split_whitespace().any(|word| word == v);
@@ -589,7 +598,7 @@ fn slash_list(v: &str, max: usize, check: impl Fn(&str) -> bool) -> bool {
             .all(|part| !part.trim().is_empty() && check(part.trim()))
 }
 
-fn length(v: &str, percent: bool, negative: bool) -> bool {
+pub(super) fn length(v: &str, percent: bool, negative: bool) -> bool {
     if v.parse::<f32>().is_ok_and(|n| n != 0.0)
         || (!percent && v.ends_with('%'))
         || (!negative && v.starts_with('-'))
@@ -609,13 +618,6 @@ fn length(v: &str, percent: bool, negative: bool) -> bool {
 }
 
 fn color(v: &str) -> bool {
-    if let Some(inner) = v
-        .strip_prefix("light-dark(")
-        .and_then(|v| v.strip_suffix(')'))
-    {
-        let parts = value_parse::split_top_level_commas(inner);
-        return parts.len() == 2 && parts.iter().all(|p| color(p.trim()));
-    }
     value_parse::parse_color(v).is_some()
 }
 
@@ -679,15 +681,7 @@ fn font_shorthand(v: &str) -> bool {
 }
 
 pub(crate) fn image(v: &str) -> bool {
-    if v == "none"
-        || super::extract_url(v).is_some()
-        || super::property_defs::extract_image_set_url_for_device_pixel_ratio(v, 1.0).is_some()
-    {
-        return true;
-    }
-    let mut style = crate::types::ComputedStyle::default();
-    super::apply::apply_gradient(&mut style, v);
-    style.rare().gradient_stops.len() >= 2
+    super::property_defs::background_image_is_valid(v)
 }
 
 fn shadow(v: &str, box_shadow: bool) -> bool {

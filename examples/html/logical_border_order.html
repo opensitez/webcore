@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Logical border and corner cascade order</title>
+<style>
+  body { margin:0; font:16px sans-serif }
+  .case { direction:rtl; width:140px; height:48px; margin:8px; background:lightblue }
+  #a { border-inline-start:6px solid red; border-right:2px dashed blue }
+  #b { border-right:2px dashed blue; border-inline-start:6px solid red }
+  #c { border-inline-start:6px solid red; border-inline-start-width:7px }
+  #d { border-inline-start:4px solid currentColor; color:purple }
+  #e { border-inline-start:4px solid red; border-right-color:currentColor; color:lime }
+  #f { border-right:4px solid red; border-inline-start:4px solid; color:purple }
+  #g { border-inline-start:4px solid currentColor; border-right-color:blue; color:lime }
+  #h { border-inline-start:6px solid red; border-inline-start:initial; color:purple }
+  #i { border-inline-start:6px solid red; border:initial; color:purple }
+  #j { border-inline-start:6px solid red; border-right:2px dashed blue!important }
+  #k { border-inline-start:6px solid red; border-inline-start-color:transparent }
+  #ca { border-start-start-radius:20px 12px; border-top-right-radius:4px 6px }
+  #cb { border-top-right-radius:4px 6px; border-start-start-radius:20px 12px }
+  #cc { border-start-start-radius:20px 12px; border-radius:4px / 6px }
+  #cd { border-start-start-radius:20px 12px; border-top-right-radius:initial }
+  #ce { border-start-start-radius:20px 12px; border-radius:initial }
+  #cf { border-start-start-radius:20px 12px!important; border-top-right-radius:4px 6px }
+  #cg { writing-mode:vertical-rl; direction:ltr; border-start-start-radius:20px 12px; border-top-right-radius:4px 6px }
+</style>
+<div class="case" id="a">Border A</div><div class="case" id="b">Border B</div>
+<div class="case" id="c">Border C</div><div class="case" id="d">Border D</div>
+<div class="case" id="e">Border E</div><div class="case" id="f">Border F</div>
+<div class="case" id="g">Border G</div><div class="case" id="h">Border H</div>
+<div class="case" id="i">Border I</div><div class="case" id="j">Border J</div>
+<div class="case" id="k">Border K</div>
+<div class="case" id="ca">Corner A</div><div class="case" id="cb">Corner B</div>
+<div class="case" id="cc">Corner C</div><div class="case" id="cd">Corner D</div>
+<div class="case" id="ce">Corner E</div><div class="case" id="cf">Corner F</div>
+<div class="case" id="cg">Corner G</div>

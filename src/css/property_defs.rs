@@ -642,6 +642,11 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
                 BorderRightColor,
                 BorderBottomColor,
                 BorderLeftColor,
+                BorderImageSource,
+                BorderImageSlice,
+                BorderImageWidth,
+                BorderImageOutset,
+                BorderImageRepeat,
             ],
         },
         BorderWidth => &PropertyDef {
@@ -2542,7 +2547,7 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             inherited: false,
             apply: apply_margin_block,
             copy: copy_noop,
-            longhands: &[MarginTop, MarginBottom],
+            longhands: &[MarginBlockStart, MarginBlockEnd],
         },
         MarginBlockStart => &PropertyDef {
             id: MarginBlockStart,
@@ -2566,7 +2571,7 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             inherited: false,
             apply: apply_margin_inline,
             copy: copy_noop,
-            longhands: &[MarginLeft, MarginRight],
+            longhands: &[MarginInlineStart, MarginInlineEnd],
         },
         MarginInlineStart => &PropertyDef {
             id: MarginInlineStart,
@@ -2590,7 +2595,7 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             inherited: false,
             apply: apply_padding_block,
             copy: copy_noop,
-            longhands: &[PaddingTop, PaddingBottom],
+            longhands: &[PaddingBlockStart, PaddingBlockEnd],
         },
         PaddingBlockStart => &PropertyDef {
             id: PaddingBlockStart,
@@ -2614,7 +2619,7 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             inherited: false,
             apply: apply_padding_inline,
             copy: copy_noop,
-            longhands: &[PaddingLeft, PaddingRight],
+            longhands: &[PaddingInlineStart, PaddingInlineEnd],
         },
         PaddingInlineStart => &PropertyDef {
             id: PaddingInlineStart,
@@ -2639,12 +2644,12 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             apply: apply_border_block,
             copy: copy_noop,
             longhands: &[
-                BorderTopWidth,
-                BorderBottomWidth,
-                BorderTopStyle,
-                BorderBottomStyle,
-                BorderTopColor,
-                BorderBottomColor,
+                BorderBlockStartWidth,
+                BorderBlockEndWidth,
+                BorderBlockStartStyle,
+                BorderBlockEndStyle,
+                BorderBlockStartColor,
+                BorderBlockEndColor,
             ],
         },
         BorderBlockStart => &PropertyDef {
@@ -2653,7 +2658,11 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             inherited: false,
             apply: apply_border_block_start,
             copy: copy_noop,
-            longhands: &[BorderTopWidth, BorderTopStyle, BorderTopColor],
+            longhands: &[
+                BorderBlockStartWidth,
+                BorderBlockStartStyle,
+                BorderBlockStartColor,
+            ],
         },
         BorderBlockEnd => &PropertyDef {
             id: BorderBlockEnd,
@@ -2661,7 +2670,11 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             inherited: false,
             apply: apply_border_block_end,
             copy: copy_noop,
-            longhands: &[BorderBottomWidth, BorderBottomStyle, BorderBottomColor],
+            longhands: &[
+                BorderBlockEndWidth,
+                BorderBlockEndStyle,
+                BorderBlockEndColor,
+            ],
         },
         BorderInline => &PropertyDef {
             id: BorderInline,
@@ -2670,12 +2683,12 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             apply: apply_border_inline,
             copy: copy_noop,
             longhands: &[
-                BorderLeftWidth,
-                BorderRightWidth,
-                BorderLeftStyle,
-                BorderRightStyle,
-                BorderLeftColor,
-                BorderRightColor,
+                BorderInlineStartWidth,
+                BorderInlineEndWidth,
+                BorderInlineStartStyle,
+                BorderInlineEndStyle,
+                BorderInlineStartColor,
+                BorderInlineEndColor,
             ],
         },
         BorderInlineStart => &PropertyDef {
@@ -2684,7 +2697,11 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             inherited: false,
             apply: apply_border_inline_start,
             copy: copy_noop,
-            longhands: &[BorderLeftWidth, BorderLeftStyle, BorderLeftColor],
+            longhands: &[
+                BorderInlineStartWidth,
+                BorderInlineStartStyle,
+                BorderInlineStartColor,
+            ],
         },
         BorderInlineEnd => &PropertyDef {
             id: BorderInlineEnd,
@@ -2692,7 +2709,11 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             inherited: false,
             apply: apply_border_inline_end,
             copy: copy_noop,
-            longhands: &[BorderRightWidth, BorderRightStyle, BorderRightColor],
+            longhands: &[
+                BorderInlineEndWidth,
+                BorderInlineEndStyle,
+                BorderInlineEndColor,
+            ],
         },
         BorderBlockStartWidth => &PropertyDef {
             id: BorderBlockStartWidth,
@@ -2836,7 +2857,7 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             inherited: false,
             apply: apply_inset_block,
             copy: copy_noop,
-            longhands: &[Top, Bottom],
+            longhands: &[InsetBlockStart, InsetBlockEnd],
         },
         InsetInline => &PropertyDef {
             id: InsetInline,
@@ -2844,7 +2865,7 @@ pub fn get(id: PropertyId) -> &'static PropertyDef {
             inherited: false,
             apply: apply_inset_inline,
             copy: copy_noop,
-            longhands: &[Left, Right],
+            longhands: &[InsetInlineStart, InsetInlineEnd],
         },
 
         // ── Place shorthands ──
@@ -3919,6 +3940,7 @@ fn copy_left(d: &mut ComputedStyle, s: &ComputedStyle) {
 // ── Border ──────────────────────────────────────────────────────────────────
 
 fn apply_border(s: &mut ComputedStyle, v: &str) {
+    super::apply::reset_to_initial(s, super::properties::PropertyId::BorderImage);
     reset_border_side(
         &mut s.border_top_width,
         &mut s.border_top_style,
@@ -4202,7 +4224,9 @@ fn apply_border_bottom_right_radius(s: &mut ComputedStyle, v: &str) {
 }
 fn note_logical_corner(s: &mut ComputedStyle, slot: LogicalCornerSlot, v: &str) {
     let (x, y) = parse_radius_pair(v);
-    s.rare_mut().logical_corners.push((slot, x, y));
+    s.rare_mut()
+        .logical_declarations
+        .push(LogicalDeclaration::Corner(slot, x, y));
 }
 fn apply_border_start_start_radius(s: &mut ComputedStyle, v: &str) {
     note_logical_corner(s, LogicalCornerSlot::StartStart, v);
@@ -5861,7 +5885,9 @@ fn remove_top_level_function(value: &str, marker: &str) -> Option<(String, Strin
             ')' => {
                 if depth > 0 {
                     depth -= 1;
-                    if depth == 0 && let Some(start) = start {
+                    if depth == 0
+                        && let Some(start) = start
+                    {
                         let end = idx + 1;
                         let function = value[start..end].trim().to_string();
                         let rest = format!("{} {}", &value[..start], &value[end..]);
@@ -5981,39 +6007,7 @@ fn find_top_level_char(s: &str, needle: char) -> Option<usize> {
 }
 
 pub(crate) fn split_top_level_whitespace(s: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut depth = 0usize;
-    let mut start = None;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '(' => {
-                if start.is_none() {
-                    start = Some(i);
-                }
-                depth += 1;
-            }
-            ')' => {
-                if start.is_none() {
-                    start = Some(i);
-                }
-                depth = depth.saturating_sub(1);
-            }
-            c if c.is_whitespace() && depth == 0 => {
-                if let Some(st) = start.take() {
-                    out.push(&s[st..i]);
-                }
-            }
-            _ => {
-                if start.is_none() {
-                    start = Some(i);
-                }
-            }
-        }
-    }
-    if let Some(st) = start {
-        out.push(&s[st..]);
-    }
-    out
+    super::syntax::split_component_values(s)
 }
 
 fn is_background_position_length_token(token: &str) -> bool {
@@ -6138,9 +6132,9 @@ fn parse_background_image_layer(v: &str) -> Option<ParsedBackgroundImage> {
     .iter()
     .any(|function| lower.starts_with(function))
     {
-        if !remove_top_level_function(v, "gradient(").is_some_and(|(function, rest)| {
-            function == v.trim() && rest.trim().is_empty()
-        }) {
+        if !remove_top_level_function(v, "gradient(")
+            .is_some_and(|(function, rest)| function == v.trim() && rest.trim().is_empty())
+        {
             return None;
         }
         let mut s = Box::new(ComputedStyle::default());
@@ -6156,6 +6150,14 @@ fn parse_background_image_layer(v: &str) -> Option<ParsedBackgroundImage> {
         return Some(ParsedBackgroundImage::Url(url));
     }
     None
+}
+
+pub(super) fn background_image_is_valid(value: &str) -> bool {
+    let layers = crate::css::value_parse::split_top_level_commas(value);
+    !layers.is_empty()
+        && layers
+            .iter()
+            .all(|layer| parse_background_image_layer(layer).is_some())
 }
 
 #[derive(Clone)]
@@ -6330,7 +6332,9 @@ fn image_set_candidate_type_is_supported(descriptor: &str) -> Option<bool> {
             | "image/svg+xml"
     ))
 }
-pub(crate) fn parse_background_size_layer(v: &str) -> Option<(BackgroundSize, CssLength, CssLength)> {
+pub(crate) fn parse_background_size_layer(
+    v: &str,
+) -> Option<(BackgroundSize, CssLength, CssLength)> {
     fn component(token: &str) -> Option<CssLength> {
         if token.eq_ignore_ascii_case("auto") {
             return Some(CssLength::Auto);
@@ -6998,17 +7002,23 @@ fn apply_mask(s: &mut ComputedStyle, v: &str) {
     let rare = s.rare_mut();
     rare.mask_image_url = parsed[0].mask_image_url.clone();
     rare.mask_image_set_source = parsed[0].mask_image_set_source.clone();
-    rare.additional_mask_images = parsed.iter().skip(1).map(|layer| {
-        crate::types::MaskImageSource {
+    rare.additional_mask_images = parsed
+        .iter()
+        .skip(1)
+        .map(|layer| crate::types::MaskImageSource {
             url: layer.mask_image_url.clone(),
             image_set_source: layer.mask_image_set_source.clone(),
-        }
-    }).collect();
+        })
+        .collect();
     let layer_list = |value: fn(&crate::types::RareStyle) -> &str, initial: &str| {
-        parsed.iter().map(|layer| {
-            let part = value(layer);
-            if part.is_empty() { initial } else { part }
-        }).collect::<Vec<_>>().join(", ")
+        parsed
+            .iter()
+            .map(|layer| {
+                let part = value(layer);
+                if part.is_empty() { initial } else { part }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     };
     rare.mask_mode = layer_list(|layer| &layer.mask_mode, "match-source");
     rare.mask_repeat = layer_list(|layer| &layer.mask_repeat, "repeat");
@@ -7065,7 +7075,11 @@ fn apply_mask_single(s: &mut ComputedStyle, v: &str) -> bool {
     let mut repeat = Vec::new();
     let mut position = Vec::new();
     let mut position_closed = false;
-    for (index, token) in before_tokens.drain(..).chain(after_tokens.drain(..)).enumerate() {
+    for (index, token) in before_tokens
+        .drain(..)
+        .chain(after_tokens.drain(..))
+        .enumerate()
+    {
         let lower = token.to_ascii_lowercase();
         let is_image = lower == "none"
             || lower.starts_with("url(")
@@ -7091,12 +7105,24 @@ fn apply_mask_single(s: &mut ComputedStyle, v: &str) -> bool {
             if composite.replace(lower).is_some() {
                 return false;
             }
-        } else if matches!(lower.as_str(), "border-box" | "padding-box" | "content-box" | "fill-box" | "stroke-box" | "view-box" | "no-clip") {
+        } else if matches!(
+            lower.as_str(),
+            "border-box"
+                | "padding-box"
+                | "content-box"
+                | "fill-box"
+                | "stroke-box"
+                | "view-box"
+                | "no-clip"
+        ) {
             boxes.push(lower);
             if boxes.len() > 2 {
                 return false;
             }
-        } else if matches!(lower.as_str(), "repeat" | "repeat-x" | "repeat-y" | "no-repeat" | "space" | "round") {
+        } else if matches!(
+            lower.as_str(),
+            "repeat" | "repeat-x" | "repeat-y" | "no-repeat" | "space" | "round"
+        ) {
             repeat.push(lower);
             if repeat.len() > 2 {
                 return false;
@@ -8656,7 +8682,10 @@ pub(crate) fn parse_shape_round_radii(input: &str) -> Option<([CssLength; 4], [C
     let (horizontal, vertical) = find_top_level_char(input, '/')
         .map(|slash| (&input[..slash], &input[slash + 1..]))
         .unwrap_or((input, input));
-    Some((parse_clip_round_set(horizontal)?, parse_clip_round_set(vertical)?))
+    Some((
+        parse_clip_round_set(horizontal)?,
+        parse_clip_round_set(vertical)?,
+    ))
 }
 
 fn parse_clip_round_set(input: &str) -> Option<[CssLength; 4]> {
@@ -8731,13 +8760,22 @@ fn parse_clip_path_polygon(value: &str) -> Option<ClipPath> {
     clip.kind = ClipPathKind::Polygon;
     let first = split_top_level_whitespace(pairs[0].trim());
     let mut header_index = 0;
-    if first.first().is_some_and(|token| token.eq_ignore_ascii_case("evenodd")) {
+    if first
+        .first()
+        .is_some_and(|token| token.eq_ignore_ascii_case("evenodd"))
+    {
         clip.polygon_even_odd = true;
         header_index += 1;
-    } else if first.first().is_some_and(|token| token.eq_ignore_ascii_case("nonzero")) {
+    } else if first
+        .first()
+        .is_some_and(|token| token.eq_ignore_ascii_case("nonzero"))
+    {
         header_index += 1;
     }
-    if first.get(header_index).is_some_and(|token| token.eq_ignore_ascii_case("round")) {
+    if first
+        .get(header_index)
+        .is_some_and(|token| token.eq_ignore_ascii_case("round"))
+    {
         let value = *first.get(header_index + 1)?;
         if value.contains('%') {
             return None;
@@ -9290,12 +9328,18 @@ fn apply_contain_intrinsic_size(s: &mut ComputedStyle, v: &str) {
         if auto {
             index += 1;
         }
-        let Some(token) = parts.get(index) else { return };
+        let Some(token) = parts.get(index) else {
+            return;
+        };
         let length = if *token == "none" {
             CssLength::None
         } else {
-            let Some(length) = parse_length_checked(token) else { return };
-            if length.is_auto() || length.is_none() || length.has_percentage()
+            let Some(length) = parse_length_checked(token) else {
+                return;
+            };
+            if length.is_auto()
+                || length.is_none()
+                || length.has_percentage()
                 || matches!(length, CssLength::Px(n) if n < 0.0)
             {
                 return;
@@ -9476,7 +9520,9 @@ fn copy_scroll_margin_left(d: &mut ComputedStyle, s: &ComputedStyle) {
 // once, with the final values.
 fn note_logical(s: &mut ComputedStyle, slot: LogicalSlot, v: &str) {
     let l = parse_length(v);
-    s.rare_mut().logical_box.push((slot, l));
+    s.rare_mut()
+        .logical_declarations
+        .push(LogicalDeclaration::Length(slot, l));
 }
 fn note_logical_pair(s: &mut ComputedStyle, start: LogicalSlot, end: LogicalSlot, v: &str) {
     let parts = split_top_level_whitespace(v);
@@ -9549,35 +9595,58 @@ fn note_logical_border(
     width: Option<CssLength>,
     style: Option<BorderStyle>,
     color: Option<Color>,
+    current_color: bool,
 ) {
-    s.rare_mut().logical_borders.push(LogicalBorderValue {
-        slot,
-        width,
-        style,
-        color,
-    });
+    s.rare_mut()
+        .logical_declarations
+        .push(LogicalDeclaration::Border(LogicalBorderValue {
+            slot,
+            width,
+            style,
+            color,
+            current_color,
+        }));
 }
 
 fn note_logical_border_width(s: &mut ComputedStyle, slot: LogicalBorderSlot, v: &str) {
-    note_logical_border(s, slot, Some(parse_length(v)), None, None);
+    note_logical_border(s, slot, Some(parse_length(v)), None, None, false);
 }
 
 fn note_logical_border_style(s: &mut ComputedStyle, slot: LogicalBorderSlot, v: &str) {
-    note_logical_border(s, slot, None, Some(super::parse_border_style(v)), None);
+    note_logical_border(
+        s,
+        slot,
+        None,
+        Some(super::parse_border_style(v)),
+        None,
+        false,
+    );
 }
 
 fn note_logical_border_color(s: &mut ComputedStyle, slot: LogicalBorderSlot, v: &str) {
-    if let Some(color) = parse_color(v) {
-        note_logical_border(s, slot, None, None, Some(color));
+    if v.eq_ignore_ascii_case("currentcolor") {
+        note_logical_border(s, slot, None, None, None, true);
+    } else if let Some(color) = parse_color(v) {
+        note_logical_border(s, slot, None, None, Some(color), false);
     }
 }
 
 fn note_logical_border_shorthand(s: &mut ComputedStyle, slot: LogicalBorderSlot, v: &str) {
-    let mut width = CssLength::Px(3.0);
+    let mut width = super::apply::initial_border_width();
     let mut style = BorderStyle::None;
     let mut color = Color::BLACK;
     super::apply_border_side_shorthand(v, &mut width, &mut style, &mut color);
-    note_logical_border(s, slot, Some(width), Some(style), Some(color));
+    let current_color = !split_top_level_whitespace(v)
+        .iter()
+        .any(|token| !token.eq_ignore_ascii_case("currentcolor") && parse_color(token).is_some());
+    note_logical_border(
+        s,
+        slot,
+        Some(width),
+        Some(style),
+        Some(color),
+        current_color,
+    );
 }
 
 fn apply_border_inline_start(s: &mut ComputedStyle, v: &str) {

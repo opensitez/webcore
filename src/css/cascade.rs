@@ -24,7 +24,13 @@ pub(super) struct CustomDeclaration<'a> {
 }
 
 impl<'a> CustomDeclaration<'a> {
-    pub(super) fn rule(name: &'a str, value: &'a str, rule: &CssRule, specificity: u32, important: bool) -> Self {
+    pub(super) fn rule(
+        name: &'a str,
+        value: &'a str,
+        rule: &CssRule,
+        specificity: u32,
+        important: bool,
+    ) -> Self {
         Self {
             name,
             value,
@@ -146,12 +152,14 @@ impl CascadedCustomProperties<'_> {
                 return self.inherited.get(declaration.name).cloned();
             }
             if keyword.eq_ignore_ascii_case("revert") {
-                let Some(previous) = previous_custom_declaration(self.declarations, index, false) else {
+                let Some(previous) = previous_custom_declaration(self.declarations, index, false)
+                else {
                     return self.inherited.get(declaration.name).cloned();
                 };
                 index = previous;
             } else if keyword.eq_ignore_ascii_case("revert-layer") {
-                let Some(previous) = previous_custom_declaration(self.declarations, index, true) else {
+                let Some(previous) = previous_custom_declaration(self.declarations, index, true)
+                else {
                     return self.inherited.get(declaration.name).cloned();
                 };
                 index = previous;
@@ -317,6 +325,42 @@ fn track_inherit_for_id(inherit_props: &mut HashSet<String>, id: properties::Pro
     }
 }
 
+fn reset_substituted_property(
+    style: &mut ComputedStyle,
+    id: properties::PropertyId,
+    parent: Option<&ComputedStyle>,
+) {
+    let def = property_defs::get(id);
+    if !def.longhands.is_empty() {
+        for &longhand in def.longhands {
+            reset_substituted_property(style, longhand, parent);
+        }
+    } else if let Some(parent) = parent.filter(|_| def.inherited) {
+        copy_property_from_style(style, parent, def.name);
+    } else {
+        apply_css_value(style, id, &crate::types::CssValue::Initial);
+    }
+}
+
+/// A winning variable declaration cannot fall back to an earlier declaration
+/// when substitution fails. Parsers that discard invalid values start at unset.
+fn resolve_cascade_declaration(
+    value: &str,
+    vars: &HashMap<String, String>,
+    style: &mut ComputedStyle,
+    parent: Option<&ComputedStyle>,
+    prop: &str,
+) -> String {
+    let resolved = resolve_var_references_for_color_scheme(value, vars, &style.color_scheme);
+    if contains_var_function(value) || contains_env_function(value) {
+        reset_substituted_property(style, properties::resolve(prop), parent);
+        if resolved.trim().is_empty() || contains_var_function(&resolved) {
+            return "unset".to_string();
+        }
+    }
+    resolved
+}
+
 fn apply_css_value_with_cascade_context(
     style: &mut ComputedStyle,
     id: properties::PropertyId,
@@ -343,9 +387,10 @@ fn apply_css_value_with_cascade_context(
             }
         }
         CssValue::Raw(s) => {
-            let resolved =
-                resolve_var_references_for_color_scheme(s, local_vars, &style.color_scheme);
-            if contains_var_function(s) && (resolved.trim().is_empty() || contains_var_function(&resolved)) {
+            let resolved = resolve_cascade_declaration(s, local_vars, style, parent_style, name);
+            if contains_var_function(s)
+                && (resolved.trim().is_empty() || contains_var_function(&resolved))
+            {
                 if properties::is_inherited(id) {
                     if let Some(parent) = parent_style {
                         copy_property_from_style(style, parent, name);
@@ -749,8 +794,9 @@ fn apply_host_projected_rules_with_ancestors(
                     continue;
                 }
                 let resolved =
-                    resolve_var_references_for_color_scheme(val, &local_vars, &style.color_scheme);
-                if contains_var_function(val) && (resolved.trim().is_empty() || contains_var_function(&resolved))
+                    resolve_cascade_declaration(val, &local_vars, &mut style, parent_style, prop);
+                if contains_var_function(val)
+                    && (resolved.trim().is_empty() || contains_var_function(&resolved))
                 {
                     continue;
                 }
@@ -800,10 +846,12 @@ fn apply_host_projected_rules_with_ancestors(
                     if prop.starts_with("--") {
                         continue;
                     }
-                    let resolved = resolve_var_references_for_color_scheme(
+                    let resolved = resolve_cascade_declaration(
                         val,
                         &local_vars,
-                        &style.color_scheme,
+                        &mut style,
+                        parent_style,
+                        prop,
                     );
                     if contains_var_function(val)
                         && (resolved.trim().is_empty() || contains_var_function(&resolved))
@@ -957,8 +1005,9 @@ pub(crate) fn apply_slotted_rules_to_projected(
                     continue;
                 }
                 let resolved =
-                    resolve_var_references_for_color_scheme(val, &local_vars, &style.color_scheme);
-                if contains_var_function(val) && (resolved.trim().is_empty() || contains_var_function(&resolved))
+                    resolve_cascade_declaration(val, &local_vars, &mut style, parent_style, prop);
+                if contains_var_function(val)
+                    && (resolved.trim().is_empty() || contains_var_function(&resolved))
                 {
                     continue;
                 }
@@ -1008,10 +1057,12 @@ pub(crate) fn apply_slotted_rules_to_projected(
                     if prop.starts_with("--") {
                         continue;
                     }
-                    let resolved = resolve_var_references_for_color_scheme(
+                    let resolved = resolve_cascade_declaration(
                         val,
                         &local_vars,
-                        &style.color_scheme,
+                        &mut style,
+                        parent_style,
+                        prop,
                     );
                     if contains_var_function(val)
                         && (resolved.trim().is_empty() || contains_var_function(&resolved))
@@ -1241,7 +1292,10 @@ pub fn apply_cascade_vp_hover_target_url(
 /// pseudo-element at all. `content: ""` returns `Some("")`.
 fn pseudo_content_value(value: &str) -> Option<String> {
     let v = value.trim();
-    if v.eq_ignore_ascii_case("none") || v.eq_ignore_ascii_case("normal") {
+    if ["none", "normal", "initial", "unset"]
+        .iter()
+        .any(|keyword| v.eq_ignore_ascii_case(keyword))
+    {
         return None;
     }
     Some(value.to_string())
@@ -2276,6 +2330,38 @@ pub(crate) fn build_pseudo_style_shared(
     // specificity/scope proximity/source order. Keeping origin first prevents a UA unlayered
     // rule from beating a layered author rule.
     matched.sort_by(|&a, &b| normal_cascade_cmp(rules, a, b));
+    let mut pseudo_vars_owned = matched
+        .iter()
+        .any(|(_, ri, _)| rules[*ri].has_custom_properties)
+        .then(|| vars.clone());
+    if let Some(pseudo_vars) = pseudo_vars_owned.as_mut() {
+        let mut declarations = Vec::new();
+        for &(sp, ri, _) in matched.iter() {
+            let rule = &rules[ri];
+            for (prop, value) in &rule.declarations {
+                if prop.starts_with("--") {
+                    declarations.push(CustomDeclaration::rule(prop, value, rule, sp, false));
+                }
+            }
+        }
+        let mut important_matched = matched.clone();
+        important_matched.sort_by(|&a, &b| important_cascade_cmp(rules, a, b));
+        for author_pass in [true, false] {
+            for &(sp, ri, _) in &important_matched {
+                if is_author_origin(sp) != author_pass {
+                    continue;
+                }
+                let rule = &rules[ri];
+                for (prop, value) in &rule.important_declarations {
+                    if prop.starts_with("--") {
+                        declarations.push(CustomDeclaration::rule(prop, value, rule, sp, true));
+                    }
+                }
+            }
+        }
+        resolve_cascaded_custom_properties(&declarations, vars, pseudo_vars);
+    }
+    let vars = pseudo_vars_owned.as_ref().unwrap_or(vars);
     let mut ps = ComputedStyle::default();
     ps.inherit_from(base);
     ps.relative_font_weight_base = Some(base.font_weight);
@@ -2307,7 +2393,15 @@ pub(crate) fn build_pseudo_style_shared(
             normal_layer_start_style = ps.clone();
         }
         for (prop, val) in &rule.declarations {
-            let resolved = resolve_var_references_for_color_scheme(val, vars, &ps.color_scheme);
+            if prop.starts_with("--") {
+                continue;
+            }
+            let resolved = resolve_cascade_declaration(val, vars, &mut ps, Some(base), prop);
+            if contains_var_function(val)
+                && (resolved.trim().is_empty() || contains_var_function(&resolved))
+            {
+                continue;
+            }
             if prop == "content" {
                 content_value = pseudo_content_value(&resolved);
             } else {
@@ -2342,7 +2436,15 @@ pub(crate) fn build_pseudo_style_shared(
                 important_layer_start_style = ps.clone();
             }
             for (prop, val) in &rule.important_declarations {
-                let resolved = resolve_var_references_for_color_scheme(val, vars, &ps.color_scheme);
+                if prop.starts_with("--") {
+                    continue;
+                }
+                let resolved = resolve_cascade_declaration(val, vars, &mut ps, Some(base), prop);
+                if contains_var_function(val)
+                    && (resolved.trim().is_empty() || contains_var_function(&resolved))
+                {
+                    continue;
+                }
                 if prop == "content" {
                     content_value = pseudo_content_value(&resolved);
                 } else {
@@ -2367,6 +2469,9 @@ pub(crate) fn build_pseudo_style_shared(
     // later recascade happens to repaint them.
     crate::css::finalize_current_color(&mut ps);
     crate::css::finalize_logical(&mut ps);
+    if let Some(vars) = pseudo_vars_owned {
+        ps.custom_props = std::sync::Arc::new(vars);
+    }
     Some((content_value, Box::new(ps)))
 }
 
@@ -4124,10 +4229,12 @@ fn apply_cascade_node(
         if has_vars && rule.has_var_refs {
             if let Some(val) = rule.declarations.get("color-scheme") {
                 let resolved = if value_needs_substitution(val) {
-                    std::borrow::Cow::Owned(resolve_var_references_for_color_scheme(
+                    std::borrow::Cow::Owned(resolve_cascade_declaration(
                         val,
                         local_vars,
-                        &style.color_scheme,
+                        &mut style,
+                        parent_style,
+                        "color-scheme",
                     ))
                 } else {
                     std::borrow::Cow::Borrowed(val.as_str())
@@ -4139,19 +4246,22 @@ fn apply_cascade_node(
             }
             // Slow path: var() references need string-based resolution
             for (prop, val) in &rule.declarations {
-                if prop.starts_with("--") {
+                if prop.starts_with("--") || prop == "color-scheme" {
                     continue;
                 }
                 let resolved = if value_needs_substitution(val) {
-                    std::borrow::Cow::Owned(resolve_var_references_for_color_scheme(
+                    std::borrow::Cow::Owned(resolve_cascade_declaration(
                         val,
                         local_vars,
-                        &style.color_scheme,
+                        &mut style,
+                        parent_style,
+                        prop,
                     ))
                 } else {
                     std::borrow::Cow::Borrowed(val.as_str())
                 };
-                if contains_var_function(val) && (resolved.trim().is_empty() || contains_var_function(&resolved))
+                if contains_var_function(val)
+                    && (resolved.trim().is_empty() || contains_var_function(&resolved))
                 {
                     continue;
                 }
@@ -4167,9 +4277,6 @@ fn apply_cascade_node(
                         apply_property(&mut style, prop, "initial");
                     }
                 } else {
-                    if prop == "color-scheme" {
-                        continue;
-                    }
                     clear_inherit_tracking_for_property(&mut inherit_props, prop);
                     apply_property(&mut style, prop, &resolved);
                 }
@@ -4212,10 +4319,12 @@ fn apply_cascade_node(
                     // (the rule has var refs but no variables are defined in scope).
                     // Resolve var() with empty vars — triggers fallback values.
                     if value_needs_substitution(s) {
-                        let resolved = resolve_var_references_for_color_scheme(
+                        let resolved = resolve_cascade_declaration(
                             s,
                             local_vars,
-                            &style.color_scheme,
+                            &mut style,
+                            parent_style,
+                            property_defs::get(id).name,
                         );
                         if !resolved.trim().is_empty() && !contains_var_function(&resolved) {
                             let trimmed = resolved.trim();
@@ -4324,10 +4433,12 @@ fn apply_cascade_node(
                 };
                 if has_vars && rule.has_var_refs {
                     if let Some(val) = rule.important_declarations.get("color-scheme") {
-                        let resolved = resolve_var_references_for_color_scheme(
+                        let resolved = resolve_cascade_declaration(
                             val,
                             local_vars,
-                            &style.color_scheme,
+                            &mut style,
+                            parent_style,
+                            "color-scheme",
                         );
                         if !resolved.trim().is_empty() && !contains_var_function(&resolved) {
                             apply_resolved_property_with_cascade_context(
@@ -4342,20 +4453,19 @@ fn apply_cascade_node(
                         }
                     }
                     for (prop, val) in &rule.important_declarations {
-                        if prop.starts_with("--") {
+                        if prop.starts_with("--") || prop == "color-scheme" {
                             continue;
                         }
-                        let resolved = resolve_var_references_for_color_scheme(
+                        let resolved = resolve_cascade_declaration(
                             val,
                             local_vars,
-                            &style.color_scheme,
+                            &mut style,
+                            parent_style,
+                            prop,
                         );
                         if contains_var_function(val)
                             && (resolved.trim().is_empty() || contains_var_function(&resolved))
                         {
-                            continue;
-                        }
-                        if prop == "color-scheme" {
                             continue;
                         }
                         let id = properties::resolve(prop);
@@ -4463,8 +4573,10 @@ fn apply_cascade_node(
                 continue;
             }
             let resolved =
-                resolve_var_references_for_color_scheme(val, local_vars, &style.color_scheme);
-            if contains_var_function(val) && (resolved.trim().is_empty() || contains_var_function(&resolved)) {
+                resolve_cascade_declaration(val, local_vars, &mut style, parent_style, prop);
+            if contains_var_function(val)
+                && (resolved.trim().is_empty() || contains_var_function(&resolved))
+            {
                 continue;
             } else if resolved.trim().eq_ignore_ascii_case("inherit") {
                 if let Some(p) = parent_style {
@@ -4537,8 +4649,10 @@ fn apply_cascade_node(
         let inline_important_start_style = style.clone();
         for (prop, val) in &inline_important {
             let resolved =
-                resolve_var_references_for_color_scheme(val, local_vars, &style.color_scheme);
-            if contains_var_function(val) && (resolved.trim().is_empty() || contains_var_function(&resolved)) {
+                resolve_cascade_declaration(val, local_vars, &mut style, parent_style, prop);
+            if contains_var_function(val)
+                && (resolved.trim().is_empty() || contains_var_function(&resolved))
+            {
                 continue;
             }
             let id = properties::resolve(prop);
@@ -5622,21 +5736,23 @@ fn apply_presentational_hints(
             "dir" => match val.to_ascii_lowercase().as_str() {
                 "rtl" => apply_property(style, "direction", "rtl"),
                 "ltr" => apply_property(style, "direction", "ltr"),
-                "auto" => {
-                    match crate::layout::text::html_auto_direction(root) {
-                        Direction::RTL => apply_property(style, "direction", "rtl"),
-                        Direction::LTR => apply_property(style, "direction", "ltr"),
-                    }
-                }
+                "auto" => match crate::layout::text::html_auto_direction(root) {
+                    Direction::RTL => apply_property(style, "direction", "rtl"),
+                    Direction::LTR => apply_property(style, "direction", "ltr"),
+                },
                 _ => {}
             },
             _ => {}
         }
     }
 
-    if root.tag == "bdi" && !root.attributes.get("dir").is_some_and(|dir| {
-        dir.eq_ignore_ascii_case("ltr") || dir.eq_ignore_ascii_case("rtl") || dir.eq_ignore_ascii_case("auto")
-    }) {
+    if root.tag == "bdi"
+        && !root.attributes.get("dir").is_some_and(|dir| {
+            dir.eq_ignore_ascii_case("ltr")
+                || dir.eq_ignore_ascii_case("rtl")
+                || dir.eq_ignore_ascii_case("auto")
+        })
+    {
         match super::matching::auto_direction(root).unwrap_or(Direction::LTR) {
             Direction::RTL => apply_property(style, "direction", "rtl"),
             Direction::LTR => apply_property(style, "direction", "ltr"),

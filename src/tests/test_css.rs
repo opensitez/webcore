@@ -1,5 +1,290 @@
 // Ported from tests/test_css.cpp
 
+#[test]
+fn border_grammar_preserves_valid_declarations_and_current_color() {
+    for property in ["border", "border-right", "border-inline-start"] {
+        for invalid in [
+            "",
+            "solid dashed",
+            "red blue",
+            "1px 2px",
+            "2px solid junk",
+            "-1px solid",
+            "10% solid",
+            "calc(1px + 2%) solid",
+        ] {
+            let mut style = ComputedStyle::default();
+            apply_property(&mut style, "direction", "rtl");
+            apply_property(&mut style, property, "4px solid currentColor");
+            let expected = style.clone();
+            apply_property(&mut style, property, invalid);
+            assert_eq!(style, expected, "{property}: {invalid}");
+            assert!(!crate::css::supports_condition_matches(&format!(
+                "({property}: {invalid})"
+            )));
+        }
+    }
+    for property in [
+        "border-width",
+        "border-top-width",
+        "border-inline-start-width",
+    ] {
+        for invalid in [
+            "-2px",
+            "auto",
+            "none",
+            "8",
+            "20%",
+            "calc(20%)",
+            "calc(1px + 20%)",
+            "2px bad",
+            "thin medium thick thin thick",
+        ] {
+            let mut style = ComputedStyle::default();
+            apply_property(&mut style, property, "4px");
+            let expected = style.clone();
+            apply_property(&mut style, property, invalid);
+            assert_eq!(style, expected, "{property}: {invalid}");
+            assert!(!crate::css::supports_condition_matches(&format!(
+                "({property}: {invalid})"
+            )));
+        }
+    }
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "border-width", "thin medium thick 7px");
+    assert_eq!(style.border_top_width, CssLength::Px(1.0));
+    assert_eq!(style.border_right_width, CssLength::Px(3.0));
+    assert_eq!(style.border_bottom_width, CssLength::Px(5.0));
+    assert_eq!(style.border_left_width, CssLength::Px(7.0));
+    apply_property(&mut style, "border", "THICK solid red");
+    assert_eq!(style.border_top_width, CssLength::Px(5.0));
+    assert!(crate::css::supports_condition_matches(
+        "(border: THICK solid red)"
+    ));
+    assert!(crate::css::supports_condition_matches(
+        "(border-width: calc(1em + 2px))"
+    ));
+}
+
+#[test]
+fn escaped_dimension_units_reach_compiled_inline_variable_and_supports_paths() {
+    let doc = parse_and_layout(
+        r#"<style>
+      .case { padding: 4px; margin-left: 3px }
+      #compiled { padding: 10p\78; margin-left: 1e1\70 x }
+      #variable { --space: 12\70 x; padding: var(--space) }
+      #malformed { padding: 0.; margin-left: 1.px }
+      @supports (padding: 10p\78) { #supports { padding: 10p\78 } }
+    </style><div id=compiled class=case></div><div id=variable class=case></div>
+    <div id=inline class=case style='padding: 14p\78'></div>
+    <div id=malformed class=case></div><div id=supports class=case></div>"#,
+        800.0,
+    );
+    let style = |id: &str| {
+        &find_box(&doc.root, &|node| {
+            node.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .unwrap()
+        .style
+    };
+    for (id, padding) in [
+        ("compiled", 10.0),
+        ("variable", 12.0),
+        ("inline", 14.0),
+        ("malformed", 4.0),
+        ("supports", 10.0),
+    ] {
+        assert_eq!(style(id).padding_top, CssLength::Px(padding), "{id}");
+    }
+    assert_eq!(style("compiled").margin_left, CssLength::Px(10.0));
+    assert_eq!(style("malformed").margin_left, CssLength::Px(3.0));
+    assert!(crate::css::supports_condition_matches(r"(padding: 10p\78)"));
+    for invalid in ["0.", "1.px", r"10\25"] {
+        assert!(!crate::css::supports_condition_matches(&format!(
+            "(padding: {invalid})"
+        )));
+    }
+}
+
+#[test]
+fn border_grammar_is_shared_by_compiled_inline_and_variable_values() {
+    let doc = parse_and_layout(
+        r#"<style>
+      .case { color: purple; border: 4px solid currentColor }
+      #invalid { border: 2px dotted red blue; border-right-color: nonsense }
+      #keywords { border-width: thin medium thick 7px }
+      #logical { direction: rtl; border-inline-start-width: thick; border-inline-start-width: 20% }
+      #variable { --edge: 2px red blue; border: var(--edge) }
+      #math { border-top-width: calc(1em + 2px) }
+    </style><div id=invalid class=case></div>
+    <div id=inline class=case style='border: 2px solid dashed; border-top-width: -3px'></div>
+    <div id=keywords class=case></div><div id=logical class=case></div>
+    <div id=variable class=case></div><div id=math class=case></div>"#,
+        800.0,
+    );
+    let style = |id: &str| {
+        &find_box(&doc.root, &|node| {
+            node.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .unwrap()
+        .style
+    };
+    for id in ["invalid", "inline"] {
+        assert_eq!(style(id).border_top_width, CssLength::Px(4.0), "{id}");
+        assert_eq!(
+            style(id).border_right_color,
+            Color::rgb(128, 0, 128),
+            "{id}"
+        );
+        assert_eq!(style(id).border_top_style, BorderStyle::Solid, "{id}");
+    }
+    assert_eq!(style("keywords").border_bottom_width, CssLength::Px(5.0));
+    assert_eq!(style("logical").border_right_width, CssLength::Px(5.0));
+    assert_eq!(style("variable").border_top_style, BorderStyle::None);
+    let id = crate::css::properties::PropertyId::BorderTopWidth;
+    assert!(matches!(
+        crate::css::rule::pre_parse_value(id, "thin"),
+        CssValue::Length(CssLength::Px(1.0))
+    ));
+}
+
+#[test]
+fn radius_grammar_rejects_invalid_values_atomically() {
+    for property in [
+        "border-radius",
+        "border-top-left-radius",
+        "border-start-start-radius",
+    ] {
+        for invalid in [
+            "",
+            "auto",
+            "none",
+            "-2px",
+            "10",
+            "2px junk",
+            "2px /",
+            "2px / 3px / 4px",
+        ] {
+            let mut style = crate::types::ComputedStyle::default();
+            crate::css::apply_property(&mut style, property, "12px");
+            let expected = style.clone();
+            crate::css::apply_property(&mut style, property, invalid);
+            assert_eq!(style, expected, "{property}: {invalid}");
+            assert!(!crate::css::supports_condition_matches(&format!(
+                "({property}: {invalid})"
+            )));
+        }
+    }
+    let mut style = crate::types::ComputedStyle::default();
+    crate::css::apply_property(&mut style, "border-radius", "12px");
+    let expected = style.clone();
+    crate::css::apply_property(&mut style, "border-radius", "1px 2px 3px 4px 5px");
+    assert_eq!(style, expected);
+    crate::css::apply_property(&mut style, "border-top-left-radius", "1px 2px 3px");
+    assert_eq!(style, expected);
+    crate::css::apply_property(&mut style, "border-radius", "10% 20px / 30px 40%");
+    assert_eq!(
+        style.border_top_left_radius,
+        crate::types::CssLength::Percent(10.0)
+    );
+    assert_eq!(
+        style.border_top_left_radius_y,
+        crate::types::CssLength::Px(30.0)
+    );
+    assert!(crate::css::supports_condition_matches(
+        "(border-radius: 10% 20px / 30px 40%)"
+    ));
+}
+
+#[test]
+fn border_shorthand_resets_border_image_but_side_shorthands_do_not() {
+    let mut style = ComputedStyle::default();
+    let initial = style.clone();
+    for declaration in ["2px solid red", "initial", "unset"] {
+        apply_property(
+            &mut style,
+            "border-image",
+            "url(border.png) 30 fill / 4 / 2 round",
+        );
+        apply_property(&mut style, "border", declaration);
+        assert_eq!(
+            style.border_image_source, initial.border_image_source,
+            "{declaration}"
+        );
+        assert_eq!(style.border_image_slice, initial.border_image_slice);
+        assert_eq!(style.border_image_width, initial.border_image_width);
+        assert_eq!(style.border_image_outset, initial.border_image_outset);
+        assert_eq!(style.border_image_repeat, initial.border_image_repeat);
+    }
+    for property in [
+        "border-top",
+        "border-right",
+        "border-inline-start",
+        "border-block-end",
+    ] {
+        apply_property(
+            &mut style,
+            "border-image",
+            "url(border.png) 30 fill / 4 / 2 round",
+        );
+        apply_property(&mut style, property, "2px solid red");
+        assert_eq!(style.border_image_source, "url(border.png)", "{property}");
+        assert_eq!(style.border_image_repeat, "round", "{property}");
+    }
+    let expected = style.clone();
+    apply_property(&mut style, "border", "2px solid red blue");
+    assert_eq!(
+        style, expected,
+        "invalid border must not reset border-image"
+    );
+}
+
+#[test]
+fn border_image_reset_participates_in_compiled_inline_variable_and_inherit_cascade() {
+    let doc = parse_and_layout(
+        r#"<style>
+      .case { border-image: url(border.png) 30 fill / 4 / 2 round }
+      #normal { border: 2px solid red }
+      #variable { --edge: 2px solid red; border: var(--edge) }
+      #invalid-var { --edge: 2px red blue; border: var(--edge) }
+      #invalid { border: 2px red blue }
+      #important { border-image-repeat: round !important; border: 2px solid red }
+      #parent { border-image: url(parent.png) 20 / 3 / 1 repeat }
+      #inherit { border: inherit }
+      #override { border: 2px solid red; border-image-repeat: space }
+    </style>
+    <div id=normal class=case></div><div id=variable class=case></div>
+    <div id=invalid-var class=case></div><div id=invalid class=case></div>
+    <div id=inline class=case style='border: 2px solid red'></div>
+    <div id=important class=case></div><div id=override class=case></div>
+    <div id=parent><div id=inherit class=case></div></div>"#,
+        800.0,
+    );
+    let style = |id: &str| {
+        &find_box(&doc.root, &|node| {
+            node.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .unwrap()
+        .style
+    };
+    for id in ["normal", "variable", "invalid-var", "inline"] {
+        assert_eq!(style(id).border_image_source, "none", "{id}");
+        assert_eq!(style(id).border_image_slice, "100%", "{id}");
+        assert_eq!(style(id).border_image_width, "1", "{id}");
+        assert_eq!(style(id).border_image_outset, "0", "{id}");
+        assert_eq!(style(id).border_image_repeat, "stretch", "{id}");
+    }
+    assert_eq!(style("invalid").border_image_source, "url(border.png)");
+    assert_eq!(style("important").border_image_source, "none");
+    assert_eq!(style("important").border_image_repeat, "round");
+    assert_eq!(style("override").border_image_repeat, "space");
+    assert_eq!(style("inherit").border_image_source, "url(parent.png)");
+    assert_eq!(style("inherit").border_image_slice, "20");
+    assert_eq!(style("inherit").border_image_width, "3");
+    assert_eq!(style("inherit").border_image_outset, "1");
+    assert_eq!(style("inherit").border_image_repeat, "repeat");
+}
+
 use super::harness::*;
 use crate::css::{
     PseudoElement, Stylesheet, apply_property, parse_declarations, parse_length_checked,
@@ -10,6 +295,60 @@ use crate::html::parse_html;
 use crate::renderer::display_list::PaintCmd;
 use crate::renderer::display_list_builder::build_display_list;
 use crate::types::*;
+
+#[test]
+fn radius_grammar_is_shared_by_compiled_inline_and_variable_values() {
+    let doc = parse_and_layout(
+        r#"<style>
+      .case { border-radius: 12px; }
+      #sheet { border-radius: 1px 2px 3px 4px 5px; border-top-left-radius: -3px; }
+      #logical { direction: rtl; border-start-start-radius: 18px; border-start-start-radius: 2px 3px 4px; }
+      #variable { --radius: auto; border-top-left-radius: var(--radius); }
+      #ellipse { border-top-left-radius: 20% 8px; }
+    </style><div id=sheet class=case></div>
+    <div id=inline class=case style='border-radius: 2px /; border-top-left-radius: auto'></div>
+    <div id=logical class=case></div><div id=variable class=case></div>
+    <div id=ellipse class=case></div>"#,
+        800.0,
+    );
+    let style = |id: &str| {
+        &find_box(&doc.root, &|node| {
+            node.attributes.get("id").is_some_and(|value| value == id)
+        })
+        .unwrap()
+        .style
+    };
+    for id in ["sheet", "inline"] {
+        assert_eq!(
+            style(id).border_top_left_radius,
+            CssLength::Px(12.0),
+            "{id}"
+        );
+        assert_eq!(
+            style(id).border_top_left_radius_y,
+            CssLength::Px(12.0),
+            "{id}"
+        );
+    }
+    assert_eq!(
+        style("logical").border_top_right_radius,
+        CssLength::Px(18.0)
+    );
+    assert_eq!(style("variable").border_top_left_radius, CssLength::Zero);
+    assert_eq!(
+        style("ellipse").border_top_left_radius,
+        CssLength::Percent(20.0)
+    );
+    assert_eq!(
+        style("ellipse").border_top_left_radius_y,
+        CssLength::Px(8.0)
+    );
+    let id = crate::css::properties::PropertyId::BorderTopLeftRadius;
+    assert!(matches!(
+        crate::css::rule::pre_parse_value(id, "12px"),
+        CssValue::Length(CssLength::Px(12.0))
+    ));
+}
 
 fn resolved_root_variables(css: &str) -> std::collections::HashMap<String, String> {
     let mut sheet = Stylesheet::default();
@@ -60,6 +399,427 @@ fn changed_custom_properties_resolve_without_recomputing_inherited_values() {
 }
 
 #[test]
+fn css_comments_preserve_value_and_selector_token_boundaries() {
+    let doc = parse_and_layout(
+        r#"<style>
+      .joined { color: blue; width: 80px; color: re/**/d; width: 10/**/px; }
+      .compound/**/.joined { background-color: green; }
+      .compound/**/span { color: red; }
+      .border { border: 2px/**/solid/**/red; }
+      .priority { color: green; color: red !im/**/portant; }
+    </style><div class="compound joined">joined</div><div class="border">border</div>
+    <div class="priority">priority</div>"#,
+        800.0,
+    );
+    let find = |class: &str| {
+        find_box(&doc.root, &|node| {
+            node.attributes
+                .get("class")
+                .is_some_and(|value| value.split_whitespace().any(|part| part == class))
+        })
+        .unwrap()
+    };
+    let joined = find("joined");
+    assert_eq!(joined.style.color, Color::rgb(0, 0, 255));
+    assert_eq!(joined.style.width, CssLength::Px(80.0));
+    assert_eq!(joined.style.background_color, Color::rgb(0, 128, 0));
+    assert!(!crate::css::parse_selector(".compound/**/span").valid);
+    assert!(!crate::css::parse_selector("div/**/span").valid);
+    assert!(crate::css::parse_selector(".compound/**/.joined").valid);
+    let border = find("border");
+    assert_eq!(border.style.border_top_width, CssLength::Px(2.0));
+    assert_eq!(border.style.border_top_color, Color::rgb(255, 0, 0));
+    assert_eq!(find("priority").style.color, Color::rgb(0, 128, 0));
+}
+
+#[test]
+fn css_url_contents_and_comment_separated_shorthands_remain_distinct() {
+    let declarations = crate::css::parse_declarations(
+        "background-image:url(x/*literal*/y); border:2px/**/solid/**/red; content:'/*literal*/';",
+    );
+    assert_eq!(
+        declarations.get("background-image").map(String::as_str),
+        Some("url(x/*literal*/y)")
+    );
+    assert_eq!(
+        declarations.get("content").map(String::as_str),
+        Some("'/*literal*/'")
+    );
+    assert!(!crate::css::supports_condition_matches("(width:10/**/px)"));
+    assert!(!crate::css::supports_condition_matches("(color:re/**/d)"));
+    assert!(crate::css::supports_condition_matches(
+        "(border:2px/**/solid/**/red)"
+    ));
+    let mut style = ComputedStyle::default();
+    crate::css::apply_property(
+        &mut style,
+        "background-image",
+        &declarations["background-image"],
+    );
+    assert_eq!(style.background_image_url, "x/*literal*/y");
+}
+
+#[test]
+fn box_length_grammar_rejects_invalid_declarations_atomically() {
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "margin", "1px 2px 3px 4px");
+    apply_property(&mut style, "padding", "5px 6px 7px 8px");
+    apply_property(&mut style, "inset", "9px 10px 11px 12px");
+    for (prop, values) in [
+        (
+            "margin",
+            vec![
+                "8px bad",
+                "1px 2px 3px 4px 5px",
+                "min-content",
+                "10/**/px",
+                "8",
+            ],
+        ),
+        (
+            "padding",
+            vec!["8px bad", "1px -2px", "auto", "max-content", "8"],
+        ),
+        ("inset", vec!["8px bad", "fit-content(20px)", "none", "8"]),
+    ] {
+        for value in values {
+            apply_property(&mut style, prop, value);
+            assert!(
+                !crate::css::supports_condition_matches(&format!("({prop}:{value})")),
+                "{prop}:{value}"
+            );
+        }
+    }
+    for (value, expected) in [
+        (&style.margin_top, 1.0),
+        (&style.margin_right, 2.0),
+        (&style.margin_bottom, 3.0),
+        (&style.margin_left, 4.0),
+        (&style.padding_top, 5.0),
+        (&style.padding_right, 6.0),
+        (&style.padding_bottom, 7.0),
+        (&style.padding_left, 8.0),
+        (&style.top, 9.0),
+        (&style.right, 10.0),
+        (&style.bottom, 11.0),
+        (&style.left, 12.0),
+    ] {
+        assert_eq!(*value, CssLength::Px(expected));
+    }
+    for (prop, value) in [
+        ("margin", "-2px auto"),
+        ("padding", "calc(5% - 10px) 0"),
+        ("padding", "calc(-2px) 0"),
+        ("inset", "AUTO -2px"),
+        ("margin-inline", "1px/**/2px"),
+    ] {
+        assert!(
+            crate::css::supports_condition_matches(&format!("({prop}:{value})")),
+            "{prop}:{value}"
+        );
+    }
+}
+
+#[test]
+fn compiled_inline_and_variable_box_values_share_checked_grammar() {
+    let doc = parse_and_layout(
+        "<style>.base {margin-left:5px;padding-left:6px;left:7px} \
+         .bad {margin-left:8;padding-left:-2px;left:min-content} \
+         .variable {--bad:8px broken;margin:var(--bad);padding:var(--bad);inset:var(--bad)} \
+         .logical {direction:rtl;margin-inline:3px 4px;padding-inline:5px 6px;inset-inline:7px 8px} \
+         .logical {margin-inline:9px broken;padding-inline:9px -1px;inset-inline:none} \
+         .logical-reset {direction:rtl;margin-inline:3px 4px;inset-inline:7px 8px} \
+         .logical-reset {margin-inline:var(--missing);inset-inline:var(--missing)} \
+         </style><div id=compiled class='base bad'>compiled</div>\
+         <div id=inline class=base style='margin-left:8;padding-left:-2px;left:min-content'>inline</div>\
+         <div id=variable class='base variable'>variable</div>\
+         <div id=logical class=logical>logical</div>\
+         <div id=logical-reset class=logical-reset>reset</div>",
+        800.0,
+    );
+    let find = |id: &str| {
+        find_box(&doc.root, &|n| {
+            n.attributes.get("id").is_some_and(|s| s == id)
+        })
+        .unwrap()
+    };
+    for id in ["compiled", "inline"] {
+        assert_eq!(find(id).style.margin_left, CssLength::Px(5.0));
+        assert_eq!(find(id).style.padding_left, CssLength::Px(6.0));
+        assert_eq!(find(id).style.left, CssLength::Px(7.0));
+    }
+    let variable = &find("variable").style;
+    assert_eq!(variable.margin_left.resolve(16.0, 800.0, 16.0), 0.0);
+    assert_eq!(variable.padding_left.resolve(16.0, 800.0, 16.0), 0.0);
+    assert_eq!(variable.left, CssLength::Auto);
+    let logical = &find("logical").style;
+    assert_eq!(logical.margin_right, CssLength::Px(3.0));
+    assert_eq!(logical.margin_left, CssLength::Px(4.0));
+    assert_eq!(logical.padding_right, CssLength::Px(5.0));
+    assert_eq!(logical.padding_left, CssLength::Px(6.0));
+    assert_eq!(logical.right, CssLength::Px(7.0));
+    assert_eq!(logical.left, CssLength::Px(8.0));
+    let reset = &find("logical-reset").style;
+    assert_eq!(reset.margin_left.resolve(16.0, 800.0, 16.0), 0.0);
+    assert_eq!(reset.margin_right.resolve(16.0, 800.0, 16.0), 0.0);
+    assert_eq!(reset.left, CssLength::Auto);
+    assert_eq!(reset.right, CssLength::Auto);
+}
+
+#[test]
+fn invalid_variable_winners_use_unset_across_cascade_paths() {
+    let doc = parse_and_layout(
+        "<style>body {color:green} .base {width:80px;color:red} \
+         .normal {--bad:10/**/px;--ink:re/**/d;width:var(--bad);color:var(--ink)} \
+         .important {width:var(--absent) !important;color:var(--absent) !important} \
+         .state:hover {width:var(--absent);color:var(--absent)} \
+         .pseudo::before {content:'test';width:80px;color:red} \
+         .pseudo::before {width:var(--absent);color:var(--absent)} \
+         .no-content::before {content:'old'} .no-content::before {content:var(--absent)} \
+         .valid {--good:25px;width:var(--good);color:var(--absent,blue)} \
+         </style><div id=normal class='base normal'>normal</div>\
+         <div id=important class='base important'>important</div>\
+         <div id=inline class=base style='width:var(--absent);color:var(--absent)'>inline</div>\
+         <div id=inline-important class=base style='width:var(--absent) !important;color:var(--absent) !important'>inline important</div>\
+         <div id=state class='base state'>state</div>\
+         <div id=pseudo class=pseudo>pseudo</div>\
+         <div id=no-content class=no-content>no pseudo</div>\
+         <div id=valid class='base valid'>valid</div>",
+        800.0,
+    );
+    let find = |id: &str| {
+        find_box(&doc.root, &|n| {
+            n.attributes.get("id").is_some_and(|s| s == id)
+        })
+        .unwrap()
+    };
+    for id in ["normal", "important", "inline", "inline-important"] {
+        assert_eq!(find(id).style.width, CssLength::Auto, "{id} width");
+        assert_eq!(
+            find(id).style.color,
+            Color::rgb(0, 128, 0),
+            "{id} inherited color"
+        );
+    }
+    let hover = find("state").style.hover_style.as_ref().unwrap();
+    assert_eq!(hover.width, CssLength::Auto);
+    assert_eq!(hover.color, Color::rgb(0, 128, 0));
+    let before = find("pseudo").style.before_style.as_ref().unwrap();
+    assert_eq!(before.width, CssLength::Auto);
+    assert_eq!(before.color, Color::rgb(0, 128, 0));
+    assert!(find("no-content").style.before_style.is_none());
+    assert_eq!(find("valid").style.width, CssLength::Px(25.0));
+    assert_eq!(find("valid").style.color, Color::rgb(0, 0, 255));
+}
+
+#[test]
+fn environment_substitution_uses_the_shared_cascade_unset_baseline() {
+    let doc = parse_and_layout(
+        r#"
+      <style>
+        body { color: green; padding: 18px }
+        .base { padding: 4px; color: red }
+        #normal { padding: env(unknown, 10px, 20px); color: env(unknown, red, blue) }
+        #important { padding: env(absent) !important; color: env(absent) !important }
+        #inherit { padding: env(absent, inherit) }
+        #shorthand { border: env(absent, 3px solid blue) }
+        #list { font-family: env(absent, serif, sans-serif) }
+        #multiple { padding: env(absent, 10px) env(absent, 20px) }
+        #split { padding: 4px; padding: env(absent,10)px }
+        #pseudo::before { content: 'old' }
+        #pseudo::before { content: env(absent, 'new') }
+        #hover:hover { padding: env(absent) }
+      </style>
+      <div class=base id=normal>normal</div>
+      <div class=base id=important>important</div>
+      <div class=base id=inline style='padding:env(absent);color:env(absent)'>inline</div>
+      <div class=base id=inherit>inherit</div>
+      <div id=shorthand>shorthand</div>
+      <div id=list>list</div>
+      <div id=multiple>multiple</div>
+      <div id=split>split</div>
+      <div id=pseudo>pseudo</div>
+      <div class=base id=hover>hover</div>
+    "#,
+        800.0,
+    );
+    let find = |id: &str| {
+        find_box(&doc.root, &|n| {
+            n.attributes.get("id").is_some_and(|s| s == id)
+        })
+        .unwrap()
+    };
+    for id in ["normal", "important", "inline"] {
+        assert_eq!(
+            find(id).style.padding_top,
+            ComputedStyle::default().padding_top,
+            "{id}"
+        );
+        assert_eq!(find(id).style.color, Color::rgb(0, 128, 0), "{id}");
+    }
+    assert_eq!(find("inherit").style.padding_top, CssLength::Px(18.0));
+    assert_eq!(find("shorthand").style.border_top_width, CssLength::Px(3.0));
+    assert_eq!(
+        find("shorthand").style.border_top_color,
+        Color::rgb(0, 0, 255)
+    );
+    assert!(find("list").style.font_family.contains("sans-serif"));
+    assert_eq!(find("multiple").style.padding_top, CssLength::Px(10.0));
+    assert_eq!(find("multiple").style.padding_right, CssLength::Px(20.0));
+    assert_eq!(
+        find("split").style.padding_top,
+        ComputedStyle::default().padding_top
+    );
+    assert_eq!(find("pseudo").style.before_content, "new");
+    assert_eq!(
+        find("hover")
+            .style
+            .hover_style
+            .as_ref()
+            .unwrap()
+            .padding_top,
+        ComputedStyle::default().padding_top
+    );
+}
+
+#[test]
+fn url_punctuation_does_not_terminate_declarations_or_stylesheet_blocks() {
+    let source = ".first { background-image:url(x};!y); color:green; } .second { color:blue; }";
+    let rules = parse_stylesheet(source).expect("stylesheet");
+    assert_eq!(rules.len(), 2);
+    assert_eq!(
+        rules[0]
+            .declarations
+            .get("background-image")
+            .map(String::as_str),
+        Some("url(x};!y)")
+    );
+    assert_eq!(
+        rules[0].declarations.get("color").map(String::as_str),
+        Some("green")
+    );
+    assert_eq!(
+        rules[1].declarations.get("color").map(String::as_str),
+        Some("blue")
+    );
+    let (normal, important) = crate::css::parse_declarations_important(
+        "--url:url(x}!important); color:green !important;",
+    );
+    assert_eq!(
+        normal.get("--url").map(String::as_str),
+        Some("url(x}!important)")
+    );
+    assert_eq!(important.get("color").map(String::as_str), Some("green"));
+}
+
+#[test]
+fn declaration_grammar_preserves_component_blocks_and_identifier_escapes() {
+    let source = r#"\63 olor: red !\69mportant;
+        --\4e ame: { first: a; nested: [b; (c; d)]; flag: !important };
+        --escaped: a\;b; --foo\:bar: kept;
+        content: "!important"; --literal: \!important;
+        --function: fn(!important); background-color: blue !/**/IMPORTANT;
+        123bad: rejected; bad name: rejected; width: 10px;
+        --invalid: bang !not-important; height: 20px;"#;
+    let (normal, important) = crate::css::parse_declarations_important(source);
+    assert_eq!(important.get("color").map(String::as_str), Some("red"));
+    assert_eq!(
+        important.get("background-color").map(String::as_str),
+        Some("blue")
+    );
+    for (name, expected) in [
+        (
+            "--Name",
+            "{ first: a; nested: [b; (c; d)]; flag: !important }",
+        ),
+        ("--escaped", r"a\;b"),
+        ("--foo:bar", "kept"),
+        ("content", r#""!important""#),
+        ("--literal", r"\!important"),
+        ("--function", "fn(!important)"),
+        ("width", "10px"),
+        ("height", "20px"),
+    ] {
+        assert_eq!(
+            normal.get(name).map(String::as_str),
+            Some(expected),
+            "{name}"
+        );
+        assert!(!important.contains_key(name), "{name}");
+    }
+    for invalid in ["123bad", "bad name", "--invalid"] {
+        assert!(!normal.contains_key(invalid));
+    }
+    let merged = crate::css::parse_declarations(source);
+    assert_eq!(merged.get("color").map(String::as_str), Some("red"));
+    assert_eq!(merged.get("--Name"), normal.get("--Name"));
+}
+
+#[test]
+fn custom_property_blocks_are_not_parsed_as_nested_rules() {
+    let rules = crate::css::parse_stylesheet(
+        r#"
+        div { --data: { first: a; nested: { second: b; } }; \63 olor: red !\69mportant;
+          span { color: blue; } background-color: green;
+        }
+    "#,
+    )
+    .unwrap();
+    assert_eq!(rules.len(), 2);
+    assert_eq!(
+        rules[0].declarations.get("--data").map(String::as_str),
+        Some("{ first: a; nested: { second: b; } }")
+    );
+    assert_eq!(
+        rules[0]
+            .important_declarations
+            .get("color")
+            .map(String::as_str),
+        Some("red")
+    );
+    assert_eq!(
+        rules[0]
+            .declarations
+            .get("background-color")
+            .map(String::as_str),
+        Some("green")
+    );
+    let doc = parse_and_layout(
+        r#"<style>div { color: blue; \63 olor: red !\69mportant; }</style><div>x</div>"#,
+        800.0,
+    );
+    let node = find_box(&doc.root, &|node| node.tag == "div").unwrap();
+    assert_eq!(node.style.color, Color::rgb(255, 0, 0));
+}
+
+#[test]
+fn declaration_identifier_escapes_are_shared_with_supports() {
+    let parsed = crate::css::parse_declarations("\\63\r\nOLOR:red; --\\0 :kept;");
+    assert_eq!(parsed.get("color").map(String::as_str), Some("red"));
+    assert_eq!(parsed.get("--\u{fffd}").map(String::as_str), Some("kept"));
+    for condition in [
+        r"(\63 olor: red !\69mportant)",
+        r"(color: red !/**/IMPORTANT)",
+    ] {
+        assert!(
+            crate::css::supports_condition_matches(condition),
+            "{condition}"
+        );
+    }
+    for condition in [
+        "(123bad: red)",
+        "(bad name: red)",
+        "(--: red)",
+        "(color: red !not-important)",
+    ] {
+        assert!(
+            !crate::css::supports_condition_matches(condition),
+            "{condition}"
+        );
+    }
+}
+
+#[test]
 fn empty_custom_property_is_valid_and_does_not_use_var_fallback() {
     let (normal, important) = crate::css::parse_declarations_important(
         "--empty: ; --other: green; --priority: !important; color: ;",
@@ -89,7 +849,10 @@ fn empty_custom_property_is_valid_and_does_not_use_var_fallback() {
         b.attributes.get("id").is_some_and(|id| id == "target")
     })
     .expect("paragraph");
-    assert_eq!(p.style.custom_props.get("--empty").map(String::as_str), Some(""));
+    assert_eq!(
+        p.style.custom_props.get("--empty").map(String::as_str),
+        Some("")
+    );
     assert_ne!(p.style.color, Color::rgb(0, 0, 255));
 }
 
@@ -112,7 +875,10 @@ fn custom_property_fallback_uses_invalid_dependency_but_not_empty_one() {
     );
     assert!(!cycle.contains_key("--a"));
     assert!(!cycle.contains_key("--b"));
-    assert_eq!(cycle.get("--consumer").map(|value| value.trim()), Some("green"));
+    assert_eq!(
+        cycle.get("--consumer").map(|value| value.trim()),
+        Some("green")
+    );
 
     let mut chain_css = String::from(":root { --v0: blue;");
     for i in 1..80 {
@@ -132,7 +898,10 @@ fn css_wide_keywords_on_custom_properties_use_inheritance_or_invalid_value() {
     assert_eq!(root.get("--brand").map(String::as_str), Some("green"));
     assert!(!root.contains_key("--reset"));
     assert!(!root.contains_key("--other"));
-    assert_eq!(root.get("--literal").map(String::as_str), Some("\"initial\""));
+    assert_eq!(
+        root.get("--literal").map(String::as_str),
+        Some("\"initial\"")
+    );
     assert_eq!(
         root.get("--csstools-light-dark-toggle-1")
             .map(String::as_str),
@@ -314,9 +1083,10 @@ fn layer_snapshots_are_kept_when_revert_can_be_resolved() {
 
     let mut sheet = Stylesheet::default();
     sheet.parse_and_add(
-        "@layer base, top; @layer base { .literal, .variable { color: red } } \
+        "@layer base, top; @layer base { .literal, .variable, .fallback { color: red } } \
          @layer top { .literal { color: revert-layer } \
          .variable { --choice: revert-layer; color: var(--choice) } \
+         .fallback { --choice: revert-layer; color: var(--choice, revert-layer) } \
          .plain { --choice: blue; color: var(--choice) } }",
     );
     sheet.rebuild_index();
@@ -324,7 +1094,8 @@ fn layer_snapshots_are_kept_when_revert_can_be_resolved() {
 
     for (class, expected) in [
         ("literal", Color::rgb(255, 0, 0)),
-        ("variable", Color::rgb(255, 0, 0)),
+        ("variable", Color::BLACK),
+        ("fallback", Color::rgb(255, 0, 0)),
         ("plain", Color::rgb(0, 0, 255)),
     ] {
         let mut node = WebCore::new("p");
@@ -1306,10 +2077,15 @@ fn local_font_face_alias_is_available_to_fallback_stack() {
         ),
         "the local @font-face alias should resolve before a generic fallback"
     );
-    assert!(fs.db().query(&fontdb::Query {
-        families: &[fontdb::Family::Name("Other Fallback")],
-        ..fontdb::Query::default()
-    }).is_none(), "unused local aliases should stay inactive");
+    assert!(
+        fs.db()
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::Name("Other Fallback")],
+                ..fontdb::Query::default()
+            })
+            .is_none(),
+        "unused local aliases should stay inactive"
+    );
     let alias_normal = crate::layout::inline_layout::measure_text_width_weighted(
         "Darüber spricht Deutschland",
         20.0,
@@ -1362,10 +2138,17 @@ fn local_font_face_alias_is_available_to_fallback_stack() {
     let title = doc.query_selector("#title").unwrap();
     doc.set_style_property(title, "font-family", "Other Fallback");
     renderer.layout_engine().layout(&mut doc, 400.0);
-    assert!(renderer.font_system.db().query(&fontdb::Query {
-        families: &[fontdb::Family::Name("Other Fallback")],
-        ..fontdb::Query::default()
-    }).is_some(), "a newly used local alias should register on relayout");
+    assert!(
+        renderer
+            .font_system
+            .db()
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::Name("Other Fallback")],
+                ..fontdb::Query::default()
+            })
+            .is_some(),
+        "a newly used local alias should register on relayout"
+    );
 }
 
 #[test]
@@ -1738,10 +2521,14 @@ fn supports_only_treats_var_function_tokens_as_deferred_values() {
 
     assert!(supports_condition_matches("(display: var(--mode))"));
     assert!(supports_condition_matches("(display: var(--mód))"));
-    assert!(supports_condition_matches("(width: calc(100% - var(--gap, 1px)))"));
+    assert!(supports_condition_matches(
+        "(width: calc(100% - var(--gap, 1px)))"
+    ));
     assert!(!supports_condition_matches("(display: \"var(--mode)\")"));
     assert!(!supports_condition_matches("(display: url('var(--mode)'))"));
-    assert!(!supports_condition_matches("(display: var(not-a-custom-property))"));
+    assert!(!supports_condition_matches(
+        "(display: var(not-a-custom-property))"
+    ));
     assert!(!supports_condition_matches("(display: prefix-var(--mode))"));
 }
 
@@ -2038,7 +2825,10 @@ fn supports_clip_path_matches_applied_forms() {
         "polygon(round 10px, 0 0, 100% 0, 100% 100%)",
         "polygon(evenodd round 10px, 0 0, 100% 0, 100% 100%)",
     ] {
-        assert!(supports_condition_matches(&format!("(clip-path: {value})")), "{value}");
+        assert!(
+            supports_condition_matches(&format!("(clip-path: {value})")),
+            "{value}"
+        );
     }
     for value in [
         "none border-box",
@@ -2053,7 +2843,10 @@ fn supports_clip_path_matches_applied_forms() {
         "polygon(round -10px, 0 0, 100% 0, 100% 100%)",
         "polygon(round 10%, 0 0, 100% 0, 100% 100%)",
     ] {
-        assert!(!supports_condition_matches(&format!("(clip-path: {value})")), "{value}");
+        assert!(
+            !supports_condition_matches(&format!("(clip-path: {value})")),
+            "{value}"
+        );
     }
 }
 
@@ -2591,14 +3384,22 @@ fn mask_repeat_accepts_two_axis_values_and_rejects_bad_layers() {
     assert_eq!(style.rare().mask_repeat, "repeat no-repeat, space round");
     for invalid in ["repeat nonsense", "repeat, no-repeat garbage", "repeat,"] {
         apply_property(&mut style, "mask-repeat", invalid);
-        assert_eq!(style.rare().mask_repeat, "repeat no-repeat, space round", "{invalid}");
+        assert_eq!(
+            style.rare().mask_repeat,
+            "repeat no-repeat, space round",
+            "{invalid}"
+        );
     }
 }
 
 #[test]
 fn mask_image_layer_list_preserves_none_and_rejects_invalid_tail() {
     let mut style = ComputedStyle::default();
-    apply_property(&mut style, "mask-image", "none, url(second.svg), url(third.svg)");
+    apply_property(
+        &mut style,
+        "mask-image",
+        "none, url(second.svg), url(third.svg)",
+    );
     assert!(style.rare().mask_image_url.is_empty());
     assert_eq!(style.rare().additional_mask_images.len(), 2);
     assert_eq!(style.rare().additional_mask_images[0].url, "second.svg");
@@ -2609,7 +3410,11 @@ fn mask_image_layer_list_preserves_none_and_rejects_invalid_tail() {
     for invalid in ["junk url(replacement.svg)", "url(replacement.svg) trailing"] {
         apply_property(&mut style, "mask-image", invalid);
         assert!(style.rare().mask_image_url.is_empty(), "{invalid}");
-        assert_eq!(style.rare().additional_mask_images[0].url, "second.svg", "{invalid}");
+        assert_eq!(
+            style.rare().additional_mask_images[0].url,
+            "second.svg",
+            "{invalid}"
+        );
     }
 }
 
@@ -2642,8 +3447,16 @@ fn mask_shorthand_parses_geometry_and_rejects_invalid_values_atomically() {
         "url(other.svg), url(second.svg) left / nonsense",
     ] {
         apply_property(&mut style, "mask", invalid);
-        assert_eq!(style.rare().mask_image_url, previous.mask_image_url, "{invalid}");
-        assert_eq!(style.rare().mask_position, previous.mask_position, "{invalid}");
+        assert_eq!(
+            style.rare().mask_image_url,
+            previous.mask_image_url,
+            "{invalid}"
+        );
+        assert_eq!(
+            style.rare().mask_position,
+            previous.mask_position,
+            "{invalid}"
+        );
         assert_eq!(style.rare().mask_size, previous.mask_size, "{invalid}");
         assert_eq!(style.rare().mask_repeat, previous.mask_repeat, "{invalid}");
         assert_eq!(style.rare().mask_origin, previous.mask_origin, "{invalid}");
@@ -2651,7 +3464,11 @@ fn mask_shorthand_parses_geometry_and_rejects_invalid_values_atomically() {
         assert_eq!(style.rare().mask_mode, previous.mask_mode, "{invalid}");
     }
 
-    apply_property(&mut style, "mask", "url(next.svg) center / contain border-box no-clip");
+    apply_property(
+        &mut style,
+        "mask",
+        "url(next.svg) center / contain border-box no-clip",
+    );
     assert_eq!(style.rare().mask_origin, "border-box");
     assert_eq!(style.rare().mask_clip, "no-clip");
     apply_property(&mut style, "mask", "url(next.svg) padding-box content-box");
@@ -5884,6 +6701,52 @@ fn var_function_resolves_a_variable_supplied_property_name() {
 }
 
 #[test]
+fn variable_functions_and_references_decode_shared_css_tokens() {
+    let vars = std::collections::HashMap::from([
+        ("--color".to_string(), "green".to_string()),
+        ("--COLOR".to_string(), "blue".to_string()),
+    ]);
+    for (source, expected) in [
+        (r"v\61 r(--color)", "green"),
+        (r"\56 AR(--COLOR)", "blue"),
+        (r"var(--c\6f lor)", "green"),
+        ("var(/* name */ --color /* tail */)", "green"),
+        (r#""v\61 r(--color)""#, r#""v\61 r(--color)""#),
+        ("url(var(--color))", "url(var(--color))"),
+        ("var(--missing, rgb(1, 2, 3))", "rgb(1, 2, 3)"),
+    ] {
+        assert_eq!(crate::css::resolve_var_references(source, &vars), expected);
+    }
+    let doc = parse_and_layout(
+        r#"<style>
+        :root { --color: green; --width: 12px; --nested: v\61 r(--width); }
+        #reference { color: v\61 r(--c\6f lor); padding: var(--nested); }
+        @supports (color: v\61 r(--c\6f lor)) { #query { color: blue; } }
+        #inline { color: red; }
+        </style><div id="reference">reference</div><div id="query">query</div>
+        <div id="inline" style="color: \76 ar(--color)">inline</div>"#,
+        800.0,
+    );
+    for id in ["reference", "inline"] {
+        let node = find_box(&doc.root, &|b| {
+            b.attributes.get("id").is_some_and(|v| v == id)
+        })
+        .unwrap();
+        assert_eq!(node.style.color, Color::rgb(0, 128, 0), "{id}");
+    }
+    let reference = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|v| v == "reference")
+    })
+    .unwrap();
+    assert_eq!(reference.style.padding_top, CssLength::Px(12.0));
+    let query = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|v| v == "query")
+    })
+    .unwrap();
+    assert_eq!(query.style.color, Color::rgb(0, 0, 255));
+}
+
+#[test]
 fn var_function_name_is_case_insensitive_but_custom_property_name_is_not() {
     let vars = std::collections::HashMap::from([
         ("--color".to_string(), "green".to_string()),
@@ -6943,6 +7806,249 @@ fn physical_and_logical_spacing_share_cascade_order() {
 }
 
 #[test]
+fn logical_box_inheritance_uses_parent_axes_then_child_axes() {
+    let doc = parse_and_layout(
+        r#"<style>
+        * { margin:0; padding:0 }
+        .parent { margin:11px 12px 13px 14px; padding:21px 22px 23px 24px;
+                  position:relative; inset:31px 32px 33px 34px }
+        .child { direction:rtl; margin-inline:inherit; padding-inline:inherit;
+                 position:relative; inset-inline:inherit }
+        #vertical { writing-mode:vertical-rl }
+        #vertical .child { writing-mode:horizontal-tb; direction:ltr }
+    </style><div class=parent><div class=child id=rtl></div></div>
+    <div class=parent id=vertical><div class=child id=horizontal></div></div>"#,
+        800.0,
+    );
+    let rtl = &crate::dom::query_selector(&doc.root, "#rtl").unwrap().style;
+    assert_eq!(rtl.margin_right, CssLength::Px(14.0));
+    assert_eq!(rtl.margin_left, CssLength::Px(12.0));
+    assert_eq!(rtl.padding_right, CssLength::Px(24.0));
+    assert_eq!(rtl.padding_left, CssLength::Px(22.0));
+    assert_eq!(rtl.right, CssLength::Px(34.0));
+    assert_eq!(rtl.left, CssLength::Px(32.0));
+    let horizontal = &crate::dom::query_selector(&doc.root, "#horizontal")
+        .unwrap()
+        .style;
+    assert_eq!(horizontal.margin_left, CssLength::Px(11.0));
+    assert_eq!(horizontal.margin_right, CssLength::Px(13.0));
+    assert_eq!(horizontal.padding_left, CssLength::Px(21.0));
+    assert_eq!(horizontal.padding_right, CssLength::Px(23.0));
+    assert_eq!(horizontal.left, CssLength::Px(31.0));
+    assert_eq!(horizontal.right, CssLength::Px(33.0));
+}
+
+#[test]
+fn logical_borders_preserve_physical_order_resets_and_current_color() {
+    let doc = parse_and_layout(
+        r#"<style>
+        .case { direction:rtl; width:140px; height:48px }
+        #a { border-inline-start:6px solid red; border-right:2px dashed blue }
+        #b { border-right:2px dashed blue; border-inline-start:6px solid red }
+        #c { border-inline-start:6px solid red; border-inline-start-width:7px }
+        #d { border-inline-start:4px solid currentColor; color:purple }
+        #e { border-inline-start:4px solid red; border-right-color:currentColor; color:lime }
+        #f { border-right:4px solid red; border-inline-start:4px solid; color:purple }
+        #g { border-inline-start:4px solid currentColor; border-right-color:blue; color:lime }
+        #h { border-inline-start:6px solid red; border-inline-start:initial; color:purple }
+        #i { border-inline-start:6px solid red; border:initial; color:purple }
+        #j { border-inline-start:6px solid red; border-right:2px dashed blue!important }
+        #k { border-inline-start:6px solid red; border-inline-start-color:transparent }
+    </style><div class=case id=a></div><div class=case id=b></div>
+      <div class=case id=c></div><div class=case id=d></div>
+      <div class=case id=e></div><div class=case id=f></div>
+      <div class=case id=g></div><div class=case id=h></div>
+      <div class=case id=i></div><div class=case id=j></div><div class=case id=k></div>"#,
+        800.0,
+    );
+    let node = |id| crate::dom::query_selector(&doc.root, id).unwrap();
+    assert_eq!(node("#k").style.border_right_color.a, 0);
+    for (id, width, border_style, color) in [
+        ("#a", 2.0, BorderStyle::Dashed, Color::rgb(0, 0, 255)),
+        ("#b", 6.0, BorderStyle::Solid, Color::rgb(255, 0, 0)),
+        ("#c", 7.0, BorderStyle::Solid, Color::rgb(255, 0, 0)),
+        ("#d", 4.0, BorderStyle::Solid, Color::rgb(128, 0, 128)),
+        ("#e", 4.0, BorderStyle::Solid, Color::rgb(0, 255, 0)),
+        ("#f", 4.0, BorderStyle::Solid, Color::rgb(128, 0, 128)),
+        ("#g", 4.0, BorderStyle::Solid, Color::rgb(0, 0, 255)),
+        ("#j", 2.0, BorderStyle::Dashed, Color::rgb(0, 0, 255)),
+    ] {
+        let style = &node(id).style;
+        assert_eq!(style.border_right_width, CssLength::Px(width), "{id} width");
+        assert_eq!(style.border_right_style, border_style, "{id} style");
+        assert_eq!(style.border_right_color, color, "{id} color");
+    }
+    for id in ["#h", "#i"] {
+        let style = &node(id).style;
+        assert_eq!(
+            style.border_right_width,
+            ComputedStyle::default().border_right_width,
+            "{id}"
+        );
+        assert_eq!(style.border_right_style, BorderStyle::None, "{id}");
+        assert_eq!(style.border_right_color, Color::rgb(128, 0, 128), "{id}");
+    }
+}
+
+#[test]
+fn logical_corners_preserve_physical_order_and_shorthand_resets() {
+    let doc = parse_and_layout(
+        r#"<style>
+        .case { direction:rtl; width:140px; height:48px }
+        #a { border-start-start-radius:20px 12px; border-top-right-radius:4px 6px }
+        #b { border-top-right-radius:4px 6px; border-start-start-radius:20px 12px }
+        #c { border-start-start-radius:20px 12px; border-radius:4px / 6px }
+        #d { border-start-start-radius:20px 12px; border-top-right-radius:initial }
+        #e { border-start-start-radius:20px 12px; border-radius:initial }
+        #f { border-start-start-radius:20px 12px!important; border-top-right-radius:4px 6px }
+        #g { writing-mode:vertical-rl; direction:ltr; border-start-start-radius:20px 12px; border-top-right-radius:4px 6px }
+    </style><div class=case id=a></div><div class=case id=b></div>
+      <div class=case id=c></div><div class=case id=d></div>
+      <div class=case id=e></div><div class=case id=f></div><div class=case id=g></div>"#,
+        800.0,
+    );
+    for (id, x, y) in [
+        ("#a", 4.0, 6.0),
+        ("#b", 20.0, 12.0),
+        ("#c", 4.0, 6.0),
+        ("#f", 20.0, 12.0),
+        ("#g", 4.0, 6.0),
+    ] {
+        let style = &crate::dom::query_selector(&doc.root, id).unwrap().style;
+        assert_eq!(style.border_top_right_radius, CssLength::Px(x), "{id} x");
+        assert_eq!(style.border_top_right_radius_y, CssLength::Px(y), "{id} y");
+    }
+    for id in ["#d", "#e"] {
+        let style = &crate::dom::query_selector(&doc.root, id).unwrap().style;
+        assert_eq!(
+            style.border_top_right_radius,
+            ComputedStyle::default().border_top_right_radius,
+            "{id}"
+        );
+        assert_eq!(
+            style.border_top_right_radius_y,
+            ComputedStyle::default().border_top_right_radius_y,
+            "{id}"
+        );
+    }
+}
+
+#[test]
+fn physical_and_logical_insets_share_cascade_order() {
+    let doc = parse_and_layout(
+        r#"<style>
+        .parent { right:9px }
+        .case { position:relative; direction:rtl }
+        #a { inset-inline-start:30px; right:5px }
+        #b { right:5px; inset-inline-start:30px }
+        #c { inset-inline-start:30px; inset:initial }
+        #d { inset-inline-start:30px; right:inherit }
+        #e { inset-inline-start:30px!important; right:5px }
+        #f { inset-inline-start:30px; right:5px!important }
+        #g { inset-inline:30px 40px; inset:1px 2px 3px 4px }
+        #h { inset:1px 2px 3px 4px; inset-inline:30px 40px }
+        #i { writing-mode:vertical-rl; direction:ltr; inset-block-start:30px; right:5px }
+        #j { writing-mode:vertical-rl; direction:ltr; inset-inline-start:30px; top:5px }
+    </style><div class=parent>
+      <div class=case id=a></div><div class=case id=b></div>
+      <div class=case id=c></div><div class=case id=d></div>
+      <div class=case id=e></div><div class=case id=f></div>
+      <div class=case id=g></div><div class=case id=h></div>
+      <div class=case id=i></div><div class=case id=j></div>
+    </div>"#,
+        800.0,
+    );
+    for (id, right) in [
+        ("a", 5.0),
+        ("b", 30.0),
+        ("d", 9.0),
+        ("e", 30.0),
+        ("f", 5.0),
+        ("g", 2.0),
+        ("h", 30.0),
+        ("i", 5.0),
+    ] {
+        let node = crate::dom::query_selector(&doc.root, &format!("#{id}")).unwrap();
+        assert_eq!(node.style.right, CssLength::Px(right), "{id}");
+    }
+    let c = crate::dom::query_selector(&doc.root, "#c").unwrap();
+    assert_eq!(c.style.right, CssLength::Auto);
+    let g = crate::dom::query_selector(&doc.root, "#g").unwrap();
+    assert_eq!(g.style.left, CssLength::Px(4.0));
+    let h = crate::dom::query_selector(&doc.root, "#h").unwrap();
+    assert_eq!(h.style.left, CssLength::Px(40.0));
+    let j = crate::dom::query_selector(&doc.root, "#j").unwrap();
+    assert_eq!(j.style.top, CssLength::Px(5.0));
+}
+
+#[test]
+fn physical_and_logical_sizes_share_cascade_order_and_resets() {
+    let doc = parse_and_layout(
+        r#"<style>
+        .case { height:10px }
+        #a { inline-size:90px; width:40px }
+        #b { width:40px; inline-size:90px }
+        #c { inline-size:90px; inline-size:initial }
+        #d { min-inline-size:90px; min-width:40px; max-inline-size:200px; max-width:150px }
+        #e { min-inline-size:90px; min-inline-size:initial;
+             max-inline-size:200px; max-inline-size:initial }
+        #f { inline-size:90px; height:40px; writing-mode:vertical-rl }
+        #g { block-size:90px; width:40px; writing-mode:vertical-rl }
+        #h { inline-size:90px!important; width:40px }
+        #i { inline-size:90px; width:40px!important }
+        #j { inline-size:90px; inline-size:var(--missing) }
+    </style><div class=case id=a></div><div class=case id=b></div>
+      <div class=case id=c></div><div class=case id=d></div>
+      <div class=case id=e></div><div class=case id=f></div>
+      <div class=case id=g></div><div class=case id=h></div>
+      <div class=case id=i></div><div class=case id=j></div>"#,
+        800.0,
+    );
+    let node = |id| crate::dom::query_selector(&doc.root, id).unwrap();
+    for (id, width) in [
+        ("#a", 40.0),
+        ("#b", 90.0),
+        ("#g", 40.0),
+        ("#h", 90.0),
+        ("#i", 40.0),
+    ] {
+        assert_eq!(node(id).style.width, CssLength::Px(width), "{id}");
+    }
+    let initial = ComputedStyle::default();
+    assert_eq!(node("#c").style.width, initial.width);
+    assert_eq!(node("#j").style.width, initial.width);
+    assert_eq!(node("#d").style.min_width, CssLength::Px(40.0));
+    assert_eq!(node("#d").style.max_width, CssLength::Px(150.0));
+    assert_eq!(node("#e").style.min_width, initial.min_width);
+    assert_eq!(node("#e").style.max_width, initial.max_width);
+    assert_eq!(node("#f").style.height, CssLength::Px(40.0));
+}
+
+#[test]
+fn logical_box_rollback_reads_pending_writes_in_cascade_order() {
+    let doc = parse_and_layout(
+        r#"<style>
+        @layer base, override;
+        @layer base {
+            * { margin:0; padding:0 }
+            .case { direction:rtl; margin-inline-start:19px; margin-right:7px;
+                    padding-inline-start:23px; padding-right:9px }
+        }
+        @layer override {
+            .case { margin-inline-start:42px; margin-inline-start:revert-layer;
+                    padding-inline-start:44px; padding-inline-start:revert-layer }
+        }
+    </style><div class=case id=rollback></div>"#,
+        800.0,
+    );
+    let style = &crate::dom::query_selector(&doc.root, "#rollback")
+        .unwrap()
+        .style;
+    assert_eq!(style.margin_right, CssLength::Px(7.0));
+    assert_eq!(style.padding_right, CssLength::Px(9.0));
+}
+
+#[test]
 fn list_item_marker_uses_css_counter_value() {
     let html = r#"<style>
               ol { counter-reset: list-item 10; }
@@ -7885,13 +8991,27 @@ fn predefined_numeric_counter_styles_use_their_own_digits() {
     for (name, expected) in samples {
         let mut style = ComputedStyle::default();
         apply_property(&mut style, "list-style-type", name);
-        assert_eq!(style.list_style_type, ListStyleType::Numeric(name), "{name}");
-        assert_eq!(crate::css::format_counter_value(12, name), expected, "{name}");
-        assert_eq!(crate::css::format_counter_value(-12, name), format!("-{expected}"));
+        assert_eq!(
+            style.list_style_type,
+            ListStyleType::Numeric(name),
+            "{name}"
+        );
+        assert_eq!(
+            crate::css::format_counter_value(12, name),
+            expected,
+            "{name}"
+        );
+        assert_eq!(
+            crate::css::format_counter_value(-12, name),
+            format!("-{expected}")
+        );
         assert_eq!(crate::css::format_counter_value(0, name).chars().count(), 1);
     }
     assert_eq!(crate::css::format_counter_value(-12, "cjk-decimal"), "-12");
-    assert_eq!(crate::css::format_counter_value(i32::MIN, "cjk-decimal"), i32::MIN.to_string());
+    assert_eq!(
+        crate::css::format_counter_value(i32::MIN, "cjk-decimal"),
+        i32::MIN.to_string()
+    );
 
     let mut renderer = crate::Renderer::new();
     let mut doc = renderer.load_html(
@@ -7910,8 +9030,14 @@ fn predefined_armenian_styles_use_case_and_range() {
     assert_eq!(crate::css::format_counter_value(12, "upper-armenian"), "ԺԲ");
     assert_eq!(crate::css::format_counter_value(12, "lower-armenian"), "ժբ");
     for value in [0, -1, 10_000, i32::MIN] {
-        assert_eq!(crate::css::format_counter_value(value, "armenian"), value.to_string());
-        assert_eq!(crate::css::format_counter_value(value, "lower-armenian"), value.to_string());
+        assert_eq!(
+            crate::css::format_counter_value(value, "armenian"),
+            value.to_string()
+        );
+        assert_eq!(
+            crate::css::format_counter_value(value, "lower-armenian"),
+            value.to_string()
+        );
     }
 }
 
@@ -8927,6 +10053,144 @@ fn legacy_webkit_linear_gradient_background() {
 }
 
 #[test]
+fn pseudo_custom_properties_preserve_scope_and_important_layer_order() {
+    let doc = parse_and_layout(
+        "<style>@layer first,last;:root{--tone:blue}.box{color:var(--tone)}\
+         .box::before{content:'before';display:block;--tone:red!important;--alias:var(--tone);\
+         color:var(--alias);width:var(--size)}\
+         @layer first{.box::before{--size:40px!important}}\
+         @layer last{.box::before{--size:80px!important;--tone:black}}\
+         .box::after{content:'after';display:block;--tone:green;color:var(--tone)}\
+         </style><div class='box'></div>",
+        300.0,
+    );
+    let host = find_box(&doc.root, &|n| {
+        n.attributes.get("class").is_some_and(|v| v == "box")
+    })
+    .unwrap();
+    let before = find_box(&doc.root, &|n| n.tag == "::before").unwrap();
+    let after = find_box(&doc.root, &|n| n.tag == "::after").unwrap();
+    assert_eq!(host.style.color, Color::rgb(0, 0, 255));
+    assert_eq!(before.style.color, Color::rgb(255, 0, 0));
+    assert_eq!(before.style.width, CssLength::Px(40.0));
+    assert_eq!(after.style.color, Color::rgb(0, 128, 0));
+    assert_eq!(
+        before.style.custom_props.get("--alias").map(String::as_str),
+        Some("red")
+    );
+    assert_eq!(
+        host.style.custom_props.get("--tone").map(String::as_str),
+        Some("blue")
+    );
+}
+
+#[test]
+fn generated_gradient_resolves_zero_percentage_color_mix_without_opaque_black() {
+    assert_eq!(
+        crate::css::parse_color("color-mix(in oklch, white 0%, transparent)")
+            .unwrap()
+            .a,
+        0
+    );
+    let doc = parse_and_layout(
+        "<style>:root{--color-white:white}.shine::before{--zero-percent:0%;content:'';\
+         display:block;width:80px;height:100px;background-image:linear-gradient(to right,\
+         color-mix(in oklch,var(--color-loading-shine,var(--color-white)) var(--zero-percent),transparent),\
+         var(--color-loading-shine,var(--color-white)))}</style><div class='shine'></div>",
+        300.0,
+    );
+    let pseudo = find_box(&doc.root, &|n| n.tag == "::before").unwrap();
+    let stops = &pseudo.style.rare().gradient_stops;
+    assert_eq!(stops.len(), 2);
+    assert_eq!(stops[0].color.a, 0);
+    assert_eq!(stops[1].color, Color::WHITE);
+}
+
+#[test]
+fn gradient_invalid_components_preserve_the_previous_image() {
+    let mut style = ComputedStyle::default();
+    apply_property(&mut style, "background-image", "linear-gradient(red, blue)");
+    let before = style.clone();
+    for value in [
+        "linear-gradient(red, nonsense, blue)",
+        "linear-gradient(red auto, blue)",
+        "linear-gradient(red 0% 20% 40%, blue)",
+        "linear-gradient(red 0% 100%)",
+        "linear-gradient(to top top, red, blue)",
+        "linear-gradient(NaNdeg, red, blue)",
+        "linear-gradient(red NaN%, blue)",
+        "radial-gradient(nonsense, red, blue)",
+        "radial-gradient(circle ellipse, red, blue)",
+        "radial-gradient(circle 10% at center, red, blue)",
+        "radial-gradient(ellipse 10px, red, blue)",
+        "radial-gradient(closest-side 20px, red, blue)",
+        "radial-gradient(circle -10px, red, blue)",
+        "radial-gradient(at left left, red, blue)",
+        "linear-gradient(red, blue), radial-gradient(nonsense, red, blue)",
+    ] {
+        apply_property(&mut style, "background-image", value);
+        assert_eq!(style, before, "invalid declaration: {value}");
+        assert!(
+            !crate::css::parser::supports_condition_matches(&format!(
+                "(background-image: {value})"
+            )),
+            "feature query: {value}"
+        );
+    }
+}
+
+#[test]
+fn radial_gradient_explicit_radii_and_positions_use_shared_position_grammar() {
+    for (value, shape, rx, ry, x, y) in [
+        (
+            "radial-gradient(20px at right bottom, red, blue)",
+            GradientRadialShape::Circle,
+            CssLength::Px(20.0),
+            CssLength::Px(20.0),
+            CssLength::Percent(100.0),
+            CssLength::Percent(100.0),
+        ),
+        (
+            "radial-gradient(20% 30% at top left, red, blue)",
+            GradientRadialShape::Ellipse,
+            CssLength::Percent(20.0),
+            CssLength::Percent(30.0),
+            CssLength::Percent(0.0),
+            CssLength::Percent(0.0),
+        ),
+        (
+            "radial-gradient(at right 10px bottom 20px, red, blue)",
+            GradientRadialShape::Ellipse,
+            CssLength::Auto,
+            CssLength::Auto,
+            crate::css::parse_length("calc(100% - 10px)"),
+            crate::css::parse_length("calc(100% - 20px)"),
+        ),
+    ] {
+        let mut style = ComputedStyle::default();
+        apply_property(&mut style, "background-image", value);
+        assert_eq!(style.gradient_type, GradientType::Radial, "{value}");
+        assert_eq!(style.gradient_radial_shape, shape);
+        assert_eq!(style.gradient_radial_radius_x, rx);
+        assert_eq!(style.gradient_radial_radius_y, ry);
+        let font_px = ComputedStyle::INITIAL_FONT_SIZE_PX;
+        let reference_box_px = 200.0;
+        assert_eq!(
+            style
+                .gradient_radial_position_x
+                .resolve(font_px, reference_box_px, font_px),
+            x.resolve(font_px, reference_box_px, font_px)
+        );
+        assert_eq!(
+            style
+                .gradient_radial_position_y
+                .resolve(font_px, reference_box_px, font_px),
+            y.resolve(font_px, reference_box_px, font_px)
+        );
+    }
+}
+
+#[test]
 fn css_radial_gradient_with_position_stops() {
     // radial-gradient(circle at 50% 50%, #fbbf24 0%, #f97316 60%, transparent 100%)
     // must parse 3 stops with correct colors and positions.
@@ -9211,6 +10475,54 @@ fn adjacent_var_substitutions_in_border_shorthand_keep_token_boundaries() {
     assert_eq!(button.style.border_top_color, Color::TRANSPARENT);
     assert_eq!(button.style.background_color, Color::rgb(251, 84, 43));
     assert_eq!(button.style.color, Color::WHITE);
+}
+
+#[test]
+fn custom_property_substitution_preserves_both_token_boundaries() {
+    let vars = std::collections::HashMap::from([
+        ("--n".to_string(), "10".to_string()),
+        ("--unit".to_string(), "px".to_string()),
+        ("--size".to_string(), "10px".to_string()),
+    ]);
+    for (source, expected) in [
+        ("var(--n)px", "10/**/px"),
+        ("1var(--n)", "1var(--n)"),
+        ("-var(--n)", "-var(--n)"),
+        (".var(--n)", "./**/10"),
+        ("var(--n)var(--unit)", "10/**/px"),
+        ("calc(var(--size)+ 1px)", "calc(10px+ 1px)"),
+        ("calc(var(--size) + 1px)", "calc(10px + 1px)"),
+    ] {
+        assert_eq!(crate::css::resolve_var_references(source, &vars), expected);
+    }
+    let doc = parse_and_layout(
+        r#"<style>
+        :root { --n: 10; --unit: px; --size: 10px; --split: var(--n)var(--unit); }
+        div { padding: 4px; }
+        #suffix { padding: var(--n)px; }
+        #nested { padding: var(--split); }
+        #bad-space { padding: calc(var(--size)+ 1px); }
+        #good-space { padding: calc(var(--size) + 1px); }
+        </style><div id="suffix"></div><div id="nested"></div>
+        <div id="bad-space"></div><div id="good-space"></div>"#,
+        800.0,
+    );
+    for id in ["suffix", "nested", "bad-space"] {
+        let node = find_box(&doc.root, &|b| {
+            b.attributes.get("id").is_some_and(|v| v == id)
+        })
+        .unwrap();
+        assert_eq!(
+            node.style.padding_top,
+            ComputedStyle::default().padding_top,
+            "{id}"
+        );
+    }
+    let valid = find_box(&doc.root, &|b| {
+        b.attributes.get("id").is_some_and(|v| v == "good-space")
+    })
+    .unwrap();
+    assert_eq!(valid.style.padding_top, CssLength::Px(11.0));
 }
 
 #[test]
@@ -9847,7 +11159,10 @@ fn state_custom_property_revert_layer_uses_prior_state_layer() {
     })
     .expect("target");
     let hover = div.style.hover_style.as_ref().expect("hover style");
-    assert_eq!(hover.custom_props.get("--ink").map(String::as_str), Some("red"));
+    assert_eq!(
+        hover.custom_props.get("--ink").map(String::as_str),
+        Some("red")
+    );
     assert_eq!(hover.color, Color::rgb(255, 0, 0));
 }
 
@@ -9875,7 +11190,9 @@ fn variable_fallback_css_wide_keywords_apply_to_ordinary_properties() {
         assert_eq!(node.style.color, color, "{id}");
     }
     let noninherited = find_box(&doc.root, &|b| {
-        b.attributes.get("id").is_some_and(|value| value == "noninherited")
+        b.attributes
+            .get("id")
+            .is_some_and(|value| value == "noninherited")
     })
     .expect("paragraph");
     assert!(matches!(
@@ -9911,11 +11228,21 @@ fn custom_property_css_wide_keywords_after_substitution_follow_cascade() {
             b.attributes.get("id").is_some_and(|actual| actual == id)
         })
         .expect("paragraph");
-        assert_eq!(node.style.custom_props.get("--x").map(String::as_str), value, "{id}");
+        assert_eq!(
+            node.style.custom_props.get("--x").map(String::as_str),
+            value,
+            "{id}"
+        );
         if id == "initial" {
-            assert_eq!(node.style.custom_props.get("--y").map(|value| value.trim()), Some("blue"));
+            assert_eq!(
+                node.style.custom_props.get("--y").map(|value| value.trim()),
+                Some("blue")
+            );
         } else if id == "layer" {
-            assert_eq!(node.style.custom_props.get("--y").map(String::as_str), Some("red"));
+            assert_eq!(
+                node.style.custom_props.get("--y").map(String::as_str),
+                Some("red")
+            );
         }
     }
 }
@@ -9932,9 +11259,18 @@ fn stylesheet_root_variable_snapshot_respects_layer_rollback() {
     );
     sheet.rebuild_index();
     sheet.resolve_variables_for_viewport(800.0, 600.0);
-    assert_eq!(sheet.variables.get("--ink").map(String::as_str), Some("red"));
-    assert_eq!(sheet.variables.get("--tone").map(String::as_str), Some("red"));
-    assert_eq!(sheet.variables.get("--important").map(String::as_str), Some("red"));
+    assert_eq!(
+        sheet.variables.get("--ink").map(String::as_str),
+        Some("red")
+    );
+    assert_eq!(
+        sheet.variables.get("--tone").map(String::as_str),
+        Some("red")
+    );
+    assert_eq!(
+        sheet.variables.get("--important").map(String::as_str),
+        Some("red")
+    );
 }
 
 #[test]
@@ -9951,7 +11287,10 @@ fn state_custom_property_keyword_after_substitution_rolls_back_layer() {
     })
     .expect("target");
     let hover = node.style.hover_style.as_ref().expect("hover style");
-    assert_eq!(hover.custom_props.get("--ink").map(String::as_str), Some("red"));
+    assert_eq!(
+        hover.custom_props.get("--ink").map(String::as_str),
+        Some("red")
+    );
     assert_eq!(hover.color, Color::rgb(255, 0, 0));
 }
 
@@ -10837,7 +12176,10 @@ fn shape_outside_uses_the_full_line_interval_for_exclusion() {
     left_float.available_width(0.0, 20.0, 200.0, &mut left, &mut right);
     assert_eq!(left, 0.0, "a line above the circle needs no exclusion");
     left_float.available_width(20.0, 30.0, 200.0, &mut left, &mut right);
-    assert!((left - 75.0).abs() < 0.01, "the line reaches the circle's widest point: {left}");
+    assert!(
+        (left - 75.0).abs() < 0.01,
+        "the line reaches the circle's widest point: {left}"
+    );
 
     let mut right_float = FloatContext::default();
     right_float.place_float(
@@ -10852,7 +12194,10 @@ fn shape_outside_uses_the_full_line_interval_for_exclusion() {
         0.0,
     );
     right_float.available_width(25.0, 16.0, 200.0, &mut left, &mut right);
-    assert!((right - 120.0).abs() < 0.01, "the line intersects the inset at its bottom edge: {right}");
+    assert!(
+        (right - 120.0).abs() < 0.01,
+        "the line intersects the inset at its bottom edge: {right}"
+    );
     right_float.available_width(0.0, 20.0, 200.0, &mut left, &mut right);
     assert_eq!(right, 200.0, "a line above the inset needs no exclusion");
 
@@ -10871,7 +12216,10 @@ fn shape_outside_uses_the_full_line_interval_for_exclusion() {
         ..FloatContext::default()
     };
     displaced_right.available_width(0.0, 20.0, 200.0, &mut left, &mut right);
-    assert_eq!(right, 200.0, "a non-intersecting internal right float must not narrow the line");
+    assert_eq!(
+        right, 200.0,
+        "a non-intersecting internal right float must not narrow the line"
+    );
 
     let mut polygon_float = FloatContext::default();
     polygon_float.place_float(
@@ -10886,7 +12234,10 @@ fn shape_outside_uses_the_full_line_interval_for_exclusion() {
         0.0,
     );
     polygon_float.available_width(20.0, 30.0, 200.0, &mut left, &mut right);
-    assert!((left - 50.0).abs() < 0.01, "the line reaches the polygon's widest vertex: {left}");
+    assert!(
+        (left - 50.0).abs() < 0.01,
+        "the line reaches the polygon's widest vertex: {left}"
+    );
 }
 
 #[test]
@@ -11012,7 +12363,10 @@ fn shape_outside_validation_agrees_between_cascade_and_supports() {
         let mut style = ComputedStyle::default();
         apply_property(&mut style, "shape-outside", "circle(20px)");
         apply_property(&mut style, "shape-outside", value);
-        assert_eq!(style.shape_outside, "circle(20px)", "invalid shape replaced the prior declaration: {value}");
+        assert_eq!(
+            style.shape_outside, "circle(20px)",
+            "invalid shape replaced the prior declaration: {value}"
+        );
     }
 }
 
@@ -11021,13 +12375,17 @@ fn shape_margin_validates_lengths_and_percentages_without_resetting() {
     use crate::css::parser::supports_condition_matches;
 
     for value in ["0", "12px", "10%", "calc(1em + 2px)"] {
-        assert!(supports_condition_matches(&format!("(shape-margin: {value})")));
+        assert!(supports_condition_matches(&format!(
+            "(shape-margin: {value})"
+        )));
         let mut style = ComputedStyle::default();
         apply_property(&mut style, "shape-margin", value);
         assert_ne!(style.shape_margin, crate::types::CssLength::Auto);
     }
     for value in ["-1px", "auto", "content", "fit-content(10px)", "12"] {
-        assert!(!supports_condition_matches(&format!("(shape-margin: {value})")));
+        assert!(!supports_condition_matches(&format!(
+            "(shape-margin: {value})"
+        )));
         let mut style = ComputedStyle::default();
         apply_property(&mut style, "shape-margin", "8px");
         apply_property(&mut style, "shape-margin", value);
@@ -11099,9 +12457,16 @@ fn shape_outside_bare_box_uses_adjusted_corner_radii() {
     .expect("float");
     let mut context = FloatContext::default();
     context.place_float_in(
-        &LayoutEngine::new(), 16.0, 0.0, 0.0,
-        node.layout.margin_rect.w, node.layout.margin_rect.h, 400.0,
-        FloatSide::Left, &node.style.shape_outside, 0.0,
+        &LayoutEngine::new(),
+        16.0,
+        0.0,
+        0.0,
+        node.layout.margin_rect.w,
+        node.layout.margin_rect.h,
+        400.0,
+        FloatSide::Left,
+        &node.style.shape_outside,
+        0.0,
         float_shape_reference(&node.style, &node.layout, 16.0),
     );
     let Some(FloatShape::RoundedBox { rect, rx, ry }) = &context.floats[0].shape else {
@@ -11112,9 +12477,15 @@ fn shape_outside_bare_box_uses_adjusted_corner_radii() {
     let mut left = 0.0;
     let mut right = 400.0;
     context.available_width(rect.y, 2.0, 400.0, &mut left, &mut right);
-    assert!(left < node.layout.margin_rect.w - 1.0, "rounded corner should narrow exclusion: {left}");
+    assert!(
+        left < node.layout.margin_rect.w - 1.0,
+        "rounded corner should narrow exclusion: {left}"
+    );
     context.available_width(rect.y + 40.0, 2.0, 400.0, &mut left, &mut right);
-    assert!(left > 0.0, "the middle of the border box must still exclude text");
+    assert!(
+        left > 0.0,
+        "the middle of the border box must still exclude text"
+    );
 }
 
 #[test]
@@ -11131,9 +12502,16 @@ fn shape_outside_half_border_box_uses_midpoint_edges_and_radii() {
     .expect("float");
     let mut context = FloatContext::default();
     context.place_float_in(
-        &LayoutEngine::new(), 16.0, 0.0, 0.0,
-        node.layout.margin_rect.w, node.layout.margin_rect.h, 400.0,
-        FloatSide::Left, &node.style.shape_outside, 0.0,
+        &LayoutEngine::new(),
+        16.0,
+        0.0,
+        0.0,
+        node.layout.margin_rect.w,
+        node.layout.margin_rect.h,
+        400.0,
+        FloatSide::Left,
+        &node.style.shape_outside,
+        0.0,
         float_shape_reference(&node.style, &node.layout, 16.0),
     );
     let Some(FloatShape::RoundedBox { rect, rx, ry }) = &context.floats[0].shape else {
@@ -11148,12 +12526,23 @@ fn shape_outside_half_border_box_uses_midpoint_edges_and_radii() {
     assert!(rx[0] > 0.0 && ry[0] > 0.0);
 
     let mut style = (*node.style).clone();
-    apply_property(&mut style, "shape-outside", "circle(25% at center) half-border-box");
+    apply_property(
+        &mut style,
+        "shape-outside",
+        "circle(25% at center) half-border-box",
+    );
     let mut basic = FloatContext::default();
     basic.place_float_in(
-        &LayoutEngine::new(), 16.0, 0.0, 0.0,
-        margin.w, margin.h, 400.0, FloatSide::Left,
-        &style.shape_outside, 0.0,
+        &LayoutEngine::new(),
+        16.0,
+        0.0,
+        0.0,
+        margin.w,
+        margin.h,
+        400.0,
+        FloatSide::Left,
+        &style.shape_outside,
+        0.0,
         float_shape_reference(&style, &node.layout, 16.0),
     );
     assert!(matches!(&basic.floats[0].shape,
@@ -11169,8 +12558,15 @@ fn shape_outside_rounded_inset_narrows_lines_at_curved_corners() {
 
     let mut context = FloatContext::default();
     context.place_float(
-        &LayoutEngine::new(), 16.0, 0.0, 100.0, 100.0, 200.0,
-        FloatSide::Left, "inset(0 round 40px / 20px)", 0.0,
+        &LayoutEngine::new(),
+        16.0,
+        0.0,
+        100.0,
+        100.0,
+        200.0,
+        FloatSide::Left,
+        "inset(0 round 40px / 20px)",
+        0.0,
     );
     assert!(matches!(&context.floats[0].shape,
         Some(FloatShape::RoundedBox { rx, ry, .. })
@@ -11179,7 +12575,10 @@ fn shape_outside_rounded_inset_narrows_lines_at_curved_corners() {
     let mut left = 0.0;
     let mut right = 200.0;
     context.available_width(0.0, 2.0, 200.0, &mut left, &mut right);
-    assert!(left > 60.0 && left < 100.0, "rounded top corner exclusion: {left}");
+    assert!(
+        left > 60.0 && left < 100.0,
+        "rounded top corner exclusion: {left}"
+    );
     context.available_width(30.0, 2.0, 200.0, &mut left, &mut right);
     assert!((left - 100.0).abs() < 0.1, "straight middle edge: {left}");
 }
@@ -11215,23 +12614,43 @@ fn polygon_shape_margin_reaches_lines_above_shape_and_diagonal_tangents() {
     let engine = LayoutEngine::new();
     let mut triangle = FloatContext::default();
     triangle.place_float(
-        &engine, 16.0, 0.0, 100.0, 100.0, 200.0,
-        FloatSide::Left, "polygon(50px 20px, 80px 80px, 20px 80px)", 10.0,
+        &engine,
+        16.0,
+        0.0,
+        100.0,
+        100.0,
+        200.0,
+        FloatSide::Left,
+        "polygon(50px 20px, 80px 80px, 20px 80px)",
+        10.0,
     );
     let mut left = 0.0;
     let mut right = 200.0;
     triangle.available_width(12.0, 2.0, 200.0, &mut left, &mut right);
-    assert!(left > 55.0 && left < 65.0, "margin must reach above polygon: {left}");
+    assert!(
+        left > 55.0 && left < 65.0,
+        "margin must reach above polygon: {left}"
+    );
     triangle.available_width(0.0, 2.0, 200.0, &mut left, &mut right);
     assert_eq!(left, 0.0, "a distant line must remain unobstructed");
 
     let mut diagonal = FloatContext::default();
     diagonal.place_float(
-        &engine, 16.0, 0.0, 100.0, 100.0, 200.0,
-        FloatSide::Left, "polygon(0 0, 100px 100px, 0 100px)", 10.0,
+        &engine,
+        16.0,
+        0.0,
+        100.0,
+        100.0,
+        200.0,
+        FloatSide::Left,
+        "polygon(0 0, 100px 100px, 0 100px)",
+        10.0,
     );
     diagonal.available_width(50.0, 0.01, 200.0, &mut left, &mut right);
-    assert!(left > 64.0 && left < 64.5, "diagonal margin tangent should reach sqrt(2) farther: {left}");
+    assert!(
+        left > 64.0 && left < 64.5,
+        "diagonal margin tangent should reach sqrt(2) farther: {left}"
+    );
 }
 
 #[test]
@@ -12408,11 +13827,19 @@ fn nth_last_child_negative_range_hides_last_two_list_items() {
     );
     for id in ["first", "second"] {
         let element = doc.get_element_by_id(id).unwrap();
-        assert_ne!(doc.computed_style_property(element, "display"), "none", "{id}");
+        assert_ne!(
+            doc.computed_style_property(element, "display"),
+            "none",
+            "{id}"
+        );
     }
     for id in ["third", "fourth"] {
         let element = doc.get_element_by_id(id).unwrap();
-        assert_eq!(doc.computed_style_property(element, "display"), "none", "{id}");
+        assert_eq!(
+            doc.computed_style_property(element, "display"),
+            "none",
+            "{id}"
+        );
     }
 }
 
@@ -14448,7 +15875,10 @@ fn overflow_clip_margin_rejects_two_lengths_without_resetting_previous_value() {
         800.0,
     );
     let clip = doc.get_element_by_id("clip").unwrap();
-    assert_eq!(doc.computed_style_property(clip, "overflow-clip-margin"), "content-box 5px");
+    assert_eq!(
+        doc.computed_style_property(clip, "overflow-clip-margin"),
+        "content-box 5px"
+    );
     assert!(crate::css::parser::supports_condition_matches(
         "(overflow-clip-margin: border-box -5px)"
     ));
@@ -14476,7 +15906,11 @@ fn overflow_clip_margin_computed_value_canonicalizes_box_and_offset() {
             800.0,
         );
         let id = doc.get_element_by_id("clip").unwrap();
-        assert_eq!(doc.computed_style_property(id, "overflow-clip-margin"), expected, "{specified}");
+        assert_eq!(
+            doc.computed_style_property(id, "overflow-clip-margin"),
+            expected,
+            "{specified}"
+        );
     }
 }
 
@@ -16950,7 +18384,9 @@ fn media_condition_not_has_feature_scope_but_media_type_not_has_query_scope() {
     ));
 
     let mut sheet = crate::css::Stylesheet::default();
-    sheet.parse_and_add(&format!("@media {condition} {{ .in-range {{ width: 33px }} }}"));
+    sheet.parse_and_add(&format!(
+        "@media {condition} {{ .in-range {{ width: 33px }} }}"
+    ));
     assert!(sheet.rules[0].media_condition.matches(800.0, 600.0));
     assert!(!sheet.rules[0].media_condition.matches(400.0, 600.0));
 }

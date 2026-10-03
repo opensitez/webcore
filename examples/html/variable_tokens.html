@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Variable function tokens</title>
+<style>
+  :root { --color: green; --COLOR: blue; --width: 12px; --nested: v\61 r(--width); }
+  body { margin: 12px; font: 16px/24px sans-serif; }
+  .case { width: 280px; margin: 12px 0; border: 3px solid green; padding: 4px; }
+  #function { color: v\61 r(--color); }
+  #identifier { color: var(--c\6f lor); }
+  #case { color: \56 AR(--COLOR); }
+  #nested { padding: var(--nested); }
+  @supports (color: v\61 r(--c\6f lor)) { #query { color: blue; } }
+  #fallback { color: v\61 r(--missing, rgb(1, 2, 3)); }
+</style>
+<div class="case" id="function">Escaped function name</div>
+<div class="case" id="identifier">Escaped custom-property reference</div>
+<div class="case" id="case">Function case and variable case differ</div>
+<div class="case" id="nested">Dependency resolution uses tokens</div>
+<div class="case" id="query">Feature query uses the same tokens</div>
+<div class="case" id="fallback">Fallback preserves nested commas</div>
+<div class="case" id="inline" style="color: \76 ar(--color)">Inline declaration</div>

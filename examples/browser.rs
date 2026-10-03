@@ -3972,10 +3972,13 @@ impl BrowserApp {
                                     && clip.bottom() >= y
                                 {
                                     out.push(format!(
-                                        r#"{{"kind":"gradient","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"clip":[{:.1},{:.1},{:.1},{:.1}],"gradient_type":{},"angle":{:.1},"stops":{}}}"#,
+                                        r#"{{"kind":"gradient","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"clip":[{:.1},{:.1},{:.1},{:.1}],"gradient_type":{},"angle":{:.1},"stops":{},"resolved_stops":{}}}"#,
                                         rect.x, rect.y, rect.w, rect.h,
                                         clip.x, clip.y, clip.w, clip.h,
-                                        gradient_type, angle, stops.len()
+                                        gradient_type, angle, stops.len(),
+                                        format!("[{}]", stops.iter().map(|(color, position)|
+                                            format!(r#"{{"rgba":[{},{},{},{}],"position":{}}}"#, color.r, color.g, color.b, color.a, position)
+                                        ).collect::<Vec<_>>().join(","))
                                     ));
                                 }
                             }
@@ -7574,10 +7577,13 @@ fn dispatch_headless_cmd(
                         if clip.x <= qx2 && clip.right() >= x && clip.y <= qy2 && clip.bottom() >= y
                         {
                             out.push(format!(
-                                r#"{{"kind":"gradient","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"clip":[{:.1},{:.1},{:.1},{:.1}],"gradient_type":{},"angle":{:.1},"stops":{}}}"#,
+                                r#"{{"kind":"gradient","x":{:.1},"y":{:.1},"w":{:.1},"h":{:.1},"clip":[{:.1},{:.1},{:.1},{:.1}],"gradient_type":{},"angle":{:.1},"stops":{},"resolved_stops":{}}}"#,
                                 rect.x, rect.y, rect.w, rect.h,
                                 clip.x, clip.y, clip.w, clip.h,
-                                gradient_type, angle, stops.len()
+                                gradient_type, angle, stops.len(),
+                                format!("[{}]", stops.iter().map(|(color, position)|
+                                    format!(r#"{{"rgba":[{},{},{},{}],"position":{}}}"#, color.r, color.g, color.b, color.a, position)
+                                ).collect::<Vec<_>>().join(","))
                             ));
                         }
                     }

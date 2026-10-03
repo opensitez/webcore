@@ -631,6 +631,26 @@ fn set_and_get_style_property() {
 }
 
 #[test]
+fn changing_background_image_drops_stale_pixels() {
+    let mut doc = parse_html("<div></div>");
+    let div = doc.query_selector("div").unwrap();
+    doc.set_style_property(div, "background-image", "url(first.png)");
+    doc.find_webcore_mut(div).unwrap().bg_image_data = Some(std::sync::Arc::new(vec![0; 4]));
+
+    doc.set_style_property(div, "color", "red");
+    assert!(doc.find_webcore_mut(div).unwrap().bg_image_data.is_some());
+    doc.set_style_property(div, "background-image", "url(first.png)");
+    assert!(doc.find_webcore_mut(div).unwrap().bg_image_data.is_some());
+
+    doc.set_style_property(div, "background-image", "url(second.png)");
+    assert!(doc.find_webcore_mut(div).unwrap().bg_image_data.is_none());
+
+    doc.find_webcore_mut(div).unwrap().bg_image_data = Some(std::sync::Arc::new(vec![0; 4]));
+    doc.set_style_property(div, "background", "url(third.png)");
+    assert!(doc.find_webcore_mut(div).unwrap().bg_image_data.is_none());
+}
+
+#[test]
 fn set_style_property_overwrites() {
     let mut doc = parse_html(r#"<div style="color: blue"></div>"#);
     let div = doc.query_selector("div").unwrap();

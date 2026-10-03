@@ -1,7 +1,233 @@
 //! Tests for CSS value AST: min(), max(), clamp(), calc() with proper resolution.
 
 use crate::css::{parse_color, parse_length};
+
+#[test]
+fn comma_components_use_shared_opaque_tokens_and_all_block_kinds() {
+    let split = crate::css::value_parse::split_top_level_commas;
+    for (source, expected) in [
+        ("red/* , ) */ , blue", vec!["red/* , ) */ ", " blue"]),
+        (r"first\,family, serif", vec![r"first\,family", " serif"]),
+        ("[a,b], {c,d}, e", vec!["[a,b]", " {c,d}", " e"]),
+        ("url(x,y}) , rgb(1,2,3)", vec!["url(x,y}) ", " rgb(1,2,3)"]),
+        (
+            r#""a,b", url("c),d"), e"#,
+            vec![r#""a,b""#, r#" url("c),d")"#, " e"],
+        ),
+        ("a,,", vec!["a", "", ""]),
+    ] {
+        assert_eq!(split(source), expected, "{source}");
+    }
+    let vars = std::collections::HashMap::from([("--color".to_string(), "green".to_string())]);
+    assert_eq!(
+        crate::css::resolve_var_references("var(--color/* , ) */ , red)", &vars),
+        "green"
+    );
+    assert_eq!(
+        crate::css::resolve_var_references("var(--missing, [a,b], {c,d})", &vars),
+        "[a,b], {c,d}"
+    );
+}
+
+#[test]
+fn light_dark_color_grammar_uses_balanced_tokens_and_validates_both_branches() {
+    for source in [
+        "light-dark(rgb(1, 2, 3), black)",
+        r"light-\64 ark(rgb(1, 2, 3), black)",
+        "light-dark(light-dark(rgb(1, 2, 3), white), black)",
+    ] {
+        assert_eq!(parse_color(source), Some(Color::rgb(1, 2, 3)), "{source}");
+    }
+    for source in [
+        "light-dark(red, nonsense)",
+        "light-dark(red, blue, green)",
+        "light-dark(red,)",
+        "light-dark(red, blue) extra",
+    ] {
+        assert_eq!(parse_color(source), None, "{source}");
+    }
+}
+
+#[test]
+fn length_dimension_tokens_decode_units_without_merging_tokens() {
+    for (source, expected) in [
+        (r"10p\78", CssLength::Px(10.0)),
+        (r"10\70 x", CssLength::Px(10.0)),
+        ("10\\70\r\nx", CssLength::Px(10.0)),
+        (r"2\65 m", CssLength::Em(2.0)),
+        (r"1e2p\78", CssLength::Px(100.0)),
+        (r".5\72 em", CssLength::Rem(0.5)),
+        (r"3\56 W", CssLength::Vw(3.0)),
+    ] {
+        assert_eq!(parse_length(source), expected, "{source}");
+        assert_eq!(parse_length(source), expected, "cached {source}");
+    }
+    for source in [
+        r"10\25", "10/**/px", "10 px", "0.", "1.px", r"10p\", "1e+px",
+    ] {
+        assert_eq!(parse_length(source), CssLength::Auto, "{source}");
+    }
+}
+
+#[test]
+fn math_numeric_tokens_decode_units_and_keep_operator_whitespace() {
+    for (source, expected) in [
+        (r"calc(10\70 x + 2px)", 12.0),
+        (r"calc(10p\78  + 2px)", 12.0),
+        (r"calc(.5\72 em * 2)", 16.0),
+        (r"min(1e1p\78, 20px)", 10.0),
+        (r"calc(sin(90d\65 g) * 10px)", 10.0),
+    ] {
+        let value = parse_length(source);
+        assert!(!matches!(value, CssLength::Auto), "{source}");
+        assert!(
+            (value.resolve_vp(16.0, 100.0, 16.0, 800.0, 600.0) - expected).abs() < 0.001,
+            "{source}: {value:?}"
+        );
+    }
+    assert_eq!(
+        crate::css::calc::parse_math_time_ms(r"calc(2\6d s * 3)"),
+        Some(6.0)
+    );
+    assert_eq!(
+        crate::css::calc::parse_math_resolution_dppx(r"calc(192d\70 i / 2)"),
+        Some(1.0)
+    );
+    for source in [
+        r"calc(10p\78 + 2px)",
+        r"calc(10\25)",
+        "calc(1.px)",
+        "calc(0.)",
+        "calc(10px+ 2px)",
+    ] {
+        assert_eq!(parse_length(source), CssLength::Auto, "{source}");
+    }
+    assert!(
+        crate::css::calc::parse_calc_number("calc(-INFINITY)")
+            .unwrap()
+            .is_infinite()
+    );
+}
 use crate::types::{BorderStyle, Color, CssLength, Display, QueryContainerSizes};
+
+#[test]
+fn math_function_and_keyword_tokens_decode_css_escapes() {
+    for (source, expected) in [
+        (r"c\61 lc(10px + 2px)", 12.0),
+        (r"\63 alc(10px + 2px)", 12.0),
+        (r"calc(m\69 n(10px, 20px) + 2px)", 12.0),
+        (r"r\6f und(\75 p, 11px, 5px)", 15.0),
+        (r"clamp(n\6f ne, 12px, n\6f ne)", 12.0),
+        (r"calc(s\69 n(p\69 / 2) * 10px)", 10.0),
+    ] {
+        let value = parse_length(source);
+        assert!(!matches!(value, CssLength::Auto), "{source}");
+        assert!(
+            (resolve(&value, 100.0, 800.0) - expected).abs() < 0.001,
+            "{source}: {value:?}"
+        );
+    }
+    assert!(
+        crate::css::calc::parse_calc_number(r"calc(-\69 nfinity)")
+            .unwrap()
+            .is_infinite()
+    );
+    for source in [
+        r"c\61 lc (10px)",
+        r"calc(10px + p\69 x)",
+        r"clamp(n\6f nex, 12px, none)",
+    ] {
+        assert_eq!(parse_length(source), CssLength::Auto, "{source}");
+    }
+}
+
+#[test]
+fn math_comments_preserve_tokens_and_operator_whitespace() {
+    for (source, expected) in [
+        ("calc(/*before*/10px/*left*/ * /*right*/2/*after*/)", 20.0),
+        ("calc(10px/**//2)", 5.0),
+        ("calc(10px/**/ + /**/2px)", 12.0),
+        ("calc(10px /**/+/**/ 2px)", 12.0),
+        ("min(10px/**/,/**/20px)", 10.0),
+        ("calc(10px)/*tail*/", 10.0),
+        ("round(up/**/,/**/11px, 5px)", 15.0),
+    ] {
+        let value = parse_length(source);
+        assert!(!matches!(value, CssLength::Auto), "{source}");
+        assert_eq!(
+            parse_length(&crate::css::parser::strip_css_comments(source)),
+            value,
+            "normalized {source}"
+        );
+        assert!(
+            (resolve(&value, 100.0, 800.0) - expected).abs() < 0.001,
+            "{source}: {value:?}"
+        );
+    }
+    for source in [
+        "calc(10px/**/+/**/2px)",
+        "calc(10px/* space */+/* space */2px)",
+        "calc(10/**/px)",
+        "calc(1/**/0px)",
+        "calc(si/**/n(90deg) * 10px)",
+        "calc(10px/*unterminated)",
+    ] {
+        assert_eq!(parse_length(source), CssLength::Auto, "{source}");
+        assert_eq!(
+            parse_length(&crate::css::parser::strip_css_comments(source)),
+            CssLength::Auto,
+            "normalized {source}"
+        );
+    }
+}
+
+#[test]
+fn environment_functions_preserve_names_indices_and_complete_fallbacks() {
+    for (source, expected) in [
+        ("ENV(safe-area-inset-top, 12px)", 0.0),
+        ("env(safe-area-inset-top, \"text)\")", 0.0),
+        ("calc(env(safe-area-inset-top, \"text)\") + 2px)", 2.0),
+        (r"e\6e v(safe-area-inset-top, 12px)", 0.0),
+        (r"env(safe-area-inset-\74 op, 12px)", 0.0),
+        ("env(SAFE-AREA-INSET-TOP, 12px)", 12.0),
+        ("env(safe-area-inset-top 0, 12px)", 12.0),
+        ("env(viewport-segment-width 0 1, 12px)", 12.0),
+        ("env(/*before*/unknown/**/, min(12px, 20px))", 12.0),
+        (r"calc(e\6e v(unknown, min(10px, 20px)) + 2px)", 12.0),
+    ] {
+        let value = parse_length(source);
+        assert!(!matches!(value, CssLength::Auto), "{source}");
+        assert!(
+            (resolve(&value, 100.0, 800.0) - expected).abs() < 0.001,
+            "{source}: {value:?}"
+        );
+    }
+    for source in [
+        "env(unknown, 10px, 20px)",
+        "env(, 10px)",
+        "env(1, 10px)",
+        "env(unknown -1, 10px)",
+        "env(unknown 1.0, 10px)",
+        "env(unknown 1e0, 10px)",
+        "env(unknown 1px, 10px)",
+        "env(inherit, 10px)",
+        "env(unknown, 10px)extra",
+        "env(safe-area-inset-top, [mismatched})",
+    ] {
+        assert_eq!(parse_length(source), CssLength::Auto, "{source}");
+    }
+    assert_eq!(
+        parse_color("ENV(SAFE-AREA-INSET-TOP, red)"),
+        Some(Color::rgb(255, 0, 0))
+    );
+    assert_eq!(
+        parse_color(r"e\6e v(unknown, rgb(255, 0, 0))"),
+        Some(Color::rgb(255, 0, 0))
+    );
+    assert_eq!(parse_color("env(safe-area-inset-top, red)"), None);
+    assert_eq!(parse_color("env(unknown, red, blue)"), None);
+    assert_eq!(parse_color("env(, red)"), None);
+}
 
 fn resolve(val: &CssLength, containing: f32, vw: f32) -> f32 {
     val.resolve_vp(16.0, containing, 16.0, vw, 600.0)
@@ -485,7 +711,10 @@ fn invalid_background_image_layer_preserves_the_previous_declaration() {
         "url(first.png), url(second.png)",
     );
     assert_eq!(style.background_image_url, "first.png");
-    assert_eq!(style.rare().additional_background_layers[0].image_url, "second.png");
+    assert_eq!(
+        style.rare().additional_background_layers[0].image_url,
+        "second.png"
+    );
 
     for invalid in [
         "url(replacement.png), bogus",
@@ -513,8 +742,14 @@ fn background_shorthand_keeps_parentheses_in_quoted_url() {
         "URL('/assets/gradient(foo)bar).png') no-repeat center",
     );
     assert_eq!(style.background_image_url, "/assets/gradient(foo)bar).png");
-    assert_eq!(style.background_position_x, crate::types::CssLength::Percent(50.0));
-    assert_eq!(style.background_position_y, crate::types::CssLength::Percent(50.0));
+    assert_eq!(
+        style.background_position_x,
+        crate::types::CssLength::Percent(50.0)
+    );
+    assert_eq!(
+        style.background_position_y,
+        crate::types::CssLength::Percent(50.0)
+    );
 }
 
 #[test]

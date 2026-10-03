@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CSS math comment boundaries</title>
+<style>
+  body { margin: 0; font: 16px/24px sans-serif }
+  .case { width: 280px; margin: 12px; padding: 4px; border: 3px solid green }
+  #multiply { padding: calc(/*before*/10px/*left*/ * /*right*/2/*after*/) }
+  #divide { padding: calc(10px/**//2) }
+  #sum { padding: calc(10px/**/ + /**/2px) }
+  #missing-space { padding: calc(10px/* space */+/* space */2px) }
+  #split-unit { padding: calc(10/**/px) }
+  #minimum { padding: min(10px/**/,/**/20px) }
+  #variable { --amount: calc(10px/**//2); padding: var(--amount) }
+  @supports (padding: calc(10px/**//2)) { #supports { padding: 5px } }
+</style>
+<div class="case" id="multiply">Commented multiplication</div>
+<div class="case" id="divide">Division after a comment</div>
+<div class="case" id="sum">Actual whitespace around plus</div>
+<div class="case" id="missing-space">Whitespace inside a comment is ignored</div>
+<div class="case" id="split-unit">Comments cannot join a dimension</div>
+<div class="case" id="minimum">Commented minimum arguments</div>
+<div class="case" id="variable">Variable calculation</div>
+<div class="case" id="supports">Commented feature query</div>

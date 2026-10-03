@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Box Length Grammar</title>
+<style>
+body { font-family: sans-serif; margin: 32px; }
+.case { width: 240px; border: 1px solid green; background: #eef8ee; }
+.physical { margin: 1px 2px 3px 4px; padding: 5px 6px 7px 8px; }
+.physical { margin: 8px broken; padding: 9px -1px; }
+.inline { margin-left: 12px; padding-left: 18px; }
+.logical { direction: rtl; margin-inline: 3px 4px; padding-inline: 5px 6px; }
+.logical { margin-inline: 9px broken; padding-inline: 9px -1px; }
+.variable { margin: 15px; padding: 12px; --bad: 8px broken; }
+.variable { margin: var(--bad); padding: var(--bad); }
+.reset { direction: rtl; margin-inline: 20px 30px; padding-inline: 10px 15px; }
+.reset { margin-inline: var(--missing); padding-inline: var(--missing); }
+.math { padding: calc(-2px) calc(5px + 3px); margin: -2px auto; }
+</style>
+<h1>Box Length Grammar</h1>
+<div class="case physical">Invalid shorthands leave all four previous sides unchanged.</div>
+<div class="case inline" style="margin-left:8;padding-left:auto">Invalid inline values keep the previous margins and padding.</div>
+<div class="case logical">Logical start and end follow RTL. Invalid pairs are atomic.</div>
+<div class="case variable">Invalid variables reset every side to zero.</div>
+<div class="case reset">Missing variables reset the logical sides to zero.</div>
+<div class="case math">Calculated negative padding clamps to zero. Negative margins remain valid.</div>
+</html>

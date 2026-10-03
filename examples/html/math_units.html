@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CSS math numeric tokens</title>
+<style>
+  body { margin: 0; font: 16px/24px sans-serif }
+  .case { width: 260px; margin: 12px; padding: 4px; border: 3px solid green }
+  #hex { padding: calc(10\70 x + 2px) }
+  #terminator { padding: calc(10p\78  + 2px) }
+  #relative { padding: calc(.5\72 em * 2) }
+  #minimum { padding: min(1e1p\78, 20px) }
+  #angle { padding: calc(sin(90d\65 g) * 10px) }
+  #invalid { padding: calc(10p\78 + 2px) }
+  #variable { --space: 10\70 x; padding: calc(var(--space) + 2px) }
+  @supports (padding: calc(10\70 x + 2px)) { #supports { padding: 12px } }
+  #function { padding: c\61 lc(10px + 2px) }
+  #nested { padding: calc(m\69 n(10px, 20px) + 2px) }
+  #rounding { padding: r\6f und(\75 p, 11px, 5px) }
+  #unbounded { padding: clamp(n\6f ne, 12px, n\6f ne) }
+  #constant { padding: calc(s\69 n(p\69 / 2) * 10px) }
+  #function-gap { padding: c\61 lc (10px) }
+  @supports (padding: c\61 lc(10px + 2px)) { #escaped-supports { padding: 12px } }
+</style>
+<div class="case" id="hex">Hex unit in calculation</div>
+<div class="case" id="terminator">Escape and operator whitespace</div>
+<div class="case" id="relative">Relative unit in multiplication</div>
+<div class="case" id="minimum">Escaped unit in minimum</div>
+<div class="case" id="angle">Escaped angle in trigonometry</div>
+<div class="case" id="invalid">Missing operator whitespace is invalid</div>
+<div class="case" id="variable">Variable calculation</div>
+<div class="case" id="supports">Math feature query</div>
+<div class="case" id="function">Escaped function name</div>
+<div class="case" id="nested">Escaped nested function</div>
+<div class="case" id="rounding">Escaped rounding strategy</div>
+<div class="case" id="unbounded">Escaped unbounded keywords</div>
+<div class="case" id="constant">Escaped math constant</div>
+<div class="case" id="function-gap">Separated name is not a function</div>
+<div class="case" id="escaped-supports">Escaped function feature query</div>

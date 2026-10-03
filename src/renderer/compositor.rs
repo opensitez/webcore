@@ -40,6 +40,7 @@ pub struct FixedSurface {
     pub scale: f32,
     viewport_width: u32,
     viewport_height: u32,
+    row_bands: Vec<(u32, u32)>,
 }
 
 impl FixedSurface {
@@ -50,15 +51,17 @@ impl FixedSurface {
         let mut top = viewport_height;
         let mut right = 0;
         let mut bottom = 0;
-        for (index, pixel) in surface.data().chunks_exact(4).enumerate() {
-            if pixel[3] != 0 {
-                let x = index as u32 % viewport_width;
-                let y = index as u32 / viewport_width;
-                left = left.min(x);
-                top = top.min(y);
-                right = right.max(x + 1);
-                bottom = bottom.max(y + 1);
-            }
+        let mut occupied_rows = vec![false; viewport_height as usize];
+        for (y, row) in surface.data().chunks_exact(viewport_width as usize * 4).enumerate() {
+            let Some(first) = row.chunks_exact(4).position(|pixel| pixel[3] != 0) else {
+                continue;
+            };
+            let last = row.chunks_exact(4).rposition(|pixel| pixel[3] != 0).unwrap();
+            occupied_rows[y] = true;
+            left = left.min(first as u32);
+            top = top.min(y as u32);
+            right = right.max(last as u32 + 1);
+            bottom = bottom.max(y as u32 + 1);
         }
         if right == viewport_width && bottom == viewport_height && left == 0 && top == 0 {
             return Self {
@@ -68,6 +71,7 @@ impl FixedSurface {
                 scale,
                 viewport_width,
                 viewport_height,
+                row_bands: occupied_row_bands(&occupied_rows),
             };
         }
         if right <= left || bottom <= top {
@@ -78,6 +82,7 @@ impl FixedSurface {
                 scale,
                 viewport_width,
                 viewport_height,
+                row_bands: Vec::new(),
             };
         }
         let width = right - left;
@@ -97,6 +102,7 @@ impl FixedSurface {
             scale,
             viewport_width,
             viewport_height,
+            row_bands: occupied_row_bands(&occupied_rows[top as usize..bottom as usize]),
         }
     }
 
@@ -107,14 +113,66 @@ impl FixedSurface {
     }
 
     pub fn composite(&self, target: &mut tiny_skia::Pixmap) {
-        target.draw_pixmap(
-            self.x,
-            self.y,
-            self.image.as_ref(),
-            &tiny_skia::PixmapPaint::default(),
-            tiny_skia::Transform::identity(),
-            None,
-        );
+        let stride = self.image.width() as usize * 4;
+        for &(top, bottom) in &self.row_bands {
+            let image = tiny_skia::PixmapRef::from_bytes(
+                &self.image.data()[top as usize * stride..bottom as usize * stride],
+                self.image.width(), bottom - top,
+            ).expect("bounded fixed surface band");
+            target.draw_pixmap(
+                self.x,
+                self.y + top as i32,
+                image,
+                &tiny_skia::PixmapPaint::default(),
+                tiny_skia::Transform::identity(),
+                None,
+            );
+        }
+    }
+}
+
+fn occupied_row_bands(rows: &[bool]) -> Vec<(u32, u32)> {
+    let mut bands = Vec::new();
+    let mut start = None;
+    for (row, &occupied) in rows.iter().enumerate() {
+        if occupied && start.is_none() {
+            start = Some(row as u32);
+        } else if !occupied && let Some(top) = start.take() {
+            bands.push((top, row as u32));
+        }
+    }
+    if let Some(top) = start {
+        bands.push((top, rows.len() as u32));
+    }
+    // Highly fragmented artwork is cheaper as one draw.
+    if bands.len() > 16 {
+        vec![(bands[0].0, bands.last().unwrap().1)]
+    } else {
+        bands
+    }
+}
+
+#[test]
+fn fixed_surface_row_bands_match_full_blits() {
+    for fragmented in [false, true] {
+        let mut source = tiny_skia::Pixmap::new(64, 80).unwrap();
+        for y in 0..80 {
+            if (fragmented && y % 2 == 0) || (!fragmented && (y < 8 || y >= 72)) {
+                for x in 3..61 {
+                    source.pixels_mut()[(y * 64 + x) as usize] =
+                        tiny_skia::PremultipliedColorU8::from_rgba(35, 70, 100, 140).unwrap();
+                }
+            }
+        }
+        let layer = FixedSurface::from_viewport(source.clone(), 1.0);
+        assert_eq!(layer.row_bands.len(), if fragmented { 1 } else { 2 });
+        let mut expected = tiny_skia::Pixmap::new(64, 80).unwrap();
+        let mut actual = tiny_skia::Pixmap::new(64, 80).unwrap();
+        expected.fill(tiny_skia::Color::from_rgba8(80, 50, 30, 255));
+        actual.fill(tiny_skia::Color::from_rgba8(80, 50, 30, 255));
+        expected.draw_pixmap(0, 0, source.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
+        layer.composite(&mut actual);
+        assert_eq!(actual.data(), expected.data());
     }
 }
 

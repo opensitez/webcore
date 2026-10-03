@@ -5096,6 +5096,113 @@ fn render_display_list_text_clipped_by_overflow_hidden() {
 }
 
 #[test]
+fn transformed_repeating_gradient_intersects_its_rounded_and_ancestor_clips() {
+    let (_, list) = build(
+        "<style>body{margin:0}.outer{position:relative;overflow:hidden;\
+         margin:40px;width:100px;height:80px}.tile{position:absolute;left:0;top:0;\
+         width:60px;height:60px;border-radius:16px;transform:translateX(80px);\
+         background-image:linear-gradient(red,red);background-size:20px 20px}</style>\
+         <main><div class='outer'><div class='tile'></div></div></main>",
+    );
+    for scale in [1.0, 2.0] {
+        let mut pixels =
+            tiny_skia::Pixmap::new((240.0 * scale) as u32, (160.0 * scale) as u32).unwrap();
+        pixels.fill(tiny_skia::Color::WHITE);
+        replay(&list, &mut pixels, scale);
+        for (x, y, color) in [
+            (130.0, 70.0, (255, 0, 0)),
+            (150.0, 70.0, (255, 255, 255)),
+            (121.0, 41.0, (255, 255, 255)),
+        ] {
+            let p = pixels
+                .pixel((x * scale) as u32, (y * scale) as u32)
+                .unwrap();
+            assert_eq!(
+                (p.red(), p.green(), p.blue()),
+                color,
+                "scale={scale}, at ({x}, {y})"
+            );
+        }
+    }
+}
+
+#[test]
+fn absolute_paint_bypasses_only_clips_between_it_and_its_containing_block() {
+    let (_, list) = build(
+        "<style>body{margin:0}.outer{position:relative;width:200px;height:80px;\
+         margin:40px;overflow:hidden}.intermediate{width:20px;height:20px;overflow:hidden}\
+         .child{position:absolute;left:100px;top:0;width:140px;height:40px;\
+         background:red}</style><main><div class='outer'><div class='intermediate'>\
+         <div class='child'></div></div></div></main>",
+    );
+    let mut pixels = tiny_skia::Pixmap::new(320, 160).unwrap();
+    pixels.fill(tiny_skia::Color::WHITE);
+    replay(&list, &mut pixels, 1.0);
+    let visible = pixels.pixel(150, 50).unwrap();
+    assert_eq!(
+        (visible.red(), visible.green(), visible.blue()),
+        (255, 0, 0)
+    );
+    let clipped = pixels.pixel(250, 50).unwrap();
+    assert_eq!(
+        (clipped.red(), clipped.green(), clipped.blue()),
+        (255, 255, 255)
+    );
+}
+
+#[test]
+fn animated_gradient_keeps_its_ancestor_overflow_clip() {
+    let (_, list) = build(
+        "<style>body{margin:0}.box{position:relative;overflow:hidden;border-radius:16px;\
+         width:200px;height:80px;margin:40px;background:#e9eaf2}.shine{position:absolute;\
+         inset:0;transform:translateX(-40px)}.shine::before{content:'';display:block;\
+         width:40px;height:100%;background:linear-gradient(to right,transparent,red)}</style>\
+         <main><section><div class='box'><div class='shine'></div></div></section></main>",
+    );
+    let node_id = list
+        .commands
+        .iter()
+        .find_map(|cmd| match cmd {
+            PaintCmd::PushTransform { node_id, .. } => Some(*node_id),
+            _ => None,
+        })
+        .unwrap();
+    let mut font_system = cosmic_text::FontSystem::new();
+    let mut swash_cache = cosmic_text::SwashCache::new();
+    for scale in [1.0, 2.0] {
+        for translation in [-40.0, -20.0, 80.0, 190.0, 200.0] {
+            let mut pixmap =
+                tiny_skia::Pixmap::new((320.0 * scale) as u32, (160.0 * scale) as u32).unwrap();
+            pixmap.fill(tiny_skia::Color::WHITE);
+            let overrides = std::collections::HashMap::from([(
+                node_id,
+                [1.0, 0.0, 0.0, 1.0, translation, 0.0],
+            )]);
+            replay_with_scroll_and_transform_overrides(
+                &list,
+                &mut pixmap,
+                scale,
+                &mut font_system,
+                &mut swash_cache,
+                0.0,
+                0.0,
+                &overrides,
+            );
+            for (x, y) in [(30.0, 70.0), (250.0, 70.0), (41.0, 41.0)] {
+                let pixel = pixmap
+                    .pixel((x * scale) as u32, (y * scale) as u32)
+                    .unwrap();
+                assert_eq!(
+                    (pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()),
+                    (255, 255, 255, 255),
+                    "shine escaped clip: scale={scale}, translation={translation}, at ({x}, {y})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn replay_clip_inside_transform_moves_with_transformed_content() {
     let mut list = DisplayList::new();
     list.push(PaintCmd::PushTransform {
@@ -5423,6 +5530,93 @@ fn gradient_stops(list: &DisplayList) -> Option<Vec<(crate::types::Color, f32)>>
         PaintCmd::Gradient { stops, .. } => Some(stops.clone()),
         _ => None,
     })
+}
+
+#[test]
+fn gradient_lengths_resolve_against_used_image_geometry() {
+    let cases = [
+        (
+            "width:200px",
+            "linear-gradient(to right,red 40px,green,blue 80%)",
+            vec![0.2, 0.5, 0.8],
+        ),
+        (
+            "width:100px",
+            "linear-gradient(to right,red 40px,green,blue 80%)",
+            vec![0.4, 0.6, 0.8],
+        ),
+        (
+            "width:100px",
+            "linear-gradient(to right,red 100px,blue 50%)",
+            vec![1.0, 1.0],
+        ),
+        (
+            "width:400px",
+            "linear-gradient(to right,red 100px,blue 50%)",
+            vec![0.25, 0.5],
+        ),
+        (
+            "width:200px",
+            "linear-gradient(to right,red 20px 60px,blue)",
+            vec![0.1, 0.3, 1.0],
+        ),
+        (
+            "width:200px",
+            "linear-gradient(to right,red calc(10% + 20px),blue)",
+            vec![0.2, 1.0],
+        ),
+        (
+            "width:200px;font-size:20px",
+            "linear-gradient(to right,red 2em,blue)",
+            vec![0.2, 1.0],
+        ),
+        (
+            "width:200px;background-size:100px 100px;background-repeat:no-repeat",
+            "linear-gradient(to right,red 20px,blue)",
+            vec![0.2, 1.0],
+        ),
+        (
+            "width:200px",
+            "radial-gradient(ellipse 100px 50px,red 25px,blue)",
+            vec![0.25, 1.0],
+        ),
+        (
+            "width:100px",
+            "linear-gradient(45deg,red 50px,blue)",
+            vec![50.0 / (100.0_f32 * 2.0_f32.sqrt()), 1.0],
+        ),
+    ];
+    for (geometry, image, expected) in cases {
+        let (_, list) = build(&format!(
+            "<style>body{{margin:0}}div{{height:100px;{geometry};background-image:{image}}}</style><div></div>"
+        ));
+        let actual = gradient_stops(&list).expect(image);
+        assert_eq!(actual.len(), expected.len(), "{image}");
+        for ((_, actual), expected) in actual.iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 0.001,
+                "{geometry}; {image}: {actual} != {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn layered_gradient_lengths_use_each_layers_geometry() {
+    let (_, list) = build(
+        "<style>body{margin:0}div{width:200px;height:100px;background-image:linear-gradient(to right,red 20px,blue),linear-gradient(to right,green 20px,blue);background-size:100px 100px,200px 100px;background-repeat:no-repeat}</style><div></div>",
+    );
+    let positions: Vec<_> = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            PaintCmd::Gradient { stops, .. } => Some(stops[0].1),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(positions.len(), 2);
+    assert!((positions[0] - 0.1).abs() < 0.001);
+    assert!((positions[1] - 0.2).abs() < 0.001);
 }
 
 fn gradient_rect(list: &DisplayList) -> Option<crate::types::Rect> {
@@ -8903,6 +9097,183 @@ fn straight_border_segments_paint_dashed_dotted_and_double_styles() {
 }
 
 #[test]
+fn ordinary_patterned_borders_preserve_gaps_on_all_sides_and_scales() {
+    for scale in [1.0, 2.0] {
+        for radius in [0.0, 16.0] {
+            for style in [2, 3] {
+                let list = DisplayList {
+                    commands: vec![PaintCmd::Border {
+                        rect: Rect::new(8.0, 8.0, 96.0, 64.0),
+                        widths: [6.0; 4],
+                        colors: [Color::rgba(0, 180, 0, 255); 4],
+                        styles: [style; 4],
+                        radii: [radius; 4],
+                        radii_y: [radius; 4],
+                        opacity: 1.0,
+                    }],
+                    has_scroll_dependent_sticky: false,
+                    fixed_commands: Vec::new(),
+                };
+                let mut pixmap =
+                    tiny_skia::Pixmap::new((120.0 * scale) as u32, (88.0 * scale) as u32).unwrap();
+                replay(&list, &mut pixmap, scale);
+                let alpha = |x: f32, y: f32| {
+                    let x = (x * scale) as usize;
+                    let y = (y * scale) as usize;
+                    pixmap.data()[(y * pixmap.width() as usize + x) * 4 + 3]
+                };
+                for side in 0..4 {
+                    let values: Vec<_> = (26..54)
+                        .map(|at| match side {
+                            0 => alpha(at as f32, 11.0),
+                            1 => alpha(101.0, at as f32),
+                            2 => alpha(at as f32, 69.0),
+                            _ => alpha(11.0, at as f32),
+                        })
+                        .collect();
+                    assert!(
+                        values.iter().any(|alpha| *alpha > 200),
+                        "paint: {style}/{radius}/{scale}/{side}"
+                    );
+                    assert!(
+                        values.iter().any(|alpha| *alpha == 0),
+                        "gaps: {style}/{radius}/{scale}/{side}"
+                    );
+                }
+                assert_eq!(alpha(56.0, 40.0), 0, "border must not fill its interior");
+                assert_eq!(alpha(5.0, 40.0), 0, "border must not escape its outer box");
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_border_patterns_do_not_turn_solid_or_paint_missing_sides() {
+    let list = DisplayList {
+        commands: vec![PaintCmd::Border {
+            rect: Rect::new(8.0, 8.0, 96.0, 64.0),
+            widths: [6.0, 6.0, 6.0, 0.0],
+            colors: [Color::rgba(0, 180, 0, 255); 4],
+            styles: [2, 3, 1, 0],
+            radii: [0.0; 4],
+            radii_y: [0.0; 4],
+            opacity: 1.0,
+        }],
+        has_scroll_dependent_sticky: false,
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(120, 88).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let alpha = |x: usize, y: usize| pixmap.data()[(y * 120 + x) * 4 + 3];
+    for side in [0, 1] {
+        let values: Vec<_> = (26..54)
+            .map(|at| {
+                if side == 0 {
+                    alpha(at, 11)
+                } else {
+                    alpha(101, at)
+                }
+            })
+            .collect();
+        assert!(values.iter().any(|alpha| *alpha > 200));
+        assert!(values.iter().any(|alpha| *alpha == 0));
+    }
+    for x in 26..54 {
+        assert!(alpha(x, 69) > 200);
+    }
+    assert_eq!(alpha(9, 40), 0);
+}
+
+#[test]
+fn uniform_double_borders_keep_two_stripes_and_a_gap() {
+    for scale in [1.0, 2.0] {
+        for radius in [0.0, 16.0] {
+            let list = DisplayList {
+                commands: vec![PaintCmd::Border {
+                    rect: Rect::new(8.0, 8.0, 96.0, 64.0),
+                    widths: [6.0; 4],
+                    colors: [Color::rgba(0, 180, 0, 255); 4],
+                    styles: [4; 4],
+                    radii: [radius; 4],
+                    radii_y: [radius; 4],
+                    opacity: 1.0,
+                }],
+                has_scroll_dependent_sticky: false,
+                fixed_commands: Vec::new(),
+            };
+            let mut pixmap =
+                tiny_skia::Pixmap::new((120.0 * scale) as u32, (88.0 * scale) as u32).unwrap();
+            replay(&list, &mut pixmap, scale);
+            let alpha = |x: f32, y: f32| {
+                pixmap.data()[(((y * scale) as usize * pixmap.width() as usize)
+                    + (x * scale) as usize)
+                    * 4
+                    + 3]
+            };
+            for (x, y) in [
+                (48.0, 9.0),
+                (48.0, 13.0),
+                (48.0, 67.0),
+                (48.0, 71.0),
+                (9.0, 40.0),
+                (13.0, 40.0),
+                (99.0, 40.0),
+                (103.0, 40.0),
+            ] {
+                assert!(alpha(x, y) > 200, "stripe: {radius}/{scale}/{x}/{y}");
+            }
+            for (x, y) in [
+                (48.0, 11.0),
+                (48.0, 69.0),
+                (11.0, 40.0),
+                (101.0, 40.0),
+                (48.0, 40.0),
+                (5.0, 40.0),
+            ] {
+                assert_eq!(alpha(x, y), 0, "gap: {radius}/{scale}/{x}/{y}");
+            }
+        }
+    }
+}
+
+#[test]
+fn patterned_border_replay_preserves_parent_clip_and_opacity() {
+    let list = DisplayList {
+        commands: vec![
+            PaintCmd::PushClip {
+                rect: Rect::new(0.0, 0.0, 48.0, 88.0),
+                radius: [0.0; 4],
+                radius_y: [0.0; 4],
+            },
+            PaintCmd::Border {
+                rect: Rect::new(8.0, 8.0, 96.0, 64.0),
+                widths: [6.0; 4],
+                colors: [Color::rgba(0, 180, 0, 255); 4],
+                styles: [3; 4],
+                radii: [16.0; 4],
+                radii_y: [16.0; 4],
+                opacity: 0.5,
+            },
+            PaintCmd::PopClip,
+        ],
+        has_scroll_dependent_sticky: false,
+        fixed_commands: Vec::new(),
+    };
+    let mut pixmap = tiny_skia::Pixmap::new(120, 88).unwrap();
+    replay(&list, &mut pixmap, 1.0);
+    let alpha = |x: usize, y: usize| pixmap.data()[(y * 120 + x) * 4 + 3];
+    assert!((8..48).any(|x| alpha(x, 11) > 100));
+    for y in 0..88 {
+        for x in 0..120 {
+            assert!(alpha(x, y) <= 128, "opacity at {x},{y}");
+            if x >= 48 {
+                assert_eq!(alpha(x, y), 0, "parent clip at {x},{y}");
+            }
+        }
+    }
+}
+
+#[test]
 fn collapsed_table_winning_double_border_reaches_replay() {
     let (_, list) = build(
         "<style>body{margin:0}table{border-collapse:collapse}</style>\
@@ -8946,6 +9317,65 @@ fn straight_border_segments_shade_raised_and_sunken_styles() {
     assert!(groove.0 < groove.1);
     assert!(ridge.0 > ridge.1);
     assert!(render(7).0 < render(8).0);
+}
+
+#[test]
+fn ordinary_square_bands_preserve_unequal_widths_and_shading_orientation() {
+    for scale in [1.0, 2.0] {
+        for style in 4..=8 {
+            let list = DisplayList {
+                commands: vec![PaintCmd::Border {
+                    rect: Rect::new(8.0, 8.0, 96.0, 64.0),
+                    widths: [6.0, 12.0, 9.0, 3.0],
+                    colors: [Color::rgba(100, 100, 100, 255); 4],
+                    styles: [style; 4],
+                    radii: [0.0; 4],
+                    radii_y: [0.0; 4],
+                    opacity: 1.0,
+                }],
+                has_scroll_dependent_sticky: false,
+                fixed_commands: Vec::new(),
+            };
+            let mut pixmap =
+                tiny_skia::Pixmap::new((120.0 * scale) as u32, (88.0 * scale) as u32).unwrap();
+            replay(&list, &mut pixmap, scale);
+            let pixel = |x: f32, y: f32| {
+                let offset =
+                    (((y * scale) as usize * pixmap.width() as usize) + (x * scale) as usize) * 4;
+                (pixmap.data()[offset], pixmap.data()[offset + 3])
+            };
+            let outer = [(48.0, 8.0), (103.0, 40.0), (48.0, 71.0), (8.0, 40.0)];
+            let inner = [(48.0, 13.0), (93.0, 40.0), (48.0, 63.0), (10.0, 40.0)];
+            for side in 0..4 {
+                let near = pixel(outer[side].0, outer[side].1);
+                let far = pixel(inner[side].0, inner[side].1);
+                assert_eq!(near.1, 255, "outer alpha: {style}/{side}/{scale}");
+                assert_eq!(far.1, 255, "inner alpha: {style}/{side}/{scale}");
+                if style == 4 {
+                    assert_eq!(near.0, 100);
+                    assert_eq!(far.0, 100);
+                } else {
+                    let light = (style == 6 || style == 8) == matches!(side, 0 | 3);
+                    assert_eq!(near.0, if light { 162 } else { 60 });
+                    assert_eq!(
+                        far.0,
+                        if matches!(style, 5 | 6) {
+                            if light { 60 } else { 162 }
+                        } else {
+                            near.0
+                        }
+                    );
+                }
+            }
+            if style == 4 {
+                for (x, y) in [(48.0, 11.0), (98.0, 40.0), (48.0, 67.0), (9.0, 40.0)] {
+                    assert_eq!(pixel(x, y).1, 0, "double gap: {scale}/{x}/{y}");
+                }
+            }
+            assert_eq!(pixel(48.0, 40.0).1, 0);
+            assert_eq!(pixel(5.0, 40.0).1, 0);
+        }
+    }
 }
 
 #[test]

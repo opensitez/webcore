@@ -169,6 +169,53 @@ fn opaque_physical_fill_matches_tiny_skia() {
     }
 }
 
+#[test]
+fn software_video_updates_retain_static_overlays_and_match_fresh_paint() {
+    let html = r#"<style>
+        body { margin:0; background:#234; }
+        video { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; }
+        #overlay { position:fixed; left:20px; top:30px; color:white;
+            font:20px sans-serif; text-shadow:0 2px 12px black; }
+        </style><video id="video" controls></video><div id="overlay">Video overlay</div>"#;
+    for scale in [1.0, 2.0] {
+        let mut renderer = Renderer::new();
+        renderer.use_tiles = true;
+        let mut doc = renderer.load_html_vp(html, 320.0, 180.0);
+        let id = doc.get_element_by_id("video").unwrap();
+        let mut actual = Pixmap::new((320.0 * scale) as u32, (180.0 * scale) as u32).unwrap();
+        let mut retained_overlay = None;
+        for frame in 0..3 {
+            let node = doc.find_webcore_mut(id).unwrap();
+            node.image_data = Some(std::sync::Arc::new([40 + frame * 50, 100, 180, 255].repeat(64)));
+            node.image_width = 8;
+            node.image_height = 8;
+            node.media_paused = false;
+            node.media_duration = Some(10.0);
+            node.media_current_time = frame as f32;
+            let rect = node.layout.content_rect;
+            if frame != 0 {
+                renderer.invalidate_paint_only_display_list();
+                renderer.invalidate_paint_rects([rect]);
+            }
+            renderer.render(&mut doc, &mut actual, scale);
+            let overlay = renderer.paint_segments.as_ref().unwrap().segments.iter()
+                .find(|segment| segment.list.commands.iter().any(|cmd| matches!(cmd,
+                    display_list::PaintCmd::TextShadow { text, .. } if text == "Video overlay")))
+                .unwrap().fixed_surface.as_ref().unwrap();
+            if let Some(previous) = retained_overlay {
+                assert_eq!(overlay.image.data().as_ptr(), previous, "static overlay was rerasterized");
+            }
+            retained_overlay = Some(overlay.image.data().as_ptr());
+            let mut reference = Renderer::new();
+            reference.use_tiles = true;
+            let mut expected = Pixmap::new(actual.width(), actual.height()).unwrap();
+            reference.render(&mut doc, &mut expected, scale);
+            let difference = actual.data().iter().zip(expected.data()).position(|(a, b)| a != b);
+            assert_eq!(difference, None, "frame={frame}, scale={scale}");
+        }
+    }
+}
+
 fn fill_viewport_clip(pixmap: &mut Pixmap, clip: Rect, scale: f32, color: tiny_skia::Color) {
     let x = (clip.x * scale).floor().max(0.0) as u32;
     let y = (clip.y * scale).floor().max(0.0) as u32;
@@ -1600,7 +1647,11 @@ impl Renderer {
         if self.use_tiles {
             for rect in &dirty_paint_rects {
                 self.tile_manager.invalidate_rect(rect);
-                if let Some(segments) = &mut self.paint_segments {
+                // Rebuilt command lists determine which segments changed.
+                // Invalidating them first destroys unchanged fixed overlays.
+                if !self.display_list_dirty
+                    && let Some(segments) = &mut self.paint_segments
+                {
                     segments.invalidate_rect(rect);
                 }
             }
@@ -1799,7 +1850,25 @@ impl Renderer {
                     if !animation_restore.is_empty() {
                         crate::css::restore_animation_overrides(&mut doc.root, animation_restore);
                     }
-                    for rect in &dirty_paint_rects {
+                    let mut segments = self
+                        .use_tiles
+                        .then(|| {
+                            compositor::PaintSegments::from_display_list(&paint_list, view_w, doc_h)
+                        })
+                        .flatten();
+                    if let (Some(new), Some(previous)) = (&mut segments, self.paint_segments.take())
+                    {
+                        new.retain_unchanged_rasters(previous);
+                    }
+                    // Large paint updates should composite retained layers;
+                    // a clipped replay would rerasterize all static overlays.
+                    let retained_layers = segments.is_some()
+                        && dirty_paint_rects.iter().any(|rect| {
+                            viewport_clip_from_doc_rect(
+                                *rect, doc.scroll_x, doc.scroll_y, view_w, view_h,
+                            ).is_some_and(|clip| clip.w * clip.h >= view_w * view_h * 0.5)
+                        });
+                    for rect in dirty_paint_rects.iter().filter(|_| !retained_layers) {
                         if let Some(clip) = viewport_clip_from_doc_rect(
                             *rect,
                             doc.scroll_x,
@@ -1820,20 +1889,10 @@ impl Renderer {
                             );
                         }
                     }
-                    let mut segments = self
-                        .use_tiles
-                        .then(|| {
-                            compositor::PaintSegments::from_display_list(&paint_list, view_w, doc_h)
-                        })
-                        .flatten();
-                    if let (Some(new), Some(previous)) = (&mut segments, self.paint_segments.take())
-                    {
-                        new.retain_unchanged_rasters(previous);
-                    }
                     self.paint_segments = segments;
                     self.cached_display_list = Some(paint_list);
                     replay_ms = replay_start.elapsed().as_millis();
-                    used_dirty_surface = true;
+                    used_dirty_surface = !retained_layers;
                     page_content_repainted = true;
                     self.display_list_dirty = false;
                     self.paint_only_display_list_dirty = false;

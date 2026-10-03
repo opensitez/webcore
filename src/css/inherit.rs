@@ -6,8 +6,113 @@ use super::*;
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
 
-/// Walk the box tree and apply `animation_overrides` (from `Document::tick_animations`)
-/// on top of the cascaded computed styles.
+pub(crate) fn copy_property_from_style(
+    style: &mut ComputedStyle,
+    parent: &ComputedStyle,
+    prop: &str,
+) {
+    // Cascade rollback snapshots can still contain deferred logical writes.
+    // Resolve those only on this uncommon path; computed parents need no copy.
+    if !parent.rare().logical_declarations.is_empty() {
+        let mut resolved = parent.clone();
+        super::apply::finalize_logical(&mut resolved);
+        copy_property_from_style(style, &resolved, prop);
+        return;
+    }
+    use properties::PropertyId::*;
+    let id = properties::resolve(prop);
+    if let Some((slot, aspect)) = super::apply::logical_border_property(id) {
+        let value = super::apply::logical_border_from_style(parent, slot, aspect);
+        style
+            .rare_mut()
+            .logical_declarations
+            .push(LogicalDeclaration::Border(value));
+        return;
+    }
+    let (slot, side) = match id {
+        MarginInlineStart => (
+            LogicalSlot::MarginInlineStart,
+            inline_start_side(parent.writing_mode, parent.direction),
+        ),
+        MarginInlineEnd => (
+            LogicalSlot::MarginInlineEnd,
+            opposite(inline_start_side(parent.writing_mode, parent.direction)),
+        ),
+        MarginBlockStart => (
+            LogicalSlot::MarginBlockStart,
+            block_start_side(parent.writing_mode),
+        ),
+        MarginBlockEnd => (
+            LogicalSlot::MarginBlockEnd,
+            opposite(block_start_side(parent.writing_mode)),
+        ),
+        PaddingInlineStart => (
+            LogicalSlot::PaddingInlineStart,
+            inline_start_side(parent.writing_mode, parent.direction),
+        ),
+        PaddingInlineEnd => (
+            LogicalSlot::PaddingInlineEnd,
+            opposite(inline_start_side(parent.writing_mode, parent.direction)),
+        ),
+        PaddingBlockStart => (
+            LogicalSlot::PaddingBlockStart,
+            block_start_side(parent.writing_mode),
+        ),
+        PaddingBlockEnd => (
+            LogicalSlot::PaddingBlockEnd,
+            opposite(block_start_side(parent.writing_mode)),
+        ),
+        InsetInlineStart => (
+            LogicalSlot::InsetInlineStart,
+            inline_start_side(parent.writing_mode, parent.direction),
+        ),
+        InsetInlineEnd => (
+            LogicalSlot::InsetInlineEnd,
+            opposite(inline_start_side(parent.writing_mode, parent.direction)),
+        ),
+        InsetBlockStart => (
+            LogicalSlot::InsetBlockStart,
+            block_start_side(parent.writing_mode),
+        ),
+        InsetBlockEnd => (
+            LogicalSlot::InsetBlockEnd,
+            opposite(block_start_side(parent.writing_mode)),
+        ),
+        _ => return copy_non_logical_property_from_style(style, parent, prop),
+    };
+    let value = match slot {
+        LogicalSlot::MarginInlineStart
+        | LogicalSlot::MarginInlineEnd
+        | LogicalSlot::MarginBlockStart
+        | LogicalSlot::MarginBlockEnd => match side {
+            PhysicalSide::Top => &parent.margin_top,
+            PhysicalSide::Right => &parent.margin_right,
+            PhysicalSide::Bottom => &parent.margin_bottom,
+            PhysicalSide::Left => &parent.margin_left,
+        },
+        LogicalSlot::PaddingInlineStart
+        | LogicalSlot::PaddingInlineEnd
+        | LogicalSlot::PaddingBlockStart
+        | LogicalSlot::PaddingBlockEnd => match side {
+            PhysicalSide::Top => &parent.padding_top,
+            PhysicalSide::Right => &parent.padding_right,
+            PhysicalSide::Bottom => &parent.padding_bottom,
+            PhysicalSide::Left => &parent.padding_left,
+        },
+        _ => match side {
+            PhysicalSide::Top => &parent.top,
+            PhysicalSide::Right => &parent.right,
+            PhysicalSide::Bottom => &parent.bottom,
+            PhysicalSide::Left => &parent.left,
+        },
+    };
+    style
+        .rare_mut()
+        .logical_declarations
+        .push(LogicalDeclaration::Length(slot, value.clone()));
+}
+
+/// Walk the box tree and apply animation overrides on the computed styles.
 pub fn apply_animation_overrides(
     node: &mut WebCore,
     overrides: &HashMap<u32, Vec<(String, String)>>,
@@ -236,7 +341,7 @@ pub(crate) fn copy_property_from_parent(
 
 /// Copy a single CSS property from another computed style into `style`.
 /// Used by `inherit` and cascade rollback keywords such as `revert`.
-pub(crate) fn copy_property_from_style(
+fn copy_non_logical_property_from_style(
     style: &mut ComputedStyle,
     parent: &ComputedStyle,
     prop: &str,
@@ -366,7 +471,7 @@ pub(crate) fn copy_property_from_style(
         _ => {
             let def = property_defs::get(properties::resolve(prop));
             for &longhand in def.longhands {
-                (property_defs::get(longhand).copy)(style, parent);
+                copy_property_from_style(style, parent, property_defs::get(longhand).name);
             }
             if def.longhands.is_empty() {
                 (def.copy)(style, parent);

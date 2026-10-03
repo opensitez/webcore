@@ -1882,6 +1882,175 @@ struct Layer {
     paint_bounds: Option<Rect>,
 }
 
+fn layer_pixel_region(bounds: Option<Rect>, width: u32, height: u32) -> Option<tiny_skia::IntRect> {
+    let bounds = bounds.unwrap_or(Rect::new(0.0, 0.0, width as f32, height as f32));
+    tiny_skia::IntRect::from_ltrb(
+        bounds.x.floor().max(0.0).min(width as f32) as i32,
+        bounds.y.floor().max(0.0).min(height as f32) as i32,
+        bounds.right().ceil().max(0.0).min(width as f32) as i32,
+        bounds.bottom().ceil().max(0.0).min(height as f32) as i32,
+    )
+}
+
+fn clear_layer_region(pixmap: &mut Pixmap, region: tiny_skia::IntRect) {
+    let stride = pixmap.width() as usize * 4;
+    let start = region.x() as usize * 4;
+    let end = start + region.width() as usize * 4;
+    for row in pixmap
+        .data_mut()
+        .chunks_exact_mut(stride)
+        .skip(region.y() as usize)
+        .take(region.height() as usize)
+    {
+        row[start..end].fill(0);
+    }
+}
+
+fn composite_opacity_region(
+    target: &mut Pixmap,
+    source: &Pixmap,
+    alpha: f32,
+    region: tiny_skia::IntRect,
+) {
+    // Equivalent to draw_pixmap, but retain the full source's coordinate system
+    // and restrict the raster bounds instead of copying a cropped bitmap.
+    let paint = Paint {
+        shader: tiny_skia::Pattern::new(
+            source.as_ref(),
+            tiny_skia::SpreadMode::Pad,
+            tiny_skia::FilterQuality::Nearest,
+            alpha,
+            Transform::identity(),
+        ),
+        anti_alias: false,
+        ..Paint::default()
+    };
+    target.fill_rect(region.to_rect(), &paint, Transform::identity(), None);
+}
+
+#[test]
+fn opacity_region_composite_matches_cropped_reference() {
+    let mut source = Pixmap::new(57, 43).unwrap();
+    for (index, pixel) in source.pixels_mut().iter_mut().enumerate() {
+        let alpha = (index % 256) as u8;
+        *pixel = tiny_skia::PremultipliedColorU8::from_rgba(alpha / 2, alpha / 3, alpha / 4, alpha)
+            .unwrap();
+    }
+    for opacity in [0.0, 0.17, 0.5, 1.0] {
+        for region in [
+            tiny_skia::IntRect::from_xywh(0, 0, 57, 43).unwrap(),
+            tiny_skia::IntRect::from_xywh(13, 7, 29, 21).unwrap(),
+            tiny_skia::IntRect::from_xywh(56, 42, 1, 1).unwrap(),
+        ] {
+            let mut reference = Pixmap::new(57, 43).unwrap();
+            reference.fill(tiny_skia::Color::from_rgba8(17, 89, 173, 127));
+            let mut actual = reference.clone();
+            reference.draw_pixmap(
+                region.x(),
+                region.y(),
+                source.clone_rect(region).unwrap().as_ref(),
+                &tiny_skia::PixmapPaint {
+                    opacity,
+                    quality: tiny_skia::FilterQuality::Nearest,
+                    ..Default::default()
+                },
+                Transform::identity(),
+                None,
+            );
+            composite_opacity_region(&mut actual, &source, opacity, region);
+            assert_eq!(
+                actual.data(),
+                reference.data(),
+                "opacity {opacity}, region {region:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn opacity_pool_clears_only_its_previous_paint_region() {
+    let mut surface = Pixmap::new(57, 43).unwrap();
+    surface.fill(tiny_skia::Color::WHITE);
+    let bounds = Rect::new(13.25, 7.25, 28.25, 20.25);
+    let region = layer_pixel_region(Some(bounds), 57, 43).unwrap();
+    clear_layer_region(&mut surface, region);
+    for y in 0..43 {
+        for x in 0..57 {
+            let cleared = x >= 13 && x < 42 && y >= 7 && y < 28;
+            assert_eq!(
+                surface.pixel(x, y).unwrap().alpha(),
+                if cleared { 0 } else { 255 }
+            );
+        }
+    }
+    assert!(layer_pixel_region(Some(Rect::new(70.0, 0.0, 5.0, 5.0)), 57, 43).is_none());
+}
+
+#[test]
+fn reused_opacity_surfaces_preserve_disjoint_nested_and_invisible_groups() {
+    let fill = |rect, color| PaintCmd::FillRect {
+        rect,
+        color,
+        radius: [0.0; 4],
+        radius_y: [0.0; 4],
+    };
+    let groups = [
+        (0.0, Rect::new(2.0, 2.0, 15.0, 15.0), Color::rgb(220, 0, 0)),
+        (
+            0.6,
+            Rect::new(27.25, 4.5, 15.0, 12.0),
+            Color::rgba(0, 160, 0, 190),
+        ),
+        (0.4, Rect::new(8.5, 29.25, 24.0, 8.0), Color::rgb(0, 0, 220)),
+        (
+            0.8,
+            Rect::new(19.0, 11.0, 12.0, 14.0),
+            Color::rgba(180, 80, 0, 90),
+        ),
+    ];
+    for scale in [1.0, 2.0] {
+        let mut expected = Pixmap::new(100, 90).unwrap();
+        expected.fill(tiny_skia::Color::WHITE);
+        let mut actual = expected.clone();
+        let mut commands = Vec::new();
+        for (alpha, rect, color) in groups {
+            let inner = [
+                PaintCmd::PushOpacity { alpha: 0.7 },
+                fill(rect, color),
+                PaintCmd::PopOpacity,
+            ];
+            let mut source = Pixmap::new(100, 90).unwrap();
+            replay_commands_inner(&inner, &mut source, scale, None, 0.0, 0.0, None, None, None);
+            expected.draw_pixmap(
+                0,
+                0,
+                source.as_ref(),
+                &tiny_skia::PixmapPaint {
+                    opacity: alpha,
+                    ..Default::default()
+                },
+                Transform::identity(),
+                None,
+            );
+            commands.push(PaintCmd::PushOpacity { alpha });
+            commands.extend(inner);
+            commands.push(PaintCmd::PopOpacity);
+        }
+        replay_commands_inner(
+            &commands,
+            &mut actual,
+            scale,
+            None,
+            0.0,
+            0.0,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(actual.data(), expected.data(), "scale {scale}");
+    }
+}
+
 fn replay_commands_inner(
     commands: &[PaintCmd],
     pixmap: &mut Pixmap,
@@ -2453,7 +2622,7 @@ fn replay_commands_on_surface(
         .into_iter()
         .collect();
     let mut layer_stack: Vec<Layer> = Vec::new();
-    let mut opacity_surface_pool: Vec<(Pixmap, bool)> = Vec::new();
+    let mut opacity_surface_pool: Vec<(Pixmap, Option<tiny_skia::IntRect>)> = Vec::new();
     let mut mask_stack: Vec<Vec<MaskLayer>> = Vec::new();
     let mut text_gradient_stack: Vec<&PaintCmd> = Vec::new();
 
@@ -2767,6 +2936,7 @@ fn replay_commands_on_surface(
                     widths[0] == widths[1] && widths[1] == widths[2] && widths[2] == widths[3];
                 let uniform_color =
                     colors[0] == colors[1] && colors[1] == colors[2] && colors[2] == colors[3];
+                let uniform_style = styles.iter().all(|style| *style == styles[0]);
 
                 let collapsed_inner =
                     rect.w <= widths[1] + widths[3] || rect.h <= widths[0] + widths[2];
@@ -2785,6 +2955,60 @@ fn replay_commands_on_surface(
                         ts,
                         clip_mask,
                     );
+                } else if !collapsed_inner
+                    && uniform_width
+                    && uniform_color
+                    && uniform_style
+                    && styles[0] == 4
+                    && widths[0] >= 3.0
+                    && colors[0].a != 0
+                {
+                    let stripe = widths[0] / 3.0;
+                    let mut paint = Paint::default();
+                    paint.set_color(to_sk_color(&apply_opacity(&colors[0], alpha)));
+                    paint.anti_alias = true;
+                    let mut stroke = tiny_skia::Stroke::default();
+                    stroke.width = stripe;
+                    // Two stripes and their intervening gap occupy the used border width.
+                    for inset in [stripe / 2.0, widths[0] - stripe / 2.0] {
+                        if let Some(path) = rounded_rect_path_corners_xy(
+                            rect.x + inset,
+                            rect.y + inset,
+                            rect.w - inset * 2.0,
+                            rect.h - inset * 2.0,
+                            radii.map(|radius| (radius - inset).max(0.0)),
+                            radii_y.map(|radius| (radius - inset).max(0.0)),
+                        ) {
+                            target.stroke_path(&path, &paint, &stroke, ts, clip_mask);
+                        }
+                    }
+                } else if !collapsed_inner
+                    && uniform_width
+                    && uniform_color
+                    && uniform_style
+                    && matches!(styles[0], 2 | 3)
+                    && widths[0] > 0.0
+                    && colors[0].a != 0
+                {
+                    let half = widths[0] / 2.0;
+                    if let Some(path) = rounded_rect_path_corners_xy(
+                        rect.x + half,
+                        rect.y + half,
+                        rect.w - widths[0],
+                        rect.h - widths[0],
+                        radii.map(|radius| (radius - half).max(0.0)),
+                        radii_y.map(|radius| (radius - half).max(0.0)),
+                    ) {
+                        paint_patterned_border_path(
+                            target,
+                            &path,
+                            widths[0],
+                            styles[0],
+                            apply_opacity(&colors[0], alpha),
+                            ts,
+                            clip_mask,
+                        );
+                    }
                 } else if max_r > 0.5 && collapsed_inner {
                     // Border-only shapes have no centerline to stroke. Keep
                     // their side wedges and clip them to the rounded exterior.
@@ -2814,6 +3038,8 @@ fn replay_commands_on_surface(
                 } else if max_r > 0.5
                     && uniform_width
                     && uniform_color
+                    && uniform_style
+                    && styles[0] == 1
                     && widths[0] > 0.0
                     && colors[0].a != 0
                 {
@@ -2868,6 +3094,18 @@ fn replay_commands_on_surface(
                                 (radii_y[3] - half).max(0.0),
                             ],
                         ) {
+                            if matches!(styles[side], 2 | 3) {
+                                paint_patterned_border_path(
+                                    target,
+                                    &path,
+                                    bw,
+                                    styles[side],
+                                    apply_opacity(&color, alpha),
+                                    ts,
+                                    clip_mask,
+                                );
+                                continue;
+                            }
                             let mut paint = Paint::default();
                             paint.set_color(to_sk_color(&apply_opacity(&color, alpha)));
                             paint.anti_alias = true;
@@ -2879,6 +3117,42 @@ fn replay_commands_on_surface(
                 } else {
                     for side in 0..4 {
                         if widths[side] <= 0.0 || colors[side].a == 0 {
+                            continue;
+                        }
+                        if matches!(styles[side], 4..=8) && !collapsed_inner {
+                            paint_square_border_bands(
+                                target,
+                                *rect,
+                                *widths,
+                                side,
+                                styles[side],
+                                apply_opacity(&colors[side], alpha),
+                                ts,
+                                clip_mask,
+                            );
+                            continue;
+                        }
+                        if matches!(styles[side], 2 | 3) && !collapsed_inner {
+                            let half = widths[side] / 2.0;
+                            if let Some(path) = rounded_rect_side_path(
+                                side,
+                                rect.x + half,
+                                rect.y + half,
+                                rect.w - widths[side],
+                                rect.h - widths[side],
+                                [0.0; 4],
+                                [0.0; 4],
+                            ) {
+                                paint_patterned_border_path(
+                                    target,
+                                    &path,
+                                    widths[side],
+                                    styles[side],
+                                    apply_opacity(&colors[side], alpha),
+                                    ts,
+                                    clip_mask,
+                                );
+                            }
                             continue;
                         }
                         if let Some(path) = border_side_path(*rect, *widths, side) {
@@ -3203,12 +3477,12 @@ fn replay_commands_on_surface(
             PaintCmd::PushOpacity { alpha } => {
                 let _opacity_timing = crate::profile::is_enabled()
                     .then(|| crate::profile::span(crate::profile::Phase::RasterOpacityPush));
-                if let Some((mut layer_pixmap, clear)) = opacity_surface_pool
+                if let Some((mut layer_pixmap, dirty_region)) = opacity_surface_pool
                     .pop()
-                    .or_else(|| Pixmap::new(pw, ph).map(|pm| (pm, true)))
+                    .or_else(|| Pixmap::new(pw, ph).map(|pm| (pm, None)))
                 {
-                    if !clear {
-                        layer_pixmap.fill(tiny_skia::Color::TRANSPARENT);
+                    if let Some(region) = dirty_region {
+                        clear_layer_region(&mut layer_pixmap, region);
                     }
                     layer_stack.push(Layer {
                         pixmap: layer_pixmap,
@@ -3223,50 +3497,22 @@ fn replay_commands_on_surface(
                 let _opacity_timing = crate::profile::is_enabled()
                     .then(|| crate::profile::span(crate::profile::Phase::RasterOpacityPop));
                 if let Some(layer) = layer_stack.pop() {
+                    let region = layer
+                        .has_content
+                        .then(|| layer_pixel_region(layer.paint_bounds, pw, ph))
+                        .flatten();
                     if !layer.has_content || layer.alpha == 0.0 {
-                        opacity_surface_pool.push((layer.pixmap, !layer.has_content));
+                        opacity_surface_pool.push((layer.pixmap, region));
                         continue;
                     }
                     let target = layer_stack
                         .last_mut()
                         .map(|l| &mut l.pixmap)
                         .unwrap_or(pixmap);
-                    let paint = tiny_skia::PixmapPaint {
-                        opacity: layer.alpha,
-                        blend_mode: tiny_skia::BlendMode::SourceOver,
-                        quality: tiny_skia::FilterQuality::Nearest,
-                    };
-                    let bounds = layer
-                        .paint_bounds
-                        .unwrap_or(Rect::new(0.0, 0.0, pw as f32, ph as f32));
-                    let region = tiny_skia::IntRect::from_ltrb(
-                        bounds.x.floor().max(0.0).min(pw as f32) as i32,
-                        bounds.y.floor().max(0.0).min(ph as f32) as i32,
-                        bounds.right().ceil().max(0.0).min(pw as f32) as i32,
-                        bounds.bottom().ceil().max(0.0).min(ph as f32) as i32,
-                    );
                     if let Some(region) = region {
-                        if region.width() == pw && region.height() == ph {
-                            target.draw_pixmap(
-                                0,
-                                0,
-                                layer.pixmap.as_ref(),
-                                &paint,
-                                Transform::identity(),
-                                None,
-                            );
-                        } else if let Some(source) = layer.pixmap.clone_rect(region) {
-                            target.draw_pixmap(
-                                region.x(),
-                                region.y(),
-                                source.as_ref(),
-                                &paint,
-                                Transform::identity(),
-                                None,
-                            );
-                        }
+                        composite_opacity_region(target, &layer.pixmap, layer.alpha, region);
                     }
-                    opacity_surface_pool.push((layer.pixmap, false));
+                    opacity_surface_pool.push((layer.pixmap, region));
                 }
             }
 
@@ -3857,20 +4103,19 @@ fn replay_commands_on_surface(
                 // exact. Several tiles share one mask instead: a per-tile path
                 // would round every internal tile edge as well.
                 let tile_mask = if tiled && max_r > 0.0 {
-                    build_clip_mask(
+                    clip_cache.rect(
                         clip,
                         radii,
                         radii_y,
                         mask_w,
                         mask_h,
-                        scale,
-                        active_scroll_x,
-                        active_scroll_y,
+                        ts,
+                        clip_mask_stack.last().and_then(|m| m.as_ref()),
                     )
                 } else {
                     None
                 };
-                let tile_mask_ref = tile_mask.as_ref().or(clip_mask);
+                let tile_mask_ref = tile_mask.as_ref().map(|m| m.mask.as_ref()).or(clip_mask);
 
                 // A degenerate positioning area next to a large painting area
                 // would spin here, so the tile count is capped.
@@ -5647,6 +5892,90 @@ fn border_side_path(rect: Rect, widths: [f32; 4], side: usize) -> Option<tiny_sk
     path.finish()
 }
 
+fn paint_patterned_border_path(
+    target: &mut Pixmap,
+    path: &tiny_skia::Path,
+    width: f32,
+    style: u8,
+    color: Color,
+    transform: Transform,
+    clip_mask: Option<&tiny_skia::Mask>,
+) {
+    if width <= 0.0 || !width.is_finite() || color.a == 0 {
+        return;
+    }
+    // CSS Backgrounds 3: dotted uses round dots; dashed uses square-ended dashes.
+    const DASH_LENGTH_IN_WIDTHS: f32 = 3.0;
+    const DASH_GAP_IN_WIDTHS: f32 = 1.0;
+    const DOT_SPACING_IN_WIDTHS: f32 = 2.0;
+    let mut stroke = tiny_skia::Stroke::default();
+    stroke.width = width;
+    stroke.dash = match style {
+        2 => tiny_skia::StrokeDash::new(
+            vec![width * DASH_LENGTH_IN_WIDTHS, width * DASH_GAP_IN_WIDTHS],
+            0.0,
+        ),
+        3 => {
+            stroke.line_cap = tiny_skia::LineCap::Round;
+            tiny_skia::StrokeDash::new(vec![0.0, width * DOT_SPACING_IN_WIDTHS], 0.0)
+        }
+        _ => return,
+    };
+    if stroke.dash.is_none() {
+        return;
+    }
+    let mut paint = Paint::default();
+    paint.set_color(to_sk_color(&color));
+    paint.anti_alias = true;
+    target.stroke_path(path, &paint, &stroke, transform, clip_mask);
+}
+
+fn paint_square_border_bands(
+    target: &mut Pixmap,
+    rect: Rect,
+    widths: [f32; 4],
+    side: usize,
+    style: u8,
+    color: Color,
+    transform: Transform,
+    clip_mask: Option<&tiny_skia::Mask>,
+) {
+    // Proportional insets preserve the shared miter between unequal adjacent widths.
+    let mut fill_band = |start: f32, end: f32, color: Color| {
+        let inset = widths.map(|width| width * start);
+        let band_rect = Rect::new(
+            rect.x + inset[3],
+            rect.y + inset[0],
+            rect.w - inset[1] - inset[3],
+            rect.h - inset[0] - inset[2],
+        );
+        if let Some(path) =
+            border_side_path(band_rect, widths.map(|width| width * (end - start)), side)
+        {
+            let mut paint = Paint::default();
+            paint.set_color(to_sk_color(&color));
+            paint.anti_alias = true;
+            target.fill_path(&path, &paint, FillRule::Winding, transform, clip_mask);
+        }
+    };
+    match style {
+        4 if widths[side] >= 3.0 => {
+            fill_band(0.0, 1.0 / 3.0, color);
+            fill_band(2.0 / 3.0, 1.0, color);
+        }
+        5 | 6 => {
+            let outer_is_light = (style == 6) == matches!(side, 0 | 3);
+            fill_band(0.0, 0.5, shade_border_color(color, outer_is_light));
+            fill_band(0.5, 1.0, shade_border_color(color, !outer_is_light));
+        }
+        7 | 8 => {
+            let is_light = (style == 8) == matches!(side, 0 | 3);
+            fill_band(0.0, 1.0, shade_border_color(color, is_light));
+        }
+        _ => fill_band(0.0, 1.0, color),
+    }
+}
+
 fn paint_straight_border_segment(
     target: &mut Pixmap,
     rect: Rect,
@@ -6564,6 +6893,66 @@ struct ShadowText<'a> {
     small_caps: bool,
 }
 
+#[test]
+fn clipped_local_text_shadows_match_full_viewport_blurs() {
+    let mut fonts = FontSystem::new();
+    let mut glyphs = SwashCache::new();
+    for scale in [1.0, 1.5, 2.0] {
+        for (x, y) in [(60.25, 48.5), (-6.0, 10.0), (240.0, 135.0)] {
+            let width = (320.0 * scale) as u32;
+            let height = (180.0 * scale) as u32;
+            let mut mask = tiny_skia::Mask::new(width, height).unwrap();
+            mask.fill_path(
+                &PathBuilder::from_rect(SkRect::from_xywh(12.0, 8.0, 268.0, 148.0).unwrap()),
+                FillRule::Winding,
+                true,
+                Transform::from_scale(scale, scale),
+            );
+            for (text, style, blur) in [("Video overlay", 0, 12.0), ("Italic shadow", 1, 3.0)] {
+                let shadow = ShadowText {
+                    text, font_family: "sans-serif", font_size: 19.0,
+                    font_weight: 600, font_style: style, font_stretch: 100.0,
+                    line_height: 26.0, color: Color::rgba(24, 48, 72, 185),
+                    blur, letter_spacing: 0.5, word_spacing: 1.0, small_caps: false,
+                };
+                let mut expected = Pixmap::new(width, height).unwrap();
+                let mut actual = Pixmap::new(width, height).unwrap();
+                expected.fill(tiny_skia::Color::from_rgba8(40, 60, 80, 255));
+                actual.fill(tiny_skia::Color::from_rgba8(40, 60, 80, 255));
+                paint_text_shadow(&mut expected, &mut fonts, &mut glyphs, scale, x, y, &shadow, Some(&mask), false);
+                paint_text_shadow(&mut actual, &mut fonts, &mut glyphs, scale, x, y, &shadow, Some(&mask), true);
+                let difference = actual.data().iter().zip(expected.data()).position(|(a, b)| a != b);
+                assert_eq!(difference, None, "scale={scale}, x={x}, y={y}, text={text}");
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "manual software video overlay benchmark"]
+fn benchmark_clipped_text_shadow_fallback() {
+    let mut fonts = FontSystem::new();
+    let mut glyphs = SwashCache::new();
+    let mut target = Pixmap::new(2560, 1800).unwrap();
+    let mut mask = tiny_skia::Mask::new(2560, 1800).unwrap();
+    mask.data_mut().fill(255);
+    let shadow = ShadowText {
+        text: "VP9 video playback", font_family: "sans-serif", font_size: 36.0,
+        font_weight: 700, font_style: 0, font_stretch: 100.0,
+        line_height: 44.0, color: Color::rgba(0, 0, 0, 220),
+        blur: 12.0, letter_spacing: 0.0, word_spacing: 0.0, small_caps: false,
+    };
+    for local in [false, true] {
+        paint_text_shadow(&mut target, &mut fonts, &mut glyphs, 2.0, 32.0, 700.0, &shadow, Some(&mask), local);
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            paint_text_shadow(&mut target, &mut fonts, &mut glyphs, 2.0, 32.0, 700.0, &shadow, Some(&mask), local);
+            std::hint::black_box(&target);
+        }
+        eprintln!("clipped text shadow local={local}: {:?} / 20", start.elapsed());
+    }
+}
+
 fn paint_text_shadow(
     target: &mut Pixmap,
     font_system: &mut FontSystem,
@@ -6627,7 +7016,10 @@ fn paint_text_shadow(
         return;
     }
 
-    let (left, top, width, height) = if local_shadow && clip_mask.is_none() {
+    // Clipping is applied when compositing the blurred layer, not while
+    // generating it. A clip must not turn a small glyph shadow into a
+    // viewport-sized blur on every video frame.
+    let (left, top, width, height) = if local_shadow {
         let text_width = crate::layout::inline_layout::measure_text_width_fs_attrs(
             font_system,
             shadow.text,

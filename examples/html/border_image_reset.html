@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Border image shorthand reset</title>
+<style>
+  body { margin: 0; font: 16px sans-serif }
+  .case { width: 240px; height: 32px; margin: 16px; border: 6px solid green;
+    border-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12'%3E%3Crect width='12' height='12' fill='purple'/%3E%3C/svg%3E") 3 / 2 / 1 round }
+  #reset { border: 6px solid green }
+  #initial { border: initial }
+  #side { border-top: 6px solid green }
+  #variable { --edge: 6px solid green; border: var(--edge) }
+  #invalid-variable { --edge: 6px green purple; border: var(--edge) }
+  #invalid { border: 6px green purple }
+  #important { border-image-repeat: space !important; border: 6px solid green }
+  #parent { border-image: none 20 / 3 / 1 repeat }
+  #inherit { border: inherit }
+</style>
+<div class="case" id="reset">Reset image</div>
+<div class="case" id="initial">Initial</div>
+<div class="case" id="side">Side retains image</div>
+<div class="case" id="variable">Valid variable resets image</div>
+<div class="case" id="invalid-variable">Invalid variable becomes initial</div>
+<div class="case" id="invalid">Invalid literal retains image</div>
+<div class="case" id="important">Important repeat wins</div>
+<div id="parent"><div class="case" id="inherit">Inherited border image values</div></div>

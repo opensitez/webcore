@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Comma component lists</title>
+<style>
+  :root { --color: blue; }
+  body { margin: 12px; font: 16px/24px sans-serif; }
+  .case { width: 280px; margin: 12px 0; padding: 12px; border: 3px solid green; }
+  #variable { color: var(--color/* , ) */ , red); }
+  #fallback { color: var(--missing, rgb(1, 2, 3)); }
+  #layers { background-image: linear-gradient(90deg, rgb(255, 0, 0), transparent), linear-gradient(white, blue); }
+  #radial { background-image: radial-gradient(ellipse at 25% 50%, rgb(255, 0, 0), rgb(0, 0, 255)); }
+  #shadows { box-shadow: 2px 3px 0 rgb(0, 128, 0), 5px 6px 0 rgb(0, 0, 255); }
+</style>
+<div class="case" id="variable">Comment punctuation is opaque</div>
+<div class="case" id="fallback">Fallback keeps nested color commas</div>
+<div class="case" id="layers">Layer and color component lists</div>
+<div class="case" id="radial">Radial descriptor and color lists</div>
+<div class="case" id="shadows">Shadow and color component lists</div>

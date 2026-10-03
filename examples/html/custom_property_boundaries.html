@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Custom property component boundaries</title>
+<style>
+  :root { --n: 10; --unit: px; --size: 10px; --split: var(--n)var(--unit); }
+  body { margin: 12px; font: 16px/24px sans-serif; }
+  .case { width: 280px; margin: 12px 0; padding: 4px; border: 3px solid green; }
+  #suffix { padding: var(--n)px; }
+  #nested { padding: var(--split); }
+  #bad-space { padding: calc(var(--size)+ 1px); }
+  #good-space { padding: calc(var(--size) + 1px); }
+  #border { --width: 3px; --color: blue; border: solid var(--width)var(--color); }
+</style>
+<div class="case" id="suffix">A suffix cannot create a dimension</div>
+<div class="case" id="nested">Nested tokens remain separate</div>
+<div class="case" id="bad-space">Substitution cannot supply operator whitespace</div>
+<div class="case" id="good-space">Explicit operator whitespace is valid</div>
+<div class="case" id="border">Adjacent border components remain distinct</div>

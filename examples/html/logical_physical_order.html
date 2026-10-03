@@ -1,0 +1,41 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Logical and physical cascade order</title>
+<style>
+  body { margin: 0; font: 16px sans-serif }
+  .parent { right: 9px }
+  .case { position: relative; direction: rtl; width: 160px; height: 20px; background: lightblue; margin: 2px 40px }
+  #a { inset-inline-start:30px; right:5px }
+  #b { right:5px; inset-inline-start:30px }
+  #c { inset-inline-start:30px; inset:initial }
+  #d { inset-inline-start:30px; right:inherit }
+  #e { inset-inline-start:30px!important; right:5px }
+  #f { inset-inline-start:30px; right:5px!important }
+  #g { inset-inline:30px 40px; inset:1px 2px 3px 4px }
+  #h { inset:1px 2px 3px 4px; inset-inline:30px 40px }
+  #i { writing-mode:vertical-rl; direction:ltr; inset-block-start:30px; right:5px }
+  #j { writing-mode:vertical-rl; direction:ltr; inset-inline-start:30px; top:5px }
+  .size { direction:ltr }
+  #sa { inline-size:90px; width:40px }
+  #sb { width:40px; inline-size:90px }
+  #sc { inline-size:90px; inline-size:initial }
+  #sd { min-inline-size:90px; min-width:40px; max-inline-size:200px; max-width:150px }
+  #se { min-inline-size:90px; min-inline-size:initial; max-inline-size:200px; max-inline-size:initial }
+  #sf { inline-size:90px; height:40px; writing-mode:vertical-rl }
+  #sg { block-size:90px; width:40px; writing-mode:vertical-rl }
+  #sh { inline-size:90px!important; width:40px }
+  #si { inline-size:90px; width:40px!important }
+  #sj { inline-size:90px; inline-size:var(--missing) }
+</style>
+<div class="parent">
+  <div class="case" id="a">Inset A</div><div class="case" id="b">Inset B</div>
+  <div class="case" id="c">Inset C</div><div class="case" id="d">Inset D</div>
+  <div class="case" id="e">Inset E</div><div class="case" id="f">Inset F</div>
+  <div class="case" id="g">Inset G</div><div class="case" id="h">Inset H</div>
+  <div class="case" id="i">Inset I</div><div class="case" id="j">Inset J</div>
+</div>
+<div class="case size" id="sa">Size A</div><div class="case size" id="sb">Size B</div>
+<div class="case size" id="sc">Size C</div><div class="case size" id="sd">Size D</div>
+<div class="case size" id="se">Size E</div><div class="case size" id="sf">Size F</div>
+<div class="case size" id="sg">Size G</div><div class="case size" id="sh">Size H</div>
+<div class="case size" id="si">Size I</div><div class="case size" id="sj">Size J</div>

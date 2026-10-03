@@ -2901,6 +2901,12 @@ pub(crate) fn load_html_reusing_with_resource_loaders_and_wait_mode(
 
 /// Walk the DOM tree, find image resources, fire off parallel decode/fetch
 /// threads, and store their channel on Document for async polling.
+pub fn restart_async_image_fetches(doc: &mut types::Document) {
+    doc.pending_images = None;
+    doc.images_in_flight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    start_async_image_fetches_with_loader(doc, None);
+}
+
 pub fn restart_async_image_fetches_with_loader(
     doc: &mut types::Document,
     loader: std::sync::Arc<dyn Fn(&str) -> Option<html::DecodedImage> + Send + Sync + 'static>,

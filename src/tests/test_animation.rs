@@ -1110,6 +1110,152 @@ fn animation_events_report_active_seconds_and_skip_negative_delay_history() {
 }
 
 #[test]
+fn animation_events_coalesce_missed_iterations_and_track_backward_samples() {
+    let mut doc = doc_with_animation("animation: fade 1ms linear infinite;");
+    let id = doc.active_animations[0].element_id;
+    let start = doc.active_animations[0].start_time;
+    let events = record_css_events(&mut doc, id, &["animationiteration"]);
+    let now = start + Duration::from_secs(1000);
+    doc.tick_animations(now);
+    doc.tick_animations(now);
+    assert_eq!(events.lock().unwrap().len(), 1);
+    assert!((events.lock().unwrap()[0].3 - 1000.0).abs() < 0.001);
+
+    std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style)
+        .rare_mut()
+        .animations[0]
+        .duration_ms = 1000.0;
+    doc.sync_animations(now);
+    doc.tick_animations(now);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].3, 1001.0);
+}
+
+#[test]
+fn animation_delay_update_reports_backward_phase_and_adjacent_skipped_phase_events() {
+    let mut doc = doc_with_animation("animation: fade 1s linear;");
+    let id = doc.active_animations[0].element_id;
+    let start = doc.active_animations[0].start_time;
+    let events = record_css_events(
+        &mut doc,
+        id,
+        &["animationstart", "animationend", "animationiteration"],
+    );
+    let now = start + Duration::from_millis(500);
+    doc.tick_animations(now);
+    std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style)
+        .rare_mut()
+        .animations[0]
+        .delay_ms = 1000.0;
+    doc.sync_animations(now);
+    doc.tick_animations(now);
+    doc.tick_animations(start + Duration::from_secs(3));
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| (e.0.as_str(), e.3))
+            .collect::<Vec<_>>(),
+        [
+            ("animationend", 0.0),
+            ("animationstart", 0.0),
+            ("animationend", 1.0)
+        ]
+    );
+}
+
+#[test]
+fn finished_animation_timing_edits_report_after_to_active_and_before() {
+    let mut doc = doc_with_animation("animation: fade 1s linear forwards;");
+    let id = doc.active_animations[0].element_id;
+    let start = doc.active_animations[0].start_time;
+    let events = record_css_events(&mut doc, id, &["animationstart", "animationend"]);
+    let now = start + Duration::from_secs(2);
+    doc.tick_animations(now);
+    std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style)
+        .rare_mut()
+        .animations[0]
+        .duration_ms = 3000.0;
+    doc.sync_animations(now);
+    doc.tick_animations(now);
+    doc.tick_animations(start + Duration::from_secs(4));
+    let now = start + Duration::from_secs(5);
+    std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style)
+        .rare_mut()
+        .animations[0]
+        .delay_ms = 10000.0;
+    doc.sync_animations(now);
+    doc.tick_animations(now);
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| (e.0.as_str(), e.3))
+            .collect::<Vec<_>>(),
+        [
+            ("animationend", 1.0),
+            ("animationstart", 3.0),
+            ("animationend", 3.0),
+            ("animationstart", 3.0),
+            ("animationend", 0.0)
+        ]
+    );
+}
+
+#[test]
+fn paused_animation_timing_edits_change_event_phase_without_waking_the_clock() {
+    let mut doc = doc_with_animation("animation: fade 1s linear -.5s paused forwards;");
+    let id = doc.active_animations[0].element_id;
+    let now = doc.active_animations[0].start_time + Duration::from_secs(10);
+    let events = record_css_events(&mut doc, id, &["animationstart", "animationend"]);
+    std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style)
+        .rare_mut()
+        .animations[0]
+        .duration_ms = 250.0;
+    doc.sync_animations(now);
+    doc.tick_animations(now);
+    assert!(!doc.needs_animation_frame);
+    assert_eq!(doc.finished_animations.len(), 1);
+    std::sync::Arc::make_mut(&mut doc.get_box_by_id_mut(id).unwrap().style)
+        .rare_mut()
+        .animations[0]
+        .duration_ms = 1000.0;
+    doc.sync_animations(now);
+    doc.tick_animations(now);
+    assert!(!doc.needs_animation_frame);
+    assert_eq!(doc.active_animations.len(), 1);
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .map(|e| (e.0.as_str(), e.3))
+            .collect::<Vec<_>>(),
+        [("animationend", 0.25), ("animationstart", 1.0)]
+    );
+}
+
+#[test]
+fn initially_exhausted_animations_dispatch_adjacent_start_end_pairs() {
+    let mut doc = doc_with_animation("animation: fade 1s linear -2s, spin 1s linear -2s;");
+    let id = doc.finished_animations[0].element_id;
+    doc.finished_animations.clear();
+    let events = record_css_events(&mut doc, id, &["animationstart", "animationend"]);
+    let now = Instant::now();
+    doc.sync_animations(now);
+    doc.tick_animations(now);
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 4);
+    for pair in events.chunks_exact(2) {
+        assert_eq!(pair[0].0, "animationstart");
+        assert_eq!(pair[1].0, "animationend");
+        assert_eq!(pair[0].1, pair[1].1);
+        assert_eq!(pair[0].3, 1.0);
+        assert_eq!(pair[1].3, 1.0);
+    }
+}
+
+#[test]
 fn animation_cancel_excludes_delay_and_paused_time() {
     for (delay, expected) in [(1000.0, 0.0), (-250.0, 0.65)] {
         let mut doc = doc_with_animation(&format!("animation: fade 2s linear {delay}ms;"));

@@ -105,12 +105,11 @@ pub(crate) fn auto_direction(node: &crate::types::WebCore) -> Option<crate::type
     is_auto.then(|| crate::layout::text::html_auto_direction(node))
 }
 
-pub(crate) fn default_ltr_telephone(
-    tag: &str,
-    attrs: &crate::dom::attrs::AttrMap,
-) -> bool {
+pub(crate) fn default_ltr_telephone(tag: &str, attrs: &crate::dom::attrs::AttrMap) -> bool {
     tag == "input"
-        && attrs.get("type").is_some_and(|kind| kind.eq_ignore_ascii_case("tel"))
+        && attrs
+            .get("type")
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("tel"))
         && !attrs.get("dir").is_some_and(|dir| {
             dir.eq_ignore_ascii_case("ltr")
                 || dir.eq_ignore_ascii_case("rtl")
@@ -850,8 +849,10 @@ pub(crate) fn matches_part_with_context(
                             } else if dir.eq_ignore_ascii_case("ltr") {
                                 Some(crate::types::Direction::LTR)
                             } else if dir.eq_ignore_ascii_case("auto") {
-                                Some(node.map(crate::layout::text::html_auto_direction)
-                                    .unwrap_or(crate::types::Direction::LTR))
+                                Some(
+                                    node.map(crate::layout::text::html_auto_direction)
+                                        .unwrap_or(crate::types::Direction::LTR),
+                                )
                             } else {
                                 None
                             }

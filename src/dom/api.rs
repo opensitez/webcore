@@ -2384,6 +2384,9 @@ impl Document {
         {
             return;
         }
+        let changes_background = matches!(prop_lower.as_str(), "background" | "background-image");
+        let previous_background_image = changes_background
+            .then(|| self.get_style_property(id, "background-image"));
         let current = self.get_attribute(id, "style").unwrap_or_default();
         let mut props = parse_inline_style(&current);
         // CSSOM §6.7.2: `setProperty(prop, "")` REMOVES the declaration. It
@@ -2418,6 +2421,13 @@ impl Document {
         }
         let new_style = serialize_inline_style(&props);
         self.set_attribute(id, "style", &new_style);
+        if previous_background_image
+            .is_some_and(|before| before != self.get_style_property(id, "background-image"))
+        {
+            if let Some(node) = self.find_webcore_mut(id) {
+                node.bg_image_data = None;
+            }
+        }
     }
 
     /// Get a single CSS property from the element's inline style.

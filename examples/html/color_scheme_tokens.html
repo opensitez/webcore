@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Color scheme function tokens</title>
+<style>
+  body { margin: 12px; font: 16px/24px sans-serif; }
+  .case { color: green; width: 280px; margin: 12px 0; padding: 4px; border: 3px solid green; }
+  #escaped { color-scheme: dark; color: light-\64 ark(red, blue); }
+  #nested { color-scheme: dark; color: light-dark(red, light-dark(green, rgb(1, 2, 3))); }
+  #light { color-scheme: light; color: light-dark(rgb(1, 2, 3), blue); }
+  #invalid { color: light-dark(red, nonsense); }
+  #extra { color: light-dark(red, blue, green); }
+  #literal::before { content: "light-dark(white, black)"; }
+  @supports (color: light-\64 ark(red, blue)) { #query { color: blue; } }
+</style>
+<div class="case" id="escaped">Escaped color function in dark scheme</div>
+<div class="case" id="nested">Nested dark branch</div>
+<div class="case" id="light">Nested commas in light branch</div>
+<div class="case" id="invalid">Invalid unselected branch</div>
+<div class="case" id="extra">Surplus arguments remain invalid</div>
+<div class="case" id="literal"></div>
+<div class="case" id="query">Escaped function in feature query</div>

@@ -62,8 +62,8 @@ pub fn parse_length(v: &str) -> CssLength {
 }
 
 fn parse_length_inner(v: &str) -> CssLength {
-    if let Some(inner) = v.strip_prefix("env(").and_then(|s| s.strip_suffix(')')) {
-        return parse_env_length(inner);
+    if let Some(result) = env_function_body(v) {
+        return result.map(parse_env_length).unwrap_or(CssLength::Auto);
     }
     if super::calc::is_math_function(v) {
         return super::calc::parse_math_length(v);
@@ -76,39 +76,16 @@ fn parse_length_inner(v: &str) -> CssLength {
     // Units are ASCII case-insensitive (CSS Values 4 §3.1), which the old
     // chain also did not honour — `10PX` fell through to `auto`.
     // `e` is exponent syntax only when a digit follows it — `3em` must not eat it.
-    let split = {
-        let mut i = 0usize;
-        let b = v.as_bytes();
-        let mut seen_digit = false;
-        while i < b.len() {
-            let c = b[i] as char;
-            if c.is_ascii_digit() {
-                seen_digit = true;
-                i += 1;
-            } else if c == '.' || ((c == '-' || c == '+') && i == 0) {
-                i += 1;
-            } else if (c == 'e' || c == 'E')
-                && seen_digit
-                && i + 1 < b.len()
-                && ((b[i + 1] as char).is_ascii_digit()
-                    || ((b[i + 1] == b'-' || b[i + 1] == b'+')
-                        && i + 2 < b.len()
-                        && (b[i + 2] as char).is_ascii_digit()))
-            {
-                i += 2;
-            } else {
-                break;
-            }
-        }
-        i
+    let (n, unit) = match super::syntax::number_and_unit(v) {
+        Some(value) => value,
+        None => return CssLength::Auto,
     };
-    let (num, unit) = v.split_at(split);
-    let n: f32 = match num.parse() {
-        Ok(n) => n,
-        Err(_) => return CssLength::Auto,
+    let unit = if unit.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        std::borrow::Cow::Owned(unit.to_ascii_lowercase())
+    } else {
+        unit
     };
-    let unit_lower = unit.to_ascii_lowercase();
-    return match unit_lower.as_str() {
+    return match unit.as_ref() {
         "" => CssLength::Px(n), // unitless — treated as px, as before
         "%" => CssLength::Percent(n),
         "px" => CssLength::Px(n),
@@ -170,25 +147,108 @@ fn parse_length_inner(v: &str) -> CssLength {
     };
 }
 
+fn env_function_body(value: &str) -> Option<Option<&str>> {
+    let (name, body_start, function) = super::syntax::name_token(value)?;
+    if !function || !name.eq_ignore_ascii_case("env") {
+        return None;
+    }
+    Some(
+        super::syntax::function_body(value, body_start).and_then(|(body, end)| {
+            let (trivia, _) = super::syntax::trivia_prefix(&value[end..]);
+            (end + trivia == value.len()).then_some(body)
+        }),
+    )
+}
+
+fn env_arguments(inner: &str) -> Option<(std::borrow::Cow<'_, str>, bool, Option<&str>)> {
+    let comma = super::syntax::top_level_delimiters(inner, b',').next();
+    let (head, fallback) = match comma {
+        Some(at) => (&inner[..at], Some(&inner[at + 1..])),
+        None => (inner, None),
+    };
+    let (leading, _) = super::syntax::trivia_prefix(head);
+    let (name, consumed, false) = super::syntax::name_token(&head[leading..])? else {
+        return None;
+    };
+    if [
+        "initial",
+        "inherit",
+        "unset",
+        "revert",
+        "revert-layer",
+        "default",
+    ]
+    .iter()
+    .any(|keyword| name.eq_ignore_ascii_case(keyword))
+    {
+        return None;
+    }
+    let mut rest = &head[leading + consumed..];
+    let mut indexed = false;
+    loop {
+        let (trivia, _) = super::syntax::trivia_prefix(rest);
+        rest = &rest[trivia..];
+        if rest.is_empty() {
+            break;
+        }
+        let (number, unit, consumed) = super::syntax::numeric_token(rest)?;
+        let text = &rest[..consumed];
+        let digits = text.strip_prefix('+').unwrap_or(text);
+        if !unit.is_empty() || number < 0.0 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        indexed = true;
+        rest = &rest[consumed..];
+    }
+    Some((name, indexed, fallback))
+}
+
 fn parse_env_length(inner: &str) -> CssLength {
-    let args = split_top_level_commas(inner);
-    let name = args.first().map(|s| s.trim()).unwrap_or("");
-    if is_zero_env_length(name) {
+    let Some((name, indexed, fallback)) = env_arguments(inner) else {
+        return CssLength::Auto;
+    };
+    if !indexed && is_zero_env_length(&name) {
         return CssLength::Zero;
     }
-    if args.len() >= 2 {
-        return parse_length(args[1].trim());
-    }
-    CssLength::Auto
+    fallback
+        .map(|value| parse_length(value.trim()))
+        .unwrap_or(CssLength::Auto)
 }
 
 fn parse_env_color(inner: &str) -> Option<Color> {
-    let args = split_top_level_commas(inner);
-    let name = args.first().map(|s| s.trim()).unwrap_or("");
-    if is_zero_env_length(name) {
+    let (name, indexed, fallback) = env_arguments(inner)?;
+    if !indexed && is_zero_env_length(&name) {
         return None;
     }
-    parse_color(args.get(1)?.trim())
+    parse_color(fallback?.trim())
+}
+
+const MAX_ENV_SUBSTITUTION_DEPTH: usize = 128;
+
+pub(super) fn resolve_environment_functions(value: &str) -> Option<String> {
+    fn resolve(value: &str, depth: usize) -> Option<String> {
+        if depth >= MAX_ENV_SUBSTITUTION_DEPTH {
+            return None;
+        }
+        let mut out = super::syntax::ComponentWriter::default();
+        let mut offset = 0;
+        while let Some((start, body_start)) = super::syntax::find_function(&value[offset..], "env")
+        {
+            let source = &value[offset..];
+            let (body, end) = super::syntax::function_body(source, body_start)?;
+            let (name, indexed, fallback) = env_arguments(body)?;
+            out.push(&source[..start]);
+            if !indexed && is_zero_env_length(&name) {
+                out.push("0px");
+            } else {
+                out.push(&resolve(fallback?, depth + 1)?);
+            }
+            offset += end;
+        }
+        out.push(&value[offset..]);
+        Some(out.finish())
+    }
+    resolve(value, 0)
 }
 
 pub(crate) fn is_zero_env_length(name: &str) -> bool {
@@ -215,39 +275,13 @@ pub(crate) fn is_zero_env_length(name: &str) -> bool {
     )
 }
 
-/// Find the index of the closing `)` that matches the opening `(` at position 0.
-/// Split a string at top-level commas (not inside nested parentheses).
+/// Split borrowed components at commas outside tokenized blocks, strings and URLs.
 pub(crate) fn split_top_level_commas(s: &str) -> Vec<&str> {
     let mut parts = Vec::new();
-    let mut depth = 0usize;
     let mut start = 0;
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for (i, c) in s.char_indices() {
-        if let Some(q) = quote {
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == q {
-                quote = None;
-            }
-            continue;
-        }
-        match c {
-            '"' | '\'' => quote = Some(c),
-            '(' => depth += 1,
-            ')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
-            }
-            ',' if depth == 0 => {
-                parts.push(&s[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
+    for comma in super::syntax::top_level_delimiters(s, b',') {
+        parts.push(&s[start..comma]);
+        start = comma + 1;
     }
     parts.push(&s[start..]);
     parts
@@ -259,38 +293,10 @@ pub fn split_css_shorthand_values(s: &str) -> Vec<String> {
     split_css_values(s)
 }
 pub(crate) fn split_css_values(s: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut current = String::new();
-    for c in s.chars() {
-        match c {
-            '(' => {
-                depth += 1;
-                current.push(c);
-            }
-            ')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
-                current.push(c);
-            }
-            c if c.is_ascii_whitespace() && depth == 0 => {
-                let trimmed = current.trim().to_string();
-                if !trimmed.is_empty() {
-                    parts.push(trimmed);
-                }
-                current.clear();
-            }
-            _ => {
-                current.push(c);
-            }
-        }
-    }
-    let trimmed = current.trim().to_string();
-    if !trimmed.is_empty() {
-        parts.push(trimmed);
-    }
-    parts
+    super::syntax::split_component_values(s)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 /// A length that reports NOT PARSING, instead of falling back to `auto`.
@@ -307,6 +313,228 @@ pub fn parse_length_checked(v: &str) -> Option<CssLength> {
         None
     } else {
         Some(l)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum BoxLengthGrammar {
+    Offset,
+    Padding,
+}
+
+pub(super) fn box_length_grammar(id: properties::PropertyId) -> Option<BoxLengthGrammar> {
+    use properties::PropertyId::*;
+    match id {
+        Margin | MarginTop | MarginRight | MarginBottom | MarginLeft | MarginBlock
+        | MarginBlockStart | MarginBlockEnd | MarginInline | MarginInlineStart
+        | MarginInlineEnd | Inset | Top | Right | Bottom | Left | InsetBlock | InsetBlockStart
+        | InsetBlockEnd | InsetInline | InsetInlineStart | InsetInlineEnd => {
+            Some(BoxLengthGrammar::Offset)
+        }
+        Padding | PaddingTop | PaddingRight | PaddingBottom | PaddingLeft | PaddingBlock
+        | PaddingBlockStart | PaddingBlockEnd | PaddingInline | PaddingInlineStart
+        | PaddingInlineEnd => Some(BoxLengthGrammar::Padding),
+        _ => None,
+    }
+}
+
+/// Margin/inset allow auto and negative lengths; padding allows neither.
+/// Math expressions retain their range until used-value resolution clamps them.
+pub(super) fn parse_box_length(v: &str, grammar: BoxLengthGrammar) -> Option<CssLength> {
+    let v = v.trim();
+    if v.eq_ignore_ascii_case("auto") {
+        return matches!(grammar, BoxLengthGrammar::Offset).then_some(CssLength::Auto);
+    }
+    if let Ok(number) = v.parse::<f64>() {
+        return (number == 0.0
+            && super::syntax::number_and_unit(v).is_some_and(|(_, unit)| unit.is_empty()))
+        .then_some(CssLength::Zero);
+    }
+    let value = parse_length_checked(v)?;
+    let numeric = match &value {
+        CssLength::Px(n)
+        | CssLength::Em(n)
+        | CssLength::Rem(n)
+        | CssLength::Percent(n)
+        | CssLength::Vw(n)
+        | CssLength::Vh(n)
+        | CssLength::Vmin(n)
+        | CssLength::Vmax(n)
+        | CssLength::Cqw(n)
+        | CssLength::Cqh(n)
+        | CssLength::Cqi(n)
+        | CssLength::Cqb(n)
+        | CssLength::Cqmin(n)
+        | CssLength::Cqmax(n) => Some(*n),
+        CssLength::Zero
+        | CssLength::Calc(_)
+        | CssLength::CalcExpr(_)
+        | CssLength::Min(_)
+        | CssLength::Max(_)
+        | CssLength::Clamp(_) => None,
+        _ => return None,
+    };
+    if numeric.is_some_and(|n| {
+        !n.is_finite()
+            || (matches!(grammar, BoxLengthGrammar::Padding)
+                && n < 0.0
+                && !super::calc::is_math_function(v))
+    }) {
+        return None;
+    }
+    Some(value)
+}
+
+pub(super) fn parse_box_declaration(id: properties::PropertyId, v: &str) -> Option<Vec<CssLength>> {
+    let grammar = box_length_grammar(id)?;
+    let limit = property_defs::get(id).longhands.len().max(1);
+    let parts = super::syntax::split_component_values(v);
+    if parts.is_empty() || parts.len() > limit {
+        return None;
+    }
+    parts
+        .into_iter()
+        .map(|p| parse_box_length(p, grammar))
+        .collect()
+}
+
+pub(super) fn is_radius_property(id: properties::PropertyId) -> bool {
+    use properties::PropertyId::*;
+    matches!(
+        id,
+        BorderRadius
+            | BorderTopLeftRadius
+            | BorderTopRightRadius
+            | BorderBottomLeftRadius
+            | BorderBottomRightRadius
+            | BorderStartStartRadius
+            | BorderStartEndRadius
+            | BorderEndStartRadius
+            | BorderEndEndRadius
+    )
+}
+
+pub(super) fn border_width_limit(id: properties::PropertyId) -> Option<usize> {
+    use properties::PropertyId::*;
+    match id {
+        BorderWidth => Some(4),
+        BorderTopWidth
+        | BorderRightWidth
+        | BorderBottomWidth
+        | BorderLeftWidth
+        | BorderBlockStartWidth
+        | BorderBlockEndWidth
+        | BorderInlineStartWidth
+        | BorderInlineEndWidth => Some(1),
+        _ => None,
+    }
+}
+
+pub(super) fn parse_border_width(value: &str) -> Option<CssLength> {
+    // CSS Backgrounds 3 defines thin/medium/thick as 1px/3px/5px.
+    const THIN_BORDER_WIDTH_PX: f32 = 1.0;
+    const THICK_BORDER_WIDTH_PX: f32 = 5.0;
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("thin") {
+        return Some(CssLength::Px(THIN_BORDER_WIDTH_PX));
+    }
+    if value.eq_ignore_ascii_case("medium") {
+        return Some(super::apply::initial_border_width());
+    }
+    if value.eq_ignore_ascii_case("thick") {
+        return Some(CssLength::Px(THICK_BORDER_WIDTH_PX));
+    }
+    if super::calc::is_math_function(value) {
+        return super::calc::parse_math_length_without_percentage(value);
+    }
+    let length = parse_box_length(value, BoxLengthGrammar::Padding)?;
+    (!matches!(length, CssLength::Percent(_))).then_some(length)
+}
+
+pub(super) fn border_declaration_valid(id: properties::PropertyId, value: &str) -> Option<bool> {
+    use properties::PropertyId::*;
+    if let Some(limit) = border_width_limit(id) {
+        let parts = super::syntax::split_component_values(value);
+        return Some(
+            (1..=limit).contains(&parts.len())
+                && parts.iter().all(|part| parse_border_width(part).is_some()),
+        );
+    }
+    let (limit, aspect) = match id {
+        BorderStyle => (4, 1),
+        BorderTopStyle
+        | BorderRightStyle
+        | BorderBottomStyle
+        | BorderLeftStyle
+        | BorderBlockStartStyle
+        | BorderBlockEndStyle
+        | BorderInlineStartStyle
+        | BorderInlineEndStyle => (1, 1),
+        BorderColor => (4, 2),
+        BorderTopColor
+        | BorderRightColor
+        | BorderBottomColor
+        | BorderLeftColor
+        | BorderBlockStartColor
+        | BorderBlockEndColor
+        | BorderInlineStartColor
+        | BorderInlineEndColor => (1, 2),
+        Border | BorderTop | BorderRight | BorderBottom | BorderLeft | BorderBlock
+        | BorderInline | BorderBlockStart | BorderBlockEnd | BorderInlineStart
+        | BorderInlineEnd => (3, 0),
+        _ => return None,
+    };
+    let parts = super::syntax::split_component_values(value);
+    if !(1..=limit).contains(&parts.len()) {
+        return Some(false);
+    }
+    let color =
+        |part: &str| part.eq_ignore_ascii_case("currentcolor") || parse_color(part).is_some();
+    if aspect != 0 {
+        return Some(parts.iter().all(|part| {
+            if aspect == 1 {
+                try_parse_border_style(part).is_some()
+            } else {
+                color(part)
+            }
+        }));
+    }
+    let mut seen = [false; 3];
+    for part in parts {
+        let aspect = if try_parse_border_style(part).is_some() {
+            1
+        } else if color(part) {
+            2
+        } else if parse_border_width(part).is_some() {
+            0
+        } else {
+            return Some(false);
+        };
+        if seen[aspect] {
+            return Some(false);
+        }
+        seen[aspect] = true;
+    }
+    Some(true)
+}
+
+pub(super) fn radius_declaration_valid(id: properties::PropertyId, value: &str) -> bool {
+    let shorthand = id == properties::PropertyId::BorderRadius;
+    let valid_set = |input: &str| {
+        let parts = super::syntax::split_component_values(input);
+        (1..=if shorthand { 4 } else { 2 }).contains(&parts.len())
+            && parts
+                .into_iter()
+                .all(|part| parse_box_length(part, BoxLengthGrammar::Padding).is_some())
+    };
+    let mut slashes = super::syntax::top_level_delimiters(value, b'/');
+    if let Some(slash) = slashes.next() {
+        shorthand
+            && slashes.next().is_none()
+            && valid_set(&value[..slash])
+            && valid_set(&value[slash + 1..])
+    } else {
+        valid_set(value)
     }
 }
 
@@ -396,28 +624,42 @@ pub(crate) fn try_parse_border_style(v: &str) -> Option<BorderStyle> {
 }
 
 /// Parse a CSS color value into a `Color`.
+fn light_dark_arguments(value: &str) -> Option<Option<(&str, &str)>> {
+    let (name, body_start, function) = super::syntax::name_token(value)?;
+    if !function || !name.eq_ignore_ascii_case("light-dark") {
+        return None;
+    }
+    Some((|| {
+        let (inner, end) = super::syntax::function_body(value, body_start)?;
+        let (trailing, _) = super::syntax::trivia_prefix(&value[end..]);
+        if end + trailing != value.len() {
+            return None;
+        }
+        let mut commas = super::syntax::top_level_delimiters(inner, b',');
+        let comma = commas.next()?;
+        if commas.next().is_some() {
+            return None;
+        }
+        Some((&inner[..comma], &inner[comma + 1..]))
+    })())
+}
+
 pub fn parse_color(v: &str) -> Option<Color> {
+    if let Some(result) = light_dark_arguments(v.trim()) {
+        let (light, dark) = result?;
+        let light = parse_color(light.trim())?;
+        parse_color(dark.trim())?;
+        return Some(light);
+    }
+    if let Some(result) = env_function_body(v.trim()) {
+        return parse_env_color(result?);
+    }
     // ⛔ Keywords are ASCII case-insensitive (css-values-4 §3.1). Matching the
     // table byte-exactly dropped `bgcolor="White"` and `color="Red"`, which
     // legacy presentational HTML still ships, leaving the element at its default.
     let lowered = v.trim().to_ascii_lowercase();
     let v = lowered.as_str();
     let v = v.trim();
-
-    if let Some(inner) = v.strip_prefix("env(").and_then(|s| s.strip_suffix(')')) {
-        return parse_env_color(inner);
-    }
-
-    // light-dark(light, dark) — use light value (we render in light mode)
-    if v.starts_with("light-dark(") {
-        if let Some(inner) = v
-            .strip_prefix("light-dark(")
-            .and_then(|s| s.strip_suffix(')'))
-        {
-            let comma = inner.find(',')?;
-            return parse_color(inner[..comma].trim());
-        }
-    }
 
     // Named colors
     let named = match v {

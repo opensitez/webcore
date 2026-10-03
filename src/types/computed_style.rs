@@ -117,9 +117,7 @@ pub struct RareStyle {
     /// — `{ inset-inline-start: 10px; direction: rtl }` and the same two
     /// declarations in the other order disagreed. Same class as
     /// `current_color_props`.
-    pub logical_box: Vec<(LogicalSlot, CssLength)>,
-    pub logical_borders: Vec<LogicalBorderValue>,
-    pub logical_corners: Vec<(LogicalCornerSlot, CssLength, CssLength)>,
+    pub logical_declarations: Vec<LogicalDeclaration>,
     /// `transform-origin`, as offsets from the reference box's top-left corner
     /// — a percentage is a fraction of the box, a length is absolute.
     ///
@@ -197,9 +195,7 @@ impl RareStyle {
         current_color_props: 0,
         specified_svg_paint_props: 0,
         svg_stroke_width: None,
-        logical_box: Vec::new(),
-        logical_borders: Vec::new(),
-        logical_corners: Vec::new(),
+        logical_declarations: Vec::new(),
         transform_origin: None,
         additional_background_layers: Vec::new(),
         background_list_lengths: [1; 8],
@@ -239,7 +235,11 @@ impl ComputedStyle {
     pub(crate) fn mask_source_key(&self, index: usize) -> Option<&str> {
         let rare = self.rare();
         if index == 0 {
-            Some(rare.mask_image_set_source.as_deref().unwrap_or(&rare.mask_image_url))
+            Some(
+                rare.mask_image_set_source
+                    .as_deref()
+                    .unwrap_or(&rare.mask_image_url),
+            )
         } else {
             let layer = rare.additional_mask_images.get(index - 1)?;
             Some(layer.image_set_source.as_deref().unwrap_or(&layer.url))
@@ -835,6 +835,7 @@ impl Default for GradientRadialSize {
 pub struct GradientStop {
     pub color: Color,
     pub position: f32, // 0.0..1.0
+    pub authored_position: Option<CssLength>,
     pub current_color: bool,
 }
 
