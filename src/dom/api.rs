@@ -1866,6 +1866,7 @@ impl Document {
             self.dynamic_style_slots.insert(arena_id.0, None);
         }
         self.next_node_id = self.next_node_id.max(arena_id.0 + 1);
+        self.upgrade_custom_element(arena_id.0);
         arena_id.0
     }
 
@@ -1914,6 +1915,11 @@ impl Document {
                 self.append_child(parent_id, node);
             }
             return;
+        }
+
+        let custom_nodes = self.custom_subtree_ids(child_id);
+        if self.is_connected(child_id) {
+            self.custom_disconnected(&custom_nodes);
         }
 
         // Where the node is about to land, for the live-range hook below.
@@ -1965,6 +1971,9 @@ impl Document {
         }
         self.ranges_after_insert(parent_id, insert_index);
         self.sync_dynamic_style_sheets();
+        if self.is_connected(child_id) {
+            self.custom_connected(&custom_nodes);
+        }
     }
 
     /// Insert a child before a reference node.
@@ -1980,6 +1989,11 @@ impl Document {
                 self.insert_before(parent_id, node, reference_id);
             }
             return;
+        }
+
+        let custom_nodes = self.custom_subtree_ids(child_id);
+        if self.is_connected(child_id) {
+            self.custom_disconnected(&custom_nodes);
         }
 
         let insert_index = self
@@ -2020,6 +2034,9 @@ impl Document {
         }
         self.ranges_after_insert(parent_id, insert_index);
         self.sync_dynamic_style_sheets();
+        if self.is_connected(child_id) {
+            self.custom_connected(&custom_nodes);
+        }
     }
 
     /// Remove a child from its parent. The node is dropped from the WebCore tree
@@ -2028,6 +2045,8 @@ impl Document {
         if child_id == 0 {
             return;
         }
+        let was_connected = self.is_connected(child_id);
+        let custom_nodes = self.custom_subtree_ids(child_id);
         // Get parent before removing
         let parent_id = self
             .arena
@@ -2072,6 +2091,9 @@ impl Document {
             }
         }
         self.sync_dynamic_style_sheets();
+        if was_connected {
+            self.custom_disconnected(&custom_nodes);
+        }
     }
 
     /// Set an attribute on an element. Sets STYLE dirty flag + layout dirty.
@@ -2080,6 +2102,7 @@ impl Document {
             return;
         }
         let key = &self.fold_name(key);
+        let old_value = self.get_attribute(id, key);
         self.arena.set_attribute(NodeId(id), key, value);
         let mut canvas_resized = None;
         if let Some(node) = self.find_webcore_mut(id) {
@@ -2137,6 +2160,7 @@ impl Document {
         if key == "media" && self.dynamic_style_slots.contains_key(&id) {
             self.sync_dynamic_style_sheets();
         }
+        self.custom_attribute_changed(id, key, old_value.as_deref(), Some(value));
     }
 
     /// The `<select>` an option belongs to, if any.
@@ -2171,6 +2195,7 @@ impl Document {
             return;
         }
         let key = &self.fold_name(key);
+        let old_value = self.get_attribute(id, key);
         self.arena.remove_attribute(NodeId(id), key);
         if let Some(node) = self.find_webcore_mut(id) {
             node.attributes.remove(key);
@@ -2187,6 +2212,9 @@ impl Document {
         self.style_dirty = true;
         if key == "media" && self.dynamic_style_slots.contains_key(&id) {
             self.sync_dynamic_style_sheets();
+        }
+        if old_value.is_some() {
+            self.custom_attribute_changed(id, key, old_value.as_deref(), None);
         }
     }
 

@@ -74,6 +74,12 @@ pub struct DomEvent {
     /// them rather than splitting into one type per interface.
     pub old_state: String,
     pub new_state: String,
+    /// CSS AnimationEvent / TransitionEvent payload. Elapsed time is in seconds
+    /// of active time, excluding the delay and any paused interval.
+    pub elapsed_time: f64,
+    pub animation_name: String,
+    pub property_name: String,
+    pub pseudo_element: String,
     /// `CustomEvent.detail`.
     detail: String,
     /// `UIEvent.detail` — click count.
@@ -148,9 +154,11 @@ pub fn event_defaults(event_type: &str) -> (bool, bool, bool) {
         | "beforeprint" | "visibilitychange" | "readystatechange" | "DOMContentLoaded" => {
             (true, false, false)
         }
-        // Animations and transitions bubble and are cancelable.
-        "animationstart" | "animationend" | "animationiteration" | "transitionstart"
-        | "transitionend" | "transitionrun" | "transitioncancel" => (true, true, true),
+        // CSS animation/transition events bubble but are not cancelable or composed.
+        "animationstart" | "animationend" | "animationiteration" | "animationcancel"
+        | "transitionstart" | "transitionend" | "transitionrun" | "transitioncancel" => {
+            (true, false, false)
+        }
         // Anything else, including custom events, defaults to the DOM's own
         // defaults: an event created with no options bubbles nowhere.
         _ => (false, false, false),
@@ -191,6 +199,10 @@ impl DomEvent {
             composed_path: Vec::new(),
             old_state: String::new(),
             new_state: String::new(),
+            elapsed_time: 0.0,
+            animation_name: String::new(),
+            property_name: String::new(),
+            pseudo_element: String::new(),
             detail: String::new(),
             ui_detail: 0,
             buttons: 0,

@@ -695,7 +695,31 @@ impl Document {
             "animation-play-state" => serialize_animation_play_state(s),
             "animation-composition" => serialize_animation_composition(s),
             "overflow-anchor" => s.overflow_anchor.clone(),
-            "overflow-clip-margin" => s.overflow_clip_margin.clone(),
+            "overflow-clip-margin" => {
+                if let Some((edge, offset)) =
+                    crate::css::parse_overflow_clip_margin(&s.overflow_clip_margin)
+                {
+                    let value = len(&offset);
+                    match edge {
+                        crate::css::OverflowClipBox::Padding => value,
+                        crate::css::OverflowClipBox::Content
+                        | crate::css::OverflowClipBox::Border => {
+                            let box_name = if edge == crate::css::OverflowClipBox::Content {
+                                "content-box"
+                            } else {
+                                "border-box"
+                            };
+                            if value == "0px" {
+                                box_name.to_string()
+                            } else {
+                                format!("{box_name} {value}")
+                            }
+                        }
+                    }
+                } else {
+                    s.overflow_clip_margin.clone()
+                }
+            }
             "anchor-name" => s.anchor_name.clone(),
             "position-anchor" => s.position_anchor.clone(),
             "view-transition-name" => s.view_transition_name.clone(),

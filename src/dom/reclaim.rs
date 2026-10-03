@@ -78,6 +78,7 @@ impl crate::types::Document {
         out.extend(self.traversals.node_ids());
         out.extend(self.ranges.node_ids());
         out.extend(self.active_animations.iter().map(|a| a.element_id));
+        out.extend(self.finished_animations.iter().map(|a| a.element_id));
         out.extend(self.editor.caret_box);
 
         // A detached node the document is still holding for re-insertion, and

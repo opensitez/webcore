@@ -201,6 +201,7 @@ fn build_ancestor_entry(
     crate::css::AncestorInfo {
         tag: node.tag.clone(),
         attributes: node.attributes.clone().into(),
+        auto_direction: crate::css::matching::auto_direction(node),
         child_index,
         sibling_count,
         type_child_index,
@@ -243,6 +244,21 @@ fn query_walk(
 
     for (i, child) in node.children.iter().enumerate() {
         if !child.is_element() || child.node_id == 0 {
+            // Anonymous layout boxes are not DOM nodes, but their descendants
+            // can be. They must not hide those descendants from selectors.
+            if query_walk(
+                child,
+                parent_ancestors,
+                selectors,
+                hover_chain,
+                scope_root_id,
+                target_id,
+                document_url,
+                first_only,
+                results,
+            ) {
+                return true;
+            }
             continue;
         }
 

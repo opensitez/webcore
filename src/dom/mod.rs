@@ -15,6 +15,7 @@ pub mod attr_nodes;
 pub mod attrs;
 pub mod canvas_api;
 pub mod computed_style;
+pub mod custom_elements;
 pub mod dialog;
 pub mod document_meta;
 pub mod event_handlers;
