@@ -35,6 +35,36 @@ impl Document {
         self.run_query(selector, false)
     }
 
+    /// Element-scoped query. Attached elements retain document-level selector
+    /// matching (including ancestors outside the element); detached subtrees
+    /// and `:scope` match with the element as their selector root.
+    pub fn query_selector_all_within(&self, root: u32, selector: &str) -> Vec<u32> {
+        let Some(node) = self.find_webcore(root) else {
+            return Vec::new();
+        };
+        if self.contains(self.root.node_id, root) && !selector.contains(":scope") {
+            return self
+                .query_selector_all(selector)
+                .into_iter()
+                .filter(|candidate| *candidate != root && self.contains(root, *candidate))
+                .collect();
+        }
+        matching_ids_from_with_state(
+            node,
+            selector,
+            false,
+            self.fragment_target_id(),
+            &self.base_url,
+        )
+        .into_iter()
+        .filter(|candidate| *candidate != root)
+        .collect()
+    }
+
+    pub fn query_selector_within(&self, root: u32, selector: &str) -> Option<u32> {
+        self.query_selector_all_within(root, selector).into_iter().next()
+    }
+
     /// Shared body of `querySelector` / `querySelectorAll`.
     ///
     /// The document element is both a CANDIDATE and an ANCESTOR, and the walk
