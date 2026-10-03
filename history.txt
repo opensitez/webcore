@@ -1,4 +1,17 @@
-# 20260929 0.3.4
+# 20260903 0.4.0
+- fonts, images are now standalone webmedia
+- video support
+- css gaps: media queries
+- optimization
+- eot support
+- stream images, fonts
+- BFS VS DFS to appear faster
+- clipping on dirty for things like shadow for faster img
+- canvas is now its own webmedia so it's shared with widgets lib
+- up to 100x speedup by avoiding computing/caching css math
+- vp8, vp9 suppot
+
+# 20260829 0.3.4
 - parse user agent once on init
 - do not reparse css from one page to the next 
 - streaming fixes
