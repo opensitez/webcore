@@ -62,7 +62,7 @@ accessibility = ["dep:accesskit", "dep:accesskit_winit"]
 audio-symphonia = ["webmedia/audio-symphonia"]
 
 [dependencies]
-webcanvas = { version = "0.1.0", path = "../webcanvas" }
+webcanvas = "0.1.0"
 webmedia = { version = "0.1.0", features = ["font"] }
 accesskit        = { version = "0.17", optional = true }
 accesskit_winit  = { version = "0.22", optional = true, features = ["rwh_06"] }
