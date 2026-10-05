@@ -52,7 +52,7 @@ fn can_play_type_for_kind(kind: MediaKind, media_type: &str) -> &'static str {
             }
             "video/x-yuv4mpeg2" => true,
             "video/webm" => !lower.contains("codecs=") || lower.contains("vp8")
-                || lower.contains("vp9") || lower.contains("vp09"),
+                || lower.contains("vp9") || lower.contains("vp09") || lower.contains("av01"),
             _ => false,
         },
         MediaKind::Audio => matches!(
@@ -109,6 +109,18 @@ mod tests {
             "video/mp4; codecs=\"vp09.00.10.08\"", "video/mp4; codecs=\"vp08\""] {
             assert_eq!(can_play_type("video", media_type), Some("maybe"));
         }
-        assert_eq!(can_play_type("video", "video/webm; codecs=\"av01\""), Some(""));
+        assert_eq!(can_play_type("video", "video/webm; codecs=\"av01\""), Some("maybe"));
+    }
+
+    #[test]
+    fn selects_typed_av1_webm_source() {
+        let doc = crate::html::parse_html(
+            "<video id=v><source src=spacewalk_av1.webm type='video/webm; codecs=&quot;av01&quot;'></video>",
+        );
+        let node = doc.find_webcore(doc.get_element_by_id("v").unwrap()).unwrap();
+        assert_eq!(current_src(node, "http://localhost/websites/video/video_av1.html"),
+            Some("http://localhost/websites/video/spacewalk_av1.webm".into()));
+        assert_eq!(can_play_type("video", "video/webm; codecs=\"av01.0.08M.08\""), Some("maybe"));
+        assert_eq!(can_play_type("video", "video/mp4; codecs=\"av01\""), Some(""));
     }
 }

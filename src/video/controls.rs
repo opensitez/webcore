@@ -13,6 +13,9 @@ pub(crate) struct MediaControlLayout {
     pub rail_h: f32,
     pub timeline_x: f32,
     pub timeline_w: f32,
+    pub time_x: f32,
+    pub show_current_time: bool,
+    pub mute_rect: Option<Rect>,
 }
 
 pub(crate) fn media_control_layout(node: &WebCore) -> Option<MediaControlLayout> {
@@ -32,12 +35,19 @@ pub(crate) fn media_control_layout(node: &WebCore) -> Option<MediaControlLayout>
     };
     let rail_y = if is_video { cr.y + cr.h - rail_h } else { cr.y };
     let timeline_x = cr.x + 54.0;
-    let timeline_w = (cr.w - 116.0).max(0.0);
+    let mute_rect = (cr.w >= 150.0).then(|| Rect::new(cr.right() - 30.0, rail_y, 26.0, rail_h));
+    let show_current_time = cr.w >= 290.0;
+    let time_width = if show_current_time { 154.0 } else { 52.0 };
+    let time_x = (cr.x + cr.w - time_width - if mute_rect.is_some() { 32.0 } else { 0.0 }).max(cr.x + 4.0);
+    let timeline_w = (time_x - 10.0 - timeline_x).max(0.0);
     Some(MediaControlLayout {
         rail_y,
         rail_h,
         timeline_x,
         timeline_w,
+        time_x,
+        show_current_time,
+        mute_rect,
     })
 }
 
@@ -161,7 +171,9 @@ fn paint_video_poster(
             });
             list.push(PaintCmd::Image {
                 rect: Rect::new(dst.x - sx, dst.y - sy, dst.w, dst.h),
-                data: ImageRef::Shared(data.clone(), node.image_width, node.image_height),
+                data: ImageRef::Shared(data.clone(),
+                    if node.image_data_width > 0 { node.image_data_width } else { node.image_width },
+                    if node.image_data_height > 0 { node.image_data_height } else { node.image_height }),
             });
             list.push(PaintCmd::PopClip);
         }
@@ -245,15 +257,49 @@ fn paint_media_controls(
         .or_else(|| markup_duration(node))
         .map(format_media_time)
         .unwrap_or_else(|| "--:--".to_string());
+    let time_label = if control.show_current_time {
+        format!("{} / {duration}", format_media_time(node.media_current_time))
+    } else {
+        duration
+    };
     emit_media_text(
         list,
-        (x + cr.w - 52.0).max(x + 4.0),
-        rail_y + (control.rail_h - font_px) * 0.5,
-        &duration,
-        font_px,
+        control.time_x - node.layout.content_rect.x + x,
+        rail_y + (control.rail_h - font_px.min(13.0)) * 0.5,
+        &time_label,
+        font_px.min(13.0),
         if is_video { Color::WHITE } else { Color::BLACK },
         &node.style,
     );
+    if let Some(mute) = control.mute_rect {
+        let mx = mute.x - node.layout.content_rect.x + x;
+        let my = mute.y - node.layout.content_rect.y + y + (mute.h - 16.0) * 0.5;
+        let color = if is_video { Color::WHITE } else { Color::BLACK };
+        list.push(PaintCmd::PushClipPath {
+            points: vec![(mx + 2.0, my + 5.0), (mx + 7.0, my + 5.0),
+                (mx + 13.0, my + 1.0), (mx + 13.0, my + 15.0),
+                (mx + 7.0, my + 11.0), (mx + 2.0, my + 11.0)],
+            even_odd: false,
+        });
+        list.push(PaintCmd::FillRect { rect: Rect::new(mx, my, 24.0, 16.0),
+            color, radius: [0.0; 4], radius_y: [0.0; 4] });
+        list.push(PaintCmd::PopClip);
+        if node.media_muted {
+            list.push(PaintCmd::PushClipPath {
+                points: vec![(mx + 15.0, my + 3.0), (mx + 17.0, my + 2.0),
+                    (mx + 24.0, my + 13.0), (mx + 22.0, my + 14.0)],
+                even_odd: false,
+            });
+            list.push(PaintCmd::FillRect { rect: Rect::new(mx, my, 24.0, 16.0),
+                color, radius: [0.0; 4], radius_y: [0.0; 4] });
+            list.push(PaintCmd::PopClip);
+        } else {
+            for dx in [16.0, 21.0] {
+                list.push(PaintCmd::FillRect { rect: Rect::new(mx + dx, my + 4.0, 2.0, 8.0),
+                    color, radius: [1.0; 4], radius_y: [1.0; 4] });
+            }
+        }
+    }
 }
 
 fn paint_media_timeline(
@@ -365,6 +411,6 @@ fn emit_media_text(
 }
 
 fn format_media_time(seconds: f32) -> String {
-    let total = seconds.round().max(0.0) as u32;
+    let total = seconds.floor().max(0.0) as u32;
     format!("{}:{:02}", total / 60, total % 60)
 }

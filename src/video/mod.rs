@@ -8,6 +8,7 @@
 mod controls;
 mod source;
 mod tracks;
+pub(crate) mod playback;
 
 #[cfg(feature = "audio-symphonia")]
 pub use webmedia::video::symphonia_backend;
@@ -19,11 +20,13 @@ use crate::types::Document;
 use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
+pub mod audio_output;
+
 pub(crate) use controls::build_media_element;
 pub use tracks::TextTrackInfo;
 pub use webmedia::video::{
     AudioSamples, DecodedMedia, MediaDecodeError, MediaDecoder, MediaMetadata, NullMediaDecoder,
-    StreamingVideoDecoder, VideoFrame,
+    MediaSample, StreamingMediaDecoder, StreamingVideoDecoder, VideoFrame,
 };
 
 #[cfg(test)]
@@ -32,6 +35,7 @@ mod integration_tests;
 #[derive(Clone, Debug)]
 pub struct MediaElementState {
     pub current_time: f32,
+    pub seek_revision: u64,
     pub duration: Option<f32>,
     pub ready_state: u16,
     pub network_state: u16,
@@ -50,6 +54,7 @@ impl Default for MediaElementState {
     fn default() -> Self {
         Self {
             current_time: 0.0,
+            seek_revision: 0,
             duration: None,
             ready_state: MEDIA_HAVE_NOTHING,
             network_state: MEDIA_NETWORK_EMPTY,
@@ -286,10 +291,7 @@ impl Document {
         let duration = metadata
             .duration
             .filter(|value| value.is_finite() && *value >= 0.0);
-        let dimensions = metadata
-            .width
-            .zip(metadata.height)
-            .filter(|(width, height)| *width > 0 && *height > 0);
+        let dimensions = metadata.display_dimensions();
         if duration.is_none() && dimensions.is_none() {
             return false;
         }
@@ -327,16 +329,17 @@ impl Document {
         {
             return false;
         }
+        let (display_width, display_height) = frame.display_dimensions();
         let Some(node) = self.find_webcore_mut(id) else {
             return false;
         };
         let dimensions_changed =
-            node.image_width != frame.width || node.image_height != frame.height;
+            node.image_width != display_width || node.image_height != display_height;
         node.image_data = Some(frame.rgba);
         node.image_data_width = frame.width;
         node.image_data_height = frame.height;
-        node.image_width = frame.width;
-        node.image_height = frame.height;
+        node.image_width = display_width;
+        node.image_height = display_height;
         node.svg_document = None;
         if dimensions_changed {
             node.layout.intrinsic_dirty = true;
@@ -356,6 +359,7 @@ impl Document {
             return false;
         };
         if state.pending_video_frames.len() + frames.len() > 8 {
+            crate::profile::record_video_backpressure(false, frames.len());
             return false;
         }
         let mut last_timestamp = state
@@ -441,6 +445,13 @@ impl Document {
         Some(((x - controls.timeline_x) / controls.timeline_w).clamp(0.0, 1.0) * duration)
     }
 
+    pub(crate) fn media_mute_for_point(&self, id: u32, point: (f32, f32)) -> Option<bool> {
+        let node = self.find_webcore(id)?;
+        let rect = controls::media_control_layout(node)?.mute_rect?;
+        (point.0 >= rect.x && point.0 <= rect.right()
+            && point.1 >= rect.y && point.1 <= rect.bottom()).then_some(!node.media_muted)
+    }
+
     pub fn media_set_current_time(&mut self, id: u32, seconds: f32) -> bool {
         if self.ensure_media_state(id).is_none() {
             return false;
@@ -455,6 +466,11 @@ impl Document {
             let state = self.media_states.get_mut(&id).expect("checked above");
             let duration = state.duration.unwrap_or(f32::INFINITY);
             state.current_time = seconds.min(duration);
+            state.seek_revision = state.seek_revision.wrapping_add(1);
+            if crate::profile::media_enabled() {
+                eprintln!("media seek node={id} requested={seconds:.3} target={:.3} revision={} paused={}",
+                    state.current_time, state.seek_revision, state.paused);
+            }
             state.ended = state.duration.is_some_and(|d| state.current_time >= d);
             state.seeking = false;
             if !state.paused {
@@ -500,6 +516,14 @@ impl Document {
     }
 
     pub(crate) fn tick_media_with_frames(&mut self, now: Instant) -> (bool, Vec<u32>) {
+        self.tick_media_with_external_clocks(now, &[])
+    }
+
+    pub(crate) fn tick_media_with_external_clocks(&mut self, now: Instant, clocks: &[(u32, f32)]) -> (bool, Vec<u32>) {
+        static TRACE_START: std::sync::OnceLock<Option<Instant>> = std::sync::OnceLock::new();
+        let trace_start = TRACE_START.get_or_init(|| {
+            std::env::var_os("WEBCORE_TRACE_VIDEO_DELIVERY").map(|_| Instant::now())
+        });
         let ids: Vec<u32> = self.media_states.keys().copied().collect();
         let mut events = Vec::<(u32, &'static str)>::new();
         let mut sync_ids = Vec::<u32>::new();
@@ -515,7 +539,12 @@ impl Document {
             if state.paused || state.ended {
                 continue;
             }
-            if is_video && state.pending_video_frames.is_empty() {
+            let external_time = clocks.iter().find(|(node_id, time)| *node_id == id && time.is_finite())
+                .map(|(_, time)| *time);
+            if let Some(time) = external_time { state.current_time = time.max(0.0); }
+            let device_reached_end = !should_loop && external_time.is_some_and(|time|
+                state.duration.is_some_and(|duration| time >= duration));
+            if is_video && state.pending_video_frames.is_empty() && !device_reached_end {
                 state.last_tick = Some(now);
                 any_playing = true;
                 continue;
@@ -524,11 +553,11 @@ impl Document {
                 continue;
             };
             let dt = now.duration_since(last).as_secs_f32() * state.playback_rate;
-            if dt <= 0.0 {
+            if external_time.is_none() && dt <= 0.0 {
                 any_playing = true;
                 continue;
             }
-            state.current_time = (state.current_time + dt).max(0.0);
+            if external_time.is_none() { state.current_time = (state.current_time + dt).max(0.0); }
             let mut latest = None;
             while state
                 .pending_video_frames
@@ -538,6 +567,11 @@ impl Document {
                 latest = state.pending_video_frames.pop_front();
             }
             if let Some(frame) = latest {
+                if let Some(start) = trace_start {
+                    eprintln!("video presentation node={id} wall={:.3} pts={:.3} clock={:.3} queued={}",
+                        now.saturating_duration_since(*start).as_secs_f64(), frame.timestamp,
+                        state.current_time, state.pending_video_frames.len());
+                }
                 video_frames.push((id, frame));
             }
             events.push((id, "timeupdate"));

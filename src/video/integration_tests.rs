@@ -1,12 +1,107 @@
 use super::{MediaMetadata, StreamingVideoDecoder, y4m::Y4mStream};
 
 #[test]
+fn presentation_dimensions_preserve_coded_buffers_and_intrinsic_layout() {
+    use std::sync::Arc;
+    let mut doc = crate::html::parse_html("<video id=movie style='width:100px;height:100px;object-fit:contain'></video>");
+    let id = doc.get_element_by_id("movie").unwrap();
+    assert!(doc.media_apply_video_metadata(id, MediaMetadata {
+        presentation_size: Some((8.0, 4.0)), duration: Some(1.0), width: Some(4), height: Some(4),
+        sample_rate: None, channels: None,
+    }));
+    assert_eq!(doc.find_webcore(id).map(|node| (node.image_width, node.image_height)), Some((8, 4)));
+    let pixels = Arc::new(vec![255u8; 4 * 4 * 4]);
+    assert!(doc.media_present_video_frame(id, super::VideoFrame {
+        presentation_size: Some((8.0, 4.0)), width: 4, height: 4,
+        rgba: pixels.clone(), timestamp: 0.0,
+    }));
+    let node = doc.find_webcore(id).unwrap();
+    assert_eq!((node.image_width, node.image_height), (8, 4));
+    assert_eq!((node.image_data_width, node.image_data_height), (4, 4));
+    assert!(Arc::ptr_eq(node.image_data.as_ref().unwrap(), &pixels));
+    let mut engine = crate::frame::EngineFrame::new(doc, 200.0, 200.0);
+    engine.update_frame();
+    let list = crate::renderer::display_list_builder::build_display_list(&engine.doc.root, 200.0, 200.0);
+    assert!(list.commands.iter().any(|command| matches!(command,
+        crate::renderer::display_list::PaintCmd::Image {
+            rect, data: crate::renderer::display_list::ImageRef::Shared(data, 4, 4),
+        } if Arc::ptr_eq(data, &pixels) && (rect.w - 100.0).abs() < 0.01 && (rect.h - 50.0).abs() < 0.01)));
+}
+
+#[test]
+fn native_timeline_click_seeks_without_toggling_playback() {
+    let mut doc = crate::html::parse_html("<video id=movie src=movie.webm width=640 height=360 controls></video>");
+    let id = doc.get_element_by_id("movie").unwrap();
+    doc.media_apply_video_metadata(id, MediaMetadata {
+        presentation_size: None,
+        duration: Some(120.0), width: Some(640), height: Some(360),
+        sample_rate: None, channels: None,
+    });
+    let mut frame = crate::frame::EngineFrame::new(doc, 640.0, 400.0);
+    frame.update_frame();
+    assert!(frame.doc.media_play(id));
+    let layout = super::controls::media_control_layout(frame.doc.find_webcore(id).unwrap()).unwrap();
+    let point = (layout.timeline_x + layout.timeline_w * 0.5, layout.rail_y + layout.rail_h * 0.5);
+    frame.doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, point, 0);
+    frame.doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, point, 0);
+    assert_eq!(frame.doc.media_current_time(id), Some(60.0));
+    assert_eq!(frame.doc.media_paused(id), Some(false));
+    assert_eq!(frame.doc.media_states[&id].seek_revision, 1);
+    let mute = layout.mute_rect.unwrap();
+    let point = (mute.x + mute.w * 0.5, mute.y + mute.h * 0.5);
+    frame.doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, point, 0);
+    frame.doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, point, 0);
+    assert_eq!(frame.doc.media_muted(id), Some(true));
+    assert_eq!(frame.doc.media_paused(id), Some(false));
+    assert_eq!(frame.doc.media_current_time(id), Some(60.0));
+    let list = crate::renderer::display_list_builder::build_display_list(&frame.doc.root, 640.0, 400.0);
+    assert!(list.commands.iter().any(|command|
+        matches!(command, crate::renderer::display_list::PaintCmd::Text { text, .. } if text == "1:00 / 2:00")));
+}
+
+#[test]
+fn device_clock_selects_video_frames_without_browser_time_advance() {
+    use std::{sync::Arc, time::{Duration, Instant}};
+    let mut doc = crate::html::parse_html("<video id=movie src=movie.webm></video>");
+    let id = doc.get_element_by_id("movie").unwrap();
+    doc.media_apply_video_metadata(id, MediaMetadata {
+        presentation_size: None,
+        duration: Some(2.0), width: Some(2), height: Some(2), sample_rate: Some(48_000), channels: Some(2),
+    });
+    assert!(doc.media_play(id));
+    let frames = [0.0, 0.5, 1.0].into_iter().enumerate().map(|(index, timestamp)| super::VideoFrame {
+        presentation_size: None,
+        width: 2, height: 2, timestamp,
+        rgba: Arc::new(vec![(index as u8) * 80, 0, 0, 255].repeat(4)),
+    }).collect();
+    assert!(doc.media_queue_video_frames(id, frames));
+    let now = Instant::now();
+    doc.tick_media_with_external_clocks(now + Duration::from_secs(10), &[(id, 0.25)]);
+    assert_eq!(doc.media_current_time(id), Some(0.25));
+    assert_eq!(doc.find_webcore(id).unwrap().image_data.as_ref().unwrap()[0], 0);
+    doc.tick_media_with_external_clocks(now + Duration::from_secs(20), &[(id, 0.25)]);
+    assert_eq!(doc.media_current_time(id), Some(0.25));
+    assert_eq!(doc.find_webcore(id).unwrap().image_data.as_ref().unwrap()[0], 0);
+    let (_, presented) = doc.tick_media_with_external_clocks(now + Duration::from_secs(21), &[(id, 0.5)]);
+    assert_eq!(presented, vec![id]);
+    assert_eq!(doc.media_current_time(id), Some(0.5));
+    assert_eq!(doc.find_webcore(id).unwrap().image_data.as_ref().unwrap()[0], 80);
+    doc.tick_media_with_external_clocks(now + Duration::from_secs(22), &[(id, 1.5)]);
+    assert!(doc.media_states[&id].pending_video_frames.is_empty());
+    assert!(!doc.media_states[&id].ended);
+    doc.tick_media_with_external_clocks(now + Duration::from_secs(23), &[(id, 2.0)]);
+    assert!(doc.media_states[&id].ended);
+    assert!(doc.media_states[&id].paused);
+}
+
+#[test]
 fn mp4_metadata_sizes_video_before_picture_arrives() {
     let mut doc = crate::html::parse_html("<video id=movie src=movie.mp4></video>");
     let id = doc.get_element_by_id("movie").unwrap();
     assert!(doc.media_apply_video_metadata(
         id,
         MediaMetadata {
+            presentation_size: None,
             duration: Some(87.06),
             width: Some(1280),
             height: Some(720),
@@ -76,6 +171,7 @@ fn external_video_layer_omits_software_frame_and_keeps_background() {
     assert!(engine.doc.media_present_video_frame(
         id,
         crate::video::backend::VideoFrame {
+            presentation_size: None,
             width: 2,
             height: 2,
             rgba: std::sync::Arc::new(vec![90, 120, 150, 255].repeat(4)),
@@ -178,6 +274,7 @@ fn looping_stream_uses_monotonic_frame_times_but_wrapped_media_time() {
     assert!(doc.media_apply_video_metadata(
         id,
         MediaMetadata {
+            presentation_size: None,
             duration: Some(0.08),
             width: Some(1),
             height: Some(1),
@@ -189,6 +286,7 @@ fn looping_stream_uses_monotonic_frame_times_but_wrapped_media_time() {
         assert!(doc.media_queue_video_frames(
             id,
             vec![super::VideoFrame {
+                presentation_size: None,
                 width: 1,
                 height: 1,
                 rgba: std::sync::Arc::new(vec![value, value, value, 255]),
@@ -252,6 +350,7 @@ fn full_video_queue_does_not_drop_unpresented_frames() {
         assert!(doc.media_queue_video_frames(
             id,
             vec![super::VideoFrame {
+                presentation_size: None,
                 width: 1,
                 height: 1,
                 rgba: std::sync::Arc::new(vec![number, 0, 0, 255]),
@@ -262,6 +361,7 @@ fn full_video_queue_does_not_drop_unpresented_frames() {
     assert!(!doc.media_queue_video_frames(
         id,
         vec![super::VideoFrame {
+            presentation_size: None,
             width: 1,
             height: 1,
             rgba: std::sync::Arc::new(vec![8, 0, 0, 255]),
