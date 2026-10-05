@@ -3180,7 +3180,7 @@ pub(crate) fn match_rules(
                     ancestors,
                     &match_ctx,
                 ) {
-                    if has_hover {
+                    if has_hover && !sel.has_negated_hover {
                         sets.hover_matched
                             .push((rule.specificity, rule_idx, scope_proximity));
                     }
@@ -3192,11 +3192,9 @@ pub(crate) fn match_rules(
                         sets.visited_matched
                             .push((rule.specificity, rule_idx, scope_proximity));
                     }
-                    // With a hover chain live, the FULL selector is tested too:
-                    // a `:hover` rule that matches now applies as a normal rule,
-                    // so it can change layout (`display: block` on a menu).
+                    // Test the full selector even without a hover chain:
+                    // :not(:hover) matches the initial unhovered state.
                     if has_hover
-                        && !hover_chain.is_empty()
                         && sel.matches_with_ancestors_ctx(
                             node,
                             child_index,
@@ -4378,8 +4376,6 @@ fn apply_cascade_node(
         apply_presentational_hints(&mut style, root, ancestors);
     }
 
-    apply_form_sizing_hints_after_ua(&mut style, root, &stylesheet.rules, &matched);
-
     // Second pass: `!important`, in CSS Cascade §6.3 order — which REVERSES the
     // origin ranking. A UA `!important` beats an author `!important`, so the UA
     // rules are applied LAST here even though they were applied first above.
@@ -4523,6 +4519,9 @@ fn apply_cascade_node(
     // Active style — clone the base style and overlay all matched active declarations.
     if !active_matched.is_empty() {
         let mut as_ = style.clone();
+        // Resolve base and state declarations together so an active UA rule
+        // cannot override a normal author rule merely by being applied last.
+        active_matched.extend(matched.iter().copied());
         apply_state_matched_rules(
             &mut as_,
             &mut active_matched,
@@ -4592,6 +4591,19 @@ fn apply_cascade_node(
                 }
             } else {
                 apply_property(&mut style, prop, &resolved);
+            }
+            // The style attribute participates in dynamic states too. State
+            // snapshots are built before inline declarations are applied.
+            if let Some(mut active) = style.active_style.take() {
+                if !active_matched.iter().any(|(_, ri, _)| {
+                    stylesheet.rules[*ri]
+                        .important_declarations
+                        .iter()
+                        .any(|(p, _)| p == prop)
+                }) {
+                    copy_property_from_style(&mut active, &style, prop);
+                }
+                style.active_style = Some(active);
             }
         }
         (n, i)
@@ -4719,6 +4731,10 @@ fn apply_cascade_node(
     } else {
         root_font_px
     };
+
+    super::property_defs::finalize_tab_size(&mut style, &|length| {
+        length.resolve_vp(font_px, 0.0, root_font_px, vw, vh)
+    });
 
     // Preserve list_index: set by the HTML parser (ol counter), not by CSS.
     // The fresh ComputedStyle defaults list_index=0, so carry the old value forward.
@@ -5020,6 +5036,9 @@ fn apply_cascade_node(
                 .font_size
                 .resolve_vp(font_px, font_px, root_font_px, vw, vh);
             crate::css::finalize_filter_values(pseudo, &|length| {
+                length.resolve_vp(pseudo_font, 0.0, root_font_px, vw, vh)
+            });
+            super::property_defs::finalize_tab_size(pseudo, &|length| {
                 length.resolve_vp(pseudo_font, 0.0, root_font_px, vw, vh)
             });
         }
@@ -5524,54 +5543,6 @@ pub(crate) fn apply_cascade_inner(
     }
 }
 
-fn apply_form_sizing_hints_after_ua(
-    style: &mut ComputedStyle,
-    root: &crate::types::WebCore,
-    rules: &[CssRule],
-    matched: &[(u32, usize, Option<u32>)],
-) {
-    let author_declares = |property: &str| {
-        matched.iter().any(|(sp, ri, _)| {
-            is_author_origin(*sp) && rules[*ri].declarations.contains_key(property)
-        })
-    };
-
-    match root.tag.as_str() {
-        "input" => {
-            if !author_declares("width") {
-                if let Some(size) = root.attributes.get("size") {
-                    if let Ok(chars) = size.trim().parse::<f32>() {
-                        if chars > 0.0 {
-                            apply_property(style, "width", &format!("{}em", chars * 0.6 + 0.5));
-                        }
-                    }
-                }
-            }
-        }
-        "textarea" => {
-            if !author_declares("height") {
-                if let Some(rows) = root.attributes.get("rows") {
-                    if let Ok(rows) = rows.trim().parse::<f32>() {
-                        if rows > 0.0 {
-                            apply_property(style, "height", &format!("{}em", rows * 1.4));
-                        }
-                    }
-                }
-            }
-            if !author_declares("width") {
-                if let Some(cols) = root.attributes.get("cols") {
-                    if let Ok(cols) = cols.trim().parse::<f32>() {
-                        if cols > 0.0 {
-                            apply_property(style, "width", &format!("{}em", cols * 0.6));
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
 fn apply_presentational_hints(
     style: &mut ComputedStyle,
     root: &crate::types::WebCore,
@@ -5621,9 +5592,6 @@ fn apply_presentational_hints(
                 _ => {}
             },
             "valign" => apply_property(style, "vertical-align", val),
-            "multiple" if root.tag == "select" && !root.attributes.contains_key("size") => {
-                apply_property(style, "height", &format!("{}em", 4.0 * 1.2 + 0.5));
-            }
             "bgcolor" => apply_property(style, "background-color", val),
             "color" | "text" => apply_property(style, "color", val),
             "face" => apply_property(style, "font-family", val),
@@ -5641,36 +5609,8 @@ fn apply_presentational_hints(
                     };
                     apply_property(style, "font-size", &format!("{}px", px));
                 }
-                "select" => {
-                    let rows = val.trim().parse::<f32>().unwrap_or(1.0).max(1.0);
-                    if rows > 1.0 {
-                        let height = rows * 1.2 + 0.5;
-                        apply_property(style, "height", &format!("{height}em"));
-                    }
-                }
-                "input" => {
-                    if let Ok(chars) = val.trim().parse::<f32>() {
-                        if chars > 0.0 {
-                            apply_property(style, "width", &format!("{}ch", chars));
-                        }
-                    }
-                }
                 _ => {}
             },
-            "rows" if root.tag == "textarea" => {
-                if let Ok(rows) = val.trim().parse::<f32>() {
-                    if rows > 0.0 {
-                        apply_property(style, "height", &format!("{}em", rows * 1.4));
-                    }
-                }
-            }
-            "cols" if root.tag == "textarea" => {
-                if let Ok(cols) = val.trim().parse::<f32>() {
-                    if cols > 0.0 {
-                        apply_property(style, "width", &format!("{}em", cols * 0.6));
-                    }
-                }
-            }
             "width" if crate::html::supports_dimension_presentational_hint(&root.tag, "width") => {
                 let selected_source_width;
                 let clean = if root.tag == "img" {

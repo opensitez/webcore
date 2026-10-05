@@ -556,7 +556,7 @@ pub fn resolve(name: &str) -> PropertyId {
         "font-size" => PropertyId::FontSize,
         "font-weight" => PropertyId::FontWeight,
         "font-style" => PropertyId::FontStyle,
-        "font-stretch" => PropertyId::FontStretch,
+        "font-width" | "font-stretch" => PropertyId::FontStretch,
         "font-synthesis" => PropertyId::FontSynthesis,
         "font-synthesis-weight" => PropertyId::FontSynthesisWeight,
         "font-synthesis-style" => PropertyId::FontSynthesisStyle,

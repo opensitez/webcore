@@ -22,8 +22,33 @@ pub(crate) fn parse_stylesheet_with_counter_styles_cleaned(
     css: &str,
 ) -> (Option<Vec<CssRule>>, Vec<CounterStyleRule>) {
     let mut counter_styles = Vec::new();
-    let rules = parse_stylesheet_inner(css, &MediaConditions::default(), "", &mut counter_styles);
+    let rules = parse_stylesheet_inner(
+        css,
+        &MediaConditions::default(),
+        "",
+        &mut counter_styles,
+        &mut Vec::new(),
+    );
     (rules, counter_styles)
+}
+
+pub(crate) fn parse_stylesheet_definitions_cleaned(
+    css: &str,
+) -> (
+    Option<Vec<CssRule>>,
+    Vec<CounterStyleRule>,
+    Vec<super::keyframes::KeyframeRule>,
+) {
+    let mut counters = Vec::new();
+    let mut keyframes = Vec::new();
+    let rules = parse_stylesheet_inner(
+        css,
+        &MediaConditions::default(),
+        "",
+        &mut counters,
+        &mut keyframes,
+    );
+    (rules, counters, keyframes)
 }
 
 pub(crate) fn extract_page_rules_cleaned(css: &str) -> Vec<PageRule> {
@@ -282,7 +307,7 @@ fn eval_functional_token(ident: &str, args: &str) -> bool {
 }
 
 fn strip_important_flag(val: &str) -> Option<(&str, bool)> {
-    if let Some(idx) = super::syntax::top_level_delimiters(val, b'!').last() {
+    if let Some(idx) = super::syntax::declaration_priority(val)? {
         let flag = val[idx + 1..].trim();
         let mut chars = flag.chars().peekable();
         if starts_css_ident(&chars)
@@ -294,7 +319,7 @@ fn strip_important_flag(val: &str) -> Option<(&str, bool)> {
             None // invalid exclamation flag
         }
     } else {
-        Some((val, false))
+        Some((val.trim(), false))
     }
 }
 
@@ -512,10 +537,7 @@ fn supports_font_format(format: &str) -> bool {
 }
 
 fn supports_font_tech(tech: &str) -> bool {
-    matches!(
-        tech.to_ascii_lowercase().as_str(),
-        "features-opentype" | "features-aat" | "variations" | "variations-opentype"
-    )
+    super::font_face::supports_font_tech(tech)
 }
 
 fn unquote_css_string(value: &str) -> &str {
@@ -590,6 +612,7 @@ fn parse_stylesheet_inner(
     parent_media: &MediaConditions,
     parent_layer: &str,
     counter_styles: &mut Vec<CounterStyleRule>,
+    keyframes: &mut Vec<super::keyframes::KeyframeRule>,
 ) -> Option<Vec<CssRule>> {
     let mut rules = Vec::new();
     let mut s = css.trim();
@@ -601,82 +624,61 @@ fn parse_stylesheet_inner(
         }
 
         // @rules
-        if s.starts_with('@') {
-            // Only lowercase a small prefix (enough to identify the @-rule type)
-            let prefix_len = s.len().min(30);
-            let at_lower: String = s[..prefix_len].to_ascii_lowercase();
-
-            // @import / @charset — skip to semicolon (no block)
-            if at_lower.starts_with("@import") || at_lower.starts_with("@charset") {
-                if let Some(semi) = s.find(';') {
-                    s = &s[semi + 1..];
-                } else {
-                    break;
-                }
-                continue;
-            }
-
-            // ⛔ `@layer a, b;` — the STATEMENT form, which has no block. It
-            // exists purely to fix the order of the layers it names, and was
-            // being skipped with every other braceless at-rule, so the order it
-            // declared was thrown away and layers fell back to source order.
-            if at_lower.starts_with("@layer")
-                && s.find('{')
-                    .map_or(true, |b| s.find(';').map_or(false, |sc| sc < b))
-            {
-                if let Some(semi) = s.find(';') {
-                    for name in s[6..semi].split(',') {
+        if s.starts_with('@')
+            && let Some((at_name, name_end)) = super::syntax::at_keyword(s)
+        {
+            let (end, delimiter) = super::syntax::rule_prelude_end(s).unwrap_or((s.len(), b';'));
+            // EOF terminates statement at-rules; punctuation inside components does not.
+            if delimiter == b';' {
+                if at_name.eq_ignore_ascii_case("layer") {
+                    for name in s[name_end..end].split(',') {
                         let n = name.trim();
                         if !n.is_empty() {
                             let qualified = qualify_layer_name(parent_layer, n);
                             declare_layer(&qualified, parent_media);
                         }
                     }
-                    s = &s[semi + 1..];
-                    continue;
                 }
+                s = &s[(end + usize::from(end < s.len()))..];
+                continue;
             }
-
-            // Find the opening brace
-            let brace = match s.find('{') {
-                Some(p) => p,
-                None => {
-                    if let Some(semi) = s.find(';') {
-                        s = &s[semi + 1..];
-                    } else {
-                        break;
-                    }
-                    continue;
-                }
-            };
+            let brace = end;
             let at_header = s[..brace].trim();
             let rest_from_brace = &s[brace..];
             let (inner_block, after_block) = consume_block(rest_from_brace);
 
-            if at_lower.starts_with("@media") {
+            if at_name.eq_ignore_ascii_case("media") {
                 // Extract condition: everything after "@media"
-                let condition = at_header[6..].trim();
+                let condition = at_header[name_end..].trim();
                 let media_cond = parent_media.with_query(condition);
                 // Recursively parse inner block
-                if let Some(inner_rules) =
-                    parse_stylesheet_inner(inner_block, &media_cond, parent_layer, counter_styles)
-                {
+                if let Some(inner_rules) = parse_stylesheet_inner(
+                    inner_block,
+                    &media_cond,
+                    parent_layer,
+                    counter_styles,
+                    keyframes,
+                ) {
                     for r in inner_rules {
                         rules.push(r);
                     }
                 }
-            } else if at_lower.starts_with("@container") {
+            } else if at_name.eq_ignore_ascii_case("container") {
                 // Each comma-separated alternative may name a different
                 // container, so preserve the complete header for evaluation.
-                let header = at_header["@container".len()..].trim();
+                let header = at_header[name_end..].trim();
                 let first = crate::css::value_parse::split_top_level_commas(header)
                     .into_iter()
                     .next()
                     .unwrap_or(header);
                 let (cname, _) = crate::css::container::parse_container_branch_header(first);
-                if let Some(mut inner_rules) =
-                    parse_stylesheet_inner(inner_block, parent_media, parent_layer, &mut Vec::new())
-                {
+                if let Some(mut inner_rules) = parse_stylesheet_inner(
+                    inner_block,
+                    parent_media,
+                    parent_layer,
+                    counter_styles,
+                    keyframes,
+                ) {
                     for r in &mut inner_rules {
                         let inner =
                             std::mem::replace(&mut r.container_condition, header.to_string());
@@ -689,25 +691,31 @@ fn parse_stylesheet_inner(
                         rules.push(r);
                     }
                 }
-            } else if at_lower.starts_with("@supports") {
-                let condition = at_header["@supports".len()..].trim();
+            } else if at_name.eq_ignore_ascii_case("supports") {
+                let condition = at_header[name_end..].trim();
                 if supports_condition_matches(condition) {
                     if let Some(inner_rules) = parse_stylesheet_inner(
                         inner_block,
                         parent_media,
                         parent_layer,
                         counter_styles,
+                        keyframes,
                     ) {
                         for r in inner_rules {
                             rules.push(r);
                         }
                     }
                 }
-            } else if at_lower.starts_with("@scope") {
-                if let Some(inner_rules) =
-                    parse_stylesheet_inner(inner_block, parent_media, parent_layer, &mut Vec::new())
-                {
-                    let (scope_selector, scope_limit_selector) = extract_scope_selectors(at_header);
+            } else if at_name.eq_ignore_ascii_case("scope") {
+                if let Some(inner_rules) = parse_stylesheet_inner(
+                    inner_block,
+                    parent_media,
+                    parent_layer,
+                    counter_styles,
+                    keyframes,
+                ) {
+                    let (scope_selector, scope_limit_selector) =
+                        extract_scope_selectors(&at_header[name_end..]);
                     let frame = crate::css::rule::ScopeFrame {
                         root: scope_selector.clone(),
                         limit: scope_limit_selector.clone(),
@@ -723,23 +731,24 @@ fn parse_stylesheet_inner(
                         rules.push(r);
                     }
                 }
-            } else if at_lower.starts_with("@layer") {
+            } else if at_name.eq_ignore_ascii_case("layer") {
                 // `@layer name { … }` — every rule inside belongs to that layer.
                 // Naming a layer here also declares its order, if a preceding
                 // `@layer a, b;` statement did not already.
-                let mut name = at_header
-                    .trim_start_matches(|c: char| c != ' ' && c != '\t')
-                    .trim()
-                    .to_string();
+                let mut name = at_header[name_end..].trim().to_string();
                 if name.is_empty() {
                     name = next_anonymous_layer_name();
                 } else {
                     name = qualify_layer_name(parent_layer, &name);
                 }
                 declare_layer(&name, parent_media);
-                if let Some(inner_rules) =
-                    parse_stylesheet_inner(inner_block, parent_media, &name, counter_styles)
-                {
+                if let Some(inner_rules) = parse_stylesheet_inner(
+                    inner_block,
+                    parent_media,
+                    &name,
+                    counter_styles,
+                    keyframes,
+                ) {
                     for mut r in inner_rules {
                         // An inner `@layer` wins — it is the more specific one.
                         if r.layer.is_empty() {
@@ -748,8 +757,22 @@ fn parse_stylesheet_inner(
                         rules.push(r);
                     }
                 }
-            } else if at_lower.starts_with("@counter-style") {
-                let name = at_header["@counter-style".len()..].trim();
+            } else if at_name.eq_ignore_ascii_case("keyframes")
+                || at_name.eq_ignore_ascii_case("-webkit-keyframes")
+            {
+                if let Some(name) = super::keyframes::keyframes_name(at_header[name_end..].trim()) {
+                    keyframes.push(super::keyframes::KeyframeRule {
+                        name,
+                        stops: std::sync::Arc::new(super::keyframes::parse_keyframe_stops(
+                            inner_block,
+                        )),
+                        media_condition: parent_media.clone(),
+                        layer: parent_layer.to_string(),
+                        author_origin: false,
+                    });
+                }
+            } else if at_name.eq_ignore_ascii_case("counter-style") {
+                let name = at_header[name_end..].trim();
                 let (declarations, important_declarations) =
                     parse_declarations_important(inner_block);
                 if !name.is_empty()
@@ -772,7 +795,7 @@ fn parse_stylesheet_inner(
         }
 
         // Selector(s) { declarations }
-        let brace_pos = match s.find('{') {
+        let brace_pos = match find_next_top_level_open_brace(s) {
             Some(p) => p,
             None => break,
         };
@@ -863,9 +886,13 @@ fn parse_stylesheet_inner(
                 }
                 format!("{} {{{}}}", expanded, nested_block)
             };
-            if let Some(inner_rules) =
-                parse_stylesheet_inner(&nested_css, parent_media, parent_layer, &mut Vec::new())
-            {
+            if let Some(inner_rules) = parse_stylesheet_inner(
+                &nested_css,
+                parent_media,
+                parent_layer,
+                &mut Vec::new(),
+                &mut Vec::new(),
+            ) {
                 rules.extend(inner_rules);
             }
         }
@@ -1090,15 +1117,83 @@ pub(crate) fn consume_block(s: &str) -> (&str, &str) {
         if let Some(end) = super::syntax::top_level_delimiters(contents, b'}').next() {
             return (&contents[..end], &contents[end + 1..]);
         }
+        return (contents, "");
     }
     (s, "")
 }
 
-fn extract_scope_selectors(at_header: &str) -> (Option<CssSelector>, Option<CssSelector>) {
-    let Some(rest) = at_header.strip_prefix("@scope") else {
-        return (None, None);
-    };
-    let rest = rest.trim();
+pub(crate) struct RuleBlock<'a> {
+    pub name: Option<std::borrow::Cow<'a, str>>,
+    pub prelude: &'a str,
+    pub body: &'a str,
+}
+
+pub(crate) fn rule_blocks(mut source: &str) -> impl Iterator<Item = RuleBlock<'_>> {
+    std::iter::from_fn(move || {
+        loop {
+            source = source.trim_start();
+            if source.is_empty() {
+                return None;
+            }
+            let at = super::syntax::at_keyword(source);
+            let (end, delimiter) = if at.is_some() {
+                super::syntax::rule_prelude_end(source)?
+            } else {
+                (find_next_top_level_open_brace(source)?, b'{')
+            };
+            if delimiter == b';' {
+                source = &source[end + 1..];
+                continue;
+            }
+            let (name, prelude_start) = match at {
+                Some((name, consumed)) => (Some(name), consumed),
+                None => (None, 0),
+            };
+            let prelude = source[prelude_start..end].trim();
+            let (body, remaining) = consume_block(&source[end..]);
+            source = remaining;
+            return Some(RuleBlock {
+                name,
+                prelude,
+                body,
+            });
+        }
+    })
+}
+
+/// Walk global definitions in supported grouping rules without copying bodies
+/// or recursively entering ordinary style rules and opaque token contents.
+pub(crate) fn global_rule_blocks(css: &str) -> impl Iterator<Item = RuleBlock<'_>> {
+    let mut stack = vec![rule_blocks(css)];
+    std::iter::from_fn(move || {
+        loop {
+            let Some(rule) = stack.last_mut()?.next() else {
+                stack.pop();
+                continue;
+            };
+            if let Some(name) = &rule.name {
+                if name.eq_ignore_ascii_case("supports") {
+                    if supports_condition_matches(rule.prelude) {
+                        stack.push(rule_blocks(rule.body));
+                    }
+                    continue;
+                }
+                if name.eq_ignore_ascii_case("media")
+                    || name.eq_ignore_ascii_case("container")
+                    || name.eq_ignore_ascii_case("layer")
+                    || name.eq_ignore_ascii_case("scope")
+                {
+                    stack.push(rule_blocks(rule.body));
+                    continue;
+                }
+            }
+            return Some(rule);
+        }
+    })
+}
+
+fn extract_scope_selectors(prelude: &str) -> (Option<CssSelector>, Option<CssSelector>) {
+    let rest = prelude.trim();
     let Some(open) = rest.find('(') else {
         return (None, None);
     };
@@ -1204,17 +1299,19 @@ fn declaration_parts(declaration: &str) -> Option<(String, &str)> {
     if !name.starts_with("--") {
         name.make_ascii_lowercase();
     }
-    Some((name, declaration[colon + 1..].trim()))
+    // Trimming before tokenization can turn a bad newline-terminated string
+    // into a valid EOF-terminated string.
+    Some((name, &declaration[colon + 1..]))
 }
 
 /// Parse "prop: value; prop: value; ..." into a map.
 /// Strips `!important` from values.
 pub fn parse_declarations(block: &str) -> HashMap<String, String> {
-    let cleaned = block.contains("/*").then(|| strip_css_comments(block));
-    let block = cleaned.as_deref().unwrap_or(block);
+    let cleaned = super::syntax::normalize_input(block);
+    let block = cleaned.as_ref();
     let mut map = HashMap::new();
     for decl in split_declarations(block) {
-        let decl = decl.trim();
+        let decl = decl.trim_start();
         if decl.is_empty() {
             continue;
         }
@@ -1233,12 +1330,12 @@ pub fn parse_declarations(block: &str) -> HashMap<String, String> {
 /// Parse declarations, splitting into (normal, important) maps.
 /// Properties with `!important` go into the second map.
 pub fn parse_declarations_important(block: &str) -> (Declarations, Declarations) {
-    let cleaned = block.contains("/*").then(|| strip_css_comments(block));
-    let block = cleaned.as_deref().unwrap_or(block);
+    let cleaned = super::syntax::normalize_input(block);
+    let block = cleaned.as_ref();
     let mut normal = Declarations::new();
     let mut important = Declarations::new();
     for decl in split_declarations(block) {
-        let decl = decl.trim();
+        let decl = decl.trim_start();
         if decl.is_empty() {
             continue;
         }
@@ -1289,8 +1386,8 @@ fn parse_selector_for_support(s: &str) -> CssSelector {
 }
 
 fn parse_selector_impl(s: &str, strict_support: bool) -> CssSelector {
-    let normalized = s.contains("/*").then(|| strip_css_comments(s));
-    let s = normalized.as_deref().unwrap_or(s);
+    let normalized = super::syntax::normalize_input(s);
+    let s = normalized.as_ref();
     let mut parts = Vec::new();
     // Selectors §3.1 — an unrecognised simple selector makes the whole complex
     // selector invalid. Recorded rather than acted on here: whether that kills

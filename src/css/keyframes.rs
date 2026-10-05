@@ -5,6 +5,16 @@ use super::*;
 use crate::types::*;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+#[derive(Clone, Debug)]
+pub(crate) struct KeyframeRule {
+    pub name: String,
+    pub stops: Arc<Vec<KeyframeStop>>,
+    pub media_condition: MediaConditions,
+    pub layer: String,
+    pub author_origin: bool,
+}
 
 // ─── @keyframes extraction ────────────────────────────────────────────────────
 
@@ -16,102 +26,60 @@ pub fn extract_keyframes(css: &str) -> HashMap<String, Vec<KeyframeStop>> {
 
 pub(crate) fn extract_keyframes_cleaned(css: &str) -> HashMap<String, Vec<KeyframeStop>> {
     let mut out: HashMap<String, Vec<KeyframeStop>> = HashMap::new();
-    let mut s = css.trim();
-
-    while !s.is_empty() {
-        s = s.trim_start();
-        if s.is_empty() {
-            break;
-        }
-
-        if !s.starts_with('@') {
-            // Skip regular rules without recursing
-            if let Some(brace) = s.find('{') {
-                let (_, rest) = consume_block(&s[brace..]);
-                s = rest;
-            } else {
-                break;
-            }
-            continue;
-        }
-
-        // Only lowercase a small prefix to identify the @-rule type
-        let prefix = &s[..s.len().min(30)];
-        let at_lower: String = prefix.to_ascii_lowercase();
-
-        // Handle no-block @ rules
-        if at_lower.starts_with("@import") || at_lower.starts_with("@charset") {
-            if let Some(semi) = s.find(';') {
-                s = &s[semi + 1..];
-            } else {
-                break;
-            }
-            continue;
-        }
-
-        let brace = match s.find('{') {
-            Some(p) => p,
-            None => {
-                if let Some(semi) = s.find(';') {
-                    s = &s[semi + 1..];
-                } else {
-                    break;
-                }
-                continue;
-            }
-        };
-        let at_header = s[..brace].trim();
-        let rest_from_brace = &s[brace..];
-        let (inner_block, after_block) = consume_block(rest_from_brace);
-
-        if at_lower.starts_with("@keyframes") || at_lower.starts_with("@-webkit-keyframes") {
-            let prefix_len = if at_lower.starts_with("@-webkit-keyframes") {
-                "@-webkit-keyframes".len()
-            } else {
-                "@keyframes".len()
-            };
-            let name = at_header[prefix_len..].trim().to_string();
-            if !name.is_empty() {
-                out.insert(name, parse_keyframe_stops(inner_block));
-            }
-        } else if at_lower.starts_with("@media")
-            || at_lower.starts_with("@container")
-            || at_lower.starts_with("@layer")
-        {
-            // Recurse for nested @keyframes (rare but spec-valid)
-            out.extend(extract_keyframes_cleaned(inner_block));
-        } else if at_lower.starts_with("@supports") {
-            let condition = at_header["@supports".len()..].trim();
-            if crate::css::parser::supports_condition_matches(condition) {
-                out.extend(extract_keyframes_cleaned(inner_block));
+    for rule in super::parser::global_rule_blocks(css) {
+        if rule.name.as_ref().is_some_and(|name| {
+            name.eq_ignore_ascii_case("keyframes") || name.eq_ignore_ascii_case("-webkit-keyframes")
+        }) {
+            if let Some(name) = keyframes_name(rule.prelude) {
+                out.insert(name, parse_keyframe_stops(rule.body));
             }
         }
-
-        s = after_block;
     }
     out
 }
 
+pub(super) fn keyframes_name(prelude: &str) -> Option<String> {
+    if matches!(prelude.as_bytes().first(), Some(b'\'' | b'"')) {
+        let (name, rest) = super::apply::consume_css_string(prelude)?;
+        return (!name.is_empty() && rest.trim().is_empty()).then_some(name);
+    }
+    let (name, consumed, function) = super::syntax::name_token(prelude)?;
+    if function
+        || consumed != prelude.len()
+        || [
+            "none",
+            "initial",
+            "inherit",
+            "unset",
+            "revert",
+            "revert-layer",
+            "default",
+        ]
+        .iter()
+        .any(|keyword| name.eq_ignore_ascii_case(keyword))
+    {
+        return None;
+    }
+    Some(name.into_owned())
+}
+
 /// Parse the body of a `@keyframes` block into a sorted list of stops.
-fn parse_keyframe_stops(block: &str) -> Vec<KeyframeStop> {
+pub(super) fn parse_keyframe_stops(block: &str) -> Vec<KeyframeStop> {
     let mut stops: Vec<KeyframeStop> = Vec::new();
-    let mut s = block.trim();
-
-    while !s.is_empty() {
-        s = s.trim_start();
-        if s.is_empty() {
-            break;
+    for rule in super::parser::rule_blocks(block) {
+        if rule.name.is_some() {
+            continue;
         }
-
-        let brace = match s.find('{') {
-            Some(p) => p,
-            None => break,
+        let Some(offsets) = rule
+            .prelude
+            .split(',')
+            .map(|selector| keyframe_selector_offset(selector.trim()))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
         };
-        let selector = s[..brace].trim();
-        let (decl_block, rest) = consume_block(&s[brace..]);
-        s = rest;
 
-        let (props, _) = parse_declarations_important(decl_block);
+        let (props, _) = parse_declarations_important(rule.body);
         let timing_fn = props
             .get("animation-timing-function")
             .or_else(|| props.get("-webkit-animation-timing-function"))
@@ -122,6 +90,19 @@ fn parse_keyframe_stops(block: &str) -> Vec<KeyframeStop> {
                 if matches!(
                     k.as_str(),
                     "animation-timing-function" | "-webkit-animation-timing-function"
+                ) {
+                    return None;
+                }
+                if matches!(
+                    k.strip_prefix("-webkit-").unwrap_or(k),
+                    "animation"
+                        | "animation-name"
+                        | "animation-duration"
+                        | "animation-delay"
+                        | "animation-iteration-count"
+                        | "animation-direction"
+                        | "animation-fill-mode"
+                        | "animation-play-state"
                 ) {
                     return None;
                 }
@@ -157,11 +138,7 @@ fn parse_keyframe_stops(block: &str) -> Vec<KeyframeStop> {
             })
             .collect();
 
-        for sel in selector.split(',') {
-            let sel = sel.trim();
-            let Some(offset) = keyframe_selector_offset(sel) else {
-                continue;
-            };
+        for offset in offsets {
             merge_keyframe_stop(&mut stops, offset, &prop_vec, timing_fn.as_ref());
         }
     }
@@ -175,19 +152,20 @@ fn parse_keyframe_stops(block: &str) -> Vec<KeyframeStop> {
 }
 
 fn keyframe_selector_offset(sel: &str) -> Option<f32> {
-    let offset = match sel {
-        "from" => 0.0,
-        "to" => 1.0,
-        s if s.ends_with('%') => {
-            let pct = s[..s.len() - 1].trim().parse::<f32>().ok()?;
-            if !(0.0..=100.0).contains(&pct) {
-                return None;
-            }
-            pct / 100.0
+    if let Some((word, consumed, false)) = super::syntax::name_token(sel) {
+        if consumed != sel.len() {
+            return None;
         }
-        _ => return None,
-    };
-    Some(offset)
+        return if word.eq_ignore_ascii_case("from") {
+            Some(0.0)
+        } else if word.eq_ignore_ascii_case("to") {
+            Some(1.0)
+        } else {
+            None
+        };
+    }
+    let (pct, unit, consumed) = super::syntax::numeric_token(sel)?;
+    (unit == "%" && consumed == sel.len() && (0.0..=100.0).contains(&pct)).then_some(pct / 100.0)
 }
 
 fn merge_keyframe_stop(
@@ -196,10 +174,7 @@ fn merge_keyframe_stop(
     properties: &[(String, String)],
     timing_fn: Option<&EasingFn>,
 ) {
-    if let Some(stop) = stops
-        .iter_mut()
-        .find(|s| (s.offset - offset).abs() < 0.0001)
-    {
+    if let Some(stop) = stops.iter_mut().find(|s| s.offset == offset) {
         if let Some(timing_fn) = timing_fn {
             stop.timing_fn = Some(timing_fn.clone());
         }

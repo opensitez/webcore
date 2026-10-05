@@ -1231,8 +1231,14 @@ fn apply_color_value(
         BorderLeftColor => style.border_left_color = *c,
         OutlineColor => style.outline_color = *c,
         CaretColor => style.caret_color = Some(*c),
-        Fill => style.svg_fill = Some(*c),
-        Stroke => style.svg_stroke = Some(*c),
+        Fill => {
+            style.rare_mut().svg_fill_paint = None;
+            style.svg_fill = Some(*c);
+        }
+        Stroke => {
+            style.rare_mut().svg_stroke_paint = None;
+            style.svg_stroke = Some(*c);
+        }
         _ => return false,
     }
     record_physical_box_declaration(style, id);
@@ -2776,94 +2782,25 @@ pub fn apply_border_side_shorthand(
 }
 
 pub fn extract_url(v: &str) -> Option<String> {
-    let start = find_url_function(v)?;
-    let (url, _) = parse_url_function(&v[start..])?;
-    Some(url)
-}
-
-fn find_url_function(v: &str) -> Option<usize> {
-    let bytes = v.as_bytes();
-    let needle = b"url(";
-    if bytes.len() < needle.len() {
-        return None;
-    }
-    for i in 0..=bytes.len() - needle.len() {
-        if bytes[i..i + needle.len()].eq_ignore_ascii_case(needle) {
-            return Some(i);
+    let mut remaining = v;
+    while let Some((start, end)) = super::syntax::find_url_token(remaining) {
+        if let Some((url, _)) = parse_url_function(&remaining[start..]) {
+            return Some(url);
         }
+        remaining = &remaining[end..];
     }
     None
 }
 
 pub(crate) fn parse_url_function(v: &str) -> Option<(String, usize)> {
-    if !v.get(..4)?.eq_ignore_ascii_case("url(") {
-        return None;
+    let (body, end, quoted) = super::syntax::url_body(v)?;
+    if quoted {
+        let body = body.trim_start_matches([' ', '\t', '\n', '\r', '\x0c']);
+        let (value, tail) = consume_css_string(body)?;
+        let (trivia, _) = super::syntax::trivia_prefix(tail);
+        return (trivia == tail.len()).then_some((value, end));
     }
-    let mut pos = 4;
-    pos += leading_ws_len(&v[pos..]);
-    if matches!(v.as_bytes().get(pos), Some(b'"' | b'\'')) {
-        let (value, tail) = consume_css_string(&v[pos..])?;
-        pos = v.len() - tail.len();
-        pos += leading_ws_len(&v[pos..]);
-        return (v.as_bytes().get(pos) == Some(&b')')).then_some((value, pos + 1));
-    }
-
-    let start = pos;
-    while pos < v.len() {
-        let ch = v[pos..].chars().next()?;
-        match ch {
-            ')' => return Some((unescape_css_string(&v[start..pos]), pos + 1)),
-            ch if matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c') => {
-                let end = pos;
-                pos += leading_ws_len(&v[pos..]);
-                return (v.as_bytes().get(pos) == Some(&b')'))
-                    .then_some((unescape_css_string(&v[start..end]), pos + 1));
-            }
-            '"' | '\'' | '(' => return None,
-            '\\' => {
-                pos += 1;
-                let next = v[pos..].chars().next()?;
-                if matches!(next, '\n' | '\r' | '\x0c') {
-                    return None;
-                }
-                if next.is_ascii_hexdigit() {
-                    for _ in 0..6 {
-                        let Some(digit) = v[pos..].chars().next() else {
-                            break;
-                        };
-                        if !digit.is_ascii_hexdigit() {
-                            break;
-                        }
-                        pos += digit.len_utf8();
-                    }
-                    if let Some(space) = v[pos..].chars().next()
-                        && space.is_whitespace()
-                    {
-                        pos += space.len_utf8();
-                        if space == '\r' && v[pos..].starts_with('\n') {
-                            pos += 1;
-                        }
-                    }
-                } else {
-                    pos += next.len_utf8();
-                }
-            }
-            ch if ch.is_control() => return None,
-            _ => pos += ch.len_utf8(),
-        }
-    }
-    None
-}
-
-fn leading_ws_len(s: &str) -> usize {
-    let mut len = 0;
-    for ch in s.chars() {
-        if !matches!(ch, ' ' | '\t' | '\n' | '\r' | '\x0c') {
-            break;
-        }
-        len += ch.len_utf8();
-    }
-    len
+    Some((unescape_css_string(body), end))
 }
 
 /// Resolve all `url()` references in CSS text relative to the CSS file's URL.
@@ -2875,14 +2812,14 @@ pub fn resolve_css_urls(css: &str, css_base_url: &str) -> String {
     }
     let mut result = String::with_capacity(css.len());
     let mut remaining = css;
-    while let Some(url_start) = find_url_function(remaining) {
+    while let Some((url_start, token_end)) = super::syntax::find_url_token(remaining) {
         // Copy everything before url(
         result.push_str(&remaining[..url_start]);
         let url_src = &remaining[url_start..];
         let Some((url_content, consumed)) = parse_url_function(url_src) else {
-            // Malformed — just copy as-is
-            result.push_str(&remaining[url_start..]);
-            break;
+            result.push_str(&remaining[url_start..token_end]);
+            remaining = &remaining[token_end..];
+            continue;
         };
 
         // Only resolve relative URLs (not absolute, data:, or already-resolved)
@@ -2900,7 +2837,9 @@ pub fn resolve_css_urls(css: &str, css_base_url: &str) -> String {
             result.push_str(&resolved.replace('\\', "\\\\").replace('"', "\\\""));
             result.push_str("\")");
         } else {
-            result.push_str(&format!("url('{}')", resolved));
+            result.push_str("url('");
+            result.push_str(&resolved.replace('\\', "\\\\"));
+            result.push_str("')");
         }
         remaining = &url_src[consumed..];
     }
@@ -3093,23 +3032,9 @@ fn parse_gradient_direction(dir: &str) -> Option<GradientDirection> {
 /// The body of a function starting at `open` — the byte index of its `(` —
 /// without the parentheses.
 ///
-/// Trimming a trailing `)` instead would swallow the closing paren of a nested
-/// `rgb(...)`, so the matching paren is counted.
-fn function_body(s: &str, open: usize) -> &str {
-    let mut depth = 0usize;
-    for (i, ch) in s[open..].char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return &s[open + 1..open + i];
-                }
-            }
-            _ => {}
-        }
-    }
-    &s[open + 1..]
+/// Shared lexical balancing keeps strings, URLs, escapes and comments opaque.
+fn function_body(s: &str, open: usize) -> Option<&str> {
+    super::syntax::function_body(s, open + 1).map(|(body, _)| body)
 }
 
 /// A colour stop as authored. `pos` is `None` when the position was omitted —
@@ -3287,7 +3212,10 @@ fn parse_legacy_webkit_gradient(style: &mut ComputedStyle, layer: &str, name_at:
     let Some(open_offset) = layer[name_at..].find('(') else {
         return;
     };
-    let args = split_top_level_commas(function_body(layer, name_at + open_offset));
+    let Some(inner) = function_body(layer, name_at + open_offset) else {
+        return;
+    };
+    let args = split_top_level_commas(inner);
     if args.len() < 4 || !args[0].trim().eq_ignore_ascii_case("linear") {
         return;
     }
@@ -3316,7 +3244,10 @@ fn parse_legacy_webkit_gradient(style: &mut ComputedStyle, layer: &str, name_at:
         } else if lower.starts_with("to(") {
             (1.0, 2)
         } else if lower.starts_with("color-stop(") {
-            let components = split_top_level_commas(function_body(arg, 10));
+            let Some(inner) = function_body(arg, 10) else {
+                return;
+            };
+            let components = split_top_level_commas(inner);
             if components.len() != 2 {
                 continue;
             }
@@ -3336,9 +3267,10 @@ fn parse_legacy_webkit_gradient(style: &mut ComputedStyle, layer: &str, name_at:
         } else {
             continue;
         };
-        if let Some((color, current_color)) =
-            parse_gradient_stop_color(function_body(arg, open).trim())
-        {
+        let Some(inner) = function_body(arg, open) else {
+            return;
+        };
+        if let Some((color, current_color)) = parse_gradient_stop_color(inner.trim()) {
             stops.push(GradientStop {
                 color,
                 position,
@@ -3356,47 +3288,62 @@ fn parse_legacy_webkit_gradient(style: &mut ComputedStyle, layer: &str, name_at:
     style.rare_mut().gradient_stops = stops;
 }
 
+pub(super) fn gradient_function_name(name: &str) -> bool {
+    [
+        "linear-gradient",
+        "radial-gradient",
+        "repeating-linear-gradient",
+        "repeating-radial-gradient",
+        "-webkit-linear-gradient",
+        "-webkit-radial-gradient",
+        "-webkit-gradient",
+    ]
+    .iter()
+    .any(|known| name.eq_ignore_ascii_case(known))
+}
+
 pub fn apply_gradient(style: &mut ComputedStyle, v: &str) {
     // `background` and `background-image` take a comma-separated list of
     // LAYERS, and only one gradient fits in `ComputedStyle`, so the first layer
     // carrying one wins. The later layers must stay out of it: their stops are
     // not part of this gradient's colour stop list.
     let layers = split_top_level_commas(v);
-    let layer = match layers
-        .iter()
-        .find(|l| l.to_ascii_lowercase().contains("gradient"))
-    {
-        Some(l) => *l,
-        None => return,
+    let Some(layer) = layers.iter().find_map(|layer| {
+        let (start, end) = super::syntax::find_top_level_function(layer, gradient_function_name)?;
+        Some(&layer[start..end])
+    }) else {
+        return;
     };
-    // `to_ascii_lowercase` keeps byte offsets, so an index found in it indexes
-    // the original.
-    let lower = layer.to_ascii_lowercase();
-    if let Some(name_at) = lower.find("-webkit-gradient(") {
-        parse_legacy_webkit_gradient(style, &layer, name_at);
+    let Some((name, body_start, true)) = super::syntax::name_token(layer) else {
+        return;
+    };
+    if name.eq_ignore_ascii_case("-webkit-gradient") {
+        parse_legacy_webkit_gradient(style, layer, 0);
         return;
     }
-    let (kind, name_at) = if let Some(i) = lower.find("linear-gradient") {
-        (GradientType::Linear, i)
-    } else if let Some(i) = lower.find("radial-gradient") {
-        (GradientType::Radial, i)
+    let kind = if name.eq_ignore_ascii_case("repeating-linear-gradient") {
+        GradientType::RepeatingLinear
+    } else if name.eq_ignore_ascii_case("repeating-radial-gradient") {
+        GradientType::RepeatingRadial
+    } else if name.to_ascii_lowercase().ends_with("linear-gradient") {
+        GradientType::Linear
+    } else if name.to_ascii_lowercase().ends_with("radial-gradient") {
+        GradientType::Radial
     } else {
         return;
     };
-    let open = match layer[name_at..].find('(') {
-        Some(i) => name_at + i,
-        None => return,
+    let Some((inner, _)) = super::syntax::function_body(layer, body_start) else {
+        return;
     };
-    let inner = function_body(&layer, open);
     let mut args = split_top_level_commas(inner);
     if args.is_empty() {
         return;
     }
 
-    let direction = (kind == GradientType::Linear)
+    let direction = (!kind.is_radial())
         .then(|| parse_gradient_direction(args[0].trim()))
         .flatten();
-    let radial_descriptor = if kind == GradientType::Radial {
+    let radial_descriptor = if kind.is_radial() {
         let first = args[0].trim();
         let split = find_top_level_space(first).unwrap_or(first.len());
         parse_gradient_stop_color(&first[..split])
@@ -3431,7 +3378,7 @@ pub fn apply_gradient(style: &mut ComputedStyle, v: &str) {
         return;
     }
     match kind {
-        GradientType::Linear => {
+        GradientType::Linear | GradientType::RepeatingLinear => {
             // **The direction is OPTIONAL** (css-images-3 §3.4.1). Only consume
             // the first component when it really is one; otherwise it is a
             // colour stop and belongs to the stop list.
@@ -3446,7 +3393,7 @@ pub fn apply_gradient(style: &mut ComputedStyle, v: &str) {
                 },
             };
         }
-        GradientType::Radial => {
+        GradientType::Radial | GradientType::RepeatingRadial => {
             // The first component is the optional
             // `[<shape> || <size>] [at <position>]` descriptor exactly when it
             // is not a colour stop. The test is on the component's COLOUR part,
@@ -3727,10 +3674,5 @@ fn relative_lighter(base: FontWeight) -> FontWeight {
 }
 
 fn parse_absolute_font_weight(v: &str) -> Option<FontWeight> {
-    let n = v.parse::<u16>().ok()?;
-    if (1..=1000).contains(&n) {
-        Some(FontWeight::Value(n))
-    } else {
-        None
-    }
+    super::font::parse_absolute_font_weight(v)
 }

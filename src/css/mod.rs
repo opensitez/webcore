@@ -729,6 +729,7 @@ pub(crate) mod shape;
 pub mod stylesheet;
 mod supports;
 mod syntax;
+pub(crate) use syntax::{CssInputFilter, RuleBoundaryScanner};
 pub mod transform_parse;
 pub mod ua_sheet;
 pub mod value_parse;

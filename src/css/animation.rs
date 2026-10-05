@@ -90,6 +90,13 @@ fn parse_single_animation(s: &str) -> Option<ParsedAnimation> {
         if tok.is_empty() {
             continue;
         }
+        if matches!(tok.as_bytes().first(), Some(b'\'' | b'"')) {
+            if !name.is_empty() {
+                return None;
+            }
+            name = super::keyframes::keyframes_name(&tok)?;
+            continue;
+        }
         if let Some(ms) = parse_time_ms(&tok) {
             if !got_duration {
                 duration_ms = ms;
@@ -167,11 +174,11 @@ fn parse_single_animation(s: &str) -> Option<ParsedAnimation> {
             continue;
         }
         if name.is_empty() {
-            name = tok.clone();
+            name = super::keyframes::keyframes_name(&tok)?;
         }
     }
 
-    if name.is_empty() || name == "none" {
+    if name.is_empty() {
         return None;
     }
     Some(ParsedAnimation {
@@ -252,32 +259,10 @@ fn parse_single_transition(s: &str) -> Option<ParsedTransition> {
 
 /// Split an animation/transition shorthand token (handles `cubic-bezier(…)` as one token).
 fn tokenize_anim(s: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0usize;
-    for ch in s.chars() {
-        match ch {
-            '(' => {
-                depth += 1;
-                current.push(ch);
-            }
-            ')' => {
-                depth = depth.saturating_sub(1);
-                current.push(ch);
-            }
-            ' ' | '\t' if depth == 0 => {
-                if !current.is_empty() {
-                    tokens.push(current.clone());
-                    current.clear();
-                }
-            }
-            _ => current.push(ch),
-        }
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    tokens
+    super::syntax::split_component_values(s)
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
 }
 
 pub fn parse_time_ms(s: &str) -> Option<f32> {
@@ -551,109 +536,17 @@ pub fn extract_font_faces(css: &str, faces: &mut Vec<FontFaceDecl>) {
     extract_font_faces_cleaned(&cleaned, faces);
 }
 
-/// Split CSS declarations on `;`, but skip `;` inside parentheses (for data URIs).
-fn split_declarations_paren_aware(s: &str) -> Vec<&str> {
-    let mut result = Vec::new();
-    let mut depth = 0;
-    let mut start = 0;
-    for (i, c) in s.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
-            }
-            ';' if depth == 0 => {
-                result.push(&s[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    if start < s.len() {
-        result.push(&s[start..]);
-    }
-    result
-}
-
 pub(crate) fn extract_font_faces_cleaned(css: &str, faces: &mut Vec<FontFaceDecl>) {
-    let mut s = css;
-    loop {
-        s = s.trim_start();
-        if s.is_empty() {
-            break;
-        }
-        // Search for @font-face case-insensitively without lowercasing entire string
-        let pos = match find_case_insensitive(s, "@font-face") {
-            Some(p) => p,
-            None => break,
-        };
-        s = &s[pos + 10..];
-        s = s.trim_start();
-        if !s.starts_with('{') {
+    for rule in super::parser::global_rule_blocks(css) {
+        if !rule
+            .name
+            .as_ref()
+            .is_some_and(|name| name.eq_ignore_ascii_case("font-face"))
+            || !rule.prelude.is_empty()
+        {
             continue;
         }
-        let (block, rest) = consume_block(s);
-        s = rest;
-
-        // Parse declarations — split on `;` outside parentheses (to avoid
-        // splitting inside `url(data:...;base64,...)`)
-        let mut face = FontFaceDecl::default();
-        for decl in split_declarations_paren_aware(block) {
-            let decl = decl.trim();
-            if let Some(colon) = decl.find(':') {
-                let prop = decl[..colon].trim().to_ascii_lowercase();
-                let value = decl[colon + 1..].trim().to_string();
-                match prop.as_str() {
-                    "font-family" => {
-                        face.family = value.trim_matches('"').trim_matches('\'').to_string();
-                    }
-                    "src" => {
-                        face.sources = crate::css::font_face::parse_font_face_sources(&value);
-                        face.src = value;
-                    }
-                    "font-weight" => {
-                        face.weight = Some(value);
-                    }
-                    "font-style" => {
-                        face.style = Some(value);
-                    }
-                    "font-stretch" => {
-                        face.stretch = Some(value);
-                    }
-                    "font-display" => {
-                        face.display = crate::css::font_face::parse_font_display(&value);
-                    }
-                    "unicode-range" => {
-                        face.unicode_range = Some(value);
-                    }
-                    "size-adjust" => {
-                        face.size_adjust = Some(value);
-                    }
-                    "ascent-override" => {
-                        face.ascent_override = Some(value);
-                    }
-                    "descent-override" => {
-                        face.descent_override = Some(value);
-                    }
-                    "line-gap-override" => {
-                        face.line_gap_override = Some(value);
-                    }
-                    "font-feature-settings" => {
-                        face.feature_settings = Some(value);
-                    }
-                    "font-variation-settings" => {
-                        face.variation_settings = Some(value);
-                    }
-                    "font-language-override" => {
-                        face.language_override = Some(value);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if !face.family.is_empty() || !face.src.is_empty() {
+        if let Some(face) = super::font_face::parse_font_face_body(rule.body) {
             faces.push(face);
         }
     }

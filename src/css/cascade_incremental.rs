@@ -290,31 +290,32 @@ fn hover_descendant_anchor_matches(
             continue;
         }
         for sel in &rule.selectors {
-            let Some(pos) = sel
-                .parts
-                .iter()
-                .rposition(|p| matches!(p, SelectorPart::Combinator(_)))
-            else {
-                continue;
-            };
-            let prefix = &sel.parts[..pos];
-            if !selector_parts_have_state(prefix, "hover") {
-                continue;
-            }
-            let stripped = strip_state_pseudos_from_parts(prefix);
-            if stripped.is_empty() {
-                return true;
-            }
-            if matches_selector_with_ancestors(
-                &stripped,
-                &node.tag,
-                &node.attributes,
-                child_index,
-                sibling_count,
-                ancestors,
-                &ctx,
-            ) {
-                return true;
+            // Match each state-bearing compound, not the parent of the final
+            // subject: an earlier ancestor can restyle several sibling branches.
+            let mut start = 0;
+            for end in 0..=sel.parts.len() {
+                if end < sel.parts.len() && !matches!(sel.parts[end], SelectorPart::Combinator(_)) {
+                    continue;
+                }
+                if selector_parts_have_state(&sel.parts[start..end], "hover")
+                    && (end < sel.parts.len() || sel.has_negated_hover)
+                {
+                    let stripped = strip_state_pseudos_from_parts(&sel.parts[..end]);
+                    if stripped.is_empty()
+                        || matches_selector_with_ancestors(
+                            &stripped,
+                            &node.tag,
+                            &node.attributes,
+                            child_index,
+                            sibling_count,
+                            ancestors,
+                            &ctx,
+                        )
+                    {
+                        return true;
+                    }
+                }
+                start = end + 1;
             }
         }
     }

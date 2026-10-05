@@ -8,6 +8,18 @@ use std::collections::{HashMap, HashSet};
 
 // ─── Value Parsers ────────────────────────────────────────────────────────────
 
+pub(crate) fn parse_tab_size(value: &str) -> Option<TabSize> {
+    if let Some(number) = super::calc::parse_nonnegative_number(value) {
+        return Some(TabSize::Number(number));
+    }
+    let length = if super::calc::is_math_function(value.trim()) {
+        super::calc::parse_math_length_without_percentage(value)?
+    } else {
+        parse_box_length(value, BoxLengthGrammar::Padding)?
+    };
+    (!length.has_percentage()).then_some(TabSize::Length(length))
+}
+
 /// Cache for parsed CSS length values — avoids re-parsing the same string
 /// (e.g. "100%" or "calc(100% - 21.5rem)") thousands of times during cascade.
 static LENGTH_CACHE: std::sync::LazyLock<std::sync::Mutex<HashMap<String, CssLength>>> =
@@ -572,8 +584,9 @@ pub fn parse_font_size(v: &str) -> CssLength {
 }
 
 pub fn parse_line_height(v: &str) -> CssLength {
-    if v == "normal" {
-        return CssLength::Em(1.2);
+    let v = v.trim();
+    if super::font::font_keyword(v).as_deref() == Some("normal") {
+        return CssLength::Auto;
     }
     // Unitless number: treat as em
     if let Ok(n) = v.parse::<f32>() {

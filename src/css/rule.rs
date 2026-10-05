@@ -440,6 +440,11 @@ pub(crate) fn pre_parse_value(id: properties::PropertyId, val: &str) -> crate::t
                 return CssValue::Number(n);
             }
         }
+        FontStretch => {
+            if let Some(width) = super::font::parse_font_width(v) {
+                return CssValue::Number(width);
+            }
+        }
 
         // ── Integer properties ──
         ZIndex | Order => {
@@ -514,12 +519,16 @@ pub(crate) fn pre_parse_value(id: properties::PropertyId, val: &str) -> crate::t
                 return CssValue::FontWeight(w);
             }
         }
-        FontStyle => match v {
-            "normal" => return CssValue::FontStyle(crate::types::FontStyle::Normal),
-            "italic" => return CssValue::FontStyle(crate::types::FontStyle::Italic),
-            "oblique" => return CssValue::FontStyle(crate::types::FontStyle::Oblique),
-            _ => {}
-        },
+        FontStyle => {
+            if let Some(style) = super::font_face::normalize_font_style(v, false) {
+                let keyword = style.split_whitespace().next().unwrap_or(&style);
+                return CssValue::FontStyle(match keyword {
+                    "italic" => crate::types::FontStyle::Italic,
+                    "oblique" => crate::types::FontStyle::Oblique,
+                    _ => crate::types::FontStyle::Normal,
+                });
+            }
+        }
         FlexDirection => match v {
             "row" => return CssValue::FlexDirection(crate::types::FlexDirection::Row),
             "row-reverse" => {
@@ -673,35 +682,22 @@ fn parse_text_align_keyword(v: &str) -> Option<crate::types::TextAlign> {
     })
 }
 
-fn parse_white_space_keyword(v: &str) -> Option<crate::types::WhiteSpace> {
+pub(crate) fn parse_white_space_keyword(v: &str) -> Option<crate::types::WhiteSpace> {
     use crate::types::WhiteSpace::*;
-    Some(match v {
+    let keyword = super::font::font_keyword(v)?;
+    Some(match keyword.as_str() {
         "normal" => Normal,
         "nowrap" => Nowrap,
         "pre" => Pre,
         "pre-wrap" => PreWrap,
+        "break-spaces" => BreakSpaces,
         "pre-line" => PreLine,
         _ => return Option::None,
     })
 }
 
 fn parse_font_weight_keyword(v: &str) -> Option<crate::types::FontWeight> {
-    use crate::types::FontWeight;
-    let lower = v.trim().to_ascii_lowercase();
-    Some(match lower.as_str() {
-        "normal" => FontWeight::Normal,
-        "bold" => FontWeight::Bold,
-        _ => {
-            if let Ok(n) = lower.parse::<u16>() {
-                if !(1..=1000).contains(&n) {
-                    return None;
-                }
-                FontWeight::Value(n)
-            } else {
-                return None;
-            }
-        }
-    })
+    super::font::parse_absolute_font_weight(v)
 }
 
 fn parse_align_items_keyword(v: &str) -> Option<crate::types::AlignItems> {

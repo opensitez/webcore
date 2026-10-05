@@ -15,16 +15,33 @@ static PARSED_UA: LazyLock<Stylesheet> = LazyLock::new(|| {
     sheet
 });
 
+static PARSED_QUIRKS_UA: LazyLock<Stylesheet> = LazyLock::new(|| {
+    let mut sheet = PARSED_UA.clone();
+    sheet.parse_and_add("input:not([type=image i]), textarea { box-sizing: border-box; }");
+    sheet
+});
+
 pub(crate) fn initialize_ua_stylesheet() {
     LazyLock::force(&PARSED_UA);
+    LazyLock::force(&PARSED_QUIRKS_UA);
 }
 
 pub fn ua_stylesheet() -> Stylesheet {
     PARSED_UA.clone()
 }
 
-pub(crate) fn ua_rule_count() -> usize {
-    PARSED_UA.rules.len()
+pub(crate) fn ua_stylesheet_for_mode(mode: crate::html::doctype::QuirksMode) -> Stylesheet {
+    match mode {
+        crate::html::doctype::QuirksMode::Quirks => PARSED_QUIRKS_UA.clone(),
+        _ => PARSED_UA.clone(),
+    }
+}
+
+pub(crate) fn ua_rule_count(mode: crate::html::doctype::QuirksMode) -> usize {
+    match mode {
+        crate::html::doctype::QuirksMode::Quirks => PARSED_QUIRKS_UA.rules.len(),
+        _ => PARSED_UA.rules.len(),
+    }
 }
 
 #[cfg(test)]
@@ -56,6 +73,7 @@ slot { display: contents; }
 embed[hidden] { display: inline; height: 0; width: 0; }
 html { display: block; }
 body { display: block; margin: 8px; }
+input::selection, textarea::selection { background-color: Highlight; color: HighlightText; text-shadow: none; }
 article, aside, nav, section { display: block; }
 h1 { display: block; font-size: 2em; font-weight: bold; margin-top: 0.67em; margin-bottom: 0.67em; break-after: avoid; break-inside: avoid; }
 article h1, aside h1, nav h1, section h1 { font-size: 1.5em; margin-top: 0.83em; margin-bottom: 0.83em; }
@@ -190,6 +208,7 @@ thead, tbody, tfoot, tr { vertical-align: middle; }
 tbody[hidden], thead[hidden], tfoot[hidden], tr[hidden], col[hidden], colgroup[hidden] { display: none; }
 button, input[type=submit], input[type=button], input[type=reset] {
   display: inline-flex; align-items: center; justify-content: center;
+  vertical-align: baseline;
   padding: 1px 6px; cursor: default; background-color: #e8e8e8; border: 1px solid #767676;
   border-radius: 3px; box-sizing: border-box;
 }
@@ -197,6 +216,9 @@ button { white-space: normal; align-content: center; }
 input[type=submit], input[type=button], input[type=reset] { white-space: nowrap; }
 button:hover, input[type=submit]:hover, input[type=button]:hover, input[type=reset]:hover {
   background-color: #e0e0e0; border-color: #666;
+}
+button:active:not(:disabled), input[type=submit]:active:not(:disabled), input[type=button]:active:not(:disabled), input[type=reset]:active:not(:disabled) {
+  background-color: #d0d0d0; border-color: #555; border-style: inset;
 }
 input:focus, select:focus, textarea:focus {
   border-color: #4285f4;
@@ -212,18 +234,20 @@ input[type=hidden i] { display: none !important; }
 input[type=image] { display: inline-block; width: auto; height: auto; border: none; padding: 0; background-color: transparent; }
 input[type=radio], input[type=checkbox] { display: inline-block; width: 16px; height: 16px; min-height: 0; vertical-align: middle; margin: 0 6px 0 2px; border: none; padding: 0; background: transparent; flex-shrink: 0; }
 label { display: inline-block; }
-input { display: inline-block; width: 200px; min-height: 2.2em; padding: 0 6px; border: 1px solid #ababab; border-radius: 3px; box-sizing: border-box; vertical-align: middle; background-color: #ffffff; color: #000000; }
+input { display: inline-block; padding: 0 6px; border: 1px solid #ababab; border-radius: 3px; vertical-align: middle; background-color: #ffffff; color: #000000; }
+input[type=radio i], input[type=checkbox i], input[type=reset i], input[type=button i], input[type=submit i], input[type=color i], input[type=search i] { box-sizing: border-box; }
 /* Button inputs get their label normalized into an internal text node, so auto
    height can follow the line-height + padding just like `<button>`. Do not pin
    height here: author styles such as Bootstrap's `.btn` must be able to size
    the control from their own line-height and padding. */
 input[type=submit], input[type=button], input[type=reset] { width: auto; border: 1px solid #767676; padding: 3px 8px; background-color: #e8e8e8; }
-select { display: inline-block; padding: 0 6px; border: 1px solid #ababab; border-radius: 3px; box-sizing: border-box; vertical-align: middle; background-color: #ffffff; color: #000000; }
+select { display: inline-block; overflow: auto; padding: 0 6px; border: 1px solid #ababab; border-radius: 3px; box-sizing: border-box; vertical-align: middle; background-color: #ffffff; color: #000000; }
 /* Closed selects keep automatic dimensions: layout measures their option
    labels and lets flex/grid stretch the block axis. Multi-row list boxes
    receive their row-dependent height from the size/multiple hint. */
 option, optgroup { display: none; }
-textarea { display: inline-block; white-space: pre-wrap; width: 200px; height: 3em; padding: 2px; border: 1px solid #767676; box-sizing: border-box; }
+textarea { display: inline-block; overflow: auto; white-space: pre-wrap; overflow-wrap: break-word; padding: 2px; border: 1px solid #767676; background-color: Field; color: FieldText; }
+textarea[wrap="off" i] { white-space: pre; }
 input[type=range] { width: 160px; height: 1.2em; border: none; padding: 0; }
 input[type=color] { width: 44px; height: 23px; padding: 1px 2px; border: 1px solid #767676; box-sizing: border-box; }
 input[type=file] { width: 240px; height: 1.6em; border: none; padding: 0; }

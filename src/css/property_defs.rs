@@ -3310,16 +3310,30 @@ fn apply_background_color(s: &mut ComputedStyle, v: &str) {
     }
 }
 fn apply_svg_fill(s: &mut ComputedStyle, v: &str) {
-    if v.trim().eq_ignore_ascii_case("none") {
+    let value = v.trim();
+    if value.starts_with("url(") {
+        s.rare_mut().svg_fill_paint = Some(value.to_string());
+    } else if value.eq_ignore_ascii_case("currentColor") {
+        s.rare_mut().svg_fill_paint = None;
+    } else if value.eq_ignore_ascii_case("none") {
+        s.rare_mut().svg_fill_paint = None;
         s.svg_fill = None;
     } else if let Some(c) = parse_color(v) {
+        s.rare_mut().svg_fill_paint = None;
         s.svg_fill = Some(c);
     }
 }
 fn apply_svg_stroke(s: &mut ComputedStyle, v: &str) {
-    if v.trim().eq_ignore_ascii_case("none") {
+    let value = v.trim();
+    if value.starts_with("url(") {
+        s.rare_mut().svg_stroke_paint = Some(value.to_string());
+    } else if value.eq_ignore_ascii_case("currentColor") {
+        s.rare_mut().svg_stroke_paint = None;
+    } else if value.eq_ignore_ascii_case("none") {
+        s.rare_mut().svg_stroke_paint = None;
         s.svg_stroke = None;
     } else if let Some(c) = parse_color(v) {
+        s.rare_mut().svg_stroke_paint = None;
         s.svg_stroke = Some(c);
     }
 }
@@ -3384,9 +3398,15 @@ fn copy_background_color(d: &mut ComputedStyle, s: &ComputedStyle) {
 }
 fn copy_svg_fill(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.svg_fill = s.svg_fill;
+    if d.rare().svg_fill_paint != s.rare().svg_fill_paint {
+        d.rare_mut().svg_fill_paint = s.rare().svg_fill_paint.clone();
+    }
 }
 fn copy_svg_stroke(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.svg_stroke = s.svg_stroke;
+    if d.rare().svg_stroke_paint != s.rare().svg_stroke_paint {
+        d.rare_mut().svg_stroke_paint = s.rare().svg_stroke_paint.clone();
+    }
 }
 fn copy_opacity(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.opacity = s.opacity;
@@ -3403,23 +3423,14 @@ fn apply_font_family(s: &mut ComputedStyle, v: &str) {
     s.font_family = super::split_font_families(v).join(", ");
 }
 fn apply_font_weight(s: &mut ComputedStyle, v: &str) {
-    let lower = v.trim().to_ascii_lowercase();
+    let lower = super::font::font_keyword(v).unwrap_or_default();
     s.font_weight = match lower.as_str() {
         "normal" => FontWeight::Normal,
         "bold" => FontWeight::Bold,
         "bolder" => relative_bolder(s.relative_font_weight_base.unwrap_or(s.font_weight)),
         "lighter" => relative_lighter(s.relative_font_weight_base.unwrap_or(s.font_weight)),
-        _ => parse_absolute_font_weight(&lower).unwrap_or(s.font_weight),
+        _ => super::font::parse_absolute_font_weight(v).unwrap_or(s.font_weight),
     };
-}
-
-fn parse_absolute_font_weight(v: &str) -> Option<FontWeight> {
-    let n = v.parse::<u16>().ok()?;
-    if (1..=1000).contains(&n) {
-        Some(FontWeight::Value(n))
-    } else {
-        None
-    }
 }
 
 fn relative_bolder(base: FontWeight) -> FontWeight {
@@ -3438,7 +3449,10 @@ fn relative_lighter(base: FontWeight) -> FontWeight {
     }
 }
 fn apply_font_style(s: &mut ComputedStyle, v: &str) {
-    let first = v.split_whitespace().next().unwrap_or(v);
+    let Some(value) = super::font_face::normalize_font_style(v, false) else {
+        return;
+    };
+    let first = value.split_whitespace().next().unwrap_or(&value);
     s.font_style = match first {
         "italic" => FontStyle::Italic,
         "oblique" => FontStyle::Oblique,
@@ -3449,22 +3463,26 @@ fn apply_font(s: &mut ComputedStyle, v: &str) {
     super::apply_font_shorthand(s, v);
 }
 fn apply_font_variation_settings(s: &mut ComputedStyle, v: &str) {
-    s.rare_mut().font_variation_settings = super::parse_variation_settings(v);
-    // ⛔ Cloned: `&s.rare()` borrows the whole style for the loop, and the
-    // body writes to it. The list is empty for 99.3% of elements.
-    for (tag, val) in s.rare().font_variation_settings.clone() {
+    let Some(settings) = super::font::parse_variation_settings_checked(v) else {
+        return;
+    };
+    for (tag, val) in &settings {
         if tag == "wght" {
-            s.font_weight = FontWeight::Value(val as u16);
+            s.font_weight = FontWeight::Value(*val as u16);
         }
     }
+    s.rare_mut().font_variation_settings = settings;
 }
 fn apply_font_feature_settings(s: &mut ComputedStyle, v: &str) {
-    s.rare_mut().font_feature_settings = super::parse_feature_settings(v);
-    for (tag, val) in s.rare().font_feature_settings.clone() {
+    let Some(settings) = super::font::parse_feature_settings_checked(v) else {
+        return;
+    };
+    for (tag, val) in &settings {
         if tag == "smcp" {
-            s.small_caps = val != 0;
+            s.small_caps = *val != 0;
         }
     }
+    s.rare_mut().font_feature_settings = settings;
 }
 fn apply_font_variant(s: &mut ComputedStyle, v: &str) {
     s.small_caps = v
@@ -3488,16 +3506,24 @@ fn apply_font_variant_alternates(s: &mut ComputedStyle, v: &str) {
     s.font_variant_alternates = normalize_font_variant_longhand(v);
 }
 fn apply_font_variant_east_asian(s: &mut ComputedStyle, v: &str) {
-    s.font_variant_east_asian = normalize_font_variant_longhand(v);
+    if let Some(value) = super::font::parse_font_variant_groups(v, PropertyId::FontVariantEastAsian)
+    {
+        s.font_variant_east_asian = value;
+    }
 }
 fn apply_font_variant_emoji(s: &mut ComputedStyle, v: &str) {
     s.font_variant_emoji = normalize_font_variant_longhand(v);
 }
 fn apply_font_variant_ligatures(s: &mut ComputedStyle, v: &str) {
-    s.font_variant_ligatures = normalize_font_variant_longhand(v);
+    if let Some(value) = super::font::parse_font_variant_groups(v, PropertyId::FontVariantLigatures)
+    {
+        s.font_variant_ligatures = value;
+    }
 }
 fn apply_font_variant_numeric(s: &mut ComputedStyle, v: &str) {
-    s.font_variant_numeric = normalize_font_variant_longhand(v);
+    if let Some(value) = super::font::parse_font_variant_groups(v, PropertyId::FontVariantNumeric) {
+        s.font_variant_numeric = value;
+    }
 }
 fn apply_font_variant_position(s: &mut ComputedStyle, v: &str) {
     s.font_variant_position = normalize_font_variant_longhand(v);
@@ -3511,19 +3537,9 @@ fn normalize_font_variant_longhand(v: &str) -> String {
     }
 }
 fn apply_font_stretch(s: &mut ComputedStyle, v: &str) {
-    s.font_stretch = match v {
-        "ultra-condensed" => 50.0,
-        "extra-condensed" => 62.5,
-        "condensed" => 75.0,
-        "semi-condensed" => 87.5,
-        "normal" => 100.0,
-        "semi-expanded" => 112.5,
-        "expanded" => 125.0,
-        "extra-expanded" => 150.0,
-        "ultra-expanded" => 200.0,
-        s if s.ends_with('%') => s[..s.len() - 1].parse().unwrap_or(100.0),
-        _ => 100.0,
-    };
+    if let Some(width) = super::font::parse_font_width(v) {
+        s.font_stretch = width;
+    }
 }
 fn apply_font_synthesis(s: &mut ComputedStyle, v: &str) {
     let value = v.trim();
@@ -3703,13 +3719,9 @@ fn apply_word_spacing(s: &mut ComputedStyle, v: &str) {
     s.word_spacing = parse_length(v);
 }
 fn apply_white_space(s: &mut ComputedStyle, v: &str) {
-    s.white_space = match v {
-        "nowrap" => WhiteSpace::Nowrap,
-        "pre" => WhiteSpace::Pre,
-        "pre-wrap" => WhiteSpace::PreWrap,
-        "pre-line" => WhiteSpace::PreLine,
-        _ => WhiteSpace::Normal,
-    };
+    if let Some(mode) = super::rule::parse_white_space_keyword(v) {
+        s.white_space = mode;
+    }
 }
 fn apply_direction(s: &mut ComputedStyle, v: &str) {
     s.direction = match v {
@@ -5364,13 +5376,13 @@ fn apply_grid_column(s: &mut ComputedStyle, v: &str) {
         let (val, name) = super::parse_grid_line_named(v);
         s.grid_column_start = val;
         s.grid_column_end = 0;
-        if !name.is_empty() {
-            s.grid_column_start_name = format!("{}-start", name);
-            s.grid_column_end_name = format!("{}-end", name);
+        // Only a bare custom-ident is copied to the omitted end (Grid 1 section 8.4).
+        s.grid_column_end_name = if name.split_whitespace().count() == 1 {
+            name.clone()
         } else {
-            s.grid_column_start_name = String::new();
-            s.grid_column_end_name = String::new();
-        }
+            String::new()
+        };
+        s.grid_column_start_name = name;
     }
 }
 fn apply_grid_row(s: &mut ComputedStyle, v: &str) {
@@ -5385,13 +5397,13 @@ fn apply_grid_row(s: &mut ComputedStyle, v: &str) {
         let (val, name) = super::parse_grid_line_named(v);
         s.grid_row_start = val;
         s.grid_row_end = 0;
-        if !name.is_empty() {
-            s.grid_row_start_name = format!("{}-start", name);
-            s.grid_row_end_name = format!("{}-end", name);
+        // Area-edge lookup happens in layout; keep the authored identifier intact.
+        s.grid_row_end_name = if name.split_whitespace().count() == 1 {
+            name.clone()
         } else {
-            s.grid_row_start_name = String::new();
-            s.grid_row_end_name = String::new();
-        }
+            String::new()
+        };
+        s.grid_row_start_name = name;
     }
 }
 fn apply_grid_column_start(s: &mut ComputedStyle, v: &str) {
@@ -5602,12 +5614,18 @@ fn valid_background_layer(layer: &str, final_layer: bool) -> bool {
         for token in tokens {
             let lower = token.to_ascii_lowercase();
             if lower == "none"
-                || lower.starts_with("url(")
-                || lower.contains("gradient(")
-                || lower.contains("image-set(")
+                || super::syntax::url_body(token).is_some()
+                || super::syntax::name_token(token).is_some_and(|(name, _, function)| {
+                    function
+                        && (super::apply::gradient_function_name(&name)
+                            || image_set_function_name(&name))
+                })
             {
                 image_count += 1;
-                if lower.starts_with("url(") && super::extract_url(token).is_none() {
+                if super::syntax::url_body(token).is_some()
+                    && !super::apply::parse_url_function(token)
+                        .is_some_and(|(_, end)| end == token.len())
+                {
                     return false;
                 }
             } else if parse_color(token).is_some() {
@@ -5847,58 +5865,20 @@ fn background_layer_color(layer: &str) -> Option<Color> {
 }
 
 fn remove_top_level_function(value: &str, marker: &str) -> Option<(String, String)> {
-    let lower = value.to_ascii_lowercase();
-    let mut quote = None;
-    let mut escaped = false;
-    let mut depth = 0usize;
-    let mut start = None;
-    for (idx, ch) in value.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
+    let wanted = marker.strip_suffix('(')?;
+    let (start, end) = super::syntax::find_top_level_function(value, |name| {
+        if wanted == "gradient" {
+            super::apply::gradient_function_name(name)
+        } else if wanted == "image-set" {
+            image_set_function_name(name)
+        } else {
+            name.eq_ignore_ascii_case(wanted)
         }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if let Some(delimiter) = quote {
-            if ch == delimiter {
-                quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '\'' | '"' => quote = Some(ch),
-            '(' => {
-                if depth == 0 && lower[..=idx].ends_with(marker) {
-                    let mut function_start = idx + 1 - marker.len();
-                    while let Some(prev) = value[..function_start].chars().next_back() {
-                        if !prev.is_ascii_alphabetic() && prev != '-' {
-                            break;
-                        }
-                        function_start -= prev.len_utf8();
-                    }
-                    start = Some(function_start);
-                }
-                depth += 1;
-            }
-            ')' => {
-                if depth > 0 {
-                    depth -= 1;
-                    if depth == 0
-                        && let Some(start) = start
-                    {
-                        let end = idx + 1;
-                        let function = value[start..end].trim().to_string();
-                        let rest = format!("{} {}", &value[..start], &value[end..]);
-                        return Some((function, rest));
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+    })?;
+    Some((
+        value[start..end].to_string(),
+        format!("{} {}", &value[..start], &value[end..]),
+    ))
 }
 
 fn apply_background_single_layer(s: &mut ComputedStyle, v: &str) {
@@ -5990,20 +5970,8 @@ fn apply_background_single_layer(s: &mut ComputedStyle, v: &str) {
 }
 
 fn find_top_level_char(s: &str, needle: char) -> Option<usize> {
-    let mut depth = 0usize;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
-            }
-            c if c == needle && depth == 0 => return Some(i),
-            _ => {}
-        }
-    }
-    None
+    let delimiter = u8::try_from(needle).ok()?;
+    super::syntax::top_level_delimiters(s, delimiter).next()
 }
 
 pub(crate) fn split_top_level_whitespace(s: &str) -> Vec<&str> {
@@ -6110,8 +6078,7 @@ impl ParsedBackgroundImage {
 }
 
 fn parse_background_image_layer(v: &str) -> Option<ParsedBackgroundImage> {
-    let lower = v.trim().to_ascii_lowercase();
-    if lower == "none" {
+    if v.trim().eq_ignore_ascii_case("none") {
         return Some(ParsedBackgroundImage::None);
     }
     if is_image_set_function(v) {
@@ -6120,17 +6087,8 @@ fn parse_background_image_layer(v: &str) -> Option<ParsedBackgroundImage> {
             url,
             source: v.trim().to_string(),
         });
-    } else if [
-        "linear-gradient(",
-        "repeating-linear-gradient(",
-        "radial-gradient(",
-        "repeating-radial-gradient(",
-        "-webkit-linear-gradient(",
-        "-webkit-radial-gradient(",
-        "-webkit-gradient(",
-    ]
-    .iter()
-    .any(|function| lower.starts_with(function))
+    } else if super::syntax::name_token(v.trim())
+        .is_some_and(|(name, _, function)| function && super::apply::gradient_function_name(&name))
     {
         if !remove_top_level_function(v, "gradient(")
             .is_some_and(|(function, rest)| function == v.trim() && rest.trim().is_empty())
@@ -6171,11 +6129,12 @@ fn extract_image_set_url(v: &str) -> Option<String> {
 }
 
 fn is_image_set_function(v: &str) -> bool {
-    let v = v.trim();
-    v.get(..10)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("image-set("))
-        || v.get(..18)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("-webkit-image-set("))
+    super::syntax::name_token(v.trim())
+        .is_some_and(|(name, _, function)| function && image_set_function_name(&name))
+}
+
+fn image_set_function_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("image-set") || name.eq_ignore_ascii_case("-webkit-image-set")
 }
 
 pub(crate) fn extract_image_set_url_for_device_pixel_ratio(
@@ -6214,14 +6173,14 @@ pub(crate) fn image_set_resolution_for_url(
 
 fn parse_image_set_candidates(v: &str) -> Option<Vec<ImageSetCandidate>> {
     let value = v.trim();
-    let lower = value.to_ascii_lowercase();
-    let inner = if lower.starts_with("image-set(") && value.ends_with(')') {
-        &value["image-set(".len()..value.len() - 1]
-    } else if lower.starts_with("-webkit-image-set(") && value.ends_with(')') {
-        &value["-webkit-image-set(".len()..value.len() - 1]
-    } else {
+    let (name, body_start, function) = super::syntax::name_token(value)?;
+    if !function || !image_set_function_name(&name) {
         return None;
-    };
+    }
+    let (inner, end) = super::syntax::function_body(value, body_start)?;
+    if end + super::syntax::trivia_prefix(&value[end..]).0 != value.len() {
+        return None;
+    }
 
     let mut candidates = Vec::new();
     for candidate in super::split_top_level_commas(inner) {
@@ -6234,6 +6193,7 @@ fn parse_image_set_candidates(v: &str) -> Option<Vec<ImageSetCandidate>> {
 }
 
 fn parse_image_set_candidate(candidate: &str) -> Result<Option<ImageSetCandidate>, ()> {
+    let candidate = &candidate[super::syntax::trivia_prefix(candidate).0..];
     let (url, descriptors) = if candidate.starts_with(['\'', '"']) {
         super::apply::consume_css_string(candidate).ok_or(())?
     } else {
@@ -6243,10 +6203,9 @@ fn parse_image_set_candidate(candidate: &str) -> Result<Option<ImageSetCandidate
     let mut resolution = None;
     let mut mime_type_seen = false;
     let mut supported_type = true;
-    for descriptor in super::split_shorthand_values(descriptors.trim()) {
-        if descriptor
-            .get(..5)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("type("))
+    for descriptor in split_top_level_whitespace(descriptors) {
+        if super::syntax::name_token(descriptor)
+            .is_some_and(|(name, _, function)| function && name.eq_ignore_ascii_case("type"))
         {
             if mime_type_seen {
                 return Err(());
@@ -6267,52 +6226,40 @@ fn parse_image_set_candidate(candidate: &str) -> Result<Option<ImageSetCandidate
 }
 
 fn parse_image_set_resolution_descriptor(token: &str) -> Option<f32> {
-    let token = token.trim().trim_end_matches(',');
+    let token = token.trim();
     if super::calc::is_math_function(token) {
         return super::calc::parse_math_resolution_dppx(token)
             .filter(|value| value.is_finite() && *value > 0.0);
     }
-    let lower = token.to_ascii_lowercase();
-    if let Some(value) = lower.strip_suffix("dppx") {
-        return value
-            .parse::<f32>()
-            .ok()
-            .filter(|v| v.is_finite() && *v > 0.0);
-    }
-    if let Some(value) = lower.strip_suffix('x') {
-        return value
-            .parse::<f32>()
-            .ok()
-            .filter(|v| v.is_finite() && *v > 0.0);
-    }
-    if let Some(value) = lower.strip_suffix("dpi") {
-        return value
-            .parse::<f32>()
-            .ok()
-            .map(|v| v / 96.0)
-            .filter(|v| v.is_finite() && *v > 0.0);
-    }
-    if let Some(value) = lower.strip_suffix("dpcm") {
-        return value
-            .parse::<f32>()
-            .ok()
-            .map(|v| v / 37.795_276)
-            .filter(|v| v.is_finite() && *v > 0.0);
-    }
-    None
+    const CSS_DOTS_PER_INCH: f32 = 96.0;
+    const CENTIMETERS_PER_INCH: f32 = 2.54;
+    let (number, unit) = super::syntax::number_and_unit(token)?;
+    let value = if unit.eq_ignore_ascii_case("x") || unit.eq_ignore_ascii_case("dppx") {
+        number
+    } else if unit.eq_ignore_ascii_case("dpi") {
+        number / CSS_DOTS_PER_INCH
+    } else if unit.eq_ignore_ascii_case("dpcm") {
+        number * CENTIMETERS_PER_INCH / CSS_DOTS_PER_INCH
+    } else {
+        return None;
+    };
+    (value.is_finite() && value > 0.0).then_some(value)
 }
 
 fn image_set_candidate_type_is_supported(descriptor: &str) -> Option<bool> {
-    let Some(inner) = descriptor
-        .get(5..)
-        .and_then(|value| value.strip_suffix(')'))
-    else {
+    let (name, body_start, function) = super::syntax::name_token(descriptor)?;
+    if !function || !name.eq_ignore_ascii_case("type") {
+        return None;
+    }
+    let (inner, end) = super::syntax::function_body(descriptor, body_start)?;
+    if end != descriptor.len() {
+        return None;
+    }
+    let inner = &inner[super::syntax::trivia_prefix(inner).0..];
+    let Some((mime, rest)) = super::apply::consume_css_string(inner) else {
         return None;
     };
-    let Some((mime, rest)) = super::apply::consume_css_string(inner.trim()) else {
-        return None;
-    };
-    if !rest.trim().is_empty() {
+    if super::syntax::trivia_prefix(rest).0 != rest.len() {
         return None;
     }
     let mime = mime
@@ -7082,9 +7029,8 @@ fn apply_mask_single(s: &mut ComputedStyle, v: &str) -> bool {
     {
         let lower = token.to_ascii_lowercase();
         let is_image = lower == "none"
-            || lower.starts_with("url(")
-            || lower.starts_with("image-set(")
-            || lower.starts_with("-webkit-image-set(");
+            || super::syntax::url_body(token).is_some()
+            || is_image_set_function(token);
         if is_image {
             if image.is_some()
                 || (lower != "none"
@@ -7976,9 +7922,22 @@ fn parse_animation_composition(value: &str) -> AnimationComposition {
 
 fn apply_animation_name(s: &mut ComputedStyle, v: &str) {
     let values = transition_list_values(v);
+    let Some(names) = values
+        .iter()
+        .map(|value| {
+            if value.eq_ignore_ascii_case("none") {
+                Some(String::new())
+            } else {
+                super::keyframes::keyframes_name(value)
+            }
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return;
+    };
     resize_animations(s, values.len());
     for (idx, anim) in s.rare_mut().animations.iter_mut().enumerate() {
-        anim.name = values.get(idx).copied().unwrap_or("").to_string();
+        anim.name = names.get(idx).cloned().unwrap_or_default();
     }
 }
 fn apply_animation_duration(s: &mut ComputedStyle, v: &str) {
@@ -8144,7 +8103,20 @@ fn copy_text_combine_upright(d: &mut ComputedStyle, s: &ComputedStyle) {
 // ── Hyphens / tab-size / text extras ────────────────────────────────────────
 
 fn apply_tab_size(s: &mut ComputedStyle, v: &str) {
-    s.tab_size = v.parse().unwrap_or(8);
+    if let Some(value) = super::value_parse::parse_tab_size(v) {
+        if s.rare().tab_size != value {
+            s.rare_mut().tab_size = value;
+        }
+    }
+}
+
+pub(crate) fn finalize_tab_size(s: &mut ComputedStyle, resolve: &impl Fn(&CssLength) -> f32) {
+    if let TabSize::Length(length) = &s.rare().tab_size {
+        let computed = TabSize::Length(CssLength::Px(resolve(length).max(0.0)));
+        if s.rare().tab_size != computed {
+            s.rare_mut().tab_size = computed;
+        }
+    }
 }
 fn apply_hyphens(s: &mut ComputedStyle, v: &str) {
     s.hyphens = match v {
@@ -8166,7 +8138,9 @@ fn apply_orphans(s: &mut ComputedStyle, v: &str) {
 }
 
 fn copy_tab_size(d: &mut ComputedStyle, s: &ComputedStyle) {
-    d.tab_size = s.tab_size;
+    if d.rare().tab_size != s.rare().tab_size {
+        d.rare_mut().tab_size = s.rare().tab_size.clone();
+    }
 }
 fn copy_hyphens(d: &mut ComputedStyle, s: &ComputedStyle) {
     d.hyphens = s.hyphens;

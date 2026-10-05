@@ -6,6 +6,7 @@ use crate::types::*;
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 thread_local! {
     static CANDIDATE_SEEN: RefCell<(Vec<u32>, u32)> = const { RefCell::new((Vec::new(), 0)) };
@@ -75,7 +76,12 @@ pub struct Stylesheet {
     pub counter_styles: Vec<CounterStyleRule>,
     pub(crate) counter_style_viewport: (f32, f32),
     /// Parsed `@keyframes` blocks, keyed by animation name.
-    pub keyframes: HashMap<String, Vec<KeyframeStop>>,
+    pub keyframes: HashMap<String, Arc<Vec<KeyframeStop>>>,
+    pub(crate) keyframe_rules: Vec<super::keyframes::KeyframeRule>,
+    keyframe_selection_dirty: bool,
+    keyframe_conditions: Vec<bool>,
+    keyframe_layer_conditions: Vec<bool>,
+    keyframe_layer_names: Vec<String>,
     /// Selector index: rule indices bucketed by the key selector's id/class/tag.
     /// Built lazily before cascade; avoids O(rules) scan per element.
     idx_by_id: HashMap<String, Vec<usize>>,
@@ -195,6 +201,7 @@ impl Stylesheet {
     pub fn parse_and_add_author(&mut self, css: &str) {
         let before = self.rules.len();
         let before_counters = self.counter_styles.len();
+        let before_keyframes = self.keyframe_rules.len();
         self.parse_and_add(css);
         for rule in &mut self.rules[before..] {
             rule.specificity = rule.specificity.saturating_add(AUTHOR_ORIGIN_BOOST);
@@ -202,6 +209,11 @@ impl Stylesheet {
         for rule in &mut self.counter_styles[before_counters..] {
             rule.author_origin = true;
         }
+        for rule in &mut self.keyframe_rules[before_keyframes..] {
+            rule.author_origin = true;
+        }
+        self.keyframe_selection_dirty |= before_keyframes != self.keyframe_rules.len();
+        self.resolve_keyframes();
     }
 
     /// Append already-parsed rules as author-origin.
@@ -227,6 +239,8 @@ impl Stylesheet {
         self.page_rules.append(&mut fragment.page_rules);
         self.counter_styles.append(&mut fragment.counter_styles);
         self.keyframes.extend(fragment.keyframes);
+        self.keyframe_rules.append(&mut fragment.keyframe_rules);
+        self.keyframe_selection_dirty = true;
         self.layer_declarations
             .append(&mut fragment.layer_declarations);
         for name in fragment.layer_order {
@@ -235,6 +249,7 @@ impl Stylesheet {
             }
         }
         self.rules.append(&mut fragment.rules);
+        self.resolve_keyframes();
         if self.rules.len() != before {
             self.idx_dirty = true;
         }
@@ -246,6 +261,7 @@ impl Stylesheet {
             && self.page_rules.is_empty()
             && self.counter_styles.is_empty()
             && self.keyframes.is_empty()
+            && self.keyframe_rules.is_empty()
             && self.layer_order.is_empty()
             && self.layer_declarations.is_empty()
             && self.rules.iter().all(|rule| rule.layer.is_empty())
@@ -303,6 +319,7 @@ impl Stylesheet {
             let before = self.rules.len();
             let before_counters = self.counter_styles.len();
             let before_layers = self.layer_declarations.len();
+            let before_keyframes = self.keyframe_rules.len();
             self.parse_and_add_with_base(css, css_base_url);
             for rule in &mut self.rules[before..] {
                 rule.media_condition = rule.media_condition.and(media);
@@ -313,6 +330,11 @@ impl Stylesheet {
             for (_, condition) in &mut self.layer_declarations[before_layers..] {
                 *condition = condition.and(media);
             }
+            for rule in &mut self.keyframe_rules[before_keyframes..] {
+                rule.media_condition = rule.media_condition.and(media);
+            }
+            self.keyframe_selection_dirty |= before_keyframes != self.keyframe_rules.len();
+            self.resolve_keyframes();
         }
     }
 
@@ -332,6 +354,109 @@ impl Stylesheet {
 
     pub(crate) fn set_layer_viewport(&mut self, vw: f32, vh: f32) {
         self.layer_viewport = (vw, vh);
+        self.resolve_keyframes();
+    }
+
+    pub(crate) fn resolve_keyframes(&mut self) {
+        if self.keyframe_rules.is_empty() {
+            return;
+        }
+        let matches = |condition: &MediaConditions| {
+            condition.matches(self.layer_viewport.0, self.layer_viewport.1)
+        };
+        if !self.keyframe_selection_dirty
+            && self.keyframe_conditions.len() == self.keyframe_rules.len()
+            && self.keyframe_layer_conditions.len() == self.layer_declarations.len()
+            && self.keyframe_layer_names == self.layer_order
+            && self
+                .keyframe_rules
+                .iter()
+                .zip(&self.keyframe_conditions)
+                .all(|(rule, previous)| matches(&rule.media_condition) == *previous)
+            && self
+                .layer_declarations
+                .iter()
+                .zip(&self.keyframe_layer_conditions)
+                .all(|((_, condition), previous)| matches(condition) == *previous)
+        {
+            return;
+        }
+        self.keyframe_conditions = self
+            .keyframe_rules
+            .iter()
+            .map(|rule| matches(&rule.media_condition))
+            .collect();
+        self.keyframe_layer_conditions = self
+            .layer_declarations
+            .iter()
+            .map(|(_, condition)| matches(condition))
+            .collect();
+        self.keyframe_layer_names.clone_from(&self.layer_order);
+        self.keyframe_selection_dirty = false;
+        let ranks = effective_layer_ranks(&self.active_layer_order());
+        let mut winners: HashMap<&str, (bool, u32, usize)> = HashMap::new();
+        for (index, rule) in self.keyframe_rules.iter().enumerate() {
+            if !self.keyframe_conditions[index] {
+                continue;
+            }
+            let rank = if rule.layer.is_empty() {
+                u32::MAX
+            } else {
+                ranks.get(&rule.layer).copied().unwrap_or(0)
+            };
+            let priority = (rule.author_origin, rank, index);
+            let winner = winners.entry(&rule.name).or_insert(priority);
+            if priority > *winner {
+                *winner = priority;
+            }
+        }
+        self.keyframes.retain(|name, stops| {
+            winners
+                .get(name.as_str())
+                .is_some_and(|(_, _, index)| Arc::ptr_eq(stops, &self.keyframe_rules[*index].stops))
+        });
+        for (name, (_, _, index)) in winners {
+            if !self.keyframes.contains_key(name) {
+                self.keyframes.insert(
+                    name.to_string(),
+                    Arc::clone(&self.keyframe_rules[index].stops),
+                );
+            }
+        }
+    }
+
+    pub(crate) fn keyframes_heap_bytes(&self) -> usize {
+        let mut bytes = self.keyframe_rules.capacity()
+            * std::mem::size_of::<super::keyframes::KeyframeRule>()
+            + self.keyframe_conditions.capacity()
+            + self.keyframe_layer_conditions.capacity()
+            + self.keyframe_layer_names.capacity() * std::mem::size_of::<String>();
+        let mut seen = HashSet::new();
+        for name in &self.keyframe_layer_names {
+            bytes += name.capacity();
+        }
+        for rule in &self.keyframe_rules {
+            bytes +=
+                rule.name.capacity() + rule.layer.capacity() + rule.media_condition.heap_bytes();
+        }
+        for stops in self
+            .keyframe_rules
+            .iter()
+            .map(|rule| &rule.stops)
+            .chain(self.keyframes.values())
+        {
+            if !seen.insert(Arc::as_ptr(stops)) {
+                continue;
+            }
+            bytes += stops.capacity() * std::mem::size_of::<KeyframeStop>();
+            for stop in stops.iter() {
+                bytes += stop.properties.capacity() * std::mem::size_of::<(String, String)>();
+                for (name, value) in &stop.properties {
+                    bytes += name.capacity() + value.capacity();
+                }
+            }
+        }
+        bytes + self.keyframes.keys().map(String::capacity).sum::<usize>()
     }
 
     fn active_layer_order(&self) -> Vec<String> {
@@ -371,13 +496,12 @@ impl Stylesheet {
         // Preserve @page rules for print/pagination consumers.
         self.page_rules
             .extend(crate::css::parser::extract_page_rules_cleaned(cleaned));
-        // Extract @keyframes blocks
-        let kf = extract_keyframes_cleaned(cleaned);
-        self.keyframes.extend(kf);
         crate::css::parser::reset_declared_layers();
-        let (parsed, counter_styles) =
-            crate::css::parser::parse_stylesheet_with_counter_styles_cleaned(cleaned);
+        let (parsed, counter_styles, keyframes) =
+            crate::css::parser::parse_stylesheet_definitions_cleaned(cleaned);
         self.counter_styles.extend(counter_styles);
+        self.keyframe_rules.extend(keyframes);
+        self.keyframe_selection_dirty = true;
         if let Some(rules) = parsed {
             // Pick up the layer order this sheet declared, appending any name
             // we have not seen — a later sheet may add layers but cannot
@@ -394,6 +518,7 @@ impl Stylesheet {
             }
             self.idx_dirty = true;
         }
+        self.resolve_keyframes();
     }
 
     /// Resolve root custom properties from the parsed cascade. The stylesheet
@@ -401,6 +526,7 @@ impl Stylesheet {
     pub fn resolve_variables_for_viewport(&mut self, vw: f32, vh: f32) {
         self.counter_style_viewport = (vw, vh);
         self.layer_viewport = (vw, vh);
+        self.resolve_keyframes();
         self.rebuild_index();
         self.variables.clear();
         let mut matched: Vec<_> = self
@@ -560,6 +686,9 @@ impl Stylesheet {
                 break;
             }
             for sel in &rule.selectors {
+                if sel.has_negated_hover {
+                    self.has_hover_descendant_rules = true;
+                }
                 // Find the last combinator — everything before it is ancestor context
                 let last_comb = sel
                     .parts

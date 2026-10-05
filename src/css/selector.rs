@@ -122,6 +122,7 @@ pub struct CssSelector {
     pub parts: Vec<SelectorPart>,
     /// Pre-computed state pseudo-class flags (set during parse, avoids per-match scan).
     pub has_hover: bool,
+    pub has_negated_hover: bool,
     pub has_active: bool,
     pub has_visited: bool,
     /// Parts with :hover/:active/:visited stripped. Cached to avoid per-match allocation.
@@ -141,6 +142,7 @@ impl CssSelector {
     /// Create a selector with pre-computed state pseudo-class flags.
     pub fn new(parts: Vec<SelectorPart>) -> Self {
         let has_hover = selector_parts_have_state(&parts, "hover");
+        let has_negated_hover = parts.iter().any(selector_part_has_negated_hover);
         let has_active = selector_parts_have_state(&parts, "active");
         let has_visited = selector_parts_have_state(&parts, "visited");
         let base_parts = if has_hover || has_active || has_visited {
@@ -165,6 +167,7 @@ impl CssSelector {
         Self {
             parts,
             has_hover,
+            has_negated_hover,
             has_active,
             has_visited,
             base_parts,
@@ -328,6 +331,16 @@ impl CssSelector {
 
 pub(crate) fn selector_has_state(sel: &CssSelector, state: &str) -> bool {
     selector_parts_have_state(&sel.parts, state)
+}
+
+fn selector_part_has_negated_hover(part: &SelectorPart) -> bool {
+    match part {
+        SelectorPart::Not(inner) => inner.has_hover,
+        SelectorPart::Is(list) | SelectorPart::Where(list) | SelectorPart::Has(list) => {
+            list.iter().any(|selector| selector.has_negated_hover)
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn selector_parts_have_state(parts: &[SelectorPart], state: &str) -> bool {

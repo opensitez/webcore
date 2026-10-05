@@ -100,15 +100,12 @@ pub(super) fn declaration_value(id: PropertyId, value: &str) -> bool {
         ColorInterpolation => keywords("auto srgb linearrgb"),
         FontSize => value_parse::parse_font_size_checked(v).is_some(),
         FontWeight => {
-            keywords("normal bold bolder lighter")
-                || calc::parse_css_number(v).is_some_and(|n| (1.0..=1000.0).contains(&n))
+            super::font::font_keyword(value)
+                .is_some_and(|keyword| matches!(keyword.as_str(), "bolder" | "lighter"))
+                || super::font::parse_absolute_font_weight_number(value).is_some()
         }
         FontFamily => comma_list(value, |p| css_string(p) || identifiers(p)),
-        FontStyle => {
-            keywords("normal italic oblique")
-                || v.strip_prefix("oblique ")
-                    .is_some_and(|p| calc::parse_math_angle_deg(p).is_some())
-        }
+        FontStyle => super::font_face::normalize_font_style(value, false).is_some(),
         Font => font_shorthand(value),
         FontVariant => {
             keywords("normal none")
@@ -145,19 +142,9 @@ pub(super) fn declaration_value(id: PropertyId, value: &str) -> bool {
                     })
                 })
         }
-        FontStretch => {
-            keywords(
-                "normal ultra-condensed extra-condensed condensed semi-condensed semi-expanded expanded extra-expanded ultra-expanded",
-            ) || v
-                .strip_suffix('%')
-                .is_some_and(|p| calc::parse_nonnegative_number(p).is_some())
-        }
-        FontFeatureSettings => {
-            v == "normal" || !super::font::parse_feature_settings(value).is_empty()
-        }
-        FontVariationSettings => {
-            v == "normal" || !super::font::parse_variation_settings(value).is_empty()
-        }
+        FontStretch => super::font::parse_font_width(value).is_some(),
+        FontFeatureSettings => super::font::parse_feature_settings_checked(value).is_some(),
+        FontVariationSettings => super::font::parse_variation_settings_checked(value).is_some(),
         FontSynthesis => v == "none" || list("weight style small-caps position", 4),
         FontSynthesisWeight | FontSynthesisSmallCaps | FontSynthesisPosition => {
             keywords("auto none")
@@ -168,26 +155,8 @@ pub(super) fn declaration_value(id: PropertyId, value: &str) -> bool {
         ),
         FontVariantEmoji => keywords("normal text emoji unicode"),
         FontVariantPosition => keywords("normal sub super"),
-        FontVariantLigatures => {
-            keywords("normal none")
-                || list(
-                    "common-ligatures no-common-ligatures discretionary-ligatures no-discretionary-ligatures historical-ligatures no-historical-ligatures contextual no-contextual",
-                    4,
-                )
-        }
-        FontVariantNumeric => {
-            v == "normal"
-                || list(
-                    "lining-nums oldstyle-nums proportional-nums tabular-nums diagonal-fractions stacked-fractions ordinal slashed-zero",
-                    6,
-                )
-        }
-        FontVariantEastAsian => {
-            v == "normal"
-                || list(
-                    "jis78 jis83 jis90 jis04 simplified traditional full-width proportional-width ruby",
-                    3,
-                )
+        FontVariantLigatures | FontVariantNumeric | FontVariantEastAsian => {
+            super::font::parse_font_variant_groups(value, id).is_some()
         }
         TextWrap => list("wrap nowrap balance pretty stable auto", 2),
         TextDecorationLine => v == "none" || list("underline overline line-through blink", 4),
@@ -216,7 +185,7 @@ pub(super) fn declaration_value(id: PropertyId, value: &str) -> bool {
         }
         TextOrientation => keywords("mixed upright sideways"),
         TextCombineUpright => keywords("none all"),
-        WhiteSpace if v == "break-spaces" => true,
+        WhiteSpace => super::rule::parse_white_space_keyword(value).is_some(),
         OverflowWrap | WordWrap => keywords("normal anywhere break-word"),
         Hyphens => keywords("none manual auto"),
         Direction => keywords("ltr rtl"),
@@ -317,7 +286,7 @@ pub(super) fn declaration_value(id: PropertyId, value: &str) -> bool {
         ColumnFill => keywords("auto balance balance-all"),
         LineClamp => v == "none" || calc::parse_positive_integer(v).is_some(),
         Orphans | Widows => calc::parse_positive_integer(v).is_some(),
-        TabSize => v.parse::<u32>().is_ok(),
+        TabSize => super::value_parse::parse_tab_size(v).is_some(),
         PageBreakBefore | PageBreakAfter => keywords("auto always avoid left right"),
         PageBreakInside => keywords("auto avoid"),
         BreakBefore | BreakAfter => keywords(
@@ -548,7 +517,6 @@ pub(super) fn declaration_value(id: PropertyId, value: &str) -> bool {
         | TextTransform
         | TextIndent
         | TextUnderlineOffset
-        | WhiteSpace
         | WordBreak
         | VerticalAlign
         | FlexDirection

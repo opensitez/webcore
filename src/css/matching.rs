@@ -357,19 +357,15 @@ fn matches_sibling(
     ancestors: &[AncestorInfo],
     ctx: &MatchContext<'_>,
 ) -> bool {
-    let sibling_node = left_parts
-        .iter()
-        .any(crate::css::stylesheet::selector_part_contains_has)
-        .then(|| {
-            ctx.ancestor_nodes.last().and_then(|parent| {
-                parent
-                    .children
-                    .iter()
-                    .find(|child| child.node_id == sib.node_id)
-            })
-        })
-        .flatten();
-    let attrs = if sib.checkedness || sib.selectedness {
+    let sibling_node = ctx.ancestor_nodes.last().and_then(|parent| {
+        parent
+            .children
+            .iter()
+            .find(|child| child.node_id == sib.node_id)
+    });
+    let attrs = if sibling_node.is_some() {
+        std::borrow::Cow::Borrowed(&sib.attributes)
+    } else if sib.checkedness || sib.selectedness {
         let mut attrs = sib.attributes.clone();
         if sib.checkedness {
             attrs.insert("checked".to_string(), String::new());
@@ -628,14 +624,15 @@ pub(crate) fn matches_part_with_context(
                 "muted" => is_media_element_tag(tag) && ctx.html_box.is_some_and(|b| b.media_muted),
                 "buffering" | "stalled" | "volume-locked" => false,
                 "checked" => {
-                    // The BOX's state when the matcher was given one; the
-                    // attribute is the fallback for the paths that match
-                    // against a bare tag+attrs (an `<option selected>` has no
-                    // checkedness of its own).
-                    ctx.html_box
-                        .map(|b| b.checkedness)
-                        .unwrap_or_else(|| attrs.contains_key("checked"))
-                        || attrs.contains_key("selected")
+                    if tag == "option" {
+                        ctx.html_box
+                            .map(|b| b.selectedness)
+                            .unwrap_or_else(|| attrs.contains_key("selected"))
+                    } else {
+                        ctx.html_box
+                            .map(|b| b.checkedness)
+                            .unwrap_or_else(|| attrs.contains_key("checked"))
+                    }
                 }
                 // Disabledness is INHERITED from a disabled `<fieldset>`
                 // (HTML §4.10.19.6), so the attribute on the element itself is
@@ -725,7 +722,7 @@ pub(crate) fn matches_part_with_context(
                     selector_validity(tag, attrs, ctx.html_box, ancestors).is_some_and(|v| !v.valid)
                 }
                 "in-range" => selector_validity(tag, attrs, ctx.html_box, ancestors)
-                    .is_some_and(|v| v.range_applicable && v.valid),
+                    .is_some_and(|v| v.range_applicable && !v.range_underflow && !v.range_overflow),
                 "out-of-range" => selector_validity(tag, attrs, ctx.html_box, ancestors)
                     .is_some_and(|v| v.range_underflow || v.range_overflow),
                 "user-valid" => {
@@ -1100,6 +1097,9 @@ fn selector_validity(
     ) {
         return None;
     }
+    if attrs.contains_key("readonly") && crate::html::temporal::step_domain(&input_type).is_some() {
+        return None;
+    }
 
     let value = html_box
         .map(selector_box_value)
@@ -1109,6 +1109,19 @@ fn selector_validity(
         valid: true,
         ..SelectorValidity::default()
     };
+    if let Some(state) = crate::html::temporal::constraints(
+        &input_type,
+        &value,
+        attrs.get("min").map(String::as_str),
+        attrs.get("max").map(String::as_str),
+        attrs.get("step").map(String::as_str),
+        attrs.get("value").map(String::as_str),
+    ) {
+        out.range_applicable = state.range_applicable;
+        out.range_underflow = state.underflow;
+        out.range_overflow = state.overflow;
+        out.valid = !state.underflow && !state.overflow && !state.step_mismatch;
+    }
     if attrs.contains_key("required") {
         let missing = match input_type.as_str() {
             "checkbox" | "radio" => !html_box.map(|b| b.checkedness).unwrap_or(false),

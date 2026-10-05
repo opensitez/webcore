@@ -40,6 +40,166 @@ pub struct FontFaceSource {
     pub techs: Vec<String>,
 }
 
+fn normalize_font_range(value: &str, parse: fn(&str) -> Option<f32>, unit: &str) -> Option<String> {
+    if super::font::font_keyword(value).as_deref() == Some("auto") {
+        return Some("auto".into());
+    }
+    let components = super::syntax::split_component_values(value);
+    if !(1..=2).contains(&components.len()) {
+        return None;
+    }
+    let first = parse(components[0])?;
+    let mut values = vec![first];
+    if components.len() == 2 {
+        values.push(parse(components[1])?);
+        values.sort_by(f32::total_cmp);
+    }
+    Some(
+        values
+            .into_iter()
+            .map(|number| super::calc::serialize_math_literal(number, unit))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+pub(crate) fn normalize_font_style(value: &str, descriptor: bool) -> Option<String> {
+    let components = super::syntax::split_component_values(value);
+    let keyword = super::font::font_keyword(components.first()?)?;
+    if !descriptor && matches!(keyword.as_str(), "left" | "right") {
+        return None;
+    }
+    if matches!(keyword.as_str(), "normal" | "italic" | "left" | "right")
+        || (descriptor && keyword == "auto")
+    {
+        return (components.len() == 1).then_some(keyword);
+    }
+    let max_components = if descriptor { 3 } else { 2 };
+    if keyword != "oblique" || components.len() > max_components {
+        return None;
+    }
+    let mut angles = Vec::new();
+    for component in &components[1..] {
+        let number = super::calc::parse_css_angle_deg(component)?;
+        let limit = super::font::MAX_FONT_OBLIQUE_ANGLE_DEG;
+        let angle = if super::calc::is_math_function(component) {
+            number.clamp(-limit, limit)
+        } else if (-limit..=limit).contains(&number) {
+            number
+        } else {
+            return None;
+        };
+        angles.push(angle);
+    }
+    angles.sort_by(f32::total_cmp);
+    let mut normalized = keyword;
+    for angle in angles {
+        normalized.push(' ');
+        normalized.push_str(&super::calc::serialize_math_literal(angle, "deg"));
+    }
+    Some(normalized)
+}
+
+fn normalize_font_metric(value: &str, allow_normal: bool) -> Option<String> {
+    if allow_normal && super::font::font_keyword(value).as_deref() == Some("normal") {
+        return Some("normal".into());
+    }
+    super::font::parse_nonnegative_font_percentage(value)
+        .map(|number| super::calc::serialize_math_literal(number, "%"))
+}
+
+fn normalize_font_language(value: &str) -> Option<String> {
+    if super::font::font_keyword(value).as_deref() == Some("normal") {
+        return Some("normal".into());
+    }
+    let (_, rest) = super::apply::consume_css_string(value)?;
+    rest.trim().is_empty().then(|| value.trim().to_string())
+}
+
+pub(crate) fn parse_font_face_body(body: &str) -> Option<FontFaceDecl> {
+    let (declarations, _) = super::parse_declarations_important(body);
+    let mut face = FontFaceDecl::default();
+    for (property, value) in &declarations {
+        match property.as_str() {
+            "font-family" => {
+                if let Some(family) = parse_font_face_family(value) {
+                    face.family = family;
+                }
+            }
+            "src" => {
+                let sources: Vec<_> = parse_font_face_sources(value)
+                    .into_iter()
+                    .filter(font_source_supported)
+                    .collect();
+                if !sources.is_empty() {
+                    face.sources = sources;
+                    face.src = value.clone();
+                }
+            }
+            "font-weight" => {
+                if let Some(weight) =
+                    normalize_font_range(value, super::font::parse_absolute_font_weight_number, "")
+                {
+                    face.weight = Some(weight);
+                }
+            }
+            "font-style" => {
+                if let Some(style) = normalize_font_style(value, true) {
+                    face.style = Some(style);
+                }
+            }
+            "font-width" | "font-stretch" => {
+                if let Some(width) = normalize_font_range(value, super::font::parse_font_width, "%")
+                {
+                    face.stretch = Some(width);
+                }
+            }
+            "font-display" => {
+                if let Some(display) = parse_font_display(value) {
+                    face.display = Some(display);
+                }
+            }
+            "unicode-range" => {
+                if parse_unicode_ranges_checked(value).is_some() {
+                    face.unicode_range = Some(value.clone());
+                }
+            }
+            "size-adjust" => {
+                if let Some(metric) = normalize_font_metric(value, false) {
+                    face.size_adjust = Some(metric);
+                }
+            }
+            "ascent-override" | "descent-override" | "line-gap-override" => {
+                if let Some(metric) = normalize_font_metric(value, true) {
+                    let field = match property.as_str() {
+                        "ascent-override" => &mut face.ascent_override,
+                        "descent-override" => &mut face.descent_override,
+                        _ => &mut face.line_gap_override,
+                    };
+                    *field = Some(metric);
+                }
+            }
+            "font-feature-settings" => {
+                if super::font::parse_feature_settings_checked(value).is_some() {
+                    face.feature_settings = Some(value.clone());
+                }
+            }
+            "font-variation-settings" => {
+                if super::font::parse_variation_settings_checked(value).is_some() {
+                    face.variation_settings = Some(value.clone());
+                }
+            }
+            "font-language-override" => {
+                if let Some(language) = normalize_font_language(value) {
+                    face.language_override = Some(language);
+                }
+            }
+            _ => {}
+        }
+    }
+    (!face.family.is_empty() && !face.sources.is_empty()).then_some(face)
+}
+
 /// Extract a file path from a CSS url("...") or local("...") value.
 pub fn extract_url_path(src: &str) -> String {
     let src = src.trim();
@@ -61,7 +221,11 @@ pub fn extract_url_path(src: &str) -> String {
 }
 
 pub fn parse_font_face_sources(src: &str) -> Vec<FontFaceSource> {
-    split_font_sources(src)
+    let normalized = super::syntax::normalize_input(src);
+    let comments = normalized
+        .contains("/*")
+        .then(|| super::syntax::normalize_comments(&normalized));
+    super::value_parse::split_top_level_commas(comments.as_deref().unwrap_or(&normalized))
         .into_iter()
         .filter_map(parse_font_face_source)
         .collect()
@@ -83,6 +247,22 @@ pub(crate) fn supports_font_format(format: &str) -> bool {
             | "font/otf"
             | "font/ttf"
     )
+}
+
+pub(crate) fn supports_font_tech(tech: &str) -> bool {
+    matches!(
+        tech.to_ascii_lowercase().as_str(),
+        "features-opentype" | "features-aat" | "variations" | "variations-opentype"
+    )
+}
+
+pub(crate) fn font_source_supported(source: &FontFaceSource) -> bool {
+    (source.formats.is_empty()
+        || source
+            .formats
+            .iter()
+            .any(|format| supports_font_format(format)))
+        && source.techs.iter().all(|tech| supports_font_tech(tech))
 }
 
 pub fn unicode_range_intersects_text(range: Option<&str>, text: &str) -> bool {
@@ -158,7 +338,7 @@ impl UnicodeTextCoverage {
 }
 
 pub fn parse_font_display(value: &str) -> Option<String> {
-    let keyword = value.trim().to_ascii_lowercase();
+    let keyword = descriptor_ident(value.trim())?;
     matches!(
         keyword.as_str(),
         "auto" | "block" | "swap" | "fallback" | "optional"
@@ -175,21 +355,28 @@ pub(crate) fn unicode_range_intersects_latin(range: Option<&str>) -> bool {
 }
 
 fn parse_unicode_ranges(range: &str) -> Vec<(u32, u32)> {
+    parse_unicode_ranges_checked(range).unwrap_or_default()
+}
+
+pub(crate) fn parse_unicode_ranges_checked(range: &str) -> Option<Vec<(u32, u32)>> {
     range
         .split(',')
-        .filter_map(|part| parse_unicode_range_part(part.trim()))
+        .map(|part| parse_unicode_range_part(part.trim()))
         .collect()
 }
 
 fn parse_unicode_range_part(part: &str) -> Option<(u32, u32)> {
     let body = part
         .strip_prefix("U+")
-        .or_else(|| part.strip_prefix("u+"))?
-        .trim();
+        .or_else(|| part.strip_prefix("u+"))?;
     if body.is_empty() {
         return None;
     }
     if body.contains('?') {
+        let wildcard = body.find('?')?;
+        if !body[wildcard..].bytes().all(|byte| byte == b'?') {
+            return None;
+        }
         let mut start = String::with_capacity(body.len());
         let mut end = String::with_capacity(body.len());
         for ch in body.chars() {
@@ -206,8 +393,8 @@ fn parse_unicode_range_part(part: &str) -> Option<(u32, u32)> {
         return parse_codepoint(&start).zip(parse_codepoint(&end));
     }
     if let Some((start, end)) = body.split_once('-') {
-        let start = parse_codepoint(start.trim())?;
-        let end = parse_codepoint(end.trim())?;
+        let start = parse_codepoint(start)?;
+        let end = parse_codepoint(end)?;
         if start <= end {
             Some((start, end))
         } else {
@@ -219,7 +406,6 @@ fn parse_unicode_range_part(part: &str) -> Option<(u32, u32)> {
 }
 
 fn parse_codepoint(hex: &str) -> Option<u32> {
-    let hex = hex.trim();
     if hex.is_empty() || hex.len() > 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
         return None;
     }
@@ -229,40 +415,83 @@ fn parse_codepoint(hex: &str) -> Option<u32> {
 
 fn parse_font_face_source(source: &str) -> Option<FontFaceSource> {
     let source = source.trim();
-    let (kind, rest) = if let Some((value, rest)) = consume_function(source, "url") {
-        (
-            FontFaceSourceKind::Url(unquote_css_string(value.trim())),
-            rest,
-        )
+    let (kind, rest) = if let Some((value, end)) = super::apply::parse_url_function(source) {
+        (FontFaceSourceKind::Url(value), &source[end..])
     } else if let Some((value, rest)) = consume_function(source, "local") {
-        (
-            FontFaceSourceKind::Local(unquote_css_string(value.trim())),
-            rest,
-        )
+        if !rest.trim().is_empty() {
+            return None;
+        }
+        return Some(FontFaceSource {
+            kind: FontFaceSourceKind::Local(parse_font_face_family(value)?),
+            formats: Vec::new(),
+            techs: Vec::new(),
+        });
     } else {
         return None;
     };
     let mut formats = Vec::new();
     let mut techs = Vec::new();
     let mut rest = rest.trim();
-    while !rest.is_empty() {
-        if let Some((value, next)) = consume_function(rest, "format") {
-            formats.extend(
-                split_font_descriptor_list(value)
-                    .into_iter()
-                    .map(|v| unquote_css_string(v.trim()).to_ascii_lowercase()),
-            );
-            rest = next.trim();
-        } else if let Some((value, next)) = consume_function(rest, "tech") {
-            techs.extend(
-                split_font_descriptor_list(value)
-                    .into_iter()
-                    .map(|v| v.trim().to_ascii_lowercase()),
-            );
-            rest = next.trim();
+    if let Some((value, next)) = consume_function(rest, "format") {
+        let value = value.trim();
+        let format = if let Some((string, tail)) = super::apply::consume_css_string(value) {
+            if !tail.trim().is_empty() {
+                return None;
+            }
+            string.to_ascii_lowercase()
         } else {
-            break;
+            let format = descriptor_ident(value)?;
+            if !matches!(
+                format.as_str(),
+                "collection"
+                    | "embedded-opentype"
+                    | "opentype"
+                    | "svg"
+                    | "truetype"
+                    | "woff"
+                    | "woff2"
+            ) {
+                return None;
+            }
+            format
+        };
+        match format.as_str() {
+            "woff2-variations"
+            | "woff-variations"
+            | "truetype-variations"
+            | "opentype-variations" => {
+                formats.push(format.trim_end_matches("-variations").to_string());
+                techs.push("variations".to_string());
+            }
+            _ => formats.push(format),
         }
+        rest = next.trim();
+    }
+    if let Some((value, next)) = consume_function(rest, "tech") {
+        for item in super::value_parse::split_top_level_commas(value) {
+            let tech = descriptor_ident(item.trim())?;
+            if !matches!(
+                tech.as_str(),
+                "features-opentype"
+                    | "features-aat"
+                    | "features-graphite"
+                    | "color-colrv0"
+                    | "color-colrv1"
+                    | "color-svg"
+                    | "color-sbix"
+                    | "color-cbdt"
+                    | "variations"
+                    | "palettes"
+                    | "incremental"
+            ) {
+                return None;
+            }
+            techs.push(tech);
+        }
+        rest = next.trim();
+    }
+    if !rest.is_empty() {
+        return None;
     }
     Some(FontFaceSource {
         kind,
@@ -271,105 +500,207 @@ fn parse_font_face_source(source: &str) -> Option<FontFaceSource> {
     })
 }
 
-fn split_font_sources(src: &str) -> Vec<&str> {
-    split_top_level(src, ',')
-}
-
-fn split_font_descriptor_list(src: &str) -> Vec<&str> {
-    split_top_level(src, ',')
-}
-
-fn split_top_level(src: &str, separator: char) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut depth = 0usize;
-    let mut quote = None;
-    let mut start = 0usize;
-    let mut escape = false;
-    for (i, ch) in src.char_indices() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        if ch == '\\' {
-            escape = true;
-            continue;
-        }
-        if let Some(q) = quote {
-            if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '"' | '\'' => quote = Some(ch),
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            c if c == separator && depth == 0 => {
-                out.push(src[start..i].trim());
-                start = i + ch.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    let tail = src[start..].trim();
-    if !tail.is_empty() {
-        out.push(tail);
-    }
-    out
-}
-
 fn consume_function<'a>(src: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
     let src = src.trim_start();
-    if src.len() < name.len() || !src[..name.len()].eq_ignore_ascii_case(name) {
+    let (actual, start, function) = super::syntax::name_token(src)?;
+    if !function || !actual.eq_ignore_ascii_case(name) {
         return None;
     }
-    let after_name = src[name.len()..].trim_start();
-    if !after_name.starts_with('(') {
-        return None;
-    }
-    let mut quote = None;
-    let mut escape = false;
-    let mut depth = 0usize;
-    for (i, ch) in after_name.char_indices() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        if ch == '\\' {
-            escape = true;
-            continue;
-        }
-        if let Some(q) = quote {
-            if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '"' | '\'' => quote = Some(ch),
-            '(' => depth += 1,
-            ')' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some((&after_name[1..i], &after_name[i + 1..]));
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+    let (body, end) = super::syntax::function_body(src, start)?;
+    Some((body, &src[end..]))
 }
 
-fn unquote_css_string(value: &str) -> String {
+fn descriptor_ident(value: &str) -> Option<String> {
+    let (name, end, function) = super::syntax::name_token(value)?;
+    (!function && end == value.len()).then(|| name.to_ascii_lowercase())
+}
+
+pub(crate) fn parse_font_face_family(value: &str) -> Option<String> {
     let value = value.trim();
-    if value.len() >= 2 {
-        let first = value.as_bytes()[0];
-        let last = value.as_bytes()[value.len() - 1];
-        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
-            return value[1..value.len() - 1]
-                .replace("\\\"", "\"")
-                .replace("\\'", "'");
-        }
+    if let Some((family, rest)) = super::apply::consume_css_string(value) {
+        return rest.trim().is_empty().then_some(family);
     }
-    value.to_string()
+    let mut names = Vec::new();
+    for token in super::syntax::split_component_values(value) {
+        let (name, end, function) = super::syntax::name_token(token)?;
+        if function
+            || end != token.len()
+            || matches!(
+                name.to_ascii_lowercase().as_str(),
+                "initial"
+                    | "inherit"
+                    | "unset"
+                    | "revert"
+                    | "revert-layer"
+                    | "default"
+                    | "serif"
+                    | "sans-serif"
+                    | "monospace"
+                    | "cursive"
+                    | "fantasy"
+                    | "system-ui"
+                    | "ui-serif"
+                    | "ui-sans-serif"
+                    | "ui-monospace"
+                    | "ui-rounded"
+                    | "math"
+                    | "emoji"
+                    | "fangsong"
+            )
+        {
+            return None;
+        }
+        names.push(name.into_owned());
+    }
+    (!names.is_empty()).then(|| names.join(" "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn font_face_numeric_descriptors_normalize_math_ranges_and_aliases() {
+        let face = parse_font_face_body(
+            r#"
+            font-family: Example; src: url(example.woff2);
+            font-weight: 800 300;
+            font-style: o\62 lique 30deg -30deg;
+            font-stretch: condensed;
+            font-width: min(75%, 90%) calc(100% + 25%);
+            size-adjust: calc(80% + 20%);
+            ascent-override: max(70%, calc(40% + 50%));
+            descent-override: calc(-10%);
+            line-gap-override: n\6f rmal;
+            font-language-override: "TRK";
+        "#,
+        )
+        .unwrap();
+        assert_eq!(face.weight.as_deref(), Some("300 800"));
+        assert_eq!(face.style.as_deref(), Some("oblique -30deg 30deg"));
+        assert_eq!(face.stretch.as_deref(), Some("75% 125%"));
+        assert_eq!(face.size_adjust.as_deref(), Some("100%"));
+        assert_eq!(face.ascent_override.as_deref(), Some("90%"));
+        assert_eq!(face.descent_override.as_deref(), Some("0%"));
+        assert_eq!(face.line_gap_override.as_deref(), Some("normal"));
+        assert_eq!(face.language_override.as_deref(), Some(r#""TRK""#));
+        let clamped = parse_font_face_body(
+            r#"font-family: Example; src: url(example.woff2);
+            font-weight: calc(2000) calc(0); font-width: calc(-10%);
+            font-style: oblique calc(180deg);"#,
+        )
+        .unwrap();
+        assert_eq!(clamped.weight.as_deref(), Some("1 1000"));
+        assert_eq!(clamped.stretch.as_deref(), Some("0%"));
+        assert_eq!(clamped.style.as_deref(), Some("oblique 90deg"));
+    }
+
+    #[test]
+    fn font_face_invalid_numeric_descriptors_preserve_valid_values() {
+        let face = parse_font_face_body(
+            r#"font-family: Example; src: url(example.woff2);
+            font-weight: bold; font-weight: bolder; font-weight: 1001; font-weight: 400px;
+            font-style: italic; font-style: normal 20deg; font-style: oblique 91deg;
+            font-width: expanded; font-stretch: -1%; font-width: 100;
+            size-adjust: 120%; size-adjust: normal; size-adjust: -10%;
+            ascent-override: 90%; ascent-override: 90px;
+            descent-override: 20%; descent-override: 20% 30%;
+            line-gap-override: normal; line-gap-override: calc(10px);
+            font-language-override: "ENG"; font-language-override: ENG;
+            font-language-override: "TRK" garbage;
+        "#,
+        )
+        .unwrap();
+        assert_eq!(face.weight.as_deref(), Some("700"));
+        assert_eq!(face.style.as_deref(), Some("italic"));
+        assert_eq!(face.stretch.as_deref(), Some("125%"));
+        assert_eq!(face.size_adjust.as_deref(), Some("120%"));
+        assert_eq!(face.ascent_override.as_deref(), Some("90%"));
+        assert_eq!(face.descent_override.as_deref(), Some("20%"));
+        assert_eq!(face.line_gap_override.as_deref(), Some("normal"));
+        assert_eq!(face.language_override.as_deref(), Some(r#""ENG""#));
+    }
+
+    #[test]
+    fn font_face_unicode_ranges_validate_the_complete_descriptor() {
+        assert_eq!(
+            parse_unicode_ranges_checked("U+4??, u+1000-10FFFF"),
+            Some(vec![(0x400, 0x4ff), (0x1000, 0x10ffff)])
+        );
+        for range in [
+            "U+?A",
+            "U+41, bad",
+            "U+41,",
+            "U+ 41",
+            "U+40 - 50",
+            "U+50-40",
+            "U+110000",
+            "U+??????",
+        ] {
+            assert!(parse_unicode_ranges_checked(range).is_none(), "{range}");
+        }
+        let mut faces = Vec::new();
+        super::super::extract_font_faces(
+            r#"@font-face {
+            font-family: Example; src: url(example.woff2);
+            unicode-range: U+41-5A; unicode-range: U+41, invalid;
+            font-display: s\77 ap; font-display: invalid;
+        }"#,
+            &mut faces,
+        );
+        assert_eq!(faces[0].unicode_range.as_deref(), Some("U+41-5A"));
+        assert_eq!(faces[0].display.as_deref(), Some("swap"));
+    }
+
+    #[test]
+    fn font_face_sources_use_css_tokens_and_recover_by_candidate() {
+        let sources = parse_font_face_sources(
+            r#"ééé, url(a.woff2) garbage,
+            local("Arial") format("woff2"), url(a.woff2) format("woff2", "woff"),
+            url(a.woff2) tech(variations) format("woff2"),
+            url(a.woff2) tech(unknown), url(a.woff2) format ("woff2"),
+            u\72 l("f\6f nt.woff2") f\6f rmat(woff2) tech(variations),
+            l\6f cal(My\20 Font), url(legacy.woff2) format("woff2-variations")"#,
+        );
+        assert_eq!(sources.len(), 3);
+        assert_eq!(
+            sources[0].kind,
+            FontFaceSourceKind::Url("font.woff2".into())
+        );
+        assert_eq!(sources[0].formats, vec!["woff2"]);
+        assert_eq!(sources[0].techs, vec!["variations"]);
+        assert_eq!(sources[1].kind, FontFaceSourceKind::Local("My Font".into()));
+        assert_eq!(sources[2].formats, vec!["woff2"]);
+        assert_eq!(sources[2].techs, vec!["variations"]);
+        assert_eq!(
+            parse_font_face_sources("url(font.woff2)/**/format(woff2)").len(),
+            1
+        );
+        assert!(
+            parse_font_face_sources("local(serif), local(12Invalid), local(Arial, Helvetica)")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn font_face_invalid_descriptors_preserve_valid_fallbacks() {
+        let mut faces = Vec::new();
+        super::super::extract_font_faces(
+            r#"@font-face {
+            font-family: Good Font; font-family: serif;
+            src: url(good.woff2); src: url(bad.woff2) garbage;
+            src: url(unsupported.woff2) tech(color-COLRv1);
+        }
+        @font-face { font-family: NoSource; }
+        @font-face { src: url(no-family.woff2); }
+        @font-face { font-family: Invalid; src: ééé; }"#,
+            &mut faces,
+        );
+        assert_eq!(faces.len(), 1);
+        assert_eq!(faces[0].family, "Good Font");
+        assert_eq!(
+            faces[0].sources[0].kind,
+            FontFaceSourceKind::Url("good.woff2".into())
+        );
+    }
 }

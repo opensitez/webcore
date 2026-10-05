@@ -214,11 +214,43 @@ fn parse_numeric_dimension(value: &str, dimension: Dimension) -> Option<f32> {
     if !is_math_function(value) {
         return None;
     }
+    resolve_numeric_dimension(value, dimension)
+}
+
+fn resolve_numeric_dimension(value: &str, dimension: Dimension) -> Option<f32> {
     let result = MathParser::parse(value, false)?;
     if result.dimension != dimension || !context_independent(&result.node) {
         return None;
     }
     Some(result.node.resolve_vp(0.0, 0.0, 0.0, 0.0, 0.0))
+}
+
+/// A single typed numeric token or a CSS math function, never bare arithmetic.
+fn parse_css_dimension(value: &str, dimension: Dimension) -> Option<f32> {
+    let value = value.trim();
+    if !is_math_function(value) {
+        let (_, _, end) = super::syntax::numeric_token(value)?;
+        if end != value.len() {
+            return None;
+        }
+    }
+    resolve_numeric_dimension(value, dimension).filter(|number| number.is_finite())
+}
+
+pub(crate) fn parse_css_percentage(value: &str) -> Option<f32> {
+    parse_css_dimension(value, [0, 0, 0, 0, 0, 1])
+}
+
+pub(crate) fn parse_css_angle_deg(value: &str) -> Option<f32> {
+    let value = value.trim();
+    if let Some((number, unit, end)) = super::syntax::numeric_token(value) {
+        if end == value.len() && unit.eq_ignore_ascii_case("deg") {
+            return number.is_finite().then_some(number);
+        }
+    }
+    parse_css_dimension(value, ANGLE)
+        .map(f32::to_degrees)
+        .filter(|number| number.is_finite())
 }
 
 pub(crate) fn parse_math_angle_deg(value: &str) -> Option<f32> {
