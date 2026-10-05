@@ -376,20 +376,52 @@ impl Document {
 
     /// `location.<component>` — the same set over the document's own URL.
     pub fn location_component(&self, component: &str) -> String {
-        let url = parse(&self.base_url, None);
+        let url = parse(self.document_uri(), None);
         url_component(url.as_ref(), component)
     }
 
     /// The element named by the document URL fragment, for `:target`.
     pub fn fragment_target_id(&self) -> u32 {
-        let Some(url) = parse(&self.base_url, None) else {
+        let Some(url) = parse(self.document_uri(), None) else {
             return 0;
         };
         if !url.has_fragment || url.fragment.is_empty() {
             return 0;
         }
-        self.get_element_by_id(&url.fragment).unwrap_or(0)
+        let fragment = decode_fragment(&url.fragment);
+        if let Some(id) = self.get_element_by_id(&fragment) {
+            return id;
+        }
+        let mut target = 0;
+        crate::Document::walk_all(&self.root, &mut |node| {
+            if target == 0 && node.tag == "a" && node.attributes.get("name") == Some(&fragment) {
+                target = node.node_id;
+            }
+        });
+        target
     }
+}
+
+pub(crate) fn decode_fragment(fragment: &str) -> String {
+    let bytes = fragment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && let Some(pair) = bytes.get(index + 1..index + 3)
+            && let (Some(hi), Some(lo)) = (
+                (pair[0] as char).to_digit(16),
+                (pair[1] as char).to_digit(16),
+            )
+        {
+            decoded.push((hi * 16 + lo) as u8);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 /// The IDL components of a URL, or the empty-URL answers when there is none.

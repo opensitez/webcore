@@ -14,6 +14,7 @@ pub mod arena;
 pub mod attr_nodes;
 pub mod attrs;
 pub mod canvas_api;
+pub mod clipboard;
 pub mod computed_style;
 pub mod custom_elements;
 pub mod dialog;
@@ -21,6 +22,7 @@ pub mod document_meta;
 pub mod event_handlers;
 pub mod events;
 pub mod form_association;
+pub mod gauges;
 pub mod html_element;
 pub mod query;
 pub mod range;
@@ -235,53 +237,149 @@ impl HtmlEvent {
 /// DOM root so handlers can query/mutate the tree without unsafe pointer casts.
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-/// Find a node by node_id in the tree (immutable).
-fn find_node_ref(node: &WebCore, id: u32) -> Option<&WebCore> {
-    if node.node_id == id {
-        return Some(node);
+fn used_user_select(root: &WebCore, node: &WebCore, parent: UserSelect) -> UserSelect {
+    let editing_host = node.attributes.get("contenteditable").is_some_and(|value| {
+        value.is_empty()
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("plaintext-only")
+    });
+    let mutable_text_control = (node.tag == "textarea"
+        || (node.tag == "input" && crate::types::is_text_input(node)))
+        && !node.attributes.contains_key("readonly")
+        && !crate::types::form_runtime::is_actually_disabled(root, node.node_id);
+    if editing_host || mutable_text_control {
+        return UserSelect::Contain;
     }
-    for child in &node.children {
-        if let Some(f) = find_node_ref(child, id) {
-            return Some(f);
+    match node.style.user_select {
+        UserSelect::Auto if matches!(node.tag.as_str(), "::before" | "::after") => UserSelect::None,
+        UserSelect::Auto if matches!(parent, UserSelect::None | UserSelect::All) => parent,
+        UserSelect::Auto => UserSelect::Text,
+        value => value,
+    }
+}
+
+fn inline_user_select_context<'a>(
+    root: &'a WebCore,
+    node: &'a WebCore,
+    path: &[usize],
+    mut used: UserSelect,
+    mut all: Option<&'a WebCore>,
+) -> (UserSelect, Option<&'a WebCore>) {
+    let mut descendant = node;
+    for &index in path {
+        let Some(child) = descendant.children.get(index) else {
+            break;
+        };
+        descendant = child;
+        if descendant.node_id == 0 {
+            continue;
+        }
+        used = used_user_select(root, descendant, used);
+        all = if used == UserSelect::All {
+            all.or(Some(descendant))
+        } else {
+            None
+        };
+    }
+    (used, all)
+}
+
+fn fragment_user_select_context<'a>(
+    root: &'a WebCore,
+    node: &'a WebCore,
+    offset: usize,
+    used: UserSelect,
+    all: Option<&'a WebCore>,
+) -> (UserSelect, Option<&'a WebCore>) {
+    if let Some(run) = node
+        .layout
+        .inline_runs
+        .iter()
+        .find(|run| offset >= run.text_offset && offset < run.text_offset + run.length)
+    {
+        return inline_user_select_context(root, node, &run.path, used, all);
+    }
+    for child in node.children.iter().filter(|child| child.node_id == 0) {
+        let Some((start, end)) = crate::layout::inline_layout::flat_text_child_range(node, child)
+        else {
+            continue;
+        };
+        if offset >= start && offset < end {
+            return fragment_user_select_context(root, child, offset - start, used, all);
         }
     }
-    None
+    (used, all)
 }
 
-/// Build path of node_ids `[root, ..., parent, target]` from root down to target.
-fn collect_id_path(node: &WebCore, target_id: u32, path: &mut Vec<u32>) -> bool {
-    path.push(node.node_id);
-    if node.node_id == target_id {
-        return true;
-    }
-    for child in &node.children {
-        if collect_id_path(child, target_id, path) {
-            return true;
+fn append_selectable_text_ranges(
+    root: &WebCore,
+    node: &WebCore,
+    used: UserSelect,
+    base: usize,
+    len: usize,
+    ranges: &mut Vec<(usize, usize)>,
+) {
+    let mut cursor = 0;
+    if !node.layout.inline_runs.is_empty() {
+        for run in &node.layout.inline_runs {
+            let start = run.text_offset.min(len);
+            let end = (run.text_offset + run.length).min(len);
+            if used != UserSelect::None && cursor < start {
+                ranges.push((base + cursor, base + start));
+            }
+            let (run_used, _) = inline_user_select_context(root, node, &run.path, used, None);
+            if run_used != UserSelect::None && start < end {
+                ranges.push((base + start, base + end));
+            }
+            cursor = cursor.max(end);
+        }
+    } else {
+        for child in node.children.iter().filter(|child| child.node_id == 0) {
+            let Some((start, end)) =
+                crate::layout::inline_layout::flat_text_child_range(node, child)
+            else {
+                continue;
+            };
+            let (start, end) = (start.min(len), end.min(len));
+            if used != UserSelect::None && cursor < start {
+                ranges.push((base + cursor, base + start));
+            }
+            append_selectable_text_ranges(root, child, used, base + start, end - start, ranges);
+            cursor = cursor.max(end);
         }
     }
-    path.pop();
-    false
+    if used != UserSelect::None && cursor < len {
+        ranges.push((base + cursor, base + len));
+    }
 }
 
-fn user_select_allows_selection(root: &WebCore, target_id: u32) -> bool {
-    let mut path = Vec::new();
-    if !collect_id_path(root, target_id, &mut path) {
-        return true;
+fn user_select_context(
+    root: &WebCore,
+    target_id: u32,
+    offset: usize,
+) -> Option<(UserSelect, Option<&WebCore>)> {
+    fn find<'a>(
+        root: &'a WebCore,
+        node: &'a WebCore,
+        target: u32,
+        offset: usize,
+        parent: UserSelect,
+        all: Option<&'a WebCore>,
+    ) -> Option<(UserSelect, Option<&'a WebCore>)> {
+        let used = used_user_select(root, node, parent);
+        let all = if used == UserSelect::All {
+            all.or(Some(node))
+        } else {
+            None
+        };
+        if node.node_id == target {
+            return Some(fragment_user_select_context(root, node, offset, used, all));
+        }
+        node.children
+            .iter()
+            .find_map(|child| find(root, child, target, offset, used, all))
     }
-    path.into_iter()
-        .filter_map(|id| find_node_ref(root, id))
-        .all(|node| node.style.user_select != UserSelect::None)
-}
-
-fn nearest_user_select_all_node(root: &WebCore, target_id: u32) -> Option<&WebCore> {
-    let mut path = Vec::new();
-    if !collect_id_path(root, target_id, &mut path) {
-        return None;
-    }
-    path.into_iter()
-        .rev()
-        .filter_map(|id| find_node_ref(root, id))
-        .find(|node| node.style.user_select == UserSelect::All)
+    find(root, root, target_id, offset, UserSelect::Text, None)
 }
 
 /// Simple CSS selector matching: `tag`, `#id`, `.class`, `*`.
@@ -600,6 +698,7 @@ pub fn create_element(tag: &str) -> WebCore {
 /// geometry (text content, style, children added/removed).
 pub fn mark_layout_dirty(node: &mut WebCore) {
     node.layout.layout_dirty = true;
+    node.layout.intrinsic_dirty = true;
     node.layout.line_cache.clear();
 }
 
@@ -608,11 +707,13 @@ pub fn mark_layout_dirty(node: &mut WebCore) {
 pub fn propagate_dirty_to_root(root: &mut WebCore, target_id: u32) -> bool {
     if root.node_id == target_id {
         root.layout.layout_dirty = true;
+        root.layout.intrinsic_dirty = true;
         return true;
     }
     for child in &mut root.children {
         if propagate_dirty_to_root(child, target_id) {
             root.has_dirty_descendant = true;
+            root.layout.intrinsic_dirty = true;
             return true;
         }
     }
@@ -864,6 +965,7 @@ pub struct Editor {
     pub caret_box: Option<u32>,
     pub caret_local: usize,
     pub sel_anchor: usize,
+    selection_anchor_box: Option<u32>,
     pub sel_start: usize,
     pub sel_end: usize,
     pub caret_visible: bool,
@@ -887,6 +989,7 @@ impl Default for Editor {
             caret_box: None,
             caret_local: 0,
             sel_anchor: 0,
+            selection_anchor_box: None,
             sel_start: 0,
             sel_end: 0,
             caret_visible: true,
@@ -907,6 +1010,97 @@ impl Editor {
 
     pub fn has_selection(&self) -> bool {
         self.sel_start < self.sel_end
+            || self
+                .selection_anchor_box
+                .is_some_and(|id| Some(id) != self.caret_box)
+    }
+
+    /// Ranges in rendered-text byte offsets, grouped by the layout container
+    /// that owns their line geometry. These are not DOM Range UTF-16 offsets.
+    pub(crate) fn selection_segments(&self, root: &WebCore) -> Vec<(u32, usize, usize)> {
+        let Some(focus) = self.caret_box else {
+            return Vec::new();
+        };
+        let anchor = self.selection_anchor_box.unwrap_or(focus);
+        if !self.has_selection() {
+            return Vec::new();
+        }
+        fn collect(
+            root: &WebCore,
+            node: &WebCore,
+            parent: UserSelect,
+            only: Option<u32>,
+            boxes: &mut Vec<(u32, usize, Vec<(usize, usize)>)>,
+        ) {
+            if node.style.display == crate::types::Display::None {
+                return;
+            }
+            let used = used_user_select(root, node, parent);
+            if node.node_id != 0
+                && only.is_none_or(|id| node.node_id == id)
+                && (only == Some(node.node_id)
+                    || !node.layout.line_cache.is_empty()
+                    || node
+                        .children
+                        .iter()
+                        .any(|child| child.node_id == 0 && !child.layout.line_cache.is_empty()))
+            {
+                let len = crate::layout::inline_layout::collect_flat_text(node).len();
+                let mut ranges = Vec::new();
+                append_selectable_text_ranges(root, node, used, 0, len, &mut ranges);
+                let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+                for (start, end) in ranges {
+                    if let Some(last) = merged.last_mut().filter(|last| last.1 == start) {
+                        last.1 = end;
+                    } else {
+                        merged.push((start, end));
+                    }
+                }
+                boxes.push((node.node_id, len, merged));
+            }
+            for child in &node.children {
+                collect(root, child, used, only, boxes);
+            }
+        }
+        let mut boxes = Vec::new();
+        collect(
+            root,
+            root,
+            UserSelect::Text,
+            (anchor == focus).then_some(focus),
+            &mut boxes,
+        );
+        let Some(a) = boxes.iter().position(|(id, _, _)| *id == anchor) else {
+            return Vec::new();
+        };
+        let Some(f) = boxes.iter().position(|(id, _, _)| *id == focus) else {
+            return Vec::new();
+        };
+        let (start, end, start_offset, end_offset) = if a == f {
+            (a, f, self.sel_start, self.sel_end)
+        } else if a < f {
+            (a, f, self.sel_anchor, self.caret_local)
+        } else {
+            (f, a, self.caret_local, self.sel_anchor)
+        };
+        boxes[start..=end]
+            .iter()
+            .enumerate()
+            .flat_map(|(index, (id, len, ranges))| {
+                let len = *len;
+                let lo = if index == 0 { start_offset.min(len) } else { 0 };
+                let hi = if start + index == end {
+                    end_offset.min(len)
+                } else {
+                    len
+                };
+                ranges.iter().filter_map(move |&(range_start, range_end)| {
+                    let start = lo.max(range_start);
+                    let end = hi.min(range_end);
+                    (start < end).then_some((*id, start, end))
+                })
+            })
+            .collect()
     }
 
     pub fn caret_info(&self) -> Option<(u32, usize)> {
@@ -927,8 +1121,10 @@ impl Editor {
 
     pub fn set_caret_from_hit(&mut self, node_id: u32, local: usize, extend: bool) {
         self.selection_only = false;
+        let extend = extend && self.caret_box == Some(node_id);
         if !extend {
             self.sel_anchor = local;
+            self.selection_anchor_box = Some(node_id);
             self.sel_start = local;
             self.sel_end = local;
         }
@@ -949,7 +1145,7 @@ impl Editor {
             self.collapse_to(new);
             return;
         }
-        let new = prev_char_boundary(flat, pos);
+        let new = adjacent_grapheme_boundary(flat, pos, false);
         self.move_to(new, extend);
     }
 
@@ -960,7 +1156,7 @@ impl Editor {
             self.collapse_to(new);
             return;
         }
-        let new = next_char_boundary(flat, pos);
+        let new = adjacent_grapheme_boundary(flat, pos, true);
         self.move_to(new, extend);
     }
 
@@ -980,6 +1176,7 @@ impl Editor {
 
     pub fn collapse_to(&mut self, pos: usize) {
         self.caret_local = pos;
+        self.selection_anchor_box = self.caret_box;
         self.sel_anchor = pos;
         self.sel_start = pos;
         self.sel_end = pos;
@@ -988,14 +1185,68 @@ impl Editor {
         self.caret_at_line_start = false;
     }
 
-    fn select_entire_node(&mut self, node: &WebCore) {
+    fn select_entire_node(&mut self, root: &WebCore, node: &WebCore) {
+        fn inline_range(
+            owner: &WebCore,
+            target: u32,
+            inherited: (u32, usize),
+        ) -> Option<(u32, usize, usize)> {
+            let (owner_id, base) = if owner.node_id == 0 {
+                inherited
+            } else {
+                (owner.node_id, 0)
+            };
+            if owner_id != 0 && !owner.layout.line_cache.is_empty() {
+                let mut range: Option<(usize, usize)> = None;
+                for run in &owner.layout.inline_runs {
+                    let mut descendant = owner;
+                    let belongs = run.path.iter().any(|&index| {
+                        let Some(child) = descendant.children.get(index) else {
+                            return false;
+                        };
+                        descendant = child;
+                        descendant.node_id == target
+                    });
+                    if belongs {
+                        let end = run.text_offset + run.length;
+                        range = Some(range.map_or((run.text_offset, end), |(lo, hi)| {
+                            (lo.min(run.text_offset), hi.max(end))
+                        }));
+                    }
+                }
+                if let Some((start, end)) = range {
+                    return Some((owner_id, base + start, base + end));
+                }
+            }
+            owner.children.iter().find_map(|child| {
+                let child_base = if child.node_id == 0 {
+                    crate::layout::inline_layout::flat_text_child_range(owner, child)
+                        .map_or(base, |(start, _)| base + start)
+                } else {
+                    0
+                };
+                inline_range(child, target, (owner_id, child_base))
+            })
+        }
         self.selection_only = false;
-        let flat = crate::layout::inline_layout::collect_flat_text(node);
-        self.caret_box = Some(node.node_id);
-        self.caret_local = flat.len();
-        self.sel_anchor = 0;
-        self.sel_start = 0;
-        self.sel_end = flat.len();
+        let (owner, start, end) = if node.style.display == crate::types::Display::Inline {
+            inline_range(root, node.node_id, (0, 0))
+        } else {
+            None
+        }
+        .unwrap_or_else(|| {
+            (
+                node.node_id,
+                0,
+                crate::layout::inline_layout::collect_flat_text(node).len(),
+            )
+        });
+        self.caret_box = Some(owner);
+        self.selection_anchor_box = Some(owner);
+        self.caret_local = end;
+        self.sel_anchor = start;
+        self.sel_start = start;
+        self.sel_end = end;
         self.caret_visible = true;
         self.last_blink = Instant::now();
         self.caret_at_line_start = false;
@@ -1034,6 +1285,21 @@ impl Editor {
         scroll: (f32, f32),
         button: u8,
     ) -> bool {
+        self.handle_mouse_event_scrolled_with_modifiers(root, etype, doc_pt, scroll, button, false)
+    }
+
+    pub(crate) fn handle_mouse_event_scrolled_with_modifiers(
+        &mut self,
+        root: &WebCore,
+        etype: HtmlEventType,
+        doc_pt: (f32, f32),
+        scroll: (f32, f32),
+        button: u8,
+        shift: bool,
+    ) -> bool {
+        if button != 0 {
+            return false;
+        }
         match etype {
             HtmlEventType::MouseDown => {
                 self.mouse_down = true;
@@ -1041,17 +1307,27 @@ impl Editor {
                 if let Some(hit) =
                     crate::layout::hit_test::point_to_hit_scrolled(root, doc_pt, scroll, button)
                 {
-                    if !user_select_allows_selection(root, hit.node_id) {
+                    let (used, all_node) = user_select_context(root, hit.node_id, hit.local_offset)
+                        .unwrap_or((UserSelect::Text, None));
+                    if used == UserSelect::None {
                         self.mouse_down = false;
                         return false;
                     }
-                    let selection_only = !is_in_contenteditable_by_id(root, hit.node_id);
-                    if let Some(all_node) = nearest_user_select_all_node(root, hit.node_id) {
-                        self.select_entire_node(all_node);
+                    let selection_only =
+                        self.read_only && !is_in_contenteditable_by_id(root, hit.node_id);
+                    if let Some(all_node) = all_node {
+                        self.select_entire_node(root, all_node);
                         self.selection_only = selection_only;
                         return true;
                     }
-                    self.set_caret_from_hit(hit.node_id, hit.local_offset, false);
+                    if shift && self.caret_box.is_some() {
+                        self.caret_box = Some(hit.node_id);
+                        self.caret_local = hit.local_offset;
+                        self.sel_start = self.sel_anchor.min(hit.local_offset);
+                        self.sel_end = self.sel_anchor.max(hit.local_offset);
+                    } else {
+                        self.set_caret_from_hit(hit.node_id, hit.local_offset, false);
+                    }
                     self.selection_only = selection_only;
                     return true;
                 }
@@ -1061,14 +1337,18 @@ impl Editor {
                     if let Some(hit) =
                         crate::layout::hit_test::point_to_hit_scrolled(root, doc_pt, scroll, button)
                     {
-                        if !user_select_allows_selection(root, hit.node_id) {
+                        let (used, all_node) =
+                            user_select_context(root, hit.node_id, hit.local_offset)
+                                .unwrap_or((UserSelect::Text, None));
+                        if used == UserSelect::None {
                             return false;
                         }
-                        if let Some(all_node) = nearest_user_select_all_node(root, hit.node_id) {
-                            self.select_entire_node(all_node);
+                        if let Some(all_node) = all_node {
+                            self.select_entire_node(root, all_node);
                             return true;
                         }
-                        if self.caret_box == Some(hit.node_id) {
+                        if self.caret_box.is_some() {
+                            self.caret_box = Some(hit.node_id);
                             self.caret_local = hit.local_offset;
                             self.sel_start = self.sel_anchor.min(hit.local_offset);
                             self.sel_end = self.sel_anchor.max(hit.local_offset);
@@ -1093,9 +1373,31 @@ impl Editor {
         etype: HtmlEventType,
         key_code: u32,
         ch: Option<char>,
-        _ctrl: bool,
+        ctrl: bool,
     ) -> bool {
-        if self.selection_only {
+        self.handle_key_event_with_modifiers(root, etype, key_code, ch, ctrl, false)
+    }
+
+    pub fn handle_key_event_with_modifiers(
+        &mut self,
+        root: &mut WebCore,
+        etype: HtmlEventType,
+        key_code: u32,
+        ch: Option<char>,
+        _ctrl: bool,
+        shift: bool,
+    ) -> bool {
+        let selecting_with_keyboard = shift && matches!(key_code, 37 | 39);
+        if self
+            .selection_anchor_box
+            .is_some_and(|id| Some(id) != self.caret_box)
+            && !matches!(key_code, 37 | 39)
+        {
+            // Mutations need DOM-source boundaries, not offsets belonging to
+            // different rendered containers. Do not apply a foreign offset.
+            return false;
+        }
+        if self.selection_only && !selecting_with_keyboard {
             return false;
         }
         if self.read_only {
@@ -1105,7 +1407,7 @@ impl Editor {
                 .caret_box
                 .map(|id| is_in_contenteditable_by_id(root, id))
                 .unwrap_or(false);
-            if !is_editable {
+            if !is_editable && !selecting_with_keyboard {
                 return false;
             }
         }
@@ -1123,7 +1425,7 @@ impl Editor {
                 // ArrowLeft
                 if let Some(b) = find_box_mut(root, caret_id) {
                     let flat = crate::layout::inline_layout::collect_flat_text(b);
-                    self.move_left(&flat, false);
+                    self.move_left(&flat, shift);
                     return true;
                 }
                 return false;
@@ -1132,7 +1434,7 @@ impl Editor {
                 // ArrowRight
                 if let Some(b) = find_box_mut(root, caret_id) {
                     let flat = crate::layout::inline_layout::collect_flat_text(b);
-                    self.move_right(&flat, false);
+                    self.move_right(&flat, shift);
                     return true;
                 }
                 return false;
@@ -1165,6 +1467,11 @@ impl Editor {
     }
 
     pub fn insert_char(&mut self, root: &mut WebCore, ch: char) {
+        let mut encoded = [0; 4];
+        self.insert_text(root, ch.encode_utf8(&mut encoded));
+    }
+
+    pub fn insert_text(&mut self, root: &mut WebCore, text: &str) {
         let caret_nid = match self.caret_box {
             Some(id) => id,
             None => return,
@@ -1188,21 +1495,20 @@ impl Editor {
             };
             match result {
                 Ok((leaf, local)) => {
-                    let mut buf = [0u8; 4];
-                    let s = ch.encode_utf8(&mut buf);
-                    leaf.text.insert_str(local, s);
-                    self.caret_local += s.len();
+                    leaf.text.insert_str(local, text);
+                    self.caret_local += text.len();
                     self.collapse_to(self.caret_local);
                 }
                 Err(_) => {
                     let ins = self.caret_local.min(container.text.len());
-                    container.text.insert(ins, ch);
-                    self.caret_local += ch.len_utf8();
+                    container.text.insert_str(ins, text);
+                    self.caret_local += text.len();
                     self.collapse_to(self.caret_local);
                 }
             }
-            container.layout.layout_dirty = true;
+            mark_layout_dirty(container);
         }
+        propagate_dirty_to_root(root, caret_nid);
     }
 
     pub fn delete_selection_or_before(&mut self, root: &mut WebCore) {
@@ -1216,15 +1522,16 @@ impl Editor {
                 let e = self.sel_end;
                 delete_range_full(node, s, e);
                 self.collapse_to(s);
-                node.layout.layout_dirty = true;
+                mark_layout_dirty(node);
             } else if self.caret_local > 0 {
                 let flat = crate::layout::inline_layout::collect_flat_text(node);
                 let new_off = prev_char_boundary(&flat, self.caret_local);
                 delete_range_full(node, new_off, self.caret_local);
                 self.collapse_to(new_off);
-                node.layout.layout_dirty = true;
+                mark_layout_dirty(node);
             }
         }
+        propagate_dirty_to_root(root, caret_nid);
     }
 
     pub fn delete_selection_or_at(&mut self, root: &mut WebCore) {
@@ -1238,17 +1545,18 @@ impl Editor {
                 let e = self.sel_end;
                 delete_range_full(node, s, e);
                 self.collapse_to(s);
-                node.layout.layout_dirty = true;
+                mark_layout_dirty(node);
             } else {
                 let flat = crate::layout::inline_layout::collect_flat_text(node);
                 if self.caret_local < flat.len() {
                     let next_off = next_char_boundary(&flat, self.caret_local);
                     delete_range_full(node, self.caret_local, next_off);
                     self.collapse_to(self.caret_local);
-                    node.layout.layout_dirty = true;
+                    mark_layout_dirty(node);
                 }
             }
         }
+        propagate_dirty_to_root(root, caret_nid);
     }
 
     /// Split the current block element at the caret position, creating a new sibling block.
@@ -1329,6 +1637,7 @@ impl Editor {
         // Move caret to start of new block.
         self.caret_box = Some(new_block_id);
         self.collapse_to(0);
+        propagate_dirty_to_root(root, new_block_id);
     }
 
     /// Insert a `<br>` at the caret position (soft line break within the current block).
@@ -1368,6 +1677,8 @@ impl Editor {
                     append_child(container, br);
                     mark_layout_dirty(container);
                     self.collapse_to(caret);
+                    self.caret_at_line_start = true;
+                    propagate_dirty_to_root(root, caret_nid);
                     return;
                 }
             }
@@ -1380,6 +1691,7 @@ impl Editor {
         }
         self.collapse_to(caret);
         self.caret_at_line_start = true;
+        propagate_dirty_to_root(root, caret_nid);
     }
 
     /// Toggle the current block between a plain block (`<p>`) and a list item (`<ul><li>`).
@@ -1549,6 +1861,21 @@ impl Editor {
 
 // ─── Internal Editor helpers ──────────────────────────────────────────────────
 
+pub(crate) fn adjacent_grapheme_boundary(text: &str, byte: usize, forward: bool) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    let byte = byte.min(text.len());
+    if forward {
+        text.grapheme_indices(true)
+            .find_map(|(at, _)| (at > byte).then_some(at))
+            .unwrap_or(text.len())
+    } else {
+        text.grapheme_indices(true)
+            .rev()
+            .find_map(|(at, _)| (at < byte).then_some(at))
+            .unwrap_or(0)
+    }
+}
+
 fn prev_char_boundary(s: &str, mut idx: usize) -> usize {
     if idx == 0 {
         return 0;
@@ -1676,39 +2003,29 @@ fn find_node_offset_mut(
 /// `contenteditable="true"`.  Used to allow key events inside contenteditable
 /// elements when the document-level editor is otherwise read-only.
 pub fn is_in_contenteditable_by_id(node: &WebCore, target_id: u32) -> bool {
-    if node.node_id == target_id {
-        return node
-            .attributes
-            .get("contenteditable")
-            .map(|v| v.is_empty() || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-    }
-    let editable_root = node
-        .attributes
-        .get("contenteditable")
-        .map(|v| v.is_empty() || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if editable_root && node_contains_id(node, target_id) {
-        return true;
-    }
-    for child in &node.children {
-        if is_in_contenteditable_by_id(child, target_id) {
-            return true;
+    fn walk(node: &WebCore, target: u32, inherited: bool) -> Option<bool> {
+        let editable = match node.attributes.get("contenteditable").map(String::as_str) {
+            Some(value)
+                if value.is_empty()
+                    || value.eq_ignore_ascii_case("true")
+                    || value.eq_ignore_ascii_case("plaintext-only") =>
+            {
+                true
+            }
+            Some(value) if value.eq_ignore_ascii_case("false") => false,
+            _ => inherited,
+        };
+        if node.node_id == target {
+            return Some(editable);
         }
-    }
-    false
-}
-
-fn node_contains_id(node: &WebCore, target_id: u32) -> bool {
-    if node.node_id == target_id {
-        return true;
-    }
-    for child in &node.children {
-        if node_contains_id(child, target_id) {
-            return true;
+        for child in &node.children {
+            if let Some(value) = walk(child, target, editable) {
+                return Some(value);
+            }
         }
+        None
     }
-    false
+    walk(node, target_id, false).unwrap_or(false)
 }
 
 /// Like `find_node_offset_mut` but uses strict `<` for text nodes so that a

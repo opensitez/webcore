@@ -34,10 +34,37 @@ impl Document {
     /// to the declared value — an honest floor, since fully resolving every
     /// property against the cascade is a larger job than this.
     pub fn computed_style_property(&mut self, id: u32, property: &str) -> String {
-        let width = self.viewport_w;
-        let mut engine = crate::layout::LayoutEngine::new();
-        engine.viewport_h = self.viewport_h;
-        engine.layout(self, width);
+        self.flush_standalone_computed_style();
+        self.computed_style_property_current(id, property)
+    }
+
+    fn needs_computed_style_update(&self) -> bool {
+        self.layout_generation == 0
+            || self.style_dirty
+            || self.hover_changed
+            || self.has_dirty_layout()
+    }
+
+    /// Flush a dirty document with its owner's font/resource-aware layout engine.
+    /// A batch of CSSOM reads can then use the read-only current snapshot.
+    pub fn update_computed_style(&mut self, engine: &mut crate::layout::LayoutEngine) {
+        if self.needs_computed_style_update() {
+            engine.viewport_h = self.viewport_h;
+            let width = self.viewport_w;
+            engine.layout(self, width);
+        }
+    }
+
+    fn flush_standalone_computed_style(&mut self) {
+        if self.needs_computed_style_update() {
+            let mut engine = crate::layout::LayoutEngine::new();
+            self.update_computed_style(&mut engine);
+        }
+    }
+
+    /// Serialize the last completed style/layout snapshot without changing it.
+    /// Owners must call `update_computed_style` before a dirty-document read.
+    pub fn computed_style_property_current(&self, id: u32, property: &str) -> String {
         let rect = self.get_bounding_client_rect(id);
         let property = property.to_ascii_lowercase();
         // **An inset is the used value only when the element is POSITIONED**
@@ -156,8 +183,14 @@ impl Document {
             // `display: none` box — Chrome answers `"auto"` for both, and this
             // answered the rect (`"8.8px"` for a bare `<span>`). A replaced
             // inline is the exception: `<img width=30>` is `"30px"`.
-            ("width", Some(r)) if self.has_a_used_size(id) => Some(format!("{}px", r.w)),
-            ("height", Some(r)) if self.has_a_used_size(id) => Some(format!("{}px", r.h)),
+            ("width" | "height", _) if self.has_a_used_size(id) => self.get_node(id).map(|node| {
+                let rect = if node.style.box_sizing == crate::types::BoxSizing::BorderBox {
+                    node.layout.border_rect
+                } else {
+                    node.layout.content_rect
+                };
+                px(if property == "width" { rect.w } else { rect.h })
+            }),
             ("margin-top", _) => self.get_node(id).map(|n| px(n.layout.resolved_margin_top)),
             ("margin-right", _) => self
                 .get_node(id)
@@ -195,14 +228,32 @@ impl Document {
         pseudo: &str,
         property: &str,
     ) -> String {
-        let width = self.viewport_w;
-        let mut engine = crate::layout::LayoutEngine::new();
-        engine.viewport_h = self.viewport_h;
-        engine.layout(self, width);
+        self.flush_standalone_computed_style();
+        self.computed_style_pseudo_property_current(id, pseudo, property)
+    }
+
+    /// Read pseudo-element CSSOM values from an already-updated snapshot.
+    pub fn computed_style_pseudo_property_current(
+        &self,
+        id: u32,
+        pseudo: &str,
+        property: &str,
+    ) -> String {
         let Some(node) = self.get_node(id).or_else(|| self.find_webcore(id)) else {
             return String::new();
         };
         let pseudo = pseudo.trim().trim_start_matches(':');
+        let property = property.to_ascii_lowercase();
+        if property != "content" && matches!(pseudo, "before" | "after") {
+            let tag = if pseudo == "before" {
+                "::before"
+            } else {
+                "::after"
+            };
+            if let Some(generated) = node.children.iter().find(|child| child.tag == tag) {
+                return self.computed_style_property_current(generated.node_id, &property);
+            }
+        }
         let empty_content = String::new();
         let (style, content) = match pseudo {
             "before" => (
@@ -231,7 +282,7 @@ impl Document {
         let Some(style) = style else {
             return String::new();
         };
-        match property.to_ascii_lowercase().as_str() {
+        match property.as_str() {
             "content" => {
                 if content.is_empty() {
                     "none".to_string()
@@ -255,6 +306,7 @@ impl Document {
                 ))
             }
             "font-weight" => style.font_weight.value().to_string(),
+            "font-width" | "font-stretch" => format!("{}%", style.font_stretch),
             "font-style" => match style.font_style {
                 crate::types::FontStyle::Normal => "normal",
                 crate::types::FontStyle::Italic => "italic",
@@ -343,14 +395,14 @@ impl Document {
             .to_string(),
             "color" => serialize_color(s.color),
             "background-color" => serialize_color(s.background_color),
-            "fill" => s
+            "fill" => s.rare().svg_fill_paint.clone().unwrap_or_else(|| s
                 .svg_fill
                 .map(serialize_color)
-                .unwrap_or_else(|| "none".to_string()),
-            "stroke" => s
+                .unwrap_or_else(|| "none".to_string())),
+            "stroke" => s.rare().svg_stroke_paint.clone().unwrap_or_else(|| s
                 .svg_stroke
                 .map(serialize_color)
-                .unwrap_or_else(|| "none".to_string()),
+                .unwrap_or_else(|| "none".to_string())),
             "stroke-width" => s
                 .rare()
                 .svg_stroke_width
@@ -361,6 +413,7 @@ impl Document {
             // ⛔ A NUMBER, not the keyword: `font-weight: bold` serializes as
             // `"700"` (measured).
             "font-weight" => s.font_weight.value().to_string(),
+            "font-width" | "font-stretch" => format!("{}%", s.font_stretch),
             "font-style" => match s.font_style {
                 FontStyle::Normal => "normal",
                 FontStyle::Italic => "italic",
@@ -377,7 +430,13 @@ impl Document {
                     "hidden".to_string()
                 }
             }
-            "line-height" => len(&s.line_height),
+            "line-height" => {
+                if s.line_height.is_auto() {
+                    "normal".to_string()
+                } else {
+                    len(&s.line_height)
+                }
+            }
             "letter-spacing" => len(&s.letter_spacing),
             "text-transform" => serialize_text_transform(s.text_transform),
             "white-space" => serialize_white_space(s.white_space),
@@ -660,8 +719,14 @@ impl Document {
                     if auto { format!("auto {value}") } else { value }
                 };
                 shorthand_pair_values(
-                    axis(&s.contain_intrinsic_width, s.rare().contain_intrinsic_width_auto),
-                    axis(&s.contain_intrinsic_height, s.rare().contain_intrinsic_height_auto),
+                    axis(
+                        &s.contain_intrinsic_width,
+                        s.rare().contain_intrinsic_width_auto,
+                    ),
+                    axis(
+                        &s.contain_intrinsic_height,
+                        s.rare().contain_intrinsic_height_auto,
+                    ),
                 )
             }
             "color-scheme" => s.color_scheme.clone(),
@@ -738,7 +803,12 @@ impl Document {
             "pointer-events" => serialize_pointer_events(s.pointer_events),
             "user-select" => serialize_user_select(s.user_select),
             "resize" => serialize_resize(s.resize),
-            "tab-size" => s.tab_size.to_string(),
+            "tab-size" => match &s.rare().tab_size {
+                TabSize::Number(number) => number.to_string(),
+                TabSize::Length(length) => px(length
+                    .resolve_vp(font_px, 0.0, root_px, vw, self.viewport_h)
+                    .max(0.0)),
+            },
             "hyphens" => serialize_hyphens(s.hyphens),
             "scroll-snap-stop" => s.scroll_snap_stop.clone(),
             "scroll-margin-top" => len(&s.scroll_margin_top),
@@ -919,6 +989,8 @@ fn serialize_background_image(s: &crate::types::ComputedStyle) -> String {
         return match s.gradient_type {
             crate::types::GradientType::Linear => "linear-gradient(...)",
             crate::types::GradientType::Radial => "radial-gradient(...)",
+            crate::types::GradientType::RepeatingLinear => "repeating-linear-gradient(...)",
+            crate::types::GradientType::RepeatingRadial => "repeating-radial-gradient(...)",
             crate::types::GradientType::None => "none",
         }
         .to_string();
@@ -1165,23 +1237,39 @@ fn serialize_mask(s: &crate::types::ComputedStyle) -> String {
         (&rare.mask_composite, "add"),
         (&rare.mask_mode, "match-source"),
     ];
-    let lists: Vec<_> = properties.iter().map(|(value, initial)| {
-        let values = crate::css::value_parse::split_top_level_commas(value);
-        (0..images.len()).map(|index| {
-            if values.is_empty() {
-                *initial
-            } else {
-                values[index % values.len()].trim()
-            }
-        }).collect::<Vec<_>>()
-    }).collect();
-    images.iter().enumerate().map(|(index, image)| {
-        format!(
-            "{} {} / {} {} {} {} {} {}",
-            image.trim(), lists[0][index], lists[1][index], lists[2][index],
-            lists[3][index], lists[4][index], lists[5][index], lists[6][index],
-        )
-    }).collect::<Vec<_>>().join(", ")
+    let lists: Vec<_> = properties
+        .iter()
+        .map(|(value, initial)| {
+            let values = crate::css::value_parse::split_top_level_commas(value);
+            (0..images.len())
+                .map(|index| {
+                    if values.is_empty() {
+                        *initial
+                    } else {
+                        values[index % values.len()].trim()
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| {
+            format!(
+                "{} {} / {} {} {} {} {} {}",
+                image.trim(),
+                lists[0][index],
+                lists[1][index],
+                lists[2][index],
+                lists[3][index],
+                lists[4][index],
+                lists[5][index],
+                lists[6][index],
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub(crate) fn serialize_mask_images(s: &crate::types::ComputedStyle) -> String {
@@ -1273,7 +1361,58 @@ where
 }
 
 fn serialize_animation_name(s: &crate::types::ComputedStyle) -> String {
-    join_animation_values(s, |anim| anim.name.clone(), "none")
+    join_animation_values(s, |anim| serialize_animation_identifier(&anim.name), "none")
+}
+
+pub(crate) fn serialize_animation_identifier(name: &str) -> String {
+    if name.is_empty() {
+        "none".to_string()
+    } else if [
+        "none",
+        "initial",
+        "inherit",
+        "unset",
+        "revert",
+        "revert-layer",
+        "default",
+    ]
+    .iter()
+    .any(|keyword| name.eq_ignore_ascii_case(keyword))
+    {
+        format!("\"{}\"", serialize_css_string(name))
+    } else {
+        serialize_identifier(name)
+    }
+}
+
+fn serialize_animation_shorthand_identifier(name: &str) -> String {
+    if matches!(
+        name.to_ascii_lowercase().as_str(),
+        "linear"
+            | "ease"
+            | "ease-in"
+            | "ease-out"
+            | "ease-in-out"
+            | "step-start"
+            | "step-end"
+            | "normal"
+            | "reverse"
+            | "alternate"
+            | "alternate-reverse"
+            | "forwards"
+            | "backwards"
+            | "both"
+            | "running"
+            | "paused"
+            | "infinite"
+            | "replace"
+            | "add"
+            | "accumulate"
+    ) {
+        format!("\"{}\"", serialize_css_string(name))
+    } else {
+        serialize_animation_identifier(name)
+    }
 }
 
 fn serialize_animation_shorthand(s: &crate::types::ComputedStyle) -> String {
@@ -1286,7 +1425,7 @@ fn serialize_animation_shorthand(s: &crate::types::ComputedStyle) -> String {
         .map(|anim| {
             format!(
                 "{} {} {} {} {} {} {} {} {}",
-                anim.name,
+                serialize_animation_shorthand_identifier(&anim.name),
                 serialize_time_ms(anim.duration_ms),
                 serialize_easing(&anim.timing_fn),
                 serialize_time_ms(anim.delay_ms),
@@ -1529,6 +1668,7 @@ fn serialize_white_space(v: crate::types::WhiteSpace) -> String {
         W::Nowrap => "nowrap",
         W::Pre => "pre",
         W::PreWrap => "pre-wrap",
+        W::BreakSpaces => "break-spaces",
         W::PreLine => "pre-line",
     }
     .to_string()
@@ -1824,52 +1964,55 @@ impl Document {
         }
     }
 
-    fn resolved_shorthand(&mut self, id: u32, property: &str) -> String {
+    fn resolved_shorthand(&self, id: u32, property: &str) -> String {
         match property {
             "margin" => shorthand_box_values([
-                self.computed_style_property(id, "margin-top"),
-                self.computed_style_property(id, "margin-right"),
-                self.computed_style_property(id, "margin-bottom"),
-                self.computed_style_property(id, "margin-left"),
+                self.computed_style_property_current(id, "margin-top"),
+                self.computed_style_property_current(id, "margin-right"),
+                self.computed_style_property_current(id, "margin-bottom"),
+                self.computed_style_property_current(id, "margin-left"),
             ]),
             "padding" => shorthand_box_values([
-                self.computed_style_property(id, "padding-top"),
-                self.computed_style_property(id, "padding-right"),
-                self.computed_style_property(id, "padding-bottom"),
-                self.computed_style_property(id, "padding-left"),
+                self.computed_style_property_current(id, "padding-top"),
+                self.computed_style_property_current(id, "padding-right"),
+                self.computed_style_property_current(id, "padding-bottom"),
+                self.computed_style_property_current(id, "padding-left"),
             ]),
             "overflow" => shorthand_pair_values(
-                self.computed_style_property(id, "overflow-x"),
-                self.computed_style_property(id, "overflow-y"),
+                self.computed_style_property_current(id, "overflow-x"),
+                self.computed_style_property_current(id, "overflow-y"),
             ),
             "gap" => shorthand_pair_values(
-                self.computed_style_property(id, "row-gap"),
-                self.computed_style_property(id, "column-gap"),
+                self.computed_style_property_current(id, "row-gap"),
+                self.computed_style_property_current(id, "column-gap"),
             ),
             "inset" => shorthand_box_values([
-                self.computed_style_property(id, "top"),
-                self.computed_style_property(id, "right"),
-                self.computed_style_property(id, "bottom"),
-                self.computed_style_property(id, "left"),
+                self.computed_style_property_current(id, "top"),
+                self.computed_style_property_current(id, "right"),
+                self.computed_style_property_current(id, "bottom"),
+                self.computed_style_property_current(id, "left"),
             ]),
             "flex" => format!(
                 "{} {} {}",
-                self.computed_style_property(id, "flex-grow"),
-                self.computed_style_property(id, "flex-shrink"),
-                self.computed_style_property(id, "flex-basis")
+                self.computed_style_property_current(id, "flex-grow"),
+                self.computed_style_property_current(id, "flex-shrink"),
+                self.computed_style_property_current(id, "flex-basis")
             ),
             "border" => {
-                let width = self.computed_style_property(id, "border-top-width");
-                let style = self.computed_style_property(id, "border-top-style");
-                let color = self.computed_style_property(id, "border-top-color");
+                let width = self.computed_style_property_current(id, "border-top-width");
+                let style = self.computed_style_property_current(id, "border-top-style");
+                let color = self.computed_style_property_current(id, "border-top-color");
                 let same_width = ["right", "bottom", "left"].iter().all(|side| {
-                    self.computed_style_property(id, &format!("border-{side}-width")) == width
+                    self.computed_style_property_current(id, &format!("border-{side}-width"))
+                        == width
                 });
                 let same_style = ["right", "bottom", "left"].iter().all(|side| {
-                    self.computed_style_property(id, &format!("border-{side}-style")) == style
+                    self.computed_style_property_current(id, &format!("border-{side}-style"))
+                        == style
                 });
                 let same_color = ["right", "bottom", "left"].iter().all(|side| {
-                    self.computed_style_property(id, &format!("border-{side}-color")) == color
+                    self.computed_style_property_current(id, &format!("border-{side}-color"))
+                        == color
                 });
                 if same_width && same_style && same_color {
                     format!("{width} {style} {color}")
@@ -1879,19 +2022,19 @@ impl Document {
             }
             "outline" => format!(
                 "{} {} {}",
-                self.computed_style_property(id, "outline-width"),
-                self.computed_style_property(id, "outline-style"),
-                self.computed_style_property(id, "outline-color")
+                self.computed_style_property_current(id, "outline-width"),
+                self.computed_style_property_current(id, "outline-style"),
+                self.computed_style_property_current(id, "outline-color")
             ),
             "columns" => shorthand_pair_values(
-                self.computed_style_property(id, "column-width"),
-                self.computed_style_property(id, "column-count"),
+                self.computed_style_property_current(id, "column-width"),
+                self.computed_style_property_current(id, "column-count"),
             ),
             "column-rule" => format!(
                 "{} {} {}",
-                self.computed_style_property(id, "column-rule-width"),
-                self.computed_style_property(id, "column-rule-style"),
-                self.computed_style_property(id, "column-rule-color")
+                self.computed_style_property_current(id, "column-rule-width"),
+                self.computed_style_property_current(id, "column-rule-style"),
+                self.computed_style_property_current(id, "column-rule-color")
             ),
             _ => String::new(),
         }

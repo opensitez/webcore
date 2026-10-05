@@ -46,10 +46,22 @@ impl Document {
     /// attribute sits on an ancestor and the question is asked of the
     /// descendant.
     pub fn is_inert(&self, id: u32) -> bool {
+        if self
+            .active_modal_dialog()
+            .is_some_and(|modal| !self.is_descendant_of(id, modal))
+        {
+            return true;
+        }
         let mut cur = id;
         while cur != 0 {
             if self.has_attribute(cur, "inert") {
                 return true;
+            }
+            // A modal escapes ancestor inertness, but not its own inert attribute.
+            if self.find_webcore(cur).is_some_and(|node| {
+                node.top_layer_kind == Some(crate::types::TopLayerKind::ModalDialog)
+            }) {
+                break;
             }
             let parent = self.parent_node(cur);
             if parent == cur {

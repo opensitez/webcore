@@ -303,89 +303,6 @@ impl Document {
     }
 }
 
-// ─── Interactive state reconciliation ───────────────────────────────────────
-
-impl Document {
-    /// Copy form state from the render tree back into the arena.
-    ///
-    /// WHY THIS EXISTS
-    ///
-    /// Everything in this file dual-writes: the arena first, then the WebCore
-    /// tree. Interaction cannot follow that rule. `handle_form_click` and
-    /// `process_form_input_key` are free functions over `&mut WebCore` — they
-    /// have no `Document`, so they have no arena to write to, and they set
-    /// `checked` / `value` on the render tree alone.
-    ///
-    /// That is invisible until something READS through the arena, which is
-    /// exactly what the WHATWG accessors do. Without this, a user ticks a
-    /// checkbox and `getAttribute("checked")` still answers the pre-click
-    /// value — the interaction happened, and the DOM denies it.
-    ///
-    /// Reconciling here rather than fixing it at the write sites keeps the
-    /// interaction code as pure render-tree logic and puts the sync at the one
-    /// boundary that owns both stores.
-    ///
-    /// Only the three attributes interaction actually writes are copied, and
-    /// only on form controls — a click must not cost a clone of every
-    /// attribute map in the document.
-    /// Not public: this is bookkeeping between two internal stores, not a web
-    /// API. Nothing outside the browser should know the render tree and the
-    /// arena are separate things.
-    pub(crate) fn sync_form_state_to_arena(&mut self) {
-        type Snapshot = (u32, Option<String>, Option<String>, Option<String>);
-        fn walk(node: &WebCore, out: &mut Vec<Snapshot>) {
-            if node.node_id != 0
-                && matches!(
-                    node.tag.as_str(),
-                    "input" | "textarea" | "select" | "option"
-                )
-            {
-                out.push((
-                    node.node_id,
-                    // `checked` is NOT here any more: interaction writes
-                    // CHECKEDNESS on the render-tree box, and the attribute it
-                    // used to overwrite is the author's default, which no
-                    // click may touch. Syncing it would put the old conflation
-                    // back one level down.
-                    None,
-                    node.attributes.get("value").cloned(),
-                    node.attributes.get("selected").cloned(),
-                ));
-            }
-            for child in &node.children {
-                walk(child, out);
-            }
-        }
-
-        let mut updates: Vec<Snapshot> = Vec::new();
-        walk(&self.root, &mut updates);
-
-        for (id, checked, value, selected) in updates {
-            if !self.arena.is_alive(NodeId(id)) {
-                continue;
-            }
-            let attrs = &mut self.arena.get_mut(NodeId(id)).attributes;
-            // Absent is meaningful: `checked` is a boolean attribute, so
-            // REMOVING it is how "unticked" is spelled. A set-only sync would
-            // make unticking a no-op.
-            for (key, val) in [
-                ("checked", checked),
-                ("value", value),
-                ("selected", selected),
-            ] {
-                match val {
-                    Some(v) => {
-                        attrs.insert(key.to_string(), v);
-                    }
-                    None => {
-                        attrs.remove(key);
-                    }
-                }
-            }
-        }
-    }
-}
-
 // ─── WHATWG tree operations ─────────────────────────────────────────────────
 
 impl Document {
@@ -837,10 +754,15 @@ impl Document {
         // focus, and Chrome's answer when it refuses is that `activeElement`
         // stays exactly where it was — focus does NOT fall back to the nearest
         // focusable ancestor (measured: it remained on the body).
-        if self.is_inert(id) {
+        if self.is_inert(id)
+            || self.is_actually_disabled(id)
+            || !self
+                .find_webcore(id)
+                .is_some_and(crate::types::is_focusable_node)
+        {
             return;
         }
-        self.focused_box = id;
+        self.set_focus_target(id, self.keyboard_focus);
     }
 
     /// `getComputedStyle(element)` — the resolved property set after the
@@ -1553,7 +1475,7 @@ impl Document {
     /// `element.blur()`.
     pub fn blur(&mut self, id: u32) {
         if self.focused_box == id {
-            self.focused_box = 0;
+            self.set_focus_target(0, self.keyboard_focus);
         }
     }
 }
@@ -2124,6 +2046,12 @@ impl Document {
                 node.value_state = None;
                 crate::html::forms::seed_input_value(node);
             }
+            if key == "type" && node.tag == "input" {
+                let value = crate::types::input_value(node);
+                if let Some(sanitized) = crate::html::forms::sanitize_input_value(node, &value) {
+                    node.value_state = Some(sanitized);
+                }
+            }
             if key == "selected" && node.tag == "option" && !node.dirty_selectedness {
                 node.selectedness = true;
             }
@@ -2208,6 +2136,12 @@ impl Document {
             if key == "checked" && !node.dirty_checked {
                 node.checkedness = false;
             }
+            if key == "value" && !node.dirty_value {
+                node.value_state = None;
+                if node.tag == "input" {
+                    crate::html::forms::seed_input_value(node);
+                }
+            }
         }
         self.style_dirty = true;
         if key == "media" && self.dynamic_style_slots.contains_key(&id) {
@@ -2223,6 +2157,10 @@ impl Document {
         if id == 0 {
             return;
         }
+
+        // Replacing children changes selectors such as :empty even when the
+        // replacement is empty and no new text node is appended.
+        self.style_dirty = true;
 
         // **A replaced child is DETACHED, not destroyed** — the rule
         // `remove_child` already states for DOM §4.2.3, and this is the same
@@ -2264,7 +2202,6 @@ impl Document {
             // cascade, and a text run with no inherited font measures to
             // nothing. `:empty` also stops matching the parent, which is a
             // second reason this is a style change and not only a layout one.
-            self.style_dirty = true;
         }
     }
 
@@ -2385,8 +2322,8 @@ impl Document {
             return;
         }
         let changes_background = matches!(prop_lower.as_str(), "background" | "background-image");
-        let previous_background_image = changes_background
-            .then(|| self.get_style_property(id, "background-image"));
+        let previous_background_image =
+            changes_background.then(|| self.get_style_property(id, "background-image"));
         let current = self.get_attribute(id, "style").unwrap_or_default();
         let mut props = parse_inline_style(&current);
         // CSSOM §6.7.2: `setProperty(prop, "")` REMOVES the declaration. It
@@ -2869,7 +2806,7 @@ impl Document {
             (self.scroll_x, self.scroll_y),
             0,
         )
-            .map(|hit| hit.node_id)
+        .map(|hit| hit.node_id)
     }
 
     /// `window.matchMedia(query)`/`MediaQueryList.matches`.
@@ -3245,6 +3182,11 @@ impl Document {
                 }
             }
             None
+        }
+        for pending in self.pending_nodes.values_mut() {
+            if let Some(found) = walk(pending, id) {
+                return Some(found);
+            }
         }
         walk(&mut self.root, id)
     }
@@ -3779,7 +3721,12 @@ fn expand_inline_animation_shorthand(value: &str, important: bool) -> Vec<Inline
     vec![
         make(
             "animation-name",
-            join(animations.iter().map(|anim| anim.name.clone()).collect()),
+            join(
+                animations
+                    .iter()
+                    .map(|anim| super::computed_style::serialize_animation_identifier(&anim.name))
+                    .collect(),
+            ),
         ),
         make(
             "animation-duration",
@@ -3874,7 +3821,10 @@ fn expand_inline_mask_shorthand(value: &str, important: bool) -> Vec<InlineStyle
         important,
     };
     vec![
-        make("mask-image", super::computed_style::serialize_mask_images(&style)),
+        make(
+            "mask-image",
+            super::computed_style::serialize_mask_images(&style),
+        ),
         make("mask-mode", inline_rare_or(&rare.mask_mode, "match-source")),
         make("mask-repeat", inline_rare_or(&rare.mask_repeat, "repeat")),
         make(

@@ -23,6 +23,50 @@ use crate::types::Document;
 // popover opening (measured — `:popover-open` stays false afterwards).
 
 impl Document {
+    pub(crate) fn pointer_root(
+        &self,
+        point: (f32, f32),
+        button: u8,
+    ) -> Option<&crate::types::WebCore> {
+        let scroll = (self.scroll_x, self.scroll_y);
+        for id in self.top_layer.iter().rev() {
+            let Some(node) = self.find_webcore(*id) else {
+                continue;
+            };
+            if !self.is_inert(*id)
+                && crate::layout::hit_test::point_to_hit_scrolled(node, point, scroll, button)
+                    .is_some()
+            {
+                return Some(node);
+            }
+        }
+        self.active_modal_dialog().is_none().then_some(&self.root)
+    }
+
+    pub(crate) fn pointer_hit(
+        &self,
+        point: (f32, f32),
+        button: u8,
+    ) -> Option<crate::layout::hit_test::HitResult> {
+        let hit = crate::layout::hit_test::point_to_hit_scrolled(
+            self.pointer_root(point, button)?,
+            point,
+            (self.scroll_x, self.scroll_y),
+            button,
+        )?;
+        (!self.is_inert(hit.node_id)).then_some(hit)
+    }
+
+    pub(crate) fn pointer_link(&self, point: (f32, f32), button: u8) -> Option<String> {
+        self.pointer_hit(point, button)?;
+        crate::layout::hit_test::hit_test_link_scrolled(
+            self.pointer_root(point, button)?,
+            point,
+            (self.scroll_x, self.scroll_y),
+            button,
+        )
+    }
+
     /// Put `id` into the top layer, or move it to the top if already there.
     ///
     /// The single write point for both halves of the state.
@@ -178,7 +222,7 @@ impl Document {
     /// event already make — and firing `toggle` synchronously would put it
     /// BEFORE the state change that `beforetoggle` is defined to precede. It
     /// is not fired at all rather than fired at the wrong moment.
-    fn fire_before_toggle(&mut self, id: u32, old_state: &str, new_state: &str) -> bool {
+    pub(crate) fn fire_before_toggle(&mut self, id: u32, old_state: &str, new_state: &str) -> bool {
         let mut event = crate::dom::events::DomEvent::new("beforetoggle", id);
         event.cancelable = true;
         event.old_state = old_state.to_string();

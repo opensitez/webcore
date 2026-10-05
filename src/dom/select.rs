@@ -242,20 +242,7 @@ impl Document {
             // "Invoke the value sanitization algorithm, if the element's type
             // attribute's current state defines one" — a range assigned an
             // off-step number snaps, exactly as it does from the markup.
-            let sanitized = {
-                let is_range = node
-                    .attributes
-                    .get("type")
-                    .map(|t| t.trim().eq_ignore_ascii_case("range"))
-                    .unwrap_or(false);
-                if is_range {
-                    Some(crate::html::forms::best_representation(
-                        crate::html::forms::sanitize_range_value(node, value),
-                    ))
-                } else {
-                    None
-                }
-            };
+            let sanitized = crate::html::forms::sanitize_input_value(node, value);
             if let Some(v) = sanitized {
                 node.value_state = Some(v);
             }

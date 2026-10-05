@@ -97,7 +97,7 @@ impl Document {
     /// `document.URL` / `.documentURI` — the base URL the document was parsed
     /// against.
     pub fn document_uri(&self) -> &str {
-        &self.base_url
+        self.navigation_url.as_deref().unwrap_or(&self.base_url)
     }
 
     /// `document.links` — `<a>` and `<area>` that HAVE an `href`.

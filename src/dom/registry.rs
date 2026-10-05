@@ -23,7 +23,7 @@ pub type DocumentId = u64;
 struct Documents {
     /// `Mutex` per document, not one lock over the table: two windows driving
     /// two documents must not serialise against each other.
-    docs: HashMap<DocumentId, Mutex<Document>>,
+    docs: HashMap<DocumentId, crate::browser::BrowserDocument>,
     next_id: DocumentId,
 }
 
@@ -65,23 +65,34 @@ pub fn new_xml_document(title: &str) -> DocumentId {
 }
 
 fn open_document(document: Document) -> DocumentId {
+    register_document(crate::browser::BrowserDocument::new(document))
+}
+
+/// Register a shared live DOM once, preserving its identity when it is adopted
+/// by a native browser context after the host has already built its controls.
+pub fn register_document(document: crate::browser::BrowserDocument) -> DocumentId {
     let mut docs = match documents().lock() {
         Ok(d) => d,
         Err(_) => return 0,
     };
+    if let Some((id, _)) = docs
+        .docs
+        .iter()
+        .find(|(_, existing)| existing.same_document(&document))
+    {
+        return *id;
+    }
     docs.next_id += 1;
     let id = docs.next_id;
-    docs.docs.insert(id, Mutex::new(document));
+    docs.docs.insert(id, document);
     id
 }
 
 /// Borrow an open document. `None` if the handle names none — a closed window's
 /// document is gone, and asking about it is not an error.
 pub fn with_document<T>(id: DocumentId, f: impl FnOnce(&mut Document) -> T) -> Option<T> {
-    let docs = documents().lock().ok()?;
-    let cell = docs.docs.get(&id)?;
-    let mut document = cell.lock().ok()?;
-    Some(f(&mut document))
+    let document = documents().lock().ok()?.docs.get(&id)?.clone();
+    Some(f(&mut document.write()))
 }
 
 /// Drop a document. What `window.close()` does to the page it was showing.

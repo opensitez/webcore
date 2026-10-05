@@ -125,7 +125,8 @@ impl Document {
         // ⛔ Both apply only to a value the USER edited. Chrome on
         // `<input maxlength=3 value="abcdef">` answers VALID — the dirty value
         // flag is part of the constraint, not an implementation shortcut.
-        let length_constrained = tag == "textarea" || LENGTH_TYPES.contains(&input_type.as_str());
+        let length_constrained =
+            tag == "textarea" || crate::html::forms::supports_text_length_constraints(&input_type);
         if length_constrained && self.value_is_dirty(id) {
             let len = value.encode_utf16().count() as i64;
             if let Some(max) = self.numeric_attribute(id, "maxlength") {
@@ -170,6 +171,18 @@ impl Document {
                     }
                 }
             }
+        }
+        if let Some(state) = crate::html::temporal::constraints(
+            &input_type,
+            &value,
+            self.get_attribute(id, "min").as_deref(),
+            self.get_attribute(id, "max").as_deref(),
+            self.get_attribute(id, "step").as_deref(),
+            self.get_attribute(id, "value").as_deref(),
+        ) {
+            v.range_underflow = state.underflow;
+            v.range_overflow = state.overflow;
+            v.step_mismatch = state.step_mismatch;
         }
         v
     }
@@ -297,7 +310,13 @@ impl Document {
 
     /// Disabled, or inside a disabled `<fieldset>` that is not shielding it
     /// through the fieldset's first `<legend>`.
-    fn is_actually_disabled(&self, id: u32) -> bool {
+    pub(crate) fn is_actually_disabled(&self, id: u32) -> bool {
+        if !matches!(
+            self.tag_name(id),
+            Some("input" | "button" | "select" | "textarea" | "fieldset" | "option" | "optgroup")
+        ) {
+            return false;
+        }
         if self.has_attribute(id, "disabled") {
             return true;
         }
@@ -389,9 +408,6 @@ impl Document {
 
 /// The input types `pattern` applies to (HTML §4.10.5.3.6).
 const PATTERN_TYPES: &[&str] = &["text", "search", "url", "tel", "email", "password"];
-
-/// The input types `maxlength`/`minlength` apply to (HTML §4.10.5.3.3).
-const LENGTH_TYPES: &[&str] = &["text", "search", "url", "tel", "email", "password"];
 
 /// The input types whose value is a NUMBER, for range and step constraints.
 ///

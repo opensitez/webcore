@@ -52,6 +52,41 @@ impl Document {
         out
     }
 
+    /// HTML implicit submission: the first owned submit button, or the form
+    /// itself when it has no button and at most one blocking input.
+    pub(crate) fn implicit_submission_target(&self, form: u32) -> Option<u32> {
+        let mut default_button = None;
+        let mut blocking_fields = 0;
+        self.walk_tree(self.root.node_id, &mut |doc, node| {
+            let tag = doc.tag_name(node);
+            if !matches!(tag, Some("button" | "input")) || doc.form_owner(node) != Some(form) {
+                return;
+            }
+            if tag == Some("button") {
+                if default_button.is_none() && doc.button_type(node) == "submit" {
+                    default_button = Some(node);
+                }
+            } else {
+                match doc.input_type(node).as_str() {
+                    "submit" | "image" if default_button.is_none() => {
+                        default_button = Some(node);
+                    }
+                    "text" | "search" | "tel" | "url" | "email" | "password" | "date" | "month"
+                    | "week" | "time" | "datetime-local" | "number" => {
+                        blocking_fields += 1;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        match default_button {
+            Some(button) => {
+                (!self.is_actually_disabled(button) && !self.is_inert(button)).then_some(button)
+            }
+            None => (blocking_fields <= 1).then_some(form),
+        }
+    }
+
     /// `element.labels` — every `<label>` that labels this element, in tree
     /// order: the ones whose `for` names it, and any ancestor `<label>`.
     pub fn labels(&self, id: u32) -> Vec<u32> {

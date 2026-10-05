@@ -62,7 +62,9 @@ impl Document {
     }
 
     pub fn query_selector_within(&self, root: u32, selector: &str) -> Option<u32> {
-        self.query_selector_all_within(root, selector).into_iter().next()
+        self.query_selector_all_within(root, selector)
+            .into_iter()
+            .next()
     }
 
     /// Shared body of `querySelector` / `querySelectorAll`.
@@ -86,11 +88,15 @@ impl Document {
 mod scoped_query_tests {
     #[test]
     fn detached_element_queries_only_its_descendants() {
-        let mut doc = crate::html::parse_html("<html><body><span id='outside'></span></body></html>");
+        let mut doc =
+            crate::html::parse_html("<html><body><span id='outside'></span></body></html>");
         let root = doc.create_element("section");
         let child = doc.create_element("span");
         doc.append_child(root, child);
-        assert_eq!(doc.query_selector_within(root, ":scope > span"), Some(child));
+        assert_eq!(
+            doc.query_selector_within(root, ":scope > span"),
+            Some(child)
+        );
         assert_eq!(doc.query_selector_all_within(root, "span"), vec![child]);
         assert!(doc.query_selector_all_within(root, "section").is_empty());
     }
@@ -162,6 +168,7 @@ pub fn matching_ids_from_with_state(
         query_walk(
             root,
             &root_chain,
+            &[root],
             &selectors,
             &empty_hover,
             root.node_id,
@@ -265,6 +272,7 @@ fn build_ancestor_entry(
 fn query_walk(
     node: &WebCore,
     parent_ancestors: &[crate::css::AncestorInfo],
+    parent_nodes: &[&WebCore],
     selectors: &[crate::css::CssSelector],
     hover_chain: &std::collections::HashSet<u32>,
     scope_root_id: u32,
@@ -293,6 +301,7 @@ fn query_walk(
             if query_walk(
                 child,
                 parent_ancestors,
+                parent_nodes,
                 selectors,
                 hover_chain,
                 scope_root_id,
@@ -312,7 +321,7 @@ fn query_walk(
             type_child_index: pos.type_index[i],
             type_sibling_count: pos.type_count[i],
             html_box: Some(child),
-            ancestor_nodes: &[],
+            ancestor_nodes: parent_nodes,
             hover_chain,
             focus_within_chain: &empty_focus,
             element_id: child.node_id,
@@ -343,6 +352,8 @@ fn query_walk(
         }
 
         let mut child_ancestors = parent_ancestors.to_vec();
+        let mut child_nodes = parent_nodes.to_vec();
+        child_nodes.push(child);
         child_ancestors.push(build_ancestor_entry(
             child,
             pos.elem_index[i],
@@ -353,6 +364,7 @@ fn query_walk(
         if query_walk(
             child,
             &child_ancestors,
+            &child_nodes,
             selectors,
             hover_chain,
             scope_root_id,

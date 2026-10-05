@@ -74,6 +74,12 @@ pub struct DomEvent {
     /// them rather than splitting into one type per interface.
     pub old_state: String,
     pub new_state: String,
+    /// HashChangeEvent URL payload.
+    pub old_url: String,
+    pub new_url: String,
+    /// `CommandEvent.command` and its invoking button.
+    pub command: String,
+    pub source: u32,
     /// CSS AnimationEvent / TransitionEvent payload. Elapsed time is in seconds
     /// of active time, excluding the delay and any paused interval.
     pub elapsed_time: f64,
@@ -108,6 +114,7 @@ pub struct DomEvent {
     /// `InputEvent.data` and `inputType`.
     data: Option<String>,
     input_type: String,
+    clipboard_data: Option<super::clipboard::ClipboardData>,
     /// Call to prevent default browser behavior.
     prevented: bool,
     /// Call to stop event from reaching further listeners.
@@ -199,6 +206,10 @@ impl DomEvent {
             composed_path: Vec::new(),
             old_state: String::new(),
             new_state: String::new(),
+            old_url: String::new(),
+            new_url: String::new(),
+            command: String::new(),
+            source: 0,
             elapsed_time: 0.0,
             animation_name: String::new(),
             property_name: String::new(),
@@ -219,6 +230,7 @@ impl DomEvent {
             delta_mode: 0,
             data: None,
             input_type: String::new(),
+            clipboard_data: None,
             prevented: false,
             stopped: false,
             immediate_stopped: false,
@@ -1188,6 +1200,18 @@ impl DomEvent {
     }
     pub fn set_input_type(&mut self, t: impl Into<String>) {
         self.input_type = t.into();
+    }
+
+    pub fn clipboard_data(&self) -> Option<&super::clipboard::ClipboardData> {
+        self.clipboard_data.as_ref()
+    }
+
+    pub fn clipboard_data_mut(&mut self) -> Option<&mut super::clipboard::ClipboardData> {
+        self.clipboard_data.as_mut()
+    }
+
+    pub(crate) fn set_clipboard_data(&mut self, data: super::clipboard::ClipboardData) {
+        self.clipboard_data = Some(data);
     }
 
     /// Set the target's padding-box origin, so `offsetX`/`offsetY` can be
